@@ -48,6 +48,7 @@ const INTERVAL_LABEL: Record<string, string> = {
 };
 
 function cadenceLabel(sched: PipelineSchedule): string {
+  if (sched.cadence_label) return sched.cadence_label;
   if (sched.cron) return `Cron ${sched.cron}`;
   return INTERVAL_LABEL[sched.interval] ?? sched.interval;
 }

@@ -166,22 +166,16 @@ def _is_base64(value: str) -> bool:
 
 
 def _looks_like_binary_payload(value: str, *, field_name: str | None = None) -> bool:
-    """Promote to BINARY only with name evidence or strong payload evidence.
+    """Promote to BINARY only when the field name says the value is a payload.
 
-    Short base64-looking tokens (session ids, opaque keys) must stay VARCHAR —
-    never invent BINARY DDL from a single 12–20 char sample (Airbyte trap).
+    Letters, digits, and the base64 alphabet are ordinary text. A long note,
+    a token, or a code that happens to decode is not a binary column, and
+    decoding it into bytes is not a preserve. Short base64-looking tokens
+    stay VARCHAR for the same reason.
     """
-    if not _is_base64(value):
+    if not _is_binary_field_name(field_name or ""):
         return False
-    if _is_binary_field_name(field_name or ""):
-        return True
-    s = value.strip()
-    # Strong evidence without a binary-ish name: longer payload + padding or high entropy.
-    if len(s) < 32:
-        return False
-    if s.endswith("=") or s.endswith("=="):
-        return True
-    return len(set(s)) >= 12
+    return _is_base64(value)
 
 
 # Binary payloads only — not generic "data"/"key"/"token" (those are often IDs/JWTs).

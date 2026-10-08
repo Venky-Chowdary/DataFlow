@@ -106,8 +106,6 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
         parent_ctx = None
 
     def _leased_fn(*a: Any, **kw: Any) -> Any:
-        stop_event = threading.Event()
-        interval = max(5, ttl_seconds // 2)
         fence = _lease_store.get_fence(job_id)
         detach_token = None
         try:
@@ -134,6 +132,7 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
                 from services.mongodb_service import get_mongodb_service
 
                 mongo = get_mongodb_service()
+                mongo.request_job_cancel(job_id)
                 mongo.update_job_status(
                     job_id,
                     "cancelled",
@@ -145,24 +144,18 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
             except Exception:
                 _logger.exception("Failed to mark job %s cancelled after lease loss", job_id)
 
-        def _heartbeat() -> None:
-            while not stop_event.wait(interval):
-                if not _lease_store.heartbeat(job_id, ttl_seconds=ttl_seconds):
-                    _logger.warning(
-                        "Lease heartbeat failed for job %s; aborting transfer (fence=%s)",
-                        job_id,
-                        fence,
-                    )
-                    _mark_lease_lost()
-                    break
+        from services.lease_heartbeat import start_lease_heartbeat
 
-        beat_thread = threading.Thread(target=_heartbeat, name=f"df-lease-{job_id}", daemon=True)
-        beat_thread.start()
+        stop_heartbeat = start_lease_heartbeat(
+            _lease_store,
+            job_id,
+            ttl_seconds=ttl_seconds,
+            on_lost=_mark_lease_lost,
+        )
         try:
             return fn(*a, **kw)
         finally:
-            stop_event.set()
-            beat_thread.join(timeout=interval * 2)
+            stop_heartbeat()
             _lease_store.release(job_id)
             if detach_token is not None:
                 try:

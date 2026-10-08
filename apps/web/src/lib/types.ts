@@ -85,7 +85,9 @@ export interface Connector {
   path_style?: boolean;
   created_at: string;
   last_test_ok?: boolean;
+  last_tested_at?: string | null;
   last_used_at?: string | null;
+  last_transfer_ok_at?: string | null;
 }
 
 export interface TransferCheckpoint {
@@ -1553,6 +1555,8 @@ export interface PipelineSchedule {
   dest_table: string;
   interval: ScheduleInterval | string;
   cron: string;
+  /** Server label. Cron anchors win over the interval preset. */
+  cadence_label?: string;
   timezone: string;
   sync_mode: ScheduleSyncMode | string;
   validation_mode: string;

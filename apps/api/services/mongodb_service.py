@@ -704,6 +704,12 @@ class MongoDBService:
                 )
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            try:
+                from services.job_terminal_effects import apply_job_terminal_effects
+
+                apply_job_terminal_effects(job_id, status)
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return ok
 
     def request_job_cancel(self, job_id: str) -> bool:
@@ -1415,6 +1421,12 @@ class MemoryMongoDBService:
                 quarantined=int(rec.get("rejected_rows") or 0),
                 reconcile_ok=reconcile_ok,
             )
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        try:
+            from services.job_terminal_effects import apply_job_terminal_effects
+
+            apply_job_terminal_effects(job_id, status)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return True

@@ -76,6 +76,7 @@ from .stream_row_accounting import (
     _raw_page_marked,
     _raw_page_rows,
     stamp_incremental_no_op,
+    reader_population,
     stamp_source_row_count,
 )
 from .stream_foreign_keys import (
@@ -1075,7 +1076,12 @@ def _stream_database_transfer_impl(
     # COPY fast path, and reused by the row path below. A resumed run already
     # holds rows this job wrote, so its live COUNT is not a "before".
     pre_write_rows_before: int | None = None
-    if not (
+    pinned_before = (getattr(destination, "extra", None) or {}).get("overwrite_rows_before")
+    if isinstance(pinned_before, int):
+        # Counted before overwrite DROP. A live COUNT now is the empty
+        # replacement, which would authorize deleting a table that held rows.
+        pre_write_rows_before = int(pinned_before)
+    elif not (
         checkpoint
         and (
             getattr(checkpoint, "rows_processed", 0)
@@ -2232,6 +2238,7 @@ def _stream_database_transfer_impl(
     keyset_resume = bool(use_keyset and keyset_after and offset > 0)
     fetch_offset = 0 if keyset_resume else offset
     committed_offset = offset
+    population_resume_offset = int(offset or 0)
     # Keyset bookmark of the last *committed* batch. `keyset_after` belongs to
     # the reader, which runs batches ahead of the writer; persisting it would
     # resume past rows that were read but never written.
@@ -3036,6 +3043,22 @@ def _stream_database_transfer_impl(
                     "Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc
                 )
 
+        if job_id:
+            # Not the throttled progress callback: that skips calls inside
+            # its interval, and a cancel during a long batch was ignored
+            # until the next flush. The in-flight statement still ends on
+            # its lock wait; this stops the next batch.
+            try:
+                from services.error_handling import TransferCancelled
+                from services.mongodb_service import get_mongodb_service
+
+                _live = get_mongodb_service().get_job(str(job_id)) or {}
+                if _live.get("cancel_requested") or str(_live.get("status") or "") == "cancelled":
+                    raise TransferCancelled("Transfer cancelled by user")
+            except TransferCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a failed read must not hide the write
+                logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
         try:
             batch_written, last_checksum, dest_summary = with_retry(
                 write_op,
@@ -3787,9 +3810,14 @@ def _stream_database_transfer_impl(
     # Rows the incremental cursor bound excluded are outside this run's read
     # scope — a pushdown source would never have read them at all — so the
     # population is the delta, not the whole keyspace the page arrived in.
-    reader_population = max(0, int(committed_offset or 0) - int(cursor_bounded_total or 0))
+    counted_population = reader_population(
+        committed_offset=int(committed_offset or 0),
+        resume_offset=population_resume_offset,
+        total_rows=total_rows,
+        cursor_bounded=int(cursor_bounded_total or 0),
+    )
     stamp_source_row_count(
-        dest_summary, reader_count=reader_population, rows_written=int(written or 0)
+        dest_summary, reader_count=counted_population, rows_written=int(written or 0)
     )
     if cursor_bounded_total:
         dest_summary["rows_cursor_bounded"] = int(cursor_bounded_total)

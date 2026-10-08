@@ -140,6 +140,9 @@ class SavedConnector:
     last_tested_at: str | None = None
     last_test_ok: bool | None = None
     last_used_at: str | None = None
+    #: Set when a transfer that used this connector completed. A failed probe
+    #: older than this is stale — the connection has since moved data.
+    last_transfer_ok_at: str | None = None
     credentials_rotated_at: str | None = None
     created_at: str = field(default_factory=lambda: _now())
 
@@ -182,6 +185,7 @@ class SavedConnector:
             last_tested_at=data.get("last_tested_at"),
             last_test_ok=data.get("last_test_ok") if "last_test_ok" in data else None,
             last_used_at=data.get("last_used_at"),
+            last_transfer_ok_at=data.get("last_transfer_ok_at"),
             credentials_rotated_at=data.get("credentials_rotated_at"),
             created_at=data.get("created_at", _now()),
         )
@@ -619,6 +623,40 @@ def mark_tested(connector_id: str, ok: bool) -> None:
             connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
             _save_all(connectors)
             return
+
+
+def note_transfer_succeeded(*connector_ids: str | None) -> int:
+    """Stamp a completed transfer. This is not a probe pass.
+
+    ``last_test_ok`` stays false until the operator tests again. Health
+    treats a later successful transfer as newer evidence than that probe.
+    """
+    now = _now()
+    patch = {"last_transfer_ok_at": now}
+    seen: set[str] = set()
+    stamped = 0
+    for raw in connector_ids:
+        cid = str(raw or "").strip()
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        if _use_mongo():
+            try:
+                coll = _mongo_collection()
+                result = coll.update_one({"_id": cid}, {"$set": patch})
+                if result.matched_count:
+                    stamped += 1
+                    continue
+            except Exception as exc:  # noqa: BLE001 - file store is the fallback
+                logger.warning("MongoDB note_transfer_succeeded failed, falling back to file: %s", exc)
+        connectors = _load_all()
+        for i, c in enumerate(connectors):
+            if c.id == cid:
+                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
+                _save_all(connectors)
+                stamped += 1
+                break
+    return stamped
 
 
 def mark_used(*connector_ids: str | None) -> int:

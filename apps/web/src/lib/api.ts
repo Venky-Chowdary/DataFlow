@@ -1170,7 +1170,9 @@ export async function fetchConnectors(): Promise<Connector[]> {
       created_at: String(c.created_at ?? new Date().toISOString()),
       // Preserve tri-state: true / false / undefined (never tested).
       last_test_ok: lastTestOk,
+      last_tested_at: c.last_tested_at ? String(c.last_tested_at) : null,
       last_used_at: c.last_used_at ? String(c.last_used_at) : null,
+      last_transfer_ok_at: c.last_transfer_ok_at ? String(c.last_transfer_ok_at) : null,
     };
   };
 

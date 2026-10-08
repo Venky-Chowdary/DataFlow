@@ -195,11 +195,12 @@ export function PipelineDetailDrawer({
   const isRunning = Boolean(running || sched.running);
   const breakerState = breaker?.state || breakerHint || null;
   const breakerOpen = breakerBlocksRuns(breakerState);
-  const cadence = sched.cron
-    ? `Cron ${sched.cron}`
-    : (INTERVAL_LABEL[sched.interval] ?? sched.interval);
+  const cadence = sched.cadence_label
+    || (sched.cron
+      ? `Cron ${sched.cron}`
+      : (INTERVAL_LABEL[sched.interval] ?? sched.interval));
   const cadenceDetail = sched.cron
-    ? `Wall clock in ${sched.timezone || "UTC"}`
+    ? `${cadence} · ${sched.timezone || "UTC"}`
     : "Rolling interval from last run — use Cron for a fixed daily time";
   const syncLabel = formatSyncModeLabel(sched.sync_mode);
   const rejected = Number(lastJob?.rejected_rows ?? 0);
@@ -728,7 +729,7 @@ export function PipelineDetailDrawer({
             </div>
             <dl className="df2-drawer-kv">
               <div><dt>Pipeline ID</dt><dd className="df2-cell-mono">{sched.id}</dd></div>
-              <div><dt>Interval</dt><dd>{sched.interval || "—"}</dd></div>
+              <div><dt>Cadence</dt><dd>{cadence}</dd></div>
               <div><dt>Cron</dt><dd>{sched.cron || "—"}</dd></div>
               <div><dt>Max retries</dt><dd>{sched.max_retries ?? "—"}</dd></div>
               <div><dt>Retry backoff</dt><dd>{sched.retry_backoff_seconds != null ? `${sched.retry_backoff_seconds}s` : "—"}</dd></div>

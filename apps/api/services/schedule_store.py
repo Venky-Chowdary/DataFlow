@@ -252,7 +252,13 @@ class PipelineSchedule:
     created_at: str = field(default_factory=lambda: _now())
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        from src.ai.copilot.schedule_cadence import describe_stored_cadence
+
+        payload["cadence_label"] = describe_stored_cadence(
+            self.interval, self.cron, self.timezone
+        )
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PipelineSchedule:

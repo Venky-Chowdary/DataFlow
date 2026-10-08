@@ -1439,10 +1439,16 @@ def stream_file_to_database(
     # Gate-8 append proof needs the cardinality from before the first batch. On a
     # resume the destination already holds rows this job wrote, so the count is
     # no longer a "before" and the delta stays unproven rather than wrong.
-    if not resumed:
+    pinned_before = (getattr(destination, "extra", None) or {}).get("overwrite_rows_before")
+    if isinstance(pinned_before, int):
+        rows_before = int(pinned_before)
+    elif not resumed:
         rows_before = precount_table(dest_type, dest_cfg, dest_table)
-        if rows_before is not None:
-            dest_summary[PRECOUNT_KEY] = int(rows_before)
+    else:
+        rows_before = None
+    if rows_before is not None:
+        dest_summary[PRECOUNT_KEY] = int(rows_before)
+    if isinstance(pinned_before, int) or not resumed:
         from services.file_load_ledger import file_already_loaded, note_file_identity
         from services.sync_cursor import is_overwrite_sync
 

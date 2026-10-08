@@ -112,22 +112,24 @@ def enqueue_job(job_id: str, *, payload: dict[str, Any] | None = None) -> bool:
 
 
 def cancel_queued_job(job_id: str) -> dict[str, Any]:
-    """Take a not-yet-claimed job out of the queue.
+    """Stop the queue from starting or restarting this job.
 
     Cancel on the transfer document alone left the queue row ``queued``,
-    so the worker claimed it and started the write. Only a row that is
-    still ``queued`` is flipped. A claimed or running row stays for the
-    worker, which observes ``cancel_requested``.
+    so the worker claimed it and started the write. A ``claimed`` row has
+    to leave the queue too: once its lease expires, reclaim would start a
+    second writer while the first is still inside the write. The writer
+    that already holds the row observes ``cancel_requested`` and stops.
     """
     coll = _queue_coll()
     if coll is None or not job_id:
         return {"queue": "unavailable"}
     try:
         result = coll.update_one(
-            {"_id": job_id, "status": "queued"},
+            {"_id": job_id, "status": {"$in": ["queued", "claimed"]}},
             {
                 "$set": {
                     "status": "cancelled",
+                    "worker": "",
                     "finished_at": datetime.now(timezone.utc),
                     "updated_at": datetime.now(timezone.utc),
                 }
@@ -294,6 +296,19 @@ def reclaim_stale_claims(
             if not _can_reclaim_workload(doc):
                 continue
             job_id = str(doc.get("job_id") or doc.get("_id") or "")
+            if job_id and _transfer_job_cancelled(job_id):
+                coll.update_one(
+                    {"_id": doc["_id"], "status": "claimed"},
+                    {
+                        "$set": {
+                            "status": "cancelled",
+                            "worker": "",
+                            "finished_at": datetime.now(timezone.utc),
+                            "updated_at": datetime.now(timezone.utc),
+                        }
+                    },
+                )
+                continue
             if job_id and store.is_held(job_id):
                 continue
             claimed = doc.get("claimed_at") or doc.get("updated_at")
@@ -313,6 +328,49 @@ def reclaim_stale_claims(
     except Exception:
         _logger.exception("reclaim_stale_claims failed")
         return 0
+
+
+def _mark_fleet_lease_lost(job_id: str) -> None:
+    """Stop the writer when its lease heartbeat is refused.
+
+    The flag is what the write loop reads. A status write can lose the
+    fence to the worker that took the lease; the flag does not.
+    """
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        mongo = get_mongodb_service()
+        mongo.request_job_cancel(job_id)
+        mongo.update_job_status(
+            job_id,
+            "cancelled",
+            phase="cancelled",
+            error="Lease lost to another worker; aborting to prevent dual writes",
+            message="Lease lost — cooperative cancel",
+        )
+    except Exception:  # noqa: BLE001 - lease loss must still stop the writer
+        _logger.exception("Failed to mark job %s cancelled after lease loss", job_id)
+
+
+def _run_with_lease_heartbeat(
+    store: WorkerLeaseStore,
+    job_id: str,
+    handler: Callable[[str], None],
+    ttl_seconds: int | None = None,
+) -> None:
+    """Run ``handler`` while this process still owns the lease."""
+    from services.lease_heartbeat import start_lease_heartbeat
+
+    stop = start_lease_heartbeat(
+        store,
+        job_id,
+        ttl_seconds=ttl_seconds,
+        on_lost=lambda: _mark_fleet_lease_lost(job_id),
+    )
+    try:
+        handler(job_id)
+    finally:
+        stop()
 
 
 def _finish_queue_row(job_id: str, *, status: str) -> None:
@@ -354,6 +412,12 @@ def run_fleet_loop(
     except ValueError:
         inflight_cap = 8
     inflight_cap = max(1, inflight_cap)
+    from services.lease_heartbeat import lease_ttl_seconds
+
+    # Claim and heartbeat must share one TTL. A 60s claim with a longer
+    # heartbeat interval expires before the first extension, and reclaim
+    # starts a second overwrite.
+    lease_ttl = lease_ttl_seconds()
     inflight: dict[str, Future[Any]] = {}
     # Size the pool before the first claim. Creating it inside the loop left
     # every later call on the first cap that happened to run.
@@ -381,13 +445,13 @@ def run_fleet_loop(
         if len(inflight) >= inflight_cap:
             stop.wait(min(poll_seconds, 0.5))
             continue
-        job_id = claim_next_job(store)
+        job_id = claim_next_job(store, ttl_seconds=lease_ttl)
         if not job_id:
             stop.wait(poll_seconds)
             continue
         if inflight_cap == 1:
             try:
-                handler(job_id)
+                _run_with_lease_heartbeat(store, job_id, handler, lease_ttl)
                 _finish_queue_row(
                     job_id,
                     status="cancelled" if _transfer_job_cancelled(job_id) else "done",
@@ -401,9 +465,12 @@ def run_fleet_loop(
             continue
         # Concurrent path. The lease was already acquired in claim_next_job;
         # transfer_scheduler.submit would try to acquire again and skip.
+        # Heartbeat here — submit's heartbeat does not run on this path.
         if pool is None:
             raise RuntimeError("Fleet pool was not opened for a concurrent claim loop")
-        inflight[job_id] = pool.submit(handler, job_id)
+        inflight[job_id] = pool.submit(
+            _run_with_lease_heartbeat, store, job_id, handler, lease_ttl
+        )
         time.sleep(0.05)
 
     _reap()

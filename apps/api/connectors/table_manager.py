@@ -348,7 +348,17 @@ def retire_mysql_overwrite(
             present = _mysql_tables_present(cur, [table_name, backup])
             src_q = quote_sql_identifier(table_name, "`")
             bak_q = quote_sql_identifier(backup, "`")
-            if table_name not in present and backup in present:
+            if table_name in present and backup in present:
+                # The live name is this run's replacement and the backup is
+                # the pre-run table. DROP of the backup deletes those rows
+                # (a second start used to do that, then the failure path
+                # emptied the replacement). Drop the replacement, put the
+                # pre-run table back, then retire that restored table.
+                cur.execute(f"DROP TABLE {src_q}")
+                cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+                present.discard(backup)
+                present.add(table_name)
+            elif table_name not in present and backup in present:
                 # The previous overwrite renamed the table and died before
                 # restore. Put it back, then retire it for this run.
                 cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
@@ -357,7 +367,18 @@ def retire_mysql_overwrite(
             if table_name not in present:
                 return None, kept
             if backup in present:
-                cur.execute(f"DROP TABLE {bak_q}")
+                # Only a backup we just restored would still be here, and the
+                # branch above already renamed it aside. Never DROP a backup
+                # that still holds the pre-run rows.
+                logger.error(
+                    "MySQL overwrite refused to drop backup %s while %s is live",
+                    backup,
+                    table_name,
+                )
+                raise TableDropError(
+                    table_name,
+                    f"backup {backup} still holds the pre-run rows",
+                )
             cur.execute(f"RENAME TABLE {src_q} TO {bak_q}")
         return backup, kept
     except Exception as exc:  # noqa: BLE001 - any DDL failure must fail the overwrite

@@ -7709,8 +7709,9 @@ def is_lossy_coercion(
       * date â†’ datetime/string/text/json
       * datetime/time â†’ string/text/json
       * json/array â†’ string/text/json/array
-      * string/text/uuid/json/array â†’ binary (base64 reversible)
-      * binary â†’ string/text/json (base64 reversible)
+      * string/text/uuid/json/array → binary is lossy: base64-decoding
+        changes the bytes, so it is not a preserve
+      * binary → string/text/json (base64 text of the bytes) is a rendering
 
     Everything else is considered lossy and should be surfaced in preflight.
 
@@ -8024,6 +8025,16 @@ def is_lossy_coercion(
         dest_db=dest_db,
         dest_table_exists=dest_table_exists,
     ):
+        return True
+    # Text that merely uses the base64 alphabet is not a binary payload.
+    # Decoding it into a binary column changes the value; that is lossy.
+    if tgt == LOGICAL_BINARY and src in {
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        LOGICAL_UUID,
+        LOGICAL_JSON,
+        LOGICAL_ARRAY,
+    }:
         return True
     # ARRAYâ†’ARRAY is in the safe allow-list below only when element types widen.
     if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY and is_nested_shape_collapse(

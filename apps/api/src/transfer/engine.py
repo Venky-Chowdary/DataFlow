@@ -1289,6 +1289,75 @@ def _checkpoint_has_progress(checkpoint: Any) -> bool:
         return False
 
 
+def _raise_if_job_cancelled(mongo: Any, job_id: str) -> None:
+    """Stop the writer when the operator or a lost lease asked it to stop.
+
+    Progress writes that the cancel fence refuses are the same signal: the
+    loop used to ignore a False return and keep inserting.
+    """
+    if mongo is None or not job_id:
+        return
+    try:
+        job = mongo.get_job(job_id)
+    except Exception as exc:  # noqa: BLE001 - a failed read must not hide the transfer
+        logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
+        return
+    if job and (job.get("cancel_requested") or str(job.get("status") or "") == "cancelled"):
+        raise TransferCancelled("Transfer cancelled by user")
+
+
+def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
+    accepted = mongo.update_job_status(job_id, "running", **update)
+    if accepted is False:
+        _raise_if_job_cancelled(mongo, job_id)
+
+
+def _pin_overwrite_rows_before(
+    destination: EndpointConfig,
+    checkpoint: Any = None,
+    checkpoint_service: Any = None,
+) -> None:
+    """Count the destination before overwrite removes it.
+
+    The stream measures COUNT after the drop, so a table that held rows
+    looks empty and the failure path deletes the replacement. The count
+    taken here is the one undo and Gate-8 must keep.
+    """
+    extra = dict(getattr(destination, "extra", None) or {})
+    pinned = extra.get("overwrite_rows_before")
+    if isinstance(pinned, int):
+        return
+    if checkpoint is not None and getattr(checkpoint, "target_rows_before", None) is not None:
+        extra["overwrite_rows_before"] = int(checkpoint.target_rows_before)
+        destination.extra = extra
+        return
+    counted: int | None = None
+    try:
+        from services.dest_precount import precount_destination
+
+        from .adapters import resolve_connector_config
+
+        raw = precount_destination(destination, resolve_connector_config(destination))
+        if isinstance(raw, int):
+            counted = int(raw)
+    except Exception as exc:  # noqa: BLE001 - a missed count must not skip the overwrite
+        logger.warning("Overwrite pre-count failed: %s", exc, exc_info=exc)
+        return
+    if counted is None:
+        return
+    extra["overwrite_rows_before"] = counted
+    destination.extra = extra
+    if checkpoint is None:
+        return
+    checkpoint.target_rows_before = counted
+    if checkpoint_service is None:
+        return
+    try:
+        checkpoint_service.require_save(checkpoint)
+    except Exception as exc:  # noqa: BLE001 - the in-memory pin still guards this process
+        logger.warning("Overwrite pre-count was not checkpointed: %s", exc, exc_info=exc)
+
+
 def _apply_post_load_transforms(request: Any, dest_summary: dict[str, Any]) -> None:
     """Run configured transformation models and fold the result into the summary.
 
@@ -1386,9 +1455,37 @@ from .job_failure import (  # noqa: E402,F401 — re-export
 
 
 def _note_failed_batch_undo(request: Any, dest_summary: Any, message: str) -> str:
-    """Clear a partial SQL batch when this run found the destination empty."""
+    """Clear a partial SQL batch when this run found the destination empty.
+
+    A MySQL overwrite renamed the previous table aside. Restoring that
+    backup is the rollback. Deleting the replacement after the rename
+    leaves the live name empty and the pre-run rows only in the backup
+    — or gone, if a second start already dropped the backup.
+    """
     if not isinstance(dest_summary, dict):
         return message or "Reconciliation failed"
+    destination = getattr(request, "destination", None)
+    extra = dict(getattr(destination, "extra", None) or {})
+    if extra.get("overwrite_backup") and extra.get("overwrite_backup_engine") == "mysql":
+        backup_name = str(extra.get("overwrite_backup") or "")
+        restored = _settle_overwrite_backup(destination, restore=True)
+        if restored:
+            note = (
+                "The previous destination table was restored. "
+                "This run's replacement was removed."
+            )
+            dest_summary["partial_batch_undo"] = "restored"
+        else:
+            note = (
+                "The previous destination table could not be restored. "
+                f"The backup {backup_name} was left in place."
+            )
+            dest_summary["partial_batch_undo"] = "restore_failed"
+        dest_summary["partial_batch_undo_note"] = note
+        base = message or "Reconciliation failed"
+        if note not in base:
+            return f"{base} {note}"
+        return base
     from services.batch_undo import undo_failed_batch_if_dest_was_empty
 
     note = undo_failed_batch_if_dest_was_empty(
@@ -1410,7 +1507,7 @@ def _remember_preserved_columns(destination: EndpointConfig, kept: list[dict]) -
     destination.extra = extra
 
 
-def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> None:
+def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> bool:
     """Drop the MySQL backup after success, or put it back after failure.
 
     Rename-aside leaves the previous table under ``__df_bak``. A cancelled or
@@ -1419,10 +1516,11 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> N
     extra = dict(getattr(destination, "extra", None) or {})
     backup = extra.get("overwrite_backup")
     if not backup or extra.get("overwrite_backup_engine") != "mysql":
-        return
+        return False
     from .adapters import resolve_connector_config, resolve_dest_table
     from .connector_capabilities import resolve_driver_type
 
+    ok = False
     try:
         db_type = resolve_driver_type(destination.format)
         cfg = resolve_connector_config(destination)
@@ -1435,6 +1533,7 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> N
             from connectors.table_manager import discard_mysql_overwrite
 
             discard_mysql_overwrite(cfg, str(backup))
+        ok = True
     except Exception as exc:  # noqa: BLE001 - backup settle must not hide the transfer result
         logger.error(
             "MySQL overwrite backup %s failed for %s: %s",
@@ -1443,16 +1542,22 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> N
             exc,
             exc_info=exc,
         )
+        ok = False
     finally:
         extra.pop("overwrite_backup", None)
         extra.pop("overwrite_backup_engine", None)
         destination.extra = extra
+    return ok
 
 
 def _drop_destination_table(
     destination: EndpointConfig,
     *,
     mappings: list[dict] | None = None,
+    checkpoint: Any = None,
+    checkpoint_service: Any = None,
+    mongo: Any = None,
+    job_id: str = "",
 ) -> bool:
     """Drop the destination object for full-refresh overwrite sync modes.
 
@@ -1467,6 +1572,9 @@ def _drop_destination_table(
     """
     if destination.kind != "database":
         return False
+
+    _raise_if_job_cancelled(mongo, job_id)
+    _pin_overwrite_rows_before(destination, checkpoint, checkpoint_service)
 
     from connectors.table_manager import TableDropError, drop_table
 
@@ -3010,7 +3118,7 @@ class UniversalTransferEngine:
                         checkpoint, details, preview, total, truncated
                     )
                     _promote_cdc_job_fields(checkpoint, update)
-                mongo.update_job_status(job_id, "running", **update)
+                _progress_write_or_cancel(mongo, job_id, **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
             backfill_fields = effective_backfill_new_fields(
@@ -3033,7 +3141,7 @@ class UniversalTransferEngine:
                 should_drop_full_refresh = should_drop_destination_for_sync(
                     request_sync_mode=request.sync_mode,
                     contract_sync_mode=contract.sync_mode if contract else None,
-                ) and not (resume and checkpoint_has_progress)
+                ) and not checkpoint_has_progress
                 if resume and checkpoint_has_progress:
                     skip_n = max(
                         int(getattr(checkpoint, "rows_processed", 0) or 0),
@@ -3127,7 +3235,12 @@ class UniversalTransferEngine:
                             ),
                         )
                         _drop_destination_table(
-                            request.destination, mappings=mappings
+                            request.destination,
+                            mappings=mappings,
+                            checkpoint=checkpoint,
+                            checkpoint_service=checkpoint_service,
+                            mongo=mongo,
+                            job_id=job_id,
                         )
                         mongo.update_job_status(
                             job_id,
@@ -4251,7 +4364,7 @@ class UniversalTransferEngine:
                         checkpoint, details, preview, total, truncated
                     )
                     _promote_cdc_job_fields(checkpoint, update)
-                mongo.update_job_status(job_id, "running", **update)
+                _progress_write_or_cancel(mongo, job_id, **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
             backfill_fields = effective_backfill_new_fields(
@@ -4290,11 +4403,7 @@ class UniversalTransferEngine:
                 if stream_contract
                 else None,
             ):
-                if (
-                    not resume
-                    or not is_streaming
-                    or not _checkpoint_has_progress(checkpoint)
-                ):
+                if not _checkpoint_has_progress(checkpoint):
                     mongo.update_job_status(
                         job_id,
                         "running",
@@ -4308,7 +4417,12 @@ class UniversalTransferEngine:
                         ),
                     )
                     _drop_destination_table(
-                        request.destination, mappings=mappings
+                        request.destination,
+                        mappings=mappings,
+                        checkpoint=checkpoint,
+                        checkpoint_service=checkpoint_service,
+                        mongo=mongo,
+                        job_id=job_id,
                     )
                     mongo.update_job_status(
                         job_id,
@@ -5179,7 +5293,7 @@ class UniversalTransferEngine:
                         checkpoint, details, preview, total, truncated
                     )
                     _promote_cdc_job_fields(checkpoint, update)
-                mongo.update_job_status(job_id, "running", **update)
+                _progress_write_or_cancel(mongo, job_id, **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
             backfill_fields = effective_backfill_new_fields(
@@ -5211,11 +5325,7 @@ class UniversalTransferEngine:
                 if stream_contract
                 else None,
             ):
-                if (
-                    not resume
-                    or not is_streaming
-                    or not _checkpoint_has_progress(checkpoint)
-                ):
+                if not _checkpoint_has_progress(checkpoint):
                     mongo.update_job_status(
                         job_id,
                         "running",
@@ -5229,7 +5339,12 @@ class UniversalTransferEngine:
                         ),
                     )
                     _drop_destination_table(
-                        request.destination, mappings=mappings
+                        request.destination,
+                        mappings=mappings,
+                        checkpoint=checkpoint,
+                        checkpoint_service=checkpoint_service,
+                        mongo=mongo,
+                        job_id=job_id,
                     )
                     mongo.update_job_status(
                         job_id,

@@ -1305,6 +1305,32 @@ def _release_superseded_queued_claims() -> None:
     release_all_superseded_queued_claims()
 
 
+def record_schedule_for_finished_job(job_id: str) -> None:
+    """Count a manual or claimed run when its job actually ends.
+
+    The claim-queue path does not attach a completion callback, and a
+    restart used to clear ``running`` without calling ``mark_schedule_run``.
+    ``run_count`` then stayed 0 after a run the operator could see in Jobs.
+    """
+    if not str(job_id or "").strip():
+        return
+    from services.schedule_store import _load_all, _parse_ts
+
+    for sched in _load_all():
+        if str(sched.running_job_id or "") != str(job_id):
+            continue
+        if not sched.running:
+            return
+        started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
+        _finalize_run(
+            sched.id,
+            job_id,
+            sched.retry_attempt if sched.retry_at else 0,
+            started,
+        )
+        return
+
+
 def _finalize_finished_schedule_claims() -> None:
     """Record runs whose job ended without the in-process callback.
 
@@ -1377,6 +1403,21 @@ def _clear_stale_running_schedules() -> None:
     schedules = _load_all()
     changed = False
     for i, s in enumerate(schedules):
+        if s.running and str(s.running_job_id or "").strip():
+            from services.schedule_store import _job_dispatch_state, get_schedule
+
+            if _job_dispatch_state(s.running_job_id) == "terminal":
+                started = _parse_ts(s.running_started_at) or datetime.now(timezone.utc)
+                _finalize_run(
+                    s.id,
+                    s.running_job_id,
+                    s.retry_attempt if s.retry_at else 0,
+                    started,
+                )
+                fresh = get_schedule(s.id)
+                if fresh is not None:
+                    schedules[i] = fresh
+                continue
         if s.running and _is_running_stale(s):
             current = datetime.now(timezone.utc)
             nxt = _parse_ts(s.next_run_at)

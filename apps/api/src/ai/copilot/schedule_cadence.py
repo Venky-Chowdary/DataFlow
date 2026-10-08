@@ -415,3 +415,44 @@ def parse_cadence(text: str) -> CadenceSpec:
         "at a time, weekly on a weekday, a day of the month, every N minutes/hours, "
         "or an explicit 5-field cron."
     )
+
+
+def describe_stored_cadence(interval: str, cron: str = "", timezone: str = "UTC") -> str:
+    """Human label for a saved schedule. Cron wins over the interval preset.
+
+    ``hourly`` plus ``7 * * * *`` is hourly at minute 7, not a rolling hour.
+    ``daily`` plus ``40 21 * * 1-5`` is weekdays at 21:40, not every day.
+    """
+    expr = " ".join(str(cron or "").split())
+    tz = (timezone or "UTC").strip() or "UTC"
+    if expr:
+        parts = expr.split(" ")
+        if len(parts) == 5:
+            minute, hour, dom, month, dow = parts
+            if (
+                hour == "*"
+                and dom == "*"
+                and month == "*"
+                and dow == "*"
+                and minute.isdigit()
+            ):
+                return f"Hourly at :{int(minute):02d} {tz}"
+            if (
+                dom == "*"
+                and month == "*"
+                and dow == "1-5"
+                and minute.isdigit()
+                and hour.isdigit()
+            ):
+                return f"Weekdays at {int(hour):02d}:{int(minute):02d} {tz}"
+            if (
+                dom == "*"
+                and month == "*"
+                and dow == "*"
+                and minute.isdigit()
+                and hour.isdigit()
+            ):
+                return f"Daily at {int(hour):02d}:{int(minute):02d} {tz}"
+        return f"Cron {expr} ({tz})"
+    labels = {"hourly": "Every hour", "daily": "Daily", "weekly": "Weekly"}
+    return labels.get((interval or "").strip().lower(), (interval or "").strip() or "Unscheduled")
