@@ -339,7 +339,7 @@ async def list_connectors(
         _api_root = Path(__file__).resolve().parents[2]
         if str(_api_root) not in sys.path:
             sys.path.insert(0, str(_api_root))
-        from services.connector_store import list_connectors as fs_list
+        from services.connector_store import connector_ui_status, list_connectors as fs_list
         items = fs_list(workspace_id=workspace_id)
         if items:
             return {
@@ -351,9 +351,11 @@ async def list_connectors(
                         "host": c.host,
                         "port": c.port,
                         "database": c.database,
-                        "status": "configured" if c.last_test_ok is True else ("error" if c.last_tested_at and c.last_test_ok is False else "configured"),
+                        "status": connector_ui_status(c),
                         "created_at": c.created_at,
                         "last_test_ok": c.last_test_ok,
+                        "last_tested_at": c.last_tested_at,
+                        "last_transfer_ok_at": c.last_transfer_ok_at,
                         "workspace_id": c.workspace_id or "",
                         "role": getattr(c, "role", None) or "both",
                     }
@@ -365,17 +367,10 @@ async def list_connectors(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     try:
+        from services.connector_store import connector_ui_status
+
         mongo = get_mongodb_service()
         connectors = mongo.list_connectors()
-
-        def _status_from_doc(c: dict) -> str:
-            last_ok = c.get("last_test_ok")
-            last_at = c.get("last_tested_at")
-            if last_ok is True:
-                return "configured"
-            if last_ok is False and last_at:
-                return "error"
-            return "configured"
 
         result = []
         for c in connectors:
@@ -389,9 +384,11 @@ async def list_connectors(
                 "host": c.get("host", ""),
                 "port": c.get("port", 0),
                 "database": c.get("database", ""),
-                "status": _status_from_doc(c),
+                "status": connector_ui_status(c),
                 "created_at": created.isoformat() if created and hasattr(created, "isoformat") else created,
                 "last_test_ok": c.get("last_test_ok"),
+                "last_tested_at": c.get("last_tested_at"),
+                "last_transfer_ok_at": c.get("last_transfer_ok_at"),
                 "workspace_id": c.get("workspace_id", ""),
                 "role": c.get("role") or "both",
             })

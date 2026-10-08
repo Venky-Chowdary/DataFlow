@@ -936,12 +936,9 @@ def saved_connector_name(needle: str) -> str:
 
 
 def _connector_health(conn: dict[str, Any]) -> str:
-    ok = conn.get("last_test_ok")
-    if ok is True:
-        return "passed"
-    if ok is False:
-        return "failed"
-    return "untested"
+    from services.connector_store import connector_health
+
+    return connector_health(conn)
 
 
 def _connector_facts(conn: dict[str, Any]) -> dict[str, Any]:

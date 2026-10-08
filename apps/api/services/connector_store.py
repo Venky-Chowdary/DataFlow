@@ -676,6 +676,46 @@ def note_transfer_succeeded(*connector_ids: str | None) -> int:
     return stamped
 
 
+def _parse_instant(raw: Any) -> datetime | None:
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def connector_health(conn: Any) -> str:
+    """``passed`` / ``failed`` / ``untested`` — the one health rule for every reader.
+
+    A failed probe is overruled only by a transfer that completed after it;
+    the web client (``connectorHealth.ts``) applies the same rule.
+    """
+    get = conn.get if isinstance(conn, Mapping) else (lambda k: getattr(conn, k, None))
+    ok = get("last_test_ok")
+    if ok in (True, 1, "true", "1"):
+        return "passed"
+    if ok in (False, 0, "false", "0"):
+        used = _parse_instant(get("last_transfer_ok_at"))
+        if used is not None:
+            probed = _parse_instant(get("last_tested_at"))
+            if probed is None or used > probed:
+                return "passed"
+        return "failed"
+    return "untested"
+
+
+def connector_ui_status(conn: Any) -> str:
+    get = conn.get if isinstance(conn, Mapping) else (lambda k: getattr(conn, k, None))
+    if connector_health(conn) == "failed" and get("last_tested_at"):
+        return "error"
+    return "configured"
+
+
 def mark_used(*connector_ids: str | None) -> int:
     """Stamp last_used_at on saved connectors that actually ran a transfer."""
     now = _now()

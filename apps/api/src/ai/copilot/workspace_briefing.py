@@ -34,13 +34,12 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
     schedules = _load_schedules(workspace_id)
     contracts = _load_contracts(workspace_id)
 
-    failed_connectors = [
-        c for c in connectors if c.get("last_test_ok") is False
-    ]
-    untested_connectors = [
-        c for c in connectors if c.get("last_test_ok") not in (True, False)
-    ]
-    passed_connectors = [c for c in connectors if c.get("last_test_ok") is True]
+    from services.connector_store import connector_health
+
+    health = [(c, connector_health(c)) for c in connectors]
+    failed_connectors = [c for c, h in health if h == "failed"]
+    untested_connectors = [c for c, h in health if h == "untested"]
+    passed_connectors = [c for c, h in health if h == "passed"]
 
     failed_jobs = [j for j in jobs if str(j.get("status") or "").lower() in {"failed", "error"}]
     running_jobs = [
@@ -135,6 +134,8 @@ def _load_connectors(workspace_id: str) -> list[dict[str, Any]]:
                 d = {
                     "name": getattr(c, "name", ""),
                     "last_test_ok": getattr(c, "last_test_ok", None),
+                    "last_tested_at": getattr(c, "last_tested_at", None),
+                    "last_transfer_ok_at": getattr(c, "last_transfer_ok_at", None),
                 }
             out.append(d)
         return out

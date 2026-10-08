@@ -1324,6 +1324,7 @@ class DataPilotTools:
                     "status": d.get("status", "saved"),
                     "last_test_ok": d.get("last_test_ok"),
                     "last_tested_at": d.get("last_tested_at"),
+                    "last_transfer_ok_at": d.get("last_transfer_ok_at"),
                 })
         except Exception as exc:
             logging.getLogger(__name__).warning("connector_store list failed: %s", exc, exc_info=exc)
@@ -1343,6 +1344,7 @@ class DataPilotTools:
                         "status": c.get("status", "unknown"),
                         "last_test_ok": c.get("last_test_ok"),
                         "last_tested_at": c.get("last_tested_at"),
+                        "last_transfer_ok_at": c.get("last_transfer_ok_at"),
                     })
             except Exception as exc:
                 logging.getLogger(__name__).warning("mongo list_connectors failed: %s", exc, exc_info=exc)
@@ -1378,16 +1380,15 @@ class DataPilotTools:
             )
 
         # "get me the passed connectors" must not list every connector. Health is
-        # the last saved probe result, never a guess from the engine name.
+        # the saved probe, overruled only by a transfer that completed after it —
+        # never a guess from the engine name.
+        from services.connector_store import connector_health
+
+        for c in summary:
+            c["health"] = connector_health(c)
         want = (health or "any").strip().lower()
         if want in {"passed", "failed", "untested"}:
-            buckets = {
-                "passed": lambda ok: ok is True,
-                "failed": lambda ok: ok is False,
-                "untested": lambda ok: ok not in (True, False),
-            }
-            keep = buckets[want]
-            summary = [c for c in summary if keep(c.get("last_test_ok"))]
+            summary = [c for c in summary if c["health"] == want]
         else:
             want = "any"
         return ToolResult(
@@ -3900,7 +3901,7 @@ _HEALTH_WORD_IS_DOCUMENTATION = re.compile(
 def connector_health_filter(message: str) -> str:
     """Which connection-test bucket the operator asked for, or ``any``.
 
-    Health is the last saved probe (``last_test_ok``). Listing all twelve
+    Health is ``connector_store.connector_health``. Listing all twelve
     connectors for "the passed connectors" reads like every one is green.
     """
     text = (message or "").strip()
