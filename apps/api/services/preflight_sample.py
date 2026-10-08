@@ -15,7 +15,9 @@ empty list.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sized
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Any, Mapping
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,30 @@ class EngineSample:
     #: Why no rows were read; empty when the read ran (an empty table is rows=[]).
     unavailable_reason: str = ""
     attempted: bool = False
+    #: The read succeeded and the source returned no row at all (before any
+    #: row filter) — a measured empty population, not a missing sample.
+    measured_empty: bool = False
+
+
+def peek_population_empty(population: Any) -> tuple[Any, bool]:
+    """``(population, is_empty)`` without consuming a lazy population.
+
+    A stored upload or Execute's in-memory batch is the whole population, so
+    an empty one is a measured empty source — a header-only file — rather than
+    a sample nobody fetched.
+    """
+    if population is None:
+        return None, False
+    if isinstance(population, Sized):
+        return population, len(population) == 0
+    it = iter(population)
+    first = next(it, _END)
+    if first is _END:
+        return [], True
+    return chain((first,), it), False
+
+
+_END = object()
 
 
 def engine_sample_rows(
@@ -83,8 +109,19 @@ def engine_sample_rows(
             attempted=True,
         )
     rows = [dict(r) for r in (records or [])[:limit] if isinstance(r, Mapping)]
+    if not rows:
+        return EngineSample(attempted=True, measured_empty=True)
     if source_filter:
         from services.row_filter import apply_row_filter
 
+        read = len(rows)
         rows = apply_row_filter(rows, dict(source_filter))
+        if not rows:
+            return EngineSample(
+                unavailable_reason=(
+                    f"none of the first {read} source row(s) match the row filter, "
+                    "so there is no sample to validate"
+                ),
+                attempted=True,
+            )
     return EngineSample(rows=rows, attempted=True)

@@ -201,3 +201,37 @@ def restamp_mapping_source_types(
             row["source_type"] = live
         out.append(row)
     return out
+
+
+def empty_source_column_types(
+    column_types: dict[str, str] | None,
+    mappings: list[dict[str, Any]] | None,
+    *,
+    declared: dict[str, str] | None = None,
+    previous: dict[str, str] | None = None,
+    destination: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Column types for a measured-empty source whose types were only inferred.
+
+    A header-only file has names and no values, so ``string`` on every column
+    is a placeholder, not evidence. Judging it as evidence paused the route for
+    a ``type_change`` and refused ``string → INTEGER`` into the table it loads
+    every day. With no value to contradict it, the known contract stands: the
+    declared type, else the last run's, else the live destination column the
+    mapping writes by name. A column none of them knows keeps its placeholder.
+    """
+    out = dict(column_types or {})
+    targets = {
+        str(m.get("source") or ""): str(m.get("target") or "")
+        for m in mappings or []
+        if isinstance(m, dict)
+    }
+    for col in list(out):
+        known = (
+            column_type_or_none(declared or {}, col)
+            or column_type_or_none(previous or {}, col)
+            or column_type_or_none(destination or {}, targets.get(col) or col)
+        )
+        if known and str(known).strip():
+            out[col] = str(known).strip()
+    return out

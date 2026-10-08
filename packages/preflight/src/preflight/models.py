@@ -175,6 +175,8 @@ class PreflightContext:
     sample_rows: list[dict[str, Any]] = field(default_factory=list)
     # Why the host could not read a sample (named on Gate-8), empty when it did.
     sample_unavailable_reason: str = ""
+    # The source was read and holds no row: Gate-5/8/9 prove 0 = 0, not "no sample".
+    source_measured_empty: bool = False
 
     def probe_unique_constraint(self, columns: list[str]) -> list[dict[str, Any]]:
         return []

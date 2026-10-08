@@ -1453,6 +1453,7 @@ def run_integrity_audit(
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
+    source_measured_empty: bool = False,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1512,7 +1513,15 @@ def run_integrity_audit(
             "blocks_transfer": True,
             "issues": ["No source columns available for integrity validation"],
         })
-    if not rows:
+    if not rows and source_measured_empty:
+        checks.append({
+            "check": "sample_available",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": ["Source holds 0 rows (read, not assumed) — no value to audit"],
+        })
+    elif not rows:
         checks.append({
             "check": "sample_available",
             "passed": False,

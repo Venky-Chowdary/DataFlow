@@ -1715,6 +1715,22 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
             start,
             details,
         )
+    if details.get("source_measured_empty"):
+        details["evidence_scope"] = evidence_scope(
+            kind="transform_dry_run",
+            sample_rows=0,
+            available_rows=0,
+            columns=len(ctx.plan.mappings),
+            coverage="full_selected",
+            note="Source read returned 0 rows — nothing to transform",
+        )
+        return _pass(
+            GateId.G5_DRY_RUN,
+            "Source holds 0 rows (read, not assumed) — no value to transform; "
+            "Execute creates the destination and reconciles 0 = 0",
+            start,
+            details,
+        )
     return _pass(
         GateId.G5_DRY_RUN,
         (
@@ -2468,6 +2484,23 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     dest_kind = (ctx.plan.destination.db_type or "").lower()
     sample_rows = getattr(ctx, "sample_rows", None) or []
+    if not sample_rows and getattr(ctx, "source_measured_empty", False):
+        return _pass(
+            GateId.G8_RECONCILIATION,
+            "Source holds 0 rows (read, not assumed) — Execute must land 0 rows "
+            "and reconciles the destination count against 0",
+            start,
+            _with_scope(
+                {"source_rows": 0, "source_measured_empty": True},
+                evidence_scope(
+                    kind="reconciliation",
+                    sample_rows=0,
+                    available_rows=0,
+                    coverage="full_selected",
+                    note="Measured empty source — post-write count must be 0",
+                ),
+            ),
+        )
     if not sample_rows:
         # Fail closed: SKIP used to unlock Execute with zero reconcile proof.
         reason = str(getattr(ctx, "sample_unavailable_reason", "") or "").strip()

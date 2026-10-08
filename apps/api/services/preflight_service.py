@@ -87,6 +87,40 @@ def _with_date_locale(fn):
     return wrapper
 
 
+def _preflight_source_engine(kwargs: Mapping[str, Any]) -> str:
+    fmt = str(kwargs.get("source_format") or "").strip().lower()
+    if fmt:
+        return fmt
+    cfg = kwargs.get("source_config")
+    if isinstance(cfg, Mapping):
+        fmt = str(cfg.get("type") or cfg.get("format") or "").strip().lower()
+        if fmt:
+            return fmt
+    kind = str(kwargs.get("source_kind") or "file").strip().lower()
+    return "" if kind in {"database", "cloud", ""} else kind
+
+
+def _with_source_engine(fn):
+    """Bind the source engine for every gate, as Execute does for the whole job.
+
+    Binding it only around DDL stamping left the gates judging an unknown
+    engine, so Validate refused (PostgreSQL ``VARCHAR`` → SQL Server
+    ``NVARCHAR``) what Execute's own preflight, run inside the job's binding,
+    accepted.
+    """
+
+    def wrapper(*args, **kwargs):
+        from services.source_engine_scope import active_source_engine, bind_source_engine
+
+        engine = _preflight_source_engine(kwargs)
+        if not engine or active_source_engine():
+            return fn(*args, **kwargs)
+        with bind_source_engine(engine):
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 class FilePreflightContext(PreflightContext):
     """Preflight context for file → database transfers."""
 
@@ -179,6 +213,14 @@ class FilePreflightContext(PreflightContext):
         return destination_nullability(getattr(self.plan.destination, "target_columns", None))
 
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
+        if not self.sample_rows and getattr(self, "source_measured_empty", False):
+            self._last_dry_run_meta = {
+                "sample_rows_scanned": 0,
+                "sample_rows_available": 0,
+                "sample_cap": sample_size,
+                "source_measured_empty": True,
+            }
+            return True, []
         if not self.sample_rows:
             reason = str(getattr(self, "sample_unavailable_reason", "") or "").strip()
             if reason:
@@ -469,6 +511,7 @@ class FilePreflightContext(PreflightContext):
             dest_nullability=self._dest_nullability(),
             database_extract=str(getattr(self.plan.source, "kind", "") or "").lower()
             == "database",
+            source_measured_empty=bool(getattr(self, "source_measured_empty", False)),
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
         try:
@@ -1136,6 +1179,7 @@ def run_file_preflight(
     # (failed copilot sampler, a client that never fetched) gets the Execute
     # reader's own sample; a read that fails is named on Gate-8, not hidden.
     sample_unavailable_reason = ""
+    source_measured_empty = False
     if not sample_rows:
         from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT as _SAMPLE_LIMIT
         from services.preflight_sample import engine_sample_rows
@@ -1156,6 +1200,32 @@ def run_file_preflight(
         if engine_sample.rows:
             sample_rows = engine_sample.rows
         sample_unavailable_reason = engine_sample.unavailable_reason
+        source_measured_empty = engine_sample.measured_empty
+    if (
+        not sample_rows
+        and not source_measured_empty
+        and rows_are_population
+        and not (isinstance(row_count, int) and row_count > 0)
+    ):
+        from services.preflight_sample import peek_population_empty
+
+        population_rows, source_measured_empty = peek_population_empty(population_rows)
+    if source_measured_empty and not source_types_are_authoritative(
+        source_kind, source_format
+    ):
+        from services.source_schema_authority import (
+            empty_source_column_types,
+            restamp_mapping_source_types,
+        )
+
+        column_types = empty_source_column_types(
+            column_types,
+            mappings,
+            declared=declared_source_schema,
+            previous=previous_source_schema,
+            destination=destination_live_column_types or destination_column_types,
+        )
+        mappings = restamp_mapping_source_types(mappings, column_types)
 
     # Sources with no cheap cardinality — a DynamoDB Scan, a Kafka topic, a
     # search index — report ``None`` rather than inventing a total, which is the
@@ -1603,7 +1673,9 @@ def run_file_preflight(
         source=SourceConfig(
             kind=source_kind,
             connected=source_connected and bool(columns),
-            parseable=(is_file_source and has_samples and bool(columns))
+            parseable=(
+                is_file_source and (has_samples or source_measured_empty) and bool(columns)
+            )
             or (not is_file_source and bool(columns)),
             columns=source_cols,
             row_count_estimate=row_count,
@@ -1767,6 +1839,7 @@ def run_file_preflight(
         source_duplicate_probe_expected=source_duplicate_probe_expected,
     )
     ctx.sample_unavailable_reason = sample_unavailable_reason
+    ctx.source_measured_empty = source_measured_empty
     # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
     # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still
     # refuses to move rows when any blocker remains (passed=False).

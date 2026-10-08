@@ -2826,8 +2826,10 @@ class UniversalTransferEngine:
                     # discover an unfit value mid-load. A just-approved Studio
                     # Validate already asked that question; write-time fit
                     # still binds every row.
-                    population_rows=None if reuse_fit else records,
-                    rows_are_population=not reuse_fit,
+                    # An empty batch stays the population even on a reused
+                    # Validate: it is what proves a header-only file is empty.
+                    population_rows=None if reuse_fit and records else records,
+                    rows_are_population=not reuse_fit or not records,
                     skip_population_fit=reuse_fit,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
@@ -5021,13 +5023,13 @@ class UniversalTransferEngine:
                     # do not spend minutes asking the same question again.
                     population_rows=(
                         None
-                        if reuse_fit
+                        if reuse_fit and sample_rows
                         else _shaped_population_rows(
                             shape_runner,
                             _file_population_rows(content, filename, read_options),
                         )
                     ),
-                    rows_are_population=not reuse_fit,
+                    rows_are_population=not reuse_fit or not sample_rows,
                     skip_population_fit=reuse_fit,
                     source_filter=request.source_filter or None,
                     confidence_threshold=confidence_threshold_for_mode(
