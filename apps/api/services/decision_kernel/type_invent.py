@@ -2097,7 +2097,12 @@ def materialize_dest_ddl(
         # national source holds every scalar; leaving the alias (or a bare
         # VARCHAR that inherits the server's utf8mb3 default) rejects emoji
         # with 1366 after preflight said the value fits (DEF-B2-010).
-        return carry_national_unicode_charset(db, source_type or raw, legalized)
+        # ``raw`` has already lost COLLATE. The original carrier (or the
+        # explicit source type) still names a SQL Server collation, which is
+        # the measurement that licenses utf8mb4 when the engine context is gone.
+        return carry_national_unicode_charset(
+            db, source_type or carrier or raw, legalized
+        )
     # Rematerialized UUID aliases must use create-new width-safe wire
     # (BQ STRING(36), not bare STRING) so writers match Map stamps.
     if normalize_logical_type(raw) == LOGICAL_UUID:

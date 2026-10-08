@@ -1788,6 +1788,88 @@ def _sub_second_naive_wire(dialect_name: str, db_type: str, logical: str = "") -
     return None
 
 
+def _is_mysql_wire(dialect_name: str, db_type: str) -> bool:
+    """True when DDL compiles through the MySQL/MariaDB dialect."""
+    names = {(dialect_name or "").lower(), (db_type or "").lower()}
+    return bool(names & _MYSQL_WIRES)
+
+
+def _mysql_character_type(logical: str, db_type: str) -> Any | None:
+    """Compile a MySQL character stamp without dropping ``CHARACTER SET``.
+
+    ``sa.Unicode(n)`` and ``sa.String(n)`` both render ``VARCHAR(n)`` and
+    leave the character set to the server default. On a server whose default
+    is utf8mb3 that is the national alias: a 4-byte scalar is refused with
+    1366, and the next run reads the column back as
+    ``VARCHAR(n) COLLATE UTF8MB3_GENERAL_CI``. The charset has to be an
+    attribute of the type. ``NVARCHAR``/``NCHAR`` stay the alias with no
+    charset clause — a clause on those tokens is a 1064.
+
+    Returns ``None`` for carriers this path does not own, so numeric,
+    temporal, and plain ``VARCHAR(n)`` keep the existing compiler.
+    """
+    if mysql is None:
+        return None
+    raw = (logical or "").strip()
+    if not raw:
+        return None
+    from services.type_system import (
+        is_fixed_char_carrier,
+        is_national_string_carrier,
+        string_carrier_length,
+    )
+
+    national = is_national_string_carrier(raw)
+    has_charset = bool(re.search(r"(?:CHARACTER\s+SET|CHARSET)\s+", raw, re.I))
+    if not national and not has_charset:
+        return None
+    materialized = materialize_dest_ddl(db_type or "mysql", raw, source_type=raw)
+    text = (materialized or raw).strip()
+    charset_match = re.search(
+        r"(?:CHARACTER\s+SET|CHARSET)\s+([A-Za-z0-9_]+)", text, re.I
+    )
+    charset = charset_match.group(1) if charset_match else ""
+    collate_match = re.search(r"\bCOLLATE\s+([A-Za-z0-9_]+)", text, re.I)
+    collation = collate_match.group(1) if collate_match else ""
+    # SQL Server collation names are not MySQL collations. Stating one fails
+    # CREATE (1273). utf8mb4 capacity is the character set.
+    if collation and not collation.lower().startswith("utf8mb4"):
+        collation = ""
+    base = re.sub(
+        r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", text, flags=re.I
+    )
+    base = re.sub(r"\s+COLLATE\s+\S+", "", base, flags=re.I).strip()
+    head = base.upper().split("(", 1)[0].strip()
+    width = string_carrier_length(base)
+    kwargs: dict[str, Any] = {}
+    if charset:
+        kwargs["charset"] = charset
+    if collation:
+        kwargs["collation"] = collation
+    if head in {"NVARCHAR", "NCHAR", "NTEXT"} or (
+        is_national_string_carrier(base) and not charset
+    ):
+        if head == "NCHAR" or is_fixed_char_carrier(base):
+            return mysql.NCHAR(width) if width is not None else mysql.NCHAR()
+        return mysql.NVARCHAR(width) if width is not None else mysql.NVARCHAR()
+    lobs = {
+        "TINYTEXT": mysql.TINYTEXT,
+        "TEXT": mysql.TEXT,
+        "MEDIUMTEXT": mysql.MEDIUMTEXT,
+        "LONGTEXT": mysql.LONGTEXT,
+    }
+    lob = lobs.get(head)
+    if lob is not None:
+        return lob(**kwargs)
+    if head == "CHAR" or is_fixed_char_carrier(base):
+        return mysql.CHAR(width, **kwargs) if width is not None else mysql.CHAR(**kwargs)
+    if width is not None:
+        return mysql.VARCHAR(width, **kwargs)
+    if head in {"VARCHAR", "CHARACTER", "CHARACTER VARYING"}:
+        return mysql.VARCHAR(**kwargs) if kwargs else mysql.VARCHAR()
+    return None
+
+
 def _sa_type_for_logical(
     logical: str,
     dialect_name: str,
@@ -2194,7 +2276,13 @@ def _sa_type_for_logical(
     # invented NVARCHAR(64), and a live postgresql->mssql read-back came back with
     # ``中`` rewritten to ``?``. sa.Unicode/UnicodeText are the dialect-neutral
     # national wires (NVARCHAR on SQL Server, NVARCHAR2 on Oracle, VARCHAR on
-    # engines that are Unicode-only anyway).
+    # engines that are Unicode-only anyway). MySQL is the exception: those
+    # generic types drop CHARACTER SET, and the server default utf8mb3 then
+    # refuses a 4-byte scalar the national source held.
+    if _is_mysql_wire(dialect_name, db_type):
+        mysql_type = _mysql_character_type(raw, db_type or dialect_name)
+        if mysql_type is not None:
+            return _maybe_nullable(mysql_type)
     if is_national_string_carrier(raw):
         width = string_carrier_length(raw)
         if width is not None:

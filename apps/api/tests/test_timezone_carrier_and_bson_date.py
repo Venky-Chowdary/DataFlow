@@ -154,6 +154,35 @@ class TestBsonDateTokenIsAnInstant:
         # Unbound TIMESTAMP → MySQL TIMESTAMP stays a polarity collapse.
         assert is_lossy_coercion("TIMESTAMP", "TIMESTAMP", dest_db="mysql") is True
 
+    def test_catalog_aliases_are_the_same_document_instant(self) -> None:
+        """``mongo`` / ``cosmos`` must not miss the instant rules.
+
+        A raw string compare against ``mongodb`` left every relational
+        TIMESTAMP pair looking like a polarity collapse when the connector
+        id was the catalog alias.
+        """
+        from services.document_instant import is_document_instant_token
+        from services.source_engine_scope import bind_source_engine
+        from services.type_system import (
+            create_new_mapping_target_type,
+            is_lossy_coercion,
+        )
+
+        assert is_document_instant_token("mongo", "TIMESTAMP") is True
+        assert is_document_instant_token("cosmos", "date") is True
+        assert is_document_instant_token("amazon_elasticsearch", "DATE") is True
+        assert is_document_instant_token("firestore", "date") is False
+        assert is_document_instant_token("postgresql", "TIMESTAMP") is False
+        with bind_source_engine("mongo"):
+            # The alias is the same millisecond instant. Bare MySQL TIMESTAMP
+            # still drops those milliseconds, so the unaltered pair stays lossy.
+            assert is_lossy_coercion("TIMESTAMP", "TIMESTAMP", dest_db="mysql") is True
+            stamped = create_new_mapping_target_type(
+                "TIMESTAMP", "mysql", source_db="mongo"
+            )
+        assert "DATETIME" in stamped.upper()
+        assert "(3)" in stamped
+
     def test_sql_date_columns_still_truncate(self) -> None:
         assert (
             fingerprint_for_reconcile(

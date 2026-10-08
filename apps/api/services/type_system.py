@@ -4474,6 +4474,33 @@ def unicode_safe_target_carrier(
     return f"{'NCHAR' if is_fixed_width_char_carrier(text) else 'NVARCHAR'}({width})"
 
 
+def _collation_proves_foreign_national(stamp: str) -> bool:
+    """True when ``COLLATE`` names a repertoire MySQL's utf8mb3 alias cannot hold.
+
+    SQL Server ``SQL_Latin1_*`` / ``Latin1_General_CI_AS`` are UTF-16. That
+    name is evidence even when the source-engine context was dropped on the
+    way to CREATE. MySQL's own ``utf8*`` / ``latin1_general_ci`` / ``ascii*``
+    names are the column's spelling, not a foreign national source, and a
+    bare ``NVARCHAR`` with no collation stays unmeasured.
+    """
+    name = (parse_collation(stamp) or "").strip().lower()
+    if not name:
+        return False
+    if name.startswith("sql_latin1"):
+        return True
+    # MySQL ships latin1_general_ci/cs/bin. SQL Server's Latin1_General family
+    # adds an accent/width token or a code-page marker those three names lack.
+    if name.startswith("latin1_general") and name not in {
+        "latin1_general_ci",
+        "latin1_general_cs",
+        "latin1_general_bin",
+    }:
+        return True
+    if re.search(r"_(?:ci|cs)_(?:as|ai)\b", name) or name.endswith("_bin2"):
+        return True
+    return False
+
+
 def carry_national_unicode_charset(db: str, inferred: object, result: str) -> str:
     """Widen a MySQL create-new wire fed by a wider national source.
 
@@ -4487,22 +4514,31 @@ def carry_national_unicode_charset(db: str, inferred: object, result: str) -> st
 
     A MySQL-family source keeps its own spelling — its ``NVARCHAR`` really is
     utf8mb3, and re-spelling it would report a widen the source never had.
+    An unbound engine with a bare ``NVARCHAR`` is the same answer: nobody
+    measured a wider repertoire. A SQL Server collation still on the stamp
+    is that measurement, so the widen runs without the engine context.
     """
     if _normalize_dest_db(db) not in {"mysql", "mariadb"}:
         return result
-    raw = strip_identity_qualifier(
-        inferred if isinstance(inferred, str) else str(inferred)
-    )
+    inferred_text = inferred if isinstance(inferred, str) else str(inferred)
+    raw = strip_identity_qualifier(inferred_text)
     if not is_national_string_carrier(raw):
         return result
     src_engine = _normalize_dest_db(active_source_engine() or "")
-    if src_engine in {"mysql", "mariadb", ""}:
+    if src_engine in {"mysql", "mariadb"}:
+        return result
+    if src_engine == "" and not _collation_proves_foreign_national(inferred_text):
         return result
     if re.search(r"(?:CHARACTER\s+SET|CHARSET)\s+", result or "", re.I):
         return result
     parts = re.split(r"\s+COLLATE\s+", result or "", maxsplit=1, flags=re.I)
     head = parts[0].strip()
     collation = parts[1].strip() if len(parts) > 1 else ""
+    # A SQL Server collation name is unknown to MySQL (1273) and is not in
+    # the utf8mb4 family (1253). Capacity is the character set; equality
+    # stays the destination default unless the name is already utf8mb4.
+    if collation and not collation.lower().startswith("utf8mb4"):
+        collation = ""
     if not _is_mysql_character_wire(head):
         return result
     # NCHAR/NVARCHAR *is* the utf8mb3 alias — a charset clause on it is a

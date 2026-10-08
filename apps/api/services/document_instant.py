@@ -41,6 +41,7 @@ def is_document_instant_token(engine: str | None, ddl_type_token: str | None) ->
     rule, including the one that asks a zoneless source for its zone before the
     writer refuses the rows.
     """
+    from services.dest_dialect_facts import _normalize_dest_db
     from services.type_system import (
         LOGICAL_DATE,
         LOGICAL_DATETIME,
@@ -48,7 +49,17 @@ def is_document_instant_token(engine: str | None, ddl_type_token: str | None) ->
         strip_identity_qualifier,
     )
 
-    if (engine or "").strip().lower() not in INSTANT_DATE_TOKEN_ENGINES:
+    raw_engine = (engine or "").strip().lower()
+    # Catalog aliases (``mongo``, ``cosmos``, ``amazon_elasticsearch``) are the
+    # same carrier. Normalization is the SSOT for those names. Firestore shares
+    # the mongodb DDL bucket and is not a BSON date, so it stays out.
+    if raw_engine == "firestore":
+        return False
+    canonical = _normalize_dest_db(raw_engine) if raw_engine else ""
+    if (
+        raw_engine not in INSTANT_DATE_TOKEN_ENGINES
+        and canonical not in INSTANT_DATE_TOKEN_ENGINES
+    ):
         return False
     token = strip_identity_qualifier(ddl_type_token).upper().strip()
     return normalize_logical_type(token) in {LOGICAL_DATE, LOGICAL_DATETIME}
