@@ -662,14 +662,21 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         # Latin-1 VARCHAR is not a declared collapse (DEF-R20-001). No sample
         # leaves population unset and the unread pair stays a collapse.
         _sample_rows = list(getattr(ctx, "sample_rows", None) or [])
-        _code_page_population = (
-            [
-                row.get(m.source) if isinstance(row, dict) else None
-                for row in _sample_rows[:500]
-            ]
-            if _sample_rows
-            else None
-        )
+        try:
+            from services.column_case import column_population
+
+            # Case-fold the source name. row.get("amount") misses AMOUNT and
+            # the unread population stays a Latin-1 collapse.
+            _code_page_population = column_population(_sample_rows, m.source)
+        except Exception:
+            _code_page_population = (
+                [
+                    row.get(m.source) if isinstance(row, dict) else None
+                    for row in _sample_rows[:500]
+                ]
+                if _sample_rows
+                else None
+            )
         if is_lossy_coercion:
             lossy = bool(
                 is_lossy_coercion(

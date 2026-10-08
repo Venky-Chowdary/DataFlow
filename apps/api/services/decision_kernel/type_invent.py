@@ -1178,9 +1178,14 @@ def refuse_create_new_numeric_collapse(
     db = (dest_db_type or "").strip()
     if not src or not dest:
         return stamp
-    # Only rewrite numeric/integer/float invent. DECIMAL→TEXT is an explicit
-    # Map stamp (quarantine unfit cells), not the BIGINT / NUMERIC(9,4) cliff.
     dest_logical = normalize_logical_type(dest)
+    if dest_logical in {LOGICAL_STRING, LOGICAL_TEXT}:
+        # DECIMAL(12,3) → TEXT drops fixed point on an engine that has it.
+        # A pair that exceeds the destination cap stays text: that is the
+        # lossless digit carrier. SQLite and file sinks have no DECIMAL.
+        # An operator override or a clearing contract never reaches here.
+        return _recover_fitting_decimal_from_text(src, stamp, db)
+    # Only rewrite numeric/integer/float invent. Other text stamps stay.
     if dest_logical not in {LOGICAL_DECIMAL, LOGICAL_INTEGER, LOGICAL_FLOAT}:
         return stamp
     # Bare DECIMAL/NUMBER may still be sample-sized. Only rewrite when the
@@ -1206,6 +1211,28 @@ def refuse_create_new_numeric_collapse(
     if db:
         return recovered or stamp
     return src
+
+
+def _recover_fitting_decimal_from_text(src: str, stamp: str, db: str) -> str:
+    """Restore DECIMAL(p,s) when the destination can store that fixed point."""
+    if not db:
+        return stamp
+    from services.numeric_fit import decimal_fixed_point_would_collapse_to_text
+    from services.type_system import (
+        decimal_precision_would_truncate,
+        decimal_scale_would_truncate,
+    )
+
+    if not decimal_fixed_point_would_collapse_to_text(src, stamp, dest_db=db):
+        return stamp
+    if decimal_scale_would_truncate(src, db) or decimal_precision_would_truncate(
+        src, db
+    ):
+        return stamp
+    recovered = ddl_type(db, src)
+    if recovered and normalize_logical_type(recovered) == LOGICAL_DECIMAL:
+        return recovered
+    return stamp
 
 
 def _unsigned_polarity_only_collapse(src: str, dest: str, db: str) -> bool:

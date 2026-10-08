@@ -907,6 +907,23 @@ async def stream_transfer_job(job_id: str, request: Request):
     )
 
 
+def _operator_quarantine_rows(details: list) -> list:
+    """Response copy. Stored rejected_details keep the internal NULL wire."""
+    from services.dest_quarantine import project_operator_quarantine_details
+
+    return project_operator_quarantine_details(details)
+
+
+def _operator_csv_cell(value: object) -> str:
+    """CSV has no NULL token. SQL NULL is an empty field; ``""`` stays empty."""
+    from services.dest_quarantine import operator_quarantine_json_cell
+
+    cell = operator_quarantine_json_cell(value)
+    if cell is None:
+        return ""
+    return str(cell)
+
+
 @router.get("/jobs/{job_id}/quarantine")
 async def get_job_quarantine(job_id: str, request: Request):
     """Return quarantined rows for a job with their rejection reasons.
@@ -1019,7 +1036,7 @@ async def get_job_quarantine(job_id: str, request: Request):
         "rows_unaccounted": rows_unaccounted,
         "open_count": open_n,
         "source": source,
-        "quarantine": details,
+        "quarantine": _operator_quarantine_rows(details),
         "dest_dlq": dest_dlq,
         "quarantine_durable": quarantine_durable,
         "dest_dlq_durable": dest_dlq_durable,
@@ -1072,7 +1089,7 @@ async def export_job_quarantine(job_id: str, request: Request):
             str(d.get("row", "")),
             str(d.get("column", "")),
             str(d.get("target", "")),
-            str(d.get("value", "")),
+            _operator_csv_cell(d.get("value", "")),
             str(d.get("reason", "")),
             str(d.get("policy", "")),
             str(d.get("suggested_transform", "")),

@@ -309,11 +309,17 @@ def evaluate_ddl_compatibility(
         from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
         risk_cleared = mapping_has_clearing_risk_contract(m)
+        from services.column_case import column_population
+
+        # Measured ASCII is not a code-page collapse. No rows stays unread,
+        # so that pair stays a collapse until a contract clears it.
+        population = column_population(sample_rows, src)
         if not schemaless and tgt_type and is_lossy_coercion(
             src_type,
             tgt_type,
             dest_db=dest_kind,
             dest_table_exists=table_exists,
+            population=population,
         ):
             # Align with G3: declared lossy never soft-passes on head samples
             # without a clearing Risk Contract.
@@ -336,6 +342,7 @@ def evaluate_ddl_compatibility(
                         tgt_type,
                         dest_db=dest_kind,
                         dest_table_exists=table_exists,
+                        population=population,
                     )
                 ):
                     note = " — DECIMAL(p,s) narrowing (scale/capacity shrink; accept risk or remap)"
@@ -370,6 +377,7 @@ def evaluate_ddl_compatibility(
                 tgt_type,
                 dest_db=dest_kind,
                 dest_table_exists=table_exists,
+                population=population,
             )
             and not risk_cleared
         ):

@@ -295,3 +295,236 @@ def test_reported_rejects_match_stored_findings():
         summary, {"ok": True, "skipped": False, "rows_written": 5}
     )
     assert summary["rejected_rows"] == 5
+
+
+def test_datetime2_six_binds_the_microsecond():
+    """ODBC SQL_TIMESTAMP keeps 3 digits. DATETIME2(6) must bind the other 3."""
+    from datetime import datetime
+
+    from sqlalchemy.dialects import mssql
+
+    from connectors.generic_sql import _to_sa_value
+    from connectors.sqlserver_datetime2 import install_sqlserver_datetime2_bind
+
+    micro = datetime(2026, 2, 1, 10, 1, 0, 123456)
+    bound = _to_sa_value(
+        micro, "DATETIME2(6)", mssql.DATETIME2(precision=6), "mssql", "sqlserver"
+    )
+    assert isinstance(bound, str)
+    assert bound == "2026-02-01 10:01:00.123456"
+    seven = _to_sa_value(micro, "DATETIME2", mssql.DATETIME2(), "mssql", "sqlserver")
+    assert seven == "2026-02-01 10:01:00.1234560"
+    install_sqlserver_datetime2_bind()
+    install_sqlserver_datetime2_bind()
+    proc = mssql.DATETIME2(precision=6).bind_processor(None)
+    assert proc(micro) == "2026-02-01 10:01:00.123456"
+    assert proc("2026-02-01 10:01:00.123456") == "2026-02-01 10:01:00.123456"
+    assert proc(None) is None
+    narrow = mssql.DATETIME2(precision=3).bind_processor(None)
+    assert narrow(micro) == micro
+    with pytest.raises(ValueError, match="1/300"):
+        _to_sa_value(micro, "DATETIME", mssql.DATETIME(), "mssql", "sqlserver")
+    with pytest.raises(ValueError, match=r"DATETIME2\(3\)"):
+        _to_sa_value(
+            datetime(2028, 2, 29, 23, 59, 59, 999999),
+            "DATETIME2(3)",
+            mssql.DATETIME2(precision=3),
+            "mssql",
+            "sqlserver",
+        )
+    kept = _to_sa_value(micro, "TIMESTAMP", None, "postgresql", "postgresql")
+    assert isinstance(kept, datetime)
+
+
+_LATIN = "VARCHAR(20) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS"
+
+
+def test_ascii_into_latin1_is_not_blocked_and_a_signed_contract_clears_type_lock():
+    from services.column_case import column_population
+    from services.source_engine_scope import bind_source_engine
+
+    assert column_population([{"SKU": "ABC"}], "sku") == ["ABC"]
+    # A code-page sink is a collapse only when the source can emit Unicode.
+    with bind_source_engine("postgresql"):
+        _assert_latin1_population_and_contract([{"source": "sku", "target": "sku"}])
+
+
+def _assert_latin1_population_and_contract(mapping) -> None:
+    from services.ddl_compatibility import evaluate_ddl_compatibility
+    from services.migration_risk_contract import create_migration_risk_contract
+    from services.type_coercion_validator import validate_mapping_coercions
+
+    _ok, measured = evaluate_ddl_compatibility(
+        mappings=mapping,
+        source_schema={"sku": "VARCHAR(20)"},
+        target_schema={"sku": _LATIN},
+        sample_rows=[{"SKU": "ABC"}, {"sku": "12"}],
+        table_exists=True,
+        dest_connected=True,
+        dest_db_type="sqlserver",
+        destination_table="products",
+    )
+    assert not any("Lossy type coercion" in issue for issue in measured), measured
+    _unread_ok, unread = evaluate_ddl_compatibility(
+        mappings=mapping,
+        source_schema={"sku": "VARCHAR(20)"},
+        target_schema={"sku": _LATIN},
+        sample_rows=None,
+        table_exists=True,
+        dest_connected=True,
+        dest_db_type="sqlserver",
+        destination_table="products",
+    )
+    assert any("Lossy type coercion" in issue for issue in unread), unread
+
+    common = dict(
+        source_types={"sku": "VARCHAR(20)"},
+        target_types={"sku": _LATIN},
+        dest_db_type="sqlserver",
+        dest_table_exists=True,
+        schema_policy="type_locked",
+    )
+    outside = validate_mapping_coercions(
+        [{"source": "sku", "target": "sku", "target_type": _LATIN}],
+        samples_by_source={"sku": ["ABC", "山田"]},
+        **common,
+    )
+    assert any(issue["severity"] == "block" for issue in outside), outside
+    ascii = validate_mapping_coercions(
+        [{"source": "sku", "target": "sku", "target_type": _LATIN}],
+        samples_by_source={"sku": ["ABC", "12"]},
+        **common,
+    )
+    assert not any(issue["severity"] == "block" for issue in ascii), ascii
+    contract = create_migration_risk_contract(
+        column="sku",
+        source_type="VARCHAR(20)",
+        destination_type=_LATIN,
+        approved_by="qa@dataflow.app",
+        reason="Hold characters outside the Latin-1 code page",
+        execution_policy="CAST_AND_CONTINUE",
+    )
+    cleared = validate_mapping_coercions(
+        [{
+            "source": "sku",
+            "target": "sku",
+            "target_type": _LATIN,
+            "risk_contract": contract.to_dict(),
+        }],
+        **common,
+    )
+    assert cleared and all(issue["severity"] == "warn" for issue in cleared), cleared
+    changed = validate_mapping_coercions(
+        [{
+            "source": "qty",
+            "target": "qty",
+            "target_type": "VARCHAR(20)",
+            "risk_contract": contract.to_dict(),
+        }],
+        source_types={"qty": "INTEGER"},
+        target_types={"qty": "VARCHAR(20)"},
+        dest_db_type="sqlserver",
+        schema_policy="type_locked",
+    )
+    assert any(issue["severity"] == "block" for issue in changed), changed
+
+
+def test_decimal_12_3_stays_fixed_point_when_the_destination_has_one():
+    from services.decision_kernel.type_invent import refuse_create_new_numeric_collapse
+    from services.schema_inference import safe_ddl_logical_type
+
+    assert (
+        safe_ddl_logical_type(
+            "DECIMAL(12,3)", ["12.500", "not-a-number"], field_name="amt"
+        )
+        == "DECIMAL(12,3)"
+    )
+    expected = {
+        "mysql": "DECIMAL(12,3)",
+        "mariadb": "DECIMAL(12,3)",
+        "postgresql": "NUMERIC(12,3)",
+        "sqlserver": "DECIMAL(12,3)",
+    }
+    for db, want in expected.items():
+        got = refuse_create_new_numeric_collapse("DECIMAL(12,3)", "TEXT", db)
+        assert got.upper().replace(" ", "") == want, (db, got)
+    over = refuse_create_new_numeric_collapse("DECIMAL(80,40)", "TEXT", "mysql")
+    assert over.upper().replace(" ", "") == "TEXT"
+    assert refuse_create_new_numeric_collapse("DECIMAL(12,3)", "TEXT", "sqlite") == "TEXT"
+    assert refuse_create_new_numeric_collapse("DECIMAL(12,3)", "TEXT", "") == "TEXT"
+
+
+def test_quarantine_payload_stores_json_null_not_the_wire_token():
+    import json
+
+    from connectors.writer_common import quarantine_cell_wire
+    from services.dest_quarantine import (
+        project_operator_quarantine_details,
+        rejected_details_to_dlq_records,
+    )
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
+
+    assert quarantine_cell_wire(None) == SQL_NULL_SENTINEL
+    stored = {
+        "row": 1,
+        "column": "note",
+        "value": SQL_NULL_SENTINEL,
+        "values": {
+            "note": SQL_NULL_SENTINEL,
+            "sku": "",
+            "gone": DF_MISSING_SENTINEL,
+        },
+    }
+    records = rejected_details_to_dlq_records([stored], job_id="j1")
+    payload = records[0]["_df_payload"]
+    assert SQL_NULL_SENTINEL not in payload
+    parsed = json.loads(payload)
+    assert parsed["note"] is None
+    assert parsed["sku"] == ""
+    assert parsed["gone"] == DF_MISSING_SENTINEL
+    assert records[0]["_df_value"] is None
+    shown = project_operator_quarantine_details([stored])
+    assert stored["value"] == SQL_NULL_SENTINEL
+    assert shown[0]["value"] is None
+    assert shown[0]["values"]["sku"] == ""
+    assert shown[0]["values"]["note"] is None
+
+
+def test_dest_quarantine_table_stores_sql_null(tmp_path):
+    import sqlite3
+
+    from services.dest_quarantine import write_dest_quarantine
+    from services.value_serializer import SQL_NULL_SENTINEL
+    from src.transfer.models import EndpointConfig
+
+    dest_path = tmp_path / "dlq.db"
+    dest = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        table="orders",
+        connection_string=f"sqlite:///{dest_path}",
+        database=str(dest_path),
+    )
+    result = write_dest_quarantine(
+        dest,
+        [{
+            "row": 4,
+            "column": "note",
+            "target": "note",
+            "value": SQL_NULL_SENTINEL,
+            "reason": "unfit",
+            "policy": "quarantine",
+            "values": {"note": SQL_NULL_SENTINEL, "sku": ""},
+        }],
+        job_id="job-null-wire",
+    )
+    assert result["ok"] is True, result
+    with sqlite3.connect(dest_path) as db:
+        value, payload = db.execute(
+            "SELECT _df_value, _df_payload FROM orders_df_quarantine"
+        ).fetchone()
+    assert value is None
+    assert SQL_NULL_SENTINEL not in payload
+    compact = payload.replace(" ", "")
+    assert '"note":null' in compact
+    assert '"sku":""' in compact

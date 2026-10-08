@@ -842,11 +842,10 @@ def safe_ddl_logical_type(
     carrier_src = ddl_carrier_type(proposed or source_type or "VARCHAR")
     if normalize_logical_type(carrier_src) == LOGICAL_DECIMAL:
         precision, _scale = parse_numeric_precision_scale(carrier_src)
+        # Declared DECIMAL(p,s) is the carrier. A sample that does not fit
+        # quarantines on write — it must not rewrite the column as text.
         if precision is not None:
-            if not samples or samples_fit_logical_type(
-                samples, "DECIMAL", field_name=field_name
-            ):
-                return carrier_src
+            return carrier_src
     if normalize_logical_type(carrier_src) == "vector":
         dim = parse_vector_dimension(carrier_src)
         # Keep declared width even when samples are opaque float arrays as text.

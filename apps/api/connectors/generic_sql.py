@@ -1053,6 +1053,25 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
 
             # Before the first connect, so NUMBER is text+Decimal, not float64.
             install_oracle_exact_fetch()
+        if (
+            db_type in {
+                "mssql",
+                "sql_server",
+                "sqlserver",
+                "microsoft_sql_server",
+                "azure_sql_database",
+                "amazon_rds_sql_server",
+                "google_cloud_sql_sql_server",
+                "synapse_analytics",
+                "azure_synapse_dedicated",
+                "azure_synapse_serverless",
+            }
+            or "mssql" in driver
+        ):
+            from connectors.sqlserver_datetime2 import install_sqlserver_datetime2_bind
+
+            # Before the first bind, so DATETIME2(6) is not an ODBC millisecond.
+            install_sqlserver_datetime2_bind()
 
         engine = create_engine(url, pool_pre_ping=True, **pool_settings())
         from sqlalchemy import event
@@ -2805,7 +2824,16 @@ def _to_sa_value(
                 sa_type=sa_type,
                 db_type=str(db_type or dialect_name or ""),
             )
-            return coerced
+            from connectors.sqlserver_datetime2 import bind_sqlserver_datetime2
+
+            # ODBC SQL_TIMESTAMP keeps 3 fractional digits. DATETIME2(6)/(7)
+            # must bind as text or the microsecond is stored as milliseconds.
+            return bind_sqlserver_datetime2(
+                coerced,
+                logical=str(logical or ""),
+                sa_type=sa_type,
+                db_type=str(db_type or dialect_name or ""),
+            )
         if isinstance(coerced, date) and not isinstance(coerced, datetime):
             return datetime.combine(coerced, time())
         return value

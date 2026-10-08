@@ -893,7 +893,12 @@ def detect_schema_drift(
                     "reason": "pending_dest_type",
                 })
                 continue
-            if not is_lossy_coercion(src_type, tgt_type, dest_db=dest_db):
+            from services.column_case import column_population
+
+            population = column_population(sample_rows, src)
+            if not is_lossy_coercion(
+                src_type, tgt_type, dest_db=dest_db, population=population
+            ):
                 continue
             if decimal_capacity_is_equal_or_wider(
                 str(src_type), str(tgt_type), dest_db=dest_db
@@ -920,7 +925,9 @@ def detect_schema_drift(
                 })
                 continue
 
-            if is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_db):
+            if is_precision_collapse_coercion(
+                src_type, tgt_type, dest_db=dest_db, population=population
+            ):
                 type_mismatches.append({
                     "source": src,
                     "target": tgt,

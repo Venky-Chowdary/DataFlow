@@ -1391,6 +1391,7 @@ def run_mapping_pipeline(
         validation_mode=validation_mode,
         dest_db_type=destination_db_type,
         dest_table_exists=destination_table_exists,
+        samples_by_source=source_samples,
     )
     if coercion_issues:
         quality_issues = [*quality_issues, *[c["message"] for c in coercion_issues if c.get("severity") == "block"]]
