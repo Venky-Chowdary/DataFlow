@@ -81,15 +81,25 @@ def test_result_store_put_resolve_filter(tmp_path: Path) -> None:
         assert eq.success is True
         assert eq.output["match_count"] == 1
 
-        # Cross-session result_id must not resolve
-        denied = filter_stored_result(
+        # Omitting the id cannot see another session. Presenting the id can,
+        # and that follow-up is then stored on the caller's own session.
+        omitted = filter_stored_result(
+            session_id="other",
+            column="status",
+            op="eq",
+            value="active",
+        )
+        assert omitted.success is False
+        assert "no stored sample" in omitted.error.lower()
+        cross = filter_stored_result(
             result_id=rid,
             session_id="other",
             column="status",
             op="eq",
             value="active",
         )
-        assert denied.success is False
+        assert cross.success is True
+        assert cross.output["match_count"] == 1
 
         analyzed = analyze_stored_result(session_id="sess1")
         # session latest is the filtered child
@@ -177,8 +187,9 @@ def test_result_store_no_cross_session_leak(tmp_path: Path) -> None:
     )
     assert store.resolve(session_id="other") is None
     assert store.resolve() is None
-    assert store.resolve(result_id=rid, session_id="other") is None
-    assert store.resolve(result_id=rid) is None  # owned rows require session
+    # The id is the credential. Omitting it still cannot read another session.
+    assert store.resolve(result_id=rid, session_id="other") is not None
+    assert store.resolve(result_id=rid)["meta"]["table"] == "secret"
     assert store.resolve(result_id=rid, session_id="owner") is not None
 
 
@@ -197,6 +208,46 @@ def test_ack_ledger_reload_keeps_consumed_for_idempotent_replay(tmp_path: Path) 
     assert err == ""
     assert payload.get("_idempotent") is True
     assert payload.get("connector_id") == "c9"
+
+
+def test_explicit_result_id_reloads_across_stores(tmp_path: Path) -> None:
+    """A sample with no session is readable later by id, including from a store
+    that loaded the file before the write."""
+    path = tmp_path / "results-reload.json"
+    reader = PilotResultStore(path=path, ttl_sec=600)
+    writer = PilotResultStore(path=path, ttl_sec=600)
+    rid = writer.put(
+        rows=[{"id": 7}],
+        columns=["id"],
+        meta={"table": "qa6c_quar"},
+        session_id="",
+        source="sample_connector_object",
+    )
+    found = reader.resolve(result_id=rid, session_id="later-chat")
+    assert found is not None
+    assert found["rows"] == [{"id": 7}]
+    assert reader.resolve() is None
+    assert reader.resolve(session_id="later-chat") is None
+    reloaded = PilotResultStore(path=path, ttl_sec=600)
+    assert reloaded.resolve(result_id=rid)["meta"]["table"] == "qa6c_quar"
+
+
+def test_missing_result_id_is_not_the_no_sample_sentence(tmp_path: Path, monkeypatch) -> None:
+    store = PilotResultStore(path=tmp_path / "results-miss.json", ttl_sec=600)
+    monkeypatch.setattr(
+        "src.ai.copilot.result_store.get_result_store",
+        lambda: store,
+    )
+    missing = analyze_stored_result(result_id="pr_does_not_exist", session_id="owner")
+    empty = analyze_stored_result(session_id="owner")
+    assert missing.success is False and empty.success is False
+    assert missing.error != empty.error
+    assert "pr_does_not_exist" in missing.error
+    assert "one hour" in missing.error
+    assert "no stored sample" in empty.error.lower()
+    filtered = filter_stored_result(result_id="pr_also_missing", column="id")
+    assert "pr_also_missing" in filtered.error
+    assert filtered.error != empty.error
 
 
 def test_sample_still_routes() -> None:

@@ -746,15 +746,13 @@ def analyze_stored_result(
     tool = "analyze_result"
     from .result_store import get_result_store
 
-    doc = get_result_store().resolve(result_id=result_id, session_id=session_id)
+    store = get_result_store()
+    doc = store.resolve(result_id=result_id, session_id=session_id)
     if not doc:
         return _tool_result(
             tool,
             success=False,
-            error=(
-                "No stored result to analyze. Sample a table or run a query first "
-                f'(e.g. "sample {_example_table()} on {_example_connector()}").'
-            ),
+            error=store.explain_miss(result_id=result_id, session_id=session_id),
         )
     rows = list(doc.get("rows") or [])
     columns = list(doc.get("columns") or [])
@@ -830,14 +828,13 @@ def filter_stored_result(
     tool = "filter_result"
     from .result_store import get_result_store
 
-    doc = get_result_store().resolve(result_id=result_id, session_id=session_id)
+    store = get_result_store()
+    doc = store.resolve(result_id=result_id, session_id=session_id)
     if not doc:
         return _tool_result(
             tool,
             success=False,
-            error=(
-                "No stored result to filter. Sample a table or run a query first."
-            ),
+            error=store.explain_miss(result_id=result_id, session_id=session_id),
         )
     columns = list(doc.get("columns") or [])
     col = (column or "").strip()

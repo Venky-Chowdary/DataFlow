@@ -403,6 +403,10 @@ def build_connector_draft(message: str, args: dict[str, Any] | None = None) -> d
     merged.setdefault("password", "")
     merged.setdefault("host", "")
     merged.setdefault("connection_string", "")
+    if not str(merged.get("service_account") or "").strip():
+        camel = str(merged.get("serviceAccount") or "").strip()
+        if camel:
+            merged["service_account"] = camel
     merged.setdefault("service_account", "")
     merged.setdefault("ssl", False)
     from services.dialect_profiles import default_schema_for
@@ -448,6 +452,22 @@ def _path_connector_complete(draft: dict[str, Any]) -> tuple[bool, str]:
         if not resolved:
             return False, "File path or database name is required for SQLite/DuckDB."
     return True, ""
+
+
+def probe_failure_advice(connector_type: str) -> str:
+    """What to fix after a failed probe. SQL is host/port; warehouses are not."""
+    from src.transfer.connector_capabilities import CATALOG_ID_ALIASES
+
+    ctype = (connector_type or "").lower().strip()
+    driver = CATALOG_ID_ALIASES.get(ctype, ctype)
+    if driver in {"bigquery", "gcs"}:
+        return "Fix the service_account JSON key and the project id, then ask again."
+    if driver == "s3":
+        return "Fix the endpoint, bucket, and access keys, then ask again."
+    return (
+        "Fix host/port/user/password (use the public proxy if this is Railway), "
+        "then ask again."
+    )
 
 
 def draft_is_complete(draft: dict[str, Any]) -> tuple[bool, str]:

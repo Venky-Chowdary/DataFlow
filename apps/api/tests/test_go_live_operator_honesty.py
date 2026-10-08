@@ -301,3 +301,178 @@ def test_remediate_rejects_an_unknown_run_and_does_not_stage_a_write(monkeypatch
     DataPilotAgent._append_tool_actions(turn, known)
     assert turn.pending_actions == []
     assert any(a.get("type") == "navigate" and a.get("screen") == "transfer" for a in turn.actions)
+
+
+def test_describe_pilot_names_confirm_gated_delete():
+    out = DataPilotTools().execute("describe_pilot", {}).output or {}
+    cannot = " ".join(out.get("cannot_yet") or [])
+    can = " ".join(out.get("can") or [])
+    assert "Create a brand-new schedule" not in cannot
+    assert "Delete connectors, jobs, or data" not in cannot
+    assert "Delete jobs or warehouse rows from chat" in cannot
+    assert "delete a pipeline schedule after you Confirm" in can
+    assert "Delete a saved connector after you Confirm" in can
+
+
+def test_cdc_does_not_require_an_incremental_cursor():
+    from src.ai.rag.product_facts import _sync_modes_section
+
+    text = _sync_modes_section().text
+    cdc = next(line for line in text.splitlines() if line.startswith("Sync mode cdc "))
+    incremental = next(
+        line for line in text.splitlines() if line.startswith("Sync mode incremental_append ")
+    )
+    assert "cursor field" not in cdc.lower()
+    assert "gtid is optional" in cdc.lower()
+    assert "cursor column" in cdc.lower()
+    assert "cursor field" in incremental.lower()
+
+
+def test_gtid_answer_says_file_and_position_is_enough():
+    from src.ai.rag.product_docs import compose_product_answer, retrieve_product_answer
+    from src.ai.rag.product_facts import _gtid_section
+
+    fact = _gtid_section().text.lower()
+    assert "optional" in fact
+    assert "file and position are enough" in fact
+    assert "not required" in fact
+    assert "incremental cursor column" in fact
+    body = " ".join(
+        (compose_product_answer(retrieve_product_answer("Does MySQL CDC require GTID")) or "").split()
+    ).lower()
+    assert "optional" in body or "not required" in body
+    assert "file and position" in body
+    assert "cursor field" not in body
+
+
+def test_resume_fact_restarts_a_full_refresh():
+    from src.ai.rag.product_facts import _resume_section
+
+    text = _resume_section().text.lower()
+    assert "committed cursor" in text
+    assert "full refresh" in text
+    assert "restarts from the beginning" in text
+
+
+def test_minio_list_uses_the_s3_probe(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.transfer.endpoint_intelligence import introspect_endpoint
+    from src.transfer.models import EndpointConfig
+
+    seen: dict = {}
+
+    class Probe:
+        ok = True
+        tables = ["exports/a.csv"]
+        message = "listed 1 object"
+        error = ""
+
+    def fake_test_s3(**kwargs):
+        seen["list"] = kwargs
+        return Probe()
+
+    def fake_read(**kwargs):
+        seen["read"] = kwargs
+        return SimpleNamespace(
+            headers=["id"],
+            rows=[{"id": 1}],
+            total_rows=1,
+            meta={},
+        )
+
+    monkeypatch.setattr("connectors.s3.test_s3", fake_test_s3)
+    monkeypatch.setattr("connectors.s3.s3_object_exists", lambda *a, **k: True)
+    monkeypatch.setattr("connectors.s3_reader.read_object", fake_read)
+    for fmt in ("minio", "wasabi", "backblaze_b2", "digitalocean_spaces", "cloudflare_r2"):
+        seen.clear()
+        info = introspect_endpoint(
+            EndpointConfig(
+                kind="database",
+                format=fmt,
+                host="minio",
+                port=9000,
+                database="qa19-bucket",
+                table="exports/a.csv",
+                username="minio",
+                password="minio123",
+            )
+        )
+        assert "not yet implemented" not in (info.get("message") or ""), fmt
+        assert info["connected"] is True, fmt
+        assert seen["list"]["host"] == "minio"
+        assert seen["read"]["bucket"] == "qa19-bucket"
+        assert seen["read"]["key"] == "exports/a.csv"
+        assert info["columns"] == ["id"]
+
+
+def test_bigquery_probe_failure_names_the_service_account(monkeypatch):
+    monkeypatch.setattr(
+        "services.connector_store.connector_name_taken",
+        lambda *a, **k: False,
+    )
+    monkeypatch.setattr(
+        "src.transfer.connector_registry.run_probe",
+        lambda *_a, **_k: (False, "invalid_grant"),
+    )
+    res = DataPilotTools()._create_connector(
+        name="bq-qa",
+        type="bigquery",
+        database="my-project",
+        service_account='{"type":"service_account"}',
+        test_first=True,
+    )
+    assert res.success is False
+    assert "service_account" in (res.error or "")
+    assert "project id" in (res.error or "")
+    assert "Railway" not in (res.error or "")
+    assert "host/port" not in (res.error or "")
+
+
+def test_sql_probe_failure_still_names_host_and_port(monkeypatch):
+    monkeypatch.setattr(
+        "services.connector_store.connector_name_taken",
+        lambda *a, **k: False,
+    )
+    monkeypatch.setattr(
+        "src.transfer.connector_registry.run_probe",
+        lambda *_a, **_k: (False, "connection refused"),
+    )
+    res = DataPilotTools()._create_connector(
+        name="pg-qa",
+        type="postgresql",
+        host="db.internal",
+        port=5432,
+        database="app",
+        username="app",
+        password="secret",
+        test_first=True,
+    )
+    assert res.success is False
+    assert "Railway" in (res.error or "")
+    assert "host/port/user/password" in (res.error or "")
+
+
+def test_service_account_camel_case_binds():
+    from src.ai.copilot.connector_create import build_connector_draft
+    from src.ai.copilot.tools import DataPilotTools as Tools
+    from src.ai.copilot.tools import _bind_tool_arguments
+
+    draft = build_connector_draft(
+        "",
+        {
+            "name": "bq",
+            "type": "bigquery",
+            "database": "proj",
+            "serviceAccount": '{"type":"service_account"}',
+        },
+    )
+    assert draft["service_account"].startswith("{")
+    bound, err = _bind_tool_arguments(
+        "create_connector",
+        Tools._create_connector,
+        {"serviceAccount": '{"type":"service_account"}', "type": "bigquery"},
+    )
+    assert err == ""
+    assert bound["service_account"].startswith("{")
+    assert "serviceAccount" not in bound

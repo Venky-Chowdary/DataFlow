@@ -17,7 +17,7 @@ from .adapters import (
     parse_file_content,
     resolve_connector_config,
 )
-from .connector_capabilities import resolve_driver_type
+from .connector_capabilities import CATALOG_ID_ALIASES, resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
 from services.procedure_source import is_callable_source
@@ -263,6 +263,14 @@ def _specialty_object_list(
     return None
 
 
+def _s3_family_format(fmt: str) -> str:
+    """MinIO, Wasabi, B2, Spaces, and R2 list through the S3 probe."""
+    key = (fmt or "").lower().strip()
+    if key == "s3" or CATALOG_ID_ALIASES.get(key) == "s3":
+        return "s3"
+    return key
+
+
 def introspect_endpoint(
     endpoint: EndpointConfig,
     sample_content: bytes | None = None,
@@ -272,7 +280,7 @@ def introspect_endpoint(
     Probe an endpoint: connection health, available tables/collections,
     column schema, and what will be auto-created on write.
     """
-    fmt = (endpoint.format or "").lower()
+    fmt = _s3_family_format(endpoint.format or "")
     out: dict = {
         "kind": endpoint.kind,
         "format": endpoint.format,
@@ -311,7 +319,7 @@ def introspect_endpoint(
     # When a saved connector is used, its stored driver type is authoritative;
     # ignore an inline format string that may have been sent as a placeholder.
     resolved_fmt = cfg.get("type") or endpoint.format
-    fmt = (resolved_fmt or "").lower()
+    fmt = _s3_family_format(resolved_fmt or "")
     out["format"] = resolved_fmt
 
     # Dest-only / lakehouse: no information_schema. Connectivity + missing
@@ -823,7 +831,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         cfg = resolve_connector_config(endpoint)
         # Use the resolved saved-connector driver type if available, otherwise
         # fall back to the inline format string.
-        fmt = (cfg.get("type") or endpoint.format or "").lower()
+        fmt = _s3_family_format(cfg.get("type") or endpoint.format or "")
 
         if is_callable_source(endpoint) or is_callable_source(cfg):
             _attach_callable_source_sample(out, endpoint, cfg, fmt, sample_limit)

@@ -1176,6 +1176,7 @@ _TOOL_ARG_ALIASES = {
     "table_name": "table",
     "source_name": "source_connector_name",
     "dest_name": "dest_connector_name",
+    "serviceAccount": "service_account",
 }
 
 
@@ -1582,9 +1583,11 @@ class DataPilotTools:
                     if trust_failure:
                         error = probe_msg
                     else:
+                        from .connector_create import probe_failure_advice
+
                         error = (
                             f"Could not connect with those credentials: {probe_msg}. "
-                            "Fix host/port/user/password (use the public proxy if this is Railway), then ask again."
+                            f"{probe_failure_advice(str(draft.get('type') or ''))}"
                         )
                     return ToolResult(
                         name="create_connector",
@@ -1958,6 +1961,8 @@ class DataPilotTools:
                     "Create a saved connector from a URL or host/user/password (server ack + Confirm)",
                     "Compare source vs destination schemas and map columns",
                     "List and run pipeline schedules (with confirmation)",
+                    "Create, pause, resume, or delete a pipeline schedule after you Confirm",
+                    "Delete a saved connector after you Confirm",
                     "Open Fix bad data / quarantine paths in Transfer Studio (Confirm required)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
                     "Brief the live workspace (connectors, jobs, parked pipelines, contracts)",
@@ -1965,11 +1970,11 @@ class DataPilotTools:
                 "cannot_yet": [
                     "Export a table to a downloadable file from chat "
                     "(sample the table or use Query for larger pulls)",
-                    "Create a brand-new schedule/pipeline definition from chat "
-                    "(I can list and run existing ones)",
                     "Rewrite quarantine rows in place from chat "
                     "(I open Transfer Studio Fix with your Confirm)",
-                    "Delete connectors, jobs, or data",
+                    "Delete jobs or warehouse rows from chat "
+                    "(deleting a connector or a schedule asks you to Confirm "
+                    "and does not undo a committed load)",
                     "Run dbt Cloud or use dbt as the transfer engine "
                     "(transform projects can export a dbt starter pack)",
                     "Open an SSH tunnel or bastion in front of a database "
