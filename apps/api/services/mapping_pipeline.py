@@ -995,6 +995,16 @@ def run_mapping_pipeline(
         col_samples = [
             str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
         ] or None
+        # A payload scroll is a page, not the population. Re-stamping bare
+        # DECIMAL from those cells put NUMERIC(4,2) on Postgres and blocked
+        # every later price that needed another integer digit.
+        from services.schema_introspect import sample_page_is_not_a_precision_contract
+
+        invent_samples = (
+            None
+            if sample_page_is_not_a_precision_contract(source_db_type)
+            else col_samples
+        )
 
         if pending_dest:
             tgt_type = ""
@@ -1009,9 +1019,9 @@ def run_mapping_pipeline(
                 tgt_type = create_new_mapping_target_type(
                     "DECIMAL",
                     destination_db_type or "",
-                    samples=col_samples,
+                    samples=invent_samples,
                     source_db=source_db_type,
-                ) if destination_db_type or col_samples else "DECIMAL"
+                ) if destination_db_type or invent_samples else "DECIMAL"
             elif intentional_create and "unsigned" in src_l:
                 # INT/MEDIUMINT/SMALLINT UNSIGNED → BIGINT create-new (signed INT overflows).
                 tgt_type = "BIGINT"
@@ -1021,7 +1031,7 @@ def run_mapping_pipeline(
                 tgt_type = create_new_mapping_target_type(
                     src_type,
                     destination_db_type,
-                    samples=col_samples,
+                    samples=invent_samples,
                     source_db=source_db_type,
                 )
             elif destination_db_type and destination_table_exists is True:
@@ -1038,9 +1048,9 @@ def run_mapping_pipeline(
                 tgt_type = ""
             else:
                 # No dest dialect — still stamp observed DECIMAL(p,s) for Map honesty.
-                if col_samples and normalize_logical_type(src_type) in {"decimal", "float"}:
+                if invent_samples and normalize_logical_type(src_type) in {"decimal", "float"}:
                     tgt_type = create_new_mapping_target_type(
-                        src_type, "", samples=col_samples
+                        src_type, "", samples=invent_samples
                     )
                 else:
                     tgt_type = src_type
@@ -1059,7 +1069,7 @@ def run_mapping_pipeline(
             if (
                 strategy in {"identity_passthrough", "create_compatible_new"}
                 or destination_table_exists is False
-            ) and col_samples:
+            ) and invent_samples:
                 from services.type_system import parse_numeric_precision_scale
 
                 bare = normalize_logical_type(tgt_type) in {"decimal", "float"}
@@ -1068,7 +1078,7 @@ def run_mapping_pipeline(
                     upgraded = create_new_mapping_target_type(
                         src_type or tgt_type,
                         destination_db_type or "",
-                        samples=col_samples,
+                        samples=invent_samples,
                         source_db=source_db_type,
                     )
                     if upgraded:

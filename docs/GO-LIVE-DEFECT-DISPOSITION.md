@@ -8,10 +8,10 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 25
+- not fixed: 23
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 61
+- fixed in code, unit-proven — not a live QA retest: 63
 - partly fixed in code: 9
 
 ## Every row
@@ -92,10 +92,10 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-045 | P2 | OPEN | fixed in code, unit-proven (test_text_bytea_and_uuid_are_not_guessed_from_the_peek). PostgreSQL text (OID 25) stays VARCHAR even when the sample is classified INTERVAL. Not a live Postgres to SQL Server retest. |
 | DEF-C-047 | P2 | OPEN | fixed in code, unit-proven (test_a_space_in_a_table_name_stays_inside_the_quotes, test_a_spaced_sqlite_table_is_read_under_its_own_name). A name whose only unusual character is a space is quoted verbatim on PostgreSQL, SQL Server, MySQL and SQLite. A quote or semicolon still goes through the injection sanitizer. Not a live PostgreSQL retest. |
 | DEF-SCHEMALESS-DST-CONTRACT | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-DECIMAL-SAMPLE-INFER | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-DECIMAL-SAMPLE-INFER | P2 | OPEN | fixed in code, unit-proven (test_qdrant_price_page_does_not_invent_numeric_4_2). A payload or document sample page stays unbounded numeric. A spreadsheet still invents from its cells. Not a live Qdrant retest. |
 | DEF-TSTZ-NAME-INFER | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-REDIS-SRC-HEADERS | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-S3-ENDPOINT-FORM | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-S3-ENDPOINT-FORM | P2 | OPEN | fixed in code, unit-proven (connectorListenPort.test.ts). A typed port is kept. An endpoint URL that names a port is the port the preview shows. Real AWS with no other port stays 443. Not a live MinIO retest. |
 | DEF-ADLS-EMPTY-INCLUDE | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-GCS-DST-CREATE | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | UNNUMBERED (RETEST-R1 case 3.3) | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |

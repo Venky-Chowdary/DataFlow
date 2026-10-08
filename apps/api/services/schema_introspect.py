@@ -4940,6 +4940,36 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
     return out
 
 
+# A bounded scroll is not a census. Inventing NUMERIC(4,2) from the first
+# eight prices quarantined every later value that needed another integer digit.
+_PAYLOAD_SAMPLE_ENGINES = frozenset({
+    "qdrant",
+    "mongodb",
+    "dynamodb",
+    "elasticsearch",
+    "opensearch",
+    "couchbase",
+    "redis",
+    "weaviate",
+    "pinecone",
+    "milvus",
+})
+
+
+def sample_page_is_not_a_precision_contract(source_db: str) -> bool:
+    """Payload and document engines do not declare decimal precision."""
+    key = (source_db or "").lower().strip()
+    if not key:
+        return False
+    if key in _PAYLOAD_SAMPLE_ENGINES:
+        return True
+    try:
+        from src.transfer.connector_capabilities import CATALOG_ID_ALIASES
+    except Exception:
+        return False
+    return CATALOG_ID_ALIASES.get(key, key) in _PAYLOAD_SAMPLE_ENGINES
+
+
 def _unbound_sampled_decimal(carrier: str) -> str:
     """Drop a precision invented from a sample page.
 
