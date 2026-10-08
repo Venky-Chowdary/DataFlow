@@ -708,7 +708,28 @@ def run_mapping_pipeline(
                 for col, vals in source_samples.items()
             })
         if profile_rows:
-            profiled = profile_dataset(source_columns, profile_rows)
+            wire_token = None
+            if source_db_type:
+                from services.transform_engine import (
+                    NUMBER_LOCALE_WIRE,
+                    _active_number_locale,
+                    reset_active_number_locale,
+                    set_active_number_locale,
+                )
+                from src.transfer.connector_capabilities import (
+                    renders_typed_wire_values,
+                )
+
+                # Postgres NUMERIC(12,3) arrives as ``1.234``. Auto reads that
+                # as a thousands group and the column is inferred TEXT, then
+                # the plan blocks. A typed database extract is WIRE.
+                if renders_typed_wire_values(source_db_type) and not _active_number_locale():
+                    wire_token = set_active_number_locale(NUMBER_LOCALE_WIRE)
+            try:
+                profiled = profile_dataset(source_columns, profile_rows)
+            finally:
+                if wire_token is not None:
+                    reset_active_number_locale(wire_token)
             merged_schema = merge_profiler_schema(
                 {s["name"]: s.get("inferred_type", "VARCHAR") for s in (source_schemas or [])},
                 profiled.get("schema", {}),

@@ -241,3 +241,53 @@ def prove_cdc_values(
         engine=dest_type,
         dest_types=dest_types,
     )
+
+
+def identity_rows_missing_on_dest(
+    *,
+    source_type: str,
+    source_cfg: dict[str, Any],
+    source_table: str,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    mappings: list[dict[str, Any]] | None,
+    dest_types: dict[str, str] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Source rows whose identity fingerprint is not on the destination.
+
+    ``None`` when the mapping is not an identity carry. Used to upsert a gap
+    update the binlog resume already stepped past (DEF-C-005). At-least-once:
+    this is the current source image, not a claim the missed event was
+    replayed in order.
+    """
+    if not source_table or not dest_table:
+        raise CdcValueScanIncomplete(
+            "CDC value scan needs a source table and a destination table."
+        )
+    pairs = _identity_pairs(mappings)
+    if pairs is None:
+        return None
+    columns = [dest for _src, dest in pairs]
+    source_columns = [src for src, _dest in pairs]
+    try:
+        source_rows = _scan_table(source_type, source_cfg, source_table, source_columns)
+        dest_rows = _scan_table(dest_type, dest_cfg, dest_table, columns)
+    except Exception as exc:
+        raise CdcValueScanIncomplete(f"CDC value scan failed: {exc}") from exc
+    if source_rows is None or dest_rows is None:
+        raise CdcValueScanIncomplete(
+            "CDC value scan did not finish. Row count is not a cell proof."
+        )
+    renamed_source = _rename(source_rows, pairs)
+    dest_named = _rename(dest_rows, [(column, column) for column in columns])
+    present = {
+        _fingerprint_row(row, columns, engine=dest_type, dest_types=dest_types)
+        for row in dest_named
+    }
+    missing: list[dict[str, Any]] = []
+    for raw, renamed in zip(source_rows, renamed_source):
+        fp = _fingerprint_row(renamed, columns, engine=dest_type, dest_types=dest_types)
+        if fp not in present:
+            missing.append(raw)
+    return missing

@@ -1402,7 +1402,58 @@ def _note_failed_batch_undo(request: Any, dest_summary: Any, message: str) -> st
     return base
 
 
-def _drop_destination_table(destination: EndpointConfig) -> bool:
+def _remember_preserved_columns(destination: EndpointConfig, kept: list[dict]) -> None:
+    if not kept:
+        return
+    extra = dict(destination.extra or {})
+    extra["preserve_columns"] = kept
+    destination.extra = extra
+
+
+def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> None:
+    """Drop the MySQL backup after success, or put it back after failure.
+
+    Rename-aside leaves the previous table under ``__df_bak``. A cancelled or
+    failed CREATE must not leave the live name missing.
+    """
+    extra = dict(getattr(destination, "extra", None) or {})
+    backup = extra.get("overwrite_backup")
+    if not backup or extra.get("overwrite_backup_engine") != "mysql":
+        return
+    from .adapters import resolve_connector_config, resolve_dest_table
+    from .connector_capabilities import resolve_driver_type
+
+    try:
+        db_type = resolve_driver_type(destination.format)
+        cfg = resolve_connector_config(destination)
+        table_name = resolve_dest_table(db_type, destination)
+        if restore:
+            from connectors.table_manager import restore_mysql_overwrite
+
+            restore_mysql_overwrite(cfg, table_name, str(backup))
+        else:
+            from connectors.table_manager import discard_mysql_overwrite
+
+            discard_mysql_overwrite(cfg, str(backup))
+    except Exception as exc:  # noqa: BLE001 - backup settle must not hide the transfer result
+        logger.error(
+            "MySQL overwrite backup %s failed for %s: %s",
+            "restore" if restore else "discard",
+            backup,
+            exc,
+            exc_info=exc,
+        )
+    finally:
+        extra.pop("overwrite_backup", None)
+        extra.pop("overwrite_backup_engine", None)
+        destination.extra = extra
+
+
+def _drop_destination_table(
+    destination: EndpointConfig,
+    *,
+    mappings: list[dict] | None = None,
+) -> bool:
     """Drop the destination object for full-refresh overwrite sync modes.
 
     Raises :class:`FullRefreshDropFailed` when a drop was attempted and failed.
@@ -1439,6 +1490,33 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
         ) from exc
 
     carry_dest_spelling_across_drop(destination, db_type, cfg, table_name, schema)
+    if db_type == "mysql":
+        from connectors.table_manager import retire_mysql_overwrite
+
+        try:
+            backup, kept = retire_mysql_overwrite(cfg, table_name, mappings)
+        except TableDropError as exc:
+            logger.error("full_refresh retire failed for %s: %s", table_name, exc)
+            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+        _remember_preserved_columns(destination, kept)
+        if backup:
+            extra = dict(destination.extra or {})
+            extra["overwrite_backup"] = backup
+            extra["overwrite_backup_engine"] = "mysql"
+            destination.extra = extra
+        return True
+    if db_type in ("postgresql", "redshift"):
+        try:
+            from connectors.table_manager import postgres_columns_to_keep
+
+            kept = postgres_columns_to_keep(cfg, table_name, schema, mappings)
+            _remember_preserved_columns(destination, kept)
+        except Exception as exc:  # noqa: BLE001 - keep-column read must not block the overwrite
+            logger.warning(
+                "Could not read destination columns to keep on %s: %s",
+                table_name,
+                exc,
+            )
     try:
         return drop_table(db_type, cfg, table_name, schema)
     except TableDropError as exc:
@@ -3048,7 +3126,9 @@ class UniversalTransferEngine:
                                 "Preparing destination — clearing table for full refresh…"
                             ),
                         )
-                        _drop_destination_table(request.destination)
+                        _drop_destination_table(
+                            request.destination, mappings=mappings
+                        )
                         mongo.update_job_status(
                             job_id,
                             "running",
@@ -3515,6 +3595,7 @@ class UniversalTransferEngine:
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
+            _settle_overwrite_backup(request.destination, restore=False)
             mongo.update_job_status(
                 job_id,
                 terminal_status,
@@ -3648,6 +3729,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
+            _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -3685,6 +3767,7 @@ class UniversalTransferEngine:
                 destination_summary=dest_summary,
             )
         except Exception as e:
+            _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
                 mongo, job_id, e, lineage=lineage, request=request
@@ -3731,7 +3814,7 @@ class UniversalTransferEngine:
             )
             if request.limit > 0:
                 total_rows = min(total_rows, request.limit)
-            if total_rows == 0:
+            if total_rows == 0 and not columns:
                 mongo.update_job_status(
                     job_id, "failed", error="Source table is empty", phase="failed"
                 )
@@ -3741,6 +3824,12 @@ class UniversalTransferEngine:
                     operation=request.operation,
                     job_id=job_id,
                 )
+            if total_rows == 0 and columns:
+                # A table with columns and no rows is a real object. The stream
+                # creates the destination and completes with a measured 0.
+                extra = dict(request.destination.extra or {})
+                extra["create_empty_source"] = True
+                request.destination.extra = extra
 
             read_columns = list(columns)
             raw_sample_size = len(sample_rows)
@@ -4218,7 +4307,9 @@ class UniversalTransferEngine:
                             "Preparing destination — clearing table for full refresh…"
                         ),
                     )
-                    _drop_destination_table(request.destination)
+                    _drop_destination_table(
+                        request.destination, mappings=mappings
+                    )
                     mongo.update_job_status(
                         job_id,
                         "running",
@@ -4537,6 +4628,7 @@ class UniversalTransferEngine:
                     dest_cfg=dest_cfg,
                     extra_lsns=[value for value in extra_lsns if value],
                 )
+            _settle_overwrite_backup(request.destination, restore=False)
             mongo.update_job_status(
                 job_id,
                 terminal_status,
@@ -4623,6 +4715,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
+            _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -4661,6 +4754,7 @@ class UniversalTransferEngine:
                 contract_id=contract_id,
             )
         except Exception as e:
+            _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
                 mongo, job_id, e, lineage=lineage, request=request
@@ -5134,7 +5228,9 @@ class UniversalTransferEngine:
                             "Preparing destination — clearing table for full refresh…"
                         ),
                     )
-                    _drop_destination_table(request.destination)
+                    _drop_destination_table(
+                        request.destination, mappings=mappings
+                    )
                     mongo.update_job_status(
                         job_id,
                         "running",
@@ -5280,6 +5376,7 @@ class UniversalTransferEngine:
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
+            _settle_overwrite_backup(request.destination, restore=False)
             mongo.update_job_status(
                 job_id,
                 terminal_status,
@@ -5365,6 +5462,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
+            _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -5403,6 +5501,7 @@ class UniversalTransferEngine:
                 contract_id=contract_id,
             )
         except Exception as e:
+            _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
                 mongo, job_id, e, lineage=lineage, request=request

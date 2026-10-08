@@ -390,13 +390,20 @@ def prefer_listen_port(driver_type: str, inline: Any, saved: Any) -> int:
     """Pick the port the dial will use before the driver default is applied.
 
     An inline historical ``5432`` must not override a saved tunnel port.
-    Returns ``0`` when neither side chose a port, so the caller applies
-    :func:`stored_listen_port`.
+    A form that stamps the driver default (DynamoDB ``443``, Redis ``6379``)
+    must not override a saved tunnel either. Returns ``0`` when neither side
+    chose a port, so the caller applies :func:`stored_listen_port`.
     """
-    if port_was_chosen(driver_type, inline):
-        return _parse_port(inline)
-    if port_was_chosen(driver_type, saved):
-        return _parse_port(saved)
+    inline_port = _parse_port(inline) if port_was_chosen(driver_type, inline) else 0
+    saved_port = _parse_port(saved) if port_was_chosen(driver_type, saved) else 0
+    if inline_port and saved_port and inline_port != saved_port:
+        if inline_port == default_port(_driver_key(driver_type)):
+            return saved_port
+        return inline_port
+    if inline_port:
+        return inline_port
+    if saved_port:
+        return saved_port
     return 0
 
 

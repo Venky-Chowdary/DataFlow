@@ -59,6 +59,30 @@ class RedisScanState:
         return cls()
 
 
+def redis_dial_endpoint(host: str, port: int | None) -> tuple[str, int]:
+    """Host and port for ``redis.Redis``.
+
+    A connector form stores the tunnel as ``http://bore.pub:20988`` in host
+    and the driver default ``443`` in port. Passing that string as the Redis
+    host never dials the tunnel.
+    """
+    from urllib.parse import urlparse
+
+    text = (host or "").strip()
+    fallback = int(port or 6379)
+    if "://" in text:
+        from connectors.aws_common import normalize_service_endpoint
+
+        normalized = normalize_service_endpoint(text, port=port)
+        parsed = urlparse(normalized)
+        return parsed.hostname or "localhost", int(parsed.port or fallback)
+    if text.count(":") == 1:
+        name, _, raw_port = text.partition(":")
+        if raw_port.isdigit():
+            return name or "localhost", int(raw_port)
+    return text or "localhost", fallback
+
+
 def _redis_client(cfg: dict[str, Any]):
     import redis
 
@@ -74,9 +98,13 @@ def _redis_client(cfg: dict[str, Any]):
                 password=str(cfg.get("password") or parsed.password),
             )
         return redis.from_url(raw, socket_timeout=30)
+    host, port = redis_dial_endpoint(
+        str(cfg.get("host") or ""),
+        int(cfg.get("port") or 6379),
+    )
     return redis.Redis(
-        host=cfg.get("host") or "localhost",
-        port=int(cfg.get("port") or 6379),
+        host=host,
+        port=port,
         db=int(cfg.get("database") or 0) if str(cfg.get("database") or "0").isdigit() else 0,
         username=cfg.get("username") or None,
         password=cfg.get("password") or None,

@@ -342,6 +342,9 @@ def _write_batch(
             destination_column_types=dest_column_types,
             source_schema_catalog=source_schema_catalog,
             empty_cells_as_null=empty_cells_as_null,
+            preserve_columns=list(
+                (getattr(dest, "extra", None) or {}).get("preserve_columns") or []
+            ),
             **source_handoff,
         )
         if not result.ok:
@@ -390,6 +393,9 @@ def _write_batch(
             destination_column_types=dest_column_types,
             empty_cells_as_null=empty_cells_as_null,
             source_schema_catalog=source_schema_catalog,
+            preserve_columns=list(
+                (getattr(dest, "extra", None) or {}).get("preserve_columns") or []
+            ),
             **source_handoff,
         )
         if not result.ok:
@@ -3381,6 +3387,38 @@ def _stream_database_transfer_impl(
                 "written to the destination"
                 + (f" — {'; '.join(reasons)}" if reasons else "")
             )
+        if columns and (getattr(destination, "extra", None) or {}).get(
+            "create_empty_source"
+        ):
+            written_n, checksum, empty_summary = _write_batch(
+                dest_type,
+                destination,
+                dest_cfg,
+                dest_table,
+                list(columns),
+                [],
+                mappings,
+                column_types,
+                create_table=True,
+                on_checkpoint=None,
+                chunk_idx=0,
+                total_chunks=1,
+                rows_so_far=0,
+                write_mode=write_mode,
+                conflict_columns=pk_target_cols or None,
+                sync_mode=effective_sync,
+                backfill_new_fields=backfill_new_fields,
+                error_policy=stream_error_policy,
+                job_id=job_id,
+                skip_preflight=skip_preflight,
+                source_schema_catalog=source_schema_catalog,
+            )
+            dest_summary.update(empty_summary or {})
+            dest_summary["source_row_count"] = 0
+            dest_summary["empty_source_table"] = True
+            dest_summary["checksum"] = checksum
+            ddl_log.append(f"CREATE TABLE {dest_table} — source has columns and 0 rows")
+            return int(written_n or 0), ddl_log, dest_summary, columns
         raise ValueError("Source table is empty")
 
     if incremental and running_cursor and cursor_key and running_cursor != watermark:

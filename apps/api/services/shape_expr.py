@@ -26,7 +26,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from typing import Any, Callable, Mapping, Sequence
 
 from services.value_serializer import cell_to_string, is_null_evidence
@@ -578,6 +578,23 @@ def _fn_pad(value: Any, width: Any, fill: Any, *, left: bool) -> Any:
     return grown + text if left else text + grown
 
 
+def _quantize_wide(number: Decimal, quantum: Decimal, rounding: str) -> Decimal:
+    """Quantize without the process-wide precision of 28.
+
+    NUMERIC(38,10) raises ``decimal.InvalidOperation`` when the default
+    context quantizes a 38-digit coefficient. The column type is unchanged.
+    """
+    width = len(number.as_tuple().digits) + 8
+    with localcontext() as ctx:
+        ctx.prec = max(28, width)
+        try:
+            return number.quantize(quantum, rounding=rounding)
+        except InvalidOperation as exc:
+            raise EvalError(
+                "value does not fit the requested decimal places"
+            ) from exc
+
+
 def _round_half_up(value: Any, places: Any = 0) -> Any:
     if value is None:
         return None
@@ -588,7 +605,7 @@ def _round_half_up(value: Any, places: Any = 0) -> Any:
     quantum = Decimal(1).scaleb(-digits)
     # Bankers' rounding would surprise a finance user reading the preview, and
     # ROUND_HALF_UP is what a spreadsheet does.
-    return number.quantize(quantum, rounding=ROUND_HALF_UP)
+    return _quantize_wide(number, quantum, ROUND_HALF_UP)
 
 
 def _fn_truncate(value: Any, places: Any = 0) -> Any:
@@ -597,7 +614,7 @@ def _fn_truncate(value: Any, places: Any = 0) -> Any:
     number = _as_number(value)
     digits = int(_as_number(places))
     quantum = Decimal(1).scaleb(-digits)
-    return number.quantize(quantum, rounding="ROUND_DOWN")
+    return _quantize_wide(number, quantum, "ROUND_DOWN")
 
 
 def _fn_to_number(value: Any) -> Any:

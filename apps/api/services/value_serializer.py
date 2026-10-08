@@ -181,6 +181,38 @@ def _is_na(value: Any) -> bool:
         return False
 
 
+def nonfinite_wire_token(value: Any) -> str | None:
+    """``NaN`` / ``Infinity`` text for a non-finite float or Decimal.
+
+    Pandas missing values stay on :func:`_is_na`. IEEE NaN must not take that
+    path: ``value != value`` turned a source NaN into SQL NULL before the
+    writer could quarantine it.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        try:
+            if value.is_nan():
+                return "NaN"
+            if value.is_infinite():
+                return "Infinity" if value.copy_abs() == value else "-Infinity"
+        except (InvalidOperation, ValueError):
+            return None
+        return None
+    type_name = type(value).__name__
+    if isinstance(value, float) or type_name in {"float64", "float32", "float16"}:
+        try:
+            if value != value:
+                return "NaN"
+            if value == float("inf"):
+                return "Infinity"
+            if value == float("-inf"):
+                return "-Infinity"
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 def _is_decimal(obj: Any) -> bool:
     return isinstance(obj, Decimal)
 
@@ -583,6 +615,11 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     # CSV/JSON/export wires (would look like a real client value).
     if is_missing_sentinel(value):
         return ""
+
+    # IEEE NaN / Infinity are values. They are not SQL NULL.
+    nonfinite = nonfinite_wire_token(value)
+    if nonfinite:
+        return nonfinite
 
     # Missing-like values (pd.NA, np.nan, etc.) where value != value.
     if _is_na(value):

@@ -976,6 +976,15 @@ def write_mapped_rows(
                     plan=(None if table_existed else fidelity_plan),
                     dialect="mysql",
                 )
+                if not table_existed:
+                    from services.overwrite_keep import append_kept_column_sql
+
+                    col_defs = append_kept_column_sql(
+                        col_defs,
+                        list(_kwargs.get("preserve_columns") or []),
+                        dialect="mysql",
+                        existing=list(target_cols),
+                    )
                 if (
                     write_mode == "upsert"
                     and conflict_columns
@@ -1019,6 +1028,15 @@ def write_mapped_rows(
                     f"{quote_sql_identifier(c, '`')} {t}"
                     for c, t in zip(target_cols, target_types)
                 )
+                if not table_existed:
+                    from services.overwrite_keep import append_kept_column_sql
+
+                    col_defs = append_kept_column_sql(
+                        col_defs,
+                        list(_kwargs.get("preserve_columns") or []),
+                        dialect="mysql",
+                        existing=list(target_cols),
+                    )
                 if write_mode == "upsert" and conflict_columns:
                     conflict_cols = [c for c in conflict_columns if c in target_cols]
                     if conflict_cols:

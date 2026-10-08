@@ -3775,8 +3775,10 @@ def quarantine_unfit_floats(
 ) -> list[tuple]:
     """Hold out empty / non-finite / non-numeric cells into FLOAT/DOUBLE sinks.
 
-    Matrix SSOT for Kafka/S3/GCS/Iceberg — SQL bind already refuses via
-    ``coerce_float_wire``. Empty ``\"\"`` must never invent JSON null / 0.0.
+    Matrix SSOT for Kafka/S3/GCS/Iceberg. SQL bind quarantines the same
+    non-finite values in :func:`bind_rows_keeping_numbers` — MySQL DOUBLE
+    would otherwise store NaN as NULL. Empty ``\"\"`` must never invent
+    JSON null / 0.0.
     """
     from services.type_system import normalize_logical_type
 
@@ -3939,7 +3941,15 @@ def bind_rows_keeping_numbers(
             if not ddl:
                 continue
             try:
-                cells[idx] = normalize_sql_bind_value(val, ddl, engine=engine)
+                bound = normalize_sql_bind_value(val, ddl, engine=engine)
+                if isinstance(bound, float) and (
+                    bound != bound or bound in {float("inf"), float("-inf")}
+                ):
+                    raise ValueError(
+                        f"non-finite float into {dialect_label}({ddl}) "
+                        "— quarantined (refuse silent NULL)"
+                    )
+                cells[idx] = bound
             except ValueError as exc:
                 sample = cell_to_string(val)[:120]
                 col = target_cols[idx] if idx < len(target_cols) else f"col_{idx}"

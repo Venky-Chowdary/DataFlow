@@ -2457,11 +2457,18 @@ def _probe_dynamodb(
     """
     import boto3
 
-    endpoint = (connection_string or "").strip()
-    if endpoint and not endpoint.startswith("http"):
-        endpoint = ""
-    if not endpoint and host:
-        endpoint = f"http://{host}:{int(port or 8000)}"
+    from connectors.aws_common import resolve_endpoint_url
+
+    endpoint = resolve_endpoint_url(
+        {
+            "host": host,
+            "port": port,
+            "connection_string": connection_string,
+            "endpoint_url": connection_string
+            if str(connection_string or "").startswith("http")
+            else "",
+        }
+    )
 
     kwargs: dict[str, Any] = {"region_name": "us-east-1"}
     if endpoint:

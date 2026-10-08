@@ -46,9 +46,12 @@ def test_redis(
                 )
             client = redis.from_url(raw, socket_timeout=8)
         else:
+            from connectors.redis_reader import redis_dial_endpoint
+
+            dial_host, dial_port = redis_dial_endpoint(host or "", port or 6379)
             client = redis.Redis(
-                host=host or "localhost",
-                port=port or 6379,
+                host=dial_host,
+                port=dial_port,
                 db=int(database) if database.isdigit() else 0,
                 username=username or None,
                 password=password or None,

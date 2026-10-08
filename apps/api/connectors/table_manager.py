@@ -141,6 +141,46 @@ def drop_table(
     return False
 
 
+def postgres_columns_to_keep(
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None,
+    mappings: list[Any] | None,
+) -> list[dict[str, str]]:
+    """Destination columns the overwrite CREATE must still declare."""
+    from connectors.postgresql_conn import get_connection
+    from services.overwrite_keep import columns_to_keep
+
+    conn = get_connection(
+        host=cfg.get("host", "") or "127.0.0.1",
+        port=int(cfg.get("port") or 5432),
+        database=cfg.get("database", ""),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        connection_string=cfg.get("connection_string", ""),
+        ssl=bool(cfg.get("ssl")),
+    )
+    try:
+        sch = schema or cfg.get("schema") or "public"
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod)
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s AND c.relname = %s
+                  AND a.attnum > 0 AND NOT a.attisdropped
+                ORDER BY a.attnum
+                """,
+                (sch, table_name),
+            )
+            live = [{"name": row[0], "ddl_type": row[1]} for row in cur.fetchall()]
+        return columns_to_keep(live, mappings)
+    finally:
+        conn.close()
+
+
 def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
     from psycopg2 import sql
 
@@ -243,6 +283,156 @@ def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) ->
             try:
                 conn.close()
             except Exception as exc:
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
+def mysql_overwrite_backup_name(table_name: str) -> str:
+    """Backup identifier, at most 64 characters (MySQL's limit)."""
+    suffix = "__df_bak"
+    base = str(table_name or "t")[: 64 - len(suffix)]
+    return f"{base}{suffix}"
+
+
+def _mysql_tables_present(cur: Any, names: list[str]) -> set[str]:
+    if not names:
+        return set()
+    placeholders = ", ".join(["%s"] * len(names))
+    cur.execute(
+        "SELECT table_name FROM information_schema.tables "
+        f"WHERE table_schema = DATABASE() AND table_name IN ({placeholders})",
+        tuple(names),
+    )
+    return {str(row[0]) for row in cur.fetchall()}
+
+
+def retire_mysql_overwrite(
+    cfg: dict[str, Any],
+    table_name: str,
+    mappings: list[Any] | None = None,
+) -> tuple[str | None, list[dict[str, str]]]:
+    """Rename the live table aside so CREATE does not wait on its metadata lock.
+
+    DROP then CREATE left the table missing when CREATE hung, and cancel could
+    not unblock the session that held the statement. The original rows stay in
+    ``<table>__df_bak`` until the load finishes or the job restores them.
+
+    Returns ``(backup_name or None, columns the new table must keep)``.
+    """
+    from connectors.mysql_conn import enable_autocommit, get_connection
+    from connectors.sql_identifiers import quote_sql_identifier
+    from services.overwrite_keep import columns_to_keep
+
+    backup = mysql_overwrite_backup_name(table_name)
+    conn = None
+    try:
+        conn = get_connection(
+            host=cfg.get("host", "") or "127.0.0.1",
+            port=int(cfg.get("port") or 3306),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl")),
+            purpose="ddl",
+        )
+        enable_autocommit(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+                "ORDER BY ORDINAL_POSITION",
+                (table_name,),
+            )
+            live = [{"name": row[0], "ddl_type": row[1]} for row in cur.fetchall()]
+            kept = columns_to_keep(live, mappings)
+            present = _mysql_tables_present(cur, [table_name, backup])
+            src_q = quote_sql_identifier(table_name, "`")
+            bak_q = quote_sql_identifier(backup, "`")
+            if table_name not in present and backup in present:
+                # The previous overwrite renamed the table and died before
+                # restore. Put it back, then retire it for this run.
+                cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+                present.discard(backup)
+                present.add(table_name)
+            if table_name not in present:
+                return None, kept
+            if backup in present:
+                cur.execute(f"DROP TABLE {bak_q}")
+            cur.execute(f"RENAME TABLE {src_q} TO {bak_q}")
+        return backup, kept
+    except Exception as exc:  # noqa: BLE001 - any DDL failure must fail the overwrite
+        raise TableDropError(table_name, exc) from exc
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - close is best-effort
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
+def restore_mysql_overwrite(cfg: dict[str, Any], table_name: str, backup: str) -> None:
+    """Drop a partial replacement and rename the backup back to the live name."""
+    from connectors.mysql_conn import enable_autocommit, get_connection
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    conn = None
+    try:
+        conn = get_connection(
+            host=cfg.get("host", "") or "127.0.0.1",
+            port=int(cfg.get("port") or 3306),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl")),
+            purpose="ddl",
+        )
+        enable_autocommit(conn)
+        with conn.cursor() as cur:
+            present = _mysql_tables_present(cur, [table_name, backup])
+            src_q = quote_sql_identifier(table_name, "`")
+            bak_q = quote_sql_identifier(backup, "`")
+            if table_name in present:
+                cur.execute(f"DROP TABLE {src_q}")
+            if backup in present:
+                cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+    except Exception as exc:  # noqa: BLE001 - restore must surface every DDL failure
+        raise TableDropError(table_name, exc) from exc
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - close is best-effort
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
+def discard_mysql_overwrite(cfg: dict[str, Any], backup: str) -> None:
+    """Drop the renamed original after the replacement load has committed."""
+    from connectors.mysql_conn import enable_autocommit, get_connection
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    conn = None
+    try:
+        conn = get_connection(
+            host=cfg.get("host", "") or "127.0.0.1",
+            port=int(cfg.get("port") or 3306),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl")),
+            purpose="ddl",
+        )
+        enable_autocommit(conn)
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {quote_sql_identifier(backup, '`')}")
+    except Exception as exc:  # noqa: BLE001 - backup drop must surface every DDL failure
+        raise TableDropError(backup, exc) from exc
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - close is best-effort
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 

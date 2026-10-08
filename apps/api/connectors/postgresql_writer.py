@@ -1905,6 +1905,15 @@ def write_mapped_rows(
                     plan=(None if pg_table_existed else fidelity_plan),
                     dialect="postgresql",
                 )
+                if not pg_table_existed:
+                    from services.overwrite_keep import append_kept_column_sql
+
+                    body = append_kept_column_sql(
+                        body,
+                        list(_kwargs.get("preserve_columns") or []),
+                        dialect="postgresql",
+                        existing=list(target_cols),
+                    )
                 # Placement (PARTITION BY / TABLESPACE) is part of the CREATE
                 # itself — a table cannot be partitioned after the fact.
                 cursor.execute(
@@ -1985,6 +1994,24 @@ def write_mapped_rows(
                     sql.SQL("{} {}").format(sql.Identifier(c), sql.SQL(t))
                     for c, t in zip(target_cols, target_types)
                 )
+                if not pg_table_existed:
+                    have = {str(c).casefold() for c in target_cols}
+                    extras = []
+                    for col in list(_kwargs.get("preserve_columns") or []):
+                        if not isinstance(col, dict):
+                            continue
+                        name = str(col.get("name") or "").strip()
+                        if not name or name.casefold() in have:
+                            continue
+                        ddl = str(col.get("ddl_type") or "text").strip() or "text"
+                        extras.append(
+                            sql.SQL("{} {} NULL").format(
+                                sql.Identifier(name), sql.SQL(ddl)
+                            )
+                        )
+                        have.add(name.casefold())
+                    if extras:
+                        col_defs = sql.SQL(", ").join([col_defs, *extras])
                 cursor.execute(
                     sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
                         sql.Identifier(schema),

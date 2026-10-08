@@ -33,6 +33,12 @@ DEFAULT_WORKERS = int(getenv_brand("PARALLEL_WORKERS", "4") or "4")
 DEFAULT_PREFETCH = int(getenv_brand("PARALLEL_QUEUE", str(max(DEFAULT_WORKERS * 2, 4))))
 
 
+# Marker for a chunk that did not write. Not an exception instance so a
+# successful result that happens to be an exception object cannot be confused
+# with it — process() returns the caller's value, which is not this sentinel.
+_CHUNK_GAP = object()
+
+
 class ChunkAborted(Exception):
     """A queued chunk was dropped before it began because the run was aborted.
 
@@ -191,6 +197,41 @@ class ChunkDispatcher:
                         f"Parallel chunk ordering broken: expecting {self._next_yield}, "
                         f"buffer has {sorted(self._buffer.keys())[:5]}"
                     )
+
+    def drain_committed_prefix(self) -> list[tuple[int, R]]:
+        """In-order results that already wrote, stopping at the first gap.
+
+        A source outage aborts chunks that have not started. Chunks that
+        already committed stay ahead of the checkpoint unless the caller
+        applies this prefix before giving up (DEF-C-017: the job showed
+        40,000 rows while the destination held 160,000). A later success
+        is not returned across a missing index — applying it would skip
+        the hole. :meth:`results` still raises :class:`ChunkAborted`.
+        """
+        while self._pending:
+            done, _ = concurrent.futures.wait(
+                set(self._pending),
+                timeout=30,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            for future in done:
+                idx = self._pending.pop(future)
+                try:
+                    self._buffer[idx] = future.result()
+                except ChunkAborted:
+                    self._buffer[idx] = _CHUNK_GAP
+                except BaseException as exc:  # noqa: BLE001 - gap marker, caller re-raises
+                    self._buffer[idx] = exc
+        committed: list[tuple[int, R]] = []
+        while self._next_yield is not None and self._next_yield in self._buffer:
+            item = self._buffer.pop(self._next_yield)
+            if item is _CHUNK_GAP or isinstance(item, BaseException):
+                break
+            committed.append((self._next_yield, item))
+            self._next_yield += 1
+        return committed
 
 
 class OrderedChunkRunner(ChunkDispatcher):
@@ -390,7 +431,10 @@ def drive_ordered_batches(
             for ready_idx, result in dispatcher.results():
                 apply_result(ready_idx, result)
         except BaseException:
-            # A chunk already writing is allowed to finish. Chunks still queued
-            # must not commit past the last persisted checkpoint.
+            # A chunk already writing is allowed to finish. Apply that prefix
+            # before the error propagates so the checkpoint matches rows the
+            # destination already holds. Queued chunks still do not write.
             dispatcher.abort()
+            for ready_idx, result in dispatcher.drain_committed_prefix():
+                apply_result(ready_idx, result)
             raise

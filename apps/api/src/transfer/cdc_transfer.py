@@ -3301,6 +3301,54 @@ def _run_cdc_single_stream(
                             )
                             _raise_if_stream_behind(cdc, outcome)
 
+        # A resume that already stepped past a row update completes with 0
+        # events while the source cell differs. Upsert the current source
+        # image for those keys. The binlog cursor is not moved.
+        from services.cdc_resume_tokens import (
+            is_durable_log_resume_token,
+            unwrap_resume_token,
+        )
+        from services.cdc_value_digest import (
+            CdcValueScanIncomplete,
+            identity_rows_missing_on_dest,
+        )
+
+        cursor_now = (
+            state.running_cursor if state.running_cursor is not None else watermark
+        )
+        if (
+            is_durable_log_resume_token(cursor_now)
+            and getattr(source, "kind", "") == "database"
+        ):
+            try:
+                missing_image = identity_rows_missing_on_dest(
+                    source_type=src_type,
+                    source_cfg=src_cfg,
+                    source_table=str(table_name or ""),
+                    dest_type=dest_type,
+                    dest_cfg=dest_cfg,
+                    dest_table=str(dest_table or ""),
+                    mappings=list(mappings or []),
+                    dest_types=column_types if isinstance(column_types, dict) else None,
+                )
+            except CdcValueScanIncomplete as exc:
+                logger.warning("CDC image repair skipped: %s", exc)
+                missing_image = None
+            if missing_image:
+                token = unwrap_resume_token(cursor_now)
+                for start in range(0, len(missing_image), 500):
+                    _apply_and_checkpoint(
+                        ChangeBatch(
+                            updates=missing_image[start : start + 500],
+                            resume_token=token,
+                        )
+                    )
+                ddl_log.append(
+                    f"CDC image repair upserted {len(missing_image)} source row(s) "
+                    "whose cells were not on the destination. At-least-once. "
+                    "Not a replay of the missed binlog event."
+                )
+
         final_watermark = state.running_cursor if state.running_cursor is not None else watermark
         lag_fields = _cdc_lag_fields(cdc)
         if final_watermark is not None:

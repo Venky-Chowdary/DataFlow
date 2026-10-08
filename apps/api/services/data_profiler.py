@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
 
 from services.transform_engine import (
@@ -69,27 +69,52 @@ def _numeric_values(values: list[str]) -> list[Decimal]:
     return out
 
 
+def _decimal_work_prec(nums: list[Decimal]) -> int:
+    """Precision wide enough for NUMERIC(38,10) under the default context of 28.
+
+    ``quantize`` of a 38-digit coefficient raises ``InvalidOperation`` at
+    precision 28 and the planner used to surface that as a raw exception.
+    """
+    prec = 28
+    for number in nums:
+        digits = number.as_tuple().digits
+        prec = max(prec, len(digits) + 8)
+    return prec
+
+
 def _numeric_stats(values: list[str]) -> dict[str, Any]:
     nums = _numeric_values(values)
     if not nums:
         return {}
     sorted_nums = sorted(nums)
     n = len(nums)
-    mean = sum(nums, Decimal(0)) / Decimal(n)
-    variance = sum((x - mean) ** 2 for x in nums) / Decimal(n)
-    stddev = variance.sqrt() if variance >= 0 else Decimal(0)
-    quantum = Decimal("0.000001")
-    return {
-        "min": sorted_nums[0],
-        "max": sorted_nums[-1],
-        "mean": mean.quantize(quantum) if mean.is_finite() else mean,
-        "stddev": stddev.quantize(quantum) if stddev.is_finite() else stddev,
-        "p25": _percentile(sorted_nums, 0.25),
-        "p50": _percentile(sorted_nums, 0.50),
-        "p75": _percentile(sorted_nums, 0.75),
-        "p95": _percentile(sorted_nums, 0.95),
-        "numeric_parse_rate": round(n / max(len(values), 1), 4),
-    }
+    rate = round(n / max(len(values), 1), 4)
+    try:
+        with localcontext() as ctx:
+            ctx.prec = _decimal_work_prec(nums)
+            mean = sum(nums, Decimal(0)) / Decimal(n)
+            variance = sum((x - mean) ** 2 for x in nums) / Decimal(n)
+            stddev = variance.sqrt() if variance >= 0 else Decimal(0)
+            quantum = Decimal("0.000001")
+            return {
+                "min": sorted_nums[0],
+                "max": sorted_nums[-1],
+                "mean": mean.quantize(quantum) if mean.is_finite() else mean,
+                "stddev": stddev.quantize(quantum) if stddev.is_finite() else stddev,
+                "p25": _percentile(sorted_nums, 0.25),
+                "p50": _percentile(sorted_nums, 0.50),
+                "p75": _percentile(sorted_nums, 0.75),
+                "p95": _percentile(sorted_nums, 0.95),
+                "numeric_parse_rate": rate,
+            }
+    except InvalidOperation:
+        # Stats are not the column type. Omit them rather than crash the plan
+        # or shrink a declared NUMERIC(38,10).
+        return {
+            "min": sorted_nums[0],
+            "max": sorted_nums[-1],
+            "numeric_parse_rate": rate,
+        }
 
 
 def _infer_pattern(values: list[str]) -> str | None:
@@ -114,24 +139,29 @@ def _infer_pattern(values: list[str]) -> str | None:
 def _histogram(values: list[Decimal], buckets: int = 10) -> list[dict[str, Any]]:
     if not values:
         return []
-    lo, hi = min(values), max(values)
-    if lo == hi:
-        return [{"bucket": 0, "low": lo, "high": hi, "count": len(values)}]
-    width = (hi - lo) / buckets
-    counts = [0] * buckets
-    for v in values:
-        idx = min(buckets - 1, int((v - lo) / width))
-        counts[idx] += 1
-    quantum = Decimal("0.0001")
-    return [
-        {
-            "bucket": i,
-            "low": (lo + i * width).quantize(quantum),
-            "high": (lo + (i + 1) * width).quantize(quantum),
-            "count": c,
-        }
-        for i, c in enumerate(counts)
-    ]
+    try:
+        with localcontext() as ctx:
+            ctx.prec = _decimal_work_prec(values)
+            lo, hi = min(values), max(values)
+            if lo == hi:
+                return [{"bucket": 0, "low": lo, "high": hi, "count": len(values)}]
+            width = (hi - lo) / buckets
+            counts = [0] * buckets
+            for v in values:
+                idx = min(buckets - 1, int((v - lo) / width))
+                counts[idx] += 1
+            quantum = Decimal("0.0001")
+            return [
+                {
+                    "bucket": i,
+                    "low": (lo + i * width).quantize(quantum),
+                    "high": (lo + (i + 1) * width).quantize(quantum),
+                    "count": c,
+                }
+                for i, c in enumerate(counts)
+            ]
+    except InvalidOperation:
+        return []
 
 
 def _type_scores(values: list[str]) -> dict[str, float]:
