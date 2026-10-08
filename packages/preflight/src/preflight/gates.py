@@ -591,6 +591,18 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         )
         pair = (source_type_declared.upper(), target.inferred_type.upper())
         # Prefer type_system SSOT when available; LOSSY_COERCIONS is offline fallback only.
+        # Sample cells travel with the type pair so an ASCII load into a
+        # Latin-1 VARCHAR is not a declared collapse (DEF-R20-001). No sample
+        # leaves population unset and the unread pair stays a collapse.
+        _sample_rows = list(getattr(ctx, "sample_rows", None) or [])
+        _code_page_population = (
+            [
+                row.get(m.source) if isinstance(row, dict) else None
+                for row in _sample_rows[:500]
+            ]
+            if _sample_rows
+            else None
+        )
         if is_lossy_coercion:
             lossy = bool(
                 is_lossy_coercion(
@@ -600,6 +612,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     dest_table_exists=getattr(
                         ctx.plan.destination, "table_exists", None
                     ),
+                    population=_code_page_population,
                 )
             )
         else:
@@ -666,6 +679,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     or ""
                 ),
                 dest_table_exists=_dest_exists,
+                population=_code_page_population,
             )
         ):
             lossy = True
@@ -751,6 +765,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     target.inferred_type,
                     dest_db=_dest_db,
                     dest_table_exists=_dest_exists,
+                    population=_code_page_population,
                 )
             )
             or platform_decimal_trunc

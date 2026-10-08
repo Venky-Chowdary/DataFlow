@@ -807,18 +807,23 @@ def analyze_coercion(
         # Structural JSON/array pairs are always surfaced so Validate can label
         # them as serialization (not a scary cast) when they round-trip cleanly.
         # Same-logical YEAR/MONEY/width/IEEE collapses must not early-continue.
+        # Measured cells decide a code-page sink. An unread column stays a
+        # collapse; an ASCII zip code into Latin-1 VARCHAR does not.
+        code_page_population = observed_values or None
         fidelity_collapse = bool(
             is_precision_collapse_coercion(
                 src_type,
                 tgt_type,
                 dest_db=dest_db_type,
                 dest_table_exists=table_exists,
+                population=code_page_population,
             )
             or is_lossy_coercion(
                 src_type,
                 tgt_type,
                 dest_db=dest_db_type,
                 dest_table_exists=table_exists,
+                population=code_page_population,
             )
             or is_nested_shape_collapse(src_type, tgt_type, dest_db=dest_db_type)
         )

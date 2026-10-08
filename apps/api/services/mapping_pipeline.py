@@ -636,8 +636,12 @@ def run_mapping_pipeline(
     # Create-new DDL and the lossy gate read the source engine from this
     # scope. An unbound call treated PostgreSQL VARCHAR → SQL Server NVARCHAR
     # as an invent, and a MySQL TIMESTAMP source as DATETIME(6).
-    if source_db_type and not active_source_engine():
-        with bind_source_engine(source_db_type):
+    # file_format covers the Excel/CSV drop, which has no database engine id.
+    # Leaving it unbound graded Latin-1 VARCHAR as lossless on the plan while
+    # Validate, which binds the file format, blocked the same column.
+    scoped_engine = (source_db_type or file_format or "").strip()
+    if scoped_engine and not active_source_engine():
+        with bind_source_engine(scoped_engine):
             return run_mapping_pipeline(
                 source_columns,
                 target_columns,
@@ -1345,12 +1349,25 @@ def run_mapping_pipeline(
     # Transforms are final here, so the verdict computed now is the one every
     # surface renders. Stamping it on the mapping keeps Map, column review, the
     # proof drawer, and the Pilot plan from each inventing their own risk chip.
+    # Samples travel with the verdict: an ASCII Excel column into a Latin-1
+    # VARCHAR is lossless, and the same column with no sample stays a collapse.
+    samples_by_src = {
+        str(s.get("name") or ""): list(
+            s.get("samples") or s.get("sample_values") or s.get("preview_values") or []
+        )[:64]
+        for s in (source_schemas or [])
+        if s.get("name")
+        and (
+            s.get("samples") or s.get("sample_values") or s.get("preview_values")
+        )
+    }
     enriched_mappings = stamp_mapping_fidelity(
         enriched_mappings,
         source_types=declared_source_types,
         target_types=declared_target_types,
         destination_db_type=destination_db_type or "",
         dest_table_exists=destination_table_exists,
+        samples_by_source=samples_by_src,
     )
     # Snapshot before the risk/Kernel stamps: both may replace a projected
     # carrier with the destination's physical DDL, which invalidates the verdict
@@ -1366,11 +1383,12 @@ def run_mapping_pipeline(
     try:
         from services.decision_kernel import stamp_additive_mapping_types
 
-        samples_by_src = {
-            str(s.get("name") or ""): list(s.get("samples") or [])[:32]
-            for s in (source_schemas or [])
-            if s.get("name")
-        }
+        if not samples_by_src:
+            samples_by_src = {
+                str(s.get("name") or ""): list(s.get("samples") or [])[:32]
+                for s in (source_schemas or [])
+                if s.get("name")
+            }
         live_types: dict[str, str] = {}
         for s in (introspected_target_schemas or []):
             name = str(s.get("name") or "")
@@ -1404,6 +1422,7 @@ def run_mapping_pipeline(
                 target_types=declared_target_types,
                 destination_db_type=destination_db_type or "",
                 dest_table_exists=destination_table_exists,
+                samples_by_source=samples_by_src,
             )
     except Exception as stamp_exc:
         # Fail-closed honesty: leave create-new target_type blank so Map/Validate

@@ -7,7 +7,7 @@ defect it locks.
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import sqlalchemy as sa
@@ -167,3 +167,88 @@ def test_execute_refuses_an_enforced_key_before_insert(tmp_path: Path) -> None:
         )
         is None
     )
+
+
+def test_planned_source_key_does_not_block_a_heap_append(tmp_path: Path) -> None:
+    """DEF-B2-001: a plan that copied source id must not refuse a PK-less table."""
+    from services.preflight_service import run_file_preflight
+
+    heap = tmp_path / "heap.db"
+    conn = sqlite3.connect(str(heap))
+    conn.execute("CREATE TABLE jobs (id TEXT, name TEXT)")
+    conn.execute("INSERT INTO jobs VALUES ('a', 'A')")
+    conn.commit()
+    conn.close()
+    result = run_file_preflight(
+        columns=["id", "name"],
+        column_types={"id": "VARCHAR", "name": "VARCHAR"},
+        row_count=1,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99},
+            {"source": "name", "target": "name", "confidence": 0.99},
+        ],
+        destination_connected=True,
+        destination_can_create=True,
+        destination_can_write=True,
+        source_connected=True,
+        source_kind="file",
+        source_format="csv",
+        sync_mode="full_refresh_append",
+        sample_rows=[{"id": "a", "name": "A2"}],
+        destination_db_type="sqlite",
+        destination_table="jobs",
+        destination_table_exists=True,
+        destination_pk_columns=["id"],
+        destination_config={
+            "type": "sqlite",
+            "connection_string": f"sqlite:///{heap}",
+        },
+        destination_column_types={"id": "TEXT", "name": "TEXT"},
+        validation_mode="strict",
+    )
+    g6 = {g["id"]: g for g in result["gates"]}["g6_target_ddl"]
+    assert g6["status"] == "warn", g6
+    assert (g6.get("details") or {}).get("key_enforced") is False
+    assert result["passed"] is True
+
+
+def test_scheduler_sleeps_until_the_next_due_instant(monkeypatch) -> None:
+    """A fixed 60s poll fired 25s late, then 62s late. Sleep until next_run_at."""
+    from datetime import timedelta
+
+    import services.schedule_store as store
+
+    soon = datetime.now(timezone.utc) + timedelta(seconds=12)
+
+    class _Sched:
+        enabled = True
+        next_run_at = soon.isoformat()
+
+    monkeypatch.setattr(store, "_load_all", lambda: [_Sched()])
+    wait = store.seconds_until_next_schedule()
+    assert 1.0 <= wait <= 13.0
+    monkeypatch.setattr(store, "_load_all", lambda: [])
+    assert store.seconds_until_next_schedule() == 60.0
+
+
+def test_object_store_create_keeps_pending_columns() -> None:
+    """DEF-C-043: pending_dest_schema is create-new on an object, not zero columns."""
+    from connectors.writer_common import resolve_target_columns
+
+    mappings = [
+        {
+            "source": "sku",
+            "target": "sku",
+            "assignment_strategy": "pending_dest_schema",
+            "target_type": "VARCHAR",
+        }
+    ]
+    skipped, _types = resolve_target_columns(
+        mappings, {"sku": "VARCHAR"}, preserve_case=True
+    )
+    assert skipped == []
+    kept, types = resolve_target_columns(
+        mappings, {"sku": "VARCHAR"}, preserve_case=True, table_exists=False
+    )
+    assert kept == ["sku"]
+    assert types and types[0]

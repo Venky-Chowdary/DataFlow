@@ -3864,12 +3864,52 @@ def is_timezone_polarity_loss(
     return False
 
 
+def _code_page_population_fit(
+    population: Any,
+    dest_db: str,
+    target_type: str,
+) -> bool | None:
+    """True when every measured value encodes, False when one does not.
+
+    ``None`` means the population was not measured (missing, empty, or only
+    SQL NULL). An unread column is not proof that the rest of the table is
+    ASCII.
+    """
+    if population is None:
+        return None
+    try:
+        values = list(population)
+    except TypeError:
+        return None
+    if not values:
+        return None
+    from services.encoding_capacity import (
+        cell_encoding,
+        cell_fits_capacity,
+        classify_capacity,
+    )
+
+    cap = classify_capacity(dest_db, target_type)
+    measured = False
+    for value in values:
+        cell = cell_encoding(value)
+        if cell is None:
+            continue
+        measured = True
+        if not cell_fits_capacity(cell.text, cap):
+            return False
+    if not measured:
+        return None
+    return True
+
+
 def code_page_sink_would_collapse(
     source_type: str,
     target_type: str,
     *,
     dest_db: str = "",
     source_db: str = "",
+    population: Any = None,
 ) -> bool:
     """True when a Unicode source lands on a code-page CHAR/VARCHAR.
 
@@ -3879,6 +3919,14 @@ def code_page_sink_would_collapse(
     completed with corrupted cells (DEF-R1-002). A national carrier or a
     ``_UTF8`` collation is not this sink. A code-page source into the same
     sink is not a collapse — it never held the scalar.
+
+    ``population`` is the measured cells for this column. When every present
+    value encodes in the destination code page, the pair is not a collapse
+    (DEF-R20-001: ASCII zip_code / sku into an existing Latin-1 VARCHAR).
+    Omit it, or pass only nulls, and the unread type pair stays a collapse —
+    a short sample that was never taken must not green the rest of the table.
+    A scalar outside the page stays a collapse; the writer quarantines it
+    and does not store ``?``.
     """
     if not dest_db:
         return False
@@ -3900,7 +3948,12 @@ def code_page_sink_would_collapse(
     cap = classify_capacity(dest_db, target_type)
     if cap.form in {"utf8", "utf16", "cesu8", "gb18030"} and cap.max_code_point >= UNICODE_MAX:
         return False
-    return cap.form in {"cp1252", "latin1", "ascii"}
+    if cap.form not in {"cp1252", "latin1", "ascii"}:
+        return False
+    fit = _code_page_population_fit(population, dest_db, target_type)
+    if fit is None:
+        return True
+    return not fit
 
 
 def _bare_type_token(type_token: str) -> str:
@@ -7230,6 +7283,7 @@ def is_precision_collapse_coercion(
     *,
     dest_db: str = "",
     dest_table_exists: bool | None = None,
+    population: Any = None,
 ) -> bool:
     """True when source→target collapses precision even if samples appear clean.
 
@@ -7292,7 +7346,9 @@ def is_precision_collapse_coercion(
         return True
     if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
         return True
-    if code_page_sink_would_collapse(source_type, target_type, dest_db=dest_db):
+    if code_page_sink_would_collapse(
+        source_type, target_type, dest_db=dest_db, population=population
+    ):
         return True
     if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
@@ -7771,6 +7827,7 @@ def is_lossy_coercion(
     *,
     dest_db: str = "",
     dest_table_exists: bool | None = None,
+    population: Any = None,
 ) -> bool:
     """True when converting sourceâ†’target may lose precision, fail silently, or
     change the semantic meaning of a value.
@@ -7838,7 +7895,7 @@ def is_lossy_coercion(
         if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
             return True
         if code_page_sink_would_collapse(
-            source_type, target_type, dest_db=dest_db
+            source_type, target_type, dest_db=dest_db, population=population
         ):
             return True
         if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
@@ -8033,7 +8090,9 @@ def is_lossy_coercion(
         return True
     if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
         return True
-    if code_page_sink_would_collapse(source_type, target_type, dest_db=dest_db):
+    if code_page_sink_would_collapse(
+        source_type, target_type, dest_db=dest_db, population=population
+    ):
         return True
     if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
@@ -8197,7 +8256,7 @@ def is_lossy_coercion(
         if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
             return True
         if code_page_sink_would_collapse(
-            source_type, target_type, dest_db=dest_db
+            source_type, target_type, dest_db=dest_db, population=population
         ):
             return True
         if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):

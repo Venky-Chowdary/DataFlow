@@ -1467,4 +1467,16 @@ async def run_schedule_loop() -> None:
                 logger.info("Scheduler started %s pipeline run(s)", count)
         except Exception:
             logger.exception("Schedule loop error")
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+        wait = float(CHECK_INTERVAL_SECONDS)
+        try:
+            from services.schedule_store import seconds_until_next_schedule
+
+            wait = float(
+                await asyncio.get_running_loop().run_in_executor(
+                    _executor, seconds_until_next_schedule
+                )
+            )
+        except Exception:  # noqa: BLE001 — a bad store falls back to the poll cap
+            logger.exception("Schedule sleep horizon failed; using the poll cap")
+            wait = float(CHECK_INTERVAL_SECONDS)
+        await asyncio.sleep(wait)

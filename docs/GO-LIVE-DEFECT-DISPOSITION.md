@@ -1,6 +1,6 @@
 # Go-live defect disposition
 
-Source register: QA snapshot Thu 2026-10-08, build prefix `6436aaa38583`, recommendation NO-GO. 125 defect rows.
+Source register: QA snapshot Thu 2026-10-08, build prefix `6436aaa38583`, recommendation NO-GO. 126 defect rows, including DEF-R20-001 from the 10:02 ET Oct 8 note.
 
 This file is the register plus two columns: `root_cause` and `fixed_or_not`. The full row text is `docs/GO-LIVE-DEFECT-DISPOSITION.csv`.
 
@@ -8,18 +8,18 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 70
+- not fixed: 68
 - QA had already marked fixed — not re-run here: 19
-- already in tree before this wave — needs QA retest: 14
-- fixed in code, unit-proven — not a live QA retest: 14
-- partly fixed in code: 8
+- already in tree before this wave — needs QA retest: 12
+- fixed in code, unit-proven — not a live QA retest: 20
+- partly fixed in code: 7
 
 ## Every row
 
 | id | priority | QA status | fixed or not |
 | --- | --- | --- | --- |
-| DEF-B-031 | P1 | OPEN | already in tree at f125e5df. Unit-proven there. QA build 6436aaa38583 does not contain it. Needs a QA retest. Not re-proven live here. |
-| DEF-B2-001 | P1 | OPEN | already in tree at f125e5df: heap warns, enforced key blocks before write, insert create-new withholds PK/UNIQUE. Unit-proven there. Needs QA retest. |
+| DEF-B-031 | P1 | OPEN | fixed in code, unit-proven (test_scheduler_sleeps_until_the_next_due_instant). The beat sleeps until the soonest next_run_at, capped at 60 seconds, and waits 1 second when a schedule is already due so a document that does not advance next_run_at cannot busy-loop. The naive-timestamp crash fix from f125e5df stays. Not a live scheduler retest. |
+| DEF-B2-001 | P1 | OPEN | fixed in code, unit-proven (test_planned_source_key_does_not_block_a_heap_append, test_append_create_new_does_not_declare_the_source_key, test_execute_refuses_an_enforced_key_before_insert). A plan that names the source id no longer blocks a table whose live catalog has no single-column unique key. Append create-new still withholds PRIMARY KEY and UNIQUE. A real single-column primary key or unique constraint still refuses the colliding batch before any row lands. Not a live QA retest. |
 | DEF-B2-007 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B2-006 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-CDC-COUNT-ONLY-RECONCILE | P1 | OPEN | fixed in code, unit-proven (test_cdc_source_image_count_scope_does_not_claim_full_checksum). Count-only now fails the job. A finished source-row fingerprint scan can still pass. Not a live QA retest. |
@@ -27,8 +27,8 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B2-010 | P1 | OPEN | partly fixed in code, unit-proven (test_materialize_widens_copied_nvarchar_stamp_for_sqlserver). A bound SQL Server source now materializes VARCHAR(n) CHARACTER SET utf8mb4. A MySQL source NVARCHAR and an unknown engine stay the utf8mb3 alias on purpose. Not a live MySQL retest. |
 | DEF-B2-012 | P1 | OPEN | partly fixed. _records_after_failure keeps the larger committed count (test_records_after_failure_keeps_a_committed_prefix). Enforced-key refuse-before-insert was already in tree at f125e5df. Rows committed by an orphaned run are not deleted. Not a live QA retest. |
 | DEF-B2-014 | P1 | OPEN | fixed in code, unit-proven (test_ensure_product_lsn_column_on_an_existing_table). The column is ALTER'd before the physical check. A snapshot already committed on build 6436aaa38583 is not rolled back here. Not a live SQL Server retest. |
-| DEF-R1-001 | P1 | OPEN | DATETIME2(7) work is in an earlier commit. QA on 6436aaa38583 still truncated. Not re-proven on a live SQL Server here. Not marked fixed. |
-| DEF-R1-002 | P1 | OPEN | fixed in code, unit-proven (test_unicode_source_into_sql_latin1_varchar_is_a_fidelity_collapse, test_latin1_varchar_is_not_safe_by_declaration). The pair is now a fidelity collapse and the population scan does not skip it. A SQL Server VARCHAR source into the same column is not a collapse. Writer quarantine of U+90CE / U+0141 was already in the tree. Not a live SQL Server retest. |
+| DEF-R1-001 | P1 | OPEN | fixed in code, unit-proven (test_explicit_datetime_token_is_not_upgraded_to_datetime2, test_classic_datetime_refuses_microsecond_before_bind). An explicit DATETIME token binds as DATETIME and a microsecond is refused before commit. DATETIME2(3) refuses a fraction it cannot store (.999999). Bare logical datetime and DATETIME2(7) still keep .000001. Not a live SQL Server retest. |
+| DEF-R1-002 | P1 | OPEN | fixed in code, unit-proven (test_unicode_source_into_sql_latin1_varchar_is_a_fidelity_collapse, test_latin1_varchar_is_not_safe_by_declaration). An unmeasured Unicode source into SQL Server Latin-1 VARCHAR stays a fidelity collapse, and the population scan does not skip it. A measured population that encodes in the code page is not a collapse (DEF-R20-001). A scalar outside the page still quarantines. Not a live SQL Server retest. |
 | DEF-B-027 | P1 | OPEN | pin-before-drop and MySQL rename-aside are in 059974d8. Postgres overwrite that already DROP'd rows is not restored by rename-aside. Needs QA retest. Not claimed live-green. |
 | DEF-C-020 | P1 | OPEN | reader_population cap is in 059974d8. Unit-proven. The Postgres table that was already emptied was not restored. Needs QA retest. |
 | DEF-C-024 | P1 | OPEN | algorithm changes are in 059974d8. The QA job was API-cancelled; statements on the old process were not killed from this VM. Needs QA retest. |
@@ -36,7 +36,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-036 | P1 | OPEN | already in tree at f125e5df: unproven RI is a warning; measured orphans still block. Unit-proven. Needs QA retest. Rollback of a real block is unchanged. |
 | DEF-B-028 | P1 | OPEN | already in tree at f125e5df: page size 200 and tables_truncated is reported. Unit-proven. Needs QA retest on a database with more than 50 tables. |
 | DEF-C-041 | P1 | OPEN | fixed in code, unit-proven (test_business_soft_delete_is_not_a_hard_delete, test_sqlite_upsert_tombstone_drops_dest_count, test_completed_job_does_not_report_the_validate_root_as_rejected). CDC __deleted/__op still delete. Not a live QA retest. |
-| DEF-C-043 | P1 | OPEN | partly fixed. A parquet export with no destination columns now aborts before upload (test_parquet_export_refuses_a_zero_column_file). Why that route resolved zero columns while CSV on the same route did not is not reproduced here. Not a live MinIO retest. |
+| DEF-C-043 | P1 | OPEN | fixed in code, unit-proven (test_object_store_create_keeps_pending_columns, test_parquet_export_refuses_a_zero_column_file). S3, GCS, and ADLS writers pass table_exists=False so a pending_dest_schema mapping becomes a column on a new object. An export that still resolves zero columns aborts before upload. Not a live MinIO retest. |
 | DEF-B-025 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-026 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-A-010 | P1 | OPEN | already in tree before this wave. Needs QA retest on a build after that commit. |
@@ -46,7 +46,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-031 | P1 | UNCONFIRMED-ENV-DEPLOY | same long-writer path as 059974d8. Status on the register is UNCONFIRMED-ENV-DEPLOY. Not re-run live here. |
 | DEF-B2-009 | P1 | NOT RETESTED | not retested in this session. Count-only completion is now a failure (DEF-CDC-COUNT-ONLY-RECONCILE), which stops a silent complete, but it does not by itself apply the missed changes. |
 | DEF-B-018 | P1 | NOT RETESTED | refusal of uca1400 on MySQL is in 0bbb1ffe. Register status NOT RETESTED. Not re-run live here. |
-| DEF-A-007 | P1 | PARTLY FIXED | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-A-007 | P1 | PARTLY FIXED | fixed in code, unit-proven (test_utf8_collation_survives_the_encoding_type, test_nvarchar_max_holds_cjk_varchar_quarantines). Rebuilding VARCHAR(n) keeps a COLLATE clause from a VARCHAR stamp, so a UTF-8 collation stays UTF-8. A physical VARCHAR forced down from an NVARCHAR stamp does not inherit that collation. Latin-1 still quarantines a scalar outside the page. Not a live SQL Server retest. |
 | DEF-C-034 | P1 | PARTLY FIXED | cancel-before-batch is in 059974d8. QA still saw writers continue on the old process. Needs QA retest on a build that contains the commit. |
 | DEF-B-004 | P1 | PARTLY FIXED | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-001 | P1 | PARTLY FIXED | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
@@ -143,3 +143,4 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-OBJSTORE-TYPE-SPLIT | n/r | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-TIMESCALE-DST | n/r | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-OVERWRITE-NOPK-IDENTITY | n/r | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
+| DEF-R20-001 | P1 | OPEN | fixed in code, unit-proven (test_ascii_excel_into_sql_latin1_varchar_is_not_a_collapse, test_signed_cast_clears_the_code_page_block, test_unicode_source_into_sql_latin1_varchar_is_a_fidelity_collapse). A measured population that encodes in the destination code page is not a collapse, and the plan conversion_class is lossless. An unmeasured pair stays a collapse. A scalar outside the page stays a collapse and the writer still refuses question-mark substitution. A verified CAST_AND_CONTINUE sets severity warn and the finding is not blocking. Not a live SQL Server retest. |

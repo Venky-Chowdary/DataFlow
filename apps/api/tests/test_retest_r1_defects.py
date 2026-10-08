@@ -412,3 +412,135 @@ def test_latin1_varchar_is_not_safe_by_declaration() -> None:
     )
     assert "name" not in safe
     assert any(t.source == "name" for t in targets)
+
+
+def test_ascii_excel_into_sql_latin1_varchar_is_not_a_collapse() -> None:
+    """DEF-R20-001: zip_code and sku are ASCII. The type pair stays a collapse
+    until the population is measured, and a scalar outside the page still is.
+    """
+    from services.mapping_proof import stamp_mapping_fidelity
+    from services.type_system import is_lossy_coercion
+
+    dest = "VARCHAR(10) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS"
+    with bind_source_engine("excel"):
+        assert (
+            is_lossy_coercion(
+                "VARCHAR(10)",
+                dest,
+                dest_db="sqlserver",
+                population=["10001", "02134", "A100"],
+            )
+            is False
+        )
+        assert (
+            is_lossy_coercion(
+                "VARCHAR(10)",
+                dest,
+                dest_db="sqlserver",
+                population=["10001", "山田"],
+            )
+            is True
+        )
+        assert is_lossy_coercion("VARCHAR(10)", dest, dest_db="sqlserver") is True
+        stamped = stamp_mapping_fidelity(
+            [{"source": "zip_code", "target": "zip_code", "target_type": dest}],
+            source_types={"zip_code": "VARCHAR(10)"},
+            target_types={"zip_code": dest},
+            destination_db_type="sqlserver",
+            dest_table_exists=True,
+            samples_by_source={"zip_code": ["10001", "02134"]},
+        )
+    assert stamped[0]["fidelity"] == "preserve"
+    assert stamped[0]["conversion_class"] == "lossless"
+
+
+def test_signed_cast_clears_the_code_page_block() -> None:
+    """DEF-R20-001: CAST_AND_CONTINUE must not be re-blocked by fidelity_collapse."""
+    from services.coercion_probe import analyze_coercion
+    from services.decision_kernel.findings import findings_from_coercion_report
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    dest = "VARCHAR(20) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS"
+    contract = create_migration_risk_contract(
+        column="sku",
+        source_type="VARCHAR(20)",
+        destination_type=dest,
+        approved_by="qa@dataflow.app",
+        reason="Hold characters outside the Latin-1 code page",
+        execution_policy="CAST_AND_CONTINUE",
+    )
+    with bind_source_engine("excel"):
+        report = analyze_coercion(
+            sample_rows=[{"sku": "山田"}],
+            mappings=[
+                {
+                    "source": "sku",
+                    "target": "sku",
+                    "target_type": dest,
+                    "risk_contract": contract.to_dict(),
+                }
+            ],
+            source_types={"sku": "VARCHAR(20)"},
+            dest_types={"sku": dest},
+            dest_db_type="sqlserver",
+            table_exists=True,
+        )
+    column = report["by_source"]["sku"]
+    assert column["severity"] == "warn", column
+    assert column["fidelity_collapse"] is True
+    findings = findings_from_coercion_report(report, dest_db="sqlserver")
+    assert findings
+    assert findings[0]["blocking"] is False
+
+
+def test_utf8_collation_survives_the_encoding_type() -> None:
+    """A SQL Server UTF-8 VARCHAR is not a cp1252 sink once the collation is kept."""
+    from services.encoding_capacity import classify_capacity
+
+    stamped = _encoding_dest_type(
+        "VARCHAR(40) COLLATE Latin1_General_100_CI_AS_SC_UTF8",
+        mssql.VARCHAR(40),
+        dialect_name="mssql",
+        db_type="sqlserver",
+    )
+    assert "UTF8" in stamped.upper()
+    assert classify_capacity("sqlserver", stamped).form == "utf8"
+    forced = _encoding_dest_type(
+        "NVARCHAR(MAX) COLLATE Latin1_General_100_CI_AS_SC_UTF8",
+        mssql.VARCHAR(50),
+        dialect_name="mssql",
+        db_type="sqlserver",
+    )
+    assert forced == "VARCHAR(50)"
+
+
+def test_explicit_datetime_token_is_not_upgraded_to_datetime2() -> None:
+    """DEF-R1-001: classic DATETIME refuses a microsecond; DATETIME2(7) keeps it;
+    DATETIME2(3) refuses a fraction it would round.
+    """
+    classic = _sa_type_for_logical("DATETIME", "mssql", "sqlserver")
+    assert str(classic.compile(dialect=mssql.dialect())) == "DATETIME"
+    narrowed = _sa_type_for_logical("DATETIME2(3)", "mssql", "sqlserver")
+    assert str(narrowed.compile(dialect=mssql.dialect())) == "DATETIME2(3)"
+    micro = datetime(2026, 2, 1, 10, 1, 0, 1)
+    with pytest.raises(ValueError, match="1/300"):
+        _refuse_sqlserver_datetime_rounding(
+            micro,
+            logical="DATETIME",
+            sa_type=classic,
+            db_type="sqlserver",
+        )
+    _refuse_sqlserver_datetime_rounding(
+        micro,
+        logical="datetime",
+        sa_type=_sa_type_for_logical("datetime", "mssql", "sqlserver"),
+        db_type="sqlserver",
+    )
+    end = datetime(2028, 2, 29, 23, 59, 59, 999999)
+    with pytest.raises(ValueError, match="DATETIME2\\(3\\)"):
+        _refuse_sqlserver_datetime_rounding(
+            end,
+            logical="DATETIME2(3)",
+            sa_type=narrowed,
+            db_type="sqlserver",
+        )

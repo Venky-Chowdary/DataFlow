@@ -1949,6 +1949,29 @@ def _sa_type_for_logical(
             return TrinoTimestamp(precision=3, timezone=False)
         if db_type == "presto":
             return sa.TIMESTAMP()
+        # A catalog token names the physical column. Bare logical ``datetime``
+        # stays DATETIME2(7). ``DATETIME`` is classic 1/300 s, ``DATETIME2(n)``
+        # keeps n, and ``SMALLDATETIME`` is the minute carrier. Upgrading every
+        # token to DATETIME2(7) made the rounding refuse look at the wrong
+        # class, so a microsecond was rounded, the read-back failed, and the
+        # batch rolled back empty (DEF-R1-001).
+        if mssql is not None and (
+            (dialect_name or "").lower() == "mssql"
+            or (db_type or "").lower() in _MSSQL_WIRES
+        ):
+            head = raw.strip()
+            base = head.split("(", 1)[0].strip()
+            base_u = base.upper()
+            if base_u == "DATETIME2":
+                prec = 7
+                prec_match = re.search(r"\((\d+)\)", head)
+                if prec_match:
+                    prec = max(0, min(7, int(prec_match.group(1))))
+                return _maybe_nullable(mssql.DATETIME2(precision=prec))
+            if base_u == "SMALLDATETIME":
+                return _maybe_nullable(mssql.SMALLDATETIME())
+            if base == "DATETIME":
+                return _maybe_nullable(mssql.DATETIME())
         sub_second = _sub_second_naive_wire(dialect_name, db_type)
         if sub_second is not None:
             return _maybe_nullable(sub_second)
@@ -2208,10 +2231,22 @@ def _encoding_dest_type(
     ).lower() in _MSSQL_WIRES
     if mssql_code_page and upper in {"VARCHAR", "CHAR", "TEXT", "STRING", "NTEXT"}:
         # The physical class is the code page. A Map stamp of NVARCHAR must
-        # not win — ``CHAR`` is a substring of ``NVARCHAR``.
+        # not win — ``CHAR`` is a substring of ``NVARCHAR``. A UTF-8 collation
+        # on the VARCHAR stamp is the encoding: dropping it classified
+        # ``Latin1_General_100_CI_AS_SC_UTF8`` as cp1252 and quarantined rows
+        # the column stores.
         if width and width > 0:
             prefix = "CHAR" if upper == "CHAR" else "VARCHAR"
-            return f"{prefix}({width})"
+            rebuilt = f"{prefix}({width})"
+            stamp_u = stamp.upper()
+            national_stamp = any(
+                tok in stamp_u for tok in ("NVARCHAR", "NCHAR", "NTEXT")
+            )
+            if not national_stamp:
+                coll = re.search(r"COLLATE\s+(\S+)", stamp, flags=re.IGNORECASE)
+                if coll:
+                    rebuilt = f"{rebuilt} COLLATE {coll.group(1)}"
+            return rebuilt
         stamp_u = stamp.upper()
         if "NVARCHAR" in stamp_u or "NCHAR" in stamp_u or "NTEXT" in stamp_u:
             return "VARCHAR(MAX)"
@@ -2241,16 +2276,52 @@ def _refuse_sqlserver_datetime_rounding(
     if sa_type is not None:
         type_name = str(getattr(getattr(sa_type, "__class__", None), "__name__", "") or "")
     logical_u = (logical or "").upper()
-    # The physical class wins. DATETIME2/DATETIMEOFFSET keep the fraction
-    # even when a collapsed logical stamp says DATETIME.
-    if type_name.upper() in {"DATETIME2", "DATETIMEOFFSET", "SMALLDATETIME"}:
-        return
-    if "DATETIME2" in logical_u or "DATETIMEOFFSET" in logical_u:
-        if type_name.upper() != "DATETIME":
-            return
-    if type_name.upper() != "DATETIME" and logical_u not in {"DATETIME", "SMALLDATETIME"}:
+    physical = type_name.upper()
+    # DATETIMEOFFSET keeps the offset and its declared fraction.
+    if physical == "DATETIMEOFFSET" or (
+        "DATETIMEOFFSET" in logical_u and physical != "DATETIME"
+    ):
         return
     us = int(value.microsecond or 0)
+    # DATETIME2(p) stores p decimal digits. p>=6 holds a microsecond.
+    # DATETIME2(3) stores milliseconds, so .999999 and .000001 are refused
+    # before the driver rounds them and the read-back rolls the batch back.
+    # Precision omitted on DATETIME2 is SQL Server's default of 7.
+    if physical == "DATETIME2" or (
+        "DATETIME2" in logical_u and physical != "DATETIME"
+    ):
+        prec = getattr(sa_type, "precision", None) if physical == "DATETIME2" else None
+        if prec is None and "DATETIME2" in logical_u:
+            match = re.search(r"DATETIME2\s*\(\s*(\d+)\s*\)", logical_u)
+            prec = int(match.group(1)) if match else 7
+        try:
+            digits = 7 if prec is None else int(prec)
+        except (TypeError, ValueError):
+            digits = 7
+        if digits >= 6:
+            return
+        if digits <= 0:
+            fits = us == 0
+        else:
+            fits = us % (10 ** (6 - digits)) == 0
+        if fits:
+            return
+        raise ValueError(
+            f"SQL Server DATETIME2({digits}) cannot store microsecond {us:06d} "
+            f"({value.isoformat(sep='T')}) — column keeps {digits} fractional "
+            "digits. Quarantine; refuse round-after-commit."
+        )
+    if physical == "SMALLDATETIME" or (
+        logical_u == "SMALLDATETIME" and physical != "DATETIME"
+    ):
+        if us == 0 and int(value.second or 0) == 0:
+            return
+        raise ValueError(
+            f"SQL Server SMALLDATETIME cannot store {value.isoformat(sep='T')} "
+            "— column keeps whole minutes. Quarantine; refuse round-after-commit."
+        )
+    if physical != "DATETIME" and logical_u != "DATETIME":
+        return
     if us in {0, 3000, 7000}:
         return
     raise ValueError(

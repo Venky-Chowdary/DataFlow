@@ -701,15 +701,31 @@ def _fit_predicate(
         return _decimal_reason
     if target.carrier == CARRIER_STRING:
         width = parse_varchar_width(target.target_type)
-        if width is None:
-            return lambda _value: None
         type_str = target.target_type
         label = dialect_label or dest_db
-        return lambda value: (
-            None
-            if fits_varchar(value, width, type_str, dialect_label=label)
-            else f"value is longer than {type_str}"
+        from services.encoding_capacity import (
+            cell_encoding,
+            cell_fits_capacity,
+            classify_capacity,
         )
+
+        cap = classify_capacity(dest_db, type_str)
+        code_page = cap.form in {"cp1252", "latin1", "ascii"}
+
+        def _string_reason(value: Any) -> str | None:
+            # VARCHAR(MAX) has no width and still cannot store a scalar the
+            # code page replaces with '?'. ASCII fits. U+90CE does not.
+            if code_page:
+                cell = cell_encoding(value)
+                if cell is not None and not cell_fits_capacity(cell.text, cap):
+                    return f"value does not encode in {type_str}"
+            if width is None:
+                return None
+            if fits_varchar(value, width, type_str, dialect_label=label):
+                return None
+            return f"value is longer than {type_str}"
+
+        return _string_reason
     if target.carrier == CARRIER_INTEGER:
         type_str = target.target_type
         return lambda value: integer_fit_failure(value, type_str, dest_db=dest_db)

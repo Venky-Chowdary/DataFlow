@@ -356,6 +356,23 @@ def probe_append_key_collisions(
         destination_pk_columns=destination_pk_columns,
         destination_unique_keys=destination_unique_keys,
     )
+    # The plan's key list can be the source identity copied forward. A heap
+    # then blocked the second append with "enforces uniqueness" and inserted
+    # nothing (DEF-B2-001). The live catalog is the enforcement fact for a
+    # single column. A composite key is not a single-column reject, so the
+    # plan answer stands. A catalog miss returns no names and does not invent
+    # a blocker; the engine still rejects a real duplicate at insert time.
+    if (
+        destination_config
+        and destination_table
+        and len(target_columns) == 1
+        and (destination_db_type or "").strip().lower() in SQLISH_SOURCE_TYPES
+    ):
+        live_keys = live_single_column_unique_keys(
+            destination_config, destination_table
+        )
+        wanted = target_columns[0].casefold()
+        enforced = any(str(key).casefold() == wanted for key in live_keys)
     # Probe the rows this run will read, not the whole table. An incremental
     # append past a watermark cannot collide with keys it will never re-read,
     # and probing them refused every run after the first.

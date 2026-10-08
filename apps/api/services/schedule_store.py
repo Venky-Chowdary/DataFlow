@@ -1540,3 +1540,39 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
                 getattr(s, "id", ""),
             )
     return due
+
+
+def seconds_until_next_schedule(
+    now: datetime | None = None,
+    *,
+    cap: float = 60.0,
+) -> float:
+    """Seconds to sleep before the next enabled schedule is due.
+
+    The beat used to sleep a fixed 60s after every pass, so a schedule that
+    became due one second later waited almost a full minute (measured 25s,
+    then 62s). Sleep until the soonest ``next_run_at``, never longer than
+    ``cap``. An already-due schedule waits 1s so a document that fails to
+    advance ``next_run_at`` cannot busy-loop the process.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    soonest: datetime | None = None
+    for s in _load_all():
+        try:
+            if not s.enabled:
+                continue
+            nxt = _parse_ts(getattr(s, "next_run_at", None))
+        except Exception:  # noqa: BLE001 — one document must not pin the sleep
+            continue
+        if nxt is None:
+            continue
+        if soonest is None or nxt < soonest:
+            soonest = nxt
+    if soonest is None:
+        return float(cap)
+    delta = (soonest - current).total_seconds()
+    if delta <= 0:
+        return 1.0
+    return float(min(cap, max(1.0, delta)))
