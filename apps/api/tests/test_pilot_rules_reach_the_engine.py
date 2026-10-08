@@ -33,6 +33,7 @@ def _ground(**kwargs):
         source_columns=kwargs.get("source_columns", COLUMNS),
         source_label="Prod PG.users",
         mode=kwargs.get("mode", "full_refresh_append"),
+        honor_requested_mode=kwargs.get("honor_requested_mode", False),
     )
 
 
@@ -112,6 +113,59 @@ def test_dedupe_key_is_honoured_as_the_upsert_identity():
     )
     assert identity_error == ""
     assert contracts[0]["primary_key"] == ["Email"]
+
+
+def test_explicit_overwrite_keeps_its_mode_when_a_primary_key_is_named():
+    """DEF-C-011: primary_key on overwrite must not become incremental upsert."""
+    columns = ["id", "updated_at", "status"]
+    out, err = _ground(
+        upsert_key="id",
+        mode="full_refresh_overwrite",
+        honor_requested_mode=True,
+        source_columns=columns,
+    )
+    assert err == ""
+    assert out["sync_mode"] == "full_refresh_overwrite"
+    assert out["upsert_key"] == "id"
+    contracts, identity_error = _identity_stream_contract(
+        mode=out["sync_mode"],
+        source_table="users",
+        source_columns=columns,
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "updated_at", "target": "updated_at"},
+            {"source": "status", "target": "status"},
+        ],
+        operator_key=out["upsert_key"],
+        catalog_key="",
+    )
+    assert identity_error == ""
+    assert contracts[0]["sync_mode"] == "full_refresh_overwrite"
+    assert contracts[0]["primary_key"] == ["id"]
+    assert "cursor_field" not in contracts[0]
+    assert contracts[0].get("cursor_inferred") is not True
+
+
+def test_explicit_append_keeps_its_mode_when_a_primary_key_is_named():
+    out, err = _ground(
+        upsert_key="id",
+        mode="full_refresh_append",
+        honor_requested_mode=True,
+    )
+    assert err == ""
+    assert out["sync_mode"] == "full_refresh_append"
+    assert out["upsert_key"] == "id"
+    contracts, identity_error = _identity_stream_contract(
+        mode=out["sync_mode"],
+        source_table="users",
+        source_columns=COLUMNS,
+        mappings=[{"source": "id", "target": "id"}],
+        operator_key=out["upsert_key"],
+        catalog_key="",
+    )
+    assert identity_error == ""
+    assert contracts[0]["sync_mode"] == "full_refresh_append"
+    assert "cursor_field" not in contracts[0]
 
 
 def test_cdc_keeps_its_mode_and_uses_the_log_as_the_cursor():

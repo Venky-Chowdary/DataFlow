@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
@@ -1167,6 +1168,75 @@ def get_tool_registry() -> dict:
     }
 
 
+# Names operators and models send that the schema spells differently.
+# Applied only when the handler accepts the canonical name and not the alias.
+_TOOL_ARG_ALIASES = {
+    "connector_name": "name",
+    "connector": "name",
+    "table_name": "table",
+    "source_name": "source_connector_name",
+    "dest_name": "dest_connector_name",
+}
+
+
+def _tool_schema_properties(name: str) -> list[str]:
+    for tool in TOOL_DEFINITIONS:
+        if tool.get("name") == name:
+            props = (tool.get("input_schema") or {}).get("properties") or {}
+            return [str(key) for key in props]
+    return []
+
+
+def _tool_argument_error(name: str, raw: str) -> str:
+    """Operator text for a bad call. Never the Python signature."""
+    accepted = _tool_schema_properties(name)
+    if "unexpected keyword" not in raw and "required positional" not in raw and "missing" not in raw:
+        if accepted:
+            return f"{name} could not run with those arguments. Accepted parameters: {', '.join(accepted)}."
+        return f"{name} could not run with those arguments."
+    if accepted:
+        return (
+            f"{name} does not accept that argument. "
+            f"Accepted parameters: {', '.join(accepted)}."
+        )
+    return f"{name} does not accept that argument."
+
+
+def _bind_tool_arguments(
+    name: str,
+    handler: Callable[..., Any],
+    args: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Rewrite known aliases, and refuse anything the handler cannot take."""
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return dict(args), ""
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        return dict(args), ""
+    accepted = {
+        key for key, param in params.items()
+        if key != "self" and param.kind in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+    }
+    bound: dict[str, Any] = {}
+    unknown: list[str] = []
+    for key, value in args.items():
+        target = key
+        alias = _TOOL_ARG_ALIASES.get(key)
+        if target not in accepted and alias in accepted and alias not in args:
+            target = alias
+        if target not in accepted:
+            unknown.append(key)
+            continue
+        bound[target] = value
+    if unknown:
+        return {}, _tool_argument_error(name, "unexpected keyword argument")
+    return bound, ""
+
+
 class DataPilotTools:
     """Execute Datawrap Pilot tools against live app state."""
 
@@ -1248,9 +1318,17 @@ class DataPilotTools:
                 error=denial_message(role, name),
             )
         try:
-            return handler(**args)
+            bound, bind_error = _bind_tool_arguments(name, handler, args)
+            if bind_error:
+                return ToolResult(name=name, success=False, output=None, error=bind_error)
+            return handler(**bound)
         except TypeError as e:
-            return ToolResult(name=name, success=False, output=None, error=str(e))
+            return ToolResult(
+                name=name,
+                success=False,
+                output=None,
+                error=_tool_argument_error(name, str(e)),
+            )
         except Exception as e:
             return ToolResult(name=name, success=False, output=None, error=str(e))
 
@@ -1448,6 +1526,23 @@ class DataPilotTools:
                 success=False,
                 output=redact_payload(draft),
                 error=missing,
+            )
+        from services.connector_store import (
+            connector_name_conflict_message,
+            connector_name_taken,
+        )
+
+        if connector_name_taken(
+            str(draft.get("name") or ""),
+            workspace_id=str(draft.get("workspace_id") or "") or None,
+        ):
+            from .ack_ledger import redact_payload
+
+            return ToolResult(
+                name="create_connector",
+                success=False,
+                output=redact_payload(draft),
+                error=connector_name_conflict_message(str(draft.get("name") or "")),
             )
 
         probe_msg = ""
@@ -2357,23 +2452,48 @@ class DataPilotTools:
     ) -> ToolResult:
         w = workload.lower()
         callable_src = (source_read_mode or "").strip().lower() in {"procedure", "query"}
-        if callable_src and ("cdc" in w or needs_history or "scd" in w or "mirror" in w):
-            return ToolResult(name="recommend_sync_mode", success=True, output={
-                "recommended_mode": "Full Refresh Append",
-                "reason": (
-                    "CALL/SELECT is a result-set snapshot, not a WAL/binlog or table "
-                    "identity. CDC, SCD2, and mirror are refused. Use full refresh, "
-                    "or incremental only when the procedure is cursor-stable."
-                ),
-                "requires": {
-                    "cursor": False,
-                    "primary_key": False,
-                    "cdc_log_access": False,
-                },
-            })
-        if "cdc" in w:
+        mentions_delete = bool(re.search(r"\bdelet", w))
+        mentions_update = bool(re.search(r"\bupdat", w))
+        near_realtime = any(
+            token in w
+            for token in (
+                "near-real-time",
+                "near real-time",
+                "near realtime",
+                "real-time",
+                "realtime",
+                "real time",
+            )
+        )
+        # A procedure or query is a result set, not a log. CDC / SCD2 / mirror
+        # cannot run on it. Append is the non-destructive refusal unless the
+        # workload says rows disappear: appending that snapshot duplicates the
+        # full result and leaves deleted rows behind.
+        if callable_src and mentions_delete:
+            mode = "Full Refresh Overwrite"
+            reason = (
+                "A query or procedure returns the current result, not a change log. "
+                "Deletes in that result are rows that are no longer present, so the "
+                "destination has to be replaced. Append would copy the full result "
+                "again and leave the deleted rows in place."
+            )
+        elif callable_src and ("cdc" in w or needs_history or "scd" in w or "mirror" in w):
+            mode = "Full Refresh Append"
+            reason = (
+                "CALL/SELECT is a result-set snapshot, not a WAL/binlog or table "
+                "identity. CDC, SCD2, and mirror are refused. Use full refresh, "
+                "or incremental only when the procedure is cursor-stable."
+            )
+        elif "cdc" in w or (
+            near_realtime and has_primary_key and (mentions_delete or mentions_update)
+        ):
             mode = "Incremental CDC"
-            reason = "Source changes should be read from a log stream and resumed from cursor state."
+            reason = (
+                "Updates and deletes at near-real-time have to be read from the "
+                "log. Incremental append inserts new rows only, so a changed row "
+                "is duplicated and a deleted row stays. CDC here is at-least-once "
+                "upsert and needs log access plus the primary key."
+            )
         elif "upsert" in w or "merge" in w or (has_primary_key and "incremental" in w):
             mode = "Incremental Upsert"
             reason = (
@@ -2383,24 +2503,42 @@ class DataPilotTools:
         elif has_cursor and has_primary_key and needs_history:
             mode = "Incremental Append + Deduped"
             reason = "Cursor and key allow efficient updates while preserving change history."
+        elif mentions_delete and has_primary_key:
+            mode = "Mirror"
+            reason = (
+                "Deletes have to remove the destination row. Incremental append "
+                "and upsert leave it. Mirror rewrites the key and deletes "
+                "destination rows the source no longer has. It is a full read, "
+                "not a log capture."
+            )
+        elif mentions_delete or "snapshot" in w or "full" in w or "overwrite" in w:
+            mode = "Full Refresh Overwrite"
+            reason = (
+                "Snapshot workloads should replace the destination with the latest "
+                "source state. Append would keep rows the source has already deleted."
+                if mentions_delete
+                else "Snapshot workloads should replace the destination with the latest source state."
+            )
         elif has_cursor:
             mode = "Incremental Append"
             reason = "Cursor allows new records to be read without a full scan."
-        elif "snapshot" in w or "full" in w or "overwrite" in w:
-            mode = "Full Refresh Overwrite"
-            reason = "Snapshot workloads should replace the destination with the latest source state."
         elif has_primary_key:
             mode = "Incremental Upsert"
             reason = "A primary key is enough to upsert; add a cursor later to avoid full scans."
         else:
             mode = "Full Refresh Append"
             reason = "Use append until cursor/key metadata is confirmed."
+        incremental = mode.startswith("Incremental")
         return ToolResult(name="recommend_sync_mode", success=True, output={
             "recommended_mode": mode,
             "reason": reason,
             "requires": {
-                "cursor": "Append" in mode or "CDC" in mode,
-                "primary_key": "Upsert" in mode or "Deduped" in mode,
+                # "Full Refresh Append" contains "Append". A cursor is required
+                # only for a mode that advances one. Overwrite does not.
+                "cursor": incremental and "Upsert" not in mode,
+                "primary_key": (
+                    "Upsert" in mode or "Deduped" in mode or "CDC" in mode or mode == "Mirror"
+                ),
                 "cdc_log_access": "CDC" in mode,
             },
         })

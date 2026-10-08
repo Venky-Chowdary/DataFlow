@@ -127,11 +127,21 @@ def extract_sql_identifiers(sql: str) -> set[str]:
         m.group(1).lower()
         for m in re.finditer(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", scrubbed, flags=re.I)
     }
+    # date_trunc( and round( are calls. ::numeric is a cast. Neither is a column
+    # the catalog would list. A bare `SELECT round FROM t` is still checked.
+    function_calls = {
+        m.group(1).lower()
+        for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", scrubbed)
+    }
+    cast_types = {
+        m.group(1).lower()
+        for m in re.finditer(r"::\s*([A-Za-z_][A-Za-z0-9_]*)", scrubbed)
+    }
     found: set[str] = set()
     for match in _IDENT.finditer(scrubbed):
         tok = match.group(1)
         low = tok.lower()
-        if low in _SQL_KEYWORDS or low in aliases:
+        if low in _SQL_KEYWORDS or low in aliases or low in function_calls or low in cast_types:
             continue
         if tok.isdigit():
             continue

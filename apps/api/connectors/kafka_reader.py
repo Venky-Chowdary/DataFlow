@@ -29,6 +29,30 @@ if str(_api_root) not in sys.path:
 from services.value_serializer import cell_to_string
 
 
+def accepted_kafka_configs(kwargs: dict[str, Any], accepted: set[str] | None) -> dict[str, Any]:
+    """Drop client configs this kafka-python build does not recognize.
+
+    ``api_version_auto_timeout_ms`` is a real kafka-python timeout on some
+    releases and ``KafkaConfigurationError: Unrecognized configs`` on others.
+    Topic listing used to fail closed on that mismatch and Gate-2 then reported
+    the topic as unknown.
+    """
+    if not accepted:
+        return dict(kwargs)
+    return {key: value for key, value in kwargs.items() if key in accepted}
+
+
+def _consumer_configs(cfg: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {"bootstrap_servers": _bootstrap(cfg)}
+    kwargs.update(extra)
+    try:
+        from kafka import KafkaConsumer
+    except ImportError:
+        return kwargs
+    accepted = set(getattr(KafkaConsumer, "DEFAULT_CONFIG", {}) or {})
+    return accepted_kafka_configs(kwargs, accepted or None)
+
+
 def list_topics(cfg: dict[str, Any]) -> list[str]:
     """User topics on the cluster. Internal topics (``_`` prefix) stay out.
 
@@ -41,10 +65,12 @@ def list_topics(cfg: dict[str, Any]) -> list[str]:
         raise ImportError("kafka-python is required to list Kafka topics") from exc
 
     consumer = KafkaConsumer(
-        bootstrap_servers=_bootstrap(cfg),
-        consumer_timeout_ms=2000,
-        request_timeout_ms=8000,
-        api_version_auto_timeout_ms=8000,
+        **_consumer_configs(
+            cfg,
+            consumer_timeout_ms=2000,
+            request_timeout_ms=8000,
+            api_version_auto_timeout_ms=8000,
+        )
     )
     try:
         names = consumer.topics() or set()

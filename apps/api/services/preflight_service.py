@@ -1285,6 +1285,18 @@ def run_file_preflight(
             sample_rows = engine_sample.rows
         sample_unavailable_reason = engine_sample.unavailable_reason
         source_measured_empty = engine_sample.measured_empty
+        if not source_error and sample_unavailable_reason:
+            # Catalog columns without SELECT are not a readable source.
+            # Leaving this off source.error made Gate-1 pass and the cast
+            # contract the remediation for a grant the role does not have.
+            from services.preflight_sample import source_read_is_privilege_denial
+
+            if source_read_is_privilege_denial(sample_unavailable_reason):
+                source_error = (
+                    "SELECT was denied on this table. Columns visible in the catalog "
+                    "are not a readable source. Grant SELECT to the connector role, "
+                    f"then re-validate. ({sample_unavailable_reason})"
+                )
     if (
         not sample_rows
         and not source_measured_empty

@@ -8,11 +8,11 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 46
+- not fixed: 37
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 41
-- partly fixed in code: 8
+- fixed in code, unit-proven — not a live QA retest: 49
+- partly fixed in code: 9
 
 ## Every row
 
@@ -74,20 +74,20 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-A-002 | P2 | OPEN | fixed in code, unit-proven (test_sftp_create_keeps_host_from_the_uri, test_sftp_uri_fills_empty_host_and_keeps_an_explicit_host, test_extract_url_credentials_reads_sftp_uri). An explicit host is not overwritten. Not a live connector retest. |
 | DEF-A-018 | P2 | OPEN | fixed in code, unit-proven (test_header_only_file_is_a_zero_row_run_not_a_type_change[batch/stream], test_header_only_preview_without_a_population_is_still_unproven, test_a_new_header_on_an_empty_file_is_still_drift). An empty population (stored upload or Execute batch) is a measured empty source; inferred placeholders yield to the declared, previous, or live destination type; a new header name is still drift. Not a live scheduled S3 retest. |
 | DEF-B-011 | P2 | OPEN | fixed in code, unit-proven (test_declared_number_is_not_relabelled_boolean, test_oracle_number_type_object_is_decimal_not_boolean, test_create_new_does_not_stamp_boolean_on_a_declared_number). File 0/1 on is_active stays BOOLEAN. Not a live Oracle query retest. |
-| DEF-C-003 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-003 | P2 | OPEN | partly fixed in code, unit-proven (test_kafka_listing_drops_an_unrecognized_timeout). Topic listing keeps the timeout only when this client accepts it. The g4 contract block is not claimed fixed. Not a live Kafka retest. |
 | DEF-C-009 | P2 | OPEN | fixed in code, unit-proven (test_three_decimal_wire_stays_decimal_auto_does_not). A typed source renders canonical decimals, so the wire locale keeps NUMERIC(p,3). Not a live QA retest. |
 | DEF-C-010 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-011 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-011 | P2 | OPEN | fixed in code, unit-proven (test_explicit_overwrite_keeps_its_mode_when_a_primary_key_is_named, test_explicit_append_keeps_its_mode_when_a_primary_key_is_named, test_upsert_key_becomes_a_stream_contract_and_switches_the_mode). An explicit overwrite or append keeps that mode and records the key; no cursor is inferred. Omitting the mode and naming a key still becomes incremental upsert. Not a live QA retest. |
 | DEF-C-013 | P2 | OPEN | fixed in code, unit-proven (test_dynamodb_endpoint_collapses_doubled_scheme_and_default_port). A saved http://host:port is used as is. Not a live DynamoDB Local retest. |
-| DEF-C-015 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-015 | P2 | OPEN | fixed in code, unit-proven (test_near_realtime_updates_and_deletes_recommend_cdc, test_query_with_deletes_recommends_overwrite_without_a_cursor, test_recommend_sync_mode_refuses_cdc_for_procedure). Near-real-time updates or deletes with a primary key recommend Incremental CDC (at-least-once upsert, log required). A query or procedure whose workload mentions deletes recommends Full Refresh Overwrite and does not require a cursor. CDC on a procedure without deletes stays the non-destructive Full Refresh Append refusal. Not a live QA retest. |
 | DEF-C-022 | P2 | OPEN | fixed in code, unit-proven (test_empty_table_passes_and_names_the_zero_row_proof[mysql/postgresql/sqlserver], test_failed_read_of_a_table_still_blocks, test_a_filter_that_matches_no_sampled_row_is_not_an_empty_source). An engine read that returns no row passes Gate-5/8/9 as a 0-row proof and Execute reconciles 0 = 0; a failed read or an over-filtered sample still blocks with its reason. run_file_preflight binds the source engine for every gate. Not a live PostgreSQL to MySQL retest. |
 | DEF-C-023 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-025 | P2 | OPEN | fixed in code, unit-proven (test_manual_review_pauses_before_an_overwrite_empties_a_column[mysql/postgresql/sqlserver/snowflake], test_acknowledged_overwrite_proceeds_and_still_names_the_loss, test_a_propagating_policy_warns_instead_of_pausing, test_upserting_sinks_keep_unwritten_properties, test_engine_and_identity_columns_are_regenerated_not_emptied, test_overwrite_keeps_a_destination_column_the_source_dropped). Validate and Execute's preflight block an overwrite under manual_review that would empty a live destination column, naming it, until the schema change is acknowledged; other policies warn. The values themselves are not carried across an overwrite. Not a live QA retest. |
 | DEF-C-026 | P2 | OPEN | fixed in code, unit-proven (test_unconstrained_numeric_typmod_is_numeric_not_65535). 65535 is unconstrained NUMERIC. Create-new on MySQL uses the platform DECIMAL(38,15) and is not a fidelity collapse. A real NUMERIC(100,2) is kept. Not a live Postgres to MySQL retest. |
 | DEF-C-027 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-033 | P2 | OPEN | fixed in code, unit-proven (test_base64_alphabet_text_stays_text_and_is_not_a_preserve). Hex named payload stays text. Real base64 named payload_b64 stays BINARY. Not a live PG retest. |
-| DEF-C-039 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-040 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-039 | P2 | OPEN | fixed in code, unit-proven (test_pilot_preflight_forwards_a_denied_insert_probe, test_g2_gate_surfaces_privilege_probe_in_details). The plan forwards can_write and the probe. A denied INSERT blocks Gate-2 with the probe detail. Not a live grant retest. |
+| DEF-C-040 | P2 | OPEN | fixed in code, unit-proven (test_select_denied_blocks_gate_1_instead_of_a_cast). A sample read that fails with permission denied, insufficient privilege, or SQLSTATE 42501 blocks Gate-1 and names SELECT. A measured empty table is unchanged. Not a live grant retest. |
 | DEF-C-044 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-045 | P2 | OPEN | fixed in code, unit-proven (test_text_bytea_and_uuid_are_not_guessed_from_the_peek). PostgreSQL text (OID 25) stays VARCHAR even when the sample is classified INTERVAL. Not a live Postgres to SQL Server retest. |
 | DEF-C-047 | P2 | OPEN | fixed in code, unit-proven (test_a_space_in_a_table_name_stays_inside_the_quotes, test_a_spaced_sqlite_table_is_read_under_its_own_name). A name whose only unusual character is a space is quoted verbatim on PostgreSQL, SQL Server, MySQL and SQLite. A quote or semicolon still goes through the injection sanitizer. Not a live PostgreSQL retest. |
@@ -108,7 +108,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B-006 | P3 | OPEN | partly fixed. The cadence label uses describe_stored_cadence while the stored interval stays a preset. The blocker is no longer copied onto a completed job as a __DF_SQL_NULL__ quarantine row (unit-proven with DEF-B-022). Not a live QA retest. |
 | DEF-B-007 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-008 | P3 | OPEN | fixed in code, unit-proven (test_folding_dialect_create_quotes_uppercase_physical_names). Folding dialects emit quoted uppercase physical names. The column key stays the operator spelling. PostgreSQL names are unchanged. Not a live Oracle retest. |
-| DEF-B-012 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-012 | P3 | OPEN | fixed in code, unit-proven (test_expired_transfer_ack_does_not_say_create_the_connector). An expired transfer says to plan the transfer again. An unknown id says to stage the action again. A create_connector ack still says to create the connector. Not a live UI retest. |
 | DEF-B-015 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-016 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-030 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
@@ -116,12 +116,12 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-A-016 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-A-020 | P3 | OPEN | fixed in code, unit-proven (test_missing_object_and_raw_primary_key_are_operator_text, test_s3_missing_object_is_measured_zero). A missing object is operator text and is measured as zero rows. Not a live scheduled S3 retest. |
 | DEF-C-007 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-012 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-014 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-012 | P3 | OPEN | fixed in code, unit-proven (test_create_connector_refuses_a_duplicate_name). Staging and Confirm refuse a taken name and do not write. The store still keeps the id when a programmatic create repeats a name, so schedules bound to that id are not orphaned. Not a live connector retest. |
+| DEF-C-014 | P3 | OPEN | fixed in code, unit-proven (test_ordinary_sql_functions_are_not_schema_identifiers). A token followed by ( or a ::type is not a schema identifier. A bare unknown column is still refused. Not a live query retest. |
 | DEF-C-016 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-018 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-019 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-021 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-021 | P3 | OPEN | fixed in code, unit-proven (test_bad_tool_argument_names_the_schema_not_the_python_signature, test_connector_name_is_accepted_as_the_connector_argument). Unknown arguments name the accepted parameters. connector_name binds to name. Not a live Pilot retest. |
 | DEF-C-028 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-032 | P3 | OPEN | fixed in code, unit-proven (test_a_completed_job_overrules_an_older_failed_probe, test_a_failed_job_does_not_clear_a_failed_probe, test_a_probe_that_fails_after_the_transfer_is_failed_again, test_pilot_list_and_briefing_bucket_on_the_same_rule). connector_store.connector_health is the one rule: a failed probe is overruled only by a transfer that completed after it, the same rule the web client applies. Not a live QA retest. |
 | DEF-C-035 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |

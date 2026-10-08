@@ -333,11 +333,16 @@ async def copilot_confirm(
         raise HTTPException(status_code=400, detail="ack_id required")
 
     ledger = get_ack_ledger()
+    # Read the kind before peek. Peek garbage-collects an expired ack, and the
+    # old 404 always said "create the connector again" — including for a transfer.
+    unusable = ledger.unusable_reason(ack_id)
+    if unusable:
+        raise HTTPException(status_code=404, detail=unusable)
     peek = ledger.peek(ack_id)
     if not peek:
         raise HTTPException(
             status_code=404,
-            detail="Approval not found or expired. Ask Pilot to create the connector again.",
+            detail=ledger.unusable_reason(ack_id),
         )
 
     role, session_actor = _caller(http_request)
@@ -384,6 +389,20 @@ async def copilot_confirm(
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "create_connector":
+        from services.connector_store import (
+            connector_name_conflict_message,
+            connector_name_taken,
+        )
+
+        if connector_name_taken(
+            str(payload.get("name") or ""),
+            workspace_id=str(payload.get("workspace_id") or "") or None,
+        ):
+            ledger.release_claim(ack_id)
+            raise HTTPException(
+                status_code=409,
+                detail=connector_name_conflict_message(str(payload.get("name") or "")),
+            )
         try:
             conn = create_connector(payload)
         except Exception as exc:

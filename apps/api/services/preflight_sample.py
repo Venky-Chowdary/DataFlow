@@ -15,6 +15,7 @@ empty list.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Sized
 from dataclasses import dataclass, field
 from itertools import chain
@@ -55,6 +56,22 @@ def peek_population_empty(population: Any) -> tuple[Any, bool]:
 
 
 _END = object()
+
+
+_PRIVILEGE_READ_RE = re.compile(
+    r"permission denied|insufficient privilege|\b42501\b|lacks select|must be owner",
+    re.IGNORECASE,
+)
+
+
+def source_read_is_privilege_denial(reason: str) -> bool:
+    """True when a failed read is a grant problem, not an empty table.
+
+    A catalog can list columns the role cannot SELECT. Treating that as
+    "source readable" let Validate offer a cast contract for a table the
+    login will never be allowed to read.
+    """
+    return bool(_PRIVILEGE_READ_RE.search(reason or ""))
 
 
 def engine_sample_rows(

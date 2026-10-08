@@ -427,6 +427,30 @@ def _list_mongo(role: str | None, workspace_id: str | None = None) -> list[Saved
     return [_doc_to_connector(c) for c in coll.find(query)]
 
 
+def connector_name_conflict_message(name: str) -> str:
+    shown = (name or "").strip() or "that name"
+    return (
+        f'A connector named "{shown}" already exists. '
+        "Choose a different name, or open the existing connector."
+    )
+
+
+def connector_name_taken(name: str, workspace_id: str | None = None) -> bool:
+    """True when this workspace already has a connector with this name.
+
+    Pilot create used to fall through into an in-place update, and a plaintext
+    secret on that update surfaced as a Fernet error. A create is not an update.
+    """
+    target = (name or "").strip().casefold()
+    if not target:
+        return False
+    scope = (workspace_id or "").strip() or None
+    for existing in list_connectors(workspace_id=scope):
+        if str(existing.name or "").strip().casefold() == target:
+            return True
+    return False
+
+
 def list_connectors(role: str | None = None, workspace_id: str | None = None) -> list[SavedConnector]:
     if _use_mongo():
         try:

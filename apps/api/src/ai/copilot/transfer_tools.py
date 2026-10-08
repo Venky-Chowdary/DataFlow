@@ -619,6 +619,10 @@ def plan_transfer(
         )
     dst_table = (dest_table or (callable_plan["stream_name"] if callable_plan else src_table)).strip()
 
+    # An omitted mode plus a key means "dedupe this". A mode the operator
+    # actually named must stay that mode — a primary key on overwrite is an
+    # identity, not permission to switch the run to incremental upsert.
+    requested_sync_mode = bool((sync_mode or "").strip())
     mode = normalize_sync_mode(sync_mode)
     if callable_plan:
         from services.procedure_source import assert_callable_sync_allowed
@@ -707,6 +711,7 @@ def plan_transfer(
         source_columns=src_names,
         source_label=f"{src_conn.get('name')}.{src_table}",
         mode=mode,
+        honor_requested_mode=requested_sync_mode,
     )
     if rules_error:
         return _tool_result(tool, success=False, error=rules_error)
@@ -951,6 +956,7 @@ def _ground_data_rules(
     source_columns: list[str],
     source_label: str,
     mode: str,
+    honor_requested_mode: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Bind spoken row rules to real source columns, or refuse.
 
@@ -1008,13 +1014,19 @@ def _ground_data_rules(
                 return out, err
             bound.append(actual)
         out["upsert_key"] = ",".join(bound)
-        # An explicit key on append/overwrite means upsert. CDC, SCD2, and
-        # mirror already require a key — do not downgrade them to upsert.
-        # incremental_append is cursor-bounded insert. A key on that contract
-        # must not silently become upsert.
+        # A key with no spoken mode means upsert: the operator named an
+        # identity and left the mode at the non-destructive default. CDC,
+        # SCD2, and mirror already require a key — do not downgrade them.
+        # incremental_append is cursor-bounded insert. A key the operator
+        # attached to a mode they named (overwrite, append) is recorded and
+        # the mode stays. Rewriting that to upsert also inferred updated_at.
         from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
 
-        if mode not in MODES_REQUIRING_PRIMARY_KEY and mode != "incremental_append":
+        if (
+            not honor_requested_mode
+            and mode not in MODES_REQUIRING_PRIMARY_KEY
+            and mode != "incremental_append"
+        ):
             out["sync_mode"] = normalize_sync_mode("upsert")
     return out, ""
 
@@ -1354,6 +1366,24 @@ def _run_preflight(
             destination_generated_columns=dest_probe.get("generated_columns") or [],
             destination_table_exists=dest_exists,
             destination_can_create=can_create if isinstance(can_create, bool) else None,
+            # Connectivity is not INSERT. Dropping the probe here made Gate-2
+            # say "write access" for a role that can only SELECT, and Execute
+            # then failed with the denial the probe had already measured.
+            destination_can_write=(
+                dest_probe.get("can_write")
+                if isinstance(dest_probe.get("can_write"), bool)
+                else None
+            ),
+            privilege_probe=(
+                dest_probe.get("privilege_probe")
+                if isinstance(dest_probe.get("privilege_probe"), dict)
+                else None
+            ),
+            redshift_staging_probe=(
+                dest_probe.get("redshift_staging_probe")
+                if isinstance(dest_probe.get("redshift_staging_probe"), dict)
+                else None
+            ),
             destination_db_type=dest_db_type,
             destination_table=dst_table,
             source_kind=source_kind or "database",

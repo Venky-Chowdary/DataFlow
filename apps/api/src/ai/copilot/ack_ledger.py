@@ -40,6 +40,30 @@ def _new_id() -> str:
     return f"ack_{uuid.uuid4().hex[:20]}"
 
 
+def approval_restage_message(kind: str | None, *, expired: bool) -> str:
+    """Say which action to stage again. A transfer ack is not a connector create."""
+    token = (kind or "").strip()
+    if token == "start_transfer":
+        action = "plan the transfer again"
+    elif token in {
+        "create_schedule",
+        "run_schedule",
+        "update_schedule",
+        "delete_schedule",
+        "set_schedule_enabled",
+    }:
+        action = "set the schedule again"
+    elif token == "create_connector":
+        action = "create the connector again"
+    elif token in {"delete_connector", "test_connector"}:
+        action = "repeat that connector action"
+    else:
+        action = "stage the action again"
+    if expired and token:
+        return f"Approval expired. Ask Pilot to {action}."
+    return f"Approval not found or expired. Ask Pilot to {action}."
+
+
 def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Safe client-facing copy — never echo secrets."""
     out: dict[str, Any] = {}
@@ -155,25 +179,59 @@ class PilotAckLedger:
                 "consumed_at": doc.get("consumed_at"),
             }
 
+    def _expired_message_locked(self, aid: str) -> str:
+        """Drop one expired unused ack and name the action to stage again.
+
+        GC used to delete the document first, so a transfer approval and a
+        missing id produced the same "create the connector again" sentence.
+        """
+        doc = self._entries.get(aid)
+        if not doc or doc.get("consumed_at"):
+            return ""
+        if float(doc.get("expires_at") or 0) > _now():
+            return ""
+        kind = str(doc.get("kind") or "")
+        self._entries.pop(aid, None)
+        self._persist()
+        return approval_restage_message(kind, expired=True)
+
+    def unusable_reason(self, ack_id: str) -> str:
+        """Why Confirm cannot spend this id. Empty when the ack is still spendable."""
+        aid = (ack_id or "").strip()
+        if not aid:
+            return "ack_id required"
+        with self._lock:
+            expired = self._expired_message_locked(aid)
+            if expired:
+                return expired
+            doc = self._entries.get(aid)
+        if not doc:
+            return approval_restage_message(None, expired=False)
+        return ""
+
     def get_pending_payload(self, ack_id: str) -> tuple[dict[str, Any] | None, str]:
         """Return secret payload for a still-pending ack (does not consume)."""
         aid = (ack_id or "").strip()
         if not aid:
             return None, "ack_id required"
         with self._lock:
+            expired = self._expired_message_locked(aid)
+            if expired:
+                return None, expired
             self._gc_locked()
             doc = self._entries.get(aid)
             if not doc:
-                return None, "Approval not found or expired. Ask Pilot to create the connector again."
+                return None, approval_restage_message(None, expired=False)
             if doc.get("consumed_at"):
                 prior = doc.get("result")
                 if isinstance(prior, dict) and prior:
                     return {"_idempotent": True, **prior}, ""
                 return None, "This approval was already used."
             if float(doc.get("expires_at") or 0) <= _now():
+                kind = str(doc.get("kind") or "")
                 self._entries.pop(aid, None)
                 self._persist()
-                return None, "Approval expired. Ask Pilot to create the connector again."
+                return None, approval_restage_message(kind, expired=True)
             return dict(doc.get("payload") or {}), ""
 
     def claim(
@@ -195,10 +253,13 @@ class PilotAckLedger:
         reason = (reason or "").strip() or "confirmed"
         now = _now()
         with self._lock:
+            expired = self._expired_message_locked(aid)
+            if expired:
+                return None, expired
             self._gc_locked()
             doc = self._entries.get(aid)
             if not doc:
-                return None, "Approval not found or expired. Ask Pilot to create the connector again."
+                return None, approval_restage_message(None, expired=False)
             if doc.get("consumed_at"):
                 # Any stamped result means the mutation already happened. Replaying
                 # the same ack must return that result, never run the action twice.
@@ -207,9 +268,10 @@ class PilotAckLedger:
                     return {"_idempotent": True, **prior}, ""
                 return None, "This approval was already used."
             if float(doc.get("expires_at") or 0) <= now:
+                kind = str(doc.get("kind") or "")
                 self._entries.pop(aid, None)
                 self._persist()
-                return None, "Approval expired. Ask Pilot to create the connector again."
+                return None, approval_restage_message(kind, expired=True)
             claimed_at = float(doc.get("claimed_at") or 0)
             if claimed_at and (now - claimed_at) < max(5.0, float(claim_ttl_sec)):
                 return None, "This approval is already being confirmed. Wait a moment and retry."
@@ -352,6 +414,22 @@ class MongoAckLedger:
         self._coll.insert_one(doc)
         return aid
 
+    def unusable_reason(self, ack_id: str) -> str:
+        aid = (ack_id or "").strip()
+        if not aid:
+            return "ack_id required"
+        doc = self._find(aid)
+        if doc and not doc.get("consumed_at") and float(doc.get("expires_at") or 0) <= _now():
+            kind = str(doc.get("kind") or "")
+            try:
+                self._coll.delete_one({"_id": aid})
+            except Exception:
+                _log.debug("pilot ack expire delete skipped", exc_info=True)
+            return approval_restage_message(kind, expired=True)
+        if not doc:
+            return approval_restage_message(None, expired=False)
+        return ""
+
     def _find(self, ack_id: str) -> dict[str, Any] | None:
         aid = (ack_id or "").strip()
         if not aid:
@@ -387,16 +465,22 @@ class MongoAckLedger:
         aid = (ack_id or "").strip()
         if not aid:
             return None, "ack_id required"
+        doc = self._find(aid)
+        if doc and not doc.get("consumed_at") and float(doc.get("expires_at") or 0) <= _now():
+            kind = str(doc.get("kind") or "")
+            self._coll.delete_one({"_id": aid})
+            return None, approval_restage_message(kind, expired=True)
         self._gc()
         doc = self._find(aid)
         if not doc:
-            return None, "Approval not found or expired. Ask Pilot to create the connector again."
+            return None, approval_restage_message(None, expired=False)
         replay = self._idempotent(doc)
         if replay is not None:
             return replay
         if float(doc.get("expires_at") or 0) <= _now():
+            kind = str(doc.get("kind") or "")
             self._coll.delete_one({"_id": aid})
-            return None, "Approval expired. Ask Pilot to create the connector again."
+            return None, approval_restage_message(kind, expired=True)
         return dict(doc.get("payload") or {}), ""
 
     def claim(
@@ -414,14 +498,21 @@ class MongoAckLedger:
         reason = (reason or "").strip() or "confirmed"
         now = _now()
         doc = self._find(aid)
+        if doc and not doc.get("consumed_at") and float(doc.get("expires_at") or 0) <= now:
+            kind = str(doc.get("kind") or "")
+            self._coll.delete_one({"_id": aid})
+            return None, approval_restage_message(kind, expired=True)
+        self._gc()
+        doc = self._find(aid)
         if not doc:
-            return None, "Approval not found or expired. Ask Pilot to create the connector again."
+            return None, approval_restage_message(None, expired=False)
         replay = self._idempotent(doc)
         if replay is not None:
             return replay
         if float(doc.get("expires_at") or 0) <= now:
+            kind = str(doc.get("kind") or "")
             self._coll.delete_one({"_id": aid})
-            return None, "Approval expired. Ask Pilot to create the connector again."
+            return None, approval_restage_message(kind, expired=True)
         window = now - max(5.0, float(claim_ttl_sec))
         try:
             from pymongo import ReturnDocument
