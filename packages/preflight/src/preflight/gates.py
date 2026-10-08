@@ -6,7 +6,7 @@ import tempfile
 import time
 from typing import Any, Callable
 
-from preflight.constants import is_schemaless_dest
+from preflight.constants import is_schemaless_dest, object_store_put_creates_key
 from preflight.models import (
     ColumnSchema,
     GateId,
@@ -337,7 +337,16 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
 
     # INSERT grant alone must not green-light create-new. Unknown/false create with
     # a missing table is a hard block — otherwise Validate APPROVE invents DDL.
-    if dest.table_exists is False and not dest.can_create_table:
+    # Object stores are the exception: a missing key is created by PUT when
+    # object write is already proven. can_create_table there means bucket or
+    # container CREATE (storage.buckets.create), which objectAdmin does not have
+    # and which the writer does not need.
+    object_put = object_store_put_creates_key(
+        getattr(dest, "db_type", "") or getattr(dest, "kind", "")
+    )
+    if dest.table_exists is False and not dest.can_create_table and not (
+        object_put and dest.can_write
+    ):
         return _block(
             GateId.G2_DESTINATION,
             "Destination table is missing and CREATE is not proven "
@@ -359,6 +368,8 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     create_note = ""
     if dest.table_exists is False and dest.can_create_table:
         create_note = "; CREATE table allowed"
+    elif dest.table_exists is False and object_put and dest.can_write:
+        create_note = "; missing object is created by PUT"
     elif dest.table_exists is True:
         create_note = "; target table exists"
     elif dest.table_exists is None:

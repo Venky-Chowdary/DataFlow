@@ -15,7 +15,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string, load_http_json, sanitize_json_value
+from services.value_serializer import (
+    cell_to_string,
+    json_dumps_exact_numbers,
+    load_http_json,
+    sanitize_json_value,
+)
 from services.vectorization import vectorize_records
 
 from connectors.writer_common import WriteResult as _WriteResult
@@ -330,7 +335,9 @@ def build_pinecone_vectors(
     vectors: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in vector_rows:
-        meta = dict(sanitize_json_value(row.get("metadata") or {}) or {})
+        from connectors.writer_common import vector_prepare_metadata
+
+        meta = vector_prepare_metadata(row.get("metadata") or {})
         meta["content"] = vector_cell_token(row.get("content"))[:40000]
         meta["source_id"] = vector_cell_token(row.get("source_id"))
         try:
@@ -347,8 +354,6 @@ def build_pinecone_vectors(
             continue
         meta["chunk_index"] = chunk
         # Pinecone metadata values must be string/number/bool/list[string].
-        from connectors.writer_common import vector_prepare_metadata
-
         clean_meta = vector_prepare_metadata(meta)
         values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or values is None:
@@ -771,7 +776,7 @@ def write_mapped_rows(
                 payload["namespace"] = namespace
             resp = session.post(
                 f"{index_url}/vectors/upsert",
-                data=json.dumps(payload, default=sanitize_json_value),
+                data=json_dumps_exact_numbers(payload),
                 headers=hdrs,
                 timeout=60,
             )

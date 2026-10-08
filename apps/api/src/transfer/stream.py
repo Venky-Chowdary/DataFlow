@@ -128,13 +128,24 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
     # GA: never truncate rejected_details before merge/DLQ — rows cannot disappear.
     details = list(getattr(result, "rejected_details", []) or [])
+    warnings = list(getattr(result, "warnings", []) or [])
+    try:
+        from services.vectorization import attach_embedding_fallback_warning
+
+        # Qdrant and the other vector destinations write through this stream
+        # path. The adapter copy of this helper already harvested the notice;
+        # this one did not, so a TF-IDF substitution stayed on the point and
+        # never on the job.
+        warnings = attach_embedding_fallback_warning(warnings)
+    except ImportError:
+        pass
     out: dict[str, Any] = {
         "rejected_rows": rejected,
         "coerced_null_rows": coerced,
         "rows_skipped": skipped,
         "rejected_details": details,
         "rejected_details_sample": details[:200],
-        "warnings": list(getattr(result, "warnings", []) or [])[:10],
+        "warnings": warnings[:10],
         "error_policy": "quarantine" if (rejected or coerced) else "none",
         "load_method": getattr(result, "load_method", None),
     }

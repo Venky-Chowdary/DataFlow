@@ -296,6 +296,27 @@ def take_embedding_fallback_notice() -> str | None:
     return notice
 
 
+def attach_embedding_fallback_warning(warnings: list[Any] | None) -> list[Any]:
+    """Put this write's fallback notice on the job warning list.
+
+    The embedder is cached, so construction notes the substitution only once
+    per process. Each embed re-notes it. The notice is inserted first so a
+    ten-warning cap cannot drop the only line that says MiniLM was not used.
+    """
+    out = list(warnings or [])
+    notice = take_embedding_fallback_notice()
+    if notice and notice not in out:
+        out.insert(0, notice)
+    return out
+
+
+def _note_cached_fallback(embedder: Any, model: str | None) -> None:
+    """Re-arm the job warning when a cached embedder is already the fallback."""
+    backend = str(getattr(embedder, "backend", "") or "")
+    if backend and backend != "sentence_transformers":
+        note_embedding_fallback(backend, model)
+
+
 def _cache_key(text: str, model: str | None, backend: str = "") -> str:
     return hashlib.sha256(
         f"{backend}|{model or 'default'}|{text}".encode("utf-8")
@@ -341,6 +362,7 @@ def embed(
 
     use_durable = durable_cache_enabled_by_default() if durable is None else bool(durable)
     embedder = _get_embedder(model)
+    _note_cached_fallback(embedder, model)
     if not use_cache:
         return embedder.embed(texts)
 

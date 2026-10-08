@@ -18,6 +18,7 @@ from typing import Any, Callable
 from services.value_serializer import (
     cell_to_string,
     json_default,
+    json_dumps_exact_numbers,
     load_http_json,
     sanitize_json_value,
 )
@@ -173,9 +174,7 @@ def build_weaviate_objects(
     for row in vector_rows:
         from connectors.writer_common import vector_prepare_metadata
 
-        props = vector_prepare_metadata(
-            sanitize_json_value(row.get("metadata") or {}) or {}
-        )
+        props = vector_prepare_metadata(row.get("metadata") or {})
         props["content"] = vector_cell_token(row.get("content"))
         props["source_id"] = vector_cell_token(row.get("source_id"))
         try:
@@ -870,7 +869,7 @@ def write_mapped_rows(
             batch = objects[i : i + batch_size]
             resp = session.post(
                 f"{base_url}/v1/batch/objects",
-                data=json.dumps({"objects": batch}, default=sanitize_json_value),
+                data=json_dumps_exact_numbers({"objects": batch}),
                 headers=hdrs,
                 timeout=60,
             )

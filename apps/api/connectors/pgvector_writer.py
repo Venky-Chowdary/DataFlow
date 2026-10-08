@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import sanitize_json_value
+from services.value_serializer import json_dumps_exact_numbers
 from services.vectorization import vectorize_records
 
 from connectors.postgresql_conn import get_connection
@@ -716,7 +716,7 @@ def write_mapped_rows(
                         row["id"],
                         vector_cell_token(row.get("content")),
                         vector,
-                        json.dumps(metadata, ensure_ascii=False, default=sanitize_json_value),
+                        json_dumps_exact_numbers(metadata),
                         vector_cell_token(row.get("source_id")),
                         chunk_idx,
                         *_pgvector_extra_cells(metadata, typed_extras),

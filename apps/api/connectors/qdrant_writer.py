@@ -16,6 +16,7 @@ from typing import Any, Callable
 from services.value_serializer import (
     cell_to_string,
     json_default,
+    json_dumps_exact_numbers,
     load_http_json,
     sanitize_json_value,
 )
@@ -332,9 +333,7 @@ def build_qdrant_points(
             point_id = str(uuid_mod.UUID(digest[:32]))
         from connectors.writer_common import vector_prepare_metadata
 
-        payload = vector_prepare_metadata(
-            sanitize_json_value(row.get("metadata") or {}) or {}
-        )
+        payload = vector_prepare_metadata(row.get("metadata") or {})
         if not isinstance(payload, dict):
             payload = {"_meta": payload}
         payload["content"] = vector_cell_token(row.get("content"))
@@ -857,7 +856,7 @@ def write_mapped_rows(
             batch = points[i : i + batch_size]
             resp = session.put(
                 f"{base_url}/collections/{collection}/points?wait=true",
-                data=json.dumps({"points": batch}, default=sanitize_json_value),
+                data=json_dumps_exact_numbers({"points": batch}),
                 headers=hdrs,
                 timeout=30,
             )

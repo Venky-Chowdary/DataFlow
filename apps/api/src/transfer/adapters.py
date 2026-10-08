@@ -142,11 +142,9 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
     warnings = list(getattr(result, "warnings", []) or [])
     try:
-        from services.vectorization import take_embedding_fallback_notice
+        from services.vectorization import attach_embedding_fallback_warning
 
-        fallback = take_embedding_fallback_notice()
-        if fallback and fallback not in warnings:
-            warnings.append(fallback)
+        warnings = attach_embedding_fallback_warning(warnings)
     except ImportError:
         pass
     # GA: never truncate rejected_details before quarantine / proof harvest.

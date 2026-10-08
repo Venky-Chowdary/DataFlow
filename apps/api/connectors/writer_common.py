@@ -1093,15 +1093,86 @@ def vector_prepare_cell(val: Any) -> Any:
 
     ``SQL_NULL_SENTINEL`` is a string, so a None/Missing-only omit leaked the
     wire token into metadata. ``str(Decimal("1E+2"))`` invented ``1E+2``.
-    Native ``0`` / ``False`` stay present.
+    A Decimal stays a Decimal on the canonical text (``1E+2`` → ``100``) so a
+    vector payload can emit a JSON number. Native ``0`` / ``False`` stay present.
     """
     from services.value_serializer import is_reader_null_cell, present_cell_text
 
     if is_reader_null_cell(val):
         return None
+    if isinstance(val, Decimal):
+        if val.is_nan() or val.is_infinite():
+            return present_cell_text(val)
+        text = present_cell_text(val)
+        if not text:
+            return None
+        try:
+            return Decimal(text)
+        except Exception:
+            return text
     if isinstance(val, (str, int, float, bool)):
         return val
     return present_cell_text(val)
+
+
+_VECTOR_NUMERIC_LOGICAL = frozenset({"integer", "decimal", "float"})
+_VECTOR_STRING_LOGICAL = frozenset({"", "string", "text"})
+_VECTOR_JSON_NUMBER = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def vector_payload_declared_type(dest_type: str, source_type: str) -> str:
+    """Which declaration owns a vector payload cell.
+
+    A schemaless destination stamps VARCHAR because it has no column DDL.
+    That stamp is not an operator choice to store a numeric source as text.
+    An explicit numeric destination type still wins.
+    """
+    try:
+        from services.type_system import normalize_logical_type
+    except ImportError:
+        return dest_type or source_type
+    dest_l = normalize_logical_type(dest_type) if dest_type else ""
+    src_l = normalize_logical_type(source_type) if source_type else ""
+    if dest_l in _VECTOR_NUMERIC_LOGICAL:
+        return dest_type
+    if dest_l in _VECTOR_STRING_LOGICAL and src_l in _VECTOR_NUMERIC_LOGICAL:
+        return source_type
+    return dest_type or source_type
+
+
+def vector_payload_number(val: Any, declared_type: str) -> Any:
+    """Restore a numeric source literal that arrived as text.
+
+    Stream pages are ``list[list[str]]``. Leaving ``"2.36"`` in the payload
+    makes every downstream reader treat a numeric column as text. Only a
+    declared integer, decimal, or float is parsed, and only when the text is
+    a JSON number. Anything else stays text so a sku of ``"2.36"`` is unchanged.
+    """
+    prepared = vector_prepare_cell(val)
+    if prepared is None or isinstance(prepared, (int, float, bool, Decimal)):
+        return prepared
+    if not isinstance(prepared, str) or not declared_type:
+        return prepared
+    try:
+        from services.type_system import normalize_logical_type
+
+        logical = normalize_logical_type(declared_type)
+    except ImportError:
+        return prepared
+    if logical not in _VECTOR_NUMERIC_LOGICAL:
+        return prepared
+    text = prepared.strip()
+    if not _VECTOR_JSON_NUMBER.match(text):
+        return prepared
+    if logical == "integer" and "." not in text and "e" not in text.lower():
+        try:
+            return int(text, 10)
+        except ValueError:
+            return prepared
+    try:
+        return Decimal(text)
+    except Exception:
+        return prepared
 
 
 def vector_prepare_metadata(meta: Any) -> dict[str, Any]:
@@ -2242,18 +2313,33 @@ def prepare_records_for_vector_write(
         tup = mapped[mapped_i]
         mapped_i += 1
         # Preserve unmapped source headers for metadata_columns / content_column.
+        source_types = {
+            str(k).lower(): str(v)
+            for k, v in (column_types or {}).items()
+            if k and v
+        }
+        dest_type_map = {
+            str(k).lower(): str(v) for k, v in (dest_types or {}).items() if k
+        }
         row: dict[str, Any] = {}
         for i, h in enumerate(headers):
-            cell = vector_prepare_cell(raw[i] if i < len(raw) else None)
+            declared = vector_payload_declared_type("", source_types.get(h.lower(), ""))
+            cell = vector_payload_number(
+                raw[i] if i < len(raw) else None, declared
+            )
             if cell is not None:
                 row[h] = cell
         for i, tgt in enumerate(target_cols):
-            val = vector_prepare_cell(tup[i] if i < len(tup) else None)
+            src = source_for_target[i] if i < len(source_for_target) else ""
+            declared = vector_payload_declared_type(
+                dest_type_map.get(tgt.lower(), ""),
+                source_types.get((src or tgt).lower(), ""),
+            )
+            val = vector_payload_number(tup[i] if i < len(tup) else None, declared)
             if val is None:
                 # Omit DF_MISSING / null overlay — do not invent "" into metadata.
                 continue
             row[tgt] = val
-            src = source_for_target[i] if i < len(source_for_target) else ""
             if src:
                 row[src] = val
         records.append(row)

@@ -8,10 +8,10 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 18
+- not fixed: 16
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 67
+- fixed in code, unit-proven — not a live QA retest: 69
 - partly fixed in code: 10
 
 ## Every row
@@ -97,7 +97,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-REDIS-SRC-HEADERS | P2 | OPEN | fixed in code, unit-proven (test_redis_db_index_is_the_database_not_a_key_prefix, test_redis_inventory_lists_prefixes_not_db0). db0 means the selected database. The connector lists key prefixes, not the keyspace label. Not a live Redis retest. |
 | DEF-S3-ENDPOINT-FORM | P2 | OPEN | fixed in code, unit-proven (connectorListenPort.test.ts). A typed port is kept. An endpoint URL that names a port is the port the preview shows. Real AWS with no other port stays 443. Not a live MinIO retest. |
 | DEF-ADLS-EMPTY-INCLUDE | P2 | OPEN | fixed in code, unit-proven (test_container_list_omits_empty_include). The probe calls list_containers_segment with include=None, so the query is comp=list. Not a live Azurite retest. |
-| DEF-GCS-DST-CREATE | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-GCS-DST-CREATE | P2 | OPEN | fixed in code, unit-proven (test_g2_object_store_put_is_not_a_create_table_denial). A gcs, google_cloud_storage, minio, s3, adls, or azure_blob destination with can_write true, can_create_table false, and table_exists false passes G2 and says the missing object is created by PUT. A postgresql destination with the same flags still blocks with CREATE is not proven. Not a live GCS retest. DEF-B-032 fidelity collapse is a different block and is not claimed fixed. |
 | UNNUMBERED (RETEST-R1 case 3.3) | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-MCP-OUTAGE | P2 | UNCONFIRMED-ENV-DEPLOY | not fixed. Diagnose-only. No code change. |
 | DEF-C-008 | P2 | PARTLY FIXED | partly fixed in code, unit-proven (test_text_bytea_and_uuid_are_not_guessed_from_the_peek, test_declared_decimal_beats_the_sample_envelope). Float, bigint, bytea, uuid, json and a real interval now keep the cursor carrier. Arrays and custom enums have no fixed type code, so the sample remains their owner. Not a live query-mode retest. |
@@ -128,7 +128,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-046 | P3 | OPEN | fixed in code, unit-proven (test_mysql_text_tiers_do_not_collapse_to_text). Catalog longtext/mediumtext/tinytext stay their own tiers, and MySQL CREATE passes those stamps through. TEXT stays TEXT. Not a live overwrite retest. |
 | DEF-C-048 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-030 | P3 | OPEN | fixed in code, unit-proven (test_manual_run_increments_run_count_when_the_job_ends, test_manual_run_records_a_finished_claim_before_starting). The job's terminal status write records the schedule run. Not a live QA retest. |
-| DEF-EMBED-SILENT-FALLBACK | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-EMBED-SILENT-FALLBACK | P3 | OPEN | fixed in code, unit-proven (test_stream_job_warning_survives_a_cached_tfidf_embedder, test_numeric_source_stays_a_json_number_in_the_qdrant_payload). A second vectorize after the notice was consumed still puts the MiniLM fallback on the stream job warnings. A numeric(10,2) price of 2.36 is an unquoted JSON number; a text sku of 2.36 stays quoted. Not a live Qdrant retest. |
 | DEF-MINIO-ALIAS | P3 | OPEN | fixed in code, unit-proven (test_minio_list_uses_the_s3_probe). Those formats list and sample through the S3 probe. Not a live MinIO retest. |
 | GAP-XLS | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-MCP-BQ-FORM | P3 | PARTLY FIXED | fixed in code, unit-proven (test_bigquery_probe_failure_names_the_service_account, test_sql_probe_failure_still_names_host_and_port, test_service_account_camel_case_binds). BigQuery and GCS name the service_account JSON and project id. S3-compatible names the endpoint, bucket, and keys. SQL still names host/port/Railway. Not a live BigQuery retest. |
