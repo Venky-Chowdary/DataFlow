@@ -146,12 +146,12 @@ def test_sftp_test_fails_closed_on_missing_file():
     assert "file not found" in msg.lower()
 
 
-def test_require_xlsx_rejects_legacy_xls():
-    with pytest.raises(ValueError, match="xlsx"):
-        require_xlsx("/data/legacy.xls")
+def test_workbook_names_do_not_choose_the_format():
+    """A ``.xls`` suffix is not a refusal. The bytes choose BIFF or OOXML."""
+    require_xlsx("/data/legacy.xls")
     require_xlsx("/data/modern.xlsx")
     require_xlsx(b"bytes-have-no-name")
-    assert "not supported" in XLS_UNSUPPORTED_MSG.lower()
+    assert "not a readable Excel workbook" in XLS_UNSUPPORTED_MSG
 
 
 def test_resolve_connector_config_strips_topology_role_after_merge(monkeypatch):

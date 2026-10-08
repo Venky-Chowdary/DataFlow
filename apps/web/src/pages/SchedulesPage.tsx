@@ -40,6 +40,7 @@ import {
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { fleetExportBlockedReason } from "../lib/schedulesGitops";
 import { scheduleCreateOpensStudio, scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
+import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 import {
   Connector,
   PipelineSchedule,
@@ -228,7 +229,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     const q = pipelineSearch.trim().toLowerCase();
     if (!q) return list;
     return list.filter((s) =>
-      [s.name, s.source_table, s.dest_table, s.interval, s.sync_mode, s.cron]
+      [s.name, s.source_table, s.dest_table, scheduleCadenceLabel(s), s.interval, s.sync_mode, s.cron]
         .filter(Boolean)
         .some((v) => String(v).toLowerCase().includes(q)),
     );

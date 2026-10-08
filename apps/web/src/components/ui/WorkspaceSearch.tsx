@@ -5,6 +5,7 @@ import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "../../lib/types";
 import { formatJobRowMetric, destMetricCompact } from "../../lib/conservationLedger";
 import { formatJobRoute, readJobStreamNames } from "../../lib/jobEvidence";
+import { scheduleCadenceLabel } from "../../lib/scheduleCadence";
 
 export interface SearchNavigateTarget {
   screen: Screen;
@@ -148,6 +149,7 @@ export function WorkspaceSearch({
       const dest = connectors.find((c) => c.id === s.dest_connector_id);
       if (
         matchesQuery(s.name, q)
+        || matchesQuery(scheduleCadenceLabel(s), q)
         || matchesQuery(s.interval, q)
         || matchesQuery(s.source_table, q)
         || matchesQuery(s.dest_table, q)
@@ -158,7 +160,7 @@ export function WorkspaceSearch({
           id: `sched-${s.id}`,
           kind: "pipeline",
           label: s.name,
-          meta: `${s.interval} · ${s.enabled ? "active" : "paused"} · ${source?.name ?? "source"} → ${dest?.name ?? "dest"}`,
+          meta: `${scheduleCadenceLabel(s)} · ${s.enabled ? "active" : "paused"} · ${source?.name ?? "source"} → ${dest?.name ?? "dest"}`,
           screen: "schedules",
           scheduleId: s.id,
         });

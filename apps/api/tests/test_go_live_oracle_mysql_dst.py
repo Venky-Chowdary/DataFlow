@@ -225,3 +225,35 @@ def test_mysql_timestamp_reaches_postgres_without_rewriting_datetime() -> None:
             table_exists=True,
         )
     assert other["has_blocking_failures"] is True
+
+
+def test_oracle_timestamp_tz_on_postgres_timestamptz_is_not_a_collapse() -> None:
+    """DEF-B-009. PostgreSQL has one aware timestamp.
+
+    TIMESTAMP_TZ and TIMESTAMPTZ are two spellings of that instant, so the
+    pair is not a fidelity collapse. An offset label on MySQL DATETIME(6)
+    stays a collapse (DEF-B-016).
+    """
+    from services.mapping_proof import mapping_fidelity
+
+    assert is_lossy_coercion(
+        "TIMESTAMP_TZ", "TIMESTAMPTZ", dest_db="postgresql"
+    ) is False
+    assert is_lossy_coercion(
+        "TIMESTAMP_TZ(6)", "TIMESTAMPTZ(6)", dest_db="postgresql"
+    ) is False
+    verdict = mapping_fidelity(
+        {"source": "ts", "target": "ts", "transform": "none"},
+        declared_source_type="TIMESTAMP_TZ",
+        declared_target_type="TIMESTAMPTZ",
+        destination_db_type="postgresql",
+        dest_table_exists=True,
+    )
+    assert verdict["verdict"] == "preserve"
+    assert verdict["requires_risk_contract"] is False
+    assert is_lossy_coercion(
+        "TIMESTAMP WITH TIME ZONE", "DATETIME(6)", dest_db="mysql"
+    ) is True
+    assert is_lossy_coercion(
+        "TIMESTAMP_TZ", "DATETIME(6)", dest_db="mysql"
+    ) is True

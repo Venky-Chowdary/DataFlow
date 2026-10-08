@@ -1,4 +1,8 @@
-"""Excel (.xlsx) parser with streaming row count."""
+"""Excel parser with streaming row count.
+
+Bytes decide the workbook. ZIP magic is OOXML (``.xlsx``), including a
+file renamed to ``.xls``. OLE compound-document magic is BIFF ``.xls``.
+"""
 
 from __future__ import annotations
 
@@ -14,7 +18,8 @@ from services.tabular_window import header_and_rows, synthetic_headers
 from services.value_serializer import cell_to_string
 
 XLS_UNSUPPORTED_MSG = (
-    "Legacy .xls is not supported. Save the workbook as .xlsx and retry."
+    "This file is not a readable Excel workbook. "
+    "Save an unprotected .xlsx, or retry the original .xls."
 )
 
 __all__ = [
@@ -35,9 +40,10 @@ __all__ = [
 def explain_unreadable_file(exc: BaseException) -> str:
     """Operator text for a library exception that is not the file's problem.
 
-    A password-protected workbook and a legacy ``.xls`` both surface as
-    ``File is not a zip file``. A truncated object surfaces as a bad magic
-    number. Neither sentence tells the operator what to do.
+    A password-protected workbook surfaces as ``File is not a zip file``.
+    A truncated object surfaces as a bad magic number. Neither sentence
+    tells the operator what to do. A real BIFF ``.xls`` never reaches this
+    helper: the OLE magic is loaded before openpyxl sees the bytes.
     """
     text = str(exc or "")
     low = text.lower()
@@ -61,8 +67,7 @@ def explain_unreadable_file(exc: BaseException) -> str:
     if "not a zip file" in low or "badzipfile" in kind:
         return (
             "This file is not a readable .xlsx workbook. A password-protected "
-            "workbook and a legacy .xls file both fail this way. Save an "
-            "unprotected .xlsx and retry."
+            "workbook fails this way. Save an unprotected .xlsx and retry."
         )
     if "bad magic number" in low or "bad magic" in low:
         return (
@@ -74,13 +79,19 @@ def explain_unreadable_file(exc: BaseException) -> str:
     return text
 
 
+# Compound File Binary, the container BIFF .xls workbooks use.
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+
+
 def require_xlsx(path_or_name: str | os.PathLike[str] | bytes | None) -> None:
-    """Refuse BIFF .xls — openpyxl only reads Office Open XML (.xlsx)."""
-    if path_or_name is None or isinstance(path_or_name, (bytes, bytearray)):
-        return
-    name = str(path_or_name).lower()
-    if name.endswith(".xls") and not name.endswith(".xlsx"):
-        raise ValueError(XLS_UNSUPPORTED_MSG)
+    """Names do not decide the workbook format.
+
+    A path ending in ``.xls`` used to be refused here, before any byte was
+    read. Callers still invoke this so a future name check has one owner.
+    The bytes decide: OLE compound documents are BIFF ``.xls``; ZIP magic
+    is ``.xlsx``, including an ``.xlsx`` someone renamed to ``.xls``.
+    """
+    return None
 
 
 def sheet_headers(first_row: tuple) -> list[str]:
@@ -214,8 +225,129 @@ def list_excel_sheets(content: bytes | Any) -> list[dict[str, Any]]:
         wb.close()
 
 
+class _XlsCell:
+    """openpyxl-shaped cell so ``excel_cell_value`` has one owner."""
+
+    __slots__ = ("value", "number_format")
+
+    def __init__(self, value: Any, number_format: str = "") -> None:
+        self.value = value
+        self.number_format = number_format
+
+
+class _XlsSheet:
+    def __init__(self, sheet: Any, book: Any) -> None:
+        self._sheet = sheet
+        self._book = book
+        self.title = str(getattr(sheet, "name", "") or "")
+        self.max_row = int(getattr(sheet, "nrows", 0) or 0)
+        self.max_column = int(getattr(sheet, "ncols", 0) or 0)
+
+    def iter_rows(self, values_only: bool = False) -> Iterator[tuple]:
+        import xlrd
+
+        datemode = int(getattr(self._book, "datemode", 0) or 0)
+        xf_list = list(getattr(self._book, "xf_list", []) or [])
+        format_map = getattr(self._book, "format_map", {}) or {}
+        for row_index in range(self._sheet.nrows):
+            cells: list[_XlsCell] = []
+            for col_index in range(self._sheet.ncols):
+                cell = self._sheet.cell(row_index, col_index)
+                value: Any = cell.value
+                number_format = ""
+                xf_index = int(getattr(cell, "xf_index", -1) or -1)
+                if 0 <= xf_index < len(xf_list):
+                    fmt_key = getattr(xf_list[xf_index], "format_key", None)
+                    fmt = format_map.get(fmt_key)
+                    number_format = str(getattr(fmt, "format_str", "") or "")
+                ctype = int(getattr(cell, "ctype", 0) or 0)
+                if ctype == xlrd.XL_CELL_EMPTY or ctype == xlrd.XL_CELL_BLANK:
+                    value = None
+                elif ctype == xlrd.XL_CELL_BOOLEAN:
+                    value = bool(value)
+                elif ctype == xlrd.XL_CELL_DATE:
+                    value = xlrd.xldate_as_datetime(value, datemode)
+                elif ctype == xlrd.XL_CELL_NUMBER and isinstance(value, float):
+                    if value.is_integer():
+                        value = int(value)
+                elif ctype == xlrd.XL_CELL_ERROR:
+                    value = None
+                cells.append(_XlsCell(value, number_format))
+            yield tuple(cells)
+
+
+class _XlsBook:
+    def __init__(self, book: Any) -> None:
+        self._book = book
+        self.sheetnames = list(book.sheet_names())
+        self.active = (
+            _XlsSheet(book.sheet_by_index(0), book) if book.nsheets else None
+        )
+
+    def __getitem__(self, name: str) -> _XlsSheet:
+        return _XlsSheet(self._book.sheet_by_name(name), self._book)
+
+    def close(self) -> None:
+        release = getattr(self._book, "release_resources", None)
+        if callable(release):
+            release()
+
+
+def _load_xls_workbook(payload: bytes) -> _XlsBook:
+    try:
+        import xlrd
+    except ImportError as exc:
+        raise ValueError(
+            "Legacy .xls import is not ready on this platform node. "
+            "Datawrap bundles file parsers — retry shortly."
+        ) from exc
+    try:
+        book = xlrd.open_workbook(file_contents=payload)
+    except Exception as exc:
+        raise ValueError(
+            "This file is not a readable .xls workbook. "
+            "A truncated download or a renamed .xlsx both look like this. "
+            "Save an unprotected .xlsx, or retry the original .xls."
+        ) from exc
+    return _XlsBook(book)
+
+
+def _peek_magic(content: bytes | Any) -> tuple[bytes, bytes | Any]:
+    """First bytes plus a stream the matching loader can consume.
+
+    OLE workbooks come back as one ``bytes`` payload. Everything else is
+    left positioned at the start for openpyxl.
+    """
+    if isinstance(content, (bytes, bytearray)):
+        payload = bytes(content)
+        return payload[:8], payload
+    if isinstance(content, (str, os.PathLike)):
+        handle = open(os.fspath(content), "rb")
+        try:
+            magic = handle.read(8)
+            if magic.startswith(_OLE_MAGIC):
+                rest = handle.read()
+                handle.close()
+                return magic, magic + rest
+            handle.seek(0)
+        except Exception:
+            handle.close()
+            raise
+        return magic, handle
+    try:
+        content.seek(0)
+        magic = content.read(8)
+        if magic.startswith(_OLE_MAGIC):
+            rest = content.read()
+            return magic, magic + rest
+        content.seek(0)
+    except Exception as exc:
+        raise ValueError("Excel workbook source is not seekable") from exc
+    return magic, content
+
+
 def _load_workbook(content: bytes | Any):
-    """openpyxl workbook from bytes or a seekable binary handle.
+    """Workbook from bytes, a path, or a seekable binary handle.
 
     Dest gzip Excel spools a decompressed image (workbook formats are not
     sequential). ``load_workbook`` already accepts a file-like; wrapping
@@ -223,32 +355,38 @@ def _load_workbook(content: bytes | Any):
 
     Object-store / SFTP spill names the cache ``.tmp``. openpyxl keys the
     format off that suffix and refuses a real OOXML workbook. A path is
-    opened as a handle so ZIP magic decides, not the cache name. A genuine
-    ``.xls`` path is still refused.
+    opened as a handle so the magic decides, not the cache name. OLE
+    compound documents load through xlrd; ZIP magic stays on openpyxl,
+    including an ``.xlsx`` someone renamed to ``.xls``.
     """
+    magic, stream = _peek_magic(content)
+    if magic.startswith(_OLE_MAGIC):
+        payload = bytes(stream) if isinstance(stream, (bytes, bytearray)) else bytes(stream.read())
+        return _load_xls_workbook(payload)
+
+    closer = None
+    if isinstance(stream, (bytes, bytearray)):
+        file_stream: Any = BytesIO(bytes(stream))
+    else:
+        file_stream = stream
+        if isinstance(content, (str, os.PathLike)):
+            closer = stream.close
+        try:
+            file_stream.seek(0)
+        except Exception as exc:
+            if closer is not None:
+                closer()
+            raise ValueError("Excel workbook source is not seekable") from exc
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
+        if closer is not None:
+            closer()
         raise ValueError(
             "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
-    closer = None
-    if isinstance(content, (bytes, bytearray)):
-        stream: Any = BytesIO(content)
-    elif isinstance(content, (str, os.PathLike)):
-        path = os.fspath(content)
-        require_xlsx(path)
-        handle = open(path, "rb")
-        closer = handle.close
-        stream = handle
-    else:
-        stream = content
-        try:
-            stream.seek(0)
-        except Exception as exc:
-            raise ValueError("Excel workbook source is not seekable") from exc
     try:
-        workbook = load_workbook(stream, read_only=True, data_only=True)
+        workbook = load_workbook(file_stream, read_only=True, data_only=True)
     except Exception as exc:
         if closer is not None:
             closer()

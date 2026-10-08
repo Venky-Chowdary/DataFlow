@@ -25,7 +25,7 @@ path keeps quarantine). Excel nested cells are already strings on the
 row path. XML that is not a unique record path (document XML, XXE,
 ambiguous siblings) declines. Windowed ``ReadOptions`` (skip_rows /
 skip_footer / non-default header_row) decline. gzip is decompressed,
-then the same mapped COPY. Legacy ``.xls`` declines.
+then the same mapped COPY. BIFF ``.xls`` and OOXML ``.xlsx`` share the Excel reader.
 """
 
 from __future__ import annotations

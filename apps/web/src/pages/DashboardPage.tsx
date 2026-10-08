@@ -37,6 +37,7 @@ import {
   connectorPassedProbe,
   connectorTestHealth,
 } from "../lib/connectorHealth";
+import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 
 interface DashboardPageProps {
   connectors: Connector[];
@@ -568,7 +569,7 @@ export function DashboardPage({
                         <li key={s.id}>
                           <strong title={s.name}>{s.name}</strong>
                           <span className="df2-cell-meta">
-                            {s.interval}{!s.enabled && " · paused"}
+                            {scheduleCadenceLabel(s)}{!s.enabled && " · paused"}
                             {s.last_run_at && ` · ${formatRelativeTime(s.last_run_at)}`}
                           </span>
                         </li>

@@ -8,11 +8,11 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 4
+- not fixed: 3
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 84
-- partly fixed in code: 7
+- fixed in code, unit-proven — not a live QA retest: 88
+- partly fixed in code: 4
 
 ## Every row
 
@@ -40,7 +40,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B-025 | P1 | OPEN | fixed in code, unit-proven (test_list_view_strips_the_request_the_sweep_reads, test_running_job_with_no_owner_is_resumed_from_its_checkpoint, test_a_job_with_an_owner_is_left_alone, test_orphan_without_a_request_fails_with_its_committed_rows, test_reclaim_limit_fails_instead_of_looping, test_orphan_that_asked_to_cancel_is_recorded_cancelled). services.orphan_jobs sweeps at boot and every JOB_ORPHAN_SWEEP_SEC: a job with no lease, no local run, no fleet row and idle past the grace is resumed from its checkpoint (at most JOB_ORPHAN_MAX_RECLAIMS), recorded cancelled when cancel was asked, or failed job_orphaned with its committed rows. Every write is compare-and-set. Not a live restart retest. |
 | DEF-B-026 | P1 | OPEN | fixed in code, unit-proven (test_a_newer_fence_supersedes_the_dead_workers_fence, test_acquire_never_hands_out_a_fence_below_the_jobs, test_operator_cancel_is_not_fenced, test_a_job_waiting_for_a_pool_thread_keeps_its_lease). A stored fence at or below the writer's is accepted and only a lower fence is stale; acquire seeds above the job's recorded fence; operator cancel is an unfenced control write and the endpoint returns the real status when nothing was recorded. The lease heartbeat starts at submit, not when a pool thread picks the job up. Not a live restart retest. |
 | DEF-A-010 | P1 | OPEN | already in tree before this wave. Needs QA retest on a build after that commit. |
-| DEF-B-009 | P1 | OPEN | partly fixed. Uppercase keys are found (test_uppercase_oracle_keys_are_not_null_failures). A declared NUMBER is not relabelled BOOLEAN (test_declared_number_is_not_relabelled_boolean). TIMESTAMP_TZ to TIMESTAMPTZ on PostgreSQL is already not lossy and was not re-proven live. Not a live Oracle retest. |
+| DEF-B-009 | P1 | OPEN | fixed in code, unit-proven (test_uppercase_oracle_keys_are_not_null_failures, test_declared_number_is_not_relabelled_boolean, test_oracle_timestamp_tz_on_postgres_timestamptz_is_not_a_collapse). Uppercase keys are found. A declared NUMBER stays numeric. TIMESTAMP_TZ to TIMESTAMPTZ on PostgreSQL is preserve. TIMESTAMP_TZ to MySQL DATETIME(6) stays lossy. Not a live Oracle retest. |
 | DEF-B-010 | P1 | OPEN | partly fixed in code, unit-proven (test_mongo_timestamp_to_timestamp_is_not_a_false_polarity_collapse). Postgres, Oracle, and SQL Server identical TIMESTAMP pairs are not a polarity collapse when the source engine is mongodb. MySQL bare TIMESTAMP stays lossy; create-new stamps DATETIME(3). Not a live Mongo retest. |
 | DEF-A-001 | P1 | OPEN | fixed in code, unit-proven (test_sftp_host_key_refusal_is_not_called_an_auth_failure, test_sftp_preauth_close_is_not_called_an_auth_failure). A real bad password is still an authentication failure. Not a live SSH retest. Not a go-live. |
 | DEF-C-031 | P1 | UNCONFIRMED-ENV-DEPLOY | same long-writer path as 059974d8. Status on the register is UNCONFIRMED-ENV-DEPLOY. Not re-run live here. |
@@ -104,8 +104,8 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-CDC-SLOT-LEAK | P2 | PARTLY FIXED | fixed in code, unit-proven (test_first_batch_failure_releases_the_slot_the_job_never_recorded, test_cancel_before_a_checkpoint_releases_the_named_slot, test_refused_cdc_batch_releases_through_the_shared_helper, test_retriable_failure_keeps_the_slot_for_resume). Slot and publication identity travel on the exception; terminal failures and cancels drop them, retriable failures keep them. The five historical QA slots are not dropped by this change. Not a live Postgres retest. |
 | DEF-C-001 | P2 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-C-006 | P2 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
-| DEF-A-014 | P3 | OPEN | partly fixed in code. describe_stored_cadence now says Every 5 minutes, and the create_schedule preview interval uses that label. The stored interval token remains a preset because the runner only accepts hourly/daily/weekly. Not a live retest. |
-| DEF-B-006 | P3 | OPEN | partly fixed. The cadence label uses describe_stored_cadence while the stored interval stays a preset. The blocker is no longer copied onto a completed job as a __DF_SQL_NULL__ quarantine row (unit-proven with DEF-B-022). Not a live QA retest. |
+| DEF-A-014 | P3 | OPEN | fixed in code, unit-proven (test_five_minute_cron_is_the_interval_operators_read). When a cron is stored, GET interval is the cadence label and interval_preset keeps hourly/daily/weekly. Echoing the label does not retarget the preset. The runner still accepts only those three tokens. Not a live retest. |
+| DEF-B-006 | P3 | OPEN | fixed in code, unit-proven (test_five_minute_cron_is_the_interval_operators_read). GET interval for */5 is Every 5 minutes UTC while the stored token stays daily. The duplicate-identity blocker is no longer copied onto a completed job (DEF-B-022). Not a live QA retest. |
 | DEF-B-007 | P3 | OPEN | fixed in code, unit-proven (test_canonical_boolean_on_number_is_not_forecast_as_quarantine). Two hundred canonical boolean rows on NUMBER(38,0) pass the population scan. Y/N/yes/no stay unfit and are not stored as 1/0. Not a live Oracle retest. |
 | DEF-B-008 | P3 | OPEN | fixed in code, unit-proven (test_folding_dialect_create_quotes_uppercase_physical_names). Folding dialects emit quoted uppercase physical names. The column key stays the operator spelling. PostgreSQL names are unchanged. Not a live Oracle retest. |
 | DEF-B-012 | P3 | OPEN | fixed in code, unit-proven (test_expired_transfer_ack_does_not_say_create_the_connector). An expired transfer says to plan the transfer again. An unknown id says to stage the action again. A create_connector ack still says to create the connector. Not a live UI retest. |
@@ -130,7 +130,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-030 | P3 | OPEN | fixed in code, unit-proven (test_manual_run_increments_run_count_when_the_job_ends, test_manual_run_records_a_finished_claim_before_starting). The job's terminal status write records the schedule run. Not a live QA retest. |
 | DEF-EMBED-SILENT-FALLBACK | P3 | OPEN | fixed in code, unit-proven (test_stream_job_warning_survives_a_cached_tfidf_embedder, test_numeric_source_stays_a_json_number_in_the_qdrant_payload). A second vectorize after the notice was consumed still puts the MiniLM fallback on the stream job warnings. A numeric(10,2) price of 2.36 is an unquoted JSON number; a text sku of 2.36 stays quoted. Not a live Qdrant retest. |
 | DEF-MINIO-ALIAS | P3 | OPEN | fixed in code, unit-proven (test_minio_list_uses_the_s3_probe). Those formats list and sample through the S3 probe. Not a live MinIO retest. |
-| GAP-XLS | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| GAP-XLS | P3 | OPEN | fixed in code, unit-proven (test_biff_rows_keep_integers_text_and_booleans, test_renamed_xlsx_still_copies, test_corrupt_ole_names_the_workbook_not_a_zip). OLE magic loads through xlrd. ZIP magic, including an .xlsx renamed to .xls, stays on openpyxl. A formula cell in a rule workbook is the cached value Excel stored. BIFF8 still caps a sheet at 65,536 rows. Not a live file retest. |
 | DEF-MCP-BQ-FORM | P3 | PARTLY FIXED | fixed in code, unit-proven (test_bigquery_probe_failure_names_the_service_account, test_sql_probe_failure_still_names_host_and_port, test_service_account_camel_case_binds). BigQuery and GCS name the service_account JSON and project id. S3-compatible names the endpoint, bucket, and keys. SQL still names host/port/Railway. Not a live BigQuery retest. |
 | DEF-SPECIALTY-SAMPLE | P3 | PARTLY FIXED | fixed in code, unit-proven (test_redis_db_index_is_the_database_not_a_key_prefix, test_redis_inventory_lists_prefixes_not_db0, test_sample_seeks_the_tail_and_does_not_join_the_group, test_pilot_kafka_sample_uses_the_tail_reader). Redis db0 is the database. A Kafka sample assigns partitions and seeks to the tail without joining the transfer group or committing. Not a live retest. |
 | DEF-ES-PRICE-STRING | P3 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |

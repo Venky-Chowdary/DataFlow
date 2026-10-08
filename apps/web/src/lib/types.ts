@@ -1442,6 +1442,8 @@ export interface ScheduleInput {
   dest_connector_id: string;
   dest_table: string;
   interval: ScheduleInterval | string;
+  /** Runner token sent beside a displayed cadence label. */
+  interval_preset?: string;
   cron: string;
   timezone: string;
   sync_mode: ScheduleSyncMode | string;
@@ -1554,6 +1556,8 @@ export interface PipelineSchedule {
   dest_connector_id: string;
   dest_table: string;
   interval: ScheduleInterval | string;
+  /** hourly | daily | weekly. Set when ``interval`` is the displayed label. */
+  interval_preset?: string;
   cron: string;
   /** Server label. Cron anchors win over the interval preset. */
   cadence_label?: string;

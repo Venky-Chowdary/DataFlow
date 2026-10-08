@@ -222,21 +222,13 @@ def variant_path(name: str, rows: int) -> Path:
 def unsupported_carrier_path(carrier: str, rows: int) -> Path:
     """A real file in a carrier the product does not read, for refusal proof.
 
-    ``xls``: BIFF is genuinely unreadable here — openpyxl is the only spreadsheet
-    reader in ``requirements.txt`` and BIFF8 caps a sheet at 65,536 rows anyway,
-    so a 100K-row ``.xls`` cannot exist. The proof that matters is the refusal, so
-    the payload is the .xlsx fixture under an ``.xls`` name — exactly the case a
-    client hits when they rename a file.
     ``zip``: no zip branch exists in the reader at all (gzip is handled); a real
     archive proves whether the engine refuses or silently misparses the container.
+    BIFF ``.xls`` is a reader (xlrd), not an unsupported carrier. A renamed
+    ``.xlsx`` is ZIP magic and loads as Excel. BIFF8 still caps a sheet at
+    65,536 rows, so the 100K cell stays ``.xlsx``.
     """
     FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
-    if carrier == "xls":
-        src = fixture_path("excel", rows)
-        path = FIXTURE_DIR / f"dirty_legacy_{rows}.xls"
-        if not path.exists() or path.stat().st_size == 0:
-            path.write_bytes(src.read_bytes())
-        return path
     if carrier == "zip":
         src = fixture_path("csv", rows)
         path = FIXTURE_DIR / f"dirty_csv_{rows}.zip"
@@ -1290,7 +1282,6 @@ def build_cells() -> list[Cell]:
             )
         )
     for carrier, note in (
-        ("xls", "legacy BIFF .xls: no BIFF reader shipped, and BIFF8 caps a sheet at 65,536 rows"),
         ("zip", "zip container: the reader handles gzip only, no zip branch exists"),
     ):
         cells.append(

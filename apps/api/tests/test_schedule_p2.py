@@ -1489,6 +1489,48 @@ def test_list_summary_exposes_advanced_write_knobs():
     assert summary.number_locale == "EU"
 
 
+def test_five_minute_cron_is_the_interval_operators_read(temp_store):
+    """DEF-A-014 / DEF-B-006. GET says every 5 minutes. The runner token stays daily.
+
+    Echoing the label on update must not raise Invalid interval and must not
+    retarget the preset. interval_preset is how an edit changes the token.
+    """
+    from src.routers.schedules_router import ScheduleResponse
+
+    sched = store.create_schedule({
+        "name": "Every five",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "cron": "*/5 * * * *",
+        "timezone": "UTC",
+        "mappings": _MAPPINGS,
+    })
+    body = ScheduleResponse.from_schedule(sched)
+    assert body.interval == "Every 5 minutes UTC"
+    assert body.interval_preset == "daily"
+    assert body.cadence_label == "Every 5 minutes UTC"
+    assert store.get_schedule(sched.id).interval == "daily"
+    echoed = store.update_schedule(
+        sched.id,
+        {"interval": "Every 5 minutes UTC", "cron": "*/5 * * * *"},
+    )
+    assert echoed is not None
+    assert echoed.interval == "daily"
+    assert echoed.cron == "*/5 * * * *"
+    moved = store.update_schedule(
+        sched.id,
+        {"interval_preset": "hourly", "interval": "Every 5 minutes UTC"},
+    )
+    assert moved is not None
+    assert moved.interval == "hourly"
+    assert moved.cron == "*/5 * * * *"
+    with pytest.raises(ValueError, match="Invalid interval"):
+        store.update_schedule(sched.id, {"interval": "fortnightly"})
+
+
 def test_patch_empty_preserves_validate_identity_hashes(temp_store):
     """Blank identity on PATCH is omit — not a wipe of Studio Validate stamps."""
     sched = store.create_schedule({

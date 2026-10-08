@@ -762,7 +762,8 @@ def _batch_iterator_for_type(
     Used to re-scan a file from the beginning (e.g. on resume) without mutating
     the primary streaming iterator.  Accepts either ``bytes`` or an on-disk path.
     ``declared_name`` is the operator/remote filename — object-store spill is
-    ``.tmp``, so Excel must refuse ``.xls`` from this name, not the cache suffix.
+    ``.tmp``. Excel reads the bytes, so a BIFF workbook and a renamed
+    ``.xlsx`` both load; the cache suffix does not choose the format.
     """
     if file_type in ("csv", "tsv"):
         return _iter_csv_batches(content, batch_size, read_options=read_options)

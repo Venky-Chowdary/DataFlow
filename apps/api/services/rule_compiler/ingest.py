@@ -48,14 +48,20 @@ def ingest_rule_workbook(filename: str, payload: bytes) -> IngestResult:
         )
     ext = _ext(filename)
     if ext == ".xls":
-        raise RuleIngestError(
-            "Legacy .xls is not read. Save as .xlsx, CSV or JSON."
-        )
-    if ext not in SUPPORTED:
+        # Formulas in a BIFF workbook are the cached values Excel stored.
+        # A non-OLE payload is not a workbook; garbage stays a refusal.
+        from services.excel_parser import _OLE_MAGIC
+
+        if not payload.startswith(_OLE_MAGIC):
+            raise RuleIngestError(
+                "This file is not a readable .xls workbook. Save as .xlsx, CSV or JSON."
+            )
+        rows = _from_xls(payload)
+    elif ext not in SUPPORTED:
         raise RuleIngestError(
             "Upload an Excel workbook (.xlsx), a CSV/TSV, or a JSON array of rules."
         )
-    if ext in {".xlsx", ".xlsm"}:
+    elif ext in {".xlsx", ".xlsm"}:
         rows = _from_xlsx(payload)
     elif ext in {".csv", ".tsv", ".txt"}:
         rows = _from_delimited(payload, ext)
@@ -295,6 +301,39 @@ def _ndjson(text: str) -> list[Any]:
         except json.JSONDecodeError as exc:
             raise RuleIngestError(f"JSON is not valid: {exc}") from exc
     return rows
+
+
+def _from_xls(payload: bytes) -> list[dict[str, Any]]:
+    """BIFF rows. Cached values only — a formula cell is what Excel stored."""
+    from services.excel_parser import _load_workbook
+
+    try:
+        wb = _load_workbook(payload)
+    except ValueError as exc:
+        raise RuleIngestError(str(exc)) from exc
+    out: list[dict[str, Any]] = []
+    try:
+        for name in list(getattr(wb, "sheetnames", []) or []):
+            sheet = wb[name]
+            raw_rows = [
+                [getattr(cell, "value", cell) for cell in row]
+                for row in sheet.iter_rows(values_only=False)
+            ]
+            headers, numbered = _take_header(raw_rows)
+            if _header_score(headers) < 2:
+                nonempty = sum(
+                    1 for row in raw_rows
+                    if any(_cell_text(cell) for cell in row)
+                )
+                if nonempty < 2:
+                    continue
+            for row_number, raw in numbered:
+                row = _project(headers, raw, str(getattr(sheet, "title", name)), row_number)
+                if row:
+                    out.append(row)
+    finally:
+        wb.close()
+    return out
 
 
 def _from_xlsx(payload: bytes) -> list[dict[str, Any]]:

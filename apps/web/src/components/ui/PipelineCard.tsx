@@ -5,6 +5,7 @@ import { Connector, PipelineSchedule } from "../../lib/types";
 import { breakerBadgeClass, breakerWarnLabel, campaignBadgeClass, campaignWarnLabel } from "../../lib/contractBreakerUi";
 import { formatSyncModeLabel } from "../../lib/transferConstants";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
+import { scheduleCadenceLabel } from "../../lib/scheduleCadence";
 import { Button } from "./Button";
 import { CopyIdChip } from "./CopyIdChip";
 
@@ -39,18 +40,6 @@ function formatWhen(iso: string | null): string {
   } catch {
     return iso;
   }
-}
-
-const INTERVAL_LABEL: Record<string, string> = {
-  hourly: "Every hour",
-  daily: "Daily",
-  weekly: "Weekly",
-};
-
-function cadenceLabel(sched: PipelineSchedule): string {
-  if (sched.cadence_label) return sched.cadence_label;
-  if (sched.cron) return `Cron ${sched.cron}`;
-  return INTERVAL_LABEL[sched.interval] ?? sched.interval;
 }
 
 export function PipelineCard({
@@ -127,7 +116,7 @@ export function PipelineCard({
           </span>
         </div>
         <span className="df2-pipeline-row-cadence" title="Schedule cadence">
-          {cadenceLabel(sched)}
+          {scheduleCadenceLabel(sched)}
         </span>
         <span className="df2-pipeline-row-sync" title={sched.contract_id ? `Sync mode · contract ${sched.contract_id}` : "Sync mode"}>
           {syncLabel}
@@ -263,7 +252,7 @@ export function PipelineCard({
       </div>
 
       <div className="df2-pipe-card-meta">
-        <span><DtIcon name="clock" size={12} /> {cadenceLabel(sched)}</span>
+        <span><DtIcon name="clock" size={12} /> {scheduleCadenceLabel(sched)}</span>
         <span title="Sync mode"><DtIcon name="transfer" size={12} /> {syncLabel}</span>
         <span>Next {formatWhen(sched.next_run_at)}</span>
         <span>{sched.run_count} runs</span>

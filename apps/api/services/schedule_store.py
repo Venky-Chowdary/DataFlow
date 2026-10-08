@@ -997,13 +997,60 @@ def _route_stamp_is_stale(current: PipelineSchedule, merged: dict[str, Any]) -> 
     return any(merged.get(key) != before.get(key) for key in _STAMPED_ROUTE_KEYS)
 
 
+def resolve_machine_interval(data: dict[str, Any], stored: str) -> str:
+    """Runner token. A displayed cadence label is not a new preset.
+
+    ``interval_preset`` wins. ``hourly`` / ``daily`` / ``weekly`` in
+    ``interval`` is a preset change. A sentence such as ``Every 5 minutes
+    UTC`` is the label a client echoed from GET, and it keeps the stored
+    preset. Any other token is still an invalid interval.
+    """
+    raw_preset = data.get("interval_preset")
+    if raw_preset is not None and str(raw_preset).strip():
+        preset = str(raw_preset).strip().lower()
+        if preset not in INTERVALS:
+            raise ValueError(f"Invalid interval: {raw_preset}")
+        return preset
+    if "interval" not in data:
+        return stored if stored in INTERVALS else "daily"
+    spoken_raw = str(data.get("interval") or "").strip()
+    spoken = spoken_raw.lower()
+    if spoken in INTERVALS:
+        return spoken
+    if " " in spoken_raw:
+        return stored if stored in INTERVALS else "daily"
+    raise ValueError(f"Invalid interval: {spoken_raw}")
+
+
+def project_operator_cadence(data: dict[str, Any]) -> dict[str, Any]:
+    """Outward schedule JSON. Persistence keeps the runner token.
+
+    When a cron is stored, the field operators read (``interval``) is the
+    cadence label. ``interval_preset`` stays hourly/daily/weekly.
+    """
+    preset = str(data.get("interval") or "")
+    cron = str(data.get("cron") or "").strip()
+    label = str(data.get("cadence_label") or "")
+    out = dict(data)
+    out["interval_preset"] = preset
+    if cron and label:
+        out["interval"] = label
+    return out
+
+
 def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule | None:
     data = drop_blank_validate_identity(data)
     schedules = _load_all()
     for i, s in enumerate(schedules):
         if s.id != schedule_id:
             continue
-        interval = data.get("interval", s.interval)
+        interval = resolve_machine_interval(data, s.interval)
+        data = {
+            key: value
+            for key, value in data.items()
+            if key not in {"interval_preset", "cadence_label"}
+        }
+        data["interval"] = interval
         cron = (data.get("cron", s.cron) or "").strip()
         tz = (data.get("timezone", s.timezone) or "UTC").strip() or "UTC"
         sync_mode = data.get("sync_mode", s.sync_mode) or "full_refresh_overwrite"

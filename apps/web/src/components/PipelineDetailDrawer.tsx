@@ -36,6 +36,7 @@ import {
 } from "../lib/studioValidateIdentity";
 import { Connector, PipelineSchedule, StandingAuthorization, TransferJob } from "../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 
 export const PIPELINE_TABS = ["Overview", "Schema", "History", "Config"] as const;
 export type PipelineTab = (typeof PIPELINE_TABS)[number];
@@ -65,12 +66,6 @@ interface PipelineDetailDrawerProps {
   /** Empty mapping contract — open Studio instead of pretending Run now will invent a map. */
   onOpenStudio?: () => void;
 }
-
-const INTERVAL_LABEL: Record<string, string> = {
-  hourly: "Every hour",
-  daily: "Daily",
-  weekly: "Weekly",
-};
 
 function formatWhen(iso: string | null | undefined): string {
   if (!iso) return "—";
@@ -195,10 +190,7 @@ export function PipelineDetailDrawer({
   const isRunning = Boolean(running || sched.running);
   const breakerState = breaker?.state || breakerHint || null;
   const breakerOpen = breakerBlocksRuns(breakerState);
-  const cadence = sched.cadence_label
-    || (sched.cron
-      ? `Cron ${sched.cron}`
-      : (INTERVAL_LABEL[sched.interval] ?? sched.interval));
+  const cadence = scheduleCadenceLabel(sched);
   const cadenceDetail = sched.cron
     ? `${cadence} · ${sched.timezone || "UTC"}`
     : "Rolling interval from last run — use Cron for a fixed daily time";
