@@ -1289,11 +1289,15 @@ def _checkpoint_has_progress(checkpoint: Any) -> bool:
         return False
 
 
-def _raise_if_job_cancelled(mongo: Any, job_id: str) -> None:
+def _raise_if_job_cancelled(
+    mongo: Any, job_id: str, *, rows_written: int | None = None
+) -> None:
     """Stop the writer when the operator or a lost lease asked it to stop.
 
     Progress writes that the cancel fence refuses are the same signal: the
-    loop used to ignore a False return and keep inserting.
+    loop used to ignore a False return and keep inserting. ``rows_written``
+    is whatever this chunk already committed, so the cancelled job does not
+    report 0 rows for a table that now holds them.
     """
     if mongo is None or not job_id:
         return
@@ -1303,13 +1307,19 @@ def _raise_if_job_cancelled(mongo: Any, job_id: str) -> None:
         logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
         return
     if job and (job.get("cancel_requested") or str(job.get("status") or "") == "cancelled"):
-        raise TransferCancelled("Transfer cancelled by user")
+        raise TransferCancelled(
+            "Transfer cancelled by user", rows_written=rows_written
+        )
 
 
 def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
     accepted = mongo.update_job_status(job_id, "running", **update)
     if accepted is False:
-        _raise_if_job_cancelled(mongo, job_id)
+        _raise_if_job_cancelled(
+            mongo,
+            job_id,
+            rows_written=update.get("records_processed"),
+        )
 
 
 def _pin_overwrite_rows_before(
@@ -3056,28 +3066,20 @@ class UniversalTransferEngine:
                 message=f"Writing {row_count_label(total_rows)} rows…",
             )
 
-            def _check_cancelled() -> None:
-                try:
-                    job = mongo.get_job(job_id)
-                    # Honour the durable cancel flag as well as the status. The
-                    # status field is rewritten by this very loop on every
-                    # chunk, so a cancel that landed mid-chunk could be
-                    # overwritten before it was ever read.
-                    if job and (
-                        job.get("cancel_requested") or job.get("status") == "cancelled"
-                    ):
-                        raise TransferCancelled("Transfer cancelled by user")
-                except TransferCancelled:
-                    raise
-                except Exception as exc:
-                    logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
+            def _check_cancelled(committed_rows: int | None = None) -> None:
+                # After the chunk commits. The count has to travel with the
+                # cancel: the status was often already "cancelled" at 0 rows
+                # while this table held the batch.
+                _raise_if_job_cancelled(
+                    mongo, job_id, rows_written=committed_rows
+                )
 
             _quarantine_persisted = [0]
 
             def on_checkpoint(
                 chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
             ) -> None:
-                _check_cancelled()
+                _check_cancelled(rows)
                 pct = compute_transfer_progress_pct(
                     phase="writing",
                     rows_processed=rows,
@@ -3482,9 +3484,9 @@ class UniversalTransferEngine:
                     rows_processed=rows_written,
                     total_rows=total_rows,
                 )
-                mongo.update_job_status(
+                _progress_write_or_cancel(
+                    mongo,
                     job_id,
-                    "running",
                     records_processed=rows_written,
                     **(
                         {"progress_pct": write_done_pct}
@@ -4284,28 +4286,20 @@ class UniversalTransferEngine:
                     error_details={"load_history_report": load_history_report},
                 )
 
-            def _check_cancelled() -> None:
-                try:
-                    job = mongo.get_job(job_id)
-                    # Honour the durable cancel flag as well as the status. The
-                    # status field is rewritten by this very loop on every
-                    # chunk, so a cancel that landed mid-chunk could be
-                    # overwritten before it was ever read.
-                    if job and (
-                        job.get("cancel_requested") or job.get("status") == "cancelled"
-                    ):
-                        raise TransferCancelled("Transfer cancelled by user")
-                except TransferCancelled:
-                    raise
-                except Exception as exc:
-                    logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
+            def _check_cancelled(committed_rows: int | None = None) -> None:
+                # After the chunk commits. The count has to travel with the
+                # cancel: the status was often already "cancelled" at 0 rows
+                # while this table held the batch.
+                _raise_if_job_cancelled(
+                    mongo, job_id, rows_written=committed_rows
+                )
 
             _quarantine_persisted = [0]
 
             def on_checkpoint(
                 chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
             ) -> None:
-                _check_cancelled()
+                _check_cancelled(rows)
                 # CDC has no finite denominator — never invent a percentage.
                 # cdc_incremental is the same mode. A raw equality check treated
                 # that alias as a finite batch load and drew a percent mid-snapshot.
@@ -5241,28 +5235,20 @@ class UniversalTransferEngine:
                     error_details={"load_history_report": load_history_report},
                 )
 
-            def _check_cancelled() -> None:
-                try:
-                    job = mongo.get_job(job_id)
-                    # Honour the durable cancel flag as well as the status. The
-                    # status field is rewritten by this very loop on every
-                    # chunk, so a cancel that landed mid-chunk could be
-                    # overwritten before it was ever read.
-                    if job and (
-                        job.get("cancel_requested") or job.get("status") == "cancelled"
-                    ):
-                        raise TransferCancelled("Transfer cancelled by user")
-                except TransferCancelled:
-                    raise
-                except Exception as exc:
-                    logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
+            def _check_cancelled(committed_rows: int | None = None) -> None:
+                # After the chunk commits. The count has to travel with the
+                # cancel: the status was often already "cancelled" at 0 rows
+                # while this table held the batch.
+                _raise_if_job_cancelled(
+                    mongo, job_id, rows_written=committed_rows
+                )
 
             _quarantine_persisted = [0]
 
             def on_checkpoint(
                 chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
             ) -> None:
-                _check_cancelled()
+                _check_cancelled(rows)
                 pct = compute_transfer_progress_pct(
                     phase="writing",
                     rows_processed=rows,

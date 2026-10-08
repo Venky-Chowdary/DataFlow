@@ -19,7 +19,32 @@ from services.brand_env import getenv_brand
 
 
 class TransferCancelled(Exception):
-    """Raised when a user cancels a running transfer job."""
+    """Raised when a user cancels a running transfer job.
+
+    ``rows_written`` is the count already committed when the writer noticed
+    the cancel. Leaving it off made the job report 0 while the destination
+    held the table.
+    """
+
+    def __init__(
+        self,
+        message: str = "Transfer cancelled by user",
+        *,
+        rows_written: int | None = None,
+    ) -> None:
+        text = message
+        if rows_written is not None:
+            try:
+                count = max(0, int(rows_written))
+            except (TypeError, ValueError):
+                count = 0
+            self.rows_written = count
+            if count:
+                text = (
+                    f"{message}. {count} row(s) were already written "
+                    "and were not removed."
+                )
+        super().__init__(text)
 
 
 class FullRefreshDropFailed(Exception):

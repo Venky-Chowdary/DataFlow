@@ -8,10 +8,10 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 13
+- not fixed: 12
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 71
+- fixed in code, unit-proven — not a live QA retest: 72
 - partly fixed in code: 11
 
 ## Every row
@@ -81,7 +81,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-013 | P2 | OPEN | fixed in code, unit-proven (test_dynamodb_endpoint_collapses_doubled_scheme_and_default_port). A saved http://host:port is used as is. Not a live DynamoDB Local retest. |
 | DEF-C-015 | P2 | OPEN | fixed in code, unit-proven (test_near_realtime_updates_and_deletes_recommend_cdc, test_query_with_deletes_recommends_overwrite_without_a_cursor, test_recommend_sync_mode_refuses_cdc_for_procedure). Near-real-time updates or deletes with a primary key recommend Incremental CDC (at-least-once upsert, log required). A query or procedure whose workload mentions deletes recommends Full Refresh Overwrite and does not require a cursor. CDC on a procedure without deletes stays the non-destructive Full Refresh Append refusal. Not a live QA retest. |
 | DEF-C-022 | P2 | OPEN | fixed in code, unit-proven (test_empty_table_passes_and_names_the_zero_row_proof[mysql/postgresql/sqlserver], test_failed_read_of_a_table_still_blocks, test_a_filter_that_matches_no_sampled_row_is_not_an_empty_source). An engine read that returns no row passes Gate-5/8/9 as a 0-row proof and Execute reconciles 0 = 0; a failed read or an over-filtered sample still blocks with its reason. run_file_preflight binds the source engine for every gate. Not a live PostgreSQL to MySQL retest. |
-| DEF-C-023 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-023 | P2 | OPEN | fixed in code, unit-proven (test_cancel_after_a_committed_chunk_keeps_the_row_count, test_a_refused_progress_write_carries_the_committed_count). A cancel after a committed chunk records that count on the cancelled job and says those rows were not removed. A cancel before any commit still reports no rows. The in-flight statement is not rolled back. Not a live MySQL retest. |
 | DEF-C-025 | P2 | OPEN | fixed in code, unit-proven (test_manual_review_pauses_before_an_overwrite_empties_a_column[mysql/postgresql/sqlserver/snowflake], test_acknowledged_overwrite_proceeds_and_still_names_the_loss, test_a_propagating_policy_warns_instead_of_pausing, test_upserting_sinks_keep_unwritten_properties, test_engine_and_identity_columns_are_regenerated_not_emptied, test_overwrite_keeps_a_destination_column_the_source_dropped). Validate and Execute's preflight block an overwrite under manual_review that would empty a live destination column, naming it, until the schema change is acknowledged; other policies warn. The values themselves are not carried across an overwrite. Not a live QA retest. |
 | DEF-C-026 | P2 | OPEN | fixed in code, unit-proven (test_unconstrained_numeric_typmod_is_numeric_not_65535). 65535 is unconstrained NUMERIC. Create-new on MySQL uses the platform DECIMAL(38,15) and is not a fidelity collapse. A real NUMERIC(100,2) is kept. Not a live Postgres to MySQL retest. |
 | DEF-C-027 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |

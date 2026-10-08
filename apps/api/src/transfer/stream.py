@@ -3065,7 +3065,9 @@ def _stream_database_transfer_impl(
 
                 _live = get_mongodb_service().get_job(str(job_id)) or {}
                 if _live.get("cancel_requested") or str(_live.get("status") or "") == "cancelled":
-                    raise TransferCancelled("Transfer cancelled by user")
+                    raise TransferCancelled(
+                        "Transfer cancelled by user", rows_written=written
+                    )
             except TransferCancelled:
                 raise
             except Exception as exc:  # noqa: BLE001 - a failed read must not hide the write
