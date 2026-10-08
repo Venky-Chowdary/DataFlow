@@ -94,12 +94,26 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "replay_quarantine",
         "description": (
-            "Stage a replay of a job's open quarantine rows through the destination "
-            "with the original mapping. Pending action until Confirm."
+            "Stage a replay of a job's open quarantine rows through the same writer "
+            "the screen uses. Pass transform_overrides to replace the cast that "
+            "quarantined the cell, and rows to send edited cell values. Without "
+            "those, the original mapping is used. Pending action until Confirm."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}, "selector": {"type": "string"}},
+            "properties": {
+                "job_id": {"type": "string"},
+                "selector": {"type": "string"},
+                "transform_overrides": {
+                    "type": "object",
+                    "description": "Source column to transform, applied on Confirm.",
+                },
+                "rows": {
+                    "type": "array",
+                    "description": "Edited quarantine records. Empty replays every open row.",
+                    "items": {"type": "object"},
+                },
+            },
             "required": [],
         },
     },
@@ -296,7 +310,44 @@ def _stage(tool: str, *, payload: dict[str, Any], preview: dict[str, Any], label
     )
 
 
-def _job_tool(tool: str, job_id: str, selector: str) -> ToolResult:
+def normalize_quarantine_replay_edits(
+    transform_overrides: Any = None,
+    rows: Any = None,
+) -> tuple[dict[str, str], list[dict[str, Any]], str]:
+    """The edits Confirm will hand to the screen's quarantine replay.
+
+    An empty result means replay the open rows with the original mapping.
+    A non-empty error string refuses the stage — a bad edit must not become
+    an ack that Confirm then applies as the original integer cast.
+    """
+    raw_overrides = transform_overrides or {}
+    if not isinstance(raw_overrides, dict):
+        return {}, [], "transform_overrides must name each source column and its transform."
+    overrides: dict[str, str] = {}
+    for key, value in raw_overrides.items():
+        column = str(key or "").strip()
+        transform = str(value or "").strip()
+        if not column or not transform:
+            return {}, [], "Each transform override needs a source column and a transform."
+        overrides[column] = transform
+    raw_rows = rows or []
+    if not isinstance(raw_rows, list):
+        return {}, [], "rows must be a list of quarantine records."
+    edited: list[dict[str, Any]] = []
+    for item in raw_rows:
+        if not isinstance(item, dict):
+            return {}, [], "Each edited quarantine row must be an object."
+        edited.append(dict(item))
+    return overrides, edited, ""
+
+
+def _job_tool(
+    tool: str,
+    job_id: str,
+    selector: str,
+    transform_overrides: Any = None,
+    rows: Any = None,
+) -> ToolResult:
     job, clarify = resolve_job(job_id, selector)
     if not job:
         return _tool_result(tool, success=False, output=None, error=clarify)
@@ -330,8 +381,22 @@ def _job_tool(tool: str, job_id: str, selector: str) -> ToolResult:
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} has no quarantined rows to replay.",
             )
-        return _stage(tool, payload={"job_id": jid}, preview=brief,
-                      label=f"Replay quarantine rows of job {short}", destructive=False)
+        overrides, edited, edit_error = normalize_quarantine_replay_edits(
+            transform_overrides, rows
+        )
+        if edit_error:
+            return _tool_result(tool, success=False, output=None, error=edit_error)
+        payload = {"job_id": jid}
+        if overrides:
+            brief["transform_overrides"] = overrides
+            payload["transform_overrides"] = overrides
+        if edited:
+            brief["edited_rows"] = len(edited)
+            payload["rows"] = edited
+        label = f"Replay quarantine rows of job {short}"
+        if overrides or edited:
+            label += " with the staged cell edits"
+        return _stage(tool, payload=payload, preview=brief, label=label, destructive=False)
     return _tool_result(tool, success=False, output=None, error=f"Unknown job tool {tool}")
 
 

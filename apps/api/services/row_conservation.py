@@ -2961,6 +2961,36 @@ class KeyCensusAccumulator:
         self._events = 0
         self._unique_tombstone_fallback = 0
         self._failed = False
+        self._pending_new: list[tuple[Any, ...]] = []
+        self._pending_added = 0
+        self._pending_open = False
+
+    def begin_live_batch(self) -> None:
+        """Close the previous batch's reverse window without dropping its keys."""
+        self._pending_open = False
+        self._pending_new = []
+        self._pending_added = 0
+
+    def keep_last_live_batch(self) -> None:
+        """The batch committed rows, so its keys stay in the census."""
+        self.begin_live_batch()
+
+    def reverse_last_live_batch(self) -> None:
+        """A batch that wrote nothing did not insert the keys just probed.
+
+        The probe runs before the write. Counting those keys as inserts while
+        ``rows_written`` is 0 told Gate-8 the destination grew, then an empty
+        checksum matched and the job looked verified.
+        """
+        if not self._pending_open or self._failed:
+            self._pending_open = False
+            return
+        for key in self._pending_new:
+            self._seen.discard(key)
+        self._inserts -= self._pending_added
+        if self._inserts < 0:
+            self._failed = True
+        self.begin_live_batch()
 
     def unseen_live(self, keys: Sequence[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
         return self._unseen(keys, self._seen)
@@ -2988,6 +3018,7 @@ class KeyCensusAccumulator:
     def add_batch(self, keys: Sequence[tuple[Any, ...]], dest_hits: int | None) -> None:
         if dest_hits is None:
             self._failed = True
+            self._pending_open = False
             return
         batch: list[tuple[Any, ...]] = []
         seen_batch: set[tuple[Any, ...]] = set()
@@ -3001,9 +3032,14 @@ class KeyCensusAccumulator:
         if hits > len(unseen):
             # Caller probed a wider set than unseen live keys — refuse to invent inserts.
             self._failed = True
+            self._pending_open = False
             return
-        self._inserts += max(len(unseen) - hits, 0)
+        added = max(len(unseen) - hits, 0)
+        self._inserts += added
         self._seen.update(batch)
+        self._pending_new = list(unseen)
+        self._pending_added = added
+        self._pending_open = True
 
     def add_tombstones(
         self,
@@ -3067,6 +3103,7 @@ def observe_keyed_batch(
     """
     from services.dest_precount import destination_key_hits
 
+    acc.begin_live_batch()
     cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
     records = [dict(zip(headers, row)) for row in rows]
     acc.add_events(len(records))
@@ -3140,6 +3177,7 @@ def observe_change_batch(
     """
     from services.dest_precount import destination_key_hits
 
+    acc.begin_live_batch()
     cols = [str(c).strip() for c in key_columns if str(c).strip()]
     insert_list = list(inserts or [])
     update_list = list(updates or [])

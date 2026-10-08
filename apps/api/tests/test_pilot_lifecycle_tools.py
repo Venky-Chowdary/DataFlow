@@ -164,6 +164,35 @@ def test_resume_refuses_completed(monkeypatch, staged):
     assert not tr.success and "only a failed" in tr.error
 
 
+def test_replay_stages_the_cast_and_the_edited_cells(monkeypatch, staged):
+    monkeypatch.setattr(
+        lt,
+        "resolve_job",
+        lambda job_id="", selector="": (_job("completed_with_quarantine", rejected_rows=1), ""),
+    )
+    tr = lt._job_tool(
+        "replay_quarantine",
+        "",
+        "",
+        transform_overrides={"qty": "text"},
+        rows=[{"row": 1, "column": "qty", "value": "12"}],
+    )
+    assert tr.success
+    assert staged[0]["payload"]["transform_overrides"] == {"qty": "text"}
+    assert staged[0]["payload"]["rows"][0]["value"] == "12"
+    assert staged[0]["preview"]["transform_overrides"]["qty"] == "text"
+    assert staged[0]["preview"]["edited_rows"] == 1
+    assert "cell edits" in tr.output["label"]
+    refused = lt._job_tool(
+        "replay_quarantine",
+        "",
+        "",
+        transform_overrides={"qty": "  "},
+    )
+    assert not refused.success
+    assert len(staged) == 1
+
+
 def test_replay_requires_quarantine_rows(monkeypatch, staged):
     monkeypatch.setattr(lt, "resolve_job", lambda job_id="", selector="": (_job("completed"), ""))
     assert "no quarantined rows" in lt._job_tool("replay_quarantine", "", "").error

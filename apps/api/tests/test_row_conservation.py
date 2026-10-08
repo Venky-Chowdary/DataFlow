@@ -2004,6 +2004,35 @@ def test_key_census_splits_inserts_from_updates():
     assert KeyCensus.from_mapping({"unique_batch_keys": 2, "dest_preexisting": 5}) is None
 
 
+def test_a_batch_that_wrote_nothing_is_not_an_insert():
+    from services.row_conservation import KeyCensusAccumulator
+
+    acc = KeyCensusAccumulator()
+    acc.add_batch([(1,), (2,)], 0)
+    probed = acc.to_census()
+    assert probed is not None
+    assert probed.inserts == 2
+    assert probed.expected_delta == 2
+    acc.reverse_last_live_batch()
+    assert acc.to_census() is None
+
+
+def test_a_later_zero_write_keeps_keys_that_already_landed():
+    from services.row_conservation import KeyCensusAccumulator
+
+    acc = KeyCensusAccumulator()
+    acc.add_batch([(1,), (2,)], 0)
+    acc.keep_last_live_batch()
+    acc.begin_live_batch()
+    acc.add_batch([(3,)], 0)
+    acc.reverse_last_live_batch()
+    census = acc.to_census()
+    assert census is not None
+    assert census.inserts == 2
+    assert census.expected_delta == 2
+    assert census.unique_batch_keys == 2
+
+
 def test_keyed_census_closes_on_dest_delta_not_writer_ack():
     from services.row_conservation import KeyCensus
 

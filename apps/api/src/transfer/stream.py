@@ -3085,6 +3085,8 @@ def _stream_database_transfer_impl(
                 replay_safety=replay_safety,
             )
         except WriteBatchBlocked as blocked:
+            if keyed_census_acc is not None:
+                keyed_census_acc.reverse_last_live_batch()
             # Persist this batch's quarantine before aborting the stream —
             # bare RuntimeError would drop mid-write FAIL_JOB details.
             details = list(blocked.rejected_details or [])
@@ -3102,6 +3104,15 @@ def _stream_database_transfer_impl(
                     ),
                 )
             raise
+        except Exception:
+            if keyed_census_acc is not None:
+                keyed_census_acc.reverse_last_live_batch()
+            raise
+        if keyed_census_acc is not None:
+            if int(batch_written or 0) == 0:
+                keyed_census_acc.reverse_last_live_batch()
+            else:
+                keyed_census_acc.keep_last_live_batch()
         if dest_type == "snowflake":
             sf_conn_state["session_ready"] = True
         return {

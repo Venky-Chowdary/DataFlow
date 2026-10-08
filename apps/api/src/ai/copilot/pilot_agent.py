@@ -919,7 +919,7 @@ def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
             "cancel_job": "Cancel asks the worker to stop after the current batch; rows already committed stay.",
             "retry_job": "Retry starts a **new** job from zero with the same request; the failed job is kept for audit.",
             "resume_job": "Resume continues from the last committed checkpoint — no rows are re-read before it.",
-            "replay_quarantine": "Replay re-sends the open quarantine rows through the destination writer with the original mapping.",
+            "replay_quarantine": "Replay re-sends the open quarantine rows. Staged transform overrides and edited cells replace the original cast; without them the original mapping is used.",
         }[name]
         return f"{' · '.join(bits)}.\n{effect}\n\nConfirm to proceed: **{label}**."
     if name == "delete_connector":

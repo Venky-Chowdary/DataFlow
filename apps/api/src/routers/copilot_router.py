@@ -242,7 +242,18 @@ async def _run_lifecycle_confirm(
             await connectors_router.resume_transfer_job(job_id, background_tasks, http_request)
         )
     if kind == "replay_quarantine":
-        body = connectors_router.QuarantineReplayRequest()
+        from ..ai.copilot.lifecycle_tools import normalize_quarantine_replay_edits
+
+        overrides, edited, edit_error = normalize_quarantine_replay_edits(
+            payload.get("transform_overrides"),
+            payload.get("rows"),
+        )
+        if edit_error:
+            raise HTTPException(status_code=400, detail=edit_error)
+        body = connectors_router.QuarantineReplayRequest(
+            rows=edited,
+            transform_overrides=overrides,
+        )
         return dict(await connectors_router.replay_job_quarantine(job_id, body, http_request))
     if kind == "delete_connector":
         cid = str(payload.get("connector_id") or "").strip()

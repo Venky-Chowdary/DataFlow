@@ -502,6 +502,23 @@ def test_all_rows_held_out_is_an_empty_population_not_a_mismatch():
     assert r.rejected_rows == 1
 
 
+def test_empty_digest_is_not_a_match_when_the_census_still_expects_rows():
+    """Hold-outs can prove an empty projection. A census that still expects
+    inserts cannot share that proof — rows_written stayed 0."""
+    from services.reconciliation import EMPTY_POPULATION_DIGEST
+
+    report = reconcile(
+        source_rows=2,
+        target_rows=0,
+        source_checksum="",
+        target_checksum=EMPTY_POPULATION_DIGEST,
+        rejected_rows=2,
+        keyed_expected_delta=2,
+    )
+    assert report.passed is False
+    assert report.checksum_match is False
+
+
 def test_missing_source_digest_still_fails_when_rows_landed():
     r = reconcile(
         source_rows=2,

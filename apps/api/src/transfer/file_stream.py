@@ -2089,31 +2089,41 @@ def stream_file_to_database(
                 schema=census_schema,
                 table_name=dest_table,
             )
-        if use_source_spool:
-            local_warnings = _apply_batch_audit(idx, headers, records=batch)
-            spill = spill_engine_write_records(
-                batch,
-                headers,
-                mappings,
-                extra=dest_extra,
-                clear_records=True,
-            )
-            try:
-                fingerprints = _spool_fingerprints(spill.spool)
-                batch_written, last_checksum, dest_summary = _run_file_write(
-                    idx, headers, [], source_spool=spill.spool
+        try:
+            if use_source_spool:
+                local_warnings = _apply_batch_audit(idx, headers, records=batch)
+                spill = spill_engine_write_records(
+                    batch,
+                    headers,
+                    mappings,
+                    extra=dest_extra,
+                    clear_records=True,
                 )
-                batch_rows = spill.unexpanded_row_count
-            finally:
-                spill.close()
-        else:
-            headers, data_rows = records_to_matrix(batch, columns)
-            local_warnings = _apply_batch_audit(idx, headers, rows=data_rows)
-            fingerprints = _matrix_fingerprints(headers, data_rows)
-            batch_written, last_checksum, dest_summary = _run_file_write(
-                idx, headers, data_rows
-            )
-            batch_rows = len(data_rows)
+                try:
+                    fingerprints = _spool_fingerprints(spill.spool)
+                    batch_written, last_checksum, dest_summary = _run_file_write(
+                        idx, headers, [], source_spool=spill.spool
+                    )
+                    batch_rows = spill.unexpanded_row_count
+                finally:
+                    spill.close()
+            else:
+                headers, data_rows = records_to_matrix(batch, columns)
+                local_warnings = _apply_batch_audit(idx, headers, rows=data_rows)
+                fingerprints = _matrix_fingerprints(headers, data_rows)
+                batch_written, last_checksum, dest_summary = _run_file_write(
+                    idx, headers, data_rows
+                )
+                batch_rows = len(data_rows)
+        except Exception:
+            if keyed_census_acc is not None:
+                keyed_census_acc.reverse_last_live_batch()
+            raise
+        if keyed_census_acc is not None:
+            if int(batch_written or 0) == 0:
+                keyed_census_acc.reverse_last_live_batch()
+            else:
+                keyed_census_acc.keep_last_live_batch()
         return {
             "batch_written": batch_written,
             "last_checksum": last_checksum,

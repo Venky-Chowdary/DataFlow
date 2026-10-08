@@ -2853,10 +2853,22 @@ class DataPilotTools:
 
         return _job_tool("resume_job", job_id, selector)
 
-    def _replay_quarantine(self, job_id: str = "", selector: str = "") -> ToolResult:
+    def _replay_quarantine(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        transform_overrides: dict | None = None,
+        rows: list | None = None,
+    ) -> ToolResult:
         from .lifecycle_tools import _job_tool
 
-        return _job_tool("replay_quarantine", job_id, selector)
+        return _job_tool(
+            "replay_quarantine",
+            job_id,
+            selector,
+            transform_overrides=transform_overrides,
+            rows=rows,
+        )
 
     def _prepare_cdc_source(
         self,

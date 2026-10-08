@@ -865,12 +865,16 @@ def reconcile(
         and expected_rows == 0
         and target_rows == 0
         and target_checksum in {"", EMPTY_POPULATION_DIGEST}
+        and not keyed_expected_delta
     ):
         # Every source row was held out, so this run's projection is the empty
         # population — a digest that is defined, not missing. The writer had no
         # rows to hash and returned "", which then read as a mismatch against
         # the destination's empty digest and failed an all-quarantined run that
         # behaved exactly as the policy asked.
+        # A key census that still expects new rows did not hold those keys out.
+        # Pairing that delta with the empty digest reported checksum_match
+        # while rows_written stayed 0.
         source_checksum = target_checksum
     if checksum_scope == CDC_SOURCE_IMAGE_COUNT:
         # A matching COUNT does not see an in-place update. Completing the job

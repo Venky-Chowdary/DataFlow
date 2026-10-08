@@ -8,10 +8,10 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 10
+- not fixed: 9
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 74
+- fixed in code, unit-proven — not a live QA retest: 75
 - partly fixed in code: 11
 
 ## Every row
@@ -119,7 +119,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-012 | P3 | OPEN | fixed in code, unit-proven (test_create_connector_refuses_a_duplicate_name). Staging and Confirm refuse a taken name and do not write. The store still keeps the id when a programmatic create repeats a name, so schedules bound to that id are not orphaned. Not a live connector retest. |
 | DEF-C-014 | P3 | OPEN | fixed in code, unit-proven (test_ordinary_sql_functions_are_not_schema_identifiers). A token followed by ( or a ::type is not a schema identifier. A bare unknown column is still refused. Not a live query retest. |
 | DEF-C-016 | P3 | OPEN | fixed in code, unit-proven (test_what_cant_you_do_answers_with_the_limits, test_describe_pilot_names_confirm_gated_delete, test_cdc_does_not_require_an_incremental_cursor, test_gtid_answer_says_file_and_position_is_enough, test_resume_fact_restarts_a_full_refresh). Delete connector and create schedule stay Confirm-gated. Full refresh restarts from the beginning. MySQL file and position is enough; GTID is optional. Not a live QA retest. |
-| DEF-C-018 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-018 | P3 | OPEN | fixed in code, unit-proven (test_replay_stages_the_cast_and_the_edited_cells, test_a_batch_that_wrote_nothing_is_not_an_insert, test_empty_digest_is_not_a_match_when_the_census_still_expects_rows). Confirm applies the staged transform and edited cells through the same replay the screen uses. A batch that writes nothing is removed from the insert census, and an empty digest is not a match while that census still expects rows. Not a live QA retest. |
 | DEF-C-019 | P3 | OPEN | fixed in code, unit-proven (test_unknown_dataset_is_not_a_measured_profile, test_duplicate_stem_is_named_not_silently_widened, test_named_file_profiles_account_number_as_pii). A missing name returns no rules. Two different files with one stem are both named. ACCT_NO is PII from the pattern engine. Not a live QA retest. |
 | DEF-C-021 | P3 | OPEN | fixed in code, unit-proven (test_bad_tool_argument_names_the_schema_not_the_python_signature, test_connector_name_is_accepted_as_the_connector_argument). Unknown arguments name the accepted parameters. connector_name binds to name. Not a live Pilot retest. |
 | DEF-C-028 | P3 | OPEN | fixed in code, unit-proven (test_result_store_no_cross_session_leak, test_explicit_result_id_reloads_across_stores, test_missing_result_id_is_not_the_no_sample_sentence). An explicit result_id is the credential and is reloaded from disk. Omitting the id still returns only that session's latest. A missing id and a session with no sample are different sentences. Not a live QA retest. |
