@@ -690,6 +690,67 @@ def schedule_bind_summary(sched: Any) -> dict[str, Any]:
     )
 
 
+def _mapping_binding(mappings: list[dict[str, Any]] | None) -> frozenset[tuple[str, str]]:
+    """Source/target pairs. Column identity, not confidence or transform spelling."""
+    pairs: list[tuple[str, str]] = []
+    for mapping in mappings or []:
+        if not isinstance(mapping, dict):
+            continue
+        source = str(
+            mapping.get("source") or mapping.get("source_column") or ""
+        ).strip().lower()
+        target = str(
+            mapping.get("target") or mapping.get("target_column") or ""
+        ).strip().lower() or source
+        if source:
+            pairs.append((source, target))
+    return frozenset(pairs)
+
+
+def mappings_bound_to_signed_contract(
+    contract_id: str,
+    planned: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Mappings a schedule stores so a later run matches the signed contract.
+
+    The signed rows are the contract when they name the same source and target
+    columns as the plan. A freshly planned confidence or a ``none`` versus
+    empty transform is not a different mapping, and storing the plan's copy
+    made ``run_schedule_now`` refuse a schedule the operator just bound.
+    A different column binding raises the same error the runner raises, so
+    Confirm never stages a schedule that cannot run. A contract with no
+    stored mappings leaves the plan unchanged.
+    """
+    planned_rows = [m for m in (planned or []) if isinstance(m, dict)]
+    cid = (contract_id or "").strip()
+    if not cid:
+        return planned_rows
+    try:
+        from services.contract_store import get_contract_store
+        from services.schema_fingerprint import fingerprint_mappings
+    except ImportError:  # pragma: no cover
+        from src.services.contract_store import get_contract_store
+        from src.services.schema_fingerprint import fingerprint_mappings
+
+    contract = get_contract_store().get_contract(cid)
+    if contract is None:
+        return planned_rows
+    contracted = [
+        m for m in (getattr(contract, "mappings", None) or []) if isinstance(m, dict)
+    ]
+    if not contracted:
+        return planned_rows
+    if _mapping_binding(planned_rows) != _mapping_binding(contracted):
+        expected = fingerprint_mappings(contracted)
+        actual = fingerprint_mappings(planned_rows)
+        raise ValueError(
+            f"Schedule mappings do not match signed contract {cid} "
+            f"(contract {expected[:12]} vs schedule {actual[:12]}). "
+            "Open Validate and persist the approved mapping, or re-sign the contract."
+        )
+    return contracted
+
+
 def assert_schedule_mapping_matches_contract(sched: Any) -> None:
     """Refuse a beat when the schedule mapping hash drifted from the signed contract.
 

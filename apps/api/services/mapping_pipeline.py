@@ -610,6 +610,32 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
         )
 
 
+def _offset_aware_profile(upgraded: str) -> bool:
+    """True when a profiled carrier carries an offset the text did not drop."""
+    from services.type_system import (
+        datetime_timezone_polarity,
+        time_timezone_polarity,
+    )
+
+    return datetime_timezone_polarity(upgraded) in {"tz", "ltz"} or (
+        time_timezone_polarity(upgraded) == "tz"
+    )
+
+
+def _existing_open_text_column(
+    name: str,
+    declared_target_types: dict[str, str],
+    destination_table_exists: bool | None,
+) -> bool:
+    """True when this destination column already exists as open text."""
+    if destination_table_exists is not True:
+        return False
+    declared = str(declared_target_types.get(name) or "").strip()
+    if not declared:
+        return False
+    return normalize_logical_type(declared) in _UNTYPED_TEXT_LOGICALS
+
+
 def run_mapping_pipeline(
     source_columns: list[str],
     target_columns: list[str],
@@ -802,6 +828,20 @@ def run_mapping_pipeline(
                     normalize_logical_type(upgraded)
                     != normalize_logical_type(declared)
                 ):
+                    # A declared text column whose samples carry an offset is
+                    # still text when the destination column is already text.
+                    # That is the ``::text`` cast: both sides store the offset
+                    # in the string. Promoting the source to TIMESTAMPTZ made
+                    # the cast demand a contract for TIMESTAMPTZ → TEXT.
+                    # A catalog TIMESTAMPTZ is not an untyped text declaration,
+                    # so that pair stays a contract.
+                    if _offset_aware_profile(str(upgraded)) and _existing_open_text_column(
+                        name,
+                        declared_target_types,
+                        destination_table_exists,
+                    ):
+                        merged_schema[name] = declared
+                        continue
                     declared_source_types[name] = str(upgraded)
             source_schemas = [
                 {

@@ -149,6 +149,36 @@ def test_redis_json_wire_writes_the_offset() -> None:
     assert round_tripped == aware
 
 
+def test_kafka_json_wire_writes_the_offset() -> None:
+    """Kafka produce serializes an aware datetime with json_default, offset intact."""
+    from connectors.kafka_writer import kafka_json_payload
+
+    aware = datetime(
+        2024, 12, 31, 23, 59, 59, 123456, tzinfo=timezone(timedelta(hours=5, minutes=30))
+    )
+    record = kafka_json_payload(
+        {"created_at": aware},
+        ["created_at"],
+        {"created_at": "TEXT"},
+    )
+    wire = json.dumps(record, default=json_default)
+    round_tripped = datetime.fromisoformat(json.loads(wire)["created_at"])
+    assert round_tripped.utcoffset() == aware.utcoffset()
+    assert round_tripped == aware
+
+
+def test_timestamptz_into_kafka_text_needs_no_contract() -> None:
+    assert keyspace_instant_text_wire_preserved(
+        "TIMESTAMPTZ", "TEXT", dest_db="kafka"
+    ) is True
+    assert is_lossy_coercion("TIMESTAMPTZ", "TEXT", dest_db="kafka") is False
+    assert is_lossy_coercion(
+        "TIMESTAMPTZ", "TEXT", dest_db="apache_kafka"
+    ) is False
+    # A typed engine's TEXT column is still a contract. Kafka does not widen that.
+    assert is_lossy_coercion("TIMESTAMPTZ", "TEXT", dest_db="postgresql") is True
+
+
 def test_timestamptz_into_redis_text_needs_no_contract() -> None:
     for target in ("string", "TEXT", "VARCHAR"):
         assert (

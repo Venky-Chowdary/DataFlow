@@ -200,6 +200,15 @@ def create_schedule(
         # Same fail-closed bind as a chat-started run: an unsigned or tripped
         # contract must not become a standing unattended instruction.
         bound = _stage_bound_contract(contract_id, require_signed_contract)
+        from services.schedule_store import mappings_bound_to_signed_contract
+
+        # The signed rows travel with the schedule when they name the same
+        # columns. Storing a re-planned copy with a different confidence made
+        # the runner refuse the contract this call just bound.
+        engine_mappings = mappings_bound_to_signed_contract(
+            str(bound.get("contract_id") or ""),
+            engine_mappings,
+        )
     except ValueError as exc:
         return _tool_result(tool, success=False, error=str(exc))
 
