@@ -184,17 +184,24 @@ def _sample_batch_source(
     src_type = resolve_driver_type(str(endpoint.format or ""))
     cfg = resolve_connector_config(endpoint)
     name = _source_name(endpoint) or table
-    probe, _cursor = _unwrap_read(
-        _read_batch(
-            src_type,
-            cfg,
-            name,
-            None,
-            0,
-            limit,
-            database=str(cfg.get("database") or ""),
+    if src_type == "kafka":
+        # The transfer reader joins the pipeline group. After a load that
+        # offset is the end of the topic, so a sample came back with 0 rows.
+        from connectors.kafka_reader import sample_topic_batch
+
+        probe = sample_topic_batch(cfg=cfg, topic=name, limit=limit)
+    else:
+        probe, _cursor = _unwrap_read(
+            _read_batch(
+                src_type,
+                cfg,
+                name,
+                None,
+                0,
+                limit,
+                database=str(cfg.get("database") or ""),
+            )
         )
-    )
     columns = [str(h) for h in (probe.headers or [])]
     rows = [dict(zip(columns, row)) for row in (probe.rows or [])[:limit]]
     native = {}

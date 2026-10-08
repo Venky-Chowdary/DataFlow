@@ -12,9 +12,12 @@ Migration honesty (Airbyte/Fivetran-class):
 
 from __future__ import annotations
 
+import logging
 import re
 from decimal import Decimal, InvalidOperation, Overflow, localcontext
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Significant fractional digits beyond this → likely IEEE binary residue.
 _IEEE_SCALE_HARD = 12
@@ -841,6 +844,66 @@ _CURSOR_EXACT_NUMERIC_CODES = frozenset({0, 246, 1700})
 _CURSOR_BINARY_CODES = {17: "BYTEA"}
 _CURSOR_UUID_CODES = {2950: "UUID"}
 _CURSOR_INTERVAL_CODES = {1186: "INTERVAL"}
+# PostgreSQL array OIDs. These are fixed in pg_type. A custom enum's array
+# OID is not, so that one is resolved from the catalog.
+_CURSOR_ARRAY_CODES: dict[int, str] = {
+    1000: "BOOLEAN[]",
+    1001: "BYTEA[]",
+    1005: "INTEGER[]",
+    1007: "INTEGER[]",
+    1009: "VARCHAR[]",
+    1014: "VARCHAR[]",
+    1015: "VARCHAR[]",
+    1016: "BIGINT[]",
+    1021: "FLOAT[]",
+    1022: "DOUBLE[]",
+    1028: "INTEGER[]",
+    1115: "TIMESTAMP[]",
+    1182: "DATE[]",
+    1183: "TIME[]",
+    1185: "TIMESTAMPTZ[]",
+    1187: "INTERVAL[]",
+    1231: "NUMERIC[]",
+    199: "JSON[]",
+    2951: "UUID[]",
+    3807: "JSON[]",
+}
+_PG_CATALOG_DIALECTS = frozenset({
+    "postgresql",
+    "postgres",
+    "pgvector",
+    "redshift",
+    "greenplum",
+    "cockroachdb",
+    "timescaledb",
+    "citus",
+    "alloydb",
+    "yugabytedb",
+    "supabase",
+})
+_PG_ELEMENT_CARRIERS = {
+    "bool": "BOOLEAN",
+    "int2": "INTEGER",
+    "int4": "INTEGER",
+    "int8": "BIGINT",
+    "oid": "INTEGER",
+    "float4": "FLOAT",
+    "float8": "DOUBLE",
+    "numeric": "NUMERIC",
+    "text": "VARCHAR",
+    "varchar": "VARCHAR",
+    "bpchar": "VARCHAR",
+    "uuid": "UUID",
+    "json": "JSON",
+    "jsonb": "JSON",
+    "bytea": "BYTEA",
+    "date": "DATE",
+    "timestamp": "TIMESTAMP",
+    "timestamptz": "TIMESTAMPTZ",
+    "time": "TIME",
+    "timetz": "TIME",
+    "interval": "INTERVAL",
+}
 
 
 def _carrier_for_cursor_column(col: Any) -> str:
@@ -853,7 +916,18 @@ def _carrier_for_cursor_column(col: Any) -> str:
     if not col or len(col) < 2:
         return ""
     type_code = col[1]
+    # A catalog lookup stamps this when the driver only had an OID (a custom
+    # enum, or that enum's array). An int never carries it.
+    explicit = getattr(type_code, "carrier", None)
+    if (
+        isinstance(explicit, str)
+        and explicit.strip()
+        and not isinstance(type_code, (int, float))
+    ):
+        return explicit.strip()
     if isinstance(type_code, int) and not isinstance(type_code, bool):
+        if type_code in _CURSOR_ARRAY_CODES:
+            return _CURSOR_ARRAY_CODES[type_code]
         if type_code in _CURSOR_JSON_CODES:
             return "JSON"
         if type_code in _CURSOR_TEXT_CODES:
@@ -909,7 +983,138 @@ def _carrier_for_cursor_column(col: Any) -> str:
         return "DATE"
     if name in {"int", "int4", "integer", "int8", "int2", "bigint"}:
         return "BIGINT" if "8" in name or "big" in name else "INTEGER"
+    if "[]" in name:
+        return name.upper().replace(" ", "")
+    tokens = set(re.split(r"[^a-z0-9]+", name))
+    if "enum" in tokens:
+        return "ENUM"
     return ""
+
+
+class CursorDeclaredType:
+    """A carrier the catalog named when the driver only reported an OID."""
+
+    def __init__(self, name: str, carrier: str) -> None:
+        self.name = name
+        self.carrier = carrier
+
+    def __repr__(self) -> str:
+        return f"CursorDeclaredType({self.carrier!r})"
+
+
+def carrier_from_pg_type_row(
+    *,
+    typname: str,
+    typtype: str,
+    typelem: int,
+    elem_name: str = "",
+    elem_type: str = "",
+) -> str:
+    """Carrier for one ``pg_type`` row. Empty means the sample stays the owner.
+
+    ``typtype = e`` is an enum. An array has a non-zero ``typelem``. A
+    composite, domain, or range is not relabelled from this row.
+    """
+    kind = (typtype or "").strip().lower()
+    if kind == "e":
+        return "ENUM"
+    try:
+        element_oid = int(typelem or 0)
+    except (TypeError, ValueError):
+        element_oid = 0
+    if element_oid == 0:
+        return ""
+    if (elem_type or "").strip().lower() == "e":
+        return "VARCHAR[]"
+    element = _PG_ELEMENT_CARRIERS.get((elem_name or "").lstrip("_").lower(), "")
+    if element:
+        return f"{element}[]"
+    # The catalog says this OID is an array. The element is not a builtin
+    # we name, so the carrier stays an array and does not become text.
+    if (typname or "").startswith("_"):
+        return "ARRAY"
+    return ""
+
+
+def _fetch_pg_type_rows(conn: Any, oids: list[int]) -> list[Any]:
+    """``pg_type`` rows for these OIDs. A failed lookup leaves the sample in charge."""
+    if not oids:
+        return []
+    if any((not isinstance(oid, int)) or isinstance(oid, bool) or oid < 0 for oid in oids):
+        return []
+    id_list = ",".join(str(int(oid)) for oid in oids)
+    sql = (
+        "SELECT t.oid, t.typname, t.typtype, t.typelem, "
+        "COALESCE(e.typname, ''), COALESCE(e.typtype, '') "
+        "FROM pg_type t LEFT JOIN pg_type e ON e.oid = t.typelem "
+        f"WHERE t.oid IN ({id_list})"
+    )
+    try:
+        import sqlalchemy as sa
+
+        return list(conn.execute(sa.text(sql)))
+    except Exception as exc:
+        logger.debug("pg_type lookup skipped: %s", exc)
+        return []
+
+
+def annotate_unresolved_pg_types(conn: Any, description: Any, *, dialect: str) -> Any:
+    """Replace unknown PostgreSQL OIDs with the catalog carrier.
+
+    Built-in arrays already have a type code. A custom enum does not: its
+    OID is assigned per database, and the sample then guessed INTERVAL or
+    BOOLEAN from the label. A lookup that fails leaves the description
+    unchanged.
+    """
+    if description is None:
+        return None
+    if (dialect or "").strip().lower() not in _PG_CATALOG_DIALECTS:
+        return description
+    unknown: list[int] = []
+    for col in description:
+        if not col or len(col) < 2:
+            continue
+        code = col[1]
+        if isinstance(code, int) and not isinstance(code, bool) and _carrier_for_cursor_column(col) == "":
+            unknown.append(int(code))
+    if not unknown:
+        return description
+    rows = _fetch_pg_type_rows(conn, sorted(set(unknown)))
+    if not rows:
+        return description
+    by_oid: dict[int, Any] = {}
+    for row in rows:
+        try:
+            by_oid[int(row[0])] = row
+        except (TypeError, ValueError, IndexError):
+            continue
+    copied = []
+    for col in description:
+        if not col or len(col) < 2:
+            copied.append(col)
+            continue
+        code = col[1]
+        found = by_oid.get(int(code)) if isinstance(code, int) and not isinstance(code, bool) else None
+        if found is None:
+            copied.append(tuple(col) if not isinstance(col, tuple) else col)
+            continue
+        try:
+            carrier = carrier_from_pg_type_row(
+                typname=str(found[1] or ""),
+                typtype=str(found[2] or ""),
+                typelem=int(found[3] or 0),
+                elem_name=str(found[4] or ""),
+                elem_type=str(found[5] or ""),
+            )
+        except (TypeError, ValueError, IndexError):
+            carrier = ""
+        if not carrier:
+            copied.append(tuple(col) if not isinstance(col, tuple) else col)
+            continue
+        updated = list(col)
+        updated[1] = CursorDeclaredType(str(found[1] or ""), carrier)
+        copied.append(tuple(updated))
+    return tuple(copied)
 
 
 def cursor_declared_carriers(

@@ -93,3 +93,99 @@ def test_text_bytea_and_uuid_are_not_guessed_from_the_peek():
         {"label": "INTERVAL"},
     )
     assert forced["label"] == "VARCHAR"
+
+
+def test_pg_array_oids_stay_arrays_not_the_peek():
+    description = (
+        _col("ia", 1007, None, None),
+        _col("ta", 1009, None, None),
+        _col("ua", 2951, None, None),
+        _col("na", 1231, None, None),
+        _col("ja", 3807, None, None),
+    )
+    headers = [c[0] for c in description]
+    schema, _intel = peek_callable_schema(
+        headers,
+        [["{1,2}", "{a,b}", "{u}", "{1.50}", "{}"]],
+    )
+    merged = _overlay_declared_numerics(headers, description, schema)
+    assert merged["ia"] == "INTEGER[]"
+    assert merged["ta"] == "VARCHAR[]"
+    assert merged["ua"] == "UUID[]"
+    assert merged["na"] == "NUMERIC[]"
+    assert merged["ja"] == "JSON[]"
+    with bind_source_engine("postgresql"):
+        target = create_new_mapping_target_type(
+            "INTEGER[]", "mysql", source_db="postgresql"
+        )
+    assert target.upper() == "JSON"
+    assert is_lossy_coercion("INTEGER[]", target, dest_db="mysql") is False
+
+
+def test_custom_enum_oid_comes_from_the_catalog_not_the_label():
+    from services.decimal_observe import (
+        annotate_unresolved_pg_types,
+        carrier_from_pg_type_row,
+    )
+
+    assert carrier_from_pg_type_row(
+        typname="mood", typtype="e", typelem=0
+    ) == "ENUM"
+    assert carrier_from_pg_type_row(
+        typname="_mood", typtype="b", typelem=16421, elem_name="mood", elem_type="e"
+    ) == "VARCHAR[]"
+    assert carrier_from_pg_type_row(
+        typname="address", typtype="c", typelem=0
+    ) == ""
+
+    class _Conn:
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, _sql):
+            self.calls += 1
+            return [
+                (16421, "mood", "e", 0, "", ""),
+                (16422, "_mood", "b", 16421, "mood", "e"),
+            ]
+
+    conn = _Conn()
+    description = (
+        _col("mood", 16421, None, None),
+        _col("moods", 16422, None, None),
+    )
+    annotated = annotate_unresolved_pg_types(conn, description, dialect="postgresql")
+    headers = ["mood", "moods"]
+    merged = _overlay_declared_numerics(
+        headers,
+        annotated,
+        {"mood": "INTERVAL", "moods": "VARCHAR"},
+    )
+    assert merged["mood"] == "ENUM"
+    assert merged["moods"] == "VARCHAR[]"
+    assert conn.calls == 1
+    # A known array OID does not need the catalog.
+    known = _Conn()
+    assert annotate_unresolved_pg_types(
+        known, (_col("ia", 1007, None, None),), dialect="postgresql"
+    )[0][1] == 1007
+    assert known.calls == 0
+    # MySQL must not be asked about pg_type.
+    other = _Conn()
+    assert annotate_unresolved_pg_types(
+        other, description, dialect="mysql"
+    ) == description
+    assert other.calls == 0
+
+    class _Down:
+        def execute(self, _sql):
+            raise RuntimeError("catalog unavailable")
+
+    untouched = annotate_unresolved_pg_types(
+        _Down(), description, dialect="postgres"
+    )
+    assert untouched[0][1] == 16421
+    with bind_source_engine("postgresql"):
+        target = create_new_mapping_target_type("ENUM", "mysql", source_db="postgresql")
+    assert "BOOLEAN" not in target.upper()
+    assert "INTERVAL" not in target.upper()

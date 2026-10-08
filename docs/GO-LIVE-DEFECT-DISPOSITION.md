@@ -11,8 +11,8 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 - not fixed: 9
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 75
-- partly fixed in code: 11
+- fixed in code, unit-proven — not a live QA retest: 77
+- partly fixed in code: 9
 
 ## Every row
 
@@ -100,7 +100,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-GCS-DST-CREATE | P2 | OPEN | fixed in code, unit-proven (test_g2_object_store_put_is_not_a_create_table_denial). A gcs, google_cloud_storage, minio, s3, adls, or azure_blob destination with can_write true, can_create_table false, and table_exists false passes G2 and says the missing object is created by PUT. A postgresql destination with the same flags still blocks with CREATE is not proven. Not a live GCS retest. DEF-B-032 fidelity collapse is a different block and is not claimed fixed. |
 | UNNUMBERED (RETEST-R1 case 3.3) | P2 | OPEN | partly fixed in code, unit-proven (test_mysql_timestamp_stamp_stays_timestamp, test_postgres_timestamptz_stays_mysql_datetime). A TIMESTAMP(n) stamp and a bound MySQL source TIMESTAMPTZ compile to TIMESTAMP(6) on MySQL and MariaDB. PostgreSQL TIMESTAMPTZ stays DATETIME(6). The PostgreSQL destination half (source_timezone=UTC also converting DATETIME) is not fixed. Not a live MySQL retest. |
 | DEF-MCP-OUTAGE | P2 | UNCONFIRMED-ENV-DEPLOY | not fixed. Diagnose-only. No code change. |
-| DEF-C-008 | P2 | PARTLY FIXED | partly fixed in code, unit-proven (test_text_bytea_and_uuid_are_not_guessed_from_the_peek, test_declared_decimal_beats_the_sample_envelope). Float, bigint, bytea, uuid, json and a real interval now keep the cursor carrier. Arrays and custom enums have no fixed type code, so the sample remains their owner. Not a live query-mode retest. |
+| DEF-C-008 | P2 | PARTLY FIXED | fixed in code, unit-proven (test_pg_array_oids_stay_arrays_not_the_peek, test_custom_enum_oid_comes_from_the_catalog_not_the_label). Built-in array OIDs keep INTEGER[], VARCHAR[], UUID[], NUMERIC[] and JSON[]. A custom enum OID is read from pg_type after the extract cursor is closed; an enum array is VARCHAR[]. A composite and a failed catalog lookup stay with the sample. Not a live query-mode retest. |
 | DEF-CDC-SLOT-LEAK | P2 | PARTLY FIXED | fixed in code, unit-proven (test_first_batch_failure_releases_the_slot_the_job_never_recorded, test_cancel_before_a_checkpoint_releases_the_named_slot, test_refused_cdc_batch_releases_through_the_shared_helper, test_retriable_failure_keeps_the_slot_for_resume). Slot and publication identity travel on the exception; terminal failures and cancels drop them, retriable failures keep them. The five historical QA slots are not dropped by this change. Not a live Postgres retest. |
 | DEF-C-001 | P2 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-C-006 | P2 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
@@ -132,7 +132,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-MINIO-ALIAS | P3 | OPEN | fixed in code, unit-proven (test_minio_list_uses_the_s3_probe). Those formats list and sample through the S3 probe. Not a live MinIO retest. |
 | GAP-XLS | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-MCP-BQ-FORM | P3 | PARTLY FIXED | fixed in code, unit-proven (test_bigquery_probe_failure_names_the_service_account, test_sql_probe_failure_still_names_host_and_port, test_service_account_camel_case_binds). BigQuery and GCS name the service_account JSON and project id. S3-compatible names the endpoint, bucket, and keys. SQL still names host/port/Railway. Not a live BigQuery retest. |
-| DEF-SPECIALTY-SAMPLE | P3 | PARTLY FIXED | partly fixed in code, unit-proven (test_redis_db_index_is_the_database_not_a_key_prefix, test_redis_inventory_lists_prefixes_not_db0). Redis db0 is the database and the connector lists key prefixes. Kafka sample 0 is not fixed. Not a live retest. |
+| DEF-SPECIALTY-SAMPLE | P3 | PARTLY FIXED | fixed in code, unit-proven (test_redis_db_index_is_the_database_not_a_key_prefix, test_redis_inventory_lists_prefixes_not_db0, test_sample_seeks_the_tail_and_does_not_join_the_group, test_pilot_kafka_sample_uses_the_tail_reader). Redis db0 is the database. A Kafka sample assigns partitions and seeks to the tail without joining the transfer group or committing. Not a live retest. |
 | DEF-ES-PRICE-STRING | P3 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-CSV-TSTZ-OFFSET | P3 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-ES-META-INDEX | n/r | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |

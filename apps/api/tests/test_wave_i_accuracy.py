@@ -205,7 +205,7 @@ def test_kafka_infer_prefers_registry_schema(monkeypatch):
     def _boom(*_a, **_k):
         raise AssertionError("should not poll samples when registry schema resolves")
 
-    monkeypatch.setattr(kr, "read_topic_batch", _boom)
+    monkeypatch.setattr(kr, "sample_topic_batch", _boom)
     schema, native, warning = kr.infer_topic_schema(
         {"schema_registry_url": "http://registry", "host": "localhost"},
         "orders",

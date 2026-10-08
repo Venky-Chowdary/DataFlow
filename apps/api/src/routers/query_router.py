@@ -757,6 +757,17 @@ def _run_sql_query(connector, body):
                 if i >= body.limit:
                     break
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
+            try:
+                result.close()
+            except Exception:
+                pass
+            # Name custom enums after the result is closed. A pg_type
+            # lookup on the open cursor cancels the extract.
+            from services.decimal_observe import annotate_unresolved_pg_types
+
+            description = annotate_unresolved_pg_types(
+                conn, description, dialect=str(connector.type or "")
+            )
         schema = _column_schema(columns, rows)
         from services.decimal_observe import cursor_declared_carriers
 

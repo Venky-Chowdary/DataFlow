@@ -1186,6 +1186,15 @@ def _execute_live(
         cap = int(limit) if limit is not None else None
         fetched = result.fetchmany(cap) if cap is not None else result.fetchall()
         rows = [[_cell(v) for v in row] for row in fetched]
+        # The type lookup is a second statement. Close the extract first, or
+        # PostgreSQL rejects it while that cursor is still open.
+        try:
+            result.close()
+        except Exception:
+            pass
+        description = _describe_resolved(
+            conn, description, spec.dialect or str(cfg.get("type") or "")
+        )
     except ProcedureSourceError:
         raise
     except Exception as exc:
@@ -1236,6 +1245,13 @@ def _execute_to_jsonl(
                     )
                     fh.write("\n")
                     total += 1
+        try:
+            result.close()
+        except Exception:
+            pass
+        description = _describe_resolved(
+            conn, description, spec.dialect or str(cfg.get("type") or "")
+        )
     except ProcedureSourceError:
         raise
     except Exception as exc:
@@ -1249,6 +1265,17 @@ def _execute_to_jsonl(
     schema, _intel = peek_callable_schema(headers, sample)
     schema = _overlay_declared_numerics(headers, description, schema)
     return headers, total, schema
+
+
+def _describe_resolved(conn: Any, description: tuple | None, dialect: str) -> tuple | None:
+    """Name custom enum and array OIDs from pg_type while the connection is open.
+
+    Call this only after the extract result has been consumed. A second
+    statement on a live PostgreSQL cursor cancels that result.
+    """
+    from services.decimal_observe import annotate_unresolved_pg_types
+
+    return annotate_unresolved_pg_types(conn, description, dialect=dialect)
 
 
 def _copy_cursor_description(result: Any) -> tuple | None:
