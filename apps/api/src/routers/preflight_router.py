@@ -768,11 +768,12 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
                     [("" if row.get(h) is None else str(row.get(h))) for h in headers]
                     for row in (image.sample_rows or [])
                 ]
-            file_source = resolve_preflight_source_kind(
+            resolved_kind = resolve_preflight_source_kind(
                 body.source_kind,
                 source_connector_id=getattr(body, "source_connector_id", None),
                 source_file_id=getattr(body, "source_file_id", None),
-            ) == "file"
+            )
+            file_source = resolved_kind == "file"
             result = _preview(
                 headers=headers,
                 sample_rows=rows,
@@ -780,6 +781,7 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
                 column_types=column_types,
                 sample_size=body.sample_size,
                 empty_cells_as_null=file_source,
+                database_extract=resolved_kind == "database",
             )
             if image.applied:
                 result["transform_image"] = {

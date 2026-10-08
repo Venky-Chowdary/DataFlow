@@ -86,31 +86,27 @@ def _create_new_row(inferred_type: str) -> dict:
 
 
 def test_mapping_pipeline_stamps_create_new_type_risks():
-    # Nanosecond source into MySQL's 6-digit carrier — the truncation is real.
+    # Nanoseconds above MySQL's microsecond ceiling are unavoidable. They must
+    # not demand a Risk Contract, and the carrier must not be the 2038-capped
+    # TIMESTAMP(6).
     row = _create_new_row("TIMESTAMPTZ(9)")
-    risks = row.get("create_new_risks") or []
-    assert risks, (
-        f"expected create_new_risks for TIMESTAMPTZ(9)→MySQL TIMESTAMP(6), got {row}"
-    )
-    assert row.get("requires_review") is True
-    kinds = {r.get("kind") for r in risks}
-    assert kinds & {
-        "timezone_polarity",
-        "lossy_coercion",
-        "precision_collapse",
+    assert row["target_type"].upper().startswith("DATETIME(6)"), row["target_type"]
+    assert row.get("requires_risk_contract") is False
+    assert "instant_range_cap" not in {
+        r.get("kind") for r in (row.get("create_new_risks") or [])
     }
 
 
 def test_mapping_pipeline_keeps_the_instant_carrier_without_a_contract():
-    """MySQL ``TIMESTAMP(6)`` keeps the instant — its 2038 ceiling is the only cost.
+    """PostgreSQL TIMESTAMPTZ create-new on MySQL is DATETIME(6).
 
-    Polarity and precision survive, so no Risk Contract is demanded. The carrier
-    still holds only 1970..2038 of the source's range, which is a review chip
-    rather than the silence that let out-of-range rows fail at the write.
+    TIMESTAMP(6) would refuse every instant outside 1970..2038. DATETIME(6)
+    stores the UTC-normalized clock, so the route does not demand a Risk
+    Contract and does not warn about the epoch ceiling.
     """
     row = _create_new_row("TIMESTAMPTZ")
-    assert row["target_type"].upper().startswith("TIMESTAMP(6)"), row["target_type"]
-    assert {r.get("kind") for r in row.get("create_new_risks") or []} == {
-        "instant_range_cap"
+    assert row["target_type"].upper().startswith("DATETIME(6)"), row["target_type"]
+    assert "instant_range_cap" not in {
+        r.get("kind") for r in row.get("create_new_risks") or []
     }
     assert row.get("requires_risk_contract") is False

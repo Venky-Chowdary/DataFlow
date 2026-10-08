@@ -3026,13 +3026,13 @@ _TZ_AWARE_DDL: Final[dict[str, str]] = {
     "postgresql": "TIMESTAMPTZ",
     "redshift": "TIMESTAMPTZ",
     "snowflake": "TIMESTAMP_TZ",
-    # MySQL TIMESTAMP(6) stores UTC and converts on read, so an aware source
-    # keeps its instant in a self-describing carrier. DATETIME(6) would hold the
-    # same digits with no polarity marker — instant only by convention, which is
-    # why that carrier needs a UTC-normalize contract (services.timezone_policy).
-    # TIMESTAMP is epoch-bounded (1970..2038); out-of-range instants are caught
-    # at Validate and quarantined at write, never silently zeroed.
-    "mysql": "TIMESTAMP(6)",
+    # Cross-engine aware instants land on DATETIME(6). MySQL TIMESTAMP is
+    # epoch-bounded (1970-01-01 .. 2038-01-19); a PostgreSQL TIMESTAMPTZ
+    # outside that window cannot be cast, and the route blocks. DATETIME(6)
+    # holds 1000..9999. Writers pin time_zone to +00:00 and store the
+    # UTC-normalized clock, so the instant survives. A MySQL source's own
+    # TIMESTAMP still round-trips via ``_aware_ddl_for_dest``.
+    "mysql": "DATETIME(6)",
     "sqlserver": "DATETIMEOFFSET",
     "oracle": "TIMESTAMP WITH TIME ZONE",
     "bigquery": "TIMESTAMP",
@@ -3187,11 +3187,9 @@ _TZ_LTZ_DDL: Final[dict[str, str]] = {
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
     "sqlserver": "DATETIMEOFFSET",
-    # MySQL is deliberately absent so this falls through to _TZ_AWARE_DDL.
-    # A session-relative instant (PostgreSQL TIMESTAMPTZ, Snowflake
-    # TIMESTAMP_LTZ) is exactly what MySQL TIMESTAMP is: UTC on disk, converted
-    # with the session time_zone, no offset label on either side. See
-    # _TZ_AWARE_DDL for why TIMESTAMP(6) rather than DATETIME(6).
+    # MySQL is deliberately absent so this falls through to
+    # ``_aware_ddl_for_dest`` / ``_TZ_AWARE_DDL`` (DATETIME(6), or
+    # TIMESTAMP(6) when the source engine is MySQL itself).
     "bigquery": "TIMESTAMP",
     "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
@@ -3207,14 +3205,10 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
     "sqlserver": "DATETIMEOFFSET",
-    # MySQL is deliberately absent so this falls through to _TZ_AWARE_DDL.
-    # MySQL has no offset-label carrier, so the label is unstorable either way
-    # and the only open question is which carrier keeps the *instant*. That
-    # answer belongs in one place (_TZ_AWARE_DDL: TIMESTAMP(6)). Naming
-    # DATETIME(6) here chose the strictly worse of the two — same digits, no
-    # polarity marker, instant recoverable only by writer convention — which
-    # made every aware→MySQL create-new demand a UTC-normalize contract for a
-    # route that needs none.
+    # MySQL is deliberately absent so this falls through to
+    # ``_aware_ddl_for_dest``. MySQL stores no originating offset on either
+    # TIMESTAMP or DATETIME. DATETIME(6) keeps instants outside 1970..2038;
+    # the writer UTC-normalizes before bind.
     "bigquery": "TIMESTAMP",
     "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
@@ -3358,6 +3352,22 @@ def _clickhouse_native_datetime_ddl(inferred: str | None) -> str | None:
     return None
 
 
+def _aware_ddl_for_dest(db: str) -> str | None:
+    """MySQL carrier for an aware source instant.
+
+    ``TIMESTAMP(6)`` is a real instant column and the right round-trip when
+    the source is MySQL's own TIMESTAMP (introspected as TIMESTAMPTZ). It
+    cannot hold a PostgreSQL timestamptz outside 1970..2038, so every other
+    source — including an unbound engine — lands on ``DATETIME(6)``. The
+    write path UTC-normalizes the offset into that wall clock.
+    """
+    if db != "mysql":
+        return None
+    if _normalize_dest_db(active_source_engine()) == "mysql":
+        return "TIMESTAMP(6)"
+    return "DATETIME(6)"
+
+
 def _datetime_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     """Return TZ-aware or NTZ DDL when source polarity is knowable; else None.
 
@@ -3382,13 +3392,15 @@ def _datetime_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     base: str | None = None
     if polarity == "ltz":
         base = (
-            _TZ_LTZ_DDL.get(db)
+            _aware_ddl_for_dest(db)
+            or _TZ_LTZ_DDL.get(db)
             or _TZ_AWARE_DDL.get(db)
             or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
         )
     elif polarity == "tz":
         base = (
-            _TZ_OFFSET_DDL.get(db)
+            _aware_ddl_for_dest(db)
+            or _TZ_OFFSET_DDL.get(db)
             or _TZ_AWARE_DDL.get(db)
             or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
         )
@@ -3759,6 +3771,16 @@ def is_timezone_polarity_loss(
     src = datetime_timezone_polarity(source_type)
     tgt = datetime_timezone_polarity(target_type, dest_db=dest_db)
     if src in {"tz", "ltz"} and tgt == "ntz":
+        # MySQL DATETIME(6) is the unbounded stand-in for a session-relative
+        # instant. The writer converts to UTC, then stores the clock;
+        # TIMESTAMP(6) would preserve the token and drop every year outside
+        # 1970..2038. An offset-pinned source (tz) still loses its label.
+        if (
+            src == "ltz"
+            and dest_db == "mysql"
+            and _bare_type_token(target_type) == "DATETIME"
+        ):
+            return False
         return True
     # Naive / NTZ → TZ-aware invents an instant (UTC stamp) — fail-closed.
     if src == "ntz" and tgt in {"tz", "ltz"}:
@@ -3812,6 +3834,11 @@ def is_dest_instant_carrier_spelling(stamped: str, *, dest_db: str = "") -> bool
     # DATETIMEOFFSET, and a source TIMESTAMPTZ must keep being reinvented.
     if db == "mysql" and bare.startswith("TIMESTAMPTZ"):
         return datetime_timezone_polarity(stamped, dest_db=db) in {"tz", "ltz"}
+    # Physical TIMESTAMP(p) remains MySQL's own instant column even when
+    # create-new from PostgreSQL now stamps DATETIME(6). A second invent pass
+    # must not retarget that column.
+    if db == "mysql" and bare == "TIMESTAMP":
+        return True
     return False
 
 

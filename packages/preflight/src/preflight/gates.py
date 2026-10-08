@@ -2265,8 +2265,11 @@ def _spreadsheet_blank_is_sql_null(
     G5 already clears those blanks when the destination is not proven NOT NULL.
     G8 used to keep the coerce error and fail the load with zero rows written.
     """
-    if not bool(getattr(ctx, "empty_cells_as_null", False)):
-        return False
+    # File blanks opt in. A numeric/temporal/boolean/uuid/binary extract
+    # cannot store ""; that blank is a flattened SQL NULL even when the
+    # file flag is off. The shared contract refuses proven NOT NULL and
+    # refuses a text column's stored empty string.
+    file_blank = bool(getattr(ctx, "empty_cells_as_null", False))
     try:
         from services.transform_engine import _blank_is_nullable_absence
     except Exception:
@@ -2278,10 +2281,12 @@ def _spreadsheet_blank_is_sql_null(
         for col in dest_cols
         if getattr(col, "name", None)
     }
+    source_col = _source_column(ctx, str(getattr(mapping, "source", "") or ""))
     mapping_dict: dict[str, Any] = {
         "source": getattr(mapping, "source", ""),
         "target": target,
         "create_new": bool(getattr(mapping, "create_new", False)),
+        "source_type": str(getattr(source_col, "inferred_type", "") or ""),
     }
     dest_col = next(
         (
@@ -2297,8 +2302,11 @@ def _spreadsheet_blank_is_sql_null(
         raw,
         err,
         mapping_dict,
-        empty_cells_as_null=True,
+        empty_cells_as_null=file_blank,
         dest_nullability=dest_nullability,
+        database_extract=str(getattr(ctx.plan.source, "kind", "") or "").lower()
+        == "database",
+        source_type=str(mapping_dict.get("source_type") or ""),
     )
 
 

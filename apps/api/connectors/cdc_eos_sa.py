@@ -579,6 +579,32 @@ def _sa_load_dest_rows(
     return out
 
 
+def _coerce_eos_row(
+    values: dict[str, Any],
+    logical_by: dict[str, str],
+    dialect: str,
+) -> dict[str, Any]:
+    """Bind each cell with the destination DDL the CREATE used.
+
+    pgoutput emits ``2026-10-08 00:26:39.458238+00``. A temporal MySQL column
+    rejects that literal (1292). ``normalize_sql_bind_value`` turns it into
+    naive UTC when the planned type is temporal, and leaves a real text
+    column that stores an offset string untouched.
+    """
+    from connectors.sql_bind import normalize_sql_bind_value
+    from services.type_system import materialize_dest_ddl
+
+    out: dict[str, Any] = {}
+    for col, raw in values.items():
+        logical = str((logical_by or {}).get(col) or "")
+        ddl = materialize_dest_ddl(dialect, logical) if logical else ""
+        if not ddl:
+            out[col] = raw
+            continue
+        out[col] = normalize_sql_bind_value(raw, ddl, engine=dialect)
+    return out
+
+
 def _row_values(
     rec: dict[str, Any],
     target_cols: list[str],
@@ -757,7 +783,7 @@ def _sa_apply_member(
 ) -> EosApplyResult:
     from services.cdc_snapshot_window import _pk_row_dict
 
-    mappings, column_types, target_cols, _logical_by = _eos_write_shape(
+    mappings, column_types, target_cols, logical_by = _eos_write_shape(
         dialect, mappings, column_types
     )
     if not pk_target_cols:
@@ -886,7 +912,11 @@ def _sa_apply_member(
             incoming_lsn=incoming_lsn,
         )
     for rec in records:
-        values = _row_values(rec, target_cols, tgt_to_src, incoming_lsn)
+        values = _coerce_eos_row(
+            _row_values(rec, target_cols, tgt_to_src, incoming_lsn),
+            logical_by,
+            dialect,
+        )
         rows_written += _upsert_row(
             conn, table_q, target_cols, pk_target_cols, values, dialect
         )

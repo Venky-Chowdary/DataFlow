@@ -1624,8 +1624,10 @@ def build_mapped_rows_with_details(
 
     ``empty_cells_as_null`` (file/Excel/CSV sources): blank cells into nullable
     typed columns become SQL NULL — spreadsheet absence, not silent loss of a
-    present value. NOT NULL destinations still fail/quarantine. DB→DB empty
-    strings keep requiring a Risk Contract unless this flag is set.
+    present value. A numeric, temporal, boolean, uuid, or binary source cannot
+    store ``""``; that blank is a flattened SQL NULL on a nullable destination
+    even when the flag is off. NOT NULL destinations still fail/quarantine.
+    A text column's empty string stays a stored value.
     """
     from services.json_intelligence import materialize_struct_policies
 
@@ -3207,6 +3209,21 @@ def _mysql_timestamp_range_violation(
     return mysql_timestamp_out_of_range(value)
 
 
+def _mysql_datetime_utc_normalizes(typ: str, dest_db: str) -> bool:
+    """True when MySQL DATETIME will store the UTC clock, not strip an offset.
+
+    ``coerce_sql_temporal`` converts an aware wire to naive UTC before bind
+    and the session ``time_zone`` is pinned to ``+00:00``. Quarantining that
+    wire as an NTZ strip held out every timestamptz row the column can hold.
+    """
+    from connectors.sql_temporal import sql_base_type
+    from services.dest_dialect_facts import _normalize_dest_db
+
+    if _normalize_dest_db(dest_db) != "mysql":
+        return False
+    return sql_base_type(typ) == "DATETIME"
+
+
 def quarantine_unfit_temporals(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -3246,6 +3263,7 @@ def quarantine_unfit_temporals(
         check_tz = (
             logical == "datetime"
             and datetime_timezone_polarity(typ, dest_db=dest_db) == "ntz"
+            and not _mysql_datetime_utc_normalizes(typ, dest_db)
         )
         # Always include temporal columns so empty refuse runs even without FSP/TZ.
         temporal_cols.append((i, typ, check_fsp, check_tz))

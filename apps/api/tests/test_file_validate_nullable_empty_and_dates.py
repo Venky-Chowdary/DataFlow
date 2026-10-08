@@ -321,8 +321,8 @@ def test_connector_cannot_claim_the_file_blank_rule():
     assert resolve_preflight_source_kind("file") == "file"
 
 
-def test_database_blank_integer_still_blocks_and_is_not_called_collapse():
-    """DB extracts do not turn '' into NULL. The block is nullability, not fidelity."""
+def test_database_nullable_integer_blank_is_sql_null_not_collapse():
+    """A database INTEGER cannot store "". The blank is SQL NULL, not a cast."""
     from services.preflight_service import run_file_preflight
 
     result = run_file_preflight(
@@ -357,12 +357,14 @@ def test_database_blank_integer_still_blocks_and_is_not_called_collapse():
         for g in result.get("gates") or []
         if str(g.get("status") or "").lower() in {"block", "fail", "blocked"}
     )
-    assert "cannot coerce" in blob.lower() or "empty" in blob.lower(), blob
+    assert "cannot coerce" not in blob.lower(), blob
+    assert "empty value" not in blob.lower(), blob
     kinds = [
         r.get("kind") if isinstance(r, dict) else getattr(r, "kind", "")
         for r in (result.get("root_causes") or [])
     ]
     assert "fidelity_collapse" not in kinds, result.get("root_causes")
+    assert "sample_transform" not in kinds, result.get("root_causes")
 
 
 def _phone_rows():
@@ -455,14 +457,15 @@ def test_not_null_phone_blanks_are_inspectable_quarantine_rows():
     assert quarantine_rows_from_preflight({"gates": [], "blockers": []}) == []
 
 
-def test_database_integer_blank_still_blocks_after_gate8_file_contract():
+def test_database_nullable_integer_blank_passes_gate8():
     result = _run_phone_preflight(source_kind="database", nullable=True, table_exists=False)
     blob = " ".join(
         str(g.get("message") or "")
         for g in result.get("gates") or []
         if str(g.get("status") or "").lower() in {"block", "fail", "blocked"}
     )
-    assert "cannot coerce" in blob.lower() or "empty" in blob.lower(), blob
+    assert "cannot coerce" not in blob.lower(), blob
+    assert "empty value" not in blob.lower(), blob
 
 
 def test_empty_cell_g3_block_is_not_a_fidelity_root():

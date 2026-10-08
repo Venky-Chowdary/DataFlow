@@ -684,8 +684,18 @@ def run_mapping_pipeline(
 
     if source_samples and source_columns:
         from services.data_profiler import merge_profiler_schema, profile_dataset
-        from services.value_serializer import evidence_samples
+        from services.value_serializer import evidence_samples, is_null_evidence
 
+        # Type evidence must drop NULL (a sentinel is not a VARCHAR token).
+        # The column profile must not: stripping first reported null_rate=0.0
+        # on a column that held seven SQL NULLs.
+        observed_null_rate: dict[str, float] = {}
+        for col, vals in source_samples.items():
+            seq = list(vals or [])
+            if not seq:
+                continue
+            empty = sum(1 for v in seq if is_null_evidence(v))
+            observed_null_rate[col] = round(empty / len(seq), 3)
         source_samples = {
             col: evidence_samples(vals) for col, vals in source_samples.items()
         }
@@ -734,11 +744,21 @@ def run_mapping_pipeline(
                     **s,
                     "inferred_type": merged_schema.get(s["name"], s.get("inferred_type", "VARCHAR")),
                     "samples": source_samples.get(s["name"], s.get("samples", []))[:8],
-                    "null_rate": (col_profiles.get(s["name"]) or {}).get("null_rate"),
+                    "null_rate": observed_null_rate.get(
+                        s["name"],
+                        (col_profiles.get(s["name"]) or {}).get("null_rate"),
+                    ),
                     "distinct_ratio": (col_profiles.get(s["name"]) or {}).get("distinct_ratio"),
                     "statistics": (col_profiles.get(s["name"]) or {}).get("statistics") or {},
                 }
                 for s in (source_schemas or [{"name": c, "inferred_type": "VARCHAR", "samples": []} for c in source_columns])
+            ]
+        elif observed_null_rate and source_schemas:
+            # Every sampled cell was NULL. There is no type evidence, but the
+            # profile must still say the column is entirely null.
+            source_schemas = [
+                {**s, "null_rate": observed_null_rate.get(s["name"], s.get("null_rate"))}
+                for s in source_schemas
             ]
 
     semantic_analysis = analyze_schema(source_schemas or [])

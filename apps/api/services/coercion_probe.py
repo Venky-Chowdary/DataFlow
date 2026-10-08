@@ -331,6 +331,7 @@ def analyze_coercion(
     validation_mode: str = "strict",
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
 ) -> dict[str, Any]:
     """Predict per-value write coercion for each mapping against sampled rows.
 
@@ -628,20 +629,25 @@ def analyze_coercion(
                     ):
                         # File/Excel blanks are absence. The writer stores SQL NULL
                         # on a nullable typed column (``empty_cells_as_null``).
-                        # Counting them as cast failures made INTEGER→BIGINT look
-                        # like a fidelity collapse and locked Execute on CREATE.
+                        # A numeric/temporal/boolean/uuid/binary extract cannot
+                        # store ""; that blank is a flattened SQL NULL and must
+                        # not block overwrite, including lenient mode.
                         # Proven NOT NULL and unknown physical DDL stay blocked.
-                        # DB→DB keeps the flag off — do not invent NULL there.
-                        from services.blank_cell_contract import typed_blank_stores_sql_null
+                        # A text column's empty string stays a stored value.
+                        from services.blank_cell_contract import (
+                            nullable_typed_blank_is_absence,
+                        )
 
                         if (
                             not unknown_physical
-                            and typed_blank_stores_sql_null(
+                            and nullable_typed_blank_is_absence(
                                 cell,
                                 m,
                                 tgt_name,
                                 empty_cells_as_null=empty_cells_as_null,
                                 dest_nullability=dest_nullability,
+                                source_type=src_type,
+                                database_extract=database_extract,
                             )
                         ):
                             nulls += 1

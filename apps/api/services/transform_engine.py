@@ -2173,11 +2173,14 @@ def _blank_is_nullable_absence(
     *,
     empty_cells_as_null: bool,
     dest_nullability: dict[str, bool] | None,
+    database_extract: bool = False,
+    source_type: str = "",
 ) -> bool:
-    """Spreadsheet blank → SQL NULL on a nullable typed column.
+    """Blank → SQL NULL on a nullable typed column.
 
-    Same contract as the file writer (``empty_cells_as_null``). A proven NOT
-    NULL destination still fails. DB→DB keeps the flag off.
+    File blanks use ``empty_cells_as_null``. A database carrier that cannot
+    store ``""`` is a flattened SQL NULL. A proven NOT NULL destination still
+    fails. A text empty string stays stored.
     """
     from services.blank_cell_contract import blank_typed_cell_is_sql_null
 
@@ -2187,6 +2190,8 @@ def _blank_is_nullable_absence(
         mapping,
         empty_cells_as_null=empty_cells_as_null,
         dest_nullability=dest_nullability,
+        database_extract=database_extract,
+        source_type=source_type,
     )
 
 
@@ -2200,6 +2205,7 @@ def dry_run_sample(
     max_errors_per_mapping: int = 5,
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
 ) -> tuple[bool, list[str]]:
     """Apply write-path transforms to the sample window.
 
@@ -2231,6 +2237,7 @@ def dry_run_sample(
         empty_cells_as_null=empty_cells_as_null,
         dest_nullability=dest_nullability,
         dest_types=dest_types,
+        database_extract=database_extract,
     )
 
 
@@ -2245,6 +2252,7 @@ def _dry_run_sample_body(
     empty_cells_as_null: bool,
     dest_nullability: dict[str, bool] | None,
     dest_types: dict[str, str],
+    database_extract: bool = False,
 ) -> tuple[bool, list[str]]:
     from services.column_case import header_index
     from services.transform_resolver import resolve_transform
@@ -2279,6 +2287,8 @@ def _dry_run_sample_body(
                     m,
                     empty_cells_as_null=empty_cells_as_null,
                     dest_nullability=dest_nullability,
+                    database_extract=database_extract,
+                    source_type=str(column_types.get(m["source"]) or ""),
                 ):
                     err = None
                 if err:
@@ -2310,6 +2320,7 @@ def preview_quarantine_cells(
     max_cells: int = 120,
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
 ) -> dict:
     """Cell-level preview: which sample values will quarantine / coerce before run.
 
@@ -2354,6 +2365,8 @@ def preview_quarantine_cells(
                     m,
                     empty_cells_as_null=empty_cells_as_null,
                     dest_nullability=dest_nullability,
+                    database_extract=database_extract,
+                    source_type=str((column_types or {}).get(src) or ""),
                 ):
                     out, err = None, None
                 if err:

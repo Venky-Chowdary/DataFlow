@@ -538,3 +538,76 @@ def test_missing_identity_column_does_not_audit_another_column(monkeypatch) -> N
     )
     assert report.issues == []
     assert any("not in this batch" in w for w in report.warnings)
+
+
+def test_sqlserver_nvarchar_max_holds_unicode_varchar_does_not() -> None:
+    from services.encoding_capacity import classify_capacity, quarantine_unfit_encoding
+    from services.schema_introspect import _sqlserver_to_logical
+
+    national = _sqlserver_to_logical("nvarchar")
+    unbounded = _sqlserver_to_logical("nvarchar(max)")
+    assert national == "NVARCHAR"
+    assert unbounded == "NVARCHAR(MAX)"
+    assert classify_capacity("sqlserver", national).form == "utf16"
+    assert classify_capacity("sqlserver", unbounded).form == "utf16"
+    assert classify_capacity("sqlserver", "VARCHAR(MAX)").form == "cp1252"
+    names = [("山田太郎",), ("Łukasz",)]
+    kept_national = quarantine_unfit_encoding(
+        names, ["name"], [unbounded], [], "quarantine", dest_db="sqlserver"
+    )
+    assert kept_national == names
+    rejected: list[dict] = []
+    kept_varchar = quarantine_unfit_encoding(
+        names, ["name"], ["VARCHAR(100)"], rejected, "quarantine", dest_db="sqlserver"
+    )
+    assert kept_varchar == []
+    assert any("U+90CE" in str(d.get("reason")) for d in rejected)
+    assert any("U+0141" in str(d.get("reason")) for d in rejected)
+
+
+def test_pg_timestamptz_mysql_create_new_is_datetime6_and_binds() -> None:
+    from connectors.cdc_eos_sa import _coerce_eos_row
+    from connectors.sql_temporal import coerce_sql_temporal
+    from connectors.writer_common import quarantine_unfit_temporals
+    from services.source_engine_scope import bind_source_engine
+    from services.type_system import (
+        ddl_type,
+        is_lossy_coercion,
+        is_timezone_polarity_loss,
+        materialize_dest_ddl,
+    )
+
+    wire = "2026-10-08 00:26:39.458238+00"
+    early = "1900-01-01 00:00:00+00"
+    late = "2100-01-01 00:00:00+00"
+    with bind_source_engine("postgresql"):
+        assert ddl_type("mysql", "TIMESTAMPTZ") == "DATETIME(6)"
+    with bind_source_engine("mysql"):
+        assert ddl_type("mysql", "TIMESTAMPTZ") == "TIMESTAMP(6)"
+    assert is_timezone_polarity_loss(
+        "TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql"
+    ) is False
+    assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is False
+    for raw in (wire, early, late):
+        bound = coerce_sql_temporal(raw, "DATETIME(6)", engine="mysql")
+        assert isinstance(bound, datetime) and bound.tzinfo is None
+    with pytest.raises(ValueError):
+        coerce_sql_temporal(early, "TIMESTAMP(6)", engine="mysql")
+    held = quarantine_unfit_temporals(
+        [(wire,), (early,)],
+        ["updated_at"],
+        ["DATETIME(6)"],
+        [],
+        "quarantine",
+        dest_db="mysql",
+    )
+    assert len(held) == 2
+    row = _coerce_eos_row(
+        {"updated_at": wire, "note": wire},
+        {"updated_at": "TIMESTAMPTZ", "note": "TEXT"},
+        "mysql",
+    )
+    assert row["updated_at"] == datetime(2026, 10, 8, 0, 26, 39, 458238)
+    assert row["updated_at"].tzinfo is None
+    assert row["note"] == wire
+    assert materialize_dest_ddl("mysql", "TEXT").upper() in {"TEXT", "LONGTEXT", "MEDIUMTEXT"}

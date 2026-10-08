@@ -194,7 +194,15 @@ class FilePreflightContext(PreflightContext):
         # stays the missing sentinel rather than an empty string the typed
         # transforms would reject as a cast failure.
         scanned = self.sample_rows[:sample_size]
-        rows = [project_row_cells(row, headers) for row in scanned]
+        # A database NULL is None or the reader sentinel. Flattening it to ""
+        # made G5 report EMPTY_VALUE_NOT_NULLABLE on nullable amount/ts.
+        database_extract = (
+            str(getattr(self.plan.source, "kind", "") or "").lower() == "database"
+        )
+        rows = [
+            project_row_cells(row, headers, preserve_sql_null=database_extract)
+            for row in scanned
+        ]
         self._last_dry_run_meta = {
             "sample_rows_scanned": len(scanned),
             "sample_rows_available": len(self.sample_rows),
@@ -219,6 +227,7 @@ class FilePreflightContext(PreflightContext):
                 column_types=column_types,
                 empty_cells_as_null=self.empty_cells_as_null,
                 dest_nullability=self._dest_nullability(),
+                database_extract=database_extract,
             )
         except Exception as exc:
             logger.debug("dry-run sample failed: %s", exc, exc_info=exc)
@@ -271,6 +280,10 @@ class FilePreflightContext(PreflightContext):
                 validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
                 empty_cells_as_null=self.empty_cells_as_null,
                 dest_nullability=self._dest_nullability(),
+                database_extract=str(
+                    getattr(self.plan.source, "kind", "") or ""
+                ).lower()
+                == "database",
             )
             if isinstance(report, dict):
                 from services.validation_coverage import stamp_validation_coverage
@@ -432,6 +445,8 @@ class FilePreflightContext(PreflightContext):
             dest_table_exists=getattr(self.plan.destination, "table_exists", None),
             empty_cells_as_null=self.empty_cells_as_null,
             dest_nullability=self._dest_nullability(),
+            database_extract=str(getattr(self.plan.source, "kind", "") or "").lower()
+            == "database",
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
         try:

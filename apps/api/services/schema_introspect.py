@@ -2500,12 +2500,24 @@ def _sqlserver_to_logical(dtype: str) -> str:
         if base.startswith("n"):
             return f"N{'CHAR' if 'char' in base and 'varchar' not in base else 'VARCHAR'}({width})"
         return f"{'CHAR' if base == 'char' else 'VARCHAR'}({width})"
-    if d in {"text", "ntext"} or "(max)" in d:
+    # National (max) is UTF-16. Code-page (max) stays TEXT. Bare ``nvarchar``
+    # must be decided before any substring test: ``"varchar" in "nvarchar"``
+    # is true, and that misread NVARCHAR(MAX) as VARCHAR, then cp1252, and
+    # quarantined 山田 / Łukasz on a column that holds them.
+    if d in {"ntext", "sysname"} or (
+        d.startswith("n") and "(max)" in d and "char" in d
+    ):
+        return "NVARCHAR(MAX)" if d != "sysname" else "NVARCHAR"
+    if d in {"text"} or ("(max)" in d and not d.startswith("n")):
         return "TEXT"
-    if any(tok in d for tok in ("nvarchar", "varchar", "nchar", "char", "sysname")):
-        if "char" in d and "varchar" not in d:
-            return "CHAR"
+    if d in {"nvarchar"}:
+        return "NVARCHAR"
+    if d == "nchar":
+        return "NCHAR"
+    if d == "varchar":
         return "VARCHAR"
+    if d == "char":
+        return "CHAR"
     return "TEXT"
 
 
@@ -2938,13 +2950,24 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                         dtype = f"{base}({int(precision)},{int(scale)})"
                     else:
                         dtype = f"{base}({int(precision)})"
-                elif (
-                    base in {"varchar", "nvarchar", "char", "nchar", "binary", "varbinary"}
-                    and char_len is not None
-                    and int(char_len) > 0
-                ):
-                    # -1 means MAX — leave unbounded (logical TEXT/BINARY via mapper).
-                    dtype = f"{base}({int(char_len)})"
+                elif base in {
+                    "varchar",
+                    "nvarchar",
+                    "char",
+                    "nchar",
+                    "binary",
+                    "varbinary",
+                } and char_len is not None:
+                    # -1 is (max). Leaving the bare token made nvarchar(max)
+                    # look like VARCHAR and dropped national characters.
+                    try:
+                        width = int(char_len)
+                    except (TypeError, ValueError):
+                        width = 0
+                    if width < 0:
+                        dtype = f"{base}(max)"
+                    elif width > 0:
+                        dtype = f"{base}({width})"
                 elif base in {"time", "datetime2", "datetimeoffset"} and dt_prec is not None:
                     dtype = f"{base}({int(dt_prec)})"
                 logical = _sqlserver_to_logical(dtype)

@@ -191,7 +191,14 @@ def _sample_batch_source(
 
 
 def _is_nullish(v: Any) -> bool:
-    return v is None or v == ""
+    """Reader NULL, sentinel, and blank. ``0`` and ``False`` stay present.
+
+    ``__DF_SQL_NULL__`` used to look like a value, so a column with seven
+    SQL NULLs profiled at null_rate 0.0.
+    """
+    from services.value_serializer import is_null_evidence
+
+    return is_null_evidence(v)
 
 
 def _try_float(v: Any) -> Decimal | None:

@@ -177,8 +177,8 @@ def test_g8_sparse_missing_is_not_an_empty_typed_cell() -> None:
     assert "Empty value" not in (result.message or "")
 
 
-def test_g8_real_empty_string_on_a_typed_column_still_blocks() -> None:
-    """A stored empty string is not absence. Database extracts do not invent NULL."""
+def test_g8_numeric_blank_on_a_database_extract_is_sql_null() -> None:
+    """A DECIMAL column cannot store "". That blank is a flattened SQL NULL."""
     from preflight.gates import gate_g8_reconciliation
     from preflight.models import GateStatus
 
@@ -193,7 +193,9 @@ def test_g8_real_empty_string_on_a_typed_column_still_blocks() -> None:
             db_type="snowflake",
             connected=True,
             table_exists=False,
-            target_columns=[ColumnSchema(name="balance", inferred_type="NUMBER(38,10)")],
+            target_columns=[
+                ColumnSchema(name="balance", inferred_type="NUMBER(38,10)", nullable=True)
+            ],
         ),
         mappings=[
             ColumnMapping(source="balance", target="balance", confidence=0.99, transform="decimal"),
@@ -201,6 +203,37 @@ def test_g8_real_empty_string_on_a_typed_column_still_blocks() -> None:
     )
     result = gate_g8_reconciliation(
         PreflightContext(plan=plan, sample_rows=[{"balance": ""}])
+    )
+    assert result.status == GateStatus.PASS, result.message
+    assert "Empty value cannot coerce" not in (result.message or "")
+
+
+def test_g8_text_empty_string_into_a_typed_column_still_blocks() -> None:
+    """A VARCHAR empty string is a stored value. Do not invent NULL from it."""
+    from preflight.gates import gate_g8_reconciliation
+    from preflight.models import GateStatus
+
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="database",
+            connected=True,
+            columns=[ColumnSchema(name="note", inferred_type="VARCHAR")],
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            db_type="postgresql",
+            connected=True,
+            table_exists=True,
+            target_columns=[
+                ColumnSchema(name="note", inferred_type="INTEGER", nullable=True)
+            ],
+        ),
+        mappings=[
+            ColumnMapping(source="note", target="note", confidence=0.99, transform="integer"),
+        ],
+    )
+    result = gate_g8_reconciliation(
+        PreflightContext(plan=plan, sample_rows=[{"note": ""}])
     )
     assert result.status == GateStatus.BLOCK
     assert "Empty value cannot coerce" in (result.message or "")

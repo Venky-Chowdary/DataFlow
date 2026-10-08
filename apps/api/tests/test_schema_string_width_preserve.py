@@ -44,7 +44,10 @@ def test_sqlserver_preserves_varchar_and_nvarchar_width():
     assert _sqlserver_to_logical("char(5)") == "CHAR(5)"
     assert _sqlserver_to_logical("nchar(8)") == "NCHAR(8)"
     assert _sqlserver_to_logical("varchar(max)") == "TEXT"
-    assert _sqlserver_to_logical("nvarchar(max)") == "TEXT"
+    assert _sqlserver_to_logical("nvarchar(max)") == "NVARCHAR(MAX)"
+    assert _sqlserver_to_logical("nvarchar") == "NVARCHAR"
+    assert _sqlserver_to_logical("ntext") == "NVARCHAR(MAX)"
+    assert _sqlserver_to_logical("nchar(max)") == "NVARCHAR(MAX)"
     assert _sqlserver_to_logical("varbinary(64)") == "VARBINARY(64)"
     assert _sqlserver_to_logical("binary(16)") == "BINARY(16)"
 

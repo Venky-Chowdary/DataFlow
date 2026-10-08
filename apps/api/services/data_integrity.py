@@ -211,12 +211,16 @@ def _check_transform_dry_run(
     target_types: dict[str, str] | None = None,
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
 ) -> dict[str, Any]:
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
 
     headers = source_columns or list(rows[0].keys())
-    sample_rows = [project_row_cells(row, headers) for row in rows[:200]]
+    sample_rows = [
+        project_row_cells(row, headers, preserve_sql_null=database_extract)
+        for row in rows[:200]
+    ]
     from services.transform_engine import dry_run_sample
 
     # Ensure each mapping carries target_type so name heuristics (e.g. "date" in
@@ -236,6 +240,7 @@ def _check_transform_dry_run(
         column_types=source_types,
         empty_cells_as_null=empty_cells_as_null,
         dest_nullability=dest_nullability,
+        database_extract=database_extract,
     )
     # Parity with G8 / G5: continue-policy contracts demote cast failures to
     # holdouts — they must not keep G9 Data integrity blocked after Accept risk.
@@ -1447,6 +1452,7 @@ def run_integrity_audit(
     dest_table_exists: bool | None = None,
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1536,6 +1542,7 @@ def run_integrity_audit(
                 dest_kind=dest_kind,
                 target_types=target_types,
                 empty_cells_as_null=empty_cells_as_null,
+                database_extract=database_extract,
                 dest_nullability=dest_nullability,
             )
         )
