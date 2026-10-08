@@ -142,7 +142,12 @@ def effective_source_type(source_type: str, transform: str | None) -> str:
     decision that asks "is this zoneless?" has to read it the same way, or the
     declaration changes the written value without changing the verdict — the
     worst of both, a transfer still blocked for a problem it no longer has.
+
+    The zone is all the declaration supplies. The column's fractional digits
+    are kept — a bare ``TIMESTAMPTZ`` read as "no precision" and passed a
+    microsecond column onto a millisecond carrier that truncated it.
     """
+    from services.document_instant import source_fractional_digits
     from services.transform_engine import ASSUME_TIMEZONE_PREFIX
     from services.type_system import datetime_timezone_polarity
 
@@ -153,7 +158,8 @@ def effective_source_type(source_type: str, transform: str | None) -> str:
         return source_type
     if datetime_timezone_polarity(source_type) != "ntz":
         return source_type
-    return "TIMESTAMPTZ"
+    digits = source_fractional_digits(source_type)
+    return f"TIMESTAMPTZ({digits})" if digits is not None else "TIMESTAMPTZ"
 
 
 def declared_source_column_types(

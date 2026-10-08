@@ -32,7 +32,10 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from services.document_instant import transform_narrows_to_calendar_day
+from services.document_instant import (
+    cell_exceeds_document_instant,
+    transform_narrows_to_calendar_day,
+)
 from services.value_serializer import json_loads_exact
 
 logger = logging.getLogger(__name__)
@@ -638,6 +641,7 @@ def write_mapped_rows(
             if m.get("risk_acknowledged") or m.get("riskAcknowledged")
         }
         utc_normalized_cols: set[str] = set()
+        ms_truncated_cols: set[str] = set()
         # Columns the source declares as a calendar day. A date has no time of
         # day and therefore no zone to invent: UTC midnight is the one instant
         # every driver reads back as the same date. Refusing it as "naive"
@@ -769,10 +773,10 @@ def write_mapped_rows(
             # A "DATE" carrier with a datetime transform is Mongo's single BSON
             # date, which stores a full instant. Narrowing it truncated every
             # timestamp to midnight even though the carrier could hold the time.
-            if upper in {"DATE"} or upper in {
-                "DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ",
-                "TIMESTAMP_LTZ", "TIMESTAMP_NTZ",
-            }:
+            # Every date/datetime spelling names BSON's one carrier —
+            # ``TIMESTAMPTZ(6)`` / ``DATETIME2(7)`` echoed from the source
+            # included. Matching only the bare tokens wrote those as strings.
+            if _target_is_temporal(upper):
                 from connectors.sql_temporal import coerce_sql_temporal
 
                 # BSON Date is a UTC instant. Coerce as TIMESTAMPTZ so ISO-Z keeps
@@ -803,6 +807,19 @@ def write_mapped_rows(
                         else:
                             utc_normalized_cols.add(column)
                             coerced = coerced.replace(tzinfo=_tzu.utc)
+                    # BSON date counts milliseconds; the driver drops anything
+                    # finer without a word. Judge the raw cell so a seven-digit
+                    # string is not first truncated to Python's six.
+                    if cell_exceeds_document_instant(value):
+                        if column in utc_normalize_ack:
+                            ms_truncated_cols.add(column)
+                        else:
+                            raise ValueError(
+                                f"MongoDB date refused {value!r}: BSON date keeps "
+                                "milliseconds and this value has finer digits — map "
+                                "to a string, or accept the millisecond-truncation "
+                                "risk on this column (refuse silent truncation)"
+                            )
                     from datetime import timezone as _tz
 
                     return coerced.astimezone(_tz.utc)
@@ -1156,7 +1173,19 @@ def write_mapped_rows(
             rejected_rows=max(rejected_rows, len(data_rows) - written - skipped_total),
             rejected_details=list(rejected_details),
             coerced_null_rows=coerced_null_rows,
-            warnings=transform_errors,
+            warnings=[
+                *transform_errors,
+                *(
+                    f"{col}: zoneless values written as UTC under the accepted "
+                    "UTC-normalize risk"
+                    for col in sorted(utc_normalized_cols)
+                ),
+                *(
+                    f"{col}: sub-millisecond digits truncated to BSON milliseconds "
+                    "under the accepted risk"
+                    for col in sorted(ms_truncated_cols)
+                ),
+            ],
             meta=gate8_writer_meta(mapped_rows, target_cols),
         )
     except (pymongo.errors.PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:

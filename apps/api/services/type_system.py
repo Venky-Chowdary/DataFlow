@@ -7299,9 +7299,12 @@ def is_precision_collapse_coercion(
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
-    if document_instant_wire_preserved(source_type, target_type, dest_db=dest_db):
+    if document_instant_wire_preserved(
+        source_type, target_type, dest_db=dest_db, population=population
+    ):
         # A document store's ``date`` keeps the time of day; only sub-millisecond
-        # precision is lost, and a source declaring that much is excluded above
+        # precision is lost, and a source holding that much (declared, or an
+        # engine default, and not measured to whole milliseconds) is excluded
         # so it still reports below. Without this the (datetime, date) pair read
         # as dropping the clock and demoted every timestamp mapping.
         return False
@@ -7582,8 +7585,13 @@ def assess_bson_affinity(
             specialty_carrier_base(source_type) or "", target_type or ""
         )
     )
+    # An offset-bearing datetime onto a document store's single instant carrier
+    # keeps the instant; the (datetime, date) pair is the token's name only.
+    instant_kept = document_instant_wire_preserved(
+        source_type, target_type or source_type, dest_db=db
+    )
     if (
-        (src, tgt) in soft
+        ((src, tgt) in soft and not instant_kept)
         or objectid_would_collapse(source_type, target_type or source_type)
         or specialty_to_open
     ):
@@ -8001,9 +8009,12 @@ def is_lossy_coercion(
     if vector_to_array_wire_preserved(source_type, target_type, dest_db=dest_db):
         return False
     # Document store ``date`` is an instant, not a calendar day — the time of
-    # day survives. Sub-millisecond sources are excluded and fall through to
-    # temporal_precision_would_narrow, which names the truncation.
-    if document_instant_wire_preserved(source_type, target_type, dest_db=dest_db):
+    # day survives. Sub-millisecond sources not measured to whole milliseconds
+    # are excluded and fall through to temporal_precision_would_narrow, which
+    # names the truncation.
+    if document_instant_wire_preserved(
+        source_type, target_type, dest_db=dest_db, population=population
+    ):
         return False
     if _dynamodb_number_wire_preserves(source_type, target_type, dest_db=dest_db):
         # AttributeValue N is an unbounded decimal, not DECIMAL(p,s). Float

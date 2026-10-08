@@ -96,11 +96,71 @@ def transform_narrows_to_calendar_day(transform: str | None) -> bool:
     return (transform or "").strip().lower() == "date"
 
 
+def source_fractional_digits(source_type: str) -> int | None:
+    """Fractional-second digits the source column holds, engine defaults included.
+
+    A bare spelling is not "no precision": PostgreSQL ``timestamptz`` keeps
+    microseconds and SQL Server ``datetime2`` keeps seven digits. Reading only
+    an explicit typmod passed every PostgreSQL instant onto a millisecond
+    carrier while the write dropped its microseconds. An unnamed engine leaves a
+    bare spelling unknown (``None``); the writer still refuses any cell it would
+    truncate.
+    """
+    from services.source_engine_scope import active_source_engine
+    from services.type_system import (
+        destination_temporal_fractional_digits,
+        parse_temporal_fractional_precision,
+    )
+
+    explicit = parse_temporal_fractional_precision(source_type)
+    if explicit is not None:
+        return int(explicit)
+    engine = (active_source_engine() or "").strip()
+    if not engine:
+        return None
+    return destination_temporal_fractional_digits(source_type, dest_db=engine)
+
+
+def cell_exceeds_document_instant(value: object) -> bool:
+    """True when a cell carries a non-zero digit below the millisecond.
+
+    The per-cell rule the writer enforces and the population check measures.
+    Trailing zeros are not precision: ``10:00:00.120000`` lands intact.
+    """
+    from services.type_system import value_fractional_second_digits
+
+    return value_fractional_second_digits(value) > DOCUMENT_INSTANT_FRACTIONAL_DIGITS
+
+
+def population_fits_document_instant(population: object) -> bool | None:
+    """True when every measured cell fits milliseconds, False when one does not.
+
+    ``None`` means nothing was measured (no population, or only SQL NULL): a
+    sample that was never taken is not proof the column holds whole
+    milliseconds.
+    """
+    if population is None:
+        return None
+    try:
+        values = list(population)  # type: ignore[call-overload]
+    except TypeError:
+        return None
+    measured = False
+    for value in values:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        measured = True
+        if cell_exceeds_document_instant(value):
+            return False
+    return True if measured else None
+
+
 def document_instant_wire_preserved(
     source_type: str,
     target_type: str,
     *,
     dest_db: str = "",
+    population: object = None,
 ) -> bool:
     """True when a date/datetime source lands intact on a document instant.
 
@@ -114,13 +174,17 @@ def document_instant_wire_preserved(
     instant to preserve. Stamping one is the UTC invent the MongoDB writer
     refuses, and ``resolve_timezone_policy`` calls it POLICY_UTC_INVENT and
     requires an operator contract.
+
+    A source declaring more than three digits is preserved only when the
+    measured ``population`` holds whole milliseconds — the carrier then loses
+    nothing those rows contain, and the writer refuses any later cell that
+    does not. Unmeasured, the declaration stands and the pair is a truncation.
     """
     from services.type_system import (
         LOGICAL_DATE,
         LOGICAL_DATETIME,
         datetime_timezone_polarity,
         normalize_logical_type,
-        parse_temporal_fractional_precision,
     )
 
     if not is_document_instant_token(dest_db, target_type):
@@ -129,10 +193,10 @@ def document_instant_wire_preserved(
         return False
     if datetime_timezone_polarity(source_type) == "ntz":
         return False
-    src_p = parse_temporal_fractional_precision(source_type)
-    if src_p is None:
+    src_p = source_fractional_digits(source_type)
+    if src_p is None or src_p <= DOCUMENT_INSTANT_FRACTIONAL_DIGITS:
         return True
-    return int(src_p) <= DOCUMENT_INSTANT_FRACTIONAL_DIGITS
+    return population_fits_document_instant(population) is True
 
 
 def document_instant_utc_invent(
