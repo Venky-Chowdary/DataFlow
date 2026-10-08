@@ -2055,8 +2055,12 @@ def materialize_dest_ddl(
         ):
             return ddl_type(db, raw)
     if _is_explicit_physical_stamp(raw, db):
-        legalized = promote_create_new_temporal_stamp("", raw, db)
-        return legalized or raw
+        legalized = promote_create_new_temporal_stamp("", raw, db) or raw
+        # A copied NVARCHAR stamp is MySQL's utf8mb3 alias. A SQL Server
+        # national source holds every scalar; leaving the alias (or a bare
+        # VARCHAR that inherits the server's utf8mb3 default) rejects emoji
+        # with 1366 after preflight said the value fits (DEF-B2-010).
+        return carry_national_unicode_charset(db, source_type or raw, legalized)
     # Rematerialized UUID aliases must use create-new width-safe wire
     # (BQ STRING(36), not bare STRING) so writers match Map stamps.
     if normalize_logical_type(raw) == LOGICAL_UUID:
@@ -2272,6 +2276,11 @@ def temporal_precision_would_narrow(
         return True
     tgt_p = destination_temporal_fractional_digits(target_type, dest_db=dest_db)
     src_p = parse_temporal_fractional_precision(source_type)
+    if src_p is None and is_document_instant_token(active_source_engine(), source_type):
+        # BSON date keeps milliseconds. A bare source token has no typmod,
+        # so reading it as "unknown precision" green-lit MySQL TIMESTAMP
+        # (fractional digits 0) and dropped every millisecond.
+        src_p = DOCUMENT_INSTANT_FRACTIONAL_DIGITS
     if tgt_p is None:
         return False
     if src_p is None:

@@ -410,6 +410,7 @@ def _source_cannot_exceed(
     target: BoundedTarget,
     *,
     dest_db: str,
+    source_db: str = "",
 ) -> bool:
     """True when the declared source type provably fits the destination carrier.
 
@@ -440,7 +441,18 @@ def _source_cannot_exceed(
         tgt_width = parse_varchar_width(target.target_type)
         if src_width is None or tgt_width is None:
             return False
-        return src_width <= tgt_width
+        if src_width > tgt_width:
+            return False
+        # Width-identical VARCHAR → SQL Server Latin-1 VARCHAR still substitutes
+        # ``?`` for scalars the code page cannot store. Declaration does not
+        # make that safe (DEF-R1-002).
+        from services.type_system import code_page_sink_would_collapse
+
+        if code_page_sink_would_collapse(
+            src, target.target_type, dest_db=dest_db, source_db=source_db
+        ):
+            return False
+        return True
 
     if target.carrier == CARRIER_INTEGER:
         src_bounds = integer_storage_bounds(src, dest_db=dest_db)
@@ -619,7 +631,10 @@ def bounded_targets(
             declared_domain
             and not parse_in_doubt
             and _source_cannot_exceed(
-                declared_source, candidate, dest_db=dest_db
+                declared_source,
+                candidate,
+                dest_db=dest_db,
+                source_db=source_format,
             )
         ):
             # Width is decided by declaration; a parse is only decided with it

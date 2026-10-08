@@ -141,6 +141,39 @@ def parse_sftp_config(
     return cfg
 
 
+def apply_sftp_uri_endpoint(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Fill an empty host, port, user, and path from an ``sftp://`` URI.
+
+    Studio can save the URI alone. ``list_connectors`` then showed ``host``
+    as empty, so the daily Excel route had no dial target even though the
+    URI already named one (DEF-A-002). An explicit host is left alone. A
+    password already stored is not replaced by the URI.
+    """
+    out = dict(data)
+    kind = str(out.get("type") or "").strip().lower()
+    if kind not in {"sftp", "ssh"}:
+        return out
+    raw = str(out.get("connection_string") or "").strip()
+    if not raw:
+        return out
+    cfg = parse_sftp_config(connection_string=raw)
+    if not cfg.host:
+        return out
+    if not str(out.get("host") or "").strip():
+        out["host"] = cfg.host
+        # The URI is the only endpoint. Its port wins over a form default
+        # (historical 5432, or 22 stamped because host was blank).
+        if cfg.port:
+            out["port"] = cfg.port
+    if cfg.username and not str(out.get("username") or "").strip():
+        out["username"] = cfg.username
+    if cfg.password and not str(out.get("password") or ""):
+        out["password"] = cfg.password
+    if cfg.path and not str(out.get("database") or "").strip():
+        out["database"] = cfg.path
+    return out
+
+
 def split_remote_path(path: str) -> tuple[str, str]:
     """Return (directory, filename) for a remote SFTP path."""
     path = path.strip()

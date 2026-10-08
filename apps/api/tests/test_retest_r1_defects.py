@@ -372,3 +372,43 @@ def test_silent_running_job_releases_the_claim(monkeypatch) -> None:
         lambda: _Svc(),
     )
     assert store._job_is_live("dead-worker") is False
+
+
+def test_unicode_source_into_sql_latin1_varchar_is_a_fidelity_collapse() -> None:
+    """DEF-R1-002: width-identical VARCHAR completed with ? in the cells."""
+    from services.type_system import is_lossy_coercion
+
+    dest = "VARCHAR(50) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS"
+    with bind_source_engine("postgresql"):
+        assert is_lossy_coercion("VARCHAR(50)", dest, dest_db="sqlserver") is True
+    with bind_source_engine("sqlserver"):
+        assert is_lossy_coercion(dest, dest, dest_db="sqlserver") is False
+    with bind_source_engine("postgresql"):
+        assert (
+            is_lossy_coercion(
+                "VARCHAR(50)",
+                "VARCHAR(50) COLLATE Latin1_General_100_CI_AS_SC_UTF8",
+                dest_db="sqlserver",
+            )
+            is False
+        )
+
+
+def test_latin1_varchar_is_not_safe_by_declaration() -> None:
+    from services.population_fit_scan import bounded_targets
+
+    targets, _undecidable, safe = bounded_targets(
+        [
+            {
+                "source": "name",
+                "target": "name",
+                "source_type": "VARCHAR(50)",
+                "target_type": "VARCHAR(50) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS",
+            }
+        ],
+        dest_db="sqlserver",
+        source_kind="database",
+        source_format="postgresql",
+    )
+    assert "name" not in safe
+    assert any(t.source == "name" for t in targets)

@@ -95,6 +95,22 @@ def extract_url_credentials(message: str) -> dict[str, Any] | None:
         parsed = parse_mongodb_url(m.group(0).rstrip(".,;"))
         if parsed.get("host") or parsed.get("connection_string"):
             return parsed
+    m = re.search(r"((?:sftp|ssh)://)[^\s\"']+", text, re.I)
+    if m:
+        from connectors.sftp_common import parse_sftp_config
+
+        raw = m.group(0).rstrip(".,;")
+        cfg = parse_sftp_config(connection_string=raw)
+        if cfg.host:
+            return {
+                "type": "sftp",
+                "connection_string": raw,
+                "host": cfg.host,
+                "port": int(cfg.port or 22),
+                "username": cfg.username,
+                "password": cfg.password,
+                "database": cfg.path,
+            }
     m = re.search(r"(rediss?://)[^\s\"']+", text, re.I)
     if m:
         raw = m.group(0).rstrip(".,;")

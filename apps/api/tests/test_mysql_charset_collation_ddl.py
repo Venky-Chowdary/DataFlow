@@ -201,6 +201,38 @@ def test_mysql_source_national_keeps_its_own_spelling() -> None:
     assert "utf8mb4" not in stamped.lower(), stamped
 
 
+def test_materialize_widens_copied_nvarchar_stamp_for_sqlserver() -> None:
+    """Map can echo NVARCHAR(100). MySQL would create that as utf8mb3.
+
+    The writer materializes the stamp as-is unless the national carry runs.
+    SQL Server NVARCHAR holds emoji; the created column must say utf8mb4.
+    """
+    from services.decision_kernel.type_invent import materialize_dest_ddl
+
+    with bind_source_engine("sqlserver"):
+        stamped = materialize_dest_ddl(
+            "mysql",
+            "NVARCHAR(100)",
+            source_type="NVARCHAR(100) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS",
+        )
+    assert "utf8mb4" in stamped.lower(), stamped
+    assert not stamped.upper().startswith("NVARCHAR"), stamped
+
+
+def test_materialize_keeps_mysql_nvarchar_alias() -> None:
+    from services.decision_kernel.type_invent import materialize_dest_ddl
+
+    with bind_source_engine("mysql"):
+        stamped = materialize_dest_ddl(
+            "mysql", "NVARCHAR(32)", source_type="NVARCHAR(32)"
+        )
+    assert stamped.upper().startswith("NVARCHAR"), stamped
+    unbound = materialize_dest_ddl(
+        "mysql", "NVARCHAR(32)", source_type="NVARCHAR(32)"
+    )
+    assert unbound.upper().startswith("NVARCHAR"), unbound
+
+
 def test_unknown_source_engine_does_not_invent_a_widen() -> None:
     """Unknown means unmeasured: keep the source's spelling, decide nothing."""
     stamped = _mysql_type("NVARCHAR(32)", source_engine="")

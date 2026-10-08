@@ -1475,14 +1475,26 @@ class DataPilotTools:
                 if not probe_ok:
                     from .ack_ledger import redact_payload
 
+                    # A host-key or preauth refusal is not a bad password.
+                    # Prefixing "credentials" is the message QA recorded.
+                    trust_failure = re.search(
+                        r"host key|not trusted|fingerprint|known_hosts|"
+                        r"preauth|before authentication",
+                        probe_msg or "",
+                        re.I,
+                    )
+                    if trust_failure:
+                        error = probe_msg
+                    else:
+                        error = (
+                            f"Could not connect with those credentials: {probe_msg}. "
+                            "Fix host/port/user/password (use the public proxy if this is Railway), then ask again."
+                        )
                     return ToolResult(
                         name="create_connector",
                         success=False,
                         output=redact_payload(draft),
-                        error=(
-                            f"Could not connect with those credentials: {probe_msg}. "
-                            "Fix host/port/user/password (use the public proxy if this is Railway), then ask again."
-                        ),
+                        error=error,
                     )
             except Exception as exc:
                 from .ack_ledger import redact_payload

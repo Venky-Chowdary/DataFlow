@@ -54,6 +54,36 @@ def is_document_instant_token(engine: str | None, ddl_type_token: str | None) ->
     return normalize_logical_type(token) in {LOGICAL_DATE, LOGICAL_DATETIME}
 
 
+def promote_document_instant_create_target(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str,
+    source_db: str,
+) -> str:
+    """Create-new stamp that keeps a BSON datetime's milliseconds.
+
+    An echoed ``TIMESTAMP`` on MySQL is fractional-digits 0. The source token
+    has no typmod and used to look identical, so preflight called the pair a
+    fidelity collapse — or, when it did not, the write dropped every
+    millisecond. Live destination columns are not rewritten here.
+    """
+    from services.source_engine_scope import bind_source_engine
+    from services.type_system import temporal_precision_would_narrow
+
+    src = (source_type or "").strip()
+    tgt = (target_type or "").strip()
+    if not src or not tgt or not dest_db:
+        return tgt
+    with bind_source_engine(source_db or ""):
+        if not temporal_precision_would_narrow(src, tgt, dest_db=dest_db):
+            return tgt
+        from services.decision_kernel.type_invent import create_new_mapping_target_type
+
+        upgraded = create_new_mapping_target_type(src, dest_db, source_db=source_db or "")
+    return (upgraded or tgt).strip() or tgt
+
+
 def transform_narrows_to_calendar_day(transform: str | None) -> bool:
     """True only when the mapping explicitly asked for a calendar-day narrow.
 

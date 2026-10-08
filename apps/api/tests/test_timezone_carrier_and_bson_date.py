@@ -125,6 +125,35 @@ class TestBsonDateTokenIsAnInstant:
             READ_BACK_UTC, ddl_type="date", engine="mongodb"
         )
 
+    def test_mongo_timestamp_to_timestamp_is_not_a_false_polarity_collapse(self) -> None:
+        """DEF-B-010: identical TIMESTAMP → TIMESTAMP blocked every relational route."""
+        from services.source_engine_scope import bind_source_engine
+        from services.type_system import (
+            create_new_mapping_target_type,
+            is_lossy_coercion,
+        )
+
+        with bind_source_engine("mongodb"):
+            for dest in ("postgresql", "sqlserver", "oracle"):
+                assert is_lossy_coercion("TIMESTAMP", "TIMESTAMP", dest_db=dest) is False, dest
+            # MySQL bare TIMESTAMP keeps zero fractional digits. The BSON
+            # millisecond would be dropped, so that pair stays lossy and
+            # create-new stamps a carrier that keeps them.
+            assert is_lossy_coercion("TIMESTAMP", "TIMESTAMP", dest_db="mysql") is True
+            pg = create_new_mapping_target_type(
+                "TIMESTAMP", "postgresql", source_db="mongodb"
+            )
+            mysql = create_new_mapping_target_type(
+                "TIMESTAMP", "mysql", source_db="mongodb"
+            )
+            assert is_lossy_coercion("TIMESTAMP", mysql, dest_db="mysql") is False
+        assert "TIMESTAMPTZ" in pg.upper()
+        assert "(3)" in pg
+        assert "DATETIME" in mysql.upper()
+        assert "(3)" in mysql
+        # Unbound TIMESTAMP → MySQL TIMESTAMP stays a polarity collapse.
+        assert is_lossy_coercion("TIMESTAMP", "TIMESTAMP", dest_db="mysql") is True
+
     def test_sql_date_columns_still_truncate(self) -> None:
         assert (
             fingerprint_for_reconcile(

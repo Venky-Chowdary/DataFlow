@@ -1069,6 +1069,26 @@ def run_mapping_pipeline(
                     )
                     if upgraded:
                         tgt_type = upgraded
+        if (
+            not (m.get("user_override") or m.get("userOverride"))
+            and (intentional_create or destination_table_exists is False)
+            and destination_table_exists is not True
+            and src_type
+            and tgt_type
+        ):
+            from services.document_instant import promote_document_instant_create_target
+
+            promoted = promote_document_instant_create_target(
+                src_type,
+                str(tgt_type),
+                dest_db=destination_db_type or "",
+                source_db=source_db_type or "",
+            )
+            if promoted and promoted != str(tgt_type):
+                tgt_type = promoted
+                tgt_key = str(m.get("target") or "").strip()
+                if tgt_key and tgt_key in declared_target_types:
+                    declared_target_types[tgt_key] = str(tgt_type)
         # LLM-invented transforms are held as suggested_transform until Map accept —
         # do not let deterministic infer silently re-apply the invent.
         if m.get("llm_invented_transform") and not m.get("user_override"):

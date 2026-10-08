@@ -12,8 +12,50 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from connectors import email as email_connector
-from connectors.sftp_common import parse_sftp_config, split_remote_path
+from connectors.sftp_common import (
+    apply_sftp_uri_endpoint,
+    parse_sftp_config,
+    split_remote_path,
+)
 from connectors.sftp_writer import write_mapped_rows as write_sftp_rows
+
+
+def test_sftp_uri_fills_empty_host_and_keeps_an_explicit_host():
+    lifted = apply_sftp_uri_endpoint(
+        {
+            "type": "sftp",
+            "host": "",
+            "port": 5432,
+            "connection_string": "sftp://alice:secret@ftp.example.com:2222/incoming/book.xlsx",
+        }
+    )
+    assert lifted["host"] == "ftp.example.com"
+    assert lifted["port"] == 2222
+    assert lifted["username"] == "alice"
+    assert lifted["database"] == "/incoming/book.xlsx"
+    kept = apply_sftp_uri_endpoint(
+        {
+            "type": "sftp",
+            "host": "pinned.example",
+            "port": 22,
+            "connection_string": "sftp://alice:secret@ftp.example.com:2222/incoming/book.xlsx",
+        }
+    )
+    assert kept["host"] == "pinned.example"
+    assert kept["port"] == 22
+
+
+def test_extract_url_credentials_reads_sftp_uri():
+    from src.ai.copilot.connector_create import extract_url_credentials
+
+    parsed = extract_url_credentials(
+        "load the daily file from sftp://alice:secret@ftp.example.com:2222/incoming/book.xlsx"
+    )
+    assert parsed is not None
+    assert parsed["type"] == "sftp"
+    assert parsed["host"] == "ftp.example.com"
+    assert parsed["port"] == 2222
+    assert parsed["username"] == "alice"
 
 
 class TestSFTPConfig:

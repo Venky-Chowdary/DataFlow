@@ -3352,6 +3352,21 @@ def _clickhouse_native_datetime_ddl(inferred: str | None) -> str | None:
     return None
 
 
+def _bound_document_instant(inferred: str | None) -> bool:
+    """True when the bound source engine's token is a document-store instant.
+
+    Empty engine stays false: an unbound ``TIMESTAMP`` is not a BSON date.
+    """
+    engine = _normalize_dest_db(active_source_engine() or "")
+    if not engine:
+        return False
+    if not is_document_instant_token(engine, inferred):
+        return False
+    # ``date`` stays a calendar token here. The defect is a BSON datetime
+    # the sampler spelled ``TIMESTAMP`` — that token is an instant.
+    return normalize_logical_type(inferred) == LOGICAL_DATETIME
+
+
 def _mysql_source_timestamp(inferred: str | None) -> bool:
     """True when a bound MySQL source declared its own TIMESTAMP carrier.
 
@@ -3414,7 +3429,16 @@ def _datetime_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     polarity = datetime_timezone_polarity(inferred)
     if polarity == "ntz" and db == "mysql" and _mysql_source_timestamp(inferred):
         polarity = "ltz"
+    # BSON date is an instant (UTC millis), whatever the sampler spelled.
+    # Bare TIMESTAMP on a relational dest is wall-clock and drops that instant
+    # unless create-new stamps the dest's own instant carrier at millisecond
+    # precision (DEF-B-010).
+    document_instant = _bound_document_instant(inferred)
+    if document_instant:
+        polarity = "ltz"
     fsp = parse_temporal_fractional_precision(inferred)
+    if document_instant and fsp is None:
+        fsp = DOCUMENT_INSTANT_FRACTIONAL_DIGITS
     base: str | None = None
     if polarity == "ltz":
         base = (
@@ -3794,9 +3818,21 @@ def is_timezone_polarity_loss(
     sink engine's bare TIMESTAMP token is an instant.
     """
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
-    src = datetime_timezone_polarity(source_type)
+    # A Mongo/Elasticsearch temporal token is an instant even when the catalog
+    # spells it ``TIMESTAMP`` / ``date``. Leaving it NTZ made every
+    # TIMESTAMP→TIMESTAMP route into MySQL (whose TIMESTAMP is itself an
+    # instant) a fidelity collapse (DEF-B-010).
+    src_token = source_type
+    document_instant = _bound_document_instant(source_type)
+    if document_instant:
+        src_token = instant_date_carrier(active_source_engine(), source_type)
+    src = datetime_timezone_polarity(src_token)
     tgt = datetime_timezone_polarity(target_type, dest_db=dest_db)
     if src in {"tz", "ltz"} and tgt == "ntz":
+        if document_instant:
+            # BSON date has no offset label. The writer stores the UTC clock.
+            # Fractional-second narrowing is a separate check.
+            return False
         # MySQL DATETIME(6) is the unbounded stand-in for a session-relative
         # instant. The writer converts to UTC, then stores the clock;
         # TIMESTAMP(6) would preserve the token and drop every year outside
@@ -3826,6 +3862,45 @@ def is_timezone_polarity_loss(
     # WITH TIME ZONE receives the same instant at +00:00. Surfaced as a normalize
     # note, not a fidelity collapse.
     return False
+
+
+def code_page_sink_would_collapse(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    source_db: str = "",
+) -> bool:
+    """True when a Unicode source lands on a code-page CHAR/VARCHAR.
+
+    SQL Server ``VARCHAR`` under ``SQL_Latin1_General_CP1`` stores
+    Windows-1252. The server substitutes ``?`` and the statement still
+    succeeds, so a width-identical pair was graded preserve and the load
+    completed with corrupted cells (DEF-R1-002). A national carrier or a
+    ``_UTF8`` collation is not this sink. A code-page source into the same
+    sink is not a collapse — it never held the scalar.
+    """
+    if not dest_db:
+        return False
+    src_engine = source_db or active_source_engine()
+    if not source_text_is_unicode(src_engine) and not source_column_holds_unicode(
+        src_engine, source_type
+    ):
+        return False
+    if normalize_logical_type(source_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    if normalize_logical_type(target_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    if is_national_string_carrier(target_type):
+        return False
+    if re.search(r"COLLATE\s+\S*_UTF8\b", target_type or "", re.IGNORECASE):
+        return False
+    from services.encoding_capacity import UNICODE_MAX, classify_capacity
+
+    cap = classify_capacity(dest_db, target_type)
+    if cap.form in {"utf8", "utf16", "cesu8", "gb18030"} and cap.max_code_point >= UNICODE_MAX:
+        return False
+    return cap.form in {"cp1252", "latin1", "ascii"}
 
 
 def _bare_type_token(type_token: str) -> str:
@@ -7217,6 +7292,8 @@ def is_precision_collapse_coercion(
         return True
     if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
         return True
+    if code_page_sink_would_collapse(source_type, target_type, dest_db=dest_db):
+        return True
     if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
     if binary_width_would_narrow(source_type, target_type):
@@ -7760,6 +7837,10 @@ def is_lossy_coercion(
             return True
         if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
             return True
+        if code_page_sink_would_collapse(
+            source_type, target_type, dest_db=dest_db
+        ):
+            return True
         if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
             return True
         if bitstring_opaque_bytes_collapse(source_type, target_type):
@@ -7952,6 +8033,8 @@ def is_lossy_coercion(
         return True
     if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
         return True
+    if code_page_sink_would_collapse(source_type, target_type, dest_db=dest_db):
+        return True
     if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
         return True
     if binary_width_would_narrow(source_type, target_type):
@@ -8112,6 +8195,10 @@ def is_lossy_coercion(
         if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
         if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
+            return True
+        if code_page_sink_would_collapse(
+            source_type, target_type, dest_db=dest_db
+        ):
             return True
         if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
             return True

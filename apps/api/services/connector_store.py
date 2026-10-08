@@ -158,15 +158,29 @@ class SavedConnector:
         password = decrypt_secret(data.get("password", "") or "", tenant_id=tenant_id)
         conn_str = decrypt_secret(data.get("connection_string", "") or "", tenant_id=tenant_id)
         conn_type = data["type"]
+        from connectors.sftp_common import apply_sftp_uri_endpoint
+
+        lifted = apply_sftp_uri_endpoint(
+            {
+                "type": conn_type,
+                "host": data.get("host", "") or "",
+                "port": data.get("port"),
+                "username": data.get("username", "") or "",
+                "password": password,
+                "database": data.get("database", "") or "",
+                "connection_string": conn_str,
+            }
+        )
+        password = str(lifted.get("password") or "")
         return cls(
             id=data["id"],
             name=data["name"],
             type=conn_type,
             role=normalize_connector_role(conn_type, data.get("role")),
-            host=data.get("host", ""),
-            port=listen_port_for_connector(conn_type, data.get("port")),
-            database=data.get("database", ""),
-            username=data.get("username", ""),
+            host=str(lifted.get("host") or ""),
+            port=listen_port_for_connector(conn_type, lifted.get("port")),
+            database=str(lifted.get("database") or ""),
+            username=str(lifted.get("username") or ""),
             password=password,
             schema=_resolve_connector_schema(conn_type, data.get("schema"), data.get("username")),
             connection_string=conn_str,
@@ -448,6 +462,9 @@ def get_connector(connector_id: str, workspace_id: str | None = None) -> SavedCo
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
+    from connectors.sftp_common import apply_sftp_uri_endpoint
+
+    data = apply_sftp_uri_endpoint(data)
     conn_type = data["type"]
     conn = SavedConnector(
         id=str(uuid.uuid4()),

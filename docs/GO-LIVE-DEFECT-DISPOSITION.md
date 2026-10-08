@@ -8,11 +8,11 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 85
+- not fixed: 80
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 14
-- fixed in code, unit-proven — not a live QA retest: 4
-- partly fixed in code: 3
+- fixed in code, unit-proven — not a live QA retest: 7
+- partly fixed in code: 5
 
 ## Every row
 
@@ -24,11 +24,11 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B2-006 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-CDC-COUNT-ONLY-RECONCILE | P1 | OPEN | fixed in code, unit-proven (test_cdc_source_image_count_scope_does_not_claim_full_checksum). Count-only now fails the job. A finished source-row fingerprint scan can still pass. Not a live QA retest. |
 | DEF-B2-008 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-B2-010 | P1 | OPEN | not fixed in this wave. A bound sqlserver source already widens to utf8mb4 (existing test_national_source_lands_in_utf8mb4). An unknown engine deliberately does not invent that widen. The QA failure mode (VARCHAR COLLATE UTF8MB3) was not reproduced live here. |
+| DEF-B2-010 | P1 | OPEN | partly fixed in code, unit-proven (test_materialize_widens_copied_nvarchar_stamp_for_sqlserver). A bound SQL Server source now materializes VARCHAR(n) CHARACTER SET utf8mb4. A MySQL source NVARCHAR and an unknown engine stay the utf8mb3 alias on purpose. Not a live MySQL retest. |
 | DEF-B2-012 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B2-014 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-R1-001 | P1 | OPEN | DATETIME2(7) work is in an earlier commit. QA on 6436aaa38583 still truncated. Not re-proven on a live SQL Server here. Not marked fixed. |
-| DEF-R1-002 | P1 | OPEN | not fixed as a live proof. NVARCHAR promotion exists for a Unicode source; a real Latin-1 destination must quarantine, and that path was not re-run here. |
+| DEF-R1-002 | P1 | OPEN | fixed in code, unit-proven (test_unicode_source_into_sql_latin1_varchar_is_a_fidelity_collapse, test_latin1_varchar_is_not_safe_by_declaration). The pair is now a fidelity collapse and the population scan does not skip it. A SQL Server VARCHAR source into the same column is not a collapse. Writer quarantine of U+90CE / U+0141 was already in the tree. Not a live SQL Server retest. |
 | DEF-B-027 | P1 | OPEN | pin-before-drop and MySQL rename-aside are in 059974d8. Postgres overwrite that already DROP'd rows is not restored by rename-aside. Needs QA retest. Not claimed live-green. |
 | DEF-C-020 | P1 | OPEN | reader_population cap is in 059974d8. Unit-proven. The Postgres table that was already emptied was not restored. Needs QA retest. |
 | DEF-C-024 | P1 | OPEN | algorithm changes are in 059974d8. The QA job was API-cancelled; statements on the old process were not killed from this VM. Needs QA retest. |
@@ -41,8 +41,8 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B-026 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-A-010 | P1 | OPEN | already in tree before this wave. Needs QA retest on a build after that commit. |
 | DEF-B-009 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-B-010 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-A-001 | P1 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-010 | P1 | OPEN | partly fixed in code, unit-proven (test_mongo_timestamp_to_timestamp_is_not_a_false_polarity_collapse). Postgres, Oracle, and SQL Server identical TIMESTAMP pairs are not a polarity collapse when the source engine is mongodb. MySQL bare TIMESTAMP stays lossy; create-new stamps DATETIME(3). Not a live Mongo retest. |
+| DEF-A-001 | P1 | OPEN | fixed in code, unit-proven (test_sftp_host_key_refusal_is_not_called_an_auth_failure, test_sftp_preauth_close_is_not_called_an_auth_failure). A real bad password is still an authentication failure. Not a live SSH retest. Not a go-live. |
 | DEF-C-031 | P1 | UNCONFIRMED-ENV-DEPLOY | same long-writer path as 059974d8. Status on the register is UNCONFIRMED-ENV-DEPLOY. Not re-run live here. |
 | DEF-B2-009 | P1 | NOT RETESTED | not retested in this session. Count-only completion is now a failure (DEF-CDC-COUNT-ONLY-RECONCILE), which stops a silent complete, but it does not by itself apply the missed changes. |
 | DEF-B-018 | P1 | NOT RETESTED | refusal of uca1400 on MySQL is in 0bbb1ffe. Register status NOT RETESTED. Not re-run live here. |
@@ -71,7 +71,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B2-004 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B2-005 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B2-011 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-A-002 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-A-002 | P2 | OPEN | fixed in code, unit-proven (test_sftp_create_keeps_host_from_the_uri, test_sftp_uri_fills_empty_host_and_keeps_an_explicit_host, test_extract_url_credentials_reads_sftp_uri). An explicit host is not overwritten. Not a live connector retest. |
 | DEF-A-018 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-011 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-003 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
