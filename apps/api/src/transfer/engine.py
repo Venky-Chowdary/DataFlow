@@ -1385,6 +1385,23 @@ from .job_failure import (  # noqa: E402,F401 — re-export
 
 
 
+def _note_failed_batch_undo(request: Any, dest_summary: Any, message: str) -> str:
+    """Clear a partial SQL batch when this run found the destination empty."""
+    if not isinstance(dest_summary, dict):
+        return message or "Reconciliation failed"
+    from services.batch_undo import undo_failed_batch_if_dest_was_empty
+
+    note = undo_failed_batch_if_dest_was_empty(
+        destination=getattr(request, "destination", None),
+        dest_summary=dest_summary,
+        sync_mode=str(getattr(request, "sync_mode", "") or ""),
+    )
+    base = message or "Reconciliation failed"
+    if note and note not in base:
+        return f"{base} {note}"
+    return base
+
+
 def _drop_destination_table(destination: EndpointConfig) -> bool:
     """Drop the destination object for full-refresh overwrite sync modes.
 
@@ -3431,13 +3448,16 @@ class UniversalTransferEngine:
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
+                fail_message = _note_failed_batch_undo(
+                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                )
                 mongo.update_job_status(
                     job_id,
                     "failed",
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     phase="failed",
                     progress_pct=99,
-                    message=recon.get("message"),
+                    message=fail_message,
                     reconciliation=recon,
                     destination_summary=dest_summary,
                     rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
@@ -3447,7 +3467,7 @@ class UniversalTransferEngine:
                 )
                 return TransferResult(
                     success=False,
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     operation=request.operation,
                     job_id=job_id,
                     records_transferred=rows_written,
@@ -4360,13 +4380,16 @@ class UniversalTransferEngine:
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
+                fail_message = _note_failed_batch_undo(
+                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                )
                 mongo.update_job_status(
                     job_id,
                     "failed",
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     phase="failed",
                     progress_pct=99,
-                    message=recon.get("message"),
+                    message=fail_message,
                     reconciliation=recon,
                     destination_summary=dest_summary,
                     rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
@@ -4376,7 +4399,7 @@ class UniversalTransferEngine:
                 )
                 return TransferResult(
                     success=False,
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     operation=request.operation,
                     job_id=job_id,
                     records_transferred=rows_written,
@@ -5181,13 +5204,16 @@ class UniversalTransferEngine:
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
+                fail_message = _note_failed_batch_undo(
+                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                )
                 mongo.update_job_status(
                     job_id,
                     "failed",
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     phase="failed",
                     progress_pct=99,
-                    message=recon.get("message"),
+                    message=fail_message,
                     reconciliation=recon,
                     destination_summary=dest_summary,
                     rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
@@ -5197,7 +5223,7 @@ class UniversalTransferEngine:
                 )
                 return TransferResult(
                     success=False,
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     operation=request.operation,
                     job_id=job_id,
                     records_transferred=rows_written,

@@ -455,7 +455,7 @@ def _open_sftp_transport(cfg: SFTPConfig) -> Any:
             except OSError:
                 logger.debug("SFTP transport close after handshake failure", exc_info=True)
             if index == len(attempts) - 1:
-                raise
+                raise _handshake_closed_before_auth(cfg, exc) from exc
             logger.info(
                 "SFTP handshake closed before auth (%s); retrying %s:%s",
                 type(exc).__name__,
@@ -463,8 +463,23 @@ def _open_sftp_transport(cfg: SFTPConfig) -> Any:
                 cfg.port,
             )
     if last_exc is not None:
-        raise last_exc
+        raise _handshake_closed_before_auth(cfg, last_exc) from last_exc
     raise RuntimeError("SFTP handshake failed before authentication")
+
+
+def _handshake_closed_before_auth(cfg: SFTPConfig, exc: BaseException) -> RuntimeError:
+    """The server dropped the socket during key exchange, before any login.
+
+    Auth is not skipped. group1-sha1 is not offered. Host-key verification
+    still runs on a handshake that completes.
+    """
+    return RuntimeError(
+        f"SFTP server {cfg.host}:{cfg.port} closed the connection before "
+        "authentication (preauth). Datawrap tried a modern handshake, then "
+        "one without strict key exchange, then one without server-sig-algs, "
+        "then sha1 group14 and ssh-rsa. group1-sha1 is not offered, and no "
+        f"password was sent. Last error: {type(exc).__name__}: {exc}"
+    )
 
 
 def connect_sftp(cfg: SFTPConfig):

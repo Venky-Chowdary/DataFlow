@@ -5,6 +5,8 @@ Each case is the route the report named. A pass here is that fixture only.
 
 from __future__ import annotations
 
+import pytest
+
 from src.transfer.models import EndpointConfig
 
 
@@ -251,6 +253,37 @@ def test_sftp_handshake_retries_after_eof_before_auth(monkeypatch):
     transport = _open_sftp_transport(cfg)
     assert calls == [(True, True), (False, True), (False, False)]
     assert transport.server_sig_algs is False
+
+
+def test_sftp_preauth_close_names_the_handshake_after_every_retry(monkeypatch):
+    import socket
+
+    import paramiko
+
+    from connectors.sftp_common import SFTPConfig, _open_sftp_transport
+
+    class _Transport:
+        def __init__(self, sock, strict_kex=True, server_sig_algs=True, **_kwargs):
+            self.strict_kex = strict_kex
+            self.server_sig_algs = server_sig_algs
+
+        def start_client(self, timeout=30):
+            raise EOFError("Connection closed by remote host [preauth]")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(paramiko, "Transport", _Transport)
+    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: object())
+    monkeypatch.setattr("connectors.sftp_common.verify_host_key", lambda *_a, **_k: None)
+    monkeypatch.setattr("connectors.sftp_common._legacy_ssh_available", lambda: False)
+    cfg = SFTPConfig()
+    cfg.host = "files.example"
+    cfg.port = 22
+    with pytest.raises(RuntimeError, match="before authentication") as exc:
+        _open_sftp_transport(cfg)
+    assert "group1-sha1 is not offered" in str(exc.value)
+    assert "preauth" in str(exc.value)
 
 
 def test_sftp_host_key_refusal_is_not_retried(monkeypatch):
