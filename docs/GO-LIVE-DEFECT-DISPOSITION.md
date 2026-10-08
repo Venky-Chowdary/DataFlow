@@ -8,10 +8,10 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 12
+- not fixed: 10
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 72
+- fixed in code, unit-proven — not a live QA retest: 74
 - partly fixed in code: 11
 
 ## Every row
@@ -67,7 +67,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B-022 | P2 | OPEN | fixed in code, unit-proven (test_root_cause_identity_sentence_is_not_a_null_quarantine_row, test_completed_job_does_not_report_the_validate_root_as_rejected). A completed job no longer reports that sentence as a rejected row. Not a live QA retest. |
 | DEF-B-029 | P2 | OPEN | fixed in code, unit-proven (test_oracle_timestamp_keeps_declared_fractional_seconds, test_oracle_catalog_keeps_timestamp_scale). CREATE compiles TIMESTAMP(7) and TIMESTAMP(7) WITH TIME ZONE. Introspect keeps (n) from the type string and from DATA_SCALE. A live TIMESTAMP(6) still narrows against a (7) source. Not a live Oracle retest. |
 | DEF-B-032 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-B2-002 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B2-002 | P2 | OPEN | fixed in code, unit-proven (test_pilot_append_blocks_a_key_the_existing_table_already_holds, test_pilot_append_warns_when_a_heap_already_holds_the_row). A full_refresh_append into an existing keyed table blocks on the stored key. A heap warns that a second copy would land. Neither says the destination was unavailable. Not a live QA retest. |
 | DEF-B2-004 | P2 | OPEN | fixed in code, unit-proven (test_cdc_prepare_does_not_stage_mysql_grants_for_other_engines). SQL Server, Oracle, and TimescaleDB are not staged. MariaDB stages the replication grant and says gtid_mode is not applied. Not a live QA retest. |
 | DEF-B2-005 | P2 | OPEN | fixed in code, unit-proven (test_timescaledb_cdc_contract_blocks_even_when_format_was_aliased, test_capabilities_name_the_cdc_sources). g9 blocks timescaledb. Capabilities list cdc_capable_sources and state that timescaledb is not CDC-capable. Not a live QA retest. |
 | DEF-B2-011 | P2 | OPEN | fixed in code, unit-proven (test_manual_run_after_an_orphaned_claim_with_a_naive_start). Every _finalize_run caller reads the start through _parse_ts (UTC-aware). The orphan itself is settled by the orphan-job sweep (DEF-B-025). Not a live deploy retest. |
@@ -84,7 +84,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-023 | P2 | OPEN | fixed in code, unit-proven (test_cancel_after_a_committed_chunk_keeps_the_row_count, test_a_refused_progress_write_carries_the_committed_count). A cancel after a committed chunk records that count on the cancelled job and says those rows were not removed. A cancel before any commit still reports no rows. The in-flight statement is not rolled back. Not a live MySQL retest. |
 | DEF-C-025 | P2 | OPEN | fixed in code, unit-proven (test_manual_review_pauses_before_an_overwrite_empties_a_column[mysql/postgresql/sqlserver/snowflake], test_acknowledged_overwrite_proceeds_and_still_names_the_loss, test_a_propagating_policy_warns_instead_of_pausing, test_upserting_sinks_keep_unwritten_properties, test_engine_and_identity_columns_are_regenerated_not_emptied, test_overwrite_keeps_a_destination_column_the_source_dropped). Validate and Execute's preflight block an overwrite under manual_review that would empty a live destination column, naming it, until the schema change is acknowledged; other policies warn. The values themselves are not carried across an overwrite. Not a live QA retest. |
 | DEF-C-026 | P2 | OPEN | fixed in code, unit-proven (test_unconstrained_numeric_typmod_is_numeric_not_65535). 65535 is unconstrained NUMERIC. Create-new on MySQL uses the platform DECIMAL(38,15) and is not a fidelity collapse. A real NUMERIC(100,2) is kept. Not a live Postgres to MySQL retest. |
-| DEF-C-027 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-027 | P2 | OPEN | fixed in code, unit-proven (test_a_new_reader_finds_the_run_on_disk, test_pilot_append_blocks_a_key_the_existing_table_already_holds). The run id is fsynced to the jsonl file before the response returns, and a later reader finds it. The append probe uses the connection the inspect just opened. A host that wipes data_dir on deploy still loses the file. Not a live restart retest. |
 | DEF-C-033 | P2 | OPEN | fixed in code, unit-proven (test_base64_alphabet_text_stays_text_and_is_not_a_preserve). Hex named payload stays text. Real base64 named payload_b64 stays BINARY. Not a live PG retest. |
 | DEF-C-039 | P2 | OPEN | fixed in code, unit-proven (test_pilot_preflight_forwards_a_denied_insert_probe, test_g2_gate_surfaces_privilege_probe_in_details). The plan forwards can_write and the probe. A denied INSERT blocks Gate-2 with the probe detail. Not a live grant retest. |
 | DEF-C-040 | P2 | OPEN | fixed in code, unit-proven (test_select_denied_blocks_gate_1_instead_of_a_cast). A sample read that fails with permission denied, insufficient privilege, or SQLSTATE 42501 blocks Gate-1 and names SELECT. A measured empty table is unchanged. Not a live grant retest. |

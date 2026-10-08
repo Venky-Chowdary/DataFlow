@@ -1346,6 +1346,12 @@ def _run_preflight(
         destination_live_column_types = (
             dict(dest_types) if dest_recreated and dest_types else None
         )
+        # The inspect above is what Gate-2 uses to say the table exists. The
+        # collision probe has to use that same connection. Dropping it made
+        # every append into a readable table warn that the destination was
+        # unavailable, then Execute discovered the duplicate.
+        measured_exists = dest_probe.get("table_exists")
+        table_exists = measured_exists if isinstance(measured_exists, bool) else dest_exists
 
         result = run_file_preflight(
             columns=columns,
@@ -1364,7 +1370,7 @@ def _run_preflight(
             destination_column_defaults=dest_probe.get("column_defaults") or {},
             destination_identity_columns=dest_probe.get("identity_columns") or [],
             destination_generated_columns=dest_probe.get("generated_columns") or [],
-            destination_table_exists=dest_exists,
+            destination_table_exists=table_exists,
             destination_can_create=can_create if isinstance(can_create, bool) else None,
             # Connectivity is not INSERT. Dropping the probe here made Gate-2
             # say "write access" for a role that can only SELECT, and Execute
@@ -1386,6 +1392,12 @@ def _run_preflight(
             ),
             destination_db_type=dest_db_type,
             destination_table=dst_table,
+            destination_pk_columns=(
+                dest_probe.get("primary_key_columns") or dest_probe.get("pk_columns")
+            ),
+            destination_unique_keys=list(dest_probe.get("unique_keys") or []),
+            destination_foreign_keys=list(dest_probe.get("foreign_keys") or []),
+            destination_config=dest_probe.get("_probe_cfg") or None,
             source_kind=source_kind or "database",
             source_format=src_db_type,
             source_table=src_table,
