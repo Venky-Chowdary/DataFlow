@@ -232,6 +232,26 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
     return details, extras
 
 
+def _cdc_dest_release_args(request: Any) -> tuple[str, dict[str, Any] | None]:
+    """Destination identity for retiring a dropped slot's exactly-once LSN."""
+    if request is None:
+        return "", None
+    destination = getattr(request, "destination", None)
+    if destination is None:
+        return "", None
+    try:
+        from src.transfer.adapters import resolve_connector_config
+
+        cfg = resolve_connector_config(destination)
+    except Exception as exc:
+        logger.debug("CDC slot release dest config unread: %s", exc)
+        return "", None
+    dest_type = str(
+        getattr(destination, "format", "") or getattr(destination, "type", "") or ""
+    )
+    return dest_type, cfg if isinstance(cfg, dict) else None
+
+
 def _release_failed_cdc_slot(
     mongo: Any,
     job_id: str,
@@ -263,6 +283,7 @@ def _release_failed_cdc_slot(
             except Exception as exc:
                 logger.debug("CDC failure source config unread: %s", exc)
                 source_cfg = None
+    dest_type, dest_cfg = _cdc_dest_release_args(request)
     try:
         from services.cdc_catchup import release_finished_cdc_slot
 
@@ -274,6 +295,8 @@ def _release_failed_cdc_slot(
             job_id=job_id,
             worker_closed=True,
             retriable=False,
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
         )
     except Exception as exc:
         logger.warning("CDC slot release after failure failed for %s: %s", job_id, exc)
@@ -303,6 +326,7 @@ def _release_cancelled_cdc_slot(mongo: Any, job_id: str, request: Any) -> None:
             except Exception as exc:
                 logger.debug("CDC cancel source config unread: %s", exc)
                 source_cfg = None
+    dest_type, dest_cfg = _cdc_dest_release_args(request)
     try:
         from services.cdc_catchup import release_finished_cdc_slot
 
@@ -313,6 +337,8 @@ def _release_cancelled_cdc_slot(mongo: Any, job_id: str, request: Any) -> None:
             source_cfg=source_cfg,
             job_id=job_id,
             worker_closed=True,
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
         )
     except Exception as exc:
         logger.warning("CDC slot release after cancel failed for %s: %s", job_id, exc)

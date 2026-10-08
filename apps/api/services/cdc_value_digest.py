@@ -5,8 +5,10 @@ each source row through the destination bind and checks that fingerprint
 is present on the destination. Extra dest rows do not fail (a changelog
 is not the source table; leftover MERGE is a no-op).
 
-A scan that cannot finish returns ``None``. The caller then stays on
-``cdc_source_image_count`` and says value fidelity was not compared.
+Identity mappings are scanned. A transform is not a cell proof, so that
+route stays on ``cdc_source_image_count``. A scan that starts and does not
+finish raises ``CdcValueScanIncomplete`` — row count must not complete the
+job. A finished scan with a missing fingerprint fails the job.
 """
 
 from __future__ import annotations
@@ -21,6 +23,13 @@ _IDENTITY_TRANSFORMS = frozenset(
 )
 _PAGE = 500
 _MAX_PAGES = 400
+
+
+class CdcValueScanIncomplete(RuntimeError):
+    """The source image could be scanned and was not.
+
+    Row count is not a substitute. The job must fail closed.
+    """
 
 
 @dataclass(frozen=True)
@@ -199,19 +208,32 @@ def prove_cdc_values(
     mappings: list[dict[str, Any]] | None,
     dest_types: dict[str, str] | None = None,
 ) -> CdcValueProof | None:
-    """Scan both tables, or ``None`` when the scan cannot be a proof."""
+    """Scan both tables.
+
+    ``None`` means the mapping is not an identity carry, so cell compare
+    would reject a correct transform. A scan that cannot finish raises
+    ``CdcValueScanIncomplete`` instead of pretending the row count is enough.
+    """
+    if not source_table or not dest_table:
+        raise CdcValueScanIncomplete(
+            "CDC value scan needs a source table and a destination table."
+        )
     pairs = _identity_pairs(mappings)
-    if pairs is None or not source_table or not dest_table:
+    if pairs is None:
         return None
     columns = [dest for _src, dest in pairs]
     source_columns = [src for src, _dest in pairs]
     try:
         source_rows = _scan_table(source_type, source_cfg, source_table, source_columns)
         dest_rows = _scan_table(dest_type, dest_cfg, dest_table, columns)
-    except Exception:
-        return None
+    except Exception as exc:
+        raise CdcValueScanIncomplete(
+            f"CDC value scan failed: {exc}"
+        ) from exc
     if source_rows is None or dest_rows is None:
-        return None
+        raise CdcValueScanIncomplete(
+            "CDC value scan did not finish. Row count is not a cell proof."
+        )
     return compare_row_sets(
         _rename(source_rows, pairs),
         _rename(dest_rows, [(column, column) for column in columns]),

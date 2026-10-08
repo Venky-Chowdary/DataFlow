@@ -855,6 +855,11 @@ def open_eos_session(
         try:
             _ensure_wm_table(cur)
             view = _read_watermark(cur, stream_key)
+            from services.cdc_slot_resume import without_retired_slot_resume
+
+            view, job_resume = without_retired_slot_resume(
+                view, job_resume, cursor_key=stream_key
+            )
             opened = plan_open_session(
                 dest=view, incoming_fence=incoming_fence, job_resume=job_resume
             )
@@ -901,6 +906,45 @@ def dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str) -> str | None:
         if cur.fetchone() is None:
             return None
         return _read_watermark(cur, stream_key).committed_lsn
+    finally:
+        conn.close()
+
+
+def blank_sqlite_eos_resume(dest_cfg: dict[str, Any], stream_key: str, *, lsn: str) -> bool:
+    """Blank a SQLite dest resume for a dropped slot. Fence epoch stays."""
+    target = str(lsn or "").strip()
+    key = str(stream_key or "").strip()
+    if not target or not key:
+        return False
+    path = _sqlite_path(dest_cfg)
+    conn = sqlite3.connect(path, timeout=30, isolation_level=None)
+    try:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            _ensure_wm_table(cur)
+            cur.execute(
+                f"UPDATE {WATERMARK_TABLE} SET committed_lsn = '' "  # nosec B608
+                f"WHERE stream_key = ? AND committed_lsn = ?",
+                (key, target),
+            )
+            cleared = cur.rowcount > 0
+            try:
+                cur.execute(
+                    f"UPDATE {WATERMARK_TABLE} SET resume_blob = '' "  # nosec B608
+                    f"WHERE stream_key = ? AND committed_lsn = ''",
+                    (key,),
+                )
+            except sqlite3.OperationalError:
+                pass
+            conn.execute("COMMIT")
+            return cleared
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
     finally:
         conn.close()
 
@@ -966,6 +1010,34 @@ def read_route_dest_lsn(
         return sa_dest_watermark_lsn(dest_cfg, stream_key, dest)
     except Exception:
         return None
+
+
+def blank_route_dest_resume(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    stream_key: str,
+    *,
+    lsn: str,
+) -> bool:
+    """Blank one dest exactly-once resume after its Postgres slot was dropped.
+
+    The fence epoch is not changed. A newer LSN written by another run is
+    left in place. Never raises — a failed blank still leaves the retirement
+    record, and the next Open ignores that LSN.
+    """
+    dest = (dest_type or "").strip().lower().replace("-", "_")
+    try:
+        if dest == "sqlite":
+            return blank_sqlite_eos_resume(dest_cfg, stream_key, lsn=lsn)
+        from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS
+
+        if dest not in EOS_TXN_WIRED_DESTS:
+            return False
+        from connectors.cdc_eos_sa import sa_blank_eos_resume
+
+        return sa_blank_eos_resume(dest_cfg, stream_key, dest, lsn=lsn)
+    except Exception:
+        return False
 
 
 def read_route_dest_resume(

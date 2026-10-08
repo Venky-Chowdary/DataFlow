@@ -1188,6 +1188,11 @@ def open_eos_sa_session(
             conn.execute(text(_wm_ddl(dialect)))
             _ensure_wm_columns(conn, dialect)
             view = _lock_watermark(conn, dialect, stream_key)
+            from services.cdc_slot_resume import without_retired_slot_resume
+
+            view, job_resume = without_retired_slot_resume(
+                view, job_resume, cursor_key=stream_key
+            )
             opened = plan_open_session(
                 dest=view, incoming_fence=incoming_fence, job_resume=job_resume
             )
@@ -1289,6 +1294,57 @@ def sa_dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str, dest_type: 
             except Exception:
                 return None
             return str(row[0]) if row and row[0] else None
+    finally:
+        release_engine(engine)
+
+
+def sa_blank_eos_resume(
+    dest_cfg: dict[str, Any],
+    stream_key: str,
+    dest_type: str,
+    *,
+    lsn: str,
+) -> bool:
+    """Blank a dest resume that belonged to a dropped Postgres slot.
+
+    The fence epoch stays. A newer committed LSN is left alone. An empty
+    string satisfies NOT NULL; the next Open treats it as no resume.
+    """
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+
+    target = str(lsn or "").strip()
+    key = str(stream_key or "").strip()
+    if not target or not key:
+        return False
+    dialect = normalize_eos_dialect(dest_type, dest_cfg)
+    cfg = dict(dest_cfg)
+    cfg.setdefault("type", dialect)
+    engine = _engine(cfg)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(_wm_ddl(dialect)))
+            _ensure_wm_columns(conn, dialect)
+            result = conn.execute(
+                text(
+                    f"UPDATE {_wm_ref(dialect)} SET committed_lsn = '' "  # nosec B608
+                    f"WHERE stream_key = :k AND committed_lsn = :lsn"
+                ),
+                {"k": key, "lsn": target},
+            )
+            cleared = int(result.rowcount or 0) > 0
+            try:
+                with conn.begin_nested():
+                    conn.execute(
+                        text(
+                            f"UPDATE {_wm_ref(dialect)} SET resume_blob = '' "  # nosec B608
+                            f"WHERE stream_key = :k AND committed_lsn = ''"
+                        ),
+                        {"k": key},
+                    )
+            except Exception:
+                pass
+            return cleared
     finally:
         release_engine(engine)
 

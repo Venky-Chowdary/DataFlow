@@ -173,6 +173,8 @@ def build_snapshot_mode_preflight_gate(
     stream_contracts: list[dict[str, Any]] | None = None,
     watermark: Any = None,
     request_snapshot_mode: str = "",
+    retention: Any = None,
+    cursor_key: str = "",
 ) -> dict[str, Any] | None:
     """Validate≡Execute: ``never`` without a watermark must block before Execute.
 
@@ -204,6 +206,11 @@ def build_snapshot_mode_preflight_gate(
         }
     present = watermark_present(watermark)
     wm = watermark if present else None
+    from services.cdc_slot_resume import preflight_slot_gate
+
+    slot_gate = preflight_slot_gate(mode, wm, retention, cursor_key=cursor_key)
+    if slot_gate is not None:
+        return slot_gate
     if mode == SnapshotMode.NEVER and snapshot_dump_open(wm):
         return {
             "id": "g18_cdc_snapshot_mode",

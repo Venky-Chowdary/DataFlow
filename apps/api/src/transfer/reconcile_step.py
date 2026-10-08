@@ -2224,7 +2224,11 @@ def run_reconciliation(
 
     strict_checksum = validation_mode in ("strict", "maximum")
 
-    if source_checksum_scope_note and target_rows >= 0:
+    if (
+        source_checksum_scope_note
+        and target_rows >= 0
+        and not _cdc_source_image_gate(dest_summary)
+    ):
         # Resumed streaming pass: the destination digest covers the whole
         # population, the source digest could only cover the resumed tail. Prove
         # cardinality and say plainly that population fidelity is not proven —
@@ -2697,24 +2701,47 @@ def run_reconciliation(
         # value fidelity was not compared.
         keyed_scope = CDC_SOURCE_IMAGE_COUNT
         if source_endpoint is not None and source_endpoint.kind == "database":
-            from services.cdc_value_digest import prove_cdc_values
+            from services.cdc_value_digest import (
+                CdcValueScanIncomplete,
+                prove_cdc_values,
+            )
+            from services.reconciliation import ReconciliationReport
 
             src_cfg_v = resolve_connector_config(source_endpoint)
             src_type_v = resolve_driver_type(
                 str(src_cfg_v.get("type") or source_endpoint.format or "")
             )
-            proof = prove_cdc_values(
-                source_type=src_type_v,
-                source_cfg=src_cfg_v,
-                source_table=str(
-                    source_endpoint.table or source_endpoint.collection or ""
-                ),
-                dest_type=str(db_type or ""),
-                dest_cfg=dict(cfg),
-                dest_table=str(table_name or ""),
-                mappings=list(mapping_dicts or []),
-                dest_types=dest_types,
-            )
+            try:
+                proof = prove_cdc_values(
+                    source_type=src_type_v,
+                    source_cfg=src_cfg_v,
+                    source_table=str(
+                        source_endpoint.table or source_endpoint.collection or ""
+                    ),
+                    dest_type=str(db_type or ""),
+                    dest_cfg=dict(cfg),
+                    dest_table=str(table_name or ""),
+                    mappings=list(mapping_dicts or []),
+                    dest_types=dest_types,
+                )
+            except CdcValueScanIncomplete as exc:
+                return _finalize(
+                    ReconciliationReport(
+                        passed=False,
+                        source_rows=source_rows,
+                        target_rows=target_rows if isinstance(target_rows, int) else 0,
+                        source_checksum="",
+                        target_checksum="",
+                        message=(
+                            f"{exc} A matching row count does not prove the "
+                            "destination cells. At-least-once upsert. Not "
+                            "platform exactly-once."
+                        ),
+                        checksum_scope=CDC_SOURCE_IMAGE_COUNT,
+                        checksum_match=False,
+                        population_proof=False,
+                    ).to_dict()
+                )
             if proof is not None:
                 keyed_scope = CDC_SOURCE_IMAGE_VALUES
                 source_checksum = proof.source_digest

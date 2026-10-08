@@ -1789,6 +1789,13 @@ def _run_cdc_shared_multi_table(
         stream_contracts,
         cfg_snapshot_mode=str(src_cfg.get("snapshot_mode") or ""),
     )
+    from services.cdc_slot_resume import prepare_resume_for_missing_slot
+
+    shared_wm, slot_note = prepare_resume_for_missing_slot(
+        shared_wm, ret, cdc, mode=snapshot_mode
+    )
+    if slot_note:
+        ddl_log.append(slot_note)
     from services.cdc_snapshot_window import _pk_columns
 
     snapshot_plan = resolve_cdc_snapshot_plan(
@@ -3193,6 +3200,13 @@ def _run_cdc_single_stream(
         stream_contracts,
         cfg_snapshot_mode=str(src_cfg.get("snapshot_mode") or ""),
     )
+    from services.cdc_slot_resume import prepare_resume_for_missing_slot
+
+    watermark, slot_note = prepare_resume_for_missing_slot(
+        watermark, ret, cdc, mode=snapshot_mode
+    )
+    if slot_note:
+        ddl_log.append(slot_note)
     snapshot_plan = resolve_cdc_snapshot_plan(
         snapshot_mode,
         watermark=watermark,

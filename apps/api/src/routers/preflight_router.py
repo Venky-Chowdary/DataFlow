@@ -568,6 +568,7 @@ async def run_preflight(body: PreflightRequest):
             catalog_primary_key_columns=catalog_pk,
             mappings=list(body.mappings or []),
             source_table=str(body.source_table or body.source_collection or ""),
+            source_config=body.source_config if isinstance(body.source_config, dict) else None,
             read_scope=resolve_read_scope(
                 sync_mode=body.sync_mode,
                 stream_contracts=body.stream_contracts,

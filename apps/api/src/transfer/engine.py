@@ -1111,6 +1111,15 @@ def _execute_policy_gates_for_request(
         getattr(src, "table", None) or getattr(src, "collection", None) or ""
     )
     catalog_pk = _catalog_pk_for_policy(request, source_table)
+    source_config = None
+    if src is not None:
+        try:
+            from src.transfer.adapters import resolve_connector_config
+
+            source_config = resolve_connector_config(src)
+        except Exception as exc:
+            logger.debug("CDC policy source config unread: %s", exc)
+            source_config = None
     return run_transfer_policy_gates(
         sync_mode=str(getattr(request, "sync_mode", "") or ""),
         schema_policy=str(getattr(request, "schema_policy", "") or "manual_review"),
@@ -1136,6 +1145,7 @@ def _execute_policy_gates_for_request(
         catalog_primary_key_columns=catalog_pk,
         mappings=mappings,
         source_table=source_table,
+        source_config=source_config if isinstance(source_config, dict) else None,
     )
 
 
@@ -4470,12 +4480,35 @@ class UniversalTransferEngine:
                 except Exception as exc:
                     logger.debug("CDC completion source config unread: %s", exc)
                     source_cfg = None
+                dest_cfg = None
+                dest_type = ""
+                try:
+                    from src.transfer.adapters import resolve_connector_config
+
+                    dest_cfg = resolve_connector_config(request.destination)
+                    dest_type = str(
+                        getattr(request.destination, "format", "")
+                        or getattr(request.destination, "type", "")
+                        or ""
+                    )
+                except Exception as exc:
+                    logger.debug("CDC completion dest config unread: %s", exc)
+                    dest_cfg = None
+                extra_lsns = [
+                    dest_summary.get("eos_committed_lsn"),
+                    (dest_summary.get("cdc") or {}).get("eos_committed_lsn")
+                    if isinstance(dest_summary.get("cdc"), dict)
+                    else None,
+                ]
                 dest_summary["cdc_slot_release"] = release_finished_cdc_slot(
                     job_doc,
                     reason="completed",
                     schedule_id=str(getattr(request, "schedule_id", "") or ""),
                     source_cfg=source_cfg,
                     job_id=job_id,
+                    dest_type=dest_type,
+                    dest_cfg=dest_cfg,
+                    extra_lsns=[value for value in extra_lsns if value],
                 )
             mongo.update_job_status(
                 job_id,

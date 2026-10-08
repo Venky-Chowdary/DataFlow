@@ -557,6 +557,7 @@ def run_transfer_policy_gates(
     catalog_primary_key_columns: list[str] | None = None,
     mappings: list[dict[str, Any]] | None = None,
     source_table: str = "",
+    source_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     from services.schema_drift import schema_policy_honesty_line
@@ -746,10 +747,24 @@ def run_transfer_policy_gates(
     from services.cdc_snapshot_mode import build_snapshot_mode_preflight_gate
 
     snap_wm = getattr(read_scope, "watermark", None) if read_scope is not None else None
+    snap_key = str(getattr(read_scope, "cursor_key", "") or "") if read_scope is not None else ""
+    slot_probe = None
+    if sync == "cdc":
+        from services.cdc_slot_resume import probe_postgres_slot_for_preflight
+
+        slot_probe = probe_postgres_slot_for_preflight(
+            source_config,
+            source_type=src,
+            watermark=snap_wm,
+            table=source_table,
+            cursor_key=snap_key,
+        )
     snap_gate = build_snapshot_mode_preflight_gate(
         sync_mode=sync,
         stream_contracts=contracts,
         watermark=snap_wm,
+        retention=slot_probe,
+        cursor_key=snap_key,
     )
     if snap_gate:
         gates.append(snap_gate)
