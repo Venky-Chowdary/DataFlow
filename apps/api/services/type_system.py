@@ -3022,6 +3022,11 @@ def _interval_ddl_for_dest(db: str, inferred: str | None) -> str | None:
 
 
 # Destination DDL when source carrier is timezone-aware vs wall-clock NTZ.
+# MySQL create-new for an offset-pinned source. Width 64 holds an RFC-3339
+# instant with a numeric offset and nine fractional digits
+# (``2024-12-31T23:59:59.123456789+05:30`` is 35 characters). A different
+# width is not this stamp.
+MYSQL_OFFSET_TEXT_DDL: Final[str] = "VARCHAR(64)"
 _TZ_AWARE_DDL: Final[dict[str, str]] = {
     "postgresql": "TIMESTAMPTZ",
     "redshift": "TIMESTAMPTZ",
@@ -3448,12 +3453,20 @@ def _datetime_ddl_for_dest(db: str, inferred: str | None) -> str | None:
             or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
         )
     elif polarity == "tz":
-        base = (
-            _aware_ddl_for_dest(db)
-            or _TZ_OFFSET_DDL.get(db)
-            or _TZ_AWARE_DDL.get(db)
-            or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
-        )
+        # MySQL has no offset-preserving temporal type. DATETIME(6) and
+        # TIMESTAMP(6) drop the offset label (DEF-B-016). Create-new stores
+        # RFC-3339 text, which keeps the offset and more than six fractional
+        # digits. An existing DATETIME or TIMESTAMP column is not rewritten
+        # here — dest-exists stays a collapse until Map remaps it.
+        if db == "mysql":
+            base = MYSQL_OFFSET_TEXT_DDL
+        else:
+            base = (
+                _aware_ddl_for_dest(db)
+                or _TZ_OFFSET_DDL.get(db)
+                or _TZ_AWARE_DDL.get(db)
+                or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
+            )
     elif polarity == "ntz":
         base = _TZ_NAIVE_DDL.get(db) or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
     elif fsp is not None:
@@ -4023,6 +4036,30 @@ def reinvent_would_drop_dest_instant_carrier(
     return datetime_timezone_polarity(reinvented, dest_db=db) != before
 
 
+def mysql_offset_text_preserves(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True only for MySQL's offset-pinned create-new stamp.
+
+    ``VARCHAR(64)`` is that stamp. ``VARCHAR(100)``, ``TEXT``, ``DATETIME(6)``
+    and ``TIMESTAMP(6)`` are not: a name column must not go green just because
+    it is text, and a temporal column still drops the offset label.
+    """
+    if _normalize_dest_db(dest_db) != "mysql":
+        return False
+    if datetime_timezone_polarity(source_type) != "tz":
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_STRING:
+        return False
+    head = strip_identity_qualifier(target_type).upper().strip().split()[0]
+    if not head.startswith("VARCHAR("):
+        return False
+    return parse_string_carrier_width(target_type) == 64
+
+
 def timezone_aware_would_collapse_to_string(
     source_type: str,
     target_type: str,
@@ -4038,6 +4075,8 @@ def timezone_aware_would_collapse_to_string(
     store has no other carrier than text, and its JSON wire writes the offset, so
     there the text *is* the instant.
     """
+    if mysql_offset_text_preserves(source_type, target_type, dest_db=dest_db):
+        return False
     if keyspace_instant_text_wire_preserved(
         source_type, target_type, dest_db=dest_db
     ):
@@ -4662,7 +4701,12 @@ def national_charset_would_invent(
     return True
 
 
-def bounded_string_sink_would_truncate(source_type: str, target_type: str) -> bool:
+def bounded_string_sink_would_truncate(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when a scalar/document lands on tight CHAR/VARCHAR(n)/TINYTEXT.
 
     Safe-list ``integer→string`` must not greenwash ``INTEGER→VARCHAR(1)``.
@@ -4700,6 +4744,10 @@ def bounded_string_sink_would_truncate(source_type: str, target_type: str) -> bo
         bits = parse_bitstring_width(source_type)
         if bits is not None and tgt_w >= bits:
             return False
+    # MySQL create-new for an offset-pinned instant is VARCHAR(64). That
+    # width holds the offset. Every other tight string stays a truncation.
+    if mysql_offset_text_preserves(source_type, target_type, dest_db=dest_db):
+        return False
     # Non-string → tight sink — fail closed (Accept risk).
     return True
 
@@ -7379,7 +7427,9 @@ def is_precision_collapse_coercion(
         return True
     if string_width_would_narrow(source_type, target_type):
         return True
-    if bounded_string_sink_would_truncate(source_type, target_type):
+    if bounded_string_sink_would_truncate(
+        source_type, target_type, dest_db=dest_db
+    ):
         return True
     if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
@@ -7932,7 +7982,9 @@ def is_lossy_coercion(
             return True
         if string_width_would_narrow(source_type, target_type):
             return True
-        if bounded_string_sink_would_truncate(source_type, target_type):
+        if bounded_string_sink_would_truncate(
+            source_type, target_type, dest_db=dest_db
+        ):
             return True
         if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
@@ -8131,7 +8183,9 @@ def is_lossy_coercion(
         return True
     if string_width_would_narrow(source_type, target_type):
         return True
-    if bounded_string_sink_would_truncate(source_type, target_type):
+    if bounded_string_sink_would_truncate(
+        source_type, target_type, dest_db=dest_db
+    ):
         return True
     if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
@@ -8309,7 +8363,9 @@ def is_lossy_coercion(
         if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
             return True
         # INTEGERâ†’VARCHAR(1) / JSONâ†’CHAR(10) â€” bounded sink truncates.
-        if bounded_string_sink_would_truncate(source_type, target_type):
+        if bounded_string_sink_would_truncate(
+            source_type, target_type, dest_db=dest_db
+        ):
             return True
         return False
     return True

@@ -183,6 +183,47 @@ class TestBsonDateTokenIsAnInstant:
         assert "DATETIME" in stamped.upper()
         assert "(3)" in stamped
 
+    def test_existing_mysql_timestamp_is_planned_as_datetime3(self) -> None:
+        """DEF-B-010: a live TIMESTAMP(0) is not left to drop milliseconds.
+
+        The unaltered pair stays lossy. The planned target is DATETIME(3),
+        and that pair is a widen the writer can MODIFY. TIMESTAMP(6) already
+        keeps the fraction. DATETIME is not rewritten to TIMESTAMP.
+        """
+        from connectors.schema_drift import mysql_temporal_fsp_is_wider
+        from services.document_instant import promote_document_instant_existing_target
+        from services.source_engine_scope import bind_source_engine
+        from services.type_system import is_lossy_coercion
+
+        planned = promote_document_instant_existing_target(
+            "TIMESTAMP",
+            "TIMESTAMP",
+            dest_db="mysql",
+            source_db="mongodb",
+        )
+        assert planned == "DATETIME(3)"
+        with bind_source_engine("mongodb"):
+            assert is_lossy_coercion("TIMESTAMP", "TIMESTAMP", dest_db="mysql") is True
+            assert is_lossy_coercion("TIMESTAMP", planned, dest_db="mysql") is False
+        assert (
+            promote_document_instant_existing_target(
+                "TIMESTAMP",
+                "TIMESTAMP(6)",
+                dest_db="mysql",
+                source_db="mongodb",
+            )
+            == "TIMESTAMP(6)"
+        )
+        assert mysql_temporal_fsp_is_wider(
+            "TIMESTAMP", "DATETIME(3)", dest_db="mysql"
+        ) is True
+        assert mysql_temporal_fsp_is_wider(
+            "TIMESTAMP(6)", "DATETIME(3)", dest_db="mysql"
+        ) is False
+        assert mysql_temporal_fsp_is_wider(
+            "DATETIME", "TIMESTAMP(6)", dest_db="mysql"
+        ) is False
+
     def test_sql_date_columns_still_truncate(self) -> None:
         assert (
             fingerprint_for_reconcile(

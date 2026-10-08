@@ -755,12 +755,11 @@ def test_mysql_poll_preserves_gtid_on_resume_token(monkeypatch) -> None:
         ),
     ):
         batches = list(cdc.poll())
-    assert batches
-    # Idle poll still refreshes GTID into resume token (commit-boundary path).
-    token = batches[0].resume_token
-    if isinstance(token, dict) and token.get("txn_held"):
-        token = token.get("token") or {}
-    assert token.get("gtid") == "uuid:1-10"
+    # An idle poll did not apply a captured-table change. Publishing the
+    # live head (including its GTID) is how the next run started past an
+    # unread update (DEF-B2-009).
+    assert batches == []
+    assert cdc.resume_token.get("pos") == 100
 
 
 def test_extract_cdc_lsn_supports_gtid_mongo_scn() -> None:

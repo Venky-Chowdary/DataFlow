@@ -3861,14 +3861,16 @@ class UniversalTransferEngine:
                 request,
                 already_persisted=_quarantine_persisted,
             )
-            block_msg = str(blocked)
+            from src.transfer.job_failure import account_blocked_write
+
+            kept, block_msg = account_blocked_write(mongo, job_id, blocked)
             mongo.update_job_status(
                 job_id,
                 "failed",
                 phase="failed",
                 error=block_msg,
                 message=block_msg,
-                records_processed=int(blocked.rows_written or 0),
+                records_processed=kept,
                 rejected_rows=int(dest_summary.get("rejected_rows") or 0),
                 rejected_details=(
                     dest_summary.get("rejected_details") or []
@@ -3880,7 +3882,7 @@ class UniversalTransferEngine:
                 error=block_msg,
                 job_id=job_id,
                 operation=request.operation,
-                records_transferred=int(blocked.rows_written or 0),
+                records_transferred=kept,
                 destination_summary=dest_summary,
             )
         except Exception as e:
@@ -4728,18 +4730,20 @@ class UniversalTransferEngine:
                     if isinstance(dest_summary.get("cdc"), dict)
                     else None,
                 ]
-                dest_summary["cdc_slot_release"] = release_finished_cdc_slot(
+                # Drop the slot only after the job document leaves "running".
+                # Releasing first left the capture gone when this write failed
+                # (DEF-B2-007).
+                release_args = (
                     job_doc,
-                    reason="completed",
-                    schedule_id=str(getattr(request, "schedule_id", "") or ""),
-                    source_cfg=source_cfg,
-                    job_id=job_id,
-                    dest_type=dest_type,
-                    dest_cfg=dest_cfg,
-                    extra_lsns=[value for value in extra_lsns if value],
+                    source_cfg,
+                    dest_type,
+                    dest_cfg,
+                    [value for value in extra_lsns if value],
                 )
+            else:
+                release_args = None
             _settle_overwrite_backup(request.destination, restore=False)
-            mongo.update_job_status(
+            status_written = mongo.update_job_status(
                 job_id,
                 terminal_status,
                 records_processed=rows_written,
@@ -4768,6 +4772,25 @@ class UniversalTransferEngine:
                 validation_mode=request.validation_mode,
                 **_cdc_fields_from_summary(dest_summary),
             )
+            if release_args is not None and status_written:
+                job_doc, source_cfg, dest_type, dest_cfg, extra_lsns = release_args
+                job_doc["status"] = terminal_status
+                dest_summary["cdc_slot_release"] = release_finished_cdc_slot(
+                    job_doc,
+                    reason="completed",
+                    schedule_id=str(getattr(request, "schedule_id", "") or ""),
+                    source_cfg=source_cfg,
+                    job_id=job_id,
+                    dest_type=dest_type,
+                    dest_cfg=dest_cfg,
+                    extra_lsns=extra_lsns,
+                )
+                mongo.update_job_status(
+                    job_id,
+                    terminal_status,
+                    destination_summary=dest_summary,
+                    **_cdc_fields_from_summary(dest_summary),
+                )
 
             lineage.emit_preflight_completed(
                 run_id=job_id,
@@ -4840,7 +4863,9 @@ class UniversalTransferEngine:
                 request,
                 already_persisted=_quarantine_persisted,
             )
-            block_msg = str(blocked)
+            from src.transfer.job_failure import account_blocked_write
+
+            kept, block_msg = account_blocked_write(mongo, job_id, blocked)
             from services.cdc_catchup import capture_identity_from
 
             capture = capture_identity_from(blocked)
@@ -4850,7 +4875,7 @@ class UniversalTransferEngine:
                 phase="failed",
                 error=block_msg,
                 message=block_msg,
-                records_processed=int(blocked.rows_written or 0),
+                records_processed=kept,
                 rejected_rows=int(dest_summary.get("rejected_rows") or 0),
                 rejected_details=(
                     dest_summary.get("rejected_details") or []
@@ -4869,7 +4894,7 @@ class UniversalTransferEngine:
                 error=block_msg,
                 job_id=job_id,
                 operation=request.operation,
-                records_transferred=int(blocked.rows_written or 0),
+                records_transferred=kept,
                 destination_summary=dest_summary,
                 contract_id=contract_id,
             )
@@ -5590,14 +5615,16 @@ class UniversalTransferEngine:
                 request,
                 already_persisted=_quarantine_persisted,
             )
-            block_msg = str(blocked)
+            from src.transfer.job_failure import account_blocked_write
+
+            kept, block_msg = account_blocked_write(mongo, job_id, blocked)
             mongo.update_job_status(
                 job_id,
                 "failed",
                 phase="failed",
                 error=block_msg,
                 message=block_msg,
-                records_processed=int(blocked.rows_written or 0),
+                records_processed=kept,
                 rejected_rows=int(dest_summary.get("rejected_rows") or 0),
                 rejected_details=(
                     dest_summary.get("rejected_details") or []
@@ -5609,7 +5636,7 @@ class UniversalTransferEngine:
                 error=block_msg,
                 job_id=job_id,
                 operation=request.operation,
-                records_transferred=int(blocked.rows_written or 0),
+                records_transferred=kept,
                 destination_summary=dest_summary,
                 contract_id=contract_id,
             )

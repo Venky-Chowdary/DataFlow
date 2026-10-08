@@ -23,6 +23,29 @@ def test_resume_token_does_not_adopt_a_live_gtid() -> None:
     assert "gtid" not in token
 
 
+def test_unpublished_binlog_head_is_not_a_resume_token() -> None:
+    """DEF-B2-009: an empty poll must not publish the live head."""
+    from connectors.mysql_change_stream import published_resume_token
+
+    previous = {"file": "mysql-bin.000004", "pos": 100}
+    head = {"file": "mysql-bin.000004", "pos": 900}
+    assert published_resume_token(
+        previous, head, emitted=False, captured_row_dropped=False
+    ) is None
+    assert published_resume_token(
+        previous, head, emitted=True, captured_row_dropped=True
+    ) is None
+    token = published_resume_token(
+        previous,
+        {"file": "mysql-bin.000004", "pos": 200},
+        emitted=True,
+        captured_row_dropped=False,
+    )
+    assert token is not None
+    assert token["pos"] == 200
+    assert token["file"] == "mysql-bin.000004"
+
+
 def test_binlog_schema_match_is_case_insensitive() -> None:
     from connectors.mysql_change_stream import binlog_schema_matches
 

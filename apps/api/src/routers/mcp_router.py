@@ -5,6 +5,7 @@ Supports:
   - Legacy REST bridge at ``/manifest``, ``/tools``, ``/tools/call``
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -99,7 +100,13 @@ async def mcp_streamable(http_request: Request):
                 if not isinstance(message, dict):
                     results.append({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
                     continue
-                out = handle_jsonrpc(
+                # tools/call runs plan/preflight synchronously. Doing that on
+                # the event loop made ping and tools/list wait out the client
+                # timeout (JSON-RPC -32001 Request timed out). A thread keeps
+                # the listener free. A process restart during deploy still
+                # drops the in-flight call.
+                out = await asyncio.to_thread(
+                    handle_jsonrpc,
                     message,
                     authenticated=authenticated,
                     allow_unauth_tools=allow_unauth_tools,
@@ -218,7 +225,9 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
         request_token = set_mcp_request(http_request)
         try:
             with caller_role(mcp_role):
-                result = get_pilot_tools().execute(request.name, request.arguments)
+                result = await asyncio.to_thread(
+                    get_pilot_tools().execute, request.name, request.arguments
+                )
         finally:
             reset_mcp_request(request_token)
     except Exception as exc:

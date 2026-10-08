@@ -210,6 +210,34 @@ def test_one_shot_completion_drops_the_slot_and_clears_the_watermark(monkeypatch
     assert cleared == ["pg:qa:orders→mysql:qa:orders:stream"]
 
 
+def test_running_job_keeps_its_slot(monkeypatch) -> None:
+    """DEF-B2-007: a job that still says running must not lose its capture."""
+
+    def _boom(*_a, **_k):
+        raise AssertionError("slot must stay while the job is running")
+
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture", _boom
+    )
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *a, **k: False
+    )
+    out = release_finished_cdc_slot(
+        {
+            "status": "running",
+            "cdc_slot_name": "df_orders_slot",
+            "cdc_publication_name": "df_pub_orders",
+            "cursor_key": "pg:qa:orders→mysql:qa:orders:stream",
+        },
+        reason="completed",
+        source_cfg={"type": "postgresql", "database": "qa_dataflow"},
+        job_id="job-4604",
+    )
+    assert out["released"] is False
+    assert out["reason"] == "job_still_running"
+    assert out["slot_name"] == "df_orders_slot"
+
+
 def test_schedule_and_failure_keep_the_slot(monkeypatch) -> None:
     def _boom(*_a, **_k):
         raise AssertionError("slot must stay")

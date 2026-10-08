@@ -2330,5 +2330,14 @@ def normalize_sql_bind_value(
 
     handler = _BIND_DISPATCH.get(kind)
     if handler is None:
+        # A text column has no temporal caster. An aware datetime bound as a
+        # driver object is formatted without its offset, so the VARCHAR(64)
+        # create-new stamp would store a wall clock (DEF-B-016). isoformat
+        # keeps the offset. Naive values stay driver objects.
+        if (
+            type(value).__name__ == "datetime"
+            and getattr(value, "tzinfo", None) is not None
+        ):
+            return value.isoformat()
         return value
     return handler(value, route)

@@ -119,6 +119,42 @@ def _minimum_string_length_for(old_type: str) -> int | None:
     return None
 
 
+def mysql_temporal_fsp_is_wider(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
+    """True when a MySQL temporal column gains fractional seconds without a 2038 trap.
+
+    ``TIMESTAMP(0)`` → ``DATETIME(3)`` keeps milliseconds and widens the year
+    range. ``TIMESTAMP(6)`` → ``DATETIME(3)`` narrows the fraction.
+    ``DATETIME`` → ``TIMESTAMP`` is not a widen: MySQL TIMESTAMP only stores
+    1970..2038.
+    """
+    from services.type_system import destination_temporal_fractional_digits
+
+    db = (dest_db or "").strip().lower()
+    if db not in {"mysql", "mariadb"}:
+        return False
+
+    def _family(token: str) -> str:
+        text = re.sub(r"\([^)]*\)", "", token or "")
+        text = text.replace("_", " ").upper().strip()
+        if text.startswith("TIMESTAMP"):
+            return "TIMESTAMP"
+        if text.startswith("DATETIME"):
+            return "DATETIME"
+        return ""
+
+    old_family = _family(old_type)
+    new_family = _family(new_type)
+    if not old_family or not new_family:
+        return False
+    if old_family == "DATETIME" and new_family == "TIMESTAMP":
+        return False
+    old_p = destination_temporal_fractional_digits(old_type, dest_db=db)
+    new_p = destination_temporal_fractional_digits(new_type, dest_db=db)
+    if old_p is None or new_p is None:
+        return False
+    return new_p > old_p
+
+
 def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     """True when new_type can hold all values of old_type without loss."""
     old_type = old_type or "VARCHAR"
@@ -172,6 +208,10 @@ def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
             if old_w is None or new_w is None:
                 return False
             return new_w > old_w
+        if old_logical == "datetime" and mysql_temporal_fsp_is_wider(
+            old_type, new_type, dest_db=dest_db
+        ):
+            return True
         return False
 
     # Integer -> DECIMAL: new must have enough integer digits.
@@ -629,11 +669,15 @@ def widen_existing_columns_native(
     skip_cols: list[str] | None = None,
     source_types: dict[str, str] | None = None,
     suppressed_out: dict[str, str] | None = None,
+    temporal_fsp_without_backfill: bool = False,
 ) -> list[str]:
     """Issue ALTER COLUMN / MODIFY COLUMN to widen columns that are now too narrow.
 
-    Returns the list of DDL statements executed.  ``backfill`` must be True for any
-    DDL to be issued.  The function is idempotent: repeated calls will only emit
+    Returns the list of DDL statements executed.  ``backfill`` must be True for
+    a general widen. A MySQL fractional-second widen still runs when
+    ``temporal_fsp_without_backfill`` is set, because leaving TIMESTAMP(0)
+    under a millisecond source drops digits the map already refused.
+    The function is idempotent: repeated calls will only emit
     ALTER statements when the target type is wider than the existing catalog type.
 
     ``source_types`` (column → source logical type) suppresses widens that are an
@@ -646,7 +690,9 @@ def widen_existing_columns_native(
     such suppressed widen, so the caller can keep its declared types equal to
     the DDL that actually exists.
     """
-    if not backfill or not target_cols or not target_types:
+    if not target_cols or not target_types:
+        return []
+    if not backfill and not temporal_fsp_without_backfill:
         return []
 
     dialect = (dialect or "").lower()
@@ -669,6 +715,13 @@ def widen_existing_columns_native(
         existing_type = existing[col]
         if not is_wider_type(existing_type, new_type, dest_db=dialect):
             continue
+        # backfill=False still widens a fractional-second gap. Other widens
+        # stay behind the operator's backfill flag. A document instant on
+        # TIMESTAMP(0) is this gap (DEF-B-010).
+        if not backfill and not mysql_temporal_fsp_is_wider(
+            existing_type, new_type, dest_db=dialect
+        ):
+            continue
         source_type = str((source_types or {}).get(col) or "").strip()
         if source_type and not is_lossy_coercion(source_type, existing_type, dest_db=dialect):
             if suppressed_out is not None:
@@ -685,6 +738,15 @@ def widen_existing_columns_native(
             ddl = _build_widen_ddl(
                 dialect, schema, table_name, col, new_type, existing_type
             )
+            # TIMESTAMP → DATETIME converts through the session time_zone.
+            # Pin UTC first so the stored clock does not shift.
+            if mysql_temporal_fsp_is_wider(existing_type, new_type, dest_db=dialect):
+                old_family = re.sub(r"\([^)]*\)", "", existing_type or "").upper()
+                new_family = re.sub(r"\([^)]*\)", "", new_type or "").upper()
+                if "TIMESTAMP" in old_family and "DATETIME" in new_family:
+                    from services.timezone_policy import MYSQL_UTC_PIN_SQL
+
+                    cursor.execute(MYSQL_UTC_PIN_SQL)
             # Session-level lock timeouts are now configured by each driver's
             # connection guard (e.g. apply_postgres_session_guards / apply_mysql_session_guards)
             # so ALTER COLUMN cannot hang forever on a contended table lock.

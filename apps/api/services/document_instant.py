@@ -95,6 +95,47 @@ def promote_document_instant_create_target(
     return (upgraded or tgt).strip() or tgt
 
 
+def promote_document_instant_existing_target(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str,
+    source_db: str,
+) -> str:
+    """Dest-exists stamp when a BSON datetime lands on a whole-second MySQL column.
+
+    Create-new already stamps ``DATETIME(3)``. An existing ``TIMESTAMP`` or
+    ``DATETIME`` with fewer than 3 fractional digits still drops the
+    milliseconds. The planned target becomes ``DATETIME(3)`` so the writer
+    can ``MODIFY`` the column. A column that already keeps 3 digits is left
+    alone. ``DATETIME`` is not rewritten to ``TIMESTAMP`` — that carrier is
+    bounded to 1970..2038. The unaltered ``TIMESTAMP`` pair stays lossy.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.source_engine_scope import bind_source_engine
+    from services.type_system import (
+        LOGICAL_DATETIME,
+        destination_temporal_fractional_digits,
+        normalize_logical_type,
+    )
+
+    src = (source_type or "").strip()
+    tgt = (target_type or "").strip()
+    if not src or not tgt:
+        return tgt
+    if _normalize_dest_db(dest_db) != "mysql":
+        return tgt
+    with bind_source_engine(source_db or ""):
+        if not is_document_instant_token(source_db, src):
+            return tgt
+        if normalize_logical_type(src) != LOGICAL_DATETIME:
+            return tgt
+        live = destination_temporal_fractional_digits(tgt, dest_db="mysql")
+    if live is None or live >= DOCUMENT_INSTANT_FRACTIONAL_DIGITS:
+        return tgt
+    return f"DATETIME({DOCUMENT_INSTANT_FRACTIONAL_DIGITS})"
+
+
 def transform_narrows_to_calendar_day(transform: str | None) -> bool:
     """True only when the mapping explicitly asked for a calendar-day narrow.
 

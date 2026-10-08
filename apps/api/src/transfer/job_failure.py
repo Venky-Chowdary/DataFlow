@@ -418,6 +418,36 @@ def _records_after_failure(prior: Any, incoming: Any) -> int:
     return max(_n(prior), _n(incoming))
 
 
+def account_blocked_write(mongo: Any, job_id: str, blocked: Any) -> tuple[int, str]:
+    """Row count and message for a write that stopped after a committed prefix.
+
+    ``WriteBatchBlocked.rows_written`` is this attempt. A checkpoint already
+    stored a larger ``records_processed``. Replacing it with 0 made the job
+    say nothing landed while the destination still held the prefix
+    (DEF-B2-012). The rows are not deleted.
+    """
+    prior = None
+    try:
+        job = mongo.get_job(job_id) or {}
+        prior = job.get("records_processed")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Blocked-write row count could not read job %s: %s", job_id, exc
+        )
+        prior = None
+    kept = _records_after_failure(prior, getattr(blocked, "rows_written", 0))
+    message = str(blocked)
+    try:
+        incoming = max(0, int(getattr(blocked, "rows_written", 0) or 0))
+    except (TypeError, ValueError):
+        incoming = 0
+    if kept > incoming:
+        note = f"{kept} row(s) were already written and were not removed."
+        if note not in message:
+            message = f"{message.rstrip()} {note}"
+    return kept, message
+
+
 def _fail_runtime_job(
     mongo: Any,
     job_id: str,

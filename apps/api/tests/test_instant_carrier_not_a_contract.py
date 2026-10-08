@@ -138,6 +138,39 @@ def test_explicit_wall_clock_target_is_still_a_collapse() -> None:
     assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is False
 
 
+def test_offset_pinned_create_new_on_mysql_keeps_the_offset() -> None:
+    """DEF-B-016: MySQL has no offset type. Create-new stores RFC-3339 text.
+
+    DATETIME(6) and TIMESTAMP(6) stay a collapse. A wider name column does
+    not become a free pass. TIMESTAMPTZ still lands on DATETIME(6).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from connectors.sql_bind import normalize_sql_bind_value
+    from services.type_system import create_new_mapping_target_type
+
+    for source in (
+        "TIMESTAMP_TZ",
+        "TIMESTAMP WITH TIME ZONE",
+        "DATETIMEOFFSET",
+    ):
+        stamped = create_new_mapping_target_type(source, "mysql")
+        assert stamped.upper().startswith("VARCHAR(64)"), (source, stamped)
+        assert is_lossy_coercion(source, stamped, dest_db="mysql") is False
+        assert is_lossy_coercion(source, "DATETIME(6)", dest_db="mysql") is True
+        assert is_lossy_coercion(source, "TIMESTAMP(6)", dest_db="mysql") is True
+        assert is_lossy_coercion(source, "VARCHAR(100)", dest_db="mysql") is True
+    assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is False
+    assert create_new_mapping_target_type("TIMESTAMPTZ", "mysql") == "DATETIME(6)"
+    aware = datetime(
+        2024, 12, 31, 23, 59, 59, 123456, tzinfo=timezone(timedelta(hours=5, minutes=30))
+    )
+    bound = normalize_sql_bind_value(aware, "VARCHAR(64)", engine="mysql")
+    assert isinstance(bound, str)
+    assert bound.endswith("+05:30")
+    assert "23:59:59" in bound
+
+
 def test_redis_json_wire_writes_the_offset() -> None:
     """The exemption is about the wire — prove the wire before trusting it."""
     aware = datetime(

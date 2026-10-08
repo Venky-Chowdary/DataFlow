@@ -85,6 +85,26 @@ def resume_token_from_consumed(
     return token or None
 
 
+def published_resume_token(
+    previous: dict[str, Any] | None,
+    last_position: dict[str, Any] | None,
+    *,
+    emitted: bool,
+    captured_row_dropped: bool,
+) -> dict[str, Any] | None:
+    """Watermark this poll may publish.
+
+    An Xid moves the binlog even when this table emitted nothing. Publishing
+    that head made the next read start past an insert, update, or delete
+    that was never applied (DEF-B2-009). A captured-table row that could not
+    be applied also refuses the advance. Returns None unless a captured-table
+    batch was emitted and no captured row was dropped.
+    """
+    if not emitted or captured_row_dropped or not last_position:
+        return None
+    return resume_token_from_consumed(previous, last_position)
+
+
 def binlog_schema_matches(event_schema: str, database: str) -> bool:
     """Row events for this database, case-insensitive.
 
@@ -1608,6 +1628,7 @@ class MySqlChangeStreamCdc:
         deadline = datetime.now(timezone.utc).timestamp() + self.max_wait_seconds
         buf = MultiTableTransactionBuffer()
         emitted = False
+        captured_row_dropped = False
         event_count = 0
 
         def _pos_now() -> dict[str, Any]:
@@ -1629,12 +1650,27 @@ class MySqlChangeStreamCdc:
 
         def _emit_commit():
             nonlocal emitted
+            if captured_row_dropped:
+                return
             for batch in buf.commit(
                 resume_token=_token_at(last_position),
                 table_order=self.tables,
             ):
+                # A commit that touched no captured table is not a cursor.
+                # Publishing it moved the watermark past unread changes.
+                if int(batch.total_changes or 0) <= 0:
+                    continue
+                token = published_resume_token(
+                    self.resume_token if isinstance(self.resume_token, dict) else None,
+                    last_position,
+                    emitted=True,
+                    captured_row_dropped=False,
+                )
+                if token is None:
+                    continue
+                batch.resume_token = token
                 emitted = True
-                self.resume_token = batch.resume_token
+                self.resume_token = token
                 yield batch
 
         # Seed the consumed point from the cursor we opened at. An empty
@@ -1766,6 +1802,16 @@ class MySqlChangeStreamCdc:
                         if pk:
                             buf.delete(tbl, pk, lsn=str(stream.log_pos or ""))
                             event_count += 1
+                        else:
+                            # A delete with no key cannot be applied. Advancing
+                            # past it drops the row. Raising keeps the cursor
+                            # and fails the poll instead of spinning "behind".
+                            captured_row_dropped = True
+                            raise RuntimeError(
+                                f"MySQL CDC delete on {tbl} has no primary key, "
+                                "so the change was not applied and the binlog "
+                                "position was not advanced"
+                            )
 
                 if stream.log_pos:
                     last_position = {
@@ -1778,8 +1824,11 @@ class MySqlChangeStreamCdc:
                     break
         finally:
             # The library's log_pos walks to the head even when this poll
-            # applied nothing. Only a position we accepted may count as consumed.
-            if last_position:
+            # applied nothing. A dropped captured row must stay unconsumed so
+            # the drain does not report caught up. An other-table commit may
+            # mark this poll's head consumed without publishing a watermark:
+            # the next run re-reads from the last applied change.
+            if last_position and not captured_row_dropped:
                 if last_position.get("file"):
                     self._consumed_file = last_position.get("file")
                 if last_position.get("pos") is not None:
@@ -1802,13 +1851,15 @@ class MySqlChangeStreamCdc:
                 )
             return
 
-        # Nothing read: do not publish a cursor. An empty batch used to carry
-        # the live master and the job completed with 0 rows while the gap
-        # update stayed on the source.
-        if last_position is None:
+        # Nothing applied: do not publish a cursor. An Xid on another table,
+        # or a live master read, used to become the next resume and the
+        # following run started past a change it never applied.
+        token = published_resume_token(
+            self.resume_token if isinstance(self.resume_token, dict) else None,
+            last_position,
+            emitted=emitted,
+            captured_row_dropped=captured_row_dropped,
+        )
+        if token is None:
             return
-        token = _token_at(last_position)
-        if token.get("file") or token.get("gtid") or token.get("pos") is not None:
-            self.resume_token = token
-        if not emitted and (token.get("file") or token.get("gtid") or token.get("pos") is not None):
-            yield ChangeBatch(resume_token=token)
+        self.resume_token = token

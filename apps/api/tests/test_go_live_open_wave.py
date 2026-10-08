@@ -19,6 +19,79 @@ def test_records_after_failure_keeps_a_committed_prefix():
     assert _records_after_failure("nope", 2) == 2
 
 
+def test_blocked_write_names_the_committed_prefix():
+    """DEF-B2-012: a later refusal must not zero a checkpointed count."""
+    from src.transfer.job_failure import account_blocked_write
+
+    class _Blocked(Exception):
+        rows_written = 0
+
+        def __str__(self) -> str:
+            return "Destination already stores these keys: 5 key value(s)"
+
+    class _Mongo:
+        def get_job(self, job_id):
+            assert job_id == "job-55"
+            return {"records_processed": 50}
+
+    kept, message = account_blocked_write(_Mongo(), "job-55", _Blocked())
+    assert kept == 50
+    assert "5 key value(s)" in message
+    assert "50 row(s) were already written and were not removed." in message
+    again, same = account_blocked_write(_Mongo(), "job-55", _Blocked())
+    assert again == 50
+    assert same.count("already written") == 1
+
+
+def test_mysql_timestamp_zero_is_modified_without_backfill():
+    """DEF-B-010: the millisecond gap is an ALTER, not a silent write."""
+    from connectors.schema_drift import widen_existing_columns_native
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self.sql: list[str] = []
+            self._rows: list[tuple] = []
+
+        def execute(self, sql, params=None):
+            self.sql.append(sql)
+            if "information_schema" in sql.lower():
+                self._rows = [("occurred_at", "timestamp", None, None, None)]
+            else:
+                self._rows = []
+
+        def fetchall(self):
+            return list(self._rows)
+
+    cursor = _Cursor()
+    issued = widen_existing_columns_native(
+        cursor,
+        "mysql",
+        None,
+        "events",
+        ["occurred_at"],
+        ["DATETIME(3)"],
+        backfill=False,
+        source_types={"occurred_at": "TIMESTAMP"},
+        temporal_fsp_without_backfill=True,
+    )
+    assert any("MODIFY COLUMN" in sql and "DATETIME(3)" in sql for sql in issued)
+    assert any("time_zone" in sql for sql in cursor.sql)
+    quiet = _Cursor()
+    assert (
+        widen_existing_columns_native(
+            quiet,
+            "mysql",
+            None,
+            "events",
+            ["occurred_at"],
+            ["DATETIME(3)"],
+            backfill=False,
+            source_types={"occurred_at": "TIMESTAMP"},
+        )
+        == []
+    )
+
+
 def test_ensure_product_lsn_column_on_an_existing_table(tmp_path: Path):
     """DEF-B2-014: _df_lsn is added; it is not a missing source column."""
     from connectors.schema_drift import ensure_product_lsn_column

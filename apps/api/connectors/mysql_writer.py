@@ -920,6 +920,7 @@ def write_mapped_rows(
     def _run_setup(cursor) -> None:
         nonlocal target_types, dest_types, additive_refuse
         nonlocal transform_errors, rejected_details
+        instant_fraction_guard: list[tuple[str, str, str]] = []
         nonlocal insert_sql
         nonlocal scanned_dest_sig, source_row_count, rejected_rows, coerced_null_rows
         nonlocal deferred_map_abort
@@ -1153,6 +1154,9 @@ def write_mapped_rows(
                 skip_cols=conflict_columns or [],
                 source_types=source_type_by_col,
                 suppressed_out=suppressed_widens,
+                # A BSON datetime on TIMESTAMP(0) must MODIFY to DATETIME(3)
+                # even when the operator did not ask to backfill new columns.
+                temporal_fsp_without_backfill=True,
             )
             if suppressed_widens:
                 desired_types = [
@@ -1160,6 +1164,23 @@ def write_mapped_rows(
                     for col, typ in zip(target_cols, desired_types)
                 ]
             target_types = desired_types
+            from services.type_system import (
+                destination_temporal_fractional_digits,
+                normalize_logical_type,
+            )
+
+            for col, planned in zip(target_cols, target_types):
+                source = source_type_by_col.get(col) or ""
+                planned_p = destination_temporal_fractional_digits(
+                    planned, dest_db="mysql"
+                )
+                if (
+                    source
+                    and planned_p is not None
+                    and planned_p >= 3
+                    and normalize_logical_type(source) == "datetime"
+                ):
+                    instant_fraction_guard.append((col, str(planned), source))
             reflection_cache.invalidate_by_identity(_identity, "", table_name)
 
         # Map VARCHAR + live DATE/INT/BOOL/JSON — shared overlay before bind refuse.
@@ -1180,6 +1201,34 @@ def write_mapped_rows(
         )
         if overlay_err:
             raise RuntimeError(overlay_err)
+        if physical and instant_fraction_guard:
+            from services.decision_kernel import is_lossy_coercion
+            from services.type_system import destination_temporal_fractional_digits
+
+            for col, planned, source in instant_fraction_guard:
+                live = (
+                    physical.get(col)
+                    or physical.get(col.lower())
+                    or physical.get(col.upper())
+                    or ""
+                )
+                live_p = destination_temporal_fractional_digits(
+                    str(live), dest_db="mysql"
+                )
+                planned_p = destination_temporal_fractional_digits(
+                    planned, dest_db="mysql"
+                )
+                if (
+                    planned_p is not None
+                    and live_p is not None
+                    and live_p < planned_p
+                    and is_lossy_coercion(source, str(live), dest_db="mysql")
+                ):
+                    raise RuntimeError(
+                        f"MySQL column {col} is {live}, which drops fractional "
+                        f"seconds from {source}. ALTER to {planned} did not "
+                        "apply, so the write was refused."
+                    )
         if not physical and deferred_map_abort:
             raise RuntimeError(deferred_map_abort)
         if physical:

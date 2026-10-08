@@ -354,6 +354,18 @@ def release_finished_cdc_slot(
     slot_name = _slot_name_from_job(job)
     if not slot_name:
         return {"released": False, "reason": "no_slot_name", "job_id": jid}
+    # A missing status is a caller that already decided the job is finished
+    # (unit fixtures omit it). running / queued / pending still owns the slot:
+    # dropping it while the document says running leaves a job that cannot
+    # resume (DEF-B2-007).
+    status = str(job.get("status") or "").strip().lower()
+    if status in {"running", "queued", "pending"}:
+        return {
+            "released": False,
+            "reason": "job_still_running",
+            "job_id": jid,
+            "slot_name": slot_name,
+        }
     if (
         reason == "cancelled"
         and not worker_closed

@@ -1098,6 +1098,24 @@ def run_mapping_pipeline(
             tgt_type = _legalize_existing_timestamp_target_type(
                 destination_db_type, ddl_carrier_type(str(tgt_type))
             )
+            if (
+                destination_table_exists is True
+                and src_type
+                and tgt_type
+                and not (m.get("user_override") or m.get("userOverride"))
+            ):
+                from services.document_instant import (
+                    promote_document_instant_existing_target,
+                )
+
+                promoted = promote_document_instant_existing_target(
+                    src_type,
+                    str(tgt_type),
+                    dest_db=destination_db_type or "",
+                    source_db=source_db_type or "",
+                )
+                if promoted and promoted != str(tgt_type):
+                    tgt_type = promoted
             tgt_name = str(m.get("target") or "").strip()
             if tgt_name and tgt_type and destination_table_exists is not False:
                 # stamp_additive rebinds from live dest types; keep that map
