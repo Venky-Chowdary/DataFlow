@@ -761,25 +761,44 @@ def cursor_declared_numeric_types(
         col = description[idx]
         if not col or len(col) < 6:
             continue
+        type_code = col[1] if len(col) > 1 else None
+        if _cursor_type_code_is_text(type_code):
+            continue
+        # DATE / DATETIME / TINYINT carry a display width in the precision
+        # slot. Reading it as DECIMAL(10,0) made every MariaDB query column
+        # look numeric (DEF-B-019).
+        carrier = _carrier_for_cursor_column(col)
+        if carrier and carrier not in {"DECIMAL", "NUMERIC"}:
+            continue
         try:
             precision = int(col[4])
             scale = int(col[5])
         except (TypeError, ValueError):
             continue
+        name = str(header or "").strip()
+        if not name:
+            continue
+        # PostgreSQL typmod -1 (unconstrained numeric) arrives as 65535/65535.
+        # That is not a size; DECIMAL(65535,65535) cannot be created and was
+        # rewritten to TEXT, which then blocked the route (DEF-C-026).
+        if precision >= 65535 or scale >= 65535:
+            out[name] = "NUMERIC"
+            continue
         if precision <= 0 or scale < 0 or scale > precision:
             continue
-        # MariaDB reports junk precision/scale on text (FIELD_TYPE 253/254/15).
-        # DECIMAL(400,39) is not a type any engine here can create. A real
-        # declared DECIMAL stays: MySQL max precision is 65, BigQuery
-        # BIGNUMERIC is 76, and a scale above 38 is not a text column's width.
-        if precision > 76 or scale > 38:
+        exact_numeric = (
+            isinstance(type_code, int)
+            and not isinstance(type_code, bool)
+            and type_code in _CURSOR_EXACT_NUMERIC_CODES
+        )
+        # A real PostgreSQL NUMERIC(100,2) must survive. Junk widths on a
+        # type code that is not numeric (MariaDB text at 400,39) must not.
+        if exact_numeric:
+            if precision > 1000 or scale > 1000:
+                continue
+        elif precision > 76 or scale > 38:
             continue
-        type_code = col[1] if len(col) > 1 else None
-        if _cursor_type_code_is_text(type_code):
-            continue
-        name = str(header or "").strip()
-        if name:
-            out[name] = f"DECIMAL({precision},{scale})"
+        out[name] = f"DECIMAL({precision},{scale})"
     return out
 
 
@@ -815,7 +834,13 @@ _CURSOR_FLOAT_CODES: dict[int, str] = {
     701: "DOUBLE",
 }
 _CURSOR_JSON_CODES = frozenset({114, 245, 3802})
-_CURSOR_TEXT_CODES = frozenset({15, 18, 25, 253, 254, 1042, 1043})
+_CURSOR_TEXT_CODES = frozenset({15, 18, 25, 247, 248, 253, 254, 1042, 1043})
+# Exact numeric type codes. Precision on any other code (DATE is 10, DATETIME
+# is 26,6) is a display width, not a DECIMAL.
+_CURSOR_EXACT_NUMERIC_CODES = frozenset({0, 246, 1700})
+_CURSOR_BINARY_CODES = {17: "BYTEA"}
+_CURSOR_UUID_CODES = {2950: "UUID"}
+_CURSOR_INTERVAL_CODES = {1186: "INTERVAL"}
 
 
 def _carrier_for_cursor_column(col: Any) -> str:
@@ -833,6 +858,12 @@ def _carrier_for_cursor_column(col: Any) -> str:
             return "JSON"
         if type_code in _CURSOR_TEXT_CODES:
             return "VARCHAR"
+        if type_code in _CURSOR_BINARY_CODES:
+            return _CURSOR_BINARY_CODES[type_code]
+        if type_code in _CURSOR_UUID_CODES:
+            return _CURSOR_UUID_CODES[type_code]
+        if type_code in _CURSOR_INTERVAL_CODES:
+            return _CURSOR_INTERVAL_CODES[type_code]
         if type_code in _CURSOR_TEMPORAL_CODES:
             return _CURSOR_TEMPORAL_CODES[type_code]
         if type_code in _CURSOR_INTEGER_CODES:

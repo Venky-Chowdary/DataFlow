@@ -8,11 +8,11 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 52
+- not fixed: 47
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 36
-- partly fixed in code: 7
+- fixed in code, unit-proven — not a live QA retest: 40
+- partly fixed in code: 8
 
 ## Every row
 
@@ -61,8 +61,8 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B-005 | P2 | OPEN | fixed in code, unit-proven (test_bare_five_field_cron_is_a_schedule). The runner's validate_cron is the acceptor. Not a live create_schedule retest. |
 | DEF-B-013 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-014 | P2 | OPEN | already in tree before this wave (parse_cadence). Unit-proven in test_weekdays_and_hourly_minute_keep_their_anchor. QA build 6436aaa38583 predates it. Needs retest. |
-| DEF-B-017 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-B-019 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-017 | P2 | OPEN | fixed in code, unit-proven (test_declared_decimal_beats_the_sample_envelope, test_cursor_precision_wins_over_a_narrow_sample). Cursor precision and scale replace the sample envelope, including CAST(... AS DECIMAL(10,2)). Not a live query-mode retest. |
+| DEF-B-019 | P2 | OPEN | fixed in code, unit-proven (test_mariadb_display_widths_stay_their_carriers). A type code that names a carrier wins over precision and scale, so DATE, DATETIME, TIMESTAMP, TINYINT and VARCHAR stay themselves. Not a live MariaDB retest. |
 | DEF-B-021 | P2 | OPEN | guards are already in tree (_primary_key_csv, incremental_append is not rewritten). Not re-executed against QA Postgres/MySQL in this session. Needs QA retest. Do not treat as live-green. |
 | DEF-B-022 | P2 | OPEN | fixed in code, unit-proven (test_root_cause_identity_sentence_is_not_a_null_quarantine_row, test_completed_job_does_not_report_the_validate_root_as_rejected). A completed job no longer reports that sentence as a rejected row. Not a live QA retest. |
 | DEF-B-029 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
@@ -83,13 +83,13 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-022 | P2 | OPEN | fixed in code, unit-proven (test_empty_table_passes_and_names_the_zero_row_proof[mysql/postgresql/sqlserver], test_failed_read_of_a_table_still_blocks, test_a_filter_that_matches_no_sampled_row_is_not_an_empty_source). An engine read that returns no row passes Gate-5/8/9 as a 0-row proof and Execute reconciles 0 = 0; a failed read or an over-filtered sample still blocks with its reason. run_file_preflight binds the source engine for every gate. Not a live PostgreSQL to MySQL retest. |
 | DEF-C-023 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-025 | P2 | OPEN | fixed in code, unit-proven (test_manual_review_pauses_before_an_overwrite_empties_a_column[mysql/postgresql/sqlserver/snowflake], test_acknowledged_overwrite_proceeds_and_still_names_the_loss, test_a_propagating_policy_warns_instead_of_pausing, test_upserting_sinks_keep_unwritten_properties, test_engine_and_identity_columns_are_regenerated_not_emptied, test_overwrite_keeps_a_destination_column_the_source_dropped). Validate and Execute's preflight block an overwrite under manual_review that would empty a live destination column, naming it, until the schema change is acknowledged; other policies warn. The values themselves are not carried across an overwrite. Not a live QA retest. |
-| DEF-C-026 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-026 | P2 | OPEN | fixed in code, unit-proven (test_unconstrained_numeric_typmod_is_numeric_not_65535). 65535 is unconstrained NUMERIC. Create-new on MySQL uses the platform DECIMAL(38,15) and is not a fidelity collapse. A real NUMERIC(100,2) is kept. Not a live Postgres to MySQL retest. |
 | DEF-C-027 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-033 | P2 | OPEN | fixed in code, unit-proven (test_base64_alphabet_text_stays_text_and_is_not_a_preserve). Hex named payload stays text. Real base64 named payload_b64 stays BINARY. Not a live PG retest. |
 | DEF-C-039 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-040 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-044 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-045 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-045 | P2 | OPEN | fixed in code, unit-proven (test_text_bytea_and_uuid_are_not_guessed_from_the_peek). PostgreSQL text (OID 25) stays VARCHAR even when the sample is classified INTERVAL. Not a live Postgres to SQL Server retest. |
 | DEF-C-047 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-SCHEMALESS-DST-CONTRACT | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-DECIMAL-SAMPLE-INFER | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
@@ -100,7 +100,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-GCS-DST-CREATE | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | UNNUMBERED (RETEST-R1 case 3.3) | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-MCP-OUTAGE | P2 | UNCONFIRMED-ENV-DEPLOY | not fixed. Diagnose-only. No code change. |
-| DEF-C-008 | P2 | PARTLY FIXED | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-008 | P2 | PARTLY FIXED | partly fixed in code, unit-proven (test_text_bytea_and_uuid_are_not_guessed_from_the_peek, test_declared_decimal_beats_the_sample_envelope). Float, bigint, bytea, uuid, json and a real interval now keep the cursor carrier. Arrays and custom enums have no fixed type code, so the sample remains their owner. Not a live query-mode retest. |
 | DEF-CDC-SLOT-LEAK | P2 | PARTLY FIXED | fixed in code, unit-proven (test_first_batch_failure_releases_the_slot_the_job_never_recorded, test_cancel_before_a_checkpoint_releases_the_named_slot, test_refused_cdc_batch_releases_through_the_shared_helper, test_retriable_failure_keeps_the_slot_for_resume). Slot and publication identity travel on the exception; terminal failures and cancels drop them, retriable failures keep them. The five historical QA slots are not dropped by this change. Not a live Postgres retest. |
 | DEF-C-001 | P2 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-C-006 | P2 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
