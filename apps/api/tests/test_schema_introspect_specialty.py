@@ -177,7 +177,9 @@ def test_tz_polarity_introspect_and_ddl():
     assert _sqlserver_to_logical("datetime2") == "TIMESTAMP_NTZ"
     assert _oracle_to_logical("TIMESTAMP WITH TIME ZONE") == "TIMESTAMP_TZ"
     assert _oracle_to_logical("TIMESTAMP WITH LOCAL TIME ZONE") == "TIMESTAMP_LTZ"
-    assert _oracle_to_logical("TIMESTAMP(6)") == "TIMESTAMP_NTZ"
+    assert _oracle_to_logical("TIMESTAMP(6)") == "TIMESTAMP_NTZ(6)"
+    assert _oracle_to_logical("TIMESTAMP(7) WITH TIME ZONE") == "TIMESTAMP_TZ(7)"
+    assert _oracle_to_logical("TIMESTAMP(7) WITH LOCAL TIME ZONE") == "TIMESTAMP_LTZ(7)"
 
     assert ddl_type("postgresql", "TIMESTAMPTZ") == "TIMESTAMPTZ"
     assert ddl_type("postgresql", "TIMESTAMP_NTZ") == "TIMESTAMP"

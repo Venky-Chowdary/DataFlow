@@ -135,6 +135,39 @@ try:
     if oracle is not None and "JSON" not in oracle.base.OracleDialect.ischema_names:
         oracle.base.OracleDialect.ischema_names["JSON"] = _OracleJSON
 
+    class _OracleTimestamp(oracle.TIMESTAMP):
+        """Oracle ``TIMESTAMP(n)`` — the stock type compiles with no precision.
+
+        Oracle stores a bare ``TIMESTAMP`` as ``TIMESTAMP(6)``. A plan that
+        named ``TIMESTAMP(7)`` therefore created ``(6)``, and the next
+        incremental run read that as a narrowing of the source.
+        """
+
+        cache_ok = True
+
+        def __init__(
+            self,
+            timezone: bool = False,
+            local_timezone: bool = False,
+            fractional_seconds: int | None = None,
+        ) -> None:
+            super().__init__(timezone=timezone, local_timezone=local_timezone)
+            self.fractional_seconds = fractional_seconds
+
+    from sqlalchemy.ext.compiler import compiles
+
+    @compiles(_OracleTimestamp, "oracle")
+    def _compile_oracle_timestamp(type_, compiler, **_kw):  # noqa: ANN001
+        prec = ""
+        fsp = getattr(type_, "fractional_seconds", None)
+        if fsp is not None:
+            prec = f"({int(fsp)})"
+        if getattr(type_, "local_timezone", False):
+            return f"TIMESTAMP{prec} WITH LOCAL TIME ZONE"
+        if getattr(type_, "timezone", False):
+            return f"TIMESTAMP{prec} WITH TIME ZONE"
+        return f"TIMESTAMP{prec}"
+
 except (ImportError, AttributeError):  # pragma: no cover
     SQLALCHEMY_AVAILABLE = False
     mssql = None  # type: ignore[assignment]
@@ -145,6 +178,7 @@ except (ImportError, AttributeError):  # pragma: no cover
     ChNullable = None
     TrinoTimestamp = None
     _DialectNativeType = None  # type: ignore[misc, assignment]
+    _OracleTimestamp = None  # type: ignore[misc, assignment]
 
 from connectors.writer_common import (
     CHUNK_SIZE,
@@ -1666,7 +1700,63 @@ def _is_oracle_wire(dialect_name: str, db_type: str) -> bool:
     return (dialect_name or "").lower() == "oracle" or (db_type or "").lower() in _ORACLE_WIRES
 
 
-def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
+def _declared_temporal_fsp(logical: str, cap: int) -> int | None:
+    """Fractional seconds named on ``logical``, clamped to the engine maximum."""
+    from services.type_system import parse_temporal_fractional_precision
+
+    fsp = parse_temporal_fractional_precision(logical)
+    if fsp is None:
+        return None
+    return max(0, min(int(cap), int(fsp)))
+
+
+def _oracle_timestamp_type(
+    logical: str,
+    *,
+    timezone: bool = False,
+    local_timezone: bool = False,
+) -> Any:
+    """Oracle TIMESTAMP, with ``(n)`` when the stamp declared one.
+
+    A bare declaration stays the stock type (Oracle's own default of 6).
+    Declared precision is clamped to 0..9, which is what Oracle accepts.
+    """
+    fsp = _declared_temporal_fsp(logical, 9)
+    if fsp is None or _OracleTimestamp is None:
+        return oracle.TIMESTAMP(timezone=timezone, local_timezone=local_timezone)
+    return _OracleTimestamp(
+        timezone=timezone,
+        local_timezone=local_timezone,
+        fractional_seconds=fsp,
+    )
+
+
+def _mysql_timestamp_instant(logical: str) -> bool:
+    """True when this stamp is MySQL's TIMESTAMP instant, not a wall clock.
+
+    ``TIMESTAMP(n)`` is the physical instant column MySQL create-new stamps
+    and INFORMATION_SCHEMA reports. A bare ``TIMESTAMP`` is the ambiguous
+    wall-clock spelling (PostgreSQL and Oracle) unless the bound source
+    engine is MySQL itself. ``TIMESTAMPTZ`` is that same MySQL column after
+    introspect, and only then: a PostgreSQL timestamptz does not fit the
+    1970..2038 window, so it stays ``DATETIME(6)``.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.source_engine_scope import active_source_engine
+
+    raw = (logical or "").strip().lower()
+    base = re.sub(r"\s*\(\s*\d+\s*\)", "", raw).strip()
+    source_is_mysql = _normalize_dest_db(active_source_engine()) == "mysql"
+    if base in {"timestamptz", "timestamp with time zone"}:
+        return source_is_mysql
+    if base != "timestamp":
+        return False
+    if _declared_temporal_fsp(logical, 6) is not None:
+        return True
+    return source_is_mysql
+
+
+def _sub_second_naive_wire(dialect_name: str, db_type: str, logical: str = "") -> Any:
     """Naive-datetime carrier that keeps sub-second precision, else ``None``.
 
     ``sa.DateTime()`` compiles to Oracle ``DATE`` (whole seconds, no fraction),
@@ -1677,9 +1767,13 @@ def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
     got one instant, so ``valid_from == valid_to`` and no as-of query could see
     the closed version. ``None`` means the dialect's own default already
     carries fractions.
+
+    A declared Oracle ``(n)`` is kept. A MySQL ``TIMESTAMP(n)`` instant is not
+    rewritten to ``DATETIME`` — that rewrite is what turned a same-engine
+    TIMESTAMP source into a wall-clock column.
     """
     if _is_oracle_wire(dialect_name, db_type):
-        return oracle.TIMESTAMP()
+        return _oracle_timestamp_type(logical)
     if mssql is not None and (
         (dialect_name or "").lower() == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
     ):
@@ -1687,6 +1781,9 @@ def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
     if mysql is not None and _MYSQL_WIRES & {
         (dialect_name or "").lower(), (db_type or "").lower()
     }:
+        if _mysql_timestamp_instant(logical):
+            fsp = _declared_temporal_fsp(logical, 6)
+            return mysql.TIMESTAMP(fsp=6 if fsp is None else fsp)
         return mysql.DATETIME(fsp=6)
     return None
 
@@ -1756,10 +1853,13 @@ def _sa_type_for_logical(
             # sa.DateTime(timezone=True) compiles to Oracle DATE — second
             # granularity with no zone at all, so a live postgresql->oracle run
             # created DATE for TIMESTAMPTZ and reconciled green only because the
-            # fixture held whole-second UTC values.
+            # fixture held whole-second UTC values. Declared (n) is kept so a
+            # TIMESTAMP(7) plan is not created as the Oracle default of 6.
             local = "local time zone" in raw_lower or "_ltz" in raw_lower
             return _maybe_nullable(
-                oracle.TIMESTAMP(timezone=not local, local_timezone=local)
+                _oracle_timestamp_type(
+                    raw, timezone=not local, local_timezone=local
+                )
             )
         if mysql is not None and _MYSQL_WIRES & {
             (dialect_name or "").lower(), (db_type or "").lower()
@@ -1767,6 +1867,12 @@ def _sa_type_for_logical(
             # No MySQL carrier holds an offset, so the zone decision is made
             # upstream. sa.DateTime(timezone=True) compiles to fsp-0 DATETIME,
             # dropping the fraction too — a second loss for nothing.
+            # A MySQL source's own TIMESTAMP (introspected as TIMESTAMPTZ)
+            # is the instant carrier. Every other aware source stays
+            # DATETIME(6), which can hold years outside 1970..2038.
+            if _mysql_timestamp_instant(raw):
+                fsp = _declared_temporal_fsp(raw, 6)
+                return _maybe_nullable(mysql.TIMESTAMP(fsp=6 if fsp is None else fsp))
             return _maybe_nullable(mysql.DATETIME(fsp=6))
         if mssql is not None and (
             (dialect_name or "").lower() == "mssql"
@@ -1783,7 +1889,7 @@ def _sa_type_for_logical(
         or "datetime_ntz" in raw_lower
         or " without time zone" in raw_lower
     ):
-        sub_second = _sub_second_naive_wire(dialect_name, db_type)
+        sub_second = _sub_second_naive_wire(dialect_name, db_type, raw)
         return _maybe_nullable(sub_second if sub_second is not None else sa.DateTime())
 
     if t == LOGICAL_INTEGER:
@@ -1972,7 +2078,7 @@ def _sa_type_for_logical(
                 return _maybe_nullable(mssql.SMALLDATETIME())
             if base == "DATETIME":
                 return _maybe_nullable(mssql.DATETIME())
-        sub_second = _sub_second_naive_wire(dialect_name, db_type)
+        sub_second = _sub_second_naive_wire(dialect_name, db_type, raw)
         if sub_second is not None:
             return _maybe_nullable(sub_second)
         # Map≡CREATE: LOGICAL_DATETIME without TZ markers is NTZ wall-clock on

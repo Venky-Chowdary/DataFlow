@@ -8,11 +8,11 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 16
+- not fixed: 13
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 69
-- partly fixed in code: 10
+- fixed in code, unit-proven — not a live QA retest: 71
+- partly fixed in code: 11
 
 ## Every row
 
@@ -65,7 +65,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B-019 | P2 | OPEN | fixed in code, unit-proven (test_mariadb_display_widths_stay_their_carriers). A type code that names a carrier wins over precision and scale, so DATE, DATETIME, TIMESTAMP, TINYINT and VARCHAR stay themselves. Not a live MariaDB retest. |
 | DEF-B-021 | P2 | OPEN | guards are already in tree (_primary_key_csv, incremental_append is not rewritten). Not re-executed against QA Postgres/MySQL in this session. Needs QA retest. Do not treat as live-green. |
 | DEF-B-022 | P2 | OPEN | fixed in code, unit-proven (test_root_cause_identity_sentence_is_not_a_null_quarantine_row, test_completed_job_does_not_report_the_validate_root_as_rejected). A completed job no longer reports that sentence as a rejected row. Not a live QA retest. |
-| DEF-B-029 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-029 | P2 | OPEN | fixed in code, unit-proven (test_oracle_timestamp_keeps_declared_fractional_seconds, test_oracle_catalog_keeps_timestamp_scale). CREATE compiles TIMESTAMP(7) and TIMESTAMP(7) WITH TIME ZONE. Introspect keeps (n) from the type string and from DATA_SCALE. A live TIMESTAMP(6) still narrows against a (7) source. Not a live Oracle retest. |
 | DEF-B-032 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B2-002 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B2-004 | P2 | OPEN | fixed in code, unit-proven (test_cdc_prepare_does_not_stage_mysql_grants_for_other_engines). SQL Server, Oracle, and TimescaleDB are not staged. MariaDB stages the replication grant and says gtid_mode is not applied. Not a live QA retest. |
@@ -98,7 +98,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-S3-ENDPOINT-FORM | P2 | OPEN | fixed in code, unit-proven (connectorListenPort.test.ts). A typed port is kept. An endpoint URL that names a port is the port the preview shows. Real AWS with no other port stays 443. Not a live MinIO retest. |
 | DEF-ADLS-EMPTY-INCLUDE | P2 | OPEN | fixed in code, unit-proven (test_container_list_omits_empty_include). The probe calls list_containers_segment with include=None, so the query is comp=list. Not a live Azurite retest. |
 | DEF-GCS-DST-CREATE | P2 | OPEN | fixed in code, unit-proven (test_g2_object_store_put_is_not_a_create_table_denial). A gcs, google_cloud_storage, minio, s3, adls, or azure_blob destination with can_write true, can_create_table false, and table_exists false passes G2 and says the missing object is created by PUT. A postgresql destination with the same flags still blocks with CREATE is not proven. Not a live GCS retest. DEF-B-032 fidelity collapse is a different block and is not claimed fixed. |
-| UNNUMBERED (RETEST-R1 case 3.3) | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| UNNUMBERED (RETEST-R1 case 3.3) | P2 | OPEN | partly fixed in code, unit-proven (test_mysql_timestamp_stamp_stays_timestamp, test_postgres_timestamptz_stays_mysql_datetime). A TIMESTAMP(n) stamp and a bound MySQL source TIMESTAMPTZ compile to TIMESTAMP(6) on MySQL and MariaDB. PostgreSQL TIMESTAMPTZ stays DATETIME(6). The PostgreSQL destination half (source_timezone=UTC also converting DATETIME) is not fixed. Not a live MySQL retest. |
 | DEF-MCP-OUTAGE | P2 | UNCONFIRMED-ENV-DEPLOY | not fixed. Diagnose-only. No code change. |
 | DEF-C-008 | P2 | PARTLY FIXED | partly fixed in code, unit-proven (test_text_bytea_and_uuid_are_not_guessed_from_the_peek, test_declared_decimal_beats_the_sample_envelope). Float, bigint, bytea, uuid, json and a real interval now keep the cursor carrier. Arrays and custom enums have no fixed type code, so the sample remains their owner. Not a live query-mode retest. |
 | DEF-CDC-SLOT-LEAK | P2 | PARTLY FIXED | fixed in code, unit-proven (test_first_batch_failure_releases_the_slot_the_job_never_recorded, test_cancel_before_a_checkpoint_releases_the_named_slot, test_refused_cdc_batch_releases_through_the_shared_helper, test_retriable_failure_keeps_the_slot_for_resume). Slot and publication identity travel on the exception; terminal failures and cancels drop them, retriable failures keep them. The five historical QA slots are not dropped by this change. Not a live Postgres retest. |
@@ -126,7 +126,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-032 | P3 | OPEN | fixed in code, unit-proven (test_a_completed_job_overrules_an_older_failed_probe, test_a_failed_job_does_not_clear_a_failed_probe, test_a_probe_that_fails_after_the_transfer_is_failed_again, test_pilot_list_and_briefing_bucket_on_the_same_rule). connector_store.connector_health is the one rule: a failed probe is overruled only by a transfer that completed after it, the same rule the web client applies. Not a live QA retest. |
 | DEF-C-035 | P3 | OPEN | fixed in code, unit-proven (test_remediate_rejects_an_unknown_run_and_does_not_stage_a_write). An unknown run_id is rejected. A known run is ui_only, risk safe, requires_confirm false, and does not stage a confirm. Not a live Pilot retest. |
 | DEF-C-046 | P3 | OPEN | fixed in code, unit-proven (test_mysql_text_tiers_do_not_collapse_to_text). Catalog longtext/mediumtext/tinytext stay their own tiers, and MySQL CREATE passes those stamps through. TEXT stays TEXT. Not a live overwrite retest. |
-| DEF-C-048 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-048 | P3 | OPEN | fixed in code, unit-proven (test_ambiguous_new_york_wall_clock_matches_postgres, test_spring_forward_gap_is_quarantined, test_leap_day_and_unambiguous_instants_stay). An ambiguous fall-back uses the later occurrence, so 2026-11-01 01:30 America/New_York is 06:30Z. A spring-forward gap is an error and is not written. Leap day and offset-bearing values stay as they were. Not a live MySQL retest. |
 | DEF-C-030 | P3 | OPEN | fixed in code, unit-proven (test_manual_run_increments_run_count_when_the_job_ends, test_manual_run_records_a_finished_claim_before_starting). The job's terminal status write records the schedule run. Not a live QA retest. |
 | DEF-EMBED-SILENT-FALLBACK | P3 | OPEN | fixed in code, unit-proven (test_stream_job_warning_survives_a_cached_tfidf_embedder, test_numeric_source_stays_a_json_number_in_the_qdrant_payload). A second vectorize after the notice was consumed still puts the MiniLM fallback on the stream job warnings. A numeric(10,2) price of 2.36 is an unquoted JSON number; a text sku of 2.36 stays quoted. Not a live Qdrant retest. |
 | DEF-MINIO-ALIAS | P3 | OPEN | fixed in code, unit-proven (test_minio_list_uses_the_s3_probe). Those formats list and sample through the S3 probe. Not a live MinIO retest. |

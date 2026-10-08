@@ -1903,9 +1903,33 @@ def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
     if moment.tzinfo is not None:
         return _format_datetime(moment), None
     try:
-        return _format_datetime(moment.replace(tzinfo=zone)), None
+        first = moment.replace(tzinfo=zone, fold=0)
+        second = moment.replace(tzinfo=zone, fold=1)
+        utc_first = first.astimezone(timezone.utc)
+        utc_second = second.astimezone(timezone.utc)
     except (ValueError, OverflowError) as exc:
         return None, f"Could not apply zone {zone_name!r}: {exc}"
+
+    def _round_trips(aware: datetime) -> bool:
+        civil = aware.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None)
+        return civil == moment.replace(fold=0)
+
+    # A spring-forward gap does not exist. zoneinfo still attaches an offset
+    # to both folds, and those offsets differ, so fold inequality is not
+    # enough to tell a gap from an ambiguous fall-back. Neither fold
+    # round-trips to the wall clock the operator wrote. Inventing 07:30Z
+    # for 02:30 would disagree with the source database and leave no flag.
+    if not _round_trips(first) and not _round_trips(second):
+        return None, (
+            f"Wall clock {text!r} does not exist in timezone {zone_name!r}"
+        )
+    # Ambiguous fall-back: both folds are real instants of the same civil
+    # time. PostgreSQL ``AT TIME ZONE`` uses the later one (standard time,
+    # fold=1). fold=0 is the earlier occurrence and is an hour off that.
+    if utc_first != utc_second:
+        chosen = second if _round_trips(second) else first
+        return _format_datetime(chosen), None
+    return _format_datetime(first), None
 
 
 def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:

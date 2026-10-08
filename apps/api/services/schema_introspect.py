@@ -2334,6 +2334,28 @@ def _mysql_to_logical(dtype: str) -> str:
     return "TEXT"
 
 
+def _oracle_apply_timestamp_scale(dtype: str, scale: Any) -> str:
+    """Put ALL_TAB_COLUMNS.DATA_SCALE onto a TIMESTAMP that omitted ``(n)``.
+
+    For a timestamp column, ``DATA_SCALE`` is the fractional-second precision.
+    ``DATA_TYPE`` is often the bare word ``TIMESTAMP`` (or ``TIMESTAMP WITH
+    TIME ZONE``). NUMBER precision is already stitched the same way; leaving
+    the scale off here is what made a created ``TIMESTAMP(7)`` read back as
+    the Oracle default of 6.
+    """
+    text = str(dtype or "")
+    upper = text.upper()
+    if "TIMESTAMP" not in upper or "(" in upper or scale is None:
+        return text
+    try:
+        fsp = int(scale)
+    except (TypeError, ValueError):
+        return text
+    if not 0 <= fsp <= 9:
+        return text
+    return re.sub(r"(?i)\bTIMESTAMP\b", f"TIMESTAMP({fsp})", text, count=1)
+
+
 def _oracle_to_logical(dtype: str) -> str:
     """Map Oracle data_type (+ optional precision/scale) to logical carriers.
 
@@ -2374,11 +2396,20 @@ def _oracle_to_logical(dtype: str) -> str:
     if d == "DATE":
         return "TIMESTAMP"  # Oracle DATE is datetime
     if "TIMESTAMP" in d:
+        # ALL_TAB_COLUMNS often spells the type as TIMESTAMP(6) or
+        # TIMESTAMP(6) WITH TIME ZONE. Dropping (n) made the next incremental
+        # compare a source TIMESTAMP_TZ(7) to a bare live carrier, which this
+        # product reads as Oracle's default of 6 and then blocks as a narrowing.
+        suffix = ""
+        m_fsp = re.search(r"TIMESTAMP\((\d+)\)", d)
+        if m_fsp:
+            fsp = max(0, min(9, int(m_fsp.group(1))))
+            suffix = f"({fsp})"
         if "WITHLOCALTIMEZONE" in d:
-            return "TIMESTAMP_LTZ"
+            return f"TIMESTAMP_LTZ{suffix}"
         if "WITHTIMEZONE" in d:
-            return "TIMESTAMP_TZ"
-        return "TIMESTAMP_NTZ"
+            return f"TIMESTAMP_TZ{suffix}"
+        return f"TIMESTAMP_NTZ{suffix}"
     if "INTERVAL" in raw.upper():
         # Preserve Oracle leading-field / fractional-second precision
         # (INTERVAL DAY(3) TO SECOND(6) — ANSI/Oracle contract).
@@ -2733,6 +2764,7 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                     if dtype_u in {"NVARCHAR2", "NCHAR"}:
                         unit = "CHAR"
                     dtype = f"{dtype_u}({int(char_length)} {unit})"
+                dtype = _oracle_apply_timestamp_scale(dtype, scale)
                 logical = _oracle_to_logical(dtype)
                 if str(virtual_col or "").upper() == "YES":
                     logical = f"{logical} GENERATED ALWAYS"
