@@ -858,6 +858,13 @@ def detect_schema_drift(
             tgt = str(m.get("target") or "")
             if not src or not tgt:
                 continue
+            live_names = {str(c).lower() for c in target_columns}
+            live_names.update(str(k).lower() for k in target_schema)
+            # A mapped name the live table does not have is an ADD, judged
+            # below. Grading it as a type change paused the run before the
+            # operator could approve the column.
+            if tgt.lower() not in live_names and tgt.lower() not in system_targets:
+                continue
             src_type = (
                 source_schema.get(src)
                 or next(
@@ -1024,6 +1031,50 @@ def detect_schema_drift(
         evolution_unmapped = list(unmapped_sources)
     else:
         evolution_unmapped = []
+
+    # A mapped target that is not on the live table is an ADD, not a pass.
+    # Preflight used to see no unmapped source and no type mismatch, then
+    # INSERT named a column the relation does not have.
+    if live_ddl_contract and active_mappings:
+        known_targets = {str(c).lower() for c in target_columns}
+        if not isinstance(classification, dict):
+            classification = {
+                "additive": [],
+                "breaking": [],
+                "severity": "none",
+                "renamed": [],
+            }
+        additive = list(classification.get("additive") or [])
+        present = {str(a.get("column") or "").lower() for a in additive}
+        for mapping in active_mappings:
+            src = str(mapping.get("source") or "").strip()
+            tgt = str(mapping.get("target") or "").strip()
+            if not src or not tgt:
+                continue
+            if tgt.lower() in known_targets or tgt.lower() in system_targets:
+                continue
+            if tgt.lower() in present:
+                continue
+            if not any(str(c).lower() == src.lower() for c in source_columns):
+                continue
+            typ = (
+                source_schema.get(src)
+                or next(
+                    (source_schema[k] for k in source_schema if str(k).lower() == src.lower()),
+                    None,
+                )
+                or "VARCHAR"
+            )
+            additive.append({
+                "kind": "add_column",
+                "column": tgt,
+                "source": src,
+                "new_type": str(typ),
+                "nullable": True,
+                "reason": "mapped_target_absent",
+            })
+            present.add(tgt.lower())
+        classification["additive"] = additive
 
     evolution = resolve_schema_evolution(
         classification,

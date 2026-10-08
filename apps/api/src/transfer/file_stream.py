@@ -1443,6 +1443,33 @@ def stream_file_to_database(
         rows_before = precount_table(dest_type, dest_cfg, dest_table)
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
+        from services.file_load_ledger import file_already_loaded, note_file_identity
+        from services.sync_cursor import is_overwrite_sync
+
+        note_file_identity(
+            dest_summary,
+            content,
+            filename=filename,
+            dest_type=dest_type,
+            dest_database=destination.database or dest_cfg.get("database", ""),
+            dest_object=dest_table,
+            destination=destination,
+        )
+        if (
+            not is_overwrite_sync(effective_sync)
+            and dest_summary.get("file_digest")
+            and file_already_loaded(
+                str(dest_summary.get("file_route_key") or ""),
+                str(dest_summary.get("file_digest") or ""),
+            )
+        ):
+            dest_summary["file_already_loaded"] = True
+            dest_summary["sync_mode"] = effective_sync
+            dest_summary["source_row_count"] = 0
+            dest_summary["source_row_count_source"] = "file_already_loaded"
+            dest_summary["rejected_rows"] = 0
+            dest_summary["rows_written"] = 0
+            return 0, ddl_log, dest_summary, columns
     # A keyed write into an occupied destination grows it by the keys it
     # inserted, not by the batch, and a key-addressed destination replaces the
     # value at the key on every write. Gate-8 needs the dest-engine key census
@@ -1504,6 +1531,7 @@ def stream_file_to_database(
             dest_type=dest_type,
             dest_database=destination.database or dest_cfg.get("database", ""),
             dest_object=dest_table,
+            destination=destination,
         )
         cursor_key = scope.cursor_key
         watermark = scope.watermark
@@ -2191,6 +2219,16 @@ def stream_file_to_database(
             dest_summary["source_row_count_source"] = "incremental_no_new_rows"
             dest_summary["rejected_rows"] = 0
             dest_summary["incremental_watermark"] = watermark or ""
+            return 0, ddl_log, dest_summary, columns
+        if columns:
+            # A readable file that has headers and no data rows is an empty
+            # load, not a broken file. Gate-8 treats it as a quiet poll when
+            # the pre-write count was measured.
+            dest_summary["sync_mode"] = effective_sync
+            dest_summary["source_row_count"] = 0
+            dest_summary["source_row_count_source"] = "headers_only"
+            dest_summary["rejected_rows"] = 0
+            dest_summary["rows_written"] = 0
             return 0, ddl_log, dest_summary, columns
         raise ValueError("No records found in file")
 

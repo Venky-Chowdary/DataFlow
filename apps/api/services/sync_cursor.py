@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -313,11 +314,55 @@ def build_cursor_key(
     dest_database: str,
     dest_object: str,
     stream_name: str = "stream",
+    dest_identity: str = "",
 ) -> str:
-    return (
+    """Route bookmark.
+
+    ``dest_identity`` is empty for a route that has no connector id and no
+    host, which keeps the historical key. Two destinations that share a
+    database name (MySQL and MariaDB both called ``dataflow``) must not share
+    the bookmark: the second load would treat the first destination's
+    watermark as its own and skip rows it has never written.
+    """
+    base = (
         f"{source_type}:{source_database}:{source_object}"
         f"→{dest_type}:{dest_database}:{dest_object}:{stream_name}"
     )
+    ident = (dest_identity or "").strip()
+    if not ident:
+        return base
+    return f"{base}|{ident}"
+
+
+def route_endpoint_identity(endpoint: Any) -> str:
+    """Stable destination identity for a bookmark.
+
+    Connector id wins. Host and port are the fallback when the route was
+    built from a raw connection. A dict's ``id`` is not a connector id —
+    procedure tests pass two payloads that differ only by binds, and those
+    must keep one bookmark.
+    """
+    if endpoint is None:
+        return ""
+    if isinstance(endpoint, dict):
+        cid = str(endpoint.get("connector_id") or "").strip()
+        host = str(endpoint.get("host") or "").strip()
+        port = endpoint.get("port")
+    else:
+        cid = str(getattr(endpoint, "connector_id", "") or "").strip()
+        host = str(getattr(endpoint, "host", "") or "").strip()
+        port = getattr(endpoint, "port", None)
+    if cid:
+        return f"id:{cid}"
+    if host:
+        port_s = str(port or "").strip()
+        if port_s and port_s not in {"0", "None"}:
+            return f"host:{host}:{port_s}"
+        return f"host:{host}"
+    return ""
+
+
+_CURSOR_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -369,6 +414,7 @@ def resolve_incremental_read_scope(
     dest_database: str,
     dest_object: str,
     source: Any = None,
+    destination: Any = None,
 ) -> IncrementalReadScope:
     """Resolve the cursor state of a route — the read side's own view of it.
 
@@ -389,18 +435,39 @@ def resolve_incremental_read_scope(
         token = source_object_for_cursor(source, fallback="")
         if token:
             object_name = token
-    cursor_key = build_cursor_key(
+    stream_name = contract.name if contract else "stream"
+    legacy_key = build_cursor_key(
         source_type=source_type,
         source_database=source_database,
         source_object=object_name,
         dest_type=dest_type,
         dest_database=dest_database,
         dest_object=dest_object,
-        stream_name=contract.name if contract else "stream",
+        stream_name=stream_name,
+    )
+    owner = route_endpoint_identity(destination)
+    cursor_key = (
+        build_cursor_key(
+            source_type=source_type,
+            source_database=source_database,
+            source_object=object_name,
+            dest_type=dest_type,
+            dest_database=dest_database,
+            dest_object=dest_object,
+            stream_name=stream_name,
+            dest_identity=owner,
+        )
+        if owner
+        else legacy_key
     )
     pk_cols = contract.primary_key_columns() if contract else []
     tiebreak = incremental_tiebreak_column(source_type, cursor_column, pk_cols)
-    watermark, metadata = get_watermark_record(cursor_key)
+    if cursor_key != legacy_key:
+        watermark, metadata = resolve_owned_watermark(
+            cursor_key, legacy_key, owner=owner
+        )
+    else:
+        watermark, metadata = get_watermark_record(cursor_key)
     return IncrementalReadScope(
         cursor_column=cursor_column,
         primary_key=tiebreak,
@@ -440,6 +507,84 @@ def _load() -> dict[str, Any]:
 
 def _save(data: dict[str, Any]) -> None:
     write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
+
+
+def _claim_legacy_owner(legacy_key: str, owner: str) -> bool:
+    """CAS-claim an unscoped watermark for this destination only.
+
+    The first destination to resolve the old shared key keeps it. A second
+    destination sees the owner and does not inherit the bookmark, so it
+    re-reads instead of silently skipping rows it never loaded.
+    """
+    owner = (owner or "").strip()
+    if not legacy_key or not owner:
+        return False
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            doc = coll.find_one_and_update(
+                {
+                    "key": legacy_key,
+                    "$or": [
+                        {"metadata.route_owner": {"$exists": False}},
+                        {"metadata.route_owner": None},
+                        {"metadata.route_owner": ""},
+                        {"metadata.route_owner": owner},
+                    ],
+                },
+                {"$set": {"metadata.route_owner": owner}},
+            )
+            if doc is not None:
+                return True
+            existing = coll.find_one({"key": legacy_key})
+            if not existing:
+                return False
+            meta = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            return str(meta.get("route_owner") or "") == owner
+        except Exception:
+            _logger.exception("Mongo legacy cursor claim failed for %s", legacy_key)
+
+    with _CURSOR_LOCK:
+        data = _load()
+        for entry in data.get("cursors", []):
+            if entry.get("key") != legacy_key:
+                continue
+            meta = dict(entry.get("metadata") or {})
+            current = str(meta.get("route_owner") or "")
+            if current and current != owner:
+                return False
+            meta["route_owner"] = owner
+            entry["metadata"] = meta
+            _save(data)
+            return True
+    return False
+
+
+def resolve_owned_watermark(
+    scoped_key: str,
+    legacy_key: str,
+    *,
+    owner: str,
+) -> tuple[str | None, dict[str, Any]]:
+    """Watermark for one destination, adopting an unscoped bookmark once.
+
+    An empty scoped key does not fall through to the shared bookmark. That
+    fall-through is how MariaDB skipped the 20 rows MySQL had already consumed.
+    """
+    watermark, metadata = get_watermark_record(scoped_key)
+    if watermark is not None:
+        return watermark, metadata
+    if not _claim_legacy_owner(legacy_key, owner):
+        return None, {}
+    watermark, metadata = get_watermark_record(legacy_key)
+    if watermark is None:
+        return None, {}
+    copied = dict(metadata)
+    copied.pop("job_id", None)
+    copied["route_owner"] = owner
+    copied["adopted_from"] = legacy_key
+    set_watermark(scoped_key, watermark, metadata=copied)
+    return get_watermark_record(scoped_key)
 
 
 def get_watermark_record(cursor_key: str) -> tuple[str | None, dict[str, Any]]:

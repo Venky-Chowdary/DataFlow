@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+from datetime import date, datetime
 from io import BytesIO
 from typing import Any, Iterator
 
@@ -77,12 +79,64 @@ def _select_sheet(wb: Any, options: ReadOptions) -> Any:
     return wb.active
 
 
+def _format_without_literals(fmt: str) -> str:
+    return re.sub(r'"[^"]*"', "", fmt or "")
+
+
+def _zero_pad_width(fmt: str) -> int:
+    bare = _format_without_literals(fmt).strip()
+    match = re.fullmatch(r"0{2,}", bare)
+    return len(match.group(0)) if match else 0
+
+
+def _format_has_time(fmt: str) -> bool:
+    bare = _format_without_literals(fmt)
+    return bool(re.search(r"[hs]|am/pm|a/p", bare, re.I))
+
+
+def excel_cell_value(cell: Any) -> Any:
+    """Value a file load should see from one Excel cell.
+
+    A date-only cell is a datetime at midnight. Writing that as TIMESTAMP
+    then blocks a DATE column. A zero-padded number format (``00000``) is a
+    code; the int alone drops the zeros. Read-only workbooks often omit the
+    format, and the name heuristic covers those.
+    """
+    if cell is None:
+        return None
+    value = getattr(cell, "value", cell)
+    fmt = str(getattr(cell, "number_format", "") or "")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        width = _zero_pad_width(fmt)
+        if width:
+            return str(value).zfill(width)
+        return value
+    if isinstance(value, datetime) and value.tzinfo is None:
+        if (
+            value.hour == value.minute == value.second == value.microsecond == 0
+            and not _format_has_time(fmt)
+        ):
+            return value.date()
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return value
+    return value
+
+
+def _excel_value_rows(ws: Any) -> Iterator[tuple]:
+    for row in ws.iter_rows(values_only=False):
+        yield tuple(excel_cell_value(cell) for cell in row)
+
+
 def _sheet_header_and_rows(
     ws: Any, options: ReadOptions
 ) -> tuple[list[str], Iterator[Any]]:
     """Header names plus the sheet's data rows inside the declared window."""
     return header_and_rows(
-        ws.iter_rows(values_only=True),
+        _excel_value_rows(ws),
         options,
         header_names=sheet_headers,
         source_label=f"Sheet '{getattr(ws, 'title', '')}'",
@@ -102,7 +156,7 @@ def list_excel_sheets(content: bytes | Any) -> list[dict[str, Any]]:
         sheets: list[dict[str, Any]] = []
         for index, name in enumerate(list(getattr(wb, "sheetnames", []) or [])):
             ws = wb[name]
-            first = next(ws.iter_rows(values_only=True), None) or ()
+            first = next(_excel_value_rows(ws), None) or ()
             sheets.append(
                 {
                     "name": name,

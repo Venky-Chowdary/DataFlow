@@ -309,6 +309,42 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     ),
     (
         (
+            "nosuchkey",
+            "no such key",
+            "object store has no object",
+        ),
+        {
+            "code": "object_missing",
+            "category": "source",
+            "confidence": "high",
+            "title": "The file is not in the object store",
+            "fix": (
+                "The named object is not in the bucket. Check the path and that "
+                "the file has finished uploading, then run the load again."
+            ),
+            "primary_action": "open_source",
+        },
+    ),
+    (
+        (
+            "keyerror: 'primary_key'",
+            'keyerror: "primary_key"',
+            "'primary_key'",
+        ),
+        {
+            "code": "missing_primary_key",
+            "category": "mapping",
+            "confidence": "high",
+            "title": "This run needs an identity column",
+            "fix": (
+                "Open Map and set the stream contract primary_key to the column "
+                "that identifies a row. The load did not guess one."
+            ),
+            "primary_action": "open_map",
+        },
+    ),
+    (
+        (
             "duplicate redis key",
             "duplicate primary key",
             "keys repeat",

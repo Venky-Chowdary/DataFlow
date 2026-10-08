@@ -176,6 +176,7 @@ def resolve_read_scope(
             dest_type=(destination_db_type or "").strip().lower(),
             dest_database=str(dst_cfg.get("database") or ""),
             dest_object=destination_table,
+            destination=dst_cfg,
         )
     except Exception as exc:
         logger.warning("incremental read scope unresolved: %s", exc, exc_info=exc)

@@ -589,11 +589,28 @@ def get_schedule(schedule_id: str) -> PipelineSchedule | None:
     return None
 
 
-def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> None:
+def accepted_schedule_sync_mode(sync_mode: str) -> str:
+    """Schedule spelling, or the canonical mode an alias resolves to.
+
+    Tokens already stored (``incremental``) keep that spelling. ``incremental_upsert``
+    is the Pilot / transfer-tool name for an incremental deduped write; rejecting
+    it made upsert schedules impossible to create.
+    """
+    token = (sync_mode or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in SYNC_MODES:
+        return token
+    from services.sync_cursor import normalize_sync_mode
+
+    resolved = normalize_sync_mode(token, default="")
+    if resolved in SYNC_MODES:
+        return resolved
+    raise ValueError(f"Invalid sync_mode: {sync_mode}")
+
+
+def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> str:
     if interval not in INTERVALS:
         raise ValueError(f"Invalid interval: {interval}")
-    if sync_mode not in SYNC_MODES:
-        raise ValueError(f"Invalid sync_mode: {sync_mode}")
+    sync_mode = accepted_schedule_sync_mode(sync_mode)
     cron = (cron or "").strip()
     if cron:
         try:
@@ -602,6 +619,7 @@ def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> None
             _cron_next_run(cron, datetime.now(timezone.utc), tz or "UTC")
         except CronError as exc:
             raise ValueError(str(exc)) from exc
+    return sync_mode
 
 
 def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
@@ -796,7 +814,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     cron = (payload.get("cron") or "").strip()
     tz = (payload.get("timezone") or "UTC").strip() or "UTC"
     sync_mode = payload.get("sync_mode") or "full_refresh_overwrite"
-    _validate_cadence(interval, cron, tz, sync_mode)
+    sync_mode = _validate_cadence(interval, cron, tz, sync_mode)
     contract_id = (payload.get("contract_id") or "").strip()
     require_signed = bool(payload.get("require_signed_contract", bool(contract_id)))
     if contract_id or require_signed:
@@ -901,7 +919,8 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         cron = (data.get("cron", s.cron) or "").strip()
         tz = (data.get("timezone", s.timezone) or "UTC").strip() or "UTC"
         sync_mode = data.get("sync_mode", s.sync_mode) or "full_refresh_overwrite"
-        _validate_cadence(interval, cron, tz, sync_mode)
+        sync_mode = _validate_cadence(interval, cron, tz, sync_mode)
+        data = {**data, "sync_mode": sync_mode}
         merged = {**s.to_dict(), **data, "id": schedule_id}
         contract_id = (merged.get("contract_id") or "").strip()
         require_signed = bool(
@@ -1213,11 +1232,11 @@ def mark_schedule_run(
             cron=s.cron, interval=s.interval, tz=s.timezone, next_run_at=s.next_run_at
         )
         # Windows that elapsed while this run was busy are counted, not
-        # replayed. The one sync that became due starts on the next beat
-        # (Airbyte: start after the running sync finishes, once).
+        # replayed. Pinning next_run to the completion instant left the
+        # schedule due at a time that is not a cadence boundary, and the
+        # following ticks never advanced (DEF-A-010). The run that just
+        # finished is the catch-up for the overdue slot.
         next_at = compute_next_run(s.interval, _parse_ts(now), cron=s.cron, tz=s.timezone)
-        if missed > 0:
-            next_at = now
         history = list(s.run_history)
         if run_entry:
             entry = dict(run_entry)
@@ -1250,6 +1269,65 @@ def mark_schedule_run(
         _save_all(schedules)
         return updated
     return None
+
+
+def _pinned_to_completion(sched: PipelineSchedule, *, now: datetime | None = None) -> bool:
+    """True when next_run was written as the completion instant and is now due.
+
+    A real cadence boundary is not equal to last_run. Interval schedules can
+    legally carry seconds, so the signal is next_run ≈ last_run, not "has seconds".
+    """
+    if sched.running:
+        return False
+    nxt = _parse_ts(sched.next_run_at)
+    last = _parse_ts(sched.last_run_at)
+    if nxt is None or last is None:
+        return False
+    if nxt.tzinfo is None:
+        nxt = nxt.replace(tzinfo=timezone.utc)
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    if abs((nxt - last).total_seconds()) > 2:
+        return False
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return nxt <= current
+
+
+def unstick_completion_pinned_schedules(now: datetime | None = None) -> int:
+    """Advance schedules whose next run is stuck on a previous completion.
+
+    Does not start a load and does not replay the missed ticks. The next due
+    time becomes the next real cadence boundary from now, and the skipped
+    windows are added to the existing miss count.
+    """
+    current = now or datetime.now(timezone.utc)
+    schedules = _load_all()
+    changed = 0
+    for i, sched in enumerate(schedules):
+        if not _pinned_to_completion(sched, now=current):
+            continue
+        missed = count_missed_windows(
+            cron=sched.cron,
+            interval=sched.interval,
+            tz=sched.timezone,
+            next_run_at=sched.next_run_at,
+            now=current,
+        )
+        next_at = compute_next_run(
+            sched.interval, current, cron=sched.cron, tz=sched.timezone
+        )
+        schedules[i] = PipelineSchedule.from_dict({
+            **sched.to_dict(),
+            "next_run_at": next_at,
+            "missed_window_count": sched.missed_window_count + missed,
+            "last_missed_windows": missed,
+        })
+        changed += 1
+    if changed:
+        _save_all(schedules)
+    return changed
 
 
 def schedule_retry(

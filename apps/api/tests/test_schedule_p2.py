@@ -780,7 +780,11 @@ def test_enqueue_ack_does_not_close_the_schedule(temp_store, monkeypatch):
 
 
 def test_overrun_schedules_one_catch_up_instead_of_skipping_the_slot(temp_store):
-    """A run that finishes after the next */5 slot is due fires once, not at the following slot."""
+    """A run that finishes after later */5 slots counts them and waits for the next boundary.
+
+    The finished run is the catch-up. Pinning next_run to the completion instant
+    left the schedule stuck on that clock time and every later tick was missed.
+    """
     sched = _make(store, cron="*/5 * * * *", interval="hourly")
     past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
     store._save_all([
@@ -791,8 +795,10 @@ def test_overrun_schedules_one_catch_up_instead_of_skipping_the_slot(temp_store)
     assert done.missed_window_count >= 1
     assert done.run_count == 1
     nxt = store._parse_ts(done.next_run_at)
-    assert nxt is not None and nxt <= datetime.now(timezone.utc)
-    assert done.id in {item.id for item in store.due_schedules()}
+    now = datetime.now(timezone.utc)
+    assert nxt is not None and nxt > now
+    assert nxt.second == 0
+    assert done.id not in {item.id for item in store.due_schedules()}
 
 
 def test_queued_claim_is_kept_when_the_next_slot_is_due(temp_store, monkeypatch):
@@ -940,11 +946,16 @@ def test_second_beat_dispatches_after_the_first_run_is_recorded(temp_store, monk
         return "job-2"
 
     monkeypatch.setattr(runner, "_run_schedule", _fake_run)
-    assert runner._run_due_schedules() == 1
-    assert started["ids"] == [sched.id]
+    # The finished run is the catch-up for the overdue slot. The same beat
+    # records it and waits for the next cron boundary instead of starting
+    # another load immediately.
+    assert runner._run_due_schedules() == 0
+    assert started["ids"] == []
     recorded = store.get_schedule(sched.id)
     assert recorded.run_count == 1
     assert recorded.last_job_id == "job-1"
+    nxt = store._parse_ts(recorded.next_run_at)
+    assert nxt is not None and nxt > datetime.now(timezone.utc)
 
 
 def test_manual_run_records_a_finished_claim_before_starting(temp_store, monkeypatch):

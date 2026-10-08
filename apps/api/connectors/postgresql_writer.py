@@ -2220,6 +2220,35 @@ def write_mapped_rows(
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
                     _reconnect()
 
+            if table_existed and not backfill_new_fields and not additive_refuse:
+                missing_cols: list[str] = []
+                try:
+                    cur.execute(
+                        """SELECT column_name FROM information_schema.columns
+                           WHERE table_schema = %s AND table_name = %s""",
+                        (schema, table_name),
+                    )
+                    existing_cols = {str(row[0]).lower() for row in cur.fetchall()}
+                    missing_cols = [
+                        str(col)
+                        for col in target_cols
+                        if str(col).lower() not in existing_cols
+                    ]
+                except Exception:  # noqa: BLE001 — probe failure must not hide the write
+                    logger.debug(
+                        "PostgreSQL missing-column probe skipped", exc_info=True
+                    )
+                    missing_cols = []
+                if missing_cols:
+                    shown = ", ".join(missing_cols[:8])
+                    additive_refuse = (
+                        f"Destination table {schema}.{table_name} is missing "
+                        f"column(s) {shown}. Schema policy did not add them, so "
+                        "the load stopped before INSERT. Open Validate and approve "
+                        "the new column, or set the schema policy to propagate "
+                        "columns so Execute can ADD COLUMN."
+                    )
+
             if additive_refuse:
                 return WriteResult(
                     ok=False,

@@ -271,12 +271,15 @@ def _endpoint_from_connector(conn: dict, table: str):
 
 def _normalize_sync_mode(sync_mode: str, primary_key: str) -> str:
     """Map the schedule's coarse sync_mode onto the engine's contract vocabulary."""
-    mode = (sync_mode or "full_refresh_overwrite").lower()
+    mode = (sync_mode or "full_refresh_overwrite").strip().lower().replace("-", "_").replace(" ", "_")
+    # Bare "incremental" is the schedule spelling. A primary key makes the
+    # write idempotent; without one the read stays append. Other tokens,
+    # including a stored incremental_upsert, go through the sync-mode SSOT.
     if mode == "incremental":
         return "incremental_deduped" if primary_key else "incremental_append"
-    if mode in ("scd2", "mirror"):
-        return mode
-    return mode
+    from services.sync_cursor import normalize_sync_mode
+
+    return normalize_sync_mode(mode)
 
 
 def build_schedule_request(sched, src: dict, dst: dict):
@@ -1345,6 +1348,9 @@ def _run_due_schedules() -> int:
         release_create_new_dest_exists_false_refuse()
         _release_superseded_queued_claims()
         _finalize_finished_schedule_claims()
+        from services.schedule_store import unstick_completion_pinned_schedules
+
+        unstick_completion_pinned_schedules()
         started = 0
         for sched in due_schedules():
             try:

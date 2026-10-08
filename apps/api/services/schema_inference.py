@@ -65,6 +65,25 @@ _STATUS_ENUM_TOKENS = frozenset({
 })
 
 
+def _is_leading_zero_code_name(name: str) -> bool:
+    """Zip, postal, account, routing, and SSN names stay text.
+
+    A single ``0`` or an id sequence ``0..49`` is still an integer. This only
+    matches the code-shaped names Excel coerces before the zero can be seen.
+    """
+    raw = (name or "").strip()
+    if not raw or _is_boolean_field_name(raw):
+        return False
+    folded = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", raw).lower()
+    return bool(
+        re.search(
+            r"(?:^|_)(zip_?code|postal_?code|post_?code|postcode|zip|postal|"
+            r"account_?number|routing_?number|ssn)(?:_|$)",
+            folded,
+        )
+    )
+
+
 def _is_boolean_field_name(name: str) -> bool:
     """True only for flag-shaped names — not bare status/lifecycle words.
 
@@ -530,6 +549,11 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
             r"\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2}$", s
         ):
             return "TIMESTAMPTZ"
+        # Excel stores a date-only cell as midnight and serializes it with
+        # T00:00:00. That is a DATE. A real time-of-day stays TIMESTAMP, and
+        # TIMESTAMP → DATE stays lossy.
+        if re.search(r"(?:[T ])00:00:00(?:\.0+)?$", s):
+            return "DATE"
         return "TIMESTAMP"
 
     for fmt in ("%H:%M:%S", "%H:%M:%S.%f", "%H:%M:%S%z"):
@@ -541,6 +565,14 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
 
     decimal_parsed = _parse_decimal(s)
     if decimal_parsed is not None:
+        from services.transform_engine import numeric_text_without_markers
+
+        marked = numeric_text_without_markers(s) or s
+        digits_only = marked[1:] if marked[:1] in "+-" else marked
+        # "0" and "0.5" are numbers. "02115" and "007" are codes: a numeric
+        # carrier drops the zero and the later VARCHAR check then blocks.
+        if len(digits_only) > 1 and digits_only[:1] == "0" and digits_only[1:2] != ".":
+            return "VARCHAR"
         if "." in decimal_parsed or "e" in s.lower():
             return "DECIMAL"
         try:
@@ -1036,6 +1068,18 @@ def infer_column(
         inferred = "BOOLEAN"
         role = "boolean_flag"
         notes.append("0/1 on flag-shaped field name → BOOLEAN")
+
+    # Excel already dropped the leading zero (2115 in a zip_code column).
+    # The name is the remaining evidence. Bare id/code stay numeric.
+    if (
+        field_name
+        and inferred != "BOOLEAN"
+        and (inferred in {"INTEGER", "DECIMAL"} or str(inferred).startswith("DECIMAL"))
+        and _is_leading_zero_code_name(field_name)
+    ):
+        inferred = "VARCHAR"
+        role = "text"
+        notes.append("code-shaped name keeps leading zeros — VARCHAR")
 
     # Never keep BOOLEAN if any sample is status vocabulary
     if inferred == "BOOLEAN" and any(v.lower() in _STATUS_ENUM_TOKENS for v in non_empty):

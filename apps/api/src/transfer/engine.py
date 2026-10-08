@@ -2450,6 +2450,10 @@ class UniversalTransferEngine:
                 request.limit,
             )
             if not records and request.source.kind != "database":
+                if columns and str(getattr(request.source, "kind", "") or "") == "file":
+                    from .incremental_no_op import empty_file_success_result
+
+                    return empty_file_success_result(request, job_id)
                 mongo.update_job_status(
                     job_id, "failed", error="No records to transfer", phase="failed"
                 )
@@ -5210,6 +5214,10 @@ class UniversalTransferEngine:
             )
             if lost is not None:
                 return lost
+            if isinstance(dest_summary, dict) and dest_summary.get("file_digest"):
+                from services.file_load_ledger import record_successful_file_load
+
+                record_successful_file_load(dest_summary)
 
             explanation = _build_explanation(
                 request,

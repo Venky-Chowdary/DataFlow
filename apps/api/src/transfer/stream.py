@@ -1056,6 +1056,7 @@ def _stream_database_transfer_impl(
                 dest_database=destination.database or dest_cfg.get("database", ""),
                 dest_object=_dest_obj,
                 source=src_cfg,
+                destination=destination,
             )
             pre_copy_cursor_key = _scope.cursor_key
             pre_copy_watermark = _scope.watermark
@@ -1256,6 +1257,7 @@ def _stream_database_transfer_impl(
             dest_database=destination.database or dest_cfg.get("database", ""),
             dest_object=resolve_dest_table(dest_type, destination, table),
             source=source if is_callable_source(source) or is_callable_source(src_cfg) else src_cfg,
+            destination=destination,
         )
         cursor_key = scope.cursor_key
         watermark = scope.watermark
