@@ -1013,6 +1013,12 @@ def delete_schedule(schedule_id: str) -> bool:
     return True
 
 
+# A running job document that has not been touched for this long is a dead
+# worker, not a long migration. Checkpoints rewrite ``updated_at``. Leaving
+# the claim held froze ``next_run_at`` in the past with no error.
+_RUNNING_SILENCE = timedelta(minutes=15)
+
+
 def _job_is_live(job_id: str) -> bool | None:
     """Whether the claimed job is still in flight. ``None`` when unknowable."""
     if not job_id:
@@ -1026,7 +1032,19 @@ def _job_is_live(job_id: str) -> bool | None:
         return None
     if not job:
         return False
-    return not is_terminal(job.get("status"))
+    if is_terminal(job.get("status")):
+        return False
+    status = str(job.get("status") or "").strip().lower()
+    if status == "running":
+        stamp = (
+            job.get("updated_at")
+            or job.get("heartbeat_at")
+            or job.get("last_progress_at")
+        )
+        seen = _parse_ts(str(stamp)) if stamp else None
+        if seen is not None and datetime.now(timezone.utc) - seen > _RUNNING_SILENCE:
+            return False
+    return True
 
 
 def _is_running_stale(sched: PipelineSchedule) -> bool:
@@ -1107,7 +1125,13 @@ def release_all_superseded_queued_claims(now: datetime | None = None) -> int:
     return 0
 
 
-def _claim_running_mongo(schedule_id: str, instance: str, now: str) -> PipelineSchedule | None:
+def _claim_running_mongo(
+    schedule_id: str,
+    instance: str,
+    now: str,
+    *,
+    next_run_at: str | None = None,
+) -> PipelineSchedule | None:
     """CAS the running flag on the per-schedule Mongo document."""
     svc = _mongo_backend()
     if not svc:
@@ -1127,6 +1151,7 @@ def _claim_running_mongo(schedule_id: str, instance: str, now: str) -> PipelineS
                 "running_instance": instance,
                 "running_started_at": now,
                 "running_job_id": "",
+                **({"next_run_at": next_run_at} if next_run_at else {}),
             }
         },
         return_document=True,
@@ -1157,7 +1182,18 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                 s.source_connector_id, s.dest_connector_id, exclude_id=s.id
             ):
                 return None
-            claimed = _claim_running_mongo(schedule_id, instance, now)
+            # One catch-up for a slot already in the past, then the next
+            # cadence boundary. Leaving next_run_at behind made every beat
+            # fire again (a resumed schedule ran three times in one window)
+            # and a crashed finalize left the schedule due forever.
+            nxt = _parse_ts(s.next_run_at)
+            current = _parse_ts(now) or datetime.now(timezone.utc)
+            advanced = s.next_run_at
+            if nxt is None or nxt <= current:
+                advanced = compute_next_run(
+                    s.interval, current, cron=s.cron, tz=s.timezone
+                )
+            claimed = _claim_running_mongo(schedule_id, instance, now, next_run_at=advanced)
             if claimed is not None:
                 return claimed
             updated = PipelineSchedule.from_dict({
@@ -1166,6 +1202,7 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                 "running_instance": instance,
                 "running_started_at": now,
                 "running_job_id": "",
+                "next_run_at": advanced,
             })
             schedules[i] = updated
             _save_all(schedules)

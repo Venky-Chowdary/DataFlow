@@ -194,6 +194,13 @@ def _refine_columns_by_samples(
                 continue
             str_values = [str(v) for v in values]
             inferred = _infer_logical_from_strings(str_values, field_name=c["name"])
+            # An offset string (``Z`` or ``±HH:MM``) is text that happens to
+            # look like a timestamp. Promoting it to DATETIME drops the offset.
+            if inferred in {"DATETIME", "TIMESTAMP", "TIMESTAMPTZ", "DATE"} and any(
+                re.search(r"(?:Z|[+-]\d{2}:?\d{2})\s*$", str(value).strip(), re.I)
+                for value in str_values
+            ):
+                continue
             if inferred and inferred != "TEXT":
                 # Keep the catalog carrier: value inference describes the rows a
                 # source holds, not what a destination column will accept. A

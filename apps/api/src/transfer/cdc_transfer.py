@@ -3311,6 +3311,7 @@ def _run_cdc_single_stream(
         from services.cdc_value_digest import (
             CdcValueScanIncomplete,
             identity_rows_missing_on_dest,
+            rows_absent_by_primary_key,
         )
 
         cursor_now = (
@@ -3334,6 +3335,27 @@ def _run_cdc_single_stream(
             except CdcValueScanIncomplete as exc:
                 logger.warning("CDC image repair skipped: %s", exc)
                 missing_image = None
+            if not missing_image:
+                # A transformed column (timestamptz → datetime) is not an
+                # identity fingerprint, so the scan above declines. Keys the
+                # destination does not have are still unapplied inserts. The
+                # slot may already sit past them; this upsert does not move it.
+                pk = str(primary_key or "")
+                if pk:
+                    try:
+                        missing_image = rows_absent_by_primary_key(
+                            source_type=src_type,
+                            source_cfg=src_cfg,
+                            source_table=str(table_name or ""),
+                            dest_type=dest_type,
+                            dest_cfg=dest_cfg,
+                            dest_table=str(dest_table or ""),
+                            mappings=list(mappings or []),
+                            primary_key=pk,
+                        )
+                    except CdcValueScanIncomplete as exc:
+                        logger.warning("CDC key image repair skipped: %s", exc)
+                        missing_image = None
             if missing_image:
                 token = unwrap_resume_token(cursor_now)
                 for start in range(0, len(missing_image), 500):

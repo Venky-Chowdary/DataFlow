@@ -352,14 +352,49 @@ def route_endpoint_identity(endpoint: Any) -> str:
         cid = str(getattr(endpoint, "connector_id", "") or "").strip()
         host = str(getattr(endpoint, "host", "") or "").strip()
         port = getattr(endpoint, "port", None)
+    ident = ""
     if cid:
-        return f"id:{cid}"
-    if host:
+        ident = f"id:{cid}"
+    elif host:
         port_s = str(port or "").strip()
         if port_s and port_s not in {"0", "None"}:
-            return f"host:{host}:{port_s}"
-        return f"host:{host}"
-    return ""
+            ident = f"host:{host}:{port_s}"
+        else:
+            ident = f"host:{host}"
+    return _stamp_engine_identity(endpoint, ident)
+
+
+def _endpoint_format(endpoint: Any) -> str:
+    if endpoint is None:
+        return ""
+    if isinstance(endpoint, dict):
+        raw = endpoint.get("format") or endpoint.get("type") or endpoint.get("db_type") or ""
+    else:
+        raw = (
+            getattr(endpoint, "format", None)
+            or getattr(endpoint, "type", None)
+            or ""
+        )
+    return str(raw or "").strip().lower()
+
+
+def _stamp_engine_identity(endpoint: Any, ident: str) -> str:
+    """MariaDB must not share a MySQL bookmark when the driver alias is mysql.
+
+    The catalog id of MariaDB is ``mysql``. Two connectors on the same
+    database name then build one cursor key, and the second destination
+    looks reset. ``engine:mariadb`` is the distinguisher when host and
+    connector id were not on the endpoint yet.
+    """
+    fmt = _endpoint_format(endpoint)
+    if fmt not in {"mariadb", "maria"}:
+        return ident
+    tag = "engine:mariadb"
+    if not ident:
+        return tag
+    if tag in ident:
+        return ident
+    return f"{ident}|{tag}"
 
 
 _CURSOR_LOCK = threading.Lock()
@@ -415,6 +450,7 @@ def resolve_incremental_read_scope(
     dest_object: str,
     source: Any = None,
     destination: Any = None,
+    destination_config: Any = None,
 ) -> IncrementalReadScope:
     """Resolve the cursor state of a route — the read side's own view of it.
 
@@ -446,6 +482,10 @@ def resolve_incremental_read_scope(
         stream_name=stream_name,
     )
     owner = route_endpoint_identity(destination)
+    if not owner and destination_config is not None:
+        owner = route_endpoint_identity(destination_config)
+    if destination_config is not None and _endpoint_format(destination) in {"mariadb", "maria"}:
+        owner = _stamp_engine_identity(destination, owner)
     cursor_key = (
         build_cursor_key(
             source_type=source_type,

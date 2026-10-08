@@ -146,6 +146,13 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         "error_confidence": human.get("confidence"),
         "operator_error": human.get("message"),
     }
+    # A destination that is short of the source image still has the rows on
+    # the source. Dropping the replication slot here makes the next resume
+    # report slot_missing and the unapplied inserts cannot be read back.
+    short_image = "short of the live source image" in str(exc).lower()
+    if short_image or "short of the live source image" in str(details.get("message") or "").lower():
+        details["retriable"] = True
+        details["code"] = "cdc_image_short"
     try:
         from services.cdc_catchup import CdcStreamBehind
         from services.cdc_lease import CdcLeaseConflict, LeaseStoreError

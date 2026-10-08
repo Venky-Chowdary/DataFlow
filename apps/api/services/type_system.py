@@ -3352,6 +3352,23 @@ def _clickhouse_native_datetime_ddl(inferred: str | None) -> str | None:
     return None
 
 
+def _mysql_source_timestamp(inferred: str | None) -> bool:
+    """True when a bound MySQL source declared its own TIMESTAMP carrier.
+
+    ``active_source_engine`` is empty outside a transfer, so an unbound
+    ``ddl_type("mysql", "TIMESTAMP")`` stays wall-clock DATETIME(6). MariaDB
+    normalizes to the same engine: its TIMESTAMP is the same UTC instant.
+    """
+    if _normalize_dest_db(active_source_engine()) != "mysql":
+        return False
+    collapsed = re.sub(
+        r"\s*\(\s*\d+\s*\)",
+        "",
+        (inferred or "").strip().upper().replace("_", " "),
+    ).strip()
+    return collapsed == "TIMESTAMP"
+
+
 def _aware_ddl_for_dest(db: str) -> str | None:
     """MySQL carrier for an aware source instant.
 
@@ -3387,7 +3404,16 @@ def _datetime_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     # platform default, which is wall-clock NTZ (TIMESTAMP / TIMESTAMP_NTZ /
     # DATETIME). Explicit TIMESTAMPTZ / WITH TIME ZONE keep aware polarity.
     # Inventing TIMESTAMPTZ from bare datetime silently relocates civil times.
+    #
+    # MySQL's own TIMESTAMP is the exception. The catalog spells it
+    # ``timestamp`` (introspect also lifts it to TIMESTAMPTZ) and stores UTC.
+    # Same-engine create-new keeps TIMESTAMP(6). A PostgreSQL or unbound
+    # TIMESTAMP stays NTZ and lands on DATETIME(6), which holds 1000..9999.
+    # This branch runs only for a MySQL destination and a MySQL source engine,
+    # so a MySQL TIMESTAMP heading to PostgreSQL is unchanged.
     polarity = datetime_timezone_polarity(inferred)
+    if polarity == "ntz" and db == "mysql" and _mysql_source_timestamp(inferred):
+        polarity = "ltz"
     fsp = parse_temporal_fractional_precision(inferred)
     base: str | None = None
     if polarity == "ltz":

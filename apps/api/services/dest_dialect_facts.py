@@ -232,6 +232,11 @@ def _collation_compatible_with_dest(db: str, collation: str) -> bool:
             return False
         if windowish:
             return False
+        # MariaDB 11 utf8mb4_uca1400_ai_ci is not a MySQL collation. Copying
+        # it into CREATE makes MySQL raise Unknown collation, and that error
+        # was retried as a dropped connection so the job sat at 5% forever.
+        if db == "mysql" and "UCA1400" in upper:
+            return False
         return bool(
             re.search(r"UTF8|LATIN1|ASCII|UCA|BINARY|UNICODE|GENERAL", upper)
             or upper.endswith(("_CI", "_CS", "_BIN"))

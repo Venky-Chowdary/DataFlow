@@ -1369,18 +1369,29 @@ def _clear_stale_running_schedules() -> None:
         PipelineSchedule,
         _is_running_stale,
         _load_all,
+        _parse_ts,
         _save_all,
+        compute_next_run,
     )
 
     schedules = _load_all()
     changed = False
     for i, s in enumerate(schedules):
         if s.running and _is_running_stale(s):
+            current = datetime.now(timezone.utc)
+            nxt = _parse_ts(s.next_run_at)
+            advanced = s.next_run_at
+            if nxt is None or nxt <= current:
+                advanced = compute_next_run(
+                    s.interval, current, cron=s.cron, tz=s.timezone
+                )
             schedules[i] = PipelineSchedule.from_dict({
                 **s.to_dict(),
                 "running": False,
                 "running_instance": "",
                 "running_started_at": None,
+                "running_job_id": "",
+                "next_run_at": advanced,
             })
             changed = True
     if changed:

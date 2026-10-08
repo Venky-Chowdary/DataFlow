@@ -1297,8 +1297,26 @@ def _logical_type_from_sa(col_type: Any) -> str:
         # mssql.DATETIMEOFFSET subclasses DateTime and leaves ``timezone`` False,
         # so the flag alone reads an offset-storing carrier as NTZ and the writer
         # then quarantines every aware value the column exists to hold.
+        # Classic SQL Server DATETIME is 1/300 s. Folding it into the same token
+        # as DATETIME2 made preflight believe the column kept seven digits, the
+        # write rounded ``.000001`` to ``.000``, and the sample check failed
+        # only after the batch had committed.
+        type_name = getattr(getattr(col_type, "__class__", None), "__name__", "")
+        type_upper = str(type_name or "").upper()
+        if type_upper == "DATETIME2":
+            precision = getattr(col_type, "precision", None)
+            digits = int(precision) if isinstance(precision, int) and precision >= 0 else 7
+            return f"DATETIME2({digits})"
+        if type_upper == "DATETIMEOFFSET":
+            precision = getattr(col_type, "precision", None)
+            digits = int(precision) if isinstance(precision, int) and precision >= 0 else 7
+            return f"DATETIMEOFFSET({digits})"
+        if type_upper == "SMALLDATETIME":
+            return "SMALLDATETIME"
+        if type_upper == "DATETIME":
+            return "DATETIME"
         if "datetimeoffset" in (
-            f"{type(col_type).__name__} {col_type!r}".lower()
+            f"{type_name} {col_type!r}".lower()
         ):
             return "timestamptz"
         # Oracle TIMESTAMP WITH LOCAL TIME ZONE carries awareness on
@@ -1330,9 +1348,17 @@ def _logical_type_from_sa(col_type: Any) -> str:
             n = None
         type_name = getattr(getattr(col_type, "__class__", None), "__name__", "").lower()
         module = getattr(getattr(col_type, "__class__", None), "__module__", "").lower()
-        national = "nvarchar" in type_name or "nchar" in type_name or (
-            "mssql" in module and "national" in repr(col_type).lower()
+        national = (
+            isinstance(col_type, (sa.Unicode, sa.UnicodeText))
+            or "nvarchar" in type_name
+            or type_name in {"nchar", "unicodetext", "unicode"}
+            or ("mssql" in module and "national" in repr(col_type).lower())
         )
+        # NVARCHAR(MAX) reflects with length None. Returning "TEXT" or "string"
+        # classified the column as SQL Server VARCHAR (cp1252) and quarantined
+        # U+90CE on a national column that holds it.
+        if national and (n is None or n <= 0):
+            return "NVARCHAR(MAX)"
         if isinstance(col_type, sa.Text) and n is None:
             return "TEXT"
         if n is not None and n > 0:
@@ -1344,6 +1370,8 @@ def _logical_type_from_sa(col_type: Any) -> str:
             ):
                 return f"CHAR({n})"
             return f"VARCHAR({n})"
+        if "mssql" in module and type_name in {"varchar", "char", "text"}:
+            return "VARCHAR(MAX)" if type_name != "char" else "CHAR"
         return "string"
 
     # Fallback text matching for dialect-specific types not captured above
@@ -1653,7 +1681,7 @@ def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
     if mssql is not None and (
         (dialect_name or "").lower() == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
     ):
-        return mssql.DATETIME2()
+        return mssql.DATETIME2(precision=7)
     if mysql is not None and _MYSQL_WIRES & {
         (dialect_name or "").lower(), (db_type or "").lower()
     }:
@@ -1738,6 +1766,14 @@ def _sa_type_for_logical(
             # upstream. sa.DateTime(timezone=True) compiles to fsp-0 DATETIME,
             # dropping the fraction too — a second loss for nothing.
             return _maybe_nullable(mysql.DATETIME(fsp=6))
+        if mssql is not None and (
+            (dialect_name or "").lower() == "mssql"
+            or (db_type or "").lower() in _MSSQL_WIRES
+        ):
+            # sa.DateTime(timezone=True) compiles to DATETIMEOFFSET with no
+            # precision argument. Name the seven digits the column keeps so a
+            # PostgreSQL microsecond cannot land on classic DATETIME.
+            return _maybe_nullable(mssql.DATETIMEOFFSET(precision=7))
         return sa.DateTime(timezone=True)
     if (
         "timestamp_ntz" in raw_lower
@@ -2132,6 +2168,96 @@ def _is_string_type(sa_type: Any) -> bool:
     return bool(nested is not None and isinstance(nested, (sa.String, sa.Text, sa.CHAR)))
 
 
+def _encoding_dest_type(
+    logical: str,
+    sa_type: Any,
+    *,
+    dialect_name: str,
+    db_type: str,
+) -> str:
+    """Character carrier the encoding gate must judge.
+
+    A collapsed logical ``string`` on SQL Server is the code-page default.
+    The live class is the carrier: NVARCHAR holds U+90CE, VARCHAR does not.
+    """
+    stamp = (logical or "").strip()
+    if sa_type is None:
+        return stamp
+    type_name = getattr(getattr(sa_type, "__class__", None), "__name__", "")
+    upper = str(type_name or "").upper()
+    module = getattr(getattr(sa_type, "__class__", None), "__module__", "")
+    national = upper in {"NVARCHAR", "NCHAR", "UNICODE", "UNICODETEXT"} or (
+        "mssql" in module.lower() and "NATIONAL" in repr(sa_type).upper()
+    )
+    length = getattr(sa_type, "length", None)
+    try:
+        width = int(length) if length is not None else None
+    except (TypeError, ValueError):
+        width = None
+    if national:
+        if "NVARCHAR" in stamp.upper() or "NCHAR" in stamp.upper():
+            return stamp
+        if width and width > 0:
+            prefix = "NCHAR" if upper == "NCHAR" else "NVARCHAR"
+            return f"{prefix}({width})"
+        return "NVARCHAR(MAX)"
+    mssql_code_page = (dialect_name or "").lower() == "mssql" or (
+        db_type or ""
+    ).lower() in _MSSQL_WIRES
+    if mssql_code_page and upper in {"VARCHAR", "CHAR", "TEXT", "STRING", "NTEXT"}:
+        # The physical class is the code page. A Map stamp of NVARCHAR must
+        # not win — ``CHAR`` is a substring of ``NVARCHAR``.
+        if width and width > 0:
+            prefix = "CHAR" if upper == "CHAR" else "VARCHAR"
+            return f"{prefix}({width})"
+        stamp_u = stamp.upper()
+        if "NVARCHAR" in stamp_u or "NCHAR" in stamp_u or "NTEXT" in stamp_u:
+            return "VARCHAR(MAX)"
+        if any(tok in stamp_u for tok in ("VARCHAR", "CHAR", "TEXT")):
+            return stamp
+        return "VARCHAR(MAX)"
+    return stamp
+
+
+def _refuse_sqlserver_datetime_rounding(
+    value: datetime,
+    *,
+    logical: str,
+    sa_type: Any,
+    db_type: str,
+) -> None:
+    """Quarantine a microsecond classic SQL Server DATETIME cannot store.
+
+    DATETIME rounds to .000 / .003 / .007. Binding first and failing the
+    read-back leaves the rounded row committed. DATETIME2 and DATETIMEOFFSET
+    keep the fraction.
+    """
+    engine = (db_type or "").strip().lower()
+    if engine not in _MSSQL_WIRES and engine != "mssql":
+        return
+    type_name = ""
+    if sa_type is not None:
+        type_name = str(getattr(getattr(sa_type, "__class__", None), "__name__", "") or "")
+    logical_u = (logical or "").upper()
+    # The physical class wins. DATETIME2/DATETIMEOFFSET keep the fraction
+    # even when a collapsed logical stamp says DATETIME.
+    if type_name.upper() in {"DATETIME2", "DATETIMEOFFSET", "SMALLDATETIME"}:
+        return
+    if "DATETIME2" in logical_u or "DATETIMEOFFSET" in logical_u:
+        if type_name.upper() != "DATETIME":
+            return
+    if type_name.upper() != "DATETIME" and logical_u not in {"DATETIME", "SMALLDATETIME"}:
+        return
+    us = int(value.microsecond or 0)
+    if us in {0, 3000, 7000}:
+        return
+    raise ValueError(
+        f"SQL Server DATETIME cannot store microsecond {us:06d} "
+        f"({value.isoformat(sep='T')}) — column keeps 1/300 s "
+        "(.000/.003/.007). Quarantine; refuse round-after-commit."
+    )
+
+
 def _to_sa_value(
     value: Any,
     logical: str,
@@ -2399,7 +2525,13 @@ def _to_sa_value(
             return None
         if isinstance(coerced, datetime):
             if coerced.tzinfo is not None:
-                return coerced.replace(tzinfo=None)
+                coerced = coerced.replace(tzinfo=None)
+            _refuse_sqlserver_datetime_rounding(
+                coerced,
+                logical=str(logical or ""),
+                sa_type=sa_type,
+                db_type=str(db_type or dialect_name or ""),
+            )
             return coerced
         if isinstance(coerced, date) and not isinstance(coerced, datetime):
             return datetime.combine(coerced, time())
@@ -2441,10 +2573,19 @@ def _to_sa_value(
 
         # CESU-8 / surrogate leaks become Unicode scalars. Dest that cannot
         # encode a scalar raises — quarantine holds the cell, never '?'.
+        # The encoding decision follows the physical SQLAlchemy class when the
+        # logical stamp collapsed NVARCHAR(MAX) to "string"/"TEXT" (false
+        # varchar quarantine) or stamped NVARCHAR over a live VARCHAR (the
+        # driver then substitutes '?').
         return bind_unicode_text(
             value,
             engine=str(db_type or dialect_name or ""),
-            dest_type=str(logical or ""),
+            dest_type=_encoding_dest_type(
+                str(logical or ""),
+                sa_type,
+                dialect_name=dialect_name,
+                db_type=str(db_type or ""),
+            ),
         )
 
     # uuid leftover; string/text already bound above

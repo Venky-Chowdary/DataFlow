@@ -1618,7 +1618,7 @@ def _auto_map(
                             "name": c,
                             "inferred_type": schema.get(c, "string"),
                             "samples": [
-                                cell_to_string(r.get(c, ""))
+                                cell_to_string(r.get(c, ""), preserve_sql_null=True)
                                 for r in (sample_rows or [])[:8]
                             ],
                         }
@@ -1626,7 +1626,7 @@ def _auto_map(
                     ]
                     source_samples = {
                         c: [
-                            cell_to_string(r.get(c, ""))
+                            cell_to_string(r.get(c, ""), preserve_sql_null=True)
                             for r in (sample_rows or [])[:8]
                         ]
                         for c in columns
@@ -1699,7 +1699,7 @@ def _auto_map(
                             "name": c,
                             "inferred_type": schema.get(c, "string"),
                             "samples": [
-                                cell_to_string(r.get(c, ""))
+                                cell_to_string(r.get(c, ""), preserve_sql_null=True)
                                 for r in (sample_rows or [])[:8]
                             ],
                         }
@@ -1716,7 +1716,7 @@ def _auto_map(
                     ]
                     source_samples = {
                         c: [
-                            cell_to_string(r.get(c, ""))
+                            cell_to_string(r.get(c, ""), preserve_sql_null=True)
                             for r in (sample_rows or [])[:8]
                         ]
                         for c in columns

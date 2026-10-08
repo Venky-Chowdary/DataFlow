@@ -291,3 +291,88 @@ def identity_rows_missing_on_dest(
         if fp not in present:
             missing.append(raw)
     return missing
+
+
+def _mapped_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for raw in mappings or []:
+        if not isinstance(raw, dict) or raw.get("intentional_omit"):
+            continue
+        source = str(raw.get("source") or "").strip()
+        target = str(raw.get("target") or raw.get("source") or "").strip()
+        if source and target:
+            pairs.append((source, target))
+    return pairs
+
+
+def _key_tuple(row: dict[str, Any], columns: list[str]) -> tuple[str, ...]:
+    folded = {str(key).lower(): value for key, value in row.items()}
+    out: list[str] = []
+    for column in columns:
+        value = folded.get(column.lower())
+        if value is None:
+            out.append("")
+            continue
+        out.append(str(value).strip())
+    return tuple(out)
+
+
+def rows_absent_by_primary_key(
+    *,
+    source_type: str,
+    source_cfg: dict[str, Any],
+    source_table: str,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    mappings: list[dict[str, Any]] | None,
+    primary_key: str,
+) -> list[dict[str, Any]] | None:
+    """Source rows whose primary key is not on the destination.
+
+    Identity fingerprints decline when a column is transformed
+    (timestamptz → datetime). Inserts the log already stepped past are
+    still absent by key. The returned rows are the current source image,
+    applied at-least-once. This is not a replay of the missed event.
+    ``None`` when the key is not fully mapped.
+    """
+    if not source_table or not dest_table:
+        raise CdcValueScanIncomplete(
+            "CDC value scan needs a source table and a destination table."
+        )
+    wanted = [
+        part.strip()
+        for part in str(primary_key or "").replace(";", ",").split(",")
+        if part.strip()
+    ]
+    if not wanted:
+        return None
+    pairs = _mapped_pairs(mappings)
+    by_source = {source.lower(): (source, target) for source, target in pairs}
+    key_pairs: list[tuple[str, str]] = []
+    for name in wanted:
+        hit = by_source.get(name.lower())
+        if hit is None:
+            return None
+        key_pairs.append(hit)
+    if not pairs:
+        return None
+    source_columns = [source for source, _target in pairs]
+    dest_columns = [target for _source, target in pairs]
+    source_keys = [source for source, _target in key_pairs]
+    dest_keys = [target for _source, target in key_pairs]
+    try:
+        source_rows = _scan_table(source_type, source_cfg, source_table, source_columns)
+        dest_rows = _scan_table(dest_type, dest_cfg, dest_table, dest_columns)
+    except Exception as exc:  # noqa: BLE001 — any scan failure is an incomplete proof
+        raise CdcValueScanIncomplete(f"CDC value scan failed: {exc}") from exc
+    if source_rows is None or dest_rows is None:
+        raise CdcValueScanIncomplete(
+            "CDC value scan did not finish. Row count is not a cell proof."
+        )
+    present = {_key_tuple(row, dest_keys) for row in dest_rows}
+    missing: list[dict[str, Any]] = []
+    for row in source_rows:
+        if _key_tuple(row, source_keys) not in present:
+            missing.append(row)
+    return missing

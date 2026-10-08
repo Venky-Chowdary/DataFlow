@@ -289,8 +289,20 @@ def merge_column_profile(
     """Merge analyzer profile with data_profiler statistics for Map strip SSOT."""
     out = dict(base or {})
     src = schema_row or {}
-    if src.get("null_rate") is not None:
-        out["null_rate"] = src.get("null_rate")
+    schema_rate = src.get("null_rate")
+    if schema_rate is not None:
+        # A stripped sample list analyzes as 0.0 and must not erase a rate
+        # counted while the SQL NULLs were still in the sample.
+        try:
+            analyzed = float(out.get("null_rate") or 0)
+            declared = float(schema_rate)
+        except (TypeError, ValueError):
+            out["null_rate"] = schema_rate
+        else:
+            if declared == 0.0 and analyzed > 0:
+                out["null_rate"] = round(analyzed, 3)
+            else:
+                out["null_rate"] = schema_rate
     if src.get("distinct_ratio") is not None:
         out["unique_ratio"] = src.get("distinct_ratio")
     stats = src.get("statistics") if isinstance(src.get("statistics"), dict) else {}

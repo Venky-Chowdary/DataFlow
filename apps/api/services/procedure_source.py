@@ -1270,10 +1270,14 @@ def _overlay_declared_numerics(
     description: Any,
     schema: dict[str, str],
 ) -> dict[str, str]:
-    """Driver precision/scale wins over the sample envelope."""
-    from services.decimal_observe import cursor_declared_numeric_types
+    """Driver type and precision win over the sample envelope.
 
-    declared = cursor_declared_numeric_types(headers, description)
+    ``CAST(col AS DATE)`` and a MariaDB text column are in the cursor
+    description. Guessing from the peeked rows rewrote both.
+    """
+    from services.decimal_observe import cursor_declared_carriers
+
+    declared = cursor_declared_carriers(headers, description)
     if not declared:
         return schema
     return {**schema, **declared}

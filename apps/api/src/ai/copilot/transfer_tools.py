@@ -770,7 +770,7 @@ def plan_transfer(
         return _tool_result(tool, success=False, error=identity_error)
     row_rules["stream_contracts"] = contracts
     if contracts and not row_rules.get("upsert_key") and contracts[0].get("primary_key"):
-        row_rules["upsert_key"] = ",".join(contracts[0]["primary_key"])
+        row_rules["upsert_key"] = _primary_key_csv(contracts[0].get("primary_key"))
     if contracts and contracts[0].get("cursor_field"):
         row_rules["cursor_column"] = str(contracts[0]["cursor_field"])
     if contracts and contracts[0].get("cursor_semantics"):
@@ -807,7 +807,9 @@ def plan_transfer(
         dest_db_type=str(dst_info.get("db_type") or ""),
         dest_exists=dest_exists,
         source_primary_key=(
-            ",".join(contracts[0]["primary_key"]) if contracts else _source_primary_key(src_info)
+            _primary_key_csv(contracts[0].get("primary_key"))
+            if contracts
+            else _source_primary_key(src_info)
         ),
         write_via_staging=bool(write_via_staging),
         source_read_mode=str((callable_plan or {}).get("mode") or ""),
@@ -1008,11 +1010,27 @@ def _ground_data_rules(
         out["upsert_key"] = ",".join(bound)
         # An explicit key on append/overwrite means upsert. CDC, SCD2, and
         # mirror already require a key — do not downgrade them to upsert.
+        # incremental_append is cursor-bounded insert. A key on that contract
+        # must not silently become upsert.
         from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
 
-        if mode not in MODES_REQUIRING_PRIMARY_KEY:
+        if mode not in MODES_REQUIRING_PRIMARY_KEY and mode != "incremental_append":
             out["sync_mode"] = normalize_sync_mode("upsert")
     return out, ""
+
+
+def _primary_key_csv(raw: Any) -> str:
+    """Join a contract key without inventing ``i,d`` from the string ``id``.
+
+    A cursor-only incremental_append contract has no ``primary_key`` key.
+    Indexing it raised KeyError, and the error humanizer then told the
+    operator the run needed an identity column.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(part).strip() for part in raw if str(part).strip())
+    return str(raw).strip()
 
 
 def _identity_stream_contract(

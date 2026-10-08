@@ -336,6 +336,14 @@ def append_write_quarantine_detail(
     Module 9: stamp first-class quarantine contract fields before append.
     """
     d = dict(detail)
+    # The NULL wire token is not a rejected cell. Upsert quarantine was
+    # recording one ``__DF_SQL_NULL__`` row on every load after the nullable
+    # blank fix. A NOT NULL refusal still names nullability and is kept.
+    raw_value = d.get("value")
+    if isinstance(raw_value, str) and raw_value.strip() == SQL_NULL_SENTINEL:
+        reason = str(d.get("reason") or "").lower()
+        if "not null" not in reason and "non-null" not in reason and "nullability" not in reason:
+            return
     # Normalize the fault-cell sample so replay overwrite cannot re-invent "".
     d["value"] = quarantine_cell_wire(d.get("value"))
     # Full mapped-row image first (SQL NULL polarity), then overlay any CRM

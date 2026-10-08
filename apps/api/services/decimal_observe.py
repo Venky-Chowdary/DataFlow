@@ -710,6 +710,36 @@ def ieee_float_create_new_risk(observation: dict[str, Any] | None) -> dict[str, 
     }
 
 
+_TEXT_TYPE_CODES = frozenset(
+    {
+        15,  # MySQL VARCHAR
+        245,  # JSON
+        252,  # BLOB
+        253,  # VAR_STRING
+        254,  # STRING
+        18,  # Postgres char
+        25,  # text
+        1042,  # bpchar
+        1043,  # varchar
+        3802,  # jsonb
+        114,  # json
+    }
+)
+
+
+def _cursor_type_code_is_text(type_code: Any) -> bool:
+    """True for a driver type that is character data, not a DECIMAL."""
+    if isinstance(type_code, bool) or type_code is None:
+        return False
+    if isinstance(type_code, int):
+        return type_code in _TEXT_TYPE_CODES
+    name = str(getattr(type_code, "__name__", "") or type_code).lower()
+    return any(
+        token in name
+        for token in ("varchar", "char", "text", "string", "blob", "json")
+    )
+
+
 def cursor_declared_numeric_types(
     headers: list[str],
     description: Any,
@@ -738,7 +768,123 @@ def cursor_declared_numeric_types(
             continue
         if precision <= 0 or scale < 0 or scale > precision:
             continue
+        # MariaDB reports junk precision/scale on text (FIELD_TYPE 253/254/15).
+        # DECIMAL(400,39) is not a type any engine here can create. A real
+        # declared DECIMAL stays: MySQL max precision is 65, BigQuery
+        # BIGNUMERIC is 76, and a scale above 38 is not a text column's width.
+        if precision > 76 or scale > 38:
+            continue
+        type_code = col[1] if len(col) > 1 else None
+        if _cursor_type_code_is_text(type_code):
+            continue
         name = str(header or "").strip()
         if name:
             out[name] = f"DECIMAL({precision},{scale})"
+    return out
+
+
+# Driver type codes that name a carrier. MySQL FIELD_TYPE and PostgreSQL
+# OIDs do not share these values. Code 16 is MySQL BIT and Postgres bool,
+# so it is left to the sample.
+_CURSOR_TEMPORAL_CODES: dict[int, str] = {
+    7: "TIMESTAMP",
+    10: "DATE",
+    11: "TIME",
+    12: "DATETIME",
+    13: "YEAR",
+    1082: "DATE",
+    1083: "TIME",
+    1114: "TIMESTAMP",
+    1184: "TIMESTAMPTZ",
+    1266: "TIME",
+}
+_CURSOR_INTEGER_CODES: dict[int, str] = {
+    1: "INTEGER",
+    2: "INTEGER",
+    3: "INTEGER",
+    8: "BIGINT",
+    9: "INTEGER",
+    20: "BIGINT",
+    21: "INTEGER",
+    23: "INTEGER",
+}
+_CURSOR_FLOAT_CODES: dict[int, str] = {
+    4: "FLOAT",
+    5: "DOUBLE",
+    700: "FLOAT",
+    701: "DOUBLE",
+}
+_CURSOR_JSON_CODES = frozenset({114, 245, 3802})
+_CURSOR_TEXT_CODES = frozenset({15, 18, 25, 253, 254, 1042, 1043})
+
+
+def _carrier_for_cursor_column(col: Any) -> str:
+    """Logical carrier a cursor column declared, or ``""`` when it did not.
+
+    A CAST and a catalog type show up here. Fifty sample rows must not
+    re-guess them. An unknown type code stays empty so Oracle NUMBER with
+    no precision remains the sample's problem.
+    """
+    if not col or len(col) < 2:
+        return ""
+    type_code = col[1]
+    if isinstance(type_code, int) and not isinstance(type_code, bool):
+        if type_code in _CURSOR_JSON_CODES:
+            return "JSON"
+        if type_code in _CURSOR_TEXT_CODES:
+            return "VARCHAR"
+        if type_code in _CURSOR_TEMPORAL_CODES:
+            return _CURSOR_TEMPORAL_CODES[type_code]
+        if type_code in _CURSOR_INTEGER_CODES:
+            return _CURSOR_INTEGER_CODES[type_code]
+        if type_code in _CURSOR_FLOAT_CODES:
+            return _CURSOR_FLOAT_CODES[type_code]
+        # MariaDB TEXT shares the BLOB code. A real blob has no decimal
+        # scale; precision 400 scale 39 is the text-column junk.
+        if type_code == 252 and len(col) >= 6:
+            try:
+                precision = int(col[4])
+                scale = int(col[5])
+            except (TypeError, ValueError):
+                return ""
+            if precision > 76 or scale > 38:
+                return "VARCHAR"
+        return ""
+    name = str(getattr(type_code, "__name__", "") or type_code).lower()
+    if "json" in name:
+        return "JSON"
+    if any(token in name for token in ("varchar", "char", "text", "string")):
+        return "VARCHAR"
+    if "timestamptz" in name or "timestamp with time zone" in name:
+        return "TIMESTAMPTZ"
+    if "datetime" in name:
+        return "DATETIME"
+    if "timestamp" in name:
+        return "TIMESTAMP"
+    if name == "date" or name.endswith(".date"):
+        return "DATE"
+    if name in {"int", "int4", "integer", "int8", "int2", "bigint"}:
+        return "BIGINT" if "8" in name or "big" in name else "INTEGER"
+    return ""
+
+
+def cursor_declared_carriers(
+    headers: list[str],
+    description: Any,
+) -> dict[str, str]:
+    """Cursor-declared carriers. A sized DECIMAL wins over a family name.
+
+    Sample inference runs first at the call site. This map replaces it.
+    """
+    numeric = cursor_declared_numeric_types(headers, description)
+    if not headers or not description:
+        return numeric
+    out = dict(numeric)
+    for idx, header in enumerate(headers):
+        name = str(header or "").strip()
+        if not name or name in out or idx >= len(description):
+            continue
+        carrier = _carrier_for_cursor_column(description[idx])
+        if carrier:
+            out[name] = carrier
     return out

@@ -343,6 +343,21 @@ def parse_cadence(text: str) -> CadenceSpec:
         )
 
     if any(w in lower for w in ("hourly", "every hour", "each hour")):
+        minute_at = re.search(r"\bminute\s+(\d{1,2})\b", lower)
+        if minute_at and not clock:
+            anchored = int(minute_at.group(1))
+            if not 0 <= anchored <= 59:
+                return _ask(
+                    "An hourly run needs a minute from 0 to 59. "
+                    "Say e.g. “hourly at minute 7”."
+                )
+            return CadenceSpec(
+                interval="hourly",
+                cron=f"{anchored} * * * *",
+                timezone=tz,
+                description=f"every hour at :{anchored:02d} {tz}",
+                timezone_assumed=assumed,
+            )
         if hour is not None and clock:
             # "hourly at :15" — the hour field is meaningless, the minute is not.
             return CadenceSpec(
@@ -356,6 +371,20 @@ def parse_cadence(text: str) -> CadenceSpec:
             interval="hourly",
             timezone=tz,
             description="every hour, starting at the first run",
+            timezone_assumed=assumed,
+        )
+
+    if re.search(r"\bweekdays?\b", lower):
+        if hour is None:
+            return _ask(
+                "Weekdays needs a time of day. Say e.g. “weekdays at 21:40 UTC”. "
+                "Without a time this would be stored as every 7 days."
+            )
+        return CadenceSpec(
+            interval="daily",
+            cron=f"{minute} {hour} * * 1-5",
+            timezone=tz,
+            description=f"weekdays at {_clock(hour, minute)} {tz}",
             timezone_assumed=assumed,
         )
 

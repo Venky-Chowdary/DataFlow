@@ -123,6 +123,7 @@ def is_connection_lost(exc: BaseException | str) -> bool:
                 "out of range",
                 "lock wait",
                 "lock timeout",
+                "unknown collation",
             )
         ):
             return "server closed" in text or "connection reset" in text or "broken pipe" in text

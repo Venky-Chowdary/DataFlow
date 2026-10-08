@@ -329,7 +329,6 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
         (
             "keyerror: 'primary_key'",
             'keyerror: "primary_key"',
-            "'primary_key'",
         ),
         {
             "code": "missing_primary_key",
@@ -689,6 +688,13 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     """
     raw = format_exception_message(error)
     text = raw.lower()
+    # KeyError('primary_key') renders as the quoted token alone. Matching that
+    # token as a substring rewrote unrelated errors. Only the KeyError itself
+    # is an identity-column failure.
+    if isinstance(error, KeyError) and "primary_key" in text:
+        text = "keyerror: 'primary_key'"
+    elif text.strip() in {"'primary_key'", '"primary_key"'}:
+        text = "keyerror: 'primary_key'"
     # Type-aware match when str(exc) is empty (decimal.Overflow).
     if isinstance(error, Exception) and type(error).__name__ == "Overflow":
         text = f"decimal.overflow {text}"

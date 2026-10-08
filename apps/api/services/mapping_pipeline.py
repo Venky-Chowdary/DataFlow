@@ -98,22 +98,34 @@ def _canonicalize_schema_rows(schemas: list[dict] | None) -> list[dict] | None:
     read as non-numeric text and made Map invent a lossy ``<col>_text``
     LONGTEXT destination instead of honouring the declared numeric type.
     """
-    from services.value_serializer import evidence_samples
+    from services.value_serializer import evidence_samples, is_null_evidence
 
     if not schemas:
         return schemas
     out: list[dict] = []
     for s in schemas:
+        raw_samples = list(s.get("samples") or [])
+        observed = None
+        if raw_samples:
+            nulls = sum(1 for value in raw_samples if is_null_evidence(value))
+            observed = round(nulls / len(raw_samples), 3)
         raw = s.get("native_type") or s.get("inferred_type") or "VARCHAR"
         # ddl_carrier_type answers the CREATE question (INTEGER → BIGINT).
         # Mapping / lossy-check must keep the source's own carrier — otherwise
         # INTEGER → existing INT4 is billed as a BIGINT narrowing and G4 blocks
         # a path stamp_mapping_fidelity later grades preserve.
         carrier = _reported_source_carrier(str(raw), ddl_carrier_type(str(raw)))
+        stamped = s.get("null_rate")
+        # A later profiler pass sees only the non-null evidence and reports
+        # 0.0. Keep the rate counted before that strip when the schema row
+        # has not already recorded a higher one.
+        if observed is not None and (stamped is None or float(stamped or 0) == 0.0):
+            stamped = observed
         out.append({
             **s,
             "inferred_type": carrier,
             "samples": evidence_samples(s.get("samples")),
+            **({} if stamped is None else {"null_rate": stamped}),
         })
     return out
 
@@ -619,6 +631,33 @@ def run_mapping_pipeline(
     target_type_authority: dict[str, str] | None = None,
     job_id: str = "",
 ) -> dict:
+    from services.source_engine_scope import active_source_engine, bind_source_engine
+
+    # Create-new DDL and the lossy gate read the source engine from this
+    # scope. An unbound call treated PostgreSQL VARCHAR → SQL Server NVARCHAR
+    # as an invent, and a MySQL TIMESTAMP source as DATETIME(6).
+    if source_db_type and not active_source_engine():
+        with bind_source_engine(source_db_type):
+            return run_mapping_pipeline(
+                source_columns,
+                target_columns,
+                source_schemas=source_schemas,
+                target_schemas=target_schemas,
+                file_format=file_format,
+                confidence_threshold=confidence_threshold,
+                use_llm=use_llm,
+                source_samples=source_samples,
+                validation_mode=validation_mode,
+                destination_db_type=destination_db_type,
+                source_db_type=source_db_type,
+                schema_policy=schema_policy,
+                sync_mode=sync_mode,
+                destination_table_exists=destination_table_exists,
+                source_types_authoritative=source_types_authoritative,
+                prior_mappings=prior_mappings,
+                target_type_authority=target_type_authority,
+                job_id=job_id,
+            )
     from services.semantic_analyzer import analyze_schema
 
     classification = classify_format(source_columns, file_format)

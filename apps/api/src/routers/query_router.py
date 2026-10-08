@@ -758,9 +758,9 @@ def _run_sql_query(connector, body):
                     break
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
         schema = _column_schema(columns, rows)
-        from services.decimal_observe import cursor_declared_numeric_types
+        from services.decimal_observe import cursor_declared_carriers
 
-        declared = cursor_declared_numeric_types(columns, description)
+        declared = cursor_declared_carriers(columns, description)
         if declared:
             schema = {**schema, **declared}
         return rows, columns, schema, False

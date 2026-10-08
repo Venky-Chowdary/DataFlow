@@ -525,6 +525,18 @@ def bind_unicode_text(
     cap = classify_capacity(engine, dest_type, dest_charset)
     if cap.form == "binary":
         return value
+    # An unclassified SQL Server character column is a code page until the
+    # collation proves UTF-8. Passing the scalar through lets the driver
+    # substitute '?' and the job completes with 0 rejected.
+    if cap.form == "unknown" and _normalize_dest_db(engine) in _SQLSERVER_FAMILY:
+        upper = (dest_type or "").upper()
+        if not any(tok in upper for tok in ("NVARCHAR", "NCHAR", "NTEXT")):
+            cap = EncodingCapacity(
+                form="cp1252",
+                name="varchar",
+                codec="cp1252",
+                max_code_point=0xFF,
+            )
     if cap.form != "unknown" and not cell_fits_capacity(cell.text, cap):
         shown = f"U+{cell.max_code_point:04X}"
         raise ValueError(
