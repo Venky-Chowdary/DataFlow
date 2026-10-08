@@ -8,10 +8,10 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 61
+- not fixed: 52
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 27
+- fixed in code, unit-proven — not a live QA retest: 36
 - partly fixed in code: 7
 
 ## Every row
@@ -49,7 +49,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-A-007 | P1 | PARTLY FIXED | fixed in code, unit-proven (test_utf8_collation_survives_the_encoding_type, test_nvarchar_max_holds_cjk_varchar_quarantines). Rebuilding VARCHAR(n) keeps a COLLATE clause from a VARCHAR stamp, so a UTF-8 collation stays UTF-8. A physical VARCHAR forced down from an NVARCHAR stamp does not inherit that collation. Latin-1 still quarantines a scalar outside the page. Not a live SQL Server retest. |
 | DEF-C-034 | P1 | PARTLY FIXED | cancel-before-batch is in 059974d8. QA still saw writers continue on the old process. Needs QA retest on a build that contains the commit. |
 | DEF-B-004 | P1 | PARTLY FIXED | fixed in code, unit-proven (test_whole_millisecond_population_is_not_a_collapse, test_unmeasured_sub_millisecond_column_stays_a_truncation, test_declared_zone_keeps_the_columns_precision, test_writer_quarantines_a_microsecond_cell_and_writes_the_rest, test_live_mongo_round_trip_keeps_milliseconds_and_refuses_microseconds, test_gate8_proves_on_the_engine_sample_when_none_was_posted, test_gate8_names_the_read_failure, test_mongo_create_new_blocks_a_measured_microsecond_before_the_write). A measured population of whole milliseconds is not a collapse; finer or unmeasured stays one; the writer refuses a sub-millisecond cell unless the risk is accepted and reports accepted truncation. Validate reads its own sample through the Execute reader and names a failed read on Gate-8. A zoneless source still needs its zone declared (assume_timezone). Live proof is a local standalone mongod round-trip only; not a live MySQL/SQL Server/Oracle to MongoDB retest. |
-| DEF-B-001 | P1 | PARTLY FIXED | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-001 | P1 | PARTLY FIXED | fixed in code, unit-proven (test_lenient_sql_overwrite_treats_nullable_blanks_as_null, test_column_profile_null_rate_keeps_seven_of_eight). SQL NULL stays NULL through Validate and the write, and null_rate reports 7/8. Not a live QA retest. |
 | DEF-A-019 | P1 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-A-003 | P1 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
 | DEF-A-005 | P1 | FIXED-verified | QA-verified on the recorded build. Not re-run in this session. |
@@ -72,17 +72,17 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B2-005 | P2 | OPEN | fixed in code, unit-proven (test_timescaledb_cdc_contract_blocks_even_when_format_was_aliased, test_capabilities_name_the_cdc_sources). g9 blocks timescaledb. Capabilities list cdc_capable_sources and state that timescaledb is not CDC-capable. Not a live QA retest. |
 | DEF-B2-011 | P2 | OPEN | fixed in code, unit-proven (test_manual_run_after_an_orphaned_claim_with_a_naive_start). Every _finalize_run caller reads the start through _parse_ts (UTC-aware). The orphan itself is settled by the orphan-job sweep (DEF-B-025). Not a live deploy retest. |
 | DEF-A-002 | P2 | OPEN | fixed in code, unit-proven (test_sftp_create_keeps_host_from_the_uri, test_sftp_uri_fills_empty_host_and_keeps_an_explicit_host, test_extract_url_credentials_reads_sftp_uri). An explicit host is not overwritten. Not a live connector retest. |
-| DEF-A-018 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-A-018 | P2 | OPEN | fixed in code, unit-proven (test_header_only_file_is_a_zero_row_run_not_a_type_change[batch/stream], test_header_only_preview_without_a_population_is_still_unproven, test_a_new_header_on_an_empty_file_is_still_drift). An empty population (stored upload or Execute batch) is a measured empty source; inferred placeholders yield to the declared, previous, or live destination type; a new header name is still drift. Not a live scheduled S3 retest. |
 | DEF-B-011 | P2 | OPEN | fixed in code, unit-proven (test_declared_number_is_not_relabelled_boolean, test_oracle_number_type_object_is_decimal_not_boolean, test_create_new_does_not_stamp_boolean_on_a_declared_number). File 0/1 on is_active stays BOOLEAN. Not a live Oracle query retest. |
 | DEF-C-003 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-009 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-009 | P2 | OPEN | fixed in code, unit-proven (test_three_decimal_wire_stays_decimal_auto_does_not). A typed source renders canonical decimals, so the wire locale keeps NUMERIC(p,3). Not a live QA retest. |
 | DEF-C-010 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-011 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-013 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-013 | P2 | OPEN | fixed in code, unit-proven (test_dynamodb_endpoint_collapses_doubled_scheme_and_default_port). A saved http://host:port is used as is. Not a live DynamoDB Local retest. |
 | DEF-C-015 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-022 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-022 | P2 | OPEN | fixed in code, unit-proven (test_empty_table_passes_and_names_the_zero_row_proof[mysql/postgresql/sqlserver], test_failed_read_of_a_table_still_blocks, test_a_filter_that_matches_no_sampled_row_is_not_an_empty_source). An engine read that returns no row passes Gate-5/8/9 as a 0-row proof and Execute reconciles 0 = 0; a failed read or an over-filtered sample still blocks with its reason. run_file_preflight binds the source engine for every gate. Not a live PostgreSQL to MySQL retest. |
 | DEF-C-023 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-025 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-025 | P2 | OPEN | fixed in code, unit-proven (test_manual_review_pauses_before_an_overwrite_empties_a_column[mysql/postgresql/sqlserver/snowflake], test_acknowledged_overwrite_proceeds_and_still_names_the_loss, test_a_propagating_policy_warns_instead_of_pausing, test_upserting_sinks_keep_unwritten_properties, test_engine_and_identity_columns_are_regenerated_not_emptied, test_overwrite_keeps_a_destination_column_the_source_dropped). Validate and Execute's preflight block an overwrite under manual_review that would empty a live destination column, naming it, until the schema change is acknowledged; other policies warn. The values themselves are not carried across an overwrite. Not a live QA retest. |
 | DEF-C-026 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-027 | P2 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-033 | P2 | OPEN | fixed in code, unit-proven (test_base64_alphabet_text_stays_text_and_is_not_a_preserve). Hex named payload stays text. Real base64 named payload_b64 stays BINARY. Not a live PG retest. |
@@ -114,7 +114,7 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B-030 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-A-013 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-A-016 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-A-020 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-A-020 | P3 | OPEN | fixed in code, unit-proven (test_missing_object_and_raw_primary_key_are_operator_text, test_s3_missing_object_is_measured_zero). A missing object is operator text and is measured as zero rows. Not a live scheduled S3 retest. |
 | DEF-C-007 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-012 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-014 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
@@ -123,11 +123,11 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-019 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-021 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-028 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-032 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-032 | P3 | OPEN | fixed in code, unit-proven (test_a_completed_job_overrules_an_older_failed_probe, test_a_failed_job_does_not_clear_a_failed_probe, test_a_probe_that_fails_after_the_transfer_is_failed_again, test_pilot_list_and_briefing_bucket_on_the_same_rule). connector_store.connector_health is the one rule: a failed probe is overruled only by a transfer that completed after it, the same rule the web client applies. Not a live QA retest. |
 | DEF-C-035 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-046 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-048 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-030 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-030 | P3 | OPEN | fixed in code, unit-proven (test_manual_run_increments_run_count_when_the_job_ends, test_manual_run_records_a_finished_claim_before_starting). The job's terminal status write records the schedule run. Not a live QA retest. |
 | DEF-EMBED-SILENT-FALLBACK | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-MINIO-ALIAS | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | GAP-XLS | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
