@@ -468,3 +468,73 @@ def test_pgvector_create_adds_numeric_column_and_skips_text() -> None:
     ]
     assert "NUMERIC(10,2)" in tokens
     assert "BOOLEAN" in tokens
+
+
+def test_in_batch_upsert_collapse_is_not_a_rejected_row() -> None:
+    """Two images of one key in one CDC/upsert bundle write the latest image.
+
+    The earlier image used to fall out of the accepted count and show up as
+    one quarantined duplicate on a table whose keys are unique.
+    """
+    from connectors.sql_write_materialize import SqlMappedBundle, finish_sql_mapped_bundle
+    from connectors.writer_common import _rejected_row_count
+
+    bundle = SqlMappedBundle(
+        start=0,
+        mapped_rows=[("1", "old"), ("1", "new")],
+        transform_errors=[],
+        rejected_details=[],
+        accepted_source_rows=[1, 2],
+        headers=["id", "v"],
+        source_row_count=2,
+    )
+    finished = finish_sql_mapped_bundle(
+        bundle,
+        target_cols=["id", "v"],
+        target_types=["TEXT", "TEXT"],
+        policy="quarantine",
+        dialect_label="PostgreSQL",
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert finished.collapsed_duplicate_rows == 1
+    assert len(finished.dense_rows) == 1
+    assert finished.dense_rows[0][1] == "new"
+    assert finished.rejected_details == []
+    assert (
+        _rejected_row_count(
+            [["1", "old"], ["1", "new"]],
+            [()] * len(finished.dense_rows),
+            finished.rejected_details,
+            "quarantine",
+            source_row_count=2,
+            collapsed_duplicates=finished.collapsed_duplicate_rows,
+        )
+        == 0
+    )
+    insert = finish_sql_mapped_bundle(
+        bundle,
+        target_cols=["id", "v"],
+        target_types=["TEXT", "TEXT"],
+        policy="quarantine",
+        dialect_label="PostgreSQL",
+        write_mode="insert",
+        conflict_columns=["id"],
+    )
+    assert insert.collapsed_duplicate_rows == 0
+    assert len(insert.dense_rows) == 2
+
+
+def test_missing_identity_column_does_not_audit_another_column(monkeypatch) -> None:
+    from services.data_quality import run_integrity_audit
+
+    monkeypatch.setattr("services.column_case.header_index", lambda *_a, **_k: None)
+    report = run_integrity_audit(
+        headers=["status", "id"],
+        rows=[["open", "1"], ["open", "2"]],
+        primary_key="id",
+        sync_mode="upsert",
+        dest_kind="postgresql",
+    )
+    assert report.issues == []
+    assert any("not in this batch" in w for w in report.warnings)

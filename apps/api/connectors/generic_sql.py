@@ -6245,6 +6245,9 @@ def write_mapped_rows(
                             chunks_completed, max(chunks, chunk_idx + 1), written
                         )
                     chunk_idx += 1
+                write_acc.note_collapsed_duplicates(
+                    finished.collapsed_duplicate_rows
+                )
                 write_acc.add_accepted(list(finished.dense_rows))
                 row_offset += len(dense_dicts)
                 del finished
@@ -6293,8 +6296,9 @@ def write_mapped_rows(
                         rejected_details,
                         policy,
                         source_row_count=source_row_count or None,
+                        collapsed_duplicates=write_acc.collapsed_duplicate_rows,
                     ),
-                    len(data_rows) - written - rows_skipped if data_rows else 0,
+                    len(data_rows) - written - rows_skipped - write_acc.collapsed_duplicate_rows if data_rows else 0,
                 ),
                 rejected_details=rejected_details,
                 coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
@@ -6326,8 +6330,9 @@ def write_mapped_rows(
                         rejected_details,
                         policy,
                         source_row_count=source_row_count or None,
+                        collapsed_duplicates=write_acc.collapsed_duplicate_rows,
                     ),
-                    len(data_rows) - written - rows_skipped if data_rows else 0,
+                    len(data_rows) - written - rows_skipped - write_acc.collapsed_duplicate_rows if data_rows else 0,
                 ),
                 rejected_details=rejected_details,
                 coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
@@ -6356,8 +6361,9 @@ def write_mapped_rows(
                     rejected_details,
                     policy,
                     source_row_count=source_row_count or None,
+                    collapsed_duplicates=write_acc.collapsed_duplicate_rows,
                 ),
-                len(data_rows) - written - rows_skipped if data_rows else 0,
+                len(data_rows) - written - rows_skipped - write_acc.collapsed_duplicate_rows if data_rows else 0,
             ),
             rejected_details=rejected_details,
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
@@ -6382,6 +6388,7 @@ def write_mapped_rows(
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,
+                collapsed_duplicates=write_acc.collapsed_duplicate_rows,
             ),
             rejected_details=rejected_details,
             rows_skipped=rows_skipped,

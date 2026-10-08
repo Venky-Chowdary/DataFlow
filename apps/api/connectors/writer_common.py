@@ -1378,13 +1378,16 @@ def _rejected_row_count(
     *,
     sparse_rows: list[tuple] | None = None,
     source_row_count: int | None = None,
+    collapsed_duplicates: int = 0,
 ) -> int:
     """Return the number of rows that were rejected or quarantined.
 
     For ``fail`` / ``quarantine`` the held-out rows are
-    ``source_count - len(mapped_rows) - len(sparse_rows)`` (quarantine never
-    writes NULL into the primary table for a bad cell; sparse CDC rows are
-    still written via omit-from-SET and must not inflate rejected counts).
+    ``source_count - len(mapped_rows) - len(sparse_rows) - collapsed``.
+    Quarantine never writes NULL into the primary table for a bad cell.
+    Sparse CDC rows are still written via omit-from-SET. In-bundle last-wins
+    keeps one image of a key and must not charge the earlier image as a
+    rejected duplicate — the survivor is the write.
     ``source_row_count`` is the expanded STRUCT/explode count when the writer
     ingested through ``SourceRowSpool`` — ``len(data_rows)`` is the unexpanded
     engine chunk and must not be used after explode.
@@ -1393,7 +1396,11 @@ def _rejected_row_count(
     """
     if policy == "coerce_null":
         return len({d["row"] for d in rejected_details})
-    kept = len(mapped_rows) + len(sparse_rows or [])
+    kept = (
+        len(mapped_rows)
+        + len(sparse_rows or [])
+        + max(0, int(collapsed_duplicates or 0))
+    )
     n = int(source_row_count) if source_row_count is not None else len(data_rows)
     return max(0, n - kept)
 

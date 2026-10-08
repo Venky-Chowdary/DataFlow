@@ -1599,6 +1599,9 @@ def write_mapped_rows(
                         )
                         _land_dense_chunk(sub, chunk_idx, sub_nums)
                         chunk_idx += 1
+                    write_acc.note_collapsed_duplicates(
+                        finished.collapsed_duplicate_rows
+                    )
                     write_acc.add_accepted(dense)
                 del finished
             chunks = chunk_idx
@@ -1608,6 +1611,7 @@ def write_mapped_rows(
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,
+                collapsed_duplicates=write_acc.collapsed_duplicate_rows,
             )
             coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
