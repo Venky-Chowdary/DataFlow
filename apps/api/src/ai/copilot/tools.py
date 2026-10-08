@@ -1842,6 +1842,20 @@ class DataPilotTools:
                 output=None,
                 error=f"Unknown remediation kind '{kind}'. Use one of: {', '.join(sorted(allowed))}",
             )
+        cited = (run_id or "").strip()
+        if cited:
+            from services.preflight_run_store import get_preflight_run
+
+            if not get_preflight_run(cited):
+                return ToolResult(
+                    name="remediate_validation",
+                    success=False,
+                    output=None,
+                    error=(
+                        f"Preflight run '{cited}' not found. "
+                        "Ask the user for the pf_… ID shown on Validate."
+                    ),
+                )
         labels = {
             "normalize_control_chars": "Normalize control characters…",
             "open_bad_data_fix": "Fix bad data…",
@@ -1856,9 +1870,15 @@ class DataPilotTools:
                 "action": "studio",
                 "kind": kind,
                 "label": labels[kind],
-                "run_id": run_id or None,
-                "risk": "mutate",
-                "requires_confirm": True,
+                "run_id": cited or None,
+                "risk": "safe",
+                "requires_confirm": False,
+                "ui_only": True,
+                "note": (
+                    "This opens the studio control. It does not change data "
+                    "until you use that screen. There is no confirm ack because "
+                    "nothing is written here."
+                ),
             },
         )
 

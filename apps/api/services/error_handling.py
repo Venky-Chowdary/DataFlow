@@ -517,16 +517,15 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "invalid object name",
         ),
         {
-            "code": "destination_table_missing",
+            "code": "table_not_found",
             "category": "schema_mismatch",
             "confidence": "high",
-            "title": "Destination table/relation was not found at write time",
+            "title": "Table was not found",
             "fix": (
-                "Confirm Database + Table on Destination (same namespace Validate probed). "
-                "If the table should be created, Destination must show create-on-write and "
-                "the connector role needs CREATE. If it should already exist, pick it from "
-                "the table list — do not rely on a name that only exists in another database "
-                "on the same host."
+                "The driver names a table and does not say whether it is the source "
+                "or the destination. Confirm the source object exists and is the one "
+                "selected, and confirm Database + Table on the destination. "
+                "This is not a capacity problem."
             ),
             "primary_action": "open_destination",
         },
@@ -904,6 +903,11 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             )
         elif matched.get("code") in {"cdc_log_privilege", "cdc_wal_level"}:
             message = f"{title}. Driver reported: {raw}."
+        elif matched.get("code") == "table_not_found":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "This does not say the destination was missing, and it is not a capacity problem."
+            )
         else:
             message = (
                 f"{title}. Driver reported: {raw}. "

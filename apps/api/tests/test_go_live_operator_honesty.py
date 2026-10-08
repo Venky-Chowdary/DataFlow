@@ -242,3 +242,62 @@ def test_create_connector_refuses_a_duplicate_name(monkeypatch, tmp_path):
     assert "plaintext" not in (res.error or "").lower()
     assert "Fernet" not in (res.error or "")
     assert res.output is None or "ack_id" not in (res.output or {})
+
+
+def test_unreadable_workbook_is_operator_text_not_the_library_sentence():
+    import zipfile
+
+    from services.excel_parser import _load_workbook, explain_unreadable_file
+
+    zip_msg = explain_unreadable_file(zipfile.BadZipFile("File is not a zip file"))
+    assert zip_msg != "File is not a zip file"
+    assert "readable" in zip_msg.lower()
+    assert ".xlsx" in zip_msg
+    magic = explain_unreadable_file(Exception("Bad magic number for file header"))
+    assert "Bad magic number for file header" not in magic
+    assert "format" in magic.lower()
+    assert explain_unreadable_file(Exception(zip_msg)) == zip_msg
+    try:
+        _load_workbook(b"this is not a workbook")
+    except ValueError as exc:
+        opened = str(exc)
+    else:
+        raise AssertionError("garbage bytes opened as a workbook")
+    assert "File is not a zip file" not in opened
+    assert "Bad magic number for file header" not in opened
+
+
+def test_remediate_rejects_an_unknown_run_and_does_not_stage_a_write(monkeypatch):
+    from src.ai.copilot.pilot_agent import DataPilotAgent, PilotTurn
+
+    monkeypatch.setattr(
+        "services.preflight_run_store.get_preflight_run",
+        lambda _run_id: None,
+    )
+    missing = DataPilotTools().execute(
+        "remediate_validation",
+        {"kind": "normalize_control_chars", "run_id": "pf_doesnotexist"},
+    )
+    assert missing.success is False
+    assert "not found" in (missing.error or "").lower()
+    assert missing.output is None
+
+    monkeypatch.setattr(
+        "services.preflight_run_store.get_preflight_run",
+        lambda run_id: {"run_id": run_id},
+    )
+    known = DataPilotTools().execute(
+        "remediate_validation",
+        {"kind": "normalize_control_chars", "run_id": "pf_df8f4f31dca5"},
+    )
+    assert known.success is True
+    assert known.output["ui_only"] is True
+    assert known.output["requires_confirm"] is False
+    assert known.output["risk"] == "safe"
+    assert "ack_id" not in known.output
+    assert known.output["run_id"] == "pf_df8f4f31dca5"
+
+    turn = PilotTurn()
+    DataPilotAgent._append_tool_actions(turn, known)
+    assert turn.pending_actions == []
+    assert any(a.get("type") == "navigate" and a.get("screen") == "transfer" for a in turn.actions)

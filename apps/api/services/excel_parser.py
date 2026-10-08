@@ -32,6 +32,48 @@ __all__ = [
 ]
 
 
+def explain_unreadable_file(exc: BaseException) -> str:
+    """Operator text for a library exception that is not the file's problem.
+
+    A password-protected workbook and a legacy ``.xls`` both surface as
+    ``File is not a zip file``. A truncated object surfaces as a bad magic
+    number. Neither sentence tells the operator what to do.
+    """
+    text = str(exc or "")
+    low = text.lower()
+    kind = type(exc).__name__.lower()
+    # Already translated. A second pass would see the word "password" inside
+    # the zip-file sentence and replace a legacy-.xls explanation with the
+    # password-only one.
+    if text.startswith(
+        (
+            "This workbook is password-protected.",
+            "This file is not a readable",
+            "This file does not start",
+        )
+    ):
+        return text
+    if "password" in low or "encrypted" in low:
+        return (
+            "This workbook is password-protected. Remove the password, "
+            "save it as .xlsx, and retry."
+        )
+    if "not a zip file" in low or "badzipfile" in kind:
+        return (
+            "This file is not a readable .xlsx workbook. A password-protected "
+            "workbook and a legacy .xls file both fail this way. Save an "
+            "unprotected .xlsx and retry."
+        )
+    if "bad magic number" in low or "bad magic" in low:
+        return (
+            "This file does not start with the format it was declared as. "
+            "A password-protected workbook, a truncated download, or the wrong "
+            "format (xls versus xlsx, csv versus parquet) all look like this. "
+            "Check the file and retry."
+        )
+    return text
+
+
 def require_xlsx(path_or_name: str | os.PathLike[str] | bytes | None) -> None:
     """Refuse BIFF .xls — openpyxl only reads Office Open XML (.xlsx)."""
     if path_or_name is None or isinstance(path_or_name, (bytes, bytearray)):
@@ -207,10 +249,10 @@ def _load_workbook(content: bytes | Any):
             raise ValueError("Excel workbook source is not seekable") from exc
     try:
         workbook = load_workbook(stream, read_only=True, data_only=True)
-    except Exception:
+    except Exception as exc:
         if closer is not None:
             closer()
-        raise
+        raise ValueError(explain_unreadable_file(exc)) from exc
     if closer is not None:
         original_close = workbook.close
 

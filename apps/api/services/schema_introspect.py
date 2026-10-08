@@ -1293,7 +1293,9 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                     if "auto_increment" in extra:
                         logical = f"{logical} AUTO_INCREMENT"
                     # VIRTUAL/STORED GENERATED — client INSERT must omit (like PG ALWAYS).
-                    elif "generated" in extra:
+                    # DEFAULT_GENERATED is an expression default (CURRENT_TIMESTAMP),
+                    # not a computed column.
+                    elif _mysql_extra_is_computed_column(extra):
                         logical = f"{logical} GENERATED ALWAYS"
                     if collation:
                         logical = f"{logical} COLLATE {collation}"
@@ -1311,7 +1313,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         "is_identity": "auto_increment" in extra,
                         "generation": (
                             "always"
-                            if "generated" in extra
+                            if _mysql_extra_is_computed_column(extra)
                             else ("by_default" if "auto_increment" in extra else "")
                         ),
                         "collation": collation,
@@ -2204,6 +2206,18 @@ def _pg_to_logical(dtype: str) -> str:
         return "VARCHAR"
     return "TEXT"
 
+def _mysql_extra_is_computed_column(extra: str) -> bool:
+    """True only for a VIRTUAL or STORED generated column.
+
+    MySQL 8 writes ``DEFAULT_GENERATED`` into EXTRA for
+    ``DEFAULT CURRENT_TIMESTAMP(6)``. That substring contains ``generated``
+    and is still a normal writable column. Marking it GENERATED ALWAYS made
+    the writer omit ``updated_at``.
+    """
+    text = (extra or "").lower()
+    return "virtual generated" in text or "stored generated" in text
+
+
 def _mysql_to_logical(dtype: str) -> str:
     """Map MySQL ``column_type`` to logical carriers, preserving DECIMAL(p,s)."""
     raw = (dtype or "").strip()
@@ -2307,7 +2321,15 @@ def _mysql_to_logical(dtype: str) -> str:
         return f"{m.group(1).upper()}({m.group(2)})"
     if d in {"varchar", "char"}:
         return d.upper()
-    if "text" in d:
+    # Order matters: "text" is a substring of longtext, mediumtext, and tinytext.
+    # Reading LONGTEXT back as TEXT made the next overwrite CREATE a 64 KB column.
+    if d == "longtext" or d.startswith("longtext"):
+        return "LONGTEXT"
+    if d == "mediumtext" or d.startswith("mediumtext"):
+        return "MEDIUMTEXT"
+    if d == "tinytext" or d.startswith("tinytext"):
+        return "TINYTEXT"
+    if d == "text" or d.startswith("text"):
         return "TEXT"
     return "TEXT"
 

@@ -1734,6 +1734,19 @@ class DataPilotAgent:
             return
 
         if tr.name == "remediate_validation":
+            # The tool opens a studio screen. It does not write, so there is
+            # no ack and no Confirm. A caller that still sets requires_confirm
+            # keeps the older staged shape.
+            if out.get("ui_only") or out.get("requires_confirm") is False:
+                turn.actions.append({
+                    "type": "navigate",
+                    "screen": "transfer",
+                    "risk": "safe",
+                    "label": out.get("label") or "Open Transfer Studio",
+                    "kind": out.get("kind"),
+                    "run_id": out.get("run_id"),
+                })
+                return
             turn.pending_actions.append({
                 "id": f"studio:{out.get('kind')}:{out.get('run_id') or ''}",
                 "type": "studio",
@@ -3153,11 +3166,18 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     lines.append(f"• Suggested: **{rem.get('label')}** (`{rem.get('kind')}`)")
                 parts.append("\n".join(lines))
             elif tr.name == "remediate_validation" and tr.success:
-                parts.append(
-                    f"Proposed Studio remediation: **{tr.output.get('label')}**.\n"
-                    "Confirm opens **Fix bad data** in Transfer Studio — "
-                    "it does not rewrite quarantine rows inside this chat."
-                )
+                label = (tr.output or {}).get("label")
+                if (tr.output or {}).get("ui_only"):
+                    parts.append(
+                        f"**{label}** opens in Transfer Studio. "
+                        "Nothing is written from this chat, and there is no confirm step."
+                    )
+                else:
+                    parts.append(
+                        f"Proposed Studio remediation: **{label}**.\n"
+                        "Confirm opens **Fix bad data** in Transfer Studio — "
+                        "it does not rewrite quarantine rows inside this chat."
+                    )
             elif tr.name in ("plan_transfer", "start_transfer") and tr.success:
                 parts.append(_render_transfer(tr.name, tr.output or {}))
             elif tr.name == "start_transfer" and not tr.success and isinstance(tr.output, dict):

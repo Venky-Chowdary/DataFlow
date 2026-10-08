@@ -66,6 +66,15 @@ def resolve_table_name(
     wanted = (table or "").strip()
     if not wanted:
         return None, None, []
+    # ``file.xlsx#Data`` names a sheet. Fuzzy-matching the whole string to
+    # ``file.xlsx`` dropped the sheet and read a different object.
+    sheet = ""
+    if "#" in wanted:
+        wanted, sheet = wanted.split("#", 1)
+        wanted = wanted.strip()
+        sheet = sheet.strip()
+        if not wanted:
+            return None, None, []
     # Resolution is not a display concern: ask for the whole inventory rather
     # than the page size a chat reply would render.
     listed = list_connector_objects(
@@ -75,20 +84,28 @@ def resolve_table_name(
     )
     names = _object_names_from_list(listed)
     if not names:
-        return wanted, None, []
+        shown = f"{wanted}#{sheet}" if sheet else wanted
+        return shown, None, []
     truncated = bool((getattr(listed, "output", None) or {}).get("truncated"))
     lower_map = {n.lower(): n for n in names}
+    def _with_sheet(name: str) -> str:
+        return f"{name}#{sheet}" if sheet else name
+
     if wanted in names:
-        return wanted, None, names
+        return _with_sheet(wanted), None, names
     if wanted.lower() in lower_map:
         resolved = lower_map[wanted.lower()]
         note = f"Using `{resolved}` (matched case-insensitively)." if resolved != wanted else None
-        return resolved, note, names
+        return _with_sheet(resolved), note, names
     # Unqualified vs schema.table
     bare = wanted.split(".")[-1].lower()
     bare_hits = [n for n in names if n.split(".")[-1].lower() == bare]
     if len(bare_hits) == 1:
-        return bare_hits[0], f"Using `{bare_hits[0]}`.", names
+        return _with_sheet(bare_hits[0]), f"Using `{bare_hits[0]}`.", names
+    # A named sheet that did not match a real object is not a typo of another
+    # file. Substituting the closest workbook would drop the sheet.
+    if sheet:
+        return None, None, names[:12]
     close = difflib.get_close_matches(wanted.lower(), list(lower_map.keys()), n=5, cutoff=0.72)
     if len(close) == 1:
         resolved = lower_map[close[0]]
@@ -588,6 +605,11 @@ def sample_connector_object(
                     f'Ask "list tables on {label}" to see what is available.'
                 ),
             )
+        from services.excel_parser import explain_unreadable_file
+
+        explained = explain_unreadable_file(exc)
+        if explained != str(exc) or explained.startswith("This "):
+            return _tool_result(tool, success=False, error=explained)
         return _tool_result(tool, success=False, error=f"Sample failed: {exc}")
 
 

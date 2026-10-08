@@ -8,10 +8,10 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 
 ## Counts
 
-- not fixed: 37
+- not fixed: 31
 - QA had already marked fixed — not re-run here: 19
 - already in tree before this wave — needs QA retest: 12
-- fixed in code, unit-proven — not a live QA retest: 49
+- fixed in code, unit-proven — not a live QA retest: 55
 - partly fixed in code: 9
 
 ## Every row
@@ -109,13 +109,13 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-B-007 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-008 | P3 | OPEN | fixed in code, unit-proven (test_folding_dialect_create_quotes_uppercase_physical_names). Folding dialects emit quoted uppercase physical names. The column key stays the operator spelling. PostgreSQL names are unchanged. Not a live Oracle retest. |
 | DEF-B-012 | P3 | OPEN | fixed in code, unit-proven (test_expired_transfer_ack_does_not_say_create_the_connector). An expired transfer says to plan the transfer again. An unknown id says to stage the action again. A create_connector ack still says to create the connector. Not a live UI retest. |
-| DEF-B-015 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-B-015 | P3 | OPEN | fixed in code, unit-proven (test_humanize_missing_column_and_table_guide_to_map). A missing relation is table_not_found. The title does not call it a destination miss, and the message says it is not a capacity problem. Not a live job retest. |
 | DEF-B-016 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-B-030 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-A-013 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-A-016 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-A-013 | P3 | OPEN | fixed in code, unit-proven (test_sheet_suffix_is_not_a_fuzzy_typo, test_sample_fuzzy_resolves_typo). file.xlsx#Data keeps the sheet. A missing file#sheet is not swapped for another workbook. A typo with no sheet still fuzzy-matches. Not a live file retest. |
+| DEF-A-016 | P3 | OPEN | fixed in code, unit-proven (test_unreadable_workbook_is_operator_text_not_the_library_sentence). Password, bad-zip, and bad-magic opens become operator text. Legacy .xls is still unsupported. Not a live file retest. |
 | DEF-A-020 | P3 | OPEN | fixed in code, unit-proven (test_missing_object_and_raw_primary_key_are_operator_text, test_s3_missing_object_is_measured_zero). A missing object is operator text and is measured as zero rows. Not a live scheduled S3 retest. |
-| DEF-C-007 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-007 | P3 | OPEN | fixed in code, unit-proven (test_mysql_default_generated_is_not_a_computed_column). Only VIRTUAL GENERATED and STORED GENERATED are computed. DEFAULT_GENERATED stays writable. Not a live MySQL retest. |
 | DEF-C-012 | P3 | OPEN | fixed in code, unit-proven (test_create_connector_refuses_a_duplicate_name). Staging and Confirm refuse a taken name and do not write. The store still keeps the id when a programmatic create repeats a name, so schedules bound to that id are not orphaned. Not a live connector retest. |
 | DEF-C-014 | P3 | OPEN | fixed in code, unit-proven (test_ordinary_sql_functions_are_not_schema_identifiers). A token followed by ( or a ::type is not a schema identifier. A bare unknown column is still refused. Not a live query retest. |
 | DEF-C-016 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
@@ -124,8 +124,8 @@ A unit test is not a live matrix. Nothing here is a go-live. CDC delivery stays 
 | DEF-C-021 | P3 | OPEN | fixed in code, unit-proven (test_bad_tool_argument_names_the_schema_not_the_python_signature, test_connector_name_is_accepted_as_the_connector_argument). Unknown arguments name the accepted parameters. connector_name binds to name. Not a live Pilot retest. |
 | DEF-C-028 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-032 | P3 | OPEN | fixed in code, unit-proven (test_a_completed_job_overrules_an_older_failed_probe, test_a_failed_job_does_not_clear_a_failed_probe, test_a_probe_that_fails_after_the_transfer_is_failed_again, test_pilot_list_and_briefing_bucket_on_the_same_rule). connector_store.connector_health is the one rule: a failed probe is overruled only by a transfer that completed after it, the same rule the web client applies. Not a live QA retest. |
-| DEF-C-035 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
-| DEF-C-046 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
+| DEF-C-035 | P3 | OPEN | fixed in code, unit-proven (test_remediate_rejects_an_unknown_run_and_does_not_stage_a_write). An unknown run_id is rejected. A known run is ui_only and does not stage a confirm. Not a live Pilot retest. |
+| DEF-C-046 | P3 | OPEN | fixed in code, unit-proven (test_mysql_text_tiers_do_not_collapse_to_text). longtext, mediumtext, and tinytext stay their own tiers, and MySQL CREATE passes those stamps through. Not a live overwrite retest. |
 | DEF-C-048 | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |
 | DEF-C-030 | P3 | OPEN | fixed in code, unit-proven (test_manual_run_increments_run_count_when_the_job_ends, test_manual_run_records_a_finished_claim_before_starting). The job's terminal status write records the schedule run. Not a live QA retest. |
 | DEF-EMBED-SILENT-FALLBACK | P3 | OPEN | not fixed in this change. No live matrix was re-run. QA snapshot build is 6436aaa38583. |

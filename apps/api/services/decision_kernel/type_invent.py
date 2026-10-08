@@ -1805,6 +1805,15 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
             return False
         return True
     bare = upper.split("(", 1)[0].strip()
+    # MySQL LOB tiers are different widths. Rematerializing LONGTEXT through
+    # the logical TEXT default, or collapsing it on the way back from the
+    # catalog, recreated a 4 GB column as 64 KB TEXT on the next overwrite.
+    if bare in {"LONGTEXT", "MEDIUMTEXT", "TINYTEXT"} and db in {
+        "mysql",
+        "mariadb",
+        "tidb",
+    }:
+        return True
     if bare in _PHYSICAL_STAMP_PASS_THROUGH or upper in _PHYSICAL_STAMP_PASS_THROUGH:
         # Refuse pass-through of tokens illegal / non-create-wire on this dest.
         if bare in reject or upper in reject:
