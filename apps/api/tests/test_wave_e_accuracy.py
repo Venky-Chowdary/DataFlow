@@ -68,7 +68,9 @@ def test_binary_inference_requires_name_or_strong_payload():
     assert infer_type(["SGVsbG8gV29ybGQ="], field_name="payload_b64") == "BINARY"
     # Longer padded base64 without a binary-ish name still qualifies.
     long_b64 = "U29tZVNlbnNpYmxlQmluYXJ5UGF5bG9hZERhdGFGb3JUZXN0cw=="
-    assert infer_type([long_b64]) == "BINARY"
+    # A base64 alphabet without a binary name is text. Decoding it is not a preserve.
+    assert infer_type([long_b64]) in {"VARCHAR", "TEXT"}
+    assert infer_type([long_b64], field_name="payload_b64") == "BINARY"
 
 
 def test_es_upsert_derives_id_from_conflict_columns():

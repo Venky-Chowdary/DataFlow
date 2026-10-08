@@ -2252,9 +2252,9 @@ def test_sqlite_prepare_keyed_upsert_hard_deletes_dest_held_keys(tmp_path: Path)
     live, payload = prepare_keyed_upsert(
         [
             {"id": 1, "label": "A", "is_deleted": 0},
-            {"id": 2, "label": "b", "is_deleted": 1},
-            {"id": 4, "label": "d", "is_deleted": 0},
-            {"id": 9, "label": "ghost", "is_deleted": 1},
+            {"id": 2, "label": "b", "__deleted": True},
+            {"id": 4, "label": "d", "is_deleted": 1},
+            {"id": 9, "label": "ghost", "__deleted": True},
         ],
         key_columns=["id"],
         mappings=None,

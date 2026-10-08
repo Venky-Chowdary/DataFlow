@@ -144,8 +144,8 @@ def test_cdc_count_scope_does_not_ladder_veto_leftover_extras():
     assert out["passed"] is True
     assurance = classify_post_write_assurance(out)
     assert assurance["migration_proven"] is False
-    assert assurance["post_write_verified"] is True
-    assert assurance["claim_level"] == CDC_SOURCE_IMAGE_COUNT
+    assert assurance["post_write_verified"] is False
+    assert assurance["claim_level"] == "failed"
 
 
 def test_overwrite_ladder_fail_still_vetoes_when_not_cdc_count_scope():

@@ -26,7 +26,7 @@ from services.mapping_pipeline import run_mapping_pipeline
 from services.source_engine_scope import bind_source_engine
 from services.sync_cursor import resolve_incremental_read_scope
 from services.type_system import national_charset_would_invent
-from src.ai.copilot.schedule_cadence import parse_cadence
+from src.ai.copilot.schedule_cadence import describe_stored_cadence, parse_cadence
 from src.ai.copilot.transfer_tools import _ground_data_rules, _primary_key_csv
 
 
@@ -143,6 +143,28 @@ def test_mariadb_uca1400_is_not_a_mysql_collation() -> None:
     assert _collation_compatible_with_dest("mysql", "utf8mb4_uca1400_ai_ci") is False
     assert _collation_compatible_with_dest("mariadb", "utf8mb4_uca1400_ai_ci") is True
     assert is_connection_lost("OperationalError: Unknown collation 'utf8mb4_uca1400_ai_ci'") is False
+
+
+def test_pg_varchar_to_sqlserver_nvarchar_is_preserve_when_engine_is_bound() -> None:
+    from services.type_system import is_lossy_coercion
+
+    with bind_source_engine("postgresql"):
+        assert is_lossy_coercion(
+            "VARCHAR(100)",
+            "NVARCHAR(100) COLLATE LATIN1_GENERAL_BIN",
+            dest_db="sqlserver",
+        ) is False
+
+
+def test_bare_five_field_cron_is_a_schedule() -> None:
+    spec = parse_cadence("*/5 * * * *")
+    assert spec.question in {None, ""}
+    assert spec.cron == "*/5 * * * *"
+    assert spec.resolved is True
+    assert describe_stored_cadence("daily", "*/5 * * * *", "UTC") == "Every 5 minutes UTC"
+    yearly = parse_cadence("0 0 1 1 *")
+    assert yearly.cron == "0 0 1 1 *"
+    assert yearly.question in {None, ""}
 
 
 def test_weekdays_and_hourly_minute_keep_their_anchor() -> None:

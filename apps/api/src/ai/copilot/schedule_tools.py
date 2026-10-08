@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .query_tools import _tool_result
-from .schedule_cadence import CadenceSpec, parse_cadence
+from .schedule_cadence import CadenceSpec, describe_stored_cadence, parse_cadence
 from .transfer_tools import (
     _is_execute_cleared,
     _stage_bound_contract,
@@ -246,7 +246,13 @@ def create_schedule(
         "source": f"{source['connector_name']}.{source['table']}",
         "destination": f"{destination['connector_name']}.{destination['table']}",
         "cadence": spec.description,
-        "interval": spec.interval,
+        # The stored interval stays a preset the runner accepts. The label the
+        # operator reads follows the cron, so */5 is not shown as daily/hourly.
+        "interval": (
+            describe_stored_cadence(spec.interval, spec.cron, spec.timezone)
+            if spec.cron
+            else spec.interval
+        ),
         "cron": spec.cron or "(preset interval)",
         "timezone": spec.timezone,
         "sync_mode": resolved_mode,

@@ -39,6 +39,8 @@ def test_base64_alphabet_text_stays_text_and_is_not_a_preserve():
     assert len(raw) >= 32
     assert infer_type([raw]) in {"VARCHAR", "TEXT"}
     assert infer_type([raw], field_name="payload") == "BINARY"
+    hex_digest = "c4ca4238a0b923820dcc509a6f75849b" * 4
+    assert infer_type([hex_digest], field_name="payload") != "BINARY"
     assert is_lossy_coercion("VARCHAR", "BINARY") is True
     assert is_lossy_coercion("BINARY", "BINARY") is False
 

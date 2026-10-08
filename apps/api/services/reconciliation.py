@@ -294,15 +294,14 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         return out
 
     if str(out.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
-        # Last-batch writer checksum vs dest digest is not a population compare.
-        # Dest extras are leftover MERGE no-op; dest COUNT short already set
-        # passed=False in reconcile(). Never upgrade to full_checksum.
-        dest_short = not bool(out.get("passed"))
-        out["phase"] = "post_write_failed" if dest_short else "post_write_row_count"
+        # Row count is not a cell proof. Never upgrade to full_checksum and
+        # never call the phase verified — a matching COUNT completed jobs
+        # whose destination cells had already been corrupted.
+        out["phase"] = "post_write_failed"
         out["post_write_pending"] = False
         out["preview"] = False
-        out["coverage"] = "none" if dest_short else CDC_SOURCE_IMAGE_COUNT
-        out["assurance_level"] = "none" if dest_short else CDC_SOURCE_IMAGE_COUNT
+        out["coverage"] = "none"
+        out["assurance_level"] = "none"
         out["migration_proven"] = False
         out["population_proof"] = False
         out["checksum_match"] = False
@@ -874,15 +873,18 @@ def reconcile(
         # behaved exactly as the policy asked.
         source_checksum = target_checksum
     if checksum_scope == CDC_SOURCE_IMAGE_COUNT:
-        # Dest extras are expected (changelog is not S; leftover MERGE is a
-        # hard no-op). Dest COUNT short of the live source image is a fail.
+        # A matching COUNT does not see an in-place update. Completing the job
+        # here is how a corrupted cell (qty=-1) shipped as "completed" while
+        # the message said value fidelity was not compared. Dest extras are
+        # still not a merge-delete, and a short COUNT is still a fail — but
+        # neither outcome is a cell proof, so the job does not pass.
         dest_short = target_rows < expected_rows
         extra = extra_rows_note(target_rows, expected_rows) if target_rows > expected_rows else ""
         short_note = (
             " Destination is short of the live source image." if dest_short else ""
         )
         return ReconciliationReport(
-            passed=not dest_short,
+            passed=False,
             source_rows=source_rows,
             target_rows=target_rows,
             source_checksum=source_checksum,

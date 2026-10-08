@@ -386,20 +386,26 @@ def test_live_pg_cdc_leftover_dest_key_is_not_merge_deleted() -> None:
             )
         )
         slot = slot or str((second.destination_summary or {}).get("cdc_slot_name") or "")
-        assert second.success, second.error or second.reconciliation
         ids = _pg_ids(dst_t)
         assert 99 in ids, ids
         assert _pg_count(dst_t) == 3
         assert (second.destination_summary or {}).get("leftover_deleted") in {None, 0}
         recon = second.reconciliation or {}
-        assert recon.get("passed") is True, recon
         assert recon.get("source_rows") == 2
         assert recon.get("target_rows") == 3
-        from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT
+        from services.reconcile_coverage import (
+            CDC_SOURCE_IMAGE_COUNT,
+            CDC_SOURCE_IMAGE_VALUES,
+        )
 
-        assert recon.get("checksum_scope") == CDC_SOURCE_IMAGE_COUNT
-        assert recon.get("checksum_match") is False
-        assert recon.get("population_proof") is False
+        scope = recon.get("checksum_scope")
+        if scope == CDC_SOURCE_IMAGE_VALUES:
+            assert recon.get("passed") is True, recon
+        else:
+            assert scope == CDC_SOURCE_IMAGE_COUNT
+            assert recon.get("passed") is False, recon
+            assert "Value fidelity was not compared" in str(recon.get("message") or "")
+        assert recon.get("checksum_match") is False or scope == CDC_SOURCE_IMAGE_VALUES
         assert recon.get("migration_proven") in {None, False}
     finally:
         _pg_drop_slot(slot)
@@ -486,10 +492,11 @@ def test_cdc_source_image_count_scope_does_not_claim_full_checksum() -> None:
         target_checksum="full-dest",
         checksum_scope=CDC_SOURCE_IMAGE_COUNT,
     )
-    assert report.passed is True
+    assert report.passed is False
     assert report.assurance_level == CDC_SOURCE_IMAGE_COUNT
     assert report.population_proof is False
     assert report.checksum_match is False
+    assert "Value fidelity was not compared" in report.message
 
     mismatch = reconcile(
         source_rows=2,
@@ -508,23 +515,23 @@ def test_cdc_source_image_count_scope_does_not_claim_full_checksum() -> None:
         target_checksum="full-dest",
         checksum_scope=CDC_SOURCE_IMAGE_COUNT,
     )
-    assert extras.passed is True
+    assert extras.passed is False
     assert extras.checksum_match is False
     assert extras.population_proof is False
     assert extras.target_rows == 3
     assert extras.source_rows == 2
 
     equal_stamped = report.to_dict()
-    assert equal_stamped["passed"] is True
+    assert equal_stamped["passed"] is False
     assert equal_stamped["checksum_match"] is False
-    assert equal_stamped["phase"] == "post_write_row_count"
-    assert equal_stamped["coverage"] == CDC_SOURCE_IMAGE_COUNT
+    assert equal_stamped["phase"] == "post_write_failed"
+    assert equal_stamped["coverage"] == "none"
     assert equal_stamped.get("migration_proven") is False
 
     extras_stamped = extras.to_dict()
-    assert extras_stamped["passed"] is True
+    assert extras_stamped["passed"] is False
     assert extras_stamped["checksum_match"] is False
-    assert extras_stamped["phase"] == "post_write_row_count"
+    assert extras_stamped["phase"] == "post_write_failed"
 
     short_stamped = mismatch.to_dict()
     assert short_stamped["passed"] is False

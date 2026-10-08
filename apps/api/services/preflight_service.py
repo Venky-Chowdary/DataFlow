@@ -270,21 +270,37 @@ class FilePreflightContext(PreflightContext):
                 self._mapping_dict_for_probe(m, dest_types)
                 for m in self.plan.mappings
             ]
-            report = analyze_coercion(
-                sample_rows=self.sample_rows,
-                mappings=mapping_dicts,
-                source_types=source_types,
-                dest_types=dest_types,
-                dest_db_type=self.plan.destination.db_type,
-                table_exists=getattr(self.plan.destination, "table_exists", None),
-                validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
-                empty_cells_as_null=self.empty_cells_as_null,
-                dest_nullability=self._dest_nullability(),
-                database_extract=str(
-                    getattr(self.plan.source, "kind", "") or ""
-                ).lower()
-                == "database",
+            from services.source_engine_scope import (
+                active_source_engine,
+                bind_source_engine,
             )
+
+            src_engine = str(getattr(self.plan.source, "db_type", "") or "")
+            # The lossy gate reads the source engine from this scope. Binding
+            # it only around DDL stamping left PostgreSQL VARCHAR → SQL Server
+            # NVARCHAR flagged as a fidelity collapse after the stamp window
+            # had already closed (DEF-B-003).
+            engine_scope = (
+                bind_source_engine(src_engine)
+                if src_engine and not active_source_engine()
+                else nullcontext()
+            )
+            with engine_scope:
+                report = analyze_coercion(
+                    sample_rows=self.sample_rows,
+                    mappings=mapping_dicts,
+                    source_types=source_types,
+                    dest_types=dest_types,
+                    dest_db_type=self.plan.destination.db_type,
+                    table_exists=getattr(self.plan.destination, "table_exists", None),
+                    validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
+                    empty_cells_as_null=self.empty_cells_as_null,
+                    dest_nullability=self._dest_nullability(),
+                    database_extract=str(
+                        getattr(self.plan.source, "kind", "") or ""
+                    ).lower()
+                    == "database",
+                )
             if isinstance(report, dict):
                 from services.validation_coverage import stamp_validation_coverage
 

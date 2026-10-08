@@ -643,9 +643,9 @@ def _try_copy_fast_path(
         )
         return None
     if merge_upsert:
-        # A staged server-side MERGE lands every source row, including ones the
-        # row path hard-DELETEs for a set soft-delete flag; the row path owns
-        # tombstone interpretation (boolean / deleted_at / __op parsing).
+        # A staged server-side MERGE cannot tell a CDC envelope delete from a
+        # business flag. The row path owns that split: __deleted / __op hard-
+        # DELETE, and a business is_deleted column is data.
         tombstone = detect_tombstone_column(
             None, [str(m.get("target") or m.get("source") or "") for m in mappings or []]
         )

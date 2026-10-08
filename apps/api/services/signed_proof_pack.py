@@ -449,18 +449,18 @@ def classify_post_write_assurance(
             ),
         }
 
-    if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT and passed:
+    if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
         return {
-            "claim_level": CDC_SOURCE_IMAGE_COUNT,
-            "post_write_verified": True,
+            "claim_level": "failed",
+            "post_write_verified": False,
             "migration_proven": False,
             "population_proof": False,
             "referential_integrity_proven": ri_proven,
             "checksum_match": False,
             "note": (
-                "CDC dest COUNT vs live source-table COUNT. Leftover MERGE is a "
-                "no-op. At-least-once upsert — not platform exactly-once. "
-                "Not full_checksum / migration proven."
+                "CDC dest COUNT vs live source-table COUNT is not a cell proof. "
+                "A matching count does not complete the job. Leftover MERGE is a "
+                "no-op. At-least-once upsert — not platform exactly-once."
             ),
         }
 

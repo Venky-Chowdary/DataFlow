@@ -267,6 +267,36 @@ def _every_n(unit: str, count: int, tz: str, assumed: bool) -> CadenceSpec:
     )
 
 
+_BARE_CRON_RE = re.compile(
+    r"^(?:[^\s]+\s+){4}[^\s]+$"
+)
+
+
+def _bare_cron(raw: str, tz: str, assumed: bool) -> CadenceSpec | None:
+    """Accept a 5-field cron that was not prefixed with the word cron.
+
+    ``*/5 * * * *`` is a schedule. Requiring the word "cron" made
+    create_schedule answer with the failure question instead of the
+    expression the runner already knows how to evaluate.
+    """
+    text = " ".join((raw or "").split())
+    if not _BARE_CRON_RE.match(text):
+        return None
+    from services.cron_schedule import CronError, validate_cron
+
+    try:
+        validate_cron(text)
+    except CronError:
+        return None
+    return CadenceSpec(
+        interval="daily",
+        cron=text,
+        timezone=tz,
+        description=f"cron “{text}” ({tz})",
+        timezone_assumed=assumed,
+    )
+
+
 def parse_cadence(text: str) -> CadenceSpec:
     """Resolve cadence wording into a preset interval or a cron expression.
 
@@ -410,6 +440,10 @@ def parse_cadence(text: str) -> CadenceSpec:
         # A bare time with no cadence word is a daily run at that time.
         return _daily(hour, minute, tz, assumed)
 
+    bare = _bare_cron(raw, tz, assumed)
+    if bare is not None:
+        return bare
+
     return _ask(
         f"I could not turn “{raw.strip()}” into a schedule. I can do hourly, daily "
         "at a time, weekly on a weekday, a day of the month, every N minutes/hours, "
@@ -429,6 +463,16 @@ def describe_stored_cadence(interval: str, cron: str = "", timezone: str = "UTC"
         parts = expr.split(" ")
         if len(parts) == 5:
             minute, hour, dom, month, dow = parts
+            step = re.fullmatch(r"\*/(\d+)", minute)
+            if (
+                hour == "*"
+                and dom == "*"
+                and month == "*"
+                and dow == "*"
+                and step
+                and 1 <= int(step.group(1)) <= 59
+            ):
+                return f"Every {int(step.group(1))} minutes {tz}"
             if (
                 hour == "*"
                 and dom == "*"

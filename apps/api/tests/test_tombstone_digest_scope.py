@@ -30,12 +30,25 @@ _MAPPINGS = [
 ]
 
 
-def test_tombstoned_row_leaves_the_source_digest_scope() -> None:
-    """The deleted key is not in the destination, so it is not in the digest."""
+def test_business_soft_delete_stays_in_the_digest() -> None:
+    """is_deleted is a column value. Incremental upsert must not drop the row."""
     records = [
         {"id": 1, "label": "A", "is_deleted": False},
-        {"id": 2, "label": "b", "is_deleted": True},
-        {"id": 3, "label": "c", "is_deleted": False},
+        {"id": 5, "label": "kept", "is_deleted": True},
+    ]
+    live, excluded = live_records_for_digest(
+        records, key_columns=["id"], mappings=_MAPPINGS
+    )
+    assert excluded == 0
+    assert [r["id"] for r in live] == [1, 5]
+
+
+def test_tombstoned_row_leaves_the_source_digest_scope() -> None:
+    """A CDC envelope delete is not in the destination, so it is not in the digest."""
+    records = [
+        {"id": 1, "label": "A", "__deleted": False},
+        {"id": 2, "label": "b", "__deleted": True},
+        {"id": 3, "label": "c", "__deleted": False},
     ]
     live, excluded = live_records_for_digest(
         records, key_columns=["id"], mappings=_MAPPINGS
@@ -70,7 +83,7 @@ def test_without_key_columns_nothing_can_be_deleted() -> None:
 
 def test_positional_rows_keep_header_order() -> None:
     """Batch readers hand positional rows; the digest scope must round-trip."""
-    headers = ["id", "label", "is_deleted"]
+    headers = ["id", "label", "__deleted"]
     rows = [
         [1, "A", False],
         [2, "b", True],
@@ -89,9 +102,9 @@ def test_positional_rows_keep_header_order() -> None:
 def test_recreated_key_stays_live() -> None:
     """DELETE then re-INSERT of one key inside a batch is a live row."""
     records = [
-        {"id": 1, "label": "old", "is_deleted": True},
-        {"id": 1, "label": "new", "is_deleted": False},
-        {"id": 2, "label": "b", "is_deleted": True},
+        {"id": 1, "label": "old", "__deleted": True},
+        {"id": 1, "label": "new", "__deleted": False},
+        {"id": 2, "label": "b", "__deleted": True},
     ]
     live, excluded = live_records_for_digest(
         records, key_columns=["id"], mappings=_MAPPINGS

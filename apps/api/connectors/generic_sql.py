@@ -1301,19 +1301,21 @@ def _logical_type_from_sa(col_type: Any) -> str:
         # as DATETIME2 made preflight believe the column kept seven digits, the
         # write rounded ``.000001`` to ``.000``, and the sample check failed
         # only after the batch had committed.
-        type_name = getattr(getattr(col_type, "__class__", None), "__name__", "")
-        type_upper = str(type_name or "").upper()
-        if type_upper == "DATETIME2":
+        type_name = str(getattr(getattr(col_type, "__class__", None), "__name__", "") or "")
+        # Compare the class name as written. ``sa.DateTime``.upper() is also
+        # DATETIME, and that fold read TIMESTAMPTZ as the 1/300-second SQL
+        # Server type before the timezone flag was consulted.
+        if type_name == "DATETIME2":
             precision = getattr(col_type, "precision", None)
             digits = int(precision) if isinstance(precision, int) and precision >= 0 else 7
             return f"DATETIME2({digits})"
-        if type_upper == "DATETIMEOFFSET":
+        if type_name == "DATETIMEOFFSET":
             precision = getattr(col_type, "precision", None)
             digits = int(precision) if isinstance(precision, int) and precision >= 0 else 7
             return f"DATETIMEOFFSET({digits})"
-        if type_upper == "SMALLDATETIME":
+        if type_name == "SMALLDATETIME":
             return "SMALLDATETIME"
-        if type_upper == "DATETIME":
+        if type_name == "DATETIME":
             return "DATETIME"
         if "datetimeoffset" in (
             f"{type_name} {col_type!r}".lower()

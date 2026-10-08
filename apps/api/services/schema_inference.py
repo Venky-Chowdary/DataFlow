@@ -1082,18 +1082,28 @@ def infer_column(
         notes.append("status vocabulary present — demoted BOOLEAN → VARCHAR")
 
     if field_name and _is_binary_field_name(field_name):
+        # A name like ``payload`` is not a license to decode. Hex digests are
+        # valid base64 and were written as BYTEA labelled preserve (DEF-C-033).
+        # Pure hex stays text. Real base64, including a short token in the
+        # same column, still promotes.
         valid = 0
         for v in non_empty:
             s = v.strip()
-            if len(s) >= 4 and len(s) % 4 == 0 and _BASE64_RE.match(s):
-                try:
-                    import base64
+            if len(s) < 4 or len(s) % 4 != 0 or not _BASE64_RE.match(s):
+                continue
+            if all(c in "0123456789abcdefABCDEF" for c in s):
+                continue
+            if len(s) > 64 and len(set(s)) <= 3:
+                continue
+            if s.isalpha() and len(s) > 32:
+                continue
+            try:
+                import base64
 
-                    base64.b64decode(s, validate=True)
-                    valid += 1
-                except (ValueError, TypeError):
-                    # Invalid base64 padding/alphabet — treat as non-binary below.
-                    continue
+                base64.b64decode(s, validate=True)
+                valid += 1
+            except (ValueError, TypeError):
+                continue
         if valid == len(non_empty):
             inferred = "BINARY"
             role = "binary"
