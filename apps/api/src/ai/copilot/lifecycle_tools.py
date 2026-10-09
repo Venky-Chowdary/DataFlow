@@ -416,13 +416,19 @@ def _job_tool(
 
 
 def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
+    ctype = str(conn.get("type") or conn.get("format") or "")
+    # Role is the driver's declared topology, not a stale stored string —
+    # connectors saved before role normalization (pgvector with role=both)
+    # would keep reporting the wrong side forever (QA C09).
+    from services.connector_store import normalize_connector_role
+
     return {
         "connector_id": str(conn.get("id") or conn.get("connector_id") or ""),
         "name": str(conn.get("name") or ""),
-        "type": str(conn.get("type") or conn.get("format") or ""),
+        "type": ctype,
         "host": str(conn.get("host") or ""),
         "database": str(conn.get("database") or ""),
-        "role": str(conn.get("role") or ""),
+        "role": normalize_connector_role(ctype, str(conn.get("role") or "")),
     }
 
 

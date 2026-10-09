@@ -57,6 +57,23 @@ _BIDIRECTIONAL_TYPES = frozenset({
 def normalize_connector_role(connector_type: str, role: str | None) -> str:
     """Return a persisted topology role. Dual-use types always store ``both``."""
     t = (connector_type or "").strip().lower()
+    # The capability registry is the topology authority — a dest-only driver
+    # (pgvector, qdrant, weaviate, pinecone, milvus) must not persist ``both``
+    # however the caller spelled its role (QA C09: test_connector reported
+    # role=both for pgvector while the driver declares read=False).
+    try:
+        from src.transfer.connector_capabilities import (
+            _declared_capabilities,
+            resolve_driver_type,
+        )
+
+        caps = _declared_capabilities(resolve_driver_type(t) or t)
+        if caps.get("dest_only") or caps.get("write") and not caps.get("read"):
+            return "destination"
+        if caps.get("source_only") or caps.get("read") and not caps.get("write"):
+            return "source"
+    except Exception:
+        pass
     if t in _BIDIRECTIONAL_TYPES:
         return "both"
     r = (role or "both").strip().lower()

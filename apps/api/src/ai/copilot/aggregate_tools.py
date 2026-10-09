@@ -1325,6 +1325,92 @@ def aggregate_connector_data(
 #: partially and presented as the whole inventory.
 _MAX_RANKED_TABLES = 40
 
+#: Exact counts beyond the displayed ``limit`` — the catalog estimate can
+#: mis-rank near the cut, so a few boundary candidates are counted too and the
+#: real counts re-sort them.
+_RANK_MARGIN = 5
+
+
+def _estimate_table_row_counts(conn: dict[str, Any], names: list[str]) -> dict[str, int]:
+    """Bulk catalog row estimates — one query, never per-table COUNT(*).
+
+    ``pg_class.reltuples`` / ``information_schema.tables.table_rows`` are
+    planner estimates, not counts; they exist to shortlist which tables get
+    the exact COUNT so ``limit`` bounds the work instead of only trimming
+    the output (QA C12/C14 — 70 exact counts on million-row tables timed
+    out the request). Engines without cheap stats return ``{}`` and the
+    caller falls back to the bounded exact-count loop.
+    """
+    ctype = str(conn.get("type") or conn.get("format") or "").lower()
+    try:
+        from .schema_tools import _endpoint_from_connector
+        from src.transfer.adapters import resolve_connector_config
+
+        endpoint = _endpoint_from_connector(conn)
+        cfg = resolve_connector_config(endpoint)
+    except Exception:
+        return {}
+    wanted = {str(n).strip() for n in names if str(n).strip()}
+    if not wanted:
+        return {}
+    sql = ""
+    family = ""
+    if ctype in {"postgresql", "postgres", "pg", "redshift", "greenplum", "cockroachdb", "timescaledb", "yugabytedb"}:
+        family = "postgresql"
+        sql = (
+            "SELECT c.relname, n.nspname, c.reltuples::bigint "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE c.relkind IN ('r','p') AND n.nspname NOT IN ('pg_catalog','information_schema')"
+        )
+    elif ctype in {"mysql", "mariadb", "singlestore", "tidb"}:
+        family = "mysql"
+        sql = (
+            "SELECT table_name, table_schema, table_rows "
+            "FROM information_schema.tables WHERE table_type = 'BASE TABLE'"
+        )
+    if not sql:
+        return {}
+    try:
+        from services.column_profile import _connect
+
+        db = _connect(family, cfg)
+        try:
+            cur = db.cursor()
+            cur.execute(sql)
+            raw = cur.fetchall() or []
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        return {}
+    from connectors.sql_identifiers import split_qualified_table
+
+    stored: dict[tuple[str | None, str], int] = {}
+    for relname, nsp, est in raw:
+        try:
+            n = int(est)
+        except (TypeError, ValueError):
+            continue
+        # reltuples -1 means never analyzed — that is "no estimate", not 0.
+        if n < 0:
+            continue
+        stored[(str(nsp or ""), str(relname or ""))] = n
+    out: dict[str, int] = {}
+    for name in wanted:
+        sch, tbl = split_qualified_table(name, str(cfg.get("schema") or "") or None)
+        hit = stored.get((sch or "", tbl))
+        if hit is None and sch:
+            hit = stored.get(("", tbl))
+        if hit is None:
+            hits = [v for (s, t), v in stored.items() if t == tbl]
+            if len(hits) == 1:
+                hit = hits[0]
+        if hit is not None:
+            out[name] = hit
+    return out
+
 
 def rank_connector_tables(
     connector_id: str = "",
@@ -1368,7 +1454,32 @@ def rank_connector_tables(
             ),
         )
 
-    considered = names[:_MAX_RANKED_TABLES]
+    ascending = str(order or "desc").strip().lower() in {"asc", "ascending", "up"}
+    shown = max(1, int(limit or 10))
+
+    # ``limit`` must bound the *work*, not just the output (QA C12/C14):
+    # exact-counting every object is one COUNT(*) per table and timed out on
+    # warehouses with million-row tables. A bulk catalog estimate shortlists
+    # limit+margin candidates; those alone get the exact COUNT and the real
+    # counts re-sort. Engines without cheap stats keep the bounded loop.
+    estimates = _estimate_table_row_counts(conn, names)
+    if estimates:
+        pool = list(names[:_MAX_RANKED_TABLES])
+        est_ranked = sorted(
+            (n for n in pool if n in estimates),
+            key=lambda n: estimates[n],
+            reverse=not ascending,
+        )
+        # Objects with no estimate (views, never-analyzed tables) cannot be
+        # ranked by catalog — they join the count set within the same bound.
+        unestimated = [n for n in pool if n not in estimates]
+        considered = (
+            est_ranked[: shown + _RANK_MARGIN]
+            + unestimated[: shown + _RANK_MARGIN]
+        )
+    else:
+        considered = names[:_MAX_RANKED_TABLES]
+
     ranked: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     for name in considered:
@@ -1390,9 +1501,7 @@ def rank_connector_tables(
         except (TypeError, ValueError):
             skipped.append({"table": name, "error": f"non-numeric count {value!r}"})
 
-    ascending = str(order or "desc").strip().lower() in {"asc", "ascending", "up"}
     ranked.sort(key=lambda r: r["rows"], reverse=not ascending)
-    shown = max(1, int(limit or 10))
     return _tool_result(
         tool,
         success=True,
@@ -1408,6 +1517,9 @@ def rank_connector_tables(
             "total_rows": sum(r["rows"] for r in ranked),
             "skipped": skipped,
             "truncated": len(names) > len(considered) or bool(info.get("truncated")),
+            # The shortlist came from catalog estimates; every reported row
+            # count is still an exact COUNT(*).
+            "shortlisted_by": "catalog_estimate" if estimates else "all_tables",
             "exact": True,
             "read_only": True,
         },

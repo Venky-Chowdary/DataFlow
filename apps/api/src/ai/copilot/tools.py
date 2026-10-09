@@ -1919,7 +1919,9 @@ class DataPilotTools:
         try:
             ds = self._list_datasets()
             if ds.success:
-                datasets = (ds.output or {}).get("datasets", [])[:8]
+                # The whole inventory — an 8-item cap hid 14 of 22 datasets
+                # (QA D09). Entries are name/shape summaries, cheap to return.
+                datasets = (ds.output or {}).get("datasets", [])
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
@@ -2000,7 +2002,14 @@ class DataPilotTools:
                     "Run changing actions without your Confirm",
                 ],
                 "datasets": [
-                    {"name": d.get("name"), "columns": d.get("column_count"), "rows": d.get("row_count")}
+                    {
+                        "name": d.get("name"),
+                        "columns": d.get("column_count"),
+                        "rows": d.get("row_count"),
+                        "file": d.get("file") or "",
+                        "file_type": d.get("file_type") or "",
+                        "duplicate_name": bool(d.get("duplicate_name")),
+                    }
                     for d in datasets
                     if d.get("name") and not looks_like_index_dump_name(str(d.get("name")))
                 ],

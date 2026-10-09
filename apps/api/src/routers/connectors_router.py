@@ -339,7 +339,7 @@ async def list_connectors(
         _api_root = Path(__file__).resolve().parents[2]
         if str(_api_root) not in sys.path:
             sys.path.insert(0, str(_api_root))
-        from services.connector_store import connector_ui_status, list_connectors as fs_list
+        from services.connector_store import connector_ui_status, list_connectors as fs_list, normalize_connector_role
         items = fs_list(workspace_id=workspace_id)
         if items:
             return {
@@ -357,7 +357,9 @@ async def list_connectors(
                         "last_tested_at": c.last_tested_at,
                         "last_transfer_ok_at": c.last_transfer_ok_at,
                         "workspace_id": c.workspace_id or "",
-                        "role": getattr(c, "role", None) or "both",
+                        "role": normalize_connector_role(
+                            getattr(c, "type", "") or "", getattr(c, "role", None)
+                        ),
                     }
                     for c in items
                 ],
@@ -367,7 +369,7 @@ async def list_connectors(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     try:
-        from services.connector_store import connector_ui_status
+        from services.connector_store import connector_ui_status, normalize_connector_role
 
         mongo = get_mongodb_service()
         connectors = mongo.list_connectors()
@@ -390,7 +392,9 @@ async def list_connectors(
                 "last_tested_at": c.get("last_tested_at"),
                 "last_transfer_ok_at": c.get("last_transfer_ok_at"),
                 "workspace_id": c.get("workspace_id", ""),
-                "role": c.get("role") or "both",
+                "role": normalize_connector_role(
+                    str(c.get("type") or ""), c.get("role")
+                ),
             })
 
         return {"connectors": result, "count": len(result)}
