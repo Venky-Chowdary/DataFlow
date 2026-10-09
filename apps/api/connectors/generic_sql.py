@@ -995,6 +995,45 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
+#: Scheme token → DBAPI kwarg that bounds the TCP/login handshake.
+#: ``connect_timeout`` has long existed as an operator option in
+#: ``CONNECTION_OPTION_KEYS`` but was never forwarded into ``connect_args`` —
+#: a probe against a dead host blocked on the OS TCP timeout (~60s+), past
+#: the MCP request timeout, so the caller got no result at all (QA C07).
+#: SQL_ATTR_LOGIN_TIMEOUT = 103 for pyodbc (its ``timeout`` kwarg is queries).
+_CONNECT_TIMEOUT_KWARGS: tuple[tuple[str, Any], ...] = (
+    ("pymssql", {"login_timeout": 0}),
+    ("pytds", {"login_timeout": 0}),
+    ("pyodbc", {"attrs_before": {103: 0}}),
+    ("pymysql", {"connect_timeout": 0}),
+    ("mysql.connector", {"connection_timeout": 0}),
+    ("psycopg2", {"connect_timeout": 0}),
+    ("psycopg", {"connect_timeout": 0}),
+    ("pg8000", {"timeout": 0}),
+    ("oracledb", {"tcp_connect_timeout": 0}),
+    ("cx_oracle", {"tcp_connect_timeout": 0}),
+)
+
+
+def _connect_args_for(url: Any, cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate ``cfg['connect_timeout']`` seconds into driver connect args."""
+    raw = cfg.get("connect_timeout")
+    try:
+        seconds = int(float(str(raw))) if raw not in (None, "") else 0
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        return {}
+    driver = str(getattr(url, "drivername", "") or "").lower()
+    for token, template in _CONNECT_TIMEOUT_KWARGS:
+        if token in driver:
+            return {
+                key: ({k: seconds for k in value} if isinstance(value, dict) else seconds)
+                for key, value in template.items()
+            }
+    return {}
+
+
 def _build_engine(cfg: dict[str, Any]) -> Any:
     """Construct a brand-new Engine. Called once per distinct target."""
     warehouse = _warehouse_creator(cfg, (cfg.get("type") or "").lower().strip())
@@ -1073,7 +1112,12 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             # Before the first bind, so DATETIME2(6) is not an ODBC millisecond.
             install_sqlserver_datetime2_bind()
 
-        engine = create_engine(url, pool_pre_ping=True, **pool_settings())
+        engine = create_engine(
+            url,
+            pool_pre_ping=True,
+            connect_args=_connect_args_for(url, cfg),
+            **pool_settings(),
+        )
         from sqlalchemy import event
 
         from services.dest_dialect_facts import _normalize_dest_db
@@ -2935,6 +2979,11 @@ def test_generic_sql(**kwargs: Any) -> tuple[bool, str]:
     if not SQLALCHEMY_AVAILABLE:
         return False, "SQLAlchemy is not installed"
     cfg = _cfg_from_params(**kwargs)
+    # A connectivity probe must answer inside the caller's request timeout:
+    # an unconfigured probe gets a 15s handshake bound instead of inheriting
+    # the OS TCP default that outlived the MCP timeout (QA C07).
+    if not cfg.get("connect_timeout"):
+        cfg["connect_timeout"] = 15
     try:
         engine = _engine(cfg)
         with engine.connect() as conn:
@@ -3711,9 +3760,16 @@ def introspect_table_schema(
         }
     except Exception as exc:
         logger.warning("generic_sql introspect failed", exc_info=True)
+        # Surface the driver's own reason — an operator cannot fix
+        # "OperationalError" with no message attached (QA sqlserver→* routes
+        # all blocked on a bare type name).
+        detail = str(exc).strip()[:300]
         return {
             "ok": False,
-            "error": f"{type(exc).__name__}: SQL schema introspection failed",
+            "error": (
+                f"{type(exc).__name__}: SQL schema introspection failed"
+                + (f" — {detail}" if detail else "")
+            ),
             "columns": [],
             "tables": [],
         }

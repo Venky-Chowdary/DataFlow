@@ -361,12 +361,16 @@ def role_match_boost(source_role: str, target_role: str) -> float | None:
     if source_role in id_roles and target_role in id_roles:
         return 0.88
 
-    # Name / contact roles are interchangeable.
-    name_roles = {
-        "name", "full_name", "first_name", "last_name", "email_address",
-        "phone_number", "mobile_number",
-    }
+    # Person-name roles are interchangeable with other person names, and
+    # contact channels with each other — never across the boundary. Lumping
+    # them together scored ``phone_number -> full_name`` at 0.87 and
+    # auto-pinned phone digits into a name column (QA M02 false friend); a
+    # cross-role guess must reach the operator as review, not an auto-pin.
+    name_roles = {"name", "full_name", "first_name", "last_name"}
+    contact_roles = {"email_address", "phone_number", "mobile_number"}
     if source_role in name_roles and target_role in name_roles:
+        return 0.87
+    if source_role in contact_roles and target_role in contact_roles:
         return 0.87
 
     # Location / address roles are interchangeable.
