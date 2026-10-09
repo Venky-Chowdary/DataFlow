@@ -3749,10 +3749,10 @@ export interface QuarantineInfo {
     row?: number;
     column?: string;
     target?: string;
-    value?: string;
+    value?: string | null;
     reason?: string;
     policy?: string;
-    values?: Record<string, string>;
+    values?: Record<string, string | null>;
     chars?: string[];
     suggested_transform?: string;
     suggested_fix?: string;

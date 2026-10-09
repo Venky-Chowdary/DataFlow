@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { nullWireLabel } from "../../lib/nullWire";
+import { isSqlNullQuarantineCell, nullWireLabel } from "../../lib/nullWire";
 import { DtIcon } from "../DtIcon";
 import { useToast } from "../Toast";
 import { downloadJobQuarantineCsv, fetchJobQuarantine, proposeRepairFromQuarantine, replayJobQuarantine, type RepairMapping, type RepairProposal } from "../../lib/api";
@@ -80,6 +80,7 @@ function isOpenFinding(row: QuarantineRow): boolean {
 
 /** Make invisible format-control chars visible in the UI / CSV preview. */
 function formatQuarantineSample(value: unknown, chars?: string[]): string {
+  if (isSqlNullQuarantineCell(value)) return "NULL";
   const labeled = nullWireLabel(value);
   if (labeled) return labeled;
   if (value == null) return "—";
@@ -148,6 +149,7 @@ export function QuarantinePanel({
   const [rowsUnaccounted, setRowsUnaccounted] = useState(0);
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
+  const [editNull, setEditNull] = useState(false);
   const [applySuggested, setApplySuggested] = useState(true);
   const [replayResult, setReplayResult] = useState<{
     job_id: string;
@@ -240,19 +242,23 @@ export function QuarantinePanel({
   };
 
   const openEdit = (index: number) => {
+    const value = rows[index]?.value;
+    const sqlNull = isSqlNullQuarantineCell(value);
     setEditIndex(index);
-    setEditValue(String(rows[index]?.value ?? ""));
+    setEditNull(sqlNull);
+    setEditValue(sqlNull ? "" : String(value ?? ""));
   };
 
   const saveEdit = () => {
     if (editIndex == null) return;
+    const nextValue = editNull ? null : editValue;
     setRows((prev) =>
       prev.map((r, i) => {
         if (i !== editIndex) return r;
         const col = r.column || "";
         const values = { ...(r.values || {}) };
-        if (col) values[col] = editValue;
-        return { ...r, value: editValue, values };
+        if (col) values[col] = nextValue;
+        return { ...r, value: nextValue, values };
       }),
     );
     setEditIndex(null);
@@ -734,10 +740,25 @@ export function QuarantinePanel({
             <input
               id="df2-quarantine-edit-input"
               className="df2-input"
-              value={editValue}
-              onChange={(e) => setEditValue(e.target.value)}
+              value={editNull ? "" : editValue}
+              disabled={editNull}
+              onChange={(e) => {
+                setEditNull(false);
+                setEditValue(e.target.value);
+              }}
               autoFocus
             />
+            <label className="df2-quarantine-apply-suggested">
+              <input
+                type="checkbox"
+                checked={editNull}
+                onChange={(e) => {
+                  setEditNull(e.target.checked);
+                  if (e.target.checked) setEditValue("");
+                }}
+              />
+              SQL NULL — an empty field is an empty string
+            </label>
             <div className="df2-quarantine-edit-actions">
               <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setEditIndex(null)}>Cancel</button>
               <button type="button" className="df2-btn df2-btn-primary" onClick={saveEdit}>Save</button>

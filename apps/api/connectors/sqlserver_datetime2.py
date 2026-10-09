@@ -111,14 +111,35 @@ def bind_sqlserver_datetime2(
     digits = datetime2_declared_digits(sa_type, logical)
     if digits is None or digits <= 3:
         return value
+    # Execute reads the ODBC type after this conversion. Patch it here so a
+    # writer that did not pass through engine setup still avoids SQL_TIMESTAMP.
+    install_sqlserver_datetime2_bind()
     return sqlserver_datetime2_bind_text(value, precision=digits)
 
 
-def install_sqlserver_datetime2_bind() -> None:
-    """Patch ``DATETIME2.bind_processor`` so pyodbc does not cut the fraction.
+def sqlserver_datetime2_dbapi_type(precision: int | None, dbapi: Any) -> Any:
+    """ODBC type for ``setinputsizes``.
 
-    Idempotent. The processor runs at execute time, so an engine created
-    before this install still picks up the class method.
+    ``dbapi.DATETIME`` is ``SQL_TYPE_TIMESTAMP``. pyodbc then parses a
+    fractional string back into a timestamp struct and keeps three digits,
+    which undoes the text bind. Precision above 3 is sent as national
+    character data so SQL Server converts the string into ``DATETIME2(p)``.
+    """
+    digits = 7 if precision is None else int(precision)
+    if digits <= 3:
+        return dbapi.DATETIME
+    wchar = getattr(dbapi, "SQL_WVARCHAR", None)
+    if wchar is None:
+        return dbapi.DATETIME
+    # ``YYYY-MM-DD HH:MM:SS.`` is 20 characters plus the declared fraction.
+    return (wchar, 20 + digits, 0)
+
+
+def install_sqlserver_datetime2_bind() -> None:
+    """Patch ``DATETIME2`` so pyodbc does not cut the fraction.
+
+    Idempotent. The processor and the ODBC type are read at execute time, so
+    an engine created before this install still picks up the class methods.
     """
     global _INSTALLED
     if _INSTALLED:
@@ -133,5 +154,9 @@ def install_sqlserver_datetime2_bind() -> None:
 
         return process
 
+    def get_dbapi_type(self, dbapi):  # noqa: ANN001
+        return sqlserver_datetime2_dbapi_type(getattr(self, "precision", None), dbapi)
+
     DATETIME2.bind_processor = bind_processor  # type: ignore[method-assign]
+    DATETIME2.get_dbapi_type = get_dbapi_type  # type: ignore[method-assign]
     _INSTALLED = True

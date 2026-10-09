@@ -377,7 +377,30 @@ def sanitize_job_for_api(job: dict) -> dict:
         if isinstance(tr.get("destination"), dict):
             tr["destination"] = _mask_endpoint_secrets(tr["destination"])
         out["transfer_request"] = tr
+    _project_operator_quarantine(out)
     return out
+
+
+def _project_operator_quarantine(job: dict) -> None:
+    """Copy the job already. Show SQL NULL as null, not the transfer token.
+
+    Replay reads the stored job, which still carries the token so NULL and
+    an empty string stay distinct on the write path.
+    """
+    from services.dest_quarantine import project_operator_quarantine_details
+
+    if isinstance(job.get("rejected_details"), list):
+        job["rejected_details"] = project_operator_quarantine_details(job["rejected_details"])
+    summary = job.get("destination_summary")
+    if isinstance(summary, dict):
+        for key in ("rejected_details", "rejected_details_sample"):
+            if isinstance(summary.get(key), list):
+                summary[key] = project_operator_quarantine_details(summary[key])
+    checkpoint = job.get("checkpoint")
+    if isinstance(checkpoint, dict) and isinstance(checkpoint.get("rejected_details"), list):
+        checkpoint["rejected_details"] = project_operator_quarantine_details(
+            checkpoint["rejected_details"]
+        )
 
 
 def transfer_request_from_dict(data: dict) -> TransferRequest:

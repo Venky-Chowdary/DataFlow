@@ -335,6 +335,17 @@ def test_datetime2_six_binds_the_microsecond():
     kept = _to_sa_value(micro, "TIMESTAMP", None, "postgresql", "postgresql")
     assert isinstance(kept, datetime)
 
+    class _Dbapi:
+        DATETIME = "SQL_TYPE_TIMESTAMP"
+        SQL_WVARCHAR = "SQL_WVARCHAR"
+
+    from sqlalchemy.dialects.mssql.pyodbc import MSDialect_pyodbc
+
+    wide = mssql.DATETIME2(precision=6).dialect_impl(MSDialect_pyodbc())
+    assert wide.get_dbapi_type(_Dbapi) == ("SQL_WVARCHAR", 26, 0)
+    narrow_type = mssql.DATETIME2(precision=3).dialect_impl(MSDialect_pyodbc())
+    assert narrow_type.get_dbapi_type(_Dbapi) == "SQL_TYPE_TIMESTAMP"
+
 
 _LATIN = "VARCHAR(20) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS"
 
@@ -453,6 +464,46 @@ def test_decimal_12_3_stays_fixed_point_when_the_destination_has_one():
     assert refuse_create_new_numeric_collapse("DECIMAL(12,3)", "TEXT", "sqlite") == "TEXT"
     assert refuse_create_new_numeric_collapse("DECIMAL(12,3)", "TEXT", "") == "TEXT"
 
+    from connectors.generic_sql import _sa_type_for_logical
+    from connectors.writer_common import resolve_target_columns
+    from sqlalchemy.dialects import mysql as mysql_dialect
+
+    cols, types = resolve_target_columns(
+        [{
+            "source": "amt",
+            "target": "amt",
+            "target_type": "TEXT",
+            "source_type": "DECIMAL(12,3)",
+        }],
+        {"amt": "DECIMAL(12,3)"},
+        preserve_case=True,
+        table_exists=False,
+        dest_db="mysql",
+    )
+    assert cols == ["amt"]
+    assert types == ["DECIMAL(12,3)"]
+    compiled = str(
+        _sa_type_for_logical(types[0], "mysql", "mysql").compile(
+            dialect=mysql_dialect.dialect()
+        )
+    ).upper().replace(" ", "")
+    assert compiled in {"DECIMAL(12,3)", "NUMERIC(12,3)"}, compiled
+    assert "TEXT" not in compiled
+    held = resolve_target_columns(
+        [{
+            "source": "amt",
+            "target": "amt",
+            "target_type": "TEXT",
+            "source_type": "DECIMAL(12,3)",
+            "user_override": True,
+        }],
+        {"amt": "DECIMAL(12,3)"},
+        preserve_case=True,
+        table_exists=False,
+        dest_db="mysql",
+    )
+    assert held[1] == ["TEXT"]
+
 
 def test_quarantine_payload_stores_json_null_not_the_wire_token():
     import json
@@ -488,6 +539,18 @@ def test_quarantine_payload_stores_json_null_not_the_wire_token():
     assert shown[0]["value"] is None
     assert shown[0]["values"]["sku"] == ""
     assert shown[0]["values"]["note"] is None
+
+    from src.transfer.models import sanitize_job_for_api
+
+    stored_job = {
+        "rejected_details": [dict(stored)],
+        "destination_summary": {"rejected_details": [dict(stored)]},
+    }
+    shown_job = sanitize_job_for_api(stored_job)
+    assert stored_job["rejected_details"][0]["value"] == SQL_NULL_SENTINEL
+    assert shown_job["rejected_details"][0]["value"] is None
+    assert SQL_NULL_SENTINEL not in str(shown_job["destination_summary"]["rejected_details"])
+    assert shown_job["destination_summary"]["rejected_details"][0]["values"]["sku"] == ""
 
 
 def test_dest_quarantine_table_stores_sql_null(tmp_path):
