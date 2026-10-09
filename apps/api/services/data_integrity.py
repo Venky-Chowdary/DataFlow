@@ -1050,10 +1050,20 @@ def _check_duplicate_keys(
 
     # Single-column sample identity — skip when the only covering constraint is
     # composite (same code under different orgs must not false-fail).
+    # Also skip when the destination has a composite PK that includes the identity
+    # column: checking single-column duplicates on a composite PK component is a
+    # false positive (ACC-03: (region,id) composite key has duplicate 'id' values).
+    dest_has_composite_pk = len(destination_pk_columns or []) > 1
+    identity_in_composite_pk = (
+        dest_has_composite_pk
+        and target_col
+        and target_col.lower() in {str(c).lower() for c in (destination_pk_columns or [])}
+    )
     run_single = bool(
         enforce_identity
         and primary_key
         and not (covering_composite_only and not covering_single)
+        and not identity_in_composite_pk
     )
     if run_single and primary_key:
         from services.type_system import (

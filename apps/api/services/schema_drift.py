@@ -559,20 +559,24 @@ def resolve_schema_evolution(
             "hard_breaking:"
             + ",".join(sorted({str(h.get("kind")) for h in hard}))
         )
-    elif policy == "type_locked" and any(
-        str(a.get("kind")) == "widen_type" for a in additive
-    ):
-        action = "pause"
-        reasons.append("type_locked_blocks_widen")
+    elif policy == "type_locked":
+        # type_locked: block widen_type, review new columns, never auto-propagate
+        if any(str(a.get("kind")) == "widen_type" for a in additive):
+            action = "pause"
+            reasons.append("type_locked_blocks_widen")
+        elif unmapped:
+            action = "review"
+            reasons.append("type_locked_new_columns_need_approval")
+        else:
+            # Other additive changes under type_locked: review, don't auto-propagate
+            action = "review"
+            reasons.append("type_locked_review_required")
     elif policy in PROPAGATE_POLICIES and (additive or soft or unmapped):
         action = "propagate"
         reasons.append(f"auto_propagate under {policy}")
     elif policy == "manual_review" and (additive or soft or unmapped or source_changed):
         action = "review"
         reasons.append("manual_review_keep_existing_mappings")
-    elif policy == "type_locked" and unmapped:
-        action = "review"
-        reasons.append("type_locked_new_columns_need_approval")
 
     severity = "none"
     if hard or action == "pause":

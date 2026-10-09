@@ -3318,6 +3318,23 @@ def _mysql_datetime_utc_normalizes(typ: str, dest_db: str) -> bool:
     return sql_base_type(typ) == "DATETIME"
 
 
+def _dest_is_instant_only(typ: str, dest_db: str) -> bool:
+    """True when the destination's temporal carrier is an instant-only type.
+
+    MongoDB BSON date, Elasticsearch date, and similar carriers store instants
+    by design — they cannot strip an offset because they always store UTC.
+    Quarantining timezone-aware values for these destinations is a false positive.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.type_system import _INSTANT_ONLY_TEMPORAL_ENGINES
+
+    dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    if dest_db in _INSTANT_ONLY_TEMPORAL_ENGINES:
+        # MongoDB BSON date, Elasticsearch date, etc. are always instant carriers
+        return True
+    return False
+
+
 def quarantine_unfit_temporals(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -3358,6 +3375,7 @@ def quarantine_unfit_temporals(
             logical == "datetime"
             and datetime_timezone_polarity(typ, dest_db=dest_db) == "ntz"
             and not _mysql_datetime_utc_normalizes(typ, dest_db)
+            and not _dest_is_instant_only(typ, dest_db)
         )
         # Always include temporal columns so empty refuse runs even without FSP/TZ.
         temporal_cols.append((i, typ, check_fsp, check_tz))

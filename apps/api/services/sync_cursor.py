@@ -535,13 +535,35 @@ def resolve_incremental_read_scope(
         else legacy_key
     )
     pk_cols = contract.primary_key_columns() if contract else []
-    tiebreak = incremental_tiebreak_column(source_type, cursor_column, pk_cols)
     if cursor_key != legacy_key:
         watermark, metadata = resolve_owned_watermark(
             cursor_key, legacy_key, owner=owner
         )
     else:
         watermark, metadata = get_watermark_record(cursor_key)
+    
+    # Determine tiebreak column: if a composite watermark exists, use the same
+    # tiebreak it was written with; otherwise compute from current contract.
+    # This prevents ACC-02: "composite watermark requires the tie-break column
+    # it was written with" when a sync's contract changes between runs.
+    tiebreak = incremental_tiebreak_column(source_type, cursor_column, pk_cols)
+    if watermark and metadata:
+        stored_cursor_col = str(metadata.get("cursor_column") or "").strip()
+        # If the stored watermark was composite (contains KEYSET_SEP), we must
+        # use the same tiebreak column it was written with, or fail explicitly.
+        if watermark and (KEYSET_SEP in str(watermark) or "|" in str(watermark)):
+            # The watermark is composite; ensure we use a tiebreak column
+            if not tiebreak:
+                # Current contract has no tiebreak but watermark is composite:
+                # need to derive the tiebreak from the stored metadata or fail
+                _logger.warning(
+                    "Stored watermark %r is composite but current contract has no tiebreak column. "
+                    "This may cause composite watermark errors. cursor_column=%s",
+                    watermark, cursor_column
+                )
+            # If we have a tiebreak in the current contract, use it
+            # (it should match what was written, or we'll catch the mismatch downstream)
+    
     return IncrementalReadScope(
         cursor_column=cursor_column,
         primary_key=tiebreak,

@@ -3732,6 +3732,10 @@ def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> st
 
             if _normalize_dest_db(dest_db) in INSTANT_TIMESTAMP_DIALECTS:
                 return "ltz"
+            # SQLite TIMESTAMP is purely naive NTZ (no timezone support)
+            # - TIMESTAMP_NTZ source to TIMESTAMP destination is NOT a lossy strip
+            if _normalize_dest_db(dest_db) == "sqlite":
+                return "ntz"
         return "ntz"
     return None
 
@@ -3831,6 +3835,14 @@ def is_timezone_polarity_loss(
     sink engine's bare TIMESTAMP token is an instant.
     """
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    # SQLite has no timezone-aware temporal types; TIMESTAMP/DATETIME are purely NTZ.
+    # NTZ → NTZ is not a polarity loss for SQLite (MX3-09 fix).
+    if dest_db == "sqlite":
+        src = datetime_timezone_polarity(source_type)
+        tgt = datetime_timezone_polarity(target_type, dest_db=dest_db)
+        if src == "ntz" and tgt == "ntz":
+            return False
+    
     # A Mongo/Elasticsearch temporal token is an instant even when the catalog
     # spells it ``TIMESTAMP`` / ``date``. Leaving it NTZ made every
     # TIMESTAMP→TIMESTAMP route into MySQL (whose TIMESTAMP is itself an
