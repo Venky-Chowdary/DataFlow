@@ -1550,6 +1550,62 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 )
             )
 
+    # g9_sync_contract blockers are an *incomplete contract* — missing identity
+    # key / cursor — never a duplicate finding. Until now they produced no root
+    # at all: earlier code minted a phantom "Duplicate identity keys" root that
+    # hid the real message (QA T11/T08); removing that left a bare blocker with
+    # no remediation. Give the operator the contract root with the actual fix.
+    contract_blockers = [
+        b
+        for b in blockers
+        if str(b.get("id") or "") == "g9_sync_contract"
+        and re.search(
+            r"missing (?:primary key|cursor)|sync mode contract incomplete",
+            str(b.get("message") or ""),
+            re.I,
+        )
+    ]
+    if contract_blockers:
+        absorbed = sorted(
+            {str(b.get("id")) for b in contract_blockers if b.get("id")}
+        )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("sync_contract_incomplete", [], absorbed),
+                kind="sync_contract_incomplete",
+                title="Sync contract incomplete",
+                summary=(
+                    "The selected sync mode needs an identity key and/or a "
+                    "cursor column that was not provided — the run refused "
+                    "before any rows moved."
+                ),
+                business_impact=(
+                    "Incremental/upsert routes cannot checkpoint or dedupe "
+                    "without the key the contract requires."
+                ),
+                affected_columns=[],
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="medium",
+                recommended_fix=(
+                    "Open Sync → identity settings → choose the primary key "
+                    "(and cursor column for incremental), then re-Validate."
+                ),
+                alternative_fixes=[
+                    "Switch to full_refresh_append/overwrite — no key required",
+                    "Re-run with the same upsert key contract as the prior run",
+                ],
+                recovery_strategy="Set the key/cursor and re-Validate; nothing was written.",
+                expected_runtime_impact="Re-Validate only — no destination rewrite",
+                quarantine_policy="n/a — no rows moved",
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_ROLLBACK.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
+
     return roots
 
 

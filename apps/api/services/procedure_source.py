@@ -516,6 +516,37 @@ def compile_callable_sql(spec: CallableSpec) -> tuple[str, dict[str, Any]]:
     return spec.sql, dict(spec.params)
 
 
+def _python_carrier(value: Any) -> str:
+    """Declared-carrier hint from the DBAPI's own Python type.
+
+    Cells are stringified for the wire, so a VARCHAR column of digits is
+    indistinguishable from a NUMERIC column on samples alone — the QA T16
+    text column was auto-retyped NUMERIC(19,5) on exactly that. The Python
+    type the driver materialised is declared evidence: a ``str`` can only
+    come from a text column; a ``Decimal`` only from exact numeric.
+    """
+    import datetime as _dt
+    from decimal import Decimal
+
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, int):
+        return "INTEGER"
+    if isinstance(value, Decimal):
+        return "DECIMAL"
+    if isinstance(value, float):
+        return "DOUBLE"
+    if isinstance(value, _dt.datetime):
+        return "TIMESTAMP"
+    if isinstance(value, _dt.date):
+        return "DATE"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "BYTEA"
+    if isinstance(value, (list, tuple, dict)):
+        return "JSON"
+    return "VARCHAR"
+
+
 def peek_callable_schema(
     headers: list[str],
     rows: list[list[Any]] | list[dict[str, Any]],
@@ -524,19 +555,27 @@ def peek_callable_schema(
     from services.schema_inference import infer_schema_map
 
     samples: dict[str, list[str]] = {h: [] for h in headers}
+    py_carriers: dict[str, str] = {}
     for row in rows:
         if isinstance(row, Mapping):
             for h in headers:
                 val = row.get(h)
                 if not is_null_evidence(val):
                     samples[h].append(_cell(val))
+                    py_carriers.setdefault(h, _python_carrier(val))
         else:
             for i, h in enumerate(headers):
                 if i < len(row) and not is_null_evidence(row[i]):
                     samples[h].append(_cell(row[i]))
+                    py_carriers.setdefault(h, _python_carrier(row[i]))
     schema, intel = infer_schema_map(samples)
     for h in headers:
         schema.setdefault(h, "VARCHAR")
+        carrier = py_carriers.get(h)
+        if carrier == "VARCHAR" and schema[h] not in {"VARCHAR", "TEXT", "JSON", "unknown"}:
+            # str values mean a text column — never let sample-fit retype
+            # digits-in-text into NUMERIC (QA T16 fidelity block).
+            schema[h] = "VARCHAR"
     return schema, intel
 
 
