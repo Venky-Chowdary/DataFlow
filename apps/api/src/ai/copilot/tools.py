@@ -6410,37 +6410,36 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             # start_dataset_transfer parses the file, runs the same mapping +
             # 9-gate preflight, and still stops at Confirm.
             ds_name = ""
-            try:
-                for cand in (
-                    str(transfer_intent.get("source_table") or ""),
-                    str(transfer_intent.get("source_connector_name") or ""),
-                ):
-                    if not cand or cand.lower() in _BARE_OBJECT_WORDS:
-                        continue
-                    schema = get_data_analyst().resolve_dataset(cand)
-                    if (
-                        schema is not None
-                        and getattr(schema, "source", "") == "upload"
-                        and getattr(schema, "path", "")
-                    ):
-                        ds_name = getattr(schema, "name", "") or cand
-                        break
-            except Exception as exc:
-                logging.getLogger(__name__).debug(
-                    "dataset-source resolution skipped: %s", exc, exc_info=exc
-                )
-            # "transfer customers.csv to Snowflake" names a file even when the
-            # index misses it — the dataset path resolves it or says exactly
-            # which uploads exist; plan_transfer would have staged a table
-            # named "customers.csv" on a connector (QA DS05).
+            # A literal filename wins over fuzzy dataset matching — resolving
+            # "customers.csv" to a different upload named *customers* would
+            # stage the wrong file (QA DS05).
+            st = str(transfer_intent.get("source_table") or "").strip()
+            if re.search(
+                r"\.(?:csv|tsv|jsonl?|ndjson|parquet|xlsx?|ods|txt|avro|orc)$",
+                st,
+                re.I,
+            ):
+                ds_name = st
             if not ds_name:
-                st = str(transfer_intent.get("source_table") or "").strip()
-                if re.search(
-                    r"\.(?:csv|tsv|jsonl?|ndjson|parquet|xlsx?|ods|txt|avro|orc)$",
-                    st,
-                    re.I,
-                ):
-                    ds_name = st
+                try:
+                    for cand in (
+                        st,
+                        str(transfer_intent.get("source_connector_name") or ""),
+                    ):
+                        if not cand or cand.lower() in _BARE_OBJECT_WORDS:
+                            continue
+                        schema = get_data_analyst().resolve_dataset(cand)
+                        if (
+                            schema is not None
+                            and getattr(schema, "source", "") == "upload"
+                            and getattr(schema, "path", "")
+                        ):
+                            ds_name = getattr(schema, "name", "") or cand
+                            break
+                except Exception as exc:
+                    logging.getLogger(__name__).debug(
+                        "dataset-source resolution skipped: %s", exc, exc_info=exc
+                    )
             if ds_name:
                 planned.append(("start_dataset_transfer", {
                     "dataset_name": ds_name,
