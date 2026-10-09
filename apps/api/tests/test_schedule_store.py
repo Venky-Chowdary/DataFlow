@@ -40,6 +40,65 @@ def test_create_and_list(temp_store):
     assert len(store.list_schedules()) == 1
 
 
+def test_list_repairs_stale_next_run_for_enabled_schedules(temp_store):
+    """QA D11 — an enabled schedule whose ``next_run_at`` froze in the past
+    (runner outage / dead claim) must not keep advertising a due time that
+    can never arrive. The list read recomputes and persists the repair."""
+    sched = store.create_schedule({
+        "name": "Stuck beat",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+    past = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    loaded = store._load_all()
+    loaded[0].next_run_at = past
+    store._save_all(loaded)
+
+    listed = store.list_schedules()
+    due = datetime.fromisoformat(listed[0].next_run_at)
+    assert due > datetime.now(timezone.utc)
+    # The repair persisted — a second read does not see the stale value.
+    assert datetime.fromisoformat(
+        store.get_schedule(sched.id).next_run_at
+    ) > datetime.now(timezone.utc)
+
+
+def test_list_leaves_disabled_and_running_schedules_alone(temp_store):
+    sched = store.create_schedule({
+        "name": "Paused",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}],
+        "enabled": False,
+    })
+    past = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    loaded = store._load_all()
+    loaded[0].next_run_at = past
+    store._save_all(loaded)
+    assert store.list_schedules()[0].next_run_at == past
+
+
+def test_interval_cron_requires_an_expression(temp_store):
+    with pytest.raises(ValueError, match="cron"):
+        store.create_schedule({
+            "name": "Bad pair",
+            "source_connector_id": "src-1",
+            "source_table": "orders",
+            "dest_connector_id": "dst-1",
+            "dest_table": "orders_wh",
+            "interval": "cron",
+            "cron": "",
+            "mappings": [{"source": "id", "target": "id"}],
+        })
+
+
 def test_assert_signed_contract_fail_closed(temp_store, monkeypatch):
     from services import contract_store as cstore
     from services.data_contract import ContractStatus, DataContract

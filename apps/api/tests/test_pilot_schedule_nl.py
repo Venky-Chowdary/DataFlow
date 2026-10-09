@@ -63,9 +63,23 @@ def test_weekly_on_a_weekday_carries_the_day_and_the_zone():
     )
 
 
-def test_every_15_minutes_is_a_minute_cron_on_the_hourly_preset():
+def test_every_15_minutes_is_a_minute_cron_not_a_daily_preset():
+    """QA D11/S07 — a sub-hour cron labelled ``interval=daily/hourly``
+    contradicts itself. ``cron`` is the honest cadence class."""
     spec = parse_cadence("every 15 minutes")
-    assert (spec.interval, spec.cron) == ("hourly", "*/15 * * * *")
+    assert (spec.interval, spec.cron) == ("cron", "*/15 * * * *")
+
+
+def test_explicit_cron_labels_cron_not_a_contradicting_preset():
+    spec = parse_cadence("cron 30 4 * * 1-5")
+    assert (spec.interval, spec.cron) == ("cron", "30 4 * * 1-5")
+
+
+def test_weekly_on_a_weekday_without_a_time_anchors_midnight():
+    """QA S10 — the named weekday must not silently drop onto a rolling
+    7-day preset that runs on whatever day the schedule was created."""
+    spec = parse_cadence("weekly on Monday")
+    assert (spec.interval, spec.cron) == ("weekly", "0 0 * * 1")
 
 
 def test_monthly_needs_the_day_and_takes_it():

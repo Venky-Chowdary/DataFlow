@@ -605,8 +605,42 @@ def _save_all(schedules: list[PipelineSchedule], *, removed_ids: Sequence[str] =
     )
 
 
+def _repair_stale_next_run(schedules: list[PipelineSchedule]) -> list[PipelineSchedule]:
+    """Recompute ``next_run_at`` for enabled schedules frozen in the past.
+
+    A runner outage or a claim that died mid-run leaves ``next_run_at``
+    behind while the schedule stays enabled — the list then advertises a due
+    time that can never arrive (QA D11). Recompute from *now* and persist the
+    repair once; the runner will claim the recomputed instant when it comes
+    back. Disabled and actively-running schedules are left alone.
+    """
+    now = datetime.now(timezone.utc)
+    dirty = False
+    for sched in schedules:
+        if not sched.enabled or sched.running:
+            continue
+        due = _parse_ts(sched.next_run_at)
+        if due is not None and due.tzinfo is None:
+            due = due.replace(tzinfo=timezone.utc)
+        if due is None or due < now:
+            sched.next_run_at = next_run_for(sched, now)
+            dirty = True
+    if dirty:
+        try:
+            _save_all(schedules)
+        except Exception:
+            # A read must not fail because the repair could not persist —
+            # the recomputed values are still returned to the caller.
+            logging.getLogger(__name__).debug(
+                "stale next_run_at repair could not persist", exc_info=True
+            )
+    return schedules
+
+
 def list_schedules() -> list[PipelineSchedule]:
-    return sorted(_load_all(), key=lambda s: s.created_at, reverse=True)
+    return sorted(
+        _repair_stale_next_run(_load_all()), key=lambda s: s.created_at, reverse=True
+    )
 
 
 def get_schedule(schedule_id: str) -> PipelineSchedule | None:
@@ -635,10 +669,15 @@ def accepted_schedule_sync_mode(sync_mode: str) -> str:
 
 
 def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> str:
-    if interval not in INTERVALS:
+    cron = (cron or "").strip()
+    if interval == "cron":
+        # The cadence *is* the expression — a stored preset would contradict
+        # it (QA D11/S07: interval=daily beside ``*/3 * * * *``).
+        if not cron:
+            raise ValueError("interval 'cron' requires a cron expression")
+    elif interval not in INTERVALS:
         raise ValueError(f"Invalid interval: {interval}")
     sync_mode = accepted_schedule_sync_mode(sync_mode)
-    cron = (cron or "").strip()
     if cron:
         try:
             validate_cron(cron)
@@ -1012,13 +1051,13 @@ def resolve_machine_interval(data: dict[str, Any], stored: str) -> str:
             raise ValueError(f"Invalid interval: {raw_preset}")
         return preset
     if "interval" not in data:
-        return stored if stored in INTERVALS else "daily"
+        return stored if stored in INTERVALS or stored == "cron" else "daily"
     spoken_raw = str(data.get("interval") or "").strip()
     spoken = spoken_raw.lower()
-    if spoken in INTERVALS:
+    if spoken in INTERVALS or spoken == "cron":
         return spoken
     if " " in spoken_raw:
-        return stored if stored in INTERVALS else "daily"
+        return stored if stored in INTERVALS or stored == "cron" else "daily"
     raise ValueError(f"Invalid interval: {spoken_raw}")
 
 
