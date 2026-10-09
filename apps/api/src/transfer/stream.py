@@ -2611,6 +2611,24 @@ def _stream_database_transfer_impl(
                 kept.append(row)
         return kept, unbounded
 
+    # Write-path referential-integrity guard (QA fk__pg-maria / fk__pg-pg):
+    # child rows whose destination parent does not exist are quarantined, not
+    # committed. Built once per stream — the FK catalog probe is small and
+    # runs before the first page is filtered.
+    fk_orphan_guard = None
+    try:
+        from .stream_foreign_keys import build_fk_orphan_guard
+
+        fk_orphan_guard = build_fk_orphan_guard(
+            source,
+            destination,
+            table,
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+        )
+    except Exception as exc:
+        logger.debug("FK orphan guard not built for %s: %s", table, exc)
+
     def _filter_batch(batch):
         """Source filter, then the approved recipe — once per page.
 
@@ -2631,7 +2649,12 @@ def _stream_database_transfer_impl(
         if _raw_page_marked(batch):
             return batch
         raw_rows = len(batch.rows or [])
-        if raw_rows and (source_filter or shape_runner is not None or client_cursor_bound):
+        if raw_rows and (
+            source_filter
+            or shape_runner is not None
+            or client_cursor_bound
+            or fk_orphan_guard is not None
+        ):
             # Pagination bookmarks belong to the rows the source handed over. A
             # recipe that drops the page's highest key would otherwise bookmark a
             # lower one and the next read would hand those rows over again.
@@ -2710,6 +2733,23 @@ def _stream_database_transfer_impl(
                     "the filter or the transform recipe removed a row — refusing "
                     "rather than attributing it to the wrong authority"
                 ) from exc
+        if fk_orphan_guard is not None and batch.rows:
+            # fk__pg-maria/fk__pg-pg: a child row whose parent is absent at the
+            # destination must quarantine, never land. The guard anti-joins
+            # this page's FK tuples against the destination parent table.
+            kept_rows, orphan_details = fk_orphan_guard.partition(
+                list(batch.headers or []), list(batch.rows)
+            )
+            if orphan_details:
+                batch.rows = kept_rows
+                try:
+                    batch.fk_orphan_details = orphan_details
+                except AttributeError as exc:
+                    raise ValueError(
+                        "this source's read page cannot carry quarantined "
+                        "orphan-FK details, so the run cannot prove the rows "
+                        "were held out — refusing rather than dropping them"
+                    ) from exc
         if shape_runner is not None and batch.rows is not None:
             headers = list(batch.headers or [])
             unknown = [h for h in headers if h and h not in shape_inputs]
@@ -3097,6 +3137,20 @@ def _stream_database_transfer_impl(
                 ),
                 replay_safety=replay_safety,
             )
+            # Fold orphan-FK holdouts into the batch's own rejected ledger so
+            # they persist to the quarantine DLQ and balance Gate-8
+            # conservation (read = written + rejected + filtered).
+            fk_orphans = getattr(batch, "fk_orphan_details", None) or []
+            if fk_orphans:
+                det = list(dest_summary.get("rejected_details") or [])
+                det.extend(fk_orphans)
+                dest_summary["rejected_details"] = det
+                dest_summary["rejected_rows"] = int(
+                    dest_summary.get("rejected_rows") or 0
+                ) + len(fk_orphans)
+                dest_summary["orphan_fk_rows"] = int(
+                    dest_summary.get("orphan_fk_rows") or 0
+                ) + len(fk_orphans)
         except WriteBatchBlocked as blocked:
             if keyed_census_acc is not None:
                 keyed_census_acc.reverse_last_live_batch()
@@ -3300,6 +3354,33 @@ def _stream_database_transfer_impl(
             checkpoint.target_rows_before = int(dest_summary[PRECOUNT_KEY])
         checkpoint.chunk_total = chunks
         checkpoint.status = "running"
+        # ACC-05 — advance the *route* watermark with every committed batch.
+        # These rows are durable at the destination the moment the batch
+        # returns; a cancelled run's next job_id has no access to this
+        # job-scoped checkpoint, so without a per-chunk watermark the next
+        # run re-reads from the beginning and re-writes committed rows
+        # (observed: 40 duplicate documents on PG→Mongo incremental_append).
+        # Ordering: watermark first — if the checkpoint save below fails the
+        # route watermark still reflects committed rows, never behind them.
+        if incremental and running_cursor and cursor_key:
+            try:
+                set_watermark(
+                    cursor_key,
+                    running_cursor,
+                    metadata={
+                        "job_id": job_id,
+                        "sync_mode": effective_sync,
+                        # A watermark is a value of one column; record which one
+                        # so a later run on a different cursor cannot inherit it.
+                        "cursor_column": cursor_source_col,
+                    },
+                )
+            except Exception as wm_exc:
+                raise RuntimeError(
+                    "Cursor watermark persist failed after committed batch — "
+                    "refuse to continue (next run would re-read and re-write "
+                    f"committed rows): {wm_exc}"
+                ) from wm_exc
         # Fail-closed: no durable resume point ⇒ abort (do not keep writing).
         checkpoint_service.require_save(checkpoint)
         if src_type == "kafka" and kafka_cursor and src_cfg:

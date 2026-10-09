@@ -278,7 +278,12 @@ def _pgvector_gate_existing_physical(
     )
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT to_regclass(%s)", (f"{sch}.{table_name}",))
+            from connectors.sql_identifiers import pg_regclass_literal
+
+            cur.execute(
+                "SELECT to_regclass(%s)",
+                (pg_regclass_literal(sch, table_name),),
+            )
             existed = cur.fetchone()[0] is not None
             if not existed:
                 # Create-new: any Studio (incl. partial) → prepare fail-closes;
@@ -556,9 +561,11 @@ def write_mapped_rows(
                 )
             else:
                 # Respect create_table=False — never contradict preflight deny-create.
+                from connectors.sql_identifiers import pg_regclass_literal
+
                 cur.execute(
                     "SELECT to_regclass(%s)",
-                    (f"{schema or 'public'}.{table_name}",),
+                    (pg_regclass_literal(schema or "public", table_name),),
                 )
                 if cur.fetchone()[0] is None:
                     return WriteResult(

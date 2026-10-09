@@ -1317,9 +1317,11 @@ def copy_csv_to_postgres_incremental(
         try:
             dest_conn.autocommit = True
             with dest_conn.cursor() as dst_cur:
+                from connectors.sql_identifiers import pg_regclass_literal
+
                 dst_cur.execute(
                     "SELECT to_regclass(%s)",
-                    (f"{dest_schema_n}.{dest_table}",),
+                    (pg_regclass_literal(dest_schema_n, dest_table),),
                 )
                 exists = dst_cur.fetchone()[0] is not None
                 if source_count == 0:

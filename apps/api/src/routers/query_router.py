@@ -58,7 +58,7 @@ def _is_safe_sql(raw_query: str) -> bool:
     destructive = {
         "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
         "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
-        "COPY", "LOAD",
+        "COPY", "LOAD", "CALL", "DO", "LOCK", "UNLOCK",
     }
     safe_starts = {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES"}
     first_keyword = None
@@ -83,7 +83,65 @@ def _is_safe_sql(raw_query: str) -> bool:
     if stmt_type and stmt_type not in {"SELECT", "UNKNOWN"}:
         return False
 
+    if _has_side_effect_functions(raw_query):
+        return False
+
     return first_keyword in safe_starts
+
+
+# Read-only is a *session* guarantee, not a keyword filter. A SELECT can still
+# invoke volatile functions that mutate session/server state (QA R06):
+# set_config flips transaction_read_only, nextval burns sequences,
+# pg_terminate_backend kills connections, dblink/lo_* run side-channel writes.
+# These names are blocked inside any read-path query, plus a session-level
+# read-only mode is applied on dialects that support one.
+_SIDE_EFFECT_FUNCTIONS = frozenset({
+    # session/config mutation
+    "set_config", "reset", "set", "use",
+    # sequence mutation (burns values even in a rolled-back tx)
+    "nextval", "setval", "currval",
+    # backend control / admin
+    "pg_terminate_backend", "pg_cancel_backend", "pg_reload_conf",
+    "pg_rotate_logfile", "pg_promote", "pg_create_restore_point",
+    "pg_switch_wal", "pg_switch_xlog", "pg_backup_start", "pg_backup_stop",
+    "pg_control_checkpoint", "pg_logical_emit_message", "pg_notify",
+    # replication slot mutation
+    "pg_create_physical_replication_slot", "pg_drop_replication_slot",
+    "pg_create_logical_replication_slot", "pg_logical_slot_get_changes",
+    "pg_logical_slot_peek_changes", "pg_replication_slot_advance",
+    # server filesystem read (information disclosure)
+    "pg_read_file", "pg_read_binary_file", "pg_ls_dir", "pg_stat_file",
+    "pg_ls_logdir", "pg_ls_waldir", "pg_ls_archive_statusdir", "pg_ls_tmpdir",
+    # advisory locks / denial of service
+    "pg_advisory_lock", "pg_advisory_unlock", "pg_advisory_unlock_all",
+    "pg_advisory_xact_lock", "pg_try_advisory_lock", "pg_try_advisory_xact_lock",
+    "pg_advisory_xact_lock_shared", "pg_advisory_lock_shared",
+    "pg_try_advisory_xact_lock_shared", "pg_try_advisory_lock_shared",
+    "pg_sleep", "sleep", "benchmark",
+    # side-channel drivers (pg dblink, mysql locks/files, mssql xp_)
+    "get_lock", "release_lock", "load_file",
+    "xp_cmdshell", "xp_dirtree", "xp_fileexist", "xp_regread", "xp_regwrite",
+    "openrowset", "opendatasource", "bulk",
+    # oracle administrative packages are prefixed dbms_/utl_ below
+})
+_SIDE_EFFECT_PREFIXES = (
+    "dblink", "lo_", "dbms_", "utl_", "sys_exec", "sys_eval", "sp_",
+)
+
+_FUNC_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def _has_side_effect_functions(sql: str) -> bool:
+    """True when a read query invokes a function with session/server side effects."""
+    scrubbed = re.sub(r"'(?:''|[^'])*'", " ", sql or "")
+    scrubbed = re.sub(r'"(?:""|[^"])*"', " ", scrubbed)
+    for match in _FUNC_CALL_RE.finditer(scrubbed):
+        name = match.group(1).lower()
+        if name in _SIDE_EFFECT_FUNCTIONS:
+            return True
+        if any(name.startswith(prefix) for prefix in _SIDE_EFFECT_PREFIXES):
+            return True
+    return False
 
 
 def _is_safe_sql_fallback(raw_query: str) -> bool:
@@ -648,6 +706,48 @@ def _jsonify_value(value: Any) -> Any:
     return sanitize_json_value(value, refuse_nonfinite=False)
 
 
+def _unique_column_names(columns: list[str]) -> list[str]:
+    """Disambiguate duplicate result column names.
+
+    ``{col: value}`` row dicts silently collapse duplicate projection names —
+    ``SELECT count(*), count(*)`` returns one ``count`` key and the second
+    column is unrecoverable (QA R23, silent data loss in reconciliation output).
+    Suffix the nth duplicate so every projected value survives and ``columns``
+    still documents the mapping.
+    """
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for name in columns:
+        key = str(name)
+        count = seen.get(key, 0) + 1
+        seen[key] = count
+        out.append(key if count == 1 else f"{key}__{count}")
+    return out
+
+
+def _apply_read_only_session(conn: Any, db_type: str) -> None:
+    """Enforce read-only at the session level where the dialect supports it.
+
+    The keyword filter is the first line of defense; a session-level READ ONLY
+    mode is the second (QA R06). Best-effort — an unsupported dialect falls back
+    to the keyword + side-effect-function filters rather than failing the query.
+    """
+    db = (db_type or "").lower()
+    try:
+        from sqlalchemy import text
+
+        if db in {"postgresql", "postgres", "cockroachdb", "redshift", "greenplum", "yugabytedb"}:
+            conn.execute(text("SET TRANSACTION READ ONLY"))
+        elif db in {"mysql", "mariadb", "singlestore", "tidb"}:
+            conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
+        elif db in {"sqlite", "duckdb"}:
+            conn.execute(text("PRAGMA query_only = ON"))
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "read-only session option not applied on %s: %s", db, exc
+        )
+
+
 def _column_schema(columns: list[str], rows: list[dict[str, Any]]) -> dict[str, str]:
     """Infer a canonical logical type per result column from returned values.
 
@@ -744,8 +844,9 @@ def _run_sql_query(connector, body):
         from sqlalchemy import text
 
         with engine.connect() as conn:
+            _apply_read_only_session(conn, connector.type)
             result = conn.execute(text(clean_query), dict(body.params or {}))
-            columns = list(result.keys())
+            columns = _unique_column_names(list(result.keys()))
             raw_desc = getattr(getattr(result, "cursor", None), "description", None)
             description = (
                 tuple(tuple(col) if col is not None else None for col in raw_desc)
@@ -842,7 +943,7 @@ def _run_snowflake_query(connector, body):
         with conn.cursor() as cur:
             cur.execute(clean_query, params or None)
             description = cur.description or []
-            columns = [desc[0] for desc in description]
+            columns = _unique_column_names([desc[0] for desc in description])
             rows = []
             for i, row in enumerate(cur.fetchall()):
                 if i >= body.limit:

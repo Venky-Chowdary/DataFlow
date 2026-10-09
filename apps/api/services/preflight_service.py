@@ -512,6 +512,9 @@ class FilePreflightContext(PreflightContext):
             database_extract=str(getattr(self.plan.source, "kind", "") or "").lower()
             == "database",
             source_measured_empty=bool(getattr(self, "source_measured_empty", False)),
+            stream_contracts=list(
+                getattr(self.plan, "stream_contracts", None) or []
+            ),
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
         try:
@@ -1831,6 +1834,7 @@ def run_file_preflight(
         destination_unique_keys=list(destination_unique_keys or []),
         destination_foreign_keys=list(destination_foreign_keys or []),
         fk_risk_acknowledged=bool(fk_risk_acknowledged),
+        stream_contracts=list(stream_contracts or []),
     )
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large

@@ -484,6 +484,16 @@ def _is_duplicate_signal(
         or re.search(r"identity key required", str(message or ""), re.I)
     ):
         return False
+    # g9_sync_contract "Missing primary key / Missing cursor" is an *incomplete
+    # contract*, not a duplicate finding — ``Missing primary key`` matches
+    # ``primary.?key`` in ``_DUP_RE`` and minted a phantom "Duplicate identity
+    # keys" root that hid the real missing-key/cursor message (QA T11/T08).
+    if str(gate_id or "") == "g9_sync_contract":
+        return False
+    if re.search(r"sync mode contract incomplete", str(message or ""), re.I):
+        return False
+    if re.search(r"missing (?:primary key|cursor)", str(message or ""), re.I):
+        return False
     if details.get("duplicate_keys") or details.get("identity_duplicates"):
         return True
     blob = _blob(message, details)
@@ -1403,6 +1413,28 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             }
         )
         if absorbed:
+            # Surface the probe's own reason (relation not found, driver error,
+            # wrong object) — the canned "did not address the source table"
+            # erased the real failure and sent operators to re-Validate instead
+            # of fixing the actual addressing bug (QA schema_mismatch extra).
+            probe_detail = ""
+            for g in probe_gates:
+                probe = (g.get("details") or {}).get("source_uniqueness_probe")
+                if isinstance(probe, dict) and probe.get("message"):
+                    probe_detail = str(probe["message"])[:240]
+                    break
+            if not probe_detail:
+                for g in probe_gates:
+                    msg = str(g.get("message") or "").strip()
+                    if msg:
+                        probe_detail = msg[:240]
+                        break
+            if not probe_detail:
+                for b in probe_blockers:
+                    msg = str(b.get("message") or "").strip()
+                    if msg:
+                        probe_detail = msg[:240]
+                        break
             roots.append(
                 MigrationRootCause(
                     root_id=_root_id("uniqueness_probe_unavailable", [], absorbed),
@@ -1411,6 +1443,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     summary=(
                         "Validate could not prove source identity uniqueness — "
                         "the probe did not address the source table"
+                        + (f" ({probe_detail})" if probe_detail else "")
                     ),
                     business_impact=(
                         "A uniqueness-required sync cannot be approved from the sample "
@@ -1570,6 +1603,17 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
     collapsed = [r.as_operator_blocker() for r in roots] + remaining
     preflight["blockers"] = collapsed
 
+    # The verdict was stamped before roots were injected. A severity=block
+    # blocker must never coexist with decision=approve / passed=true — that
+    # produced the internally contradictory "No blocking issues detected"
+    # next to a block-severity rc-* (QA T04/T12).
+    block_roots = [r for r in roots if (r.severity or "").lower() == "block"]
+    has_blocking = bool(block_roots) or any(
+        str(b.get("severity") or "").lower() == "block" for b in remaining
+    )
+    if has_blocking:
+        preflight["passed"] = False
+
     pb = preflight.get("proof_bundle")
     if isinstance(pb, dict):
         td = pb.get("transfer_decision")
@@ -1583,6 +1627,13 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
                 ],
                 "root_causes": [r.to_dict() for r in roots],
             }
+            if has_blocking:
+                titles = [r.title for r in block_roots] or [
+                    str(b.get("title") or b.get("message") or b.get("id") or "blocking issue")
+                    for b in collapsed[:3]
+                ]
+                td["decision"] = "block"
+                td["reason"] = "Blocking issues detected: " + "; ".join(titles[:3])
             preflight["proof_bundle"] = {**pb, "transfer_decision": td}
 
     return preflight

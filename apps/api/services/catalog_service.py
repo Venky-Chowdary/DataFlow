@@ -115,9 +115,19 @@ def search_catalog(
             c for c in connectors
             if q in c["name"].lower() or q in c["id"].lower()
             or q in c.get("category", "").lower()
-            or q in c.get("description", "").lower()
             or q in c.get("driver_type", "").lower()
         ]
+        # Description matching only when it's clearly about the query term
+        # D05: Avoid SFTP matching "postgres" because its description mentions Postgres as a destination
+        desc_matches = [
+            c for c in _enriched_connectors()
+            if q in c.get("description", "").lower()
+        ]
+        # Only add description matches if they don't already appear in name/id/category/driver_type
+        seen_ids = {c["id"] for c in connectors}
+        for c in desc_matches:
+            if c["id"] not in seen_ids:
+                connectors.append(c)
 
     if category:
         connectors = [c for c in connectors if c.get("category") == category]

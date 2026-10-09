@@ -1100,9 +1100,11 @@ def copy_between_postgres_incremental(
                     "incremental COPY requires exactly one mapped primary key"
                 )
             _src_pk_table, dest_pk = pk_map
+            from connectors.sql_identifiers import pg_regclass_literal
+
             dst_cur.execute(
                 "SELECT to_regclass(%s)",
-                (f"{dest_schema or 'public'}.{dest_table}",),
+                (pg_regclass_literal(dest_schema or "public", dest_table),),
             )
             if dst_cur.fetchone()[0] is None:
                 create_destination_like_source(
@@ -1234,9 +1236,11 @@ def copy_mysql_to_postgres_incremental(
     try:
         dest_conn.autocommit = True
         with dest_conn.cursor() as dst_cur:
+            from connectors.sql_identifiers import pg_regclass_literal
+
             dst_cur.execute(
                 "SELECT to_regclass(%s)",
-                (f"{dest_schema or 'public'}.{dest_table}",),
+                (pg_regclass_literal(dest_schema or "public", dest_table),),
             )
             if dst_cur.fetchone()[0] is None:
                 dst_cur.execute(
@@ -1693,9 +1697,11 @@ def copy_sqlite_to_postgres_incremental(
     try:
         dest_conn.autocommit = True
         with dest_conn.cursor() as dst_cur:
+            from connectors.sql_identifiers import pg_regclass_literal
+
             dst_cur.execute(
                 "SELECT to_regclass(%s)",
-                (f"{dest_schema or 'public'}.{dest_table}",),
+                (pg_regclass_literal(dest_schema or "public", dest_table),),
             )
             if dst_cur.fetchone()[0] is None:
                 dst_cur.execute(

@@ -894,6 +894,7 @@ def _check_duplicate_keys(
     *,
     dest_kind: str = "",
     primary_key: str | None = None,
+    primary_key_columns: list[str] | None = None,
     source_duplicate_findings: list[dict[str, Any]] | None = None,
     sync_mode: str = "",
     destination_pk_columns: list[str] | None = None,
@@ -926,6 +927,20 @@ def _check_duplicate_keys(
         sync = normalize_sync_mode(sync_mode)
     except Exception:
         sync = (sync_mode or "").strip().lower()
+    # ACC-03 — full identity columns (composite-aware). A (region,id) contract
+    # must dedupe on the tuple, never on `id` alone: components legitimately
+    # repeat across composite keys, and checking one member false-blocks every
+    # composite-key upsert.
+    identity_cols = [
+        str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()
+    ]
+    if not identity_cols and primary_key:
+        identity_cols = [primary_key]
+    composite_identity = len(identity_cols) > 1
+    pk_label = " + ".join(identity_cols) if identity_cols else (primary_key or "")
+    target_cols = [
+        (_target_for_source(c, mappings) or c) for c in identity_cols
+    ]
     target_col = _target_for_source(primary_key, mappings) if primary_key else ""
     advisory_warnings = _advisory_unique_key_warnings(
         dest_kind=dest_kind,
@@ -947,7 +962,7 @@ def _check_duplicate_keys(
     )
     overwrite_enforces_uniqueness = _is_overwrite_like(sync) and dest_has_enforced_key
     # Single-column identity enforcement (upsert/CDC/PK/single UNIQUE).
-    enforce_identity = bool(primary_key) and (
+    enforce_identity = bool(identity_cols) and (
         schemaless
         or sync_requires_unique_identity(sync, dest_kind=dest_kind)
         or overwrite_enforces_uniqueness
@@ -1004,7 +1019,7 @@ def _check_duplicate_keys(
     )
     issues.extend(composite_issues)
 
-    if not primary_key and not issues:
+    if not identity_cols and not issues:
         return {
             "check": "duplicate_keys",
             "passed": True,
@@ -1019,14 +1034,14 @@ def _check_duplicate_keys(
     # Quarantine→balanced must not green Validate when write-time DQ will fail.
     probe_authoritative = False
     probe_status = (source_duplicate_probe_status or "").strip().lower()
-    if primary_key:
+    if identity_cols:
         findings = source_duplicate_findings or []
         if findings:
             sample = ", ".join(
                 f"{f.get('value')}×{f.get('count', 1)}" for f in findings[:3]
             )
             issues.append(
-                f"{primary_key}: duplicate key values from source probe ({sample})"
+                f"{pk_label}: duplicate key values from source probe ({sample})"
             )
             probe_authoritative = True
 
@@ -1055,17 +1070,67 @@ def _check_duplicate_keys(
     # false positive (ACC-03: (region,id) composite key has duplicate 'id' values).
     dest_has_composite_pk = len(destination_pk_columns or []) > 1
     identity_in_composite_pk = (
-        dest_has_composite_pk
+        not composite_identity
+        and dest_has_composite_pk
         and target_col
         and target_col.lower() in {str(c).lower() for c in (destination_pk_columns or [])}
     )
-    run_single = bool(
+    run_identity = bool(
         enforce_identity
-        and primary_key
+        and identity_cols
         and not (covering_composite_only and not covering_single)
         and not identity_in_composite_pk
     )
-    if run_single and primary_key:
+    if run_identity and composite_identity:
+        # ACC-03 — dedupe on the whole tuple. ``composite_unique_equality_key``
+        # applies the same per-cell engine semantics (CI/AI collation, PAD
+        # rules) and joins components with a unit separator so ("ab","c") can
+        # never equal ("a","bc"). A NULL component is SQL-NULL: not a key, so
+        # that row cannot collide and is skipped — MATCH SIMPLE semantics.
+        from services.type_system import (
+            composite_unique_equality_key,
+            unique_key_forces_casefold,
+        )
+
+        comp_ddls = [
+            _lookup_target_ddl(tc, target_types) or _lookup_target_ddl(sc, target_types)
+            for sc, tc in zip(identity_cols, target_cols)
+        ]
+        comp_casefold = [
+            unique_key_forces_casefold(
+                tc, ddl_type=comp_ddls[i], unique_keys=destination_unique_keys or []
+            )
+            for i, tc in enumerate(target_cols)
+        ]
+        seen_t: dict[str, int] = {}
+        examples_t: dict[str, str] = {}
+        for row in rows:
+            key = composite_unique_equality_key(
+                [
+                    (
+                        row.get(col),
+                        comp_ddls[i],
+                        comp_casefold[i],
+                        None,
+                    )
+                    for i, col in enumerate(identity_cols)
+                ],
+                dest_kind=dest_kind,
+            )
+            if not key:
+                continue
+            seen_t[key] = seen_t.get(key, 0) + 1
+            examples_t.setdefault(
+                key,
+                "(" + ", ".join(str(row.get(c)) for c in identity_cols) + ")",
+            )
+        dupes = [(examples_t.get(v, v), c) for v, c in seen_t.items() if c > 1]
+        if dupes:
+            sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
+            issues.append(
+                f"{pk_label}: duplicate composite key values ({sample})"
+            )
+    elif run_identity and primary_key:
         from services.type_system import (
             unique_equality_key,
             unique_key_forces_casefold,
@@ -1464,6 +1529,7 @@ def run_integrity_audit(
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
     source_measured_empty: bool = False,
+    stream_contracts: list[dict] | None = None,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1511,6 +1577,27 @@ def run_integrity_audit(
         destination_pk_columns=destination_pk_columns,
         contract_primary_key=contract_primary_key,
     )
+    # Composite-aware identity (ACC-03): Studio contracts / destination PKs can
+    # name a multi-column key. The sample/probe dedupe must run on the whole
+    # tuple — checking any one component alone reports false duplicates for
+    # values that legitimately repeat inside a composite key.
+    from services.primary_key import resolve_primary_key_source_columns
+
+    pk_columns_uniqueness = resolve_primary_key_source_columns(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=mode,
+        purpose="uniqueness",
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+        stream_contracts=stream_contracts,
+    )
+    if len(pk_columns_uniqueness) > 1 and not pk_uniqueness:
+        # Label for operator output; the check itself reads the column list.
+        pk_uniqueness = pk_columns_uniqueness[0]
+    if len(pk_columns_uniqueness) <= 1:
+        pk_columns_uniqueness = [pk_uniqueness] if pk_uniqueness else []
 
     checks: list[dict[str, Any]] = []
 
@@ -1577,6 +1664,7 @@ def run_integrity_audit(
                 validation_mode,
                 dest_kind=dest_kind,
                 primary_key=pk_uniqueness,
+                primary_key_columns=pk_columns_uniqueness,
                 source_duplicate_findings=source_duplicate_findings,
                 sync_mode=sync_mode,
                 destination_pk_columns=destination_pk_columns,

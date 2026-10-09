@@ -548,6 +548,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "has_cursor": {"type": "boolean"},
                 "has_primary_key": {"type": "boolean"},
                 "needs_history": {"type": "boolean"},
+                "row_count": {"type": "number"},
                 "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
             },
             "required": [],
@@ -2474,6 +2475,7 @@ class DataPilotTools:
         has_primary_key: bool = False,
         needs_history: bool = False,
         source_read_mode: str = "",
+        row_count: int = 0,
     ) -> ToolResult:
         w = workload.lower()
         callable_src = (source_read_mode or "").strip().lower() in {"procedure", "query"}
@@ -2490,6 +2492,23 @@ class DataPilotTools:
                 "real time",
             )
         )
+        # S04: Lookup tables (small dimension tables without PK/cursor) should use
+        # Full Refresh Overwrite, not Full Refresh Append. Append is not rerun-safe
+        # for static reference data - it would accumulate duplicates.
+        is_lookup_table = (
+            not has_cursor
+            and not has_primary_key
+            and row_count > 0
+            and row_count < 10000  # Heuristic: lookup tables are typically small
+            and ("lookup" in w or "reference" in w or "dimension" in w or "config" in w)
+        )
+        if is_lookup_table:
+            mode = "Full Refresh Overwrite"
+            reason = (
+                "Lookup/reference tables without a cursor or primary key should use "
+                "Full Refresh Overwrite. Full Refresh Append would accumulate duplicates "
+                "on each run because there is no cursor to detect new rows or key to dedupe."
+            )
         # A procedure or query is a result set, not a log. CDC / SCD2 / mirror
         # cannot run on it. Append is the non-destructive refusal unless the
         # workload says rows disappear: appending that snapshot duplicates the
@@ -2551,8 +2570,18 @@ class DataPilotTools:
             mode = "Incremental Upsert"
             reason = "A primary key is enough to upsert; add a cursor later to avoid full scans."
         else:
-            mode = "Full Refresh Append"
-            reason = "Use append until cursor/key metadata is confirmed."
+            # S04: No cursor and no key - recommend Overwrite for small tables to avoid
+            # duplicate accumulation on reruns. This is safer than Append for static data.
+            if row_count > 0 and row_count < 10000:
+                mode = "Full Refresh Overwrite"
+                reason = (
+                    "Small tables without cursor or key should use Full Refresh Overwrite "
+                    "to avoid duplicate accumulation on reruns. Append would keep adding "
+                    "the same rows on each run."
+                )
+            else:
+                mode = "Full Refresh Append"
+                reason = "Use append until cursor/key metadata is confirmed."
         incremental = mode.startswith("Incremental")
         return ToolResult(name="recommend_sync_mode", success=True, output={
             "recommended_mode": mode,

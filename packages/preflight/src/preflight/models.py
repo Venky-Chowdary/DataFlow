@@ -164,6 +164,9 @@ class TransferPlan:
     destination_foreign_keys: list[dict[str, Any]] = field(default_factory=list)
     # Operator acknowledged destination FK mapping risk for this Validate run.
     fk_risk_acknowledged: bool = False
+    # Studio stream contracts carried into G9 so composite identity keys
+    # (``primary_key: [region, id]``) dedupe on the whole tuple — ACC-03.
+    stream_contracts: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

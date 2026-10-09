@@ -114,7 +114,12 @@ def sync_mode_from_phrase(spoken: str, *, default: str = "full_refresh_append") 
     return default
 
 
-def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") -> str:
+def normalize_sync_mode(
+    spoken: str,
+    *,
+    default: str = "full_refresh_append",
+    strict: bool = False,
+) -> str:
     """Pilot-facing wrapper: phrase → sync-mode token, engine-validated.
 
     The Pilot keeps emitting its historical spellings because every engine path
@@ -122,12 +127,29 @@ def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") ->
     is now *checked* against the one canonical table in ``services.sync_cursor``
     before it is returned, so a phrase can no longer resolve to a token the
     engine would quietly ignore and degrade to full-read + insert.
+
+    ``strict=True`` (used when the operator *explicitly* named a mode) refuses
+    an unresolvable token instead of silently changing load semantics — a typo
+    like ``teleport_mode`` must not quietly become ``full_refresh_append``
+    (QA T06: that silently duplicates rows on every re-run).
     """
     from services.sync_cursor import CANONICAL_SYNC_MODES
     from services.sync_cursor import normalize_sync_mode as _canonical
 
+    if strict and (spoken or "").strip():
+        # Passing default=None distinguishes "unrecognized token" from "the
+        # phrase legitimately resolved to the default mode".
+        recognized = sync_mode_from_phrase(spoken, default=None)  # type: ignore[arg-type]
+        if recognized is None or _canonical(recognized, default="") not in CANONICAL_SYNC_MODES:
+            valid = ", ".join(sorted(SYNC_MODES))
+            raise ValueError(
+                f"Unknown sync_mode {spoken!r} — I will not guess the load semantics. "
+                f"Valid modes: {valid}."
+            )
+
     candidate = sync_mode_from_phrase(spoken, default=default)
-    if _canonical(candidate, default=default) not in CANONICAL_SYNC_MODES:
+    canonical = _canonical(candidate, default=default)
+    if canonical not in CANONICAL_SYNC_MODES:
         _LOG.warning(
             "Pilot phrase %r produced sync_mode %r, which no engine mode "
             "accepts; falling back to the non-destructive default %r.",
@@ -262,6 +284,27 @@ def _is_execute_cleared(preflight: dict[str, Any]) -> bool:
     run_id = str(preflight.get("run_id") or "")
     if run_id.startswith("pf_local_"):
         return False
+    # Defense-in-depth (QA T04/T12): a severity=block blocker must override any
+    # stale approve verdict instead of letting safe_to_start stay true beside it.
+    # Root-cause blockers are block-severity by construction even when the
+    # severity field is only in root_causes[].
+    blocking_root_ids = {
+        str(r.get("root_id") or "")
+        for r in preflight.get("root_causes") or []
+        if isinstance(r, dict) and str(r.get("severity") or "").lower() == "block"
+    }
+    for blocker in preflight.get("blockers") or []:
+        if not isinstance(blocker, dict):
+            continue
+        sev = str(
+            blocker.get("severity")
+            or (blocker.get("details") or {}).get("severity")
+            or ""
+        ).lower()
+        if sev == "block":
+            return False
+        if blocking_root_ids and str(blocker.get("id") or "") in blocking_root_ids:
+            return False
     return bool(preflight.get("passed") and _transfer_decision(preflight) == "approve")
 
 
@@ -622,8 +665,13 @@ def plan_transfer(
     # An omitted mode plus a key means "dedupe this". A mode the operator
     # actually named must stay that mode — a primary key on overwrite is an
     # identity, not permission to switch the run to incremental upsert.
+    # T06: an *explicitly named* mode that resolves to nothing is refused, not
+    # coerced — silently staging full_refresh_append duplicates rows on re-run.
     requested_sync_mode = bool((sync_mode or "").strip())
-    mode = normalize_sync_mode(sync_mode)
+    try:
+        mode = normalize_sync_mode(sync_mode, strict=requested_sync_mode)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
     if callable_plan:
         from services.procedure_source import assert_callable_sync_allowed
 
