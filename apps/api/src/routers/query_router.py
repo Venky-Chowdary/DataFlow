@@ -874,7 +874,9 @@ def _run_sql_query(connector, body):
         schema = _column_schema(columns, rows)
         from services.decimal_observe import cursor_declared_carriers
 
-        declared = cursor_declared_carriers(columns, description)
+        declared = cursor_declared_carriers(
+            columns, description, dialect=str(connector.type or "")
+        )
         if declared:
             schema = {**schema, **declared}
         return rows, columns, schema, False

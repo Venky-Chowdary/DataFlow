@@ -1093,7 +1093,38 @@ def aggregate_connector_data(
     grain = ""
     if group_by:
         wanted = group_by.strip()
-        dim_col = resolve_name(wanted, names)
+        # "year of Hire_Date" / "monthly by created_at" — grain + column.
+        # Without this, resolve_name fuzzy-matched the tail to Hire_Date and
+        # grouped by raw day values, returning 20 single-row buckets as an
+        # exact year answer (QA R13).
+        grain_hint = re.match(
+            r"(?i)^(year|years|yearly|annual|annually|quarter|quarterly|"
+            r"month|months|monthly|week|weeks|weekly|day|days|daily|date|"
+            r"hour|hours|hourly)\b[\s._-]*(?:of|by|in|per|each)?\s+(.+)$",
+            wanted,
+        )
+        if grain_hint:
+            candidate = grain_hint.group(2).strip()
+            resolved = resolve_name(candidate, names)
+            if resolved and _is_temporal(_column_type(columns, resolved)):
+                grain = _TEMPORAL_GRAINS.get(grain_hint.group(1).lower(), "")
+                dim_col = resolved
+            elif resolved:
+                # "year of status" — a real column but not a date. Refusing
+                # here matters: letting the whole phrase fuzzy-resolve to
+                # `status` grouped by the wrong thing while claiming a grain
+                # (same silent-wrong-answer class as R13).
+                return _tool_result(
+                    tool,
+                    success=False,
+                    error=(
+                        f"'{resolved}' is not a date column — "
+                        f"'{grain_hint.group(1).lower()} of {candidate}' "
+                        "needs a date/timestamp column to bucket."
+                    ),
+                )
+        if not grain_hint:
+            dim_col = resolve_name(wanted, names)
         if not dim_col:
             # "by month" is a time grain, not a column — find the date column.
             grain = _TEMPORAL_GRAINS.get(wanted.lower(), "")

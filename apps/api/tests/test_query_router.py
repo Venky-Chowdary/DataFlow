@@ -149,6 +149,70 @@ def test_safe_sql_guard():
     assert _is_safe_sql("INSERT INTO users VALUES (1)") is False
 
 
+def test_safe_sql_guard_blocks_side_effect_functions():
+    """QA R06 — a SELECT can still mutate session/server state through
+    volatile function calls. Read-only is a session guarantee, not a
+    keyword filter."""
+    # Session/config mutation
+    assert _is_safe_sql("SELECT set_config('log_statement','all',false)") is False
+    assert _is_safe_sql("SELECT set_config('transaction_read_only','off',true)") is False
+    # Sequence burn (persists even when the tx rolls back)
+    assert _is_safe_sql("SELECT nextval('orders_id_seq')") is False
+    # Backend control / DoS
+    assert _is_safe_sql("SELECT pg_sleep(30)") is False
+    assert _is_safe_sql("SELECT pg_terminate_backend(pid) FROM pg_stat_activity") is False
+    assert _is_safe_sql("SELECT pg_advisory_lock(1)") is False
+    # Side-channel drivers
+    assert _is_safe_sql("SELECT * FROM dblink('host=x','SELECT 1') t(a int)") is False
+    assert _is_safe_sql("SELECT lo_import('/etc/passwd')") is False
+    assert _is_safe_sql("SELECT get_lock('x', 10)") is False
+    # Server filesystem reads
+    assert _is_safe_sql("SELECT pg_read_file('/etc/postgresql/pg_hba.conf')") is False
+    # Same names inside a string literal are data, not calls — allowed.
+    assert _is_safe_sql("SELECT 'pg_sleep(5) is blocked'") is True
+    # Ordinary read functions stay allowed.
+    assert _is_safe_sql("SELECT now(), count(*) FROM orders") is True
+
+
+def test_copilot_sql_guard_is_stateless_for_fresh_schema():
+    """QA R24 — the allow-list is rebuilt from live introspection on every
+    query. A table created after the previous query must be allowed by the
+    next; the guard must not carry a stale module-level list."""
+    from services.copilot_sql_guard import (
+        assert_identifiers_allowed,
+        schema_allowlist,
+    )
+
+    before = schema_allowlist([{"name": "id"}], tables=["orders"])
+    sql = "SELECT id FROM new_orders"
+    try:
+        assert_identifiers_allowed(sql, allowed=before)
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised, "unintrospected table should refuse"
+
+    # Introspection now sees the created table + its columns — same call
+    # shape the live path makes per query, no cached list.
+    after = schema_allowlist(
+        [{"name": "id"}, {"name": "total"}], tables=["orders", "new_orders"]
+    )
+    assert_identifiers_allowed(sql, allowed=after)  # must not raise
+
+
+def test_copilot_sql_guard_refuses_when_schema_unavailable():
+    """Fail closed: an empty allow-list means introspection could not run —
+    invented identifiers must not pass on a missing schema."""
+    from services.copilot_sql_guard import assert_identifiers_allowed
+
+    try:
+        assert_identifiers_allowed("SELECT id FROM orders", allowed=set())
+        raised = False
+    except ValueError as exc:
+        raised = "unavailable" in str(exc).lower()
+    assert raised
+
+
 def _typed_sqlite_db(tmp_path: Path) -> Path:
     """A table whose columns span the type classes a console must distinguish."""
     db_path = tmp_path / "typed.db"

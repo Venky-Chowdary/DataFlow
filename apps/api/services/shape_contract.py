@@ -198,6 +198,7 @@ def classify_dest_exists_shape(
     identity_columns: list[str] | None = None,
     generated_columns: list[str] | None = None,
     dest_recreated: bool = False,
+    dest_emptied: bool = False,
 ) -> dict[str, Any]:
     """Single dest-exists shape + per-column verdicts.
 
@@ -207,6 +208,11 @@ def classify_dest_exists_shape(
     ``dest_recreated`` is an overwrite/full-refresh run: the table listed now
     is dropped and recreated from the source shape, so its columns are not the
     contract this run binds and its columns are a CREATE, not an ADD COLUMN.
+
+    ``dest_emptied`` is an overwrite that keeps the table and empties rows in
+    place (relational overwrite is TRUNCATE+INSERT, not DROP+CREATE): the
+    shape stays "existing table", but G15 must say *replace*, not "insert
+    more" — the append wording on an overwrite run was QA T21.
     """
     sources = [str(c) for c in (source_columns or []) if str(c).strip()]
     dests = [str(c) for c in (dest_columns or []) if str(c).strip()]
@@ -333,7 +339,9 @@ def classify_dest_exists_shape(
         "dest_only_preserve": sum(1 for c in dest_only if c["kind"] == COL_DEST_PRESERVE),
         "dest_only_required": len(unfilled),
     }
-    headline, detail, primary = _shape_copy(shape, counts, unfilled)
+    headline, detail, primary = _shape_copy(
+        shape, counts, unfilled, dest_emptied=dest_emptied
+    )
     false_friend_sources = [
         str(c.get("source") or "")
         for c in columns
@@ -366,6 +374,8 @@ def _shape_copy(
     shape: str,
     counts: dict[str, int],
     unfilled: list[str],
+    *,
+    dest_emptied: bool = False,
 ) -> tuple[str, str, str]:
     if shape == SHAPE_CREATE_NEW:
         return (
@@ -410,6 +420,13 @@ def _shape_copy(
             "confirm_add",
         )
     if shape == SHAPE_DEST_SUPERSET:
+        if dest_emptied:
+            return (
+                f"{counts['dest_only_preserve']} dest-only column(s) lose stored values",
+                "Overwrite replaces every row — unwritten dest-only columns keep "
+                "their schema but their contents are emptied on the rewrite.",
+                "continue_validate",
+            )
         return (
             f"{counts['dest_only_preserve']} dest-only column(s) stay off SET",
             "Insert/upsert will not NULL-wipe dest-only columns. Full overwrite is a different contract.",
@@ -419,6 +436,13 @@ def _shape_copy(
         return (
             "Source has extra columns with an explicit decision",
             "Extra source columns are mapped, omitted, or proposed ADD — not silently dropped.",
+            "continue_validate",
+        )
+    if dest_emptied:
+        return (
+            "Existing table bound — all rows will be replaced",
+            "Overwrite empties rows in place: constraints and dest-only column "
+            "schemas stay, stored contents are rewritten. Writes are name-addressed.",
             "continue_validate",
         )
     return (

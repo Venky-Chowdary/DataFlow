@@ -2653,7 +2653,10 @@ def _preflight_gates_list_section() -> GeneratedSection | None:
             f"{first} through {last} are the {len(ordered)} core preflight gates "
             f"Validate runs before any write; G3 Schema contract is the one "
             f"that blocks a lossy type change. These preflight gates are the "
-            f"named Validate cards. " + " ".join(ordered)
+            # One card per line: the splitter is line-based, so a space-
+            # joined blob read as a single mega-sentence and the answer
+            # pasted the list on top of the Core gates copy (QA K03).
+            f"named Validate cards.\n" + "\n".join(ordered)
         ),
         source_module="preflight.gates · help-preflight#gates",
         category="transfer",

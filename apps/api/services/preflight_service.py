@@ -1261,6 +1261,15 @@ def run_file_preflight(
     dest_recreated = is_overwrite_sync(sync_mode) and dest_schema_is_recreated_on_overwrite(
         destination_db_type
     )
+    # Relational overwrite keeps the table but replaces every row — G15 must
+    # say "replace", not "insert more" (QA T21).
+    from services.db_type_utils import overwrite_replaces_rows
+
+    dest_emptied = (
+        is_overwrite_sync(sync_mode)
+        and not dest_recreated
+        and overwrite_replaces_rows(destination_db_type)
+    )
     if (
         destination_table_exists is True
         and not dest_recreated
@@ -2637,6 +2646,7 @@ def run_file_preflight(
         # tautology for the partial-catalog check — do not substitute them.
         dest_columns=list((destination_column_types or {}).keys()),
         dest_recreated=dest_recreated,
+        dest_emptied=dest_emptied,
     )
     out["source_coverage"] = src_coverage
 

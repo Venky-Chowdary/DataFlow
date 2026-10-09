@@ -134,6 +134,84 @@ def test_live_group_by_status_on_sqlite(monkeypatch, tmp_path):
     assert "pending" in low or "cancelled" in low
 
 
+def _sqlite_dated_orders(tmp_path: Path) -> Path:
+    db_path = tmp_path / "pilot_wave29_dated.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE orders ("
+        "id INTEGER PRIMARY KEY, status TEXT, hire_date TEXT, amount REAL)"
+    )
+    conn.executemany(
+        "INSERT INTO orders (id, status, hire_date, amount) VALUES (?, ?, ?, ?)",
+        [
+            (1, "paid", "2023-01-04", 10.5),
+            (2, "paid", "2023-02-11", 20.0),
+            (3, "pending", "2023-11-30", 5.0),
+            (4, "paid", "2024-01-15", 7.5),
+            (5, "cancelled", "2024-03-22", 1.0),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_r13_group_by_year_of_column_buckets_years(monkeypatch, tmp_path):
+    """QA R13 — 'year of Hire_Date' fuzzy-resolved to the bare column and
+    grouped by raw day values (20 rows of count 1). It must bucket years."""
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_dated_orders(tmp_path)
+    uri = f"sqlite:///{db_path.resolve().as_posix()}"
+    conn_rec = connector_store.create_connector({
+        "name": "PilotSQLiteDates",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": uri,
+        "workspace_id": "",
+    })
+    from src.ai.copilot.aggregate_tools import aggregate_connector_data
+
+    res = aggregate_connector_data(
+        connector_id=conn_rec.id,
+        table="orders",
+        metric="count",
+        group_by="year of hire_date",
+    )
+    assert res.success, res.error
+    rows = (res.output or {}).get("rows") or []
+    buckets = set()
+    for r in rows:
+        for k, v in r.items():
+            if k not in {"row_count", "count", "value"}:
+                buckets.add(str(v)[:4])
+    assert buckets == {"2023", "2024"}, f"expected year buckets, got {rows}"
+    assert len(rows) == 2, f"expected 2 year buckets, got {len(rows)}"
+
+
+def test_r13_group_by_year_of_nontemporal_refuses(monkeypatch, tmp_path):
+    """'year of status' must refuse — status is not a date column; silently
+    grouping by it was the day-bucket bug in another costume."""
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_dated_orders(tmp_path)
+    uri = f"sqlite:///{db_path.resolve().as_posix()}"
+    conn_rec = connector_store.create_connector({
+        "name": "PilotSQLiteDates",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": uri,
+        "workspace_id": "",
+    })
+    from src.ai.copilot.aggregate_tools import aggregate_connector_data
+
+    res = aggregate_connector_data(
+        connector_id=conn_rec.id,
+        table="orders",
+        metric="count",
+        group_by="year of status",
+    )
+    assert not res.success or res.error
+
+
 def test_live_run_sql_on_sqlite(monkeypatch, tmp_path):
     _isolated_store(monkeypatch, tmp_path)
     _seed_pilot_sqlite(tmp_path)

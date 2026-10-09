@@ -1245,7 +1245,10 @@ def _execute_live(
             release_engine(engine)
 
     schema, _intel = peek_callable_schema(headers, rows)
-    schema = _overlay_declared_numerics(headers, description, schema)
+    schema = _overlay_declared_numerics(
+        headers, description, schema,
+        dialect=spec.dialect or str(cfg.get("type") or ""),
+    )
     return headers, rows, schema
 
 
@@ -1302,7 +1305,10 @@ def _execute_to_jsonl(
             release_engine(engine)
 
     schema, _intel = peek_callable_schema(headers, sample)
-    schema = _overlay_declared_numerics(headers, description, schema)
+    schema = _overlay_declared_numerics(
+        headers, description, schema,
+        dialect=spec.dialect or str(cfg.get("type") or ""),
+    )
     return headers, total, schema
 
 
@@ -1335,6 +1341,7 @@ def _overlay_declared_numerics(
     headers: list[str],
     description: Any,
     schema: dict[str, str],
+    dialect: str = "",
 ) -> dict[str, str]:
     """Driver type and precision win over the sample envelope.
 
@@ -1343,7 +1350,7 @@ def _overlay_declared_numerics(
     """
     from services.decimal_observe import cursor_declared_carriers
 
-    declared = cursor_declared_carriers(headers, description)
+    declared = cursor_declared_carriers(headers, description, dialect=dialect)
     if not declared:
         return schema
     return {**schema, **declared}

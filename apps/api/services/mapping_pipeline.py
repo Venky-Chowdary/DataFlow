@@ -1739,13 +1739,29 @@ def run_mapping_pipeline(
         ],
     }
 
+    from services.db_type_utils import (
+        dest_schema_is_recreated_on_overwrite,
+        overwrite_replaces_rows,
+    )
     from services.shape_contract import classify_dest_exists_shape
+    from services.sync_cursor import is_overwrite_sync
 
+    _dest_recreated = is_overwrite_sync(
+        sync_mode
+    ) and dest_schema_is_recreated_on_overwrite(destination_db_type)
     shape_contract = classify_dest_exists_shape(
         destination_table_exists=destination_table_exists,
         source_columns=list(source_columns or []),
         dest_columns=list(target_columns or []),
         mappings=list(enriched_mappings),
+        dest_recreated=_dest_recreated,
+        # Relational overwrite keeps the table, replaces the rows — the
+        # contract copy must say replace, not "insert more" (QA T21).
+        dest_emptied=(
+            is_overwrite_sync(sync_mode)
+            and not _dest_recreated
+            and overwrite_replaces_rows(destination_db_type)
+        ),
     )
 
     return {

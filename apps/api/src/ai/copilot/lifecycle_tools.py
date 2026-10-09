@@ -422,14 +422,41 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
     # would keep reporting the wrong side forever (QA C09).
     from services.connector_store import normalize_connector_role
 
-    return {
+    host = str(conn.get("host") or "")
+    port = int(conn.get("port") or 0)
+    effective_host, effective_port = host, port
+    # A connection string overrides the stored host field — the probe dials
+    # the URL's authority, so reporting the form's 'localhost' misreports the
+    # real endpoint on failures (QA C04).
+    conn_str = str(conn.get("connection_string") or "")
+    if conn_str:
+        try:
+            from connectors.url_authority import parse_url_authority
+
+            auth = parse_url_authority(conn_str)
+            if auth.host:
+                effective_host, effective_port = (
+                    auth.host,
+                    auth.port or effective_port,
+                )
+        except Exception:
+            pass
+    brief = {
         "connector_id": str(conn.get("id") or conn.get("connector_id") or ""),
         "name": str(conn.get("name") or ""),
         "type": ctype,
-        "host": str(conn.get("host") or ""),
+        "host": host,
         "database": str(conn.get("database") or ""),
         "role": normalize_connector_role(ctype, str(conn.get("role") or "")),
+        "effective_host": effective_host,
+        "effective_port": effective_port,
     }
+    if (effective_host, effective_port) != (host, port):
+        brief["host_note"] = (
+            f"Probe targets {effective_host}:{effective_port} from the "
+            "connection string — the stored host field is not what is dialed."
+        )
+    return brief
 
 
 def _connector(tool: str, connector_id: str, name: str) -> tuple[dict[str, Any] | None, ToolResult | None]:

@@ -735,7 +735,11 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         return False, humanize_connection_error(engine_type, raw)
 
     if not spec:
-        return False, f"No connectivity probe for {db_type}"
+        return False, (
+            f"Unsupported connector type '{db_type}' — no connectivity probe or "
+            "transfer driver is registered for it. The type name itself is "
+            "unsupported; host/port/user/password changes will not help."
+        )
 
     if not spec.probe:
         return False, f"No probe configured for {db_type}"

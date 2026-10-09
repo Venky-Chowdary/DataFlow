@@ -28,19 +28,22 @@ PHONE_RE = re.compile(r"^\+?[\d\s().-]{7,20}$")
 DATE_PATTERN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{2}/\d{2}/\d{4}|^\d{8}$")
 
 
-def _as_str(value: Any) -> str:
+def _as_str(value: Any) -> str | None:
     """One profiler sample. Same spelling as the transfer wire.
 
-    ``str(Decimal('1E+2'))`` invented ``1E+2``. Reader-wired
-    ``SQL_NULL_SENTINEL`` looked like a VARCHAR token. NULL / Missing /
-    blank still collapse to ``""`` so null-rate counts absence, not the
-    sentinel — that polarity is profiler-only, not extract.
+    ``None`` means absence (SQL NULL / Missing / reader-wired sentinel).
+    An empty string ``""`` is a *stored value*: VARCHAR `''` written to the
+    source is not NULL, and counting it as absent misreported null-rate and
+    hid a real column population (QA T19). Empty cells carry no type
+    evidence but still count as present.
     """
-    if value is None or is_null_evidence(value):
-        return ""
+    from services.value_serializer import is_reader_null_cell
+
+    if value is None or is_reader_null_cell(value):
+        return None
     text = cell_to_string(value, preserve_sql_null=True)
-    if is_null_evidence(text):
-        return ""
+    if is_reader_null_cell(text):
+        return None
     return text.strip()
 
 
@@ -203,8 +206,11 @@ def _type_scores(values: list[str]) -> dict[str, float]:
 def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> dict[str, Any]:
     """Profile one column: type inference, statistics, patterns, quality signals."""
     strings = [_as_str(v) for v in values[:sample_limit]]
-    non_empty = [s for s in strings if s]
-    null_rate = 1.0 - (len(non_empty) / max(len(strings), 1))
+    # Absence (None) vs presence-without-evidence (""): only the former is a
+    # null. Empty strings contribute to distinct/top-values as real data.
+    present = [s for s in strings if s is not None]
+    non_empty = [s for s in present if s]
+    null_rate = 1.0 - (len(present) / max(len(strings), 1))
     distinct = len(set(non_empty))
     distinct_ratio = distinct / max(len(non_empty), 1)
 
@@ -263,7 +269,8 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
         "distinct_ratio": round(distinct_ratio, 3),
         "likely_primary_key": is_likely_key,
         "sample_count": len(strings),
-        "non_empty_count": len(non_empty),
+        "non_empty_count": len(present),
+        "empty_string_count": len(present) - len(non_empty),
         "likely_pii": pii,
         "detected_pattern": pattern,
         "type_scores": scores,

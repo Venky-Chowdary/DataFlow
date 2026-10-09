@@ -68,3 +68,34 @@ def is_completed(status: str | None) -> bool:
 
 def is_terminal(status: str | None) -> bool:
     return (status or "") in TERMINAL_STATUSES
+
+
+def job_stall_seconds(job: dict | None, *, threshold_seconds: float = 900.0) -> float:
+    """Seconds a live job has gone without a control-plane write.
+
+    A run blocked on a lock or a stalled wire sits at ``running`` with
+    ``records_processed`` frozen — the pg→MongoDB transfer that sat at 0
+    records for ~49 minutes reported no signal anywhere (QA hang report).
+    Surfacing *silence itself* is the honest operator signal: the job did
+    not fail, it stopped making progress. Returns ``0`` for a job that is
+    terminal, fresh, or has no usable timestamp.
+    """
+    if not isinstance(job, dict):
+        return 0.0
+    status = str(job.get("status") or "").strip().lower()
+    if status not in UNFINISHED_JOB_STATUSES:
+        return 0.0
+    from datetime import datetime, timezone
+
+    last = job.get("updated_at") or job.get("started_at") or job.get("created_at")
+    if isinstance(last, (int, float)):
+        age = datetime.now(timezone.utc).timestamp() - float(last)
+    else:
+        try:
+            ts = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            age = (datetime.now(timezone.utc) - ts).total_seconds()
+        except (TypeError, ValueError):
+            return 0.0
+    return max(0.0, age) if age >= threshold_seconds else 0.0

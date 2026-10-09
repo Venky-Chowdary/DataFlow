@@ -20,7 +20,18 @@ def summarize_listed_job(doc: dict[str, Any]) -> dict[str, Any]:
     if rejected in (None, 0, "0"):
         details = doc.get("rejected_details") or []
         rejected = len(details) if details else 0
-    error = str(doc.get("error") or doc.get("message") or "").strip()
+    # `error` must mean an error: progress text ("Row fidelity verified…",
+    # "Validating mapping and schema…") landed here through the message
+    # fallback and false-alarmed every client that polls error!=null (QA J01).
+    # Only a *failed* job may read its failure text out of `message`.
+    status = str(doc.get("status") or "").lower()
+    error = str(doc.get("error") or "").strip()
+    message = str(doc.get("message") or "").strip()
+    if not error and message and status in {"failed", "error", "cancelled"}:
+        error = message
+    from services.job_status import job_stall_seconds
+
+    stall = job_stall_seconds(doc)
     return {
         "id": str(doc.get("_id") or doc.get("id") or doc.get("job_id") or ""),
         "source": (
@@ -39,6 +50,9 @@ def summarize_listed_job(doc: dict[str, Any]) -> dict[str, Any]:
         "records": doc.get("records_processed") or doc.get("rows_processed") or 0,
         "rejected_rows": int(rejected or 0),
         "error": error[:240] or None,
+        "message": message[:240] or None,
+        "stalled": stall > 0,
+        "stall_seconds": int(stall),
         "created_at": str(doc.get("created_at") or ""),
         "source_table": (
             doc.get("source_table")
@@ -70,6 +84,12 @@ def _record_as_job_doc(record: Any) -> dict[str, Any]:
         rec = dict(record)
     else:
         return {}
+    # A failed engine job stores its refusal in `message` — same J01 rule as
+    # summarize_listed_job: only a failure-class status may read it as error.
+    _status = str(rec.get("status") or "").lower()
+    _error = str(rec.get("error") or "").strip()
+    if not _error and _status in {"failed", "error", "cancelled"}:
+        _error = str(rec.get("message") or "").strip()
     return {
         "_id": rec.get("job_id") or rec.get("_id") or rec.get("id"),
         "id": rec.get("job_id") or rec.get("id"),
@@ -82,7 +102,9 @@ def _record_as_job_doc(record: Any) -> dict[str, Any]:
         "rejected_rows": rec.get("rejected_rows")
         or len(rec.get("rejected_details") or []),
         "rejected_details": rec.get("rejected_details") or [],
-        "error": rec.get("message") or rec.get("error") or "",
+        # Same J01 rule: `message` is progress text, not an error field.
+        "error": _error,
+        "message": rec.get("message") or "",
         "created_at": rec.get("created_at") or "",
         "operation": rec.get("operation") or "",
         "table_name": rec.get("table_name") or "",

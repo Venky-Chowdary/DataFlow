@@ -142,6 +142,15 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
         ds = job["destination_summary"]
         if "rejected_rows" in ds:
             out["rejected_rows"] = ds.get("rejected_rows")
+    # A live job that has not written a progress update past the stall window
+    # is surfaced as stalled — the pg→Mongo run that sat at 0 records for
+    # ~49 minutes had no signal at all (QA hang report).
+    from services.job_status import job_stall_seconds
+
+    stall = job_stall_seconds(job)
+    if stall:
+        out["stalled"] = True
+        out["stall_seconds"] = int(stall)
         if "coerced_null_rows" in ds and "coerced_null_rows" not in out:
             out["coerced_null_rows"] = ds.get("coerced_null_rows")
     # Tiny checkpoint summary for Resume affordance (no row samples).

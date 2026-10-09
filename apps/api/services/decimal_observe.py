@@ -906,7 +906,7 @@ _PG_ELEMENT_CARRIERS = {
 }
 
 
-def _carrier_for_cursor_column(col: Any) -> str:
+def _carrier_for_cursor_column(col: Any, dialect: str = "") -> str:
     """Logical carrier a cursor column declared, or ``""`` when it did not.
 
     A CAST and a catalog type show up here. Fifty sample rows must not
@@ -926,7 +926,14 @@ def _carrier_for_cursor_column(col: Any) -> str:
     ):
         return explicit.strip()
     if isinstance(type_code, int) and not isinstance(type_code, bool):
-        if type_code in _CURSOR_ARRAY_CODES:
+        # Code 16 is PostgreSQL's bool OID *and* MySQL FIELD_TYPE_BIT — only
+        # the dialect disambiguates. An all-NULL ``NULL::boolean`` column has
+        # no sample to arbitrate, so leaving it to inference rewrote the
+        # declared BOOLEAN as VARCHAR (QA T18).
+        if type_code == 16:
+            if (dialect or "").strip().lower() in _PG_CATALOG_DIALECTS:
+                return "BOOLEAN"
+        elif type_code in _CURSOR_ARRAY_CODES:
             return _CURSOR_ARRAY_CODES[type_code]
         if type_code in _CURSOR_JSON_CODES:
             return "JSON"
@@ -1120,6 +1127,7 @@ def annotate_unresolved_pg_types(conn: Any, description: Any, *, dialect: str) -
 def cursor_declared_carriers(
     headers: list[str],
     description: Any,
+    dialect: str = "",
 ) -> dict[str, str]:
     """Cursor-declared carriers. A sized DECIMAL wins over a family name.
 
@@ -1133,7 +1141,7 @@ def cursor_declared_carriers(
         name = str(header or "").strip()
         if not name or name in out or idx >= len(description):
             continue
-        carrier = _carrier_for_cursor_column(description[idx])
+        carrier = _carrier_for_cursor_column(description[idx], dialect)
         if carrier:
             out[name] = carrier
     return out
