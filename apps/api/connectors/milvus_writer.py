@@ -1173,6 +1173,8 @@ def write_mapped_rows(
             rejected_details=map_rejected,
             rejected_rows=len(map_rejected),
         )
+    from services.vectorization import vector_identity_columns
+
     try:
         vector_rows = vectorize_records(
             records,
@@ -1185,6 +1187,7 @@ def write_mapped_rows(
             chunk_overlap=chunk_overlap,
             skip_chunking=skip_chunking,
             durable_embedding_cache=durable_embedding_cache,
+            identity_columns=vector_identity_columns(pk_cols, mappings, records),
         )
     except Exception as exc:
         return WriteResult(

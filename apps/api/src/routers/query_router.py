@@ -739,7 +739,9 @@ def _apply_read_only_session(conn: Any, db_type: str) -> None:
         if db in {"postgresql", "postgres", "cockroachdb", "redshift", "greenplum", "yugabytedb"}:
             conn.execute(text("SET TRANSACTION READ ONLY"))
         elif db in {"mysql", "mariadb", "singlestore", "tidb"}:
-            conn.execute(text("SET SESSION TRANSACTION READ ONLY"))
+            # Transaction-scoped, not SESSION: a pooled connection must not
+            # hand a stale read-only mode to the next write query.
+            conn.execute(text("SET TRANSACTION READ ONLY"))
         elif db in {"sqlite", "duckdb"}:
             conn.execute(text("PRAGMA query_only = ON"))
     except Exception as exc:

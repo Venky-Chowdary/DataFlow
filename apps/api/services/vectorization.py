@@ -461,6 +461,41 @@ def _bounded_vector_content(
     return text[:CONTENT_STORE_LIMIT], meta
 
 
+def vector_identity_columns(
+    pk_cols: list[str] | None,
+    mappings: list[dict] | None,
+    records: list[dict[str, Any]] | None,
+) -> list[str] | None:
+    """One record-field name per destination PK component, or ``None``.
+
+    Document identity must come from the contract PK, not just a column
+    literally named ``id``: an ``employees(employee_id)`` source has no ``id``
+    key, so every row fell back to a content-hash document id and two records
+    with identical embedded text collided inside one upsert batch
+    (``ON CONFLICT ... cannot affect row a second time``, QA MX2-17).
+
+    Records stay source-header keyed with target overlays, so a PK component
+    renamed on Map checks the mapped source spelling.
+    """
+    if not pk_cols:
+        return None
+    record_keys = set(records[0]) if records else set()
+    source_by_target = {
+        str(m.get("target") or "").strip(): str(m.get("source") or "").strip()
+        for m in (mappings or [])
+        if str(m.get("target") or "").strip()
+    }
+    out: list[str] = []
+    for pk in pk_cols:
+        pk_name = str(pk)
+        src_name = source_by_target.get(pk_name)
+        if pk_name in record_keys or not src_name:
+            out.append(pk_name)
+        else:
+            out.append(src_name)
+    return out or None
+
+
 def vectorize_records(
     records: list[dict[str, Any]],
     *,
@@ -473,6 +508,7 @@ def vectorize_records(
     chunk_overlap: int = 50,
     skip_chunking: bool = False,
     durable_embedding_cache: bool | None = None,
+    identity_columns: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Expand records into vector rows: id, content, embedding, metadata, source_id, chunk_index.
 
@@ -550,7 +586,23 @@ def vectorize_records(
             else:
                 embedding = bound
 
-        source_id = str(rec.get("id", rec.get("_id", rec.get("source_id", ""))))
+        # Contract identity is the document id's first choice: an employees
+        # table whose PK is ``employee_id`` has no ``id`` key, so every row
+        # used to hash to the *content* — two records with identical embedded
+        # text produced the same vector id and the ON CONFLICT batch failed
+        # "cannot affect row a second time" (QA MX2-17). Composite keys join
+        # with a unit separator so ("ab","c") never equals ("a","bc").
+        source_id = ""
+        for identity_col in (identity_columns or []):
+            candidate = rec.get(identity_col)
+            if candidate is not None and str(candidate).strip():
+                source_id = (
+                    f"{source_id}\x1f{candidate}" if source_id else str(candidate)
+                )
+        if not source_id:
+            source_id = str(
+                rec.get("id", rec.get("_id", rec.get("source_id", "")))
+            )
         metadata = rec.copy()
         if content_column and content_column in metadata:
             del metadata[content_column]
@@ -669,4 +721,15 @@ def vectorize_records(
                 "source_id": source_id,
                 "chunk_index": 0,
             })
+    # Two records can still collapse to the same vector id — identical embedded
+    # content under the no-PK hash path, or two chunks of one record that are
+    # byte-identical. A single INSERT ... ON CONFLICT DO UPDATE refuses to touch
+    # the same row twice ("cannot affect row a second time", QA MX2-17). Last
+    # wins, matching the DO UPDATE semantics the statement encodes anyway.
+    seen_ids: dict[str, int] = {}
+    for idx, row in enumerate(rows):
+        seen_ids[str(row.get("id") or "")] = idx
+    if len(seen_ids) < len(rows):
+        keep = set(seen_ids.values())
+        rows = [row for idx, row in enumerate(rows) if idx in keep]
     return rows

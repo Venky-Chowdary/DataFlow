@@ -210,6 +210,8 @@ def _passthrough_identity_transform(
     user_override: bool,
     src_type: str,
     tgt_type: str,
+    source: str = "",
+    target: str = "",
 ) -> str:
     """Drop name-triggered value rewrites on identity create-new mappings.
 
@@ -220,10 +222,22 @@ def _passthrough_identity_transform(
     confidence to 0.70 and blocks G4 — a create-new identity column is a
     byte-exact copy. Type-driven transforms (decimal, date, json) are untouched;
     an operator who wants Trim still chooses it explicitly.
+
+    Same-name pairs on an *existing* destination are identity too: run 2 of a
+    route the first run created flips strategy to match-existing, and a
+    name-triggered rewrite on PK / cursor / FK columns silently mutates
+    identity values and the checkpoint contract (QA T10).
     """
     if user_override or transform not in _VALUE_REWRITING_TRANSFORMS:
         return transform
-    if not (create_new or strategy in {"identity_passthrough", "create_compatible_new"}):
+    identity_named = bool(source) and bool(target) and (
+        _normalize_col_token(source) == _normalize_col_token(target)
+    )
+    if not (
+        create_new
+        or strategy in {"identity_passthrough", "create_compatible_new"}
+        or identity_named
+    ):
         return transform
     try:
         src_logical = normalize_logical_type(src_type)
@@ -1216,6 +1230,8 @@ def run_mapping_pipeline(
                 user_override=bool(m.get("user_override")),
                 src_type=src_type,
                 tgt_type=tgt_type or src_type,
+                source=m["source"],
+                target=m["target"],
             )
         # New/generic destinations: typed transforms must stamp *physical* DDL
         # for the destination (DATETIME(6)/CHAR(36)/JSONB) — never bare logical
