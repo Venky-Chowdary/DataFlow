@@ -54,7 +54,7 @@ def test_run_plan_preflight_passes_validation_mode_to_engine():
         }
 
     with patch("services.transfer_plan_service._preflight") as mock_pf, \
-         patch("services.transfer_plan_service.read_source_database", side_effect=Exception("skip")):
+         patch("src.transfer.adapters.read_source_database", side_effect=Exception("skip")):
         mock_pf.return_value = (
             lambda pf, *_a, **_k: pf,
             lambda mode: {"balanced": 0.75, "strict": 0.85}.get((mode or "").lower(), 0.85),

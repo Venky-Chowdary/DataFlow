@@ -98,9 +98,11 @@ def _run(
     return written, summary
 
 
-def test_xls_declines_copy(tmp_path):
-    dest_cfg = {"format": "sqlite", "database": str(tmp_path / "x.db"), "table": "events"}
-    declined = try_copy_local_csv(
+def test_renamed_xlsx_still_copies(tmp_path):
+    """ZIP magic under an ``.xls`` name is OOXML, not a declined legacy file."""
+    dest_path = tmp_path / "renamed.db"
+    dest_cfg = {"format": "sqlite", "database": str(dest_path), "table": "events"}
+    used = try_copy_local_csv(
         content=_xlsx(APPEND_DAY1),
         filename="events.xls",
         file_type="excel",
@@ -112,7 +114,10 @@ def test_xls_declines_copy(tmp_path):
         schema=_schema(),
         effective_sync="full_refresh_overwrite",
     )
-    assert declined is None
+    assert used is not None
+    written, _ddl, summary, _cols = used
+    assert written == 2
+    assert summary.get("copy_fast_path") == "used"
 
 
 def test_windowed_excel_declines_copy(tmp_path):

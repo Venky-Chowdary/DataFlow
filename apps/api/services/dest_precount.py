@@ -3533,13 +3533,19 @@ def _redis_prefix_row_count(cfg: dict[str, Any], *, prefix: str) -> int | None:
     absent prefix is 0 (a known-empty destination is a proof); an unreachable
     server stays ``None`` rather than substituting writer acknowledgement.
     """
-    from connectors.redis_reader import _redis_client
+    from connectors.redis_reader import _redis_client, keys_for_prefix
 
+    prefix = (prefix or "").strip()
+    if not prefix:
+        # An unnamed prefix is not "every key in the database".
+        return None
     client = _redis_client(cfg)
-    pattern = f"{prefix}:*" if prefix else "*"
+    pattern = f"{prefix}:*"
     # SCAN guarantees each key at least once, not exactly once (a rehash during
     # the walk repeats slots), so the keys are de-duplicated before counting —
     # an inflated pre-count would understate the delta of the next append.
+    # MATCH is then checked again: a walk that returned unrelated hashes
+    # (dbsize of another prefix) must not count as this destination.
     seen: set[str] = set()
     cursor = 0
     while True:
@@ -3547,7 +3553,7 @@ def _redis_prefix_row_count(cfg: dict[str, Any], *, prefix: str) -> int | None:
         for raw in batch:
             seen.add(raw.decode() if isinstance(raw, bytes) else str(raw))
         if cursor == 0:
-            return len(seen)
+            return len(keys_for_prefix(list(seen), prefix))
 
 
 def _redis_key_hits(
@@ -3749,6 +3755,67 @@ def _search_index_doc_count(cfg: dict[str, Any], *, index: str) -> int | None:
         client.close()
 
 
+def _kafka_topic_catalog(consumer: Any) -> set[str] | None:
+    """Topic names the client can see, or ``None`` when metadata did not load."""
+    try:
+        known = consumer.topics()
+    except Exception:  # noqa: BLE001 — a broker error is unproven, not an empty topic
+        return None
+    if known is None:
+        return None
+    return {str(name) for name in known}
+
+
+def _kafka_refresh_named_topic(consumer: Any, topic_name: str) -> None:
+    """Ask the broker for one topic before calling it absent.
+
+    ``topics()`` can return a catalog fetched before auto-create finished, or
+    an empty set when the first metadata response has not landed. Neither is
+    proof the topic a produce just wrote does not exist.
+    """
+    client = getattr(consumer, "_client", None)
+    loader = getattr(client, "load_metadata_for_topics", None) if client is not None else None
+    if callable(loader):
+        loader(topic_name)
+        return
+    refresh = getattr(consumer, "refresh_topic", None)
+    if callable(refresh):
+        refresh(topic_name)
+
+
+def _kafka_partitions_after_refresh(consumer: Any, topic_name: str) -> set | None:
+    """Partition ids, after a named-topic refresh when the cache is cold.
+
+    ``partitions_for_topic`` returns ``None`` both for "topic does not exist"
+    and for "the client has not loaded metadata yet". A fresh consumer used
+    only for COUNT hits the second case right after a successful produce and
+    used to report 0. ``None`` from this helper means the count is unproven.
+    An empty set means a refresh that actually returned other topics proved
+    this one is absent. An empty catalog is unproven, not an empty topic.
+    """
+    parts = consumer.partitions_for_topic(topic_name)
+    if parts:
+        return set(parts)
+    known = _kafka_topic_catalog(consumer)
+    if known is None:
+        return None
+    if topic_name in known:
+        parts = consumer.partitions_for_topic(topic_name)
+        return set(parts) if parts else None
+    _kafka_refresh_named_topic(consumer, topic_name)
+    parts = consumer.partitions_for_topic(topic_name)
+    if parts:
+        return set(parts)
+    known_after = _kafka_topic_catalog(consumer)
+    if not known_after:
+        # No topic list at all — the broker did not prove absence.
+        return None
+    if topic_name not in known_after:
+        return set()
+    parts = consumer.partitions_for_topic(topic_name)
+    return set(parts) if parts else None
+
+
 def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
     """Log-end minus log-start watermarks. Does not consume the topic.
 
@@ -3771,7 +3838,11 @@ def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
         enable_auto_commit=False,
     )
     try:
-        parts = consumer.partitions_for_topic(topic_name)
+        parts = _kafka_partitions_after_refresh(consumer, topic_name)
+        if parts is None:
+            # Metadata never loaded. That is not an empty topic — reporting 0
+            # made a produce of 200 messages look like "target 0".
+            return None
         if not parts:
             return 0
         tps = [TopicPartition(topic_name, int(p)) for p in parts]
@@ -3784,7 +3855,7 @@ def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
     finally:
         try:
             consumer.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — close is best-effort after COUNT
             pass
 
 

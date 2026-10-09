@@ -155,6 +155,50 @@ def classify_log_capture_failure(
     return LogCaptureRefusal(cause, text or "no detail reported", _remedy(dialect, cause))
 
 
+#: Cursor meanings under which a poll still carries every change but deletes.
+_POLL_CARRIES_CHANGES = frozenset({"modification_timestamp", "insert_only"})
+
+
+def query_cdc_change_refusal(
+    *,
+    dialect: str,
+    cursor_field: str,
+    cursor_semantics: str,
+    primary_key_columns: list[str],
+    downgrade_cause: str = "",
+) -> str:
+    """Refusal when a query-CDC poll would carry new rows only.
+
+    A poll reads ``WHERE cursor > watermark``. On a primary key, an identity,
+    or an undeclared column, an UPDATE never moves the cursor, so every
+    change after the snapshot except a fresh insert is lost while the run
+    still completes. The poll is acceptable only when the operator declared
+    the cursor as a ``modification_timestamp`` (updates move it) or the table
+    as ``insert_only`` (there are no updates). Deletes are never carried by a
+    poll; that loss is declared on the summary, not refused here.
+    """
+    semantics = str(cursor_semantics or "").strip().lower()
+    if semantics in _POLL_CARRIES_CHANGES:
+        return ""
+    cursor = str(cursor_field or "").strip()
+    keys = {str(k).strip().lower() for k in primary_key_columns if str(k).strip()}
+    on_key = cursor.lower() in keys
+    why = (
+        f"the poll cursor '{cursor}' is the primary key"
+        if on_key
+        else f"the poll cursor '{cursor}' is not declared as a modification timestamp"
+    )
+    cause = f" ({downgrade_cause})" if downgrade_cause else ""
+    return (
+        f"{dialect or 'source'} log-based CDC is not available{cause}, and {why}. "
+        "A cursor poll on it sees new rows only: updates and deletes made after "
+        "the snapshot would be lost while the run reports completed. "
+        "Enable the source change log, or declare a cursor the source moves on "
+        "every update (cursor_semantics=modification_timestamp, e.g. updated_at), "
+        "or declare the table insert_only."
+    )
+
+
 def mongo_delete_key_refusal(
     database: str, collection: str, primary_key: str
 ) -> LogCaptureRefusal:

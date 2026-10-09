@@ -185,6 +185,11 @@ KIND_MIRROR = "mirror"
 KIND_VECTOR = "vector"
 KIND_SCD2 = "scd2"
 KIND_JOB = "job_rollup"
+# Preflight refused the load after the source was counted and before any
+# destination write. Dest COUNT(*) was not taken. That is a measured read
+# with a refused write — not KIND_UNMEASURED, and not a balance failure.
+KIND_WRITE_REFUSED = "write_refused"
+READ_MEASURED = "measured_read"
 DEST_ACTIVE_READBACK = "gate8_dest_active_readback"
 DEST_CURRENT_READBACK = "current_readback"
 DEST_PER_STREAM = "per_stream"
@@ -1060,6 +1065,9 @@ class ConservationLedger:
     # Identity of the recipe that removed them, so "which program did this" is
     # answerable from the ledger the run shipped rather than from a re-derivation.
     shape_recipe_hash: str = ""
+    # Spreadsheet blanks stored as SQL NULL. Absence, not a present value
+    # destroyed — kept off ``rows_coerced_null``, which means lossy coerce.
+    blank_cells_as_null: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -1072,6 +1080,7 @@ class ConservationLedger:
             "rows_source_filtered": self.rows_source_filtered,
             "shape_recipe_hash": self.shape_recipe_hash,
             "rows_coerced_null": self.rows_coerced_null,
+            "blank_cells_as_null": self.blank_cells_as_null,
             "writer_ack": self.writer_ack,
             "dest_count": self.dest_count,
             "dest_count_before": self.dest_count_before,
@@ -2241,13 +2250,136 @@ def _close_population(
     )
 
 
+def write_refused_ledger(
+    *,
+    rows_read: int,
+    quarantined_rows: int = 0,
+    blank_cells_as_null: int = 0,
+    sync_mode: str = "",
+) -> ConservationLedger:
+    """Counted source, zero writes, destination COUNT(*) not taken.
+
+    Fail-closed preflight stops the load before the writer opens the
+    destination. The file or batch was already counted, so the read is
+    measured. Calling that an unmeasured read is a false proof. Calling
+    ``balanced=False`` a ledger failure is also false: there is no dest
+    population to compare.
+
+    Spreadsheet blanks that the contract stores as SQL NULL stay on
+    ``blank_cells_as_null``. They are absence. ``rows_coerced_null`` means
+    a present value was destroyed, and that counter stays zero here.
+    """
+    read = max(int(rows_read), 0)
+    held = max(int(quarantined_rows or 0), 0)
+    blanks = max(int(blank_cells_as_null or 0), 0)
+    note = (
+        f"{read:,} source row(s) were counted. Preflight refused the load "
+        "before any destination write, so COUNT(*) was not taken. The read "
+        "is measured. This is not a balance failure. No row was committed."
+    )
+    if held:
+        note += f" {held:,} source row(s) are held out with a named cell finding."
+    if blanks:
+        word = "blank" if blanks == 1 else "blanks"
+        note += (
+            f" {blanks:,} spreadsheet {word} on nullable typed columns are "
+            "recorded as SQL NULL (absence), not as a value coerced away."
+        )
+    if is_append_sync(sync_mode):
+        note += (
+            " Sync is full append. A later successful re-run inserts another "
+            "copy of rows that do land. This run inserted nothing."
+        )
+    elif is_overwrite_sync(sync_mode):
+        note += " Sync is overwrite. This run replaced nothing."
+    else:
+        label = str(sync_mode or "").strip() or "unset"
+        note += f" Sync mode is {label}. This run wrote nothing."
+    return ConservationLedger(
+        rows_read=read,
+        rows_written=0,
+        rows_quarantined=held,
+        rows_skipped=0,
+        rows_coerced_null=0,
+        writer_ack=0,
+        dest_count=None,
+        dest_count_before=None,
+        unaccounted=None,
+        balanced=False,
+        rows_read_source=READ_MEASURED,
+        rows_written_source=DEST_UNMEASURED,
+        conservation_kind=KIND_WRITE_REFUSED,
+        note=note,
+        blank_cells_as_null=blanks,
+    )
+
+
+def conservation_ledger_from_mapping(
+    payload: Mapping[str, Any] | None,
+) -> ConservationLedger | None:
+    """Keep a stamped write-refused ledger. Do not recompute it as unmeasured.
+
+    ``account_job`` closes from dest COUNT(*) and ``source_rows``. A preflight
+    refusal has neither, so a recompute says the read was never counted.
+    """
+    data = dict(payload or {})
+    if str(data.get("conservation_kind") or "") != KIND_WRITE_REFUSED:
+        return None
+    read = _as_optional_int(data.get("rows_read"))
+    if read is None:
+        return None
+    return ConservationLedger(
+        rows_read=read,
+        rows_written=0,
+        rows_quarantined=_first_present_int(data.get("rows_quarantined")),
+        rows_skipped=_first_present_int(data.get("rows_skipped")),
+        rows_coerced_null=0,
+        writer_ack=0,
+        dest_count=None,
+        dest_count_before=None,
+        unaccounted=None,
+        balanced=False,
+        rows_read_source=str(data.get("rows_read_source") or READ_MEASURED),
+        rows_written_source=DEST_UNMEASURED,
+        conservation_kind=KIND_WRITE_REFUSED,
+        note=str(data.get("note") or ""),
+        blank_cells_as_null=_first_present_int(data.get("blank_cells_as_null")),
+    )
+
+
+def _write_refusal_still_current(job: Mapping[str, Any]) -> bool:
+    """True while this document is still the preflight refusal, not a later run.
+
+    Resume of the same job id must be allowed to close a real dest COUNT.
+    A completed reconciliation replaces the refusal stamp.
+    """
+    status = str(job.get("status") or "").strip().lower()
+    if status and status not in {"failed"}:
+        return False
+    recon = dict(job.get("reconciliation") or {})
+    if recon.get("source_rows") is not None or recon.get("target_rows") is not None:
+        return False
+    dest = dict(job.get("destination_summary") or {})
+    if dest.get("streams"):
+        return False
+    return True
+
+
 def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     """Conservation ledger for one job document.
 
     ``rows_written`` is dest COUNT(*), never ``records_processed``.
     Two or more streams replace last-table dest COUNT with the job rollup:
     the job is closed iff every stream ledger is closed.
+
+    A stamped write-refused ledger is kept while the job is still that
+    refusal. Recomputing it from a missing dest COUNT would report a
+    counted file as an unmeasured read. A later completed run closes
+    normally.
     """
+    kept = conservation_ledger_from_mapping(job.get("row_accounting"))
+    if kept is not None and _write_refusal_still_current(job):
+        return kept
     dest = dict(job.get("destination_summary") or {})
     streams = dest.get("streams")
     if streams is None:
@@ -2392,10 +2524,12 @@ def attach_conservation_to_updates(
     *,
     previous: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Stamp ``row_accounting`` on terminal job updates (mutates ``updates``).
+    """Stamp ``row_accounting`` and per-stream health on terminal job updates.
 
     Same hook shape as ``attach_trust_to_updates`` so every completed job
     carries dest COUNT(*) conservation, not only the certificate export.
+    Stream health stays the list on ``destination_summary``; this copies that
+    list onto the job so a reader that only sees the top level is not empty.
     """
     from services.job_trust import is_terminal_status
 
@@ -2405,6 +2539,15 @@ def attach_conservation_to_updates(
     merged.update(updates)
     merged["status"] = status
     updates["row_accounting"] = account_job(merged).to_dict()
+    # Same list the ledger already read. Terminal jobs must carry it on the
+    # document, not only inside destination_summary — Jobs and Theater read it.
+    from src.transfer.job_failure import summary_streams
+
+    streams = summary_streams(updates.get("destination_summary"))
+    if streams is None and "destination_summary" not in updates and isinstance(previous, Mapping):
+        streams = summary_streams(previous.get("destination_summary"))
+    if streams is not None:
+        updates["streams"] = streams
     return updates
 
 
@@ -2413,7 +2556,22 @@ def ledger_from_transfer_result(
     *,
     sync_mode: str = "",
 ) -> dict[str, Any]:
-    """Conservation ledger for a ``TransferResult`` (Studio sync response)."""
+    """Conservation ledger for a ``TransferResult`` (Studio sync response).
+
+    A write-refused stamp already on the result is the proof. Rebuilding
+    from ``records_transferred`` (unset on a preflight refusal) would
+    replace a counted read with an unmeasured one.
+    """
+    existing = getattr(result, "row_accounting", None)
+    if not isinstance(existing, Mapping):
+        details = getattr(result, "error_details", None)
+        if isinstance(details, Mapping):
+            existing = details.get("row_accounting")
+    kept = conservation_ledger_from_mapping(
+        existing if isinstance(existing, Mapping) else None
+    )
+    if kept is not None:
+        return kept.to_dict()
     dest = dict(getattr(result, "destination_summary", None) or {})
     recon = dict(getattr(result, "reconciliation", None) or {})
     return account_job(
@@ -2803,6 +2961,36 @@ class KeyCensusAccumulator:
         self._events = 0
         self._unique_tombstone_fallback = 0
         self._failed = False
+        self._pending_new: list[tuple[Any, ...]] = []
+        self._pending_added = 0
+        self._pending_open = False
+
+    def begin_live_batch(self) -> None:
+        """Close the previous batch's reverse window without dropping its keys."""
+        self._pending_open = False
+        self._pending_new = []
+        self._pending_added = 0
+
+    def keep_last_live_batch(self) -> None:
+        """The batch committed rows, so its keys stay in the census."""
+        self.begin_live_batch()
+
+    def reverse_last_live_batch(self) -> None:
+        """A batch that wrote nothing did not insert the keys just probed.
+
+        The probe runs before the write. Counting those keys as inserts while
+        ``rows_written`` is 0 told Gate-8 the destination grew, then an empty
+        checksum matched and the job looked verified.
+        """
+        if not self._pending_open or self._failed:
+            self._pending_open = False
+            return
+        for key in self._pending_new:
+            self._seen.discard(key)
+        self._inserts -= self._pending_added
+        if self._inserts < 0:
+            self._failed = True
+        self.begin_live_batch()
 
     def unseen_live(self, keys: Sequence[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
         return self._unseen(keys, self._seen)
@@ -2830,6 +3018,7 @@ class KeyCensusAccumulator:
     def add_batch(self, keys: Sequence[tuple[Any, ...]], dest_hits: int | None) -> None:
         if dest_hits is None:
             self._failed = True
+            self._pending_open = False
             return
         batch: list[tuple[Any, ...]] = []
         seen_batch: set[tuple[Any, ...]] = set()
@@ -2843,9 +3032,14 @@ class KeyCensusAccumulator:
         if hits > len(unseen):
             # Caller probed a wider set than unseen live keys — refuse to invent inserts.
             self._failed = True
+            self._pending_open = False
             return
-        self._inserts += max(len(unseen) - hits, 0)
+        added = max(len(unseen) - hits, 0)
+        self._inserts += added
         self._seen.update(batch)
+        self._pending_new = list(unseen)
+        self._pending_added = added
+        self._pending_open = True
 
     def add_tombstones(
         self,
@@ -2909,6 +3103,7 @@ def observe_keyed_batch(
     """
     from services.dest_precount import destination_key_hits
 
+    acc.begin_live_batch()
     cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
     records = [dict(zip(headers, row)) for row in rows]
     acc.add_events(len(records))
@@ -2982,6 +3177,7 @@ def observe_change_batch(
     """
     from services.dest_precount import destination_key_hits
 
+    acc.begin_live_batch()
     cols = [str(c).strip() for c in key_columns if str(c).strip()]
     insert_list = list(inserts or [])
     update_list = list(updates or [])

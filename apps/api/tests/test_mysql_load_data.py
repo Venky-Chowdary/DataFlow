@@ -24,6 +24,7 @@ from connectors.mysql_load_data import (  # noqa: E402
     render_load_data_tsv,
 )
 from connectors.mysql_writer import write_mapped_rows  # noqa: E402
+from services.copy_fast_path import FastPathUnavailable
 from services.copy_pg_mysql import (  # noqa: E402
     _mysql_create_sql,
     ctid_predicate,
@@ -398,8 +399,8 @@ def test_live_env_off_uses_insert_and_still_counts(monkeypatch):
         conn.close()
 
 
-def test_live_pk_partition_resume_reloads_partial_range(monkeypatch):
-    """Completed PK ranges are skipped; a partial range is deleted and reloaded."""
+def test_live_pk_partition_resume_declines_a_partial_append(monkeypatch):
+    """A partial occupied range is not deleted. Append declines to the row path."""
     _mysql_live_or_skip()
     _ensure_local_infile()
     try:
@@ -469,32 +470,26 @@ def test_live_pk_partition_resume_reloads_partial_range(monkeypatch):
         assert first.source_snapshot.get("copy_split") == "ctid"
         victim = parts[2]
         with my.cursor() as cur:
-            # Leave a partial range (not empty, not complete) so resume must DELETE+reload.
+            # A partial range is not proof this run owns those rows. Append must not delete them.
             lo = victim["lo"]
             assert lo is not None
             cur.execute(f"DELETE FROM `{dest_table}` WHERE `id` = %s", (lo,))
             cur.execute(f"SELECT COUNT(*) FROM `{dest_table}`")
             assert int(cur.fetchone()[0]) == 7999
-        second = copy_postgres_to_mysql(
-            source_cfg=source_cfg,
-            source_schema="public",
-            source_table=src_table,
-            dest_cfg=dest_cfg,
-            dest_table=dest_table,
-            pairs=[("id", "id"), ("label", "label")],
-            mysql_ddls=["BIGINT", "VARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_rows == 8000
-        assert second.target_rows == 8000
-        actions = [p["action"] for p in second.source_snapshot["partition_proof"]]
-        assert actions.count("skip") == 3
-        assert actions.count("reload") == 1
-        assert second.source_snapshot.get("partitions_skipped") == 3
-        assert second.source_snapshot.get("copy_split") == "pk"
+        with pytest.raises(FastPathUnavailable, match="partly"):
+            copy_postgres_to_mysql(
+                source_cfg=source_cfg,
+                source_schema="public",
+                source_table=src_table,
+                dest_cfg=dest_cfg,
+                dest_table=dest_table,
+                pairs=[("id", "id"), ("label", "label")],
+                mysql_ddls=["BIGINT", "VARCHAR(32)"],
+                replace_destination=False,
+            )
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dest_table}`")
-            assert int(cur.fetchone()[0]) == 8000
+            assert int(cur.fetchone()[0]) == 7999
     finally:
         with pg.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS "{src_table}"')

@@ -210,13 +210,20 @@ def skip_complete_s3(
     )
 
 
-def s3_csv_cell(value: object) -> str:
-    """Encode one cell for the CSV/TSV COPY wire.
+# Internal marker so the writer can emit an empty NULL field while a real
+# empty string stays quoted ``""``. It is never written to the file.
+_CSV_NULL = "\x00"
 
-    NULL is unquoted ``\\N``. Empty string is later quoted as ``""``.
+
+def s3_csv_cell(value: object) -> str:
+    """Encode one cell for an operator CSV/TSV file.
+
+    NULL is an empty field. Empty string is later quoted as ``""``.
+    Booleans are ``true`` / ``false``. The PostgreSQL COPY spellings
+    ``\\N`` and ``t`` / ``f`` are not written.
     """
     if value is None:
-        return "\\N"
+        return _CSV_NULL
     if isinstance(value, (bytes, bytearray, memoryview)):
         raise FastPathUnavailable("BLOB values are not S3 CSV COPY-safe")
     if isinstance(value, datetime):
@@ -228,13 +235,15 @@ def s3_csv_cell(value: object) -> str:
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, bool):
-        return "1" if value else "0"
+        return "true" if value else "false"
     if value == "":
         return ""
     return str(value)
 
 
 def s3_csv_quote(cell: str) -> str:
+    if cell == _CSV_NULL:
+        return ""
     if cell == "":
         return '""'
     if cell == "\\N":
@@ -246,7 +255,7 @@ def s3_csv_quote(cell: str) -> str:
 
 def s3_format_delimited_row(cells: Sequence[str], delimiter: str) -> str:
     if delimiter == "\t":
-        return "\t".join(cells)
+        return "\t".join("" if c == _CSV_NULL else c for c in cells)
     return ",".join(s3_csv_quote(c) for c in cells)
 
 

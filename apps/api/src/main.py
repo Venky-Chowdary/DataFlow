@@ -20,13 +20,14 @@ from services.platform_config import (
     apply_railway_defaults,
     cors_origins,
     docs_enabled,
-    enforce_production_config,
     is_production,
     is_railway,
+    validate_production_config,
     vector_store_dir,
 )
 
 from .middleware.auth_middleware import AuthMiddleware
+from .middleware.production_config_middleware import ProductionConfigMiddleware
 from .middleware.tenant_middleware import TenantMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
@@ -47,6 +48,7 @@ from .routers.query_router import router as query_router
 from .routers.repair_router import router as repair_router
 from .routers.saved_connectors_router import router as saved_connectors_router
 from .routers.schedules_router import router as schedules_router
+from .routers.rule_compiler_router import router as rule_compiler_router
 from .routers.shape_router import router as shape_router
 from .routers.training_agent_router import router as training_agent_router
 from .transfer.engine import DuplicateTransferSubmission
@@ -68,7 +70,17 @@ async def lifespan(app: FastAPI):
     Railway ``/health`` liveness can pass within the healthcheck window.
     """
     apply_railway_defaults()
-    enforce_production_config()
+    # Do not sys.exit here. The socket is not accepting yet, so a fatal
+    # config used to fail Railway's /health probe as "service unavailable"
+    # for the whole window. Liveness stays up; other routes return 503.
+    from services.process_role import topology_errors
+
+    config_errors = validate_production_config() + topology_errors()
+    app.state.config_errors = config_errors
+    if config_errors:
+        for msg in config_errors:
+            print(f"[FATAL] Production config: {msg}")
+        print("[!] Refusing traffic except /health until production config is fixed")
     # Configure logging before anything else can emit a line, so no startup
     # message escapes with Uvicorn's default handler and no correlation fields.
     try:
@@ -140,86 +152,64 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[!] RAG initialization warning: {e}")
 
-        # Scheduler must start even when RAG warm-up fails — otherwise due
-        # pipelines sit on Next run forever with Runs=0.
+        # Cadence stays up when RAG warm-up fails — otherwise due pipelines
+        # sit on Next run forever with Runs=0. Multi-replica API pods set
+        # SCHEDULE_LOOP=0; src.scheduler_main owns the loop there.
         try:
+            from services.process_role import schedule_loop_enabled
             from services.schedule_store import import_file_schedules_into_mongo
 
             imported = await asyncio.to_thread(import_file_schedules_into_mongo)
             if imported:
                 print(f"[+] Imported {imported} pipeline schedule(s) from schedules.json → MongoDB")
 
-            from .services.schedule_runner import run_schedule_loop
+            if schedule_loop_enabled():
+                from .services.schedule_runner import run_schedule_loop
 
-            asyncio.create_task(run_schedule_loop())
-            print("[+] Pipeline scheduler started")
+                asyncio.create_task(run_schedule_loop())
+                print("[+] Pipeline scheduler started")
+            else:
+                print("[+] Pipeline scheduler not started in this process (SCHEDULE_LOOP off)")
         except Exception as e:
             print(f"[!] Pipeline scheduler failed to start: {e}")
 
         try:
-            from services.transfer_scheduler import start as start_transfer_scheduler
+            from services.process_role import api_executes_transfers, orphan_resume_enabled
+            from services.scheduler_mode import scheduler_mode
 
-            start_transfer_scheduler()
+            if api_executes_transfers():
+                from services.transfer_scheduler import start as start_transfer_scheduler
 
-            # Phase F5 — claim-queue pull on API when SCHEDULER_MODE resolves to claim.
-            try:
-                from services.scheduler_mode import scheduler_mode
-                from services.worker_fleet import start_api_claim_loop
+                start_transfer_scheduler()
 
-                if start_api_claim_loop():
-                    print(f"[+] API claim loop started (scheduler_mode={scheduler_mode()})")
-                else:
-                    print(f"[+] Transfer scheduler local mode (scheduler_mode={scheduler_mode()})")
-            except Exception as claim_exc:
-                print(f"[!] API claim loop not started: {claim_exc}")
+                # Phase F5 — claim-queue pull on API when the operator left the
+                # API claim loop on (single replica, or no worker Deployment yet).
+                try:
+                    from services.worker_fleet import start_api_claim_loop
 
-            from .services.mongodb_service import get_mongodb_service
-            from .services.worker_leases import get_worker_lease_store
-            from .transfer.background import run_transfer_async
-            from .transfer.models import transfer_request_from_dict
+                    if start_api_claim_loop():
+                        print(f"[+] API claim loop started (scheduler_mode={scheduler_mode()})")
+                    else:
+                        print(f"[+] Transfer scheduler local mode (scheduler_mode={scheduler_mode()})")
+                except Exception as claim_exc:
+                    print(f"[!] API claim loop not started: {claim_exc}")
+            else:
+                print(
+                    "[+] This process enqueues transfers only "
+                    f"(scheduler_mode={scheduler_mode()})"
+                )
 
-            mongo = get_mongodb_service()
-            lease_store = get_worker_lease_store()
-            resumed = 0
-            for job in mongo.list_jobs(limit=200):
-                if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
-                    payload = job["transfer_request"]
-                    if lease_store.is_held(job["_id"]):
-                        continue
-                    request = transfer_request_from_dict(payload)
-                    try:
-                        from services.transfer_file_staging import (
-                            file_source_bytes_available,
-                            hydrate_file_source,
-                        )
+            if orphan_resume_enabled():
+                from services.orphan_jobs import start_orphan_sweeper, sweep_orphan_jobs
 
-                        hydrate_file_source(request)
-                        if request.source.kind == "file" and not file_source_bytes_available(
-                            request
-                        ):
-                            mongo.update_job_status(
-                                job["_id"],
-                                "failed",
-                                error="File re-upload required after restart",
-                            )
-                            continue
-                    except Exception as hydrate_exc:
-                        logging.getLogger(__name__).warning(
-                            "Orphan resume hydrate failed for %s: %s",
-                            job.get("_id"),
-                            hydrate_exc,
-                        )
-                    from services.execution_engine_contract import resolve_reclaim_resume
-
-                    # Fresh pending / zero-progress reclaim → resume=False.
-                    # Forcing resume=True on append/Excel falsely fails Module 14.
-                    run_transfer_async(
-                        job["_id"],
-                        request,
-                        resume=resolve_reclaim_resume(job),
-                    )
-                    resumed += 1
-            print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")
+                settled = sweep_orphan_jobs()
+                counts: dict[str, int] = {}
+                for row in settled:
+                    counts[row["action"]] = counts.get(row["action"], 0) + 1
+                start_orphan_sweeper()
+                print(f"[+] Orphaned job sweep started (first pass: {counts or 'none'})")
+            else:
+                print("[+] Orphan resume scan skipped")
         except Exception as e:
             print(f"[!] Orphaned job resume warning: {e}")
         finally:
@@ -289,6 +279,8 @@ if not _cors_origin_regex and is_railway():
 app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(TenantMiddleware)
+# Outermost: a missing production secret must not reach auth or transfer.
+app.add_middleware(ProductionConfigMiddleware)
 
 # Enterprise CORS: no wildcard methods/headers, explicit list only.
 # Credentials are only sent from the configured origins (cors_origins) or the
@@ -445,6 +437,7 @@ app.include_router(usage_router, prefix="/api/v1")
 app.include_router(ops_router, prefix="/api/v1")
 app.include_router(repair_router, prefix="/api/v1")
 app.include_router(shape_router, prefix="/api/v1")
+app.include_router(rule_compiler_router, prefix="/api/v1")
 
 
 @app.get("/")
@@ -466,11 +459,15 @@ async def health_check():
 
     Railway deploy healthchecks must hit this path. Keep it cheap and never
     block on Mongo/RAG/catalog so a slow warm-up cannot fail the deploy.
+    Incomplete production config does not kill the process. The missing
+    settings are written to the process log, not this public body. Every
+    other route stays closed until they are fixed.
     """
+    errors = list(getattr(app.state, "config_errors", None) or [])
     return {
-        "status": "healthy",
+        "status": "misconfigured" if errors else "healthy",
         "liveness": True,
-        "ready": bool(getattr(app.state, "ready", False)),
+        "ready": bool(getattr(app.state, "ready", False)) and not errors,
         # Present only after proxy-write hardening is deployed. Use this to
         # confirm Railway is not still running a pre-fix API image.
         "features": {

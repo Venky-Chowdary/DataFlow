@@ -231,6 +231,52 @@ def _is_risk_contract_incomplete_signal(
     )
 
 
+def _is_sample_cast_not_declared_collapse(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """G3 sample cast / empty-cell blocks are not a declared type collapse.
+
+    The gate summary always says "type coercion issue(s)". That phrase used to
+    pull INTEGER→BIGINT widening, and blank spreadsheet cells, into
+    "Lossy / fidelity collapse" even when ``is_lossy_coercion`` was false.
+    """
+    gid = str(gate_id or "")
+    if gid not in {
+        "g3_schema_contract",
+        "g3_type_compat",
+        "g3_type_compatibility",
+    }:
+        return False
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    rows = [r for r in (details.get("issues_detail") or []) if isinstance(r, dict)]
+    if any(
+        r.get("fidelity_collapse")
+        or r.get("nested_shape_collapse")
+        or r.get("nested_document_collapse")
+        or r.get("declared_lossy")
+        for r in rows
+    ):
+        return False
+    issues = details.get("issues") or []
+    issue_text = " ".join(str(i) for i in issues).lower()
+    if re.search(r"lossy coercion|precision|fidelity|collapse|truncat", issue_text):
+        return False
+    if rows and all(
+        r.get("probe_cast_only") or r.get("not_null_contract")
+        for r in rows
+    ):
+        return True
+    if "empty value cannot coerce" in issue_text or "nullability" in issue_text:
+        return True
+    if "sample value does not fit" in issue_text:
+        return True
+    return False
+
+
 def _is_fidelity_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -293,6 +339,10 @@ def _is_fidelity_signal(
                 return False
     if details.get("fidelity_collapse") is True:
         return True
+    # Blank cells and bad casts on a safe widening are not fidelity collapse.
+    # The gate title still contains the word "coercion".
+    if _is_sample_cast_not_declared_collapse(message, details, gate_id):
+        return False
     # Invisible / undecodable characters are an encoding root with its own fix
     # (normalize or quarantine the rows). Absorbing them into fidelity collapse
     # told operators to remap a type path that is not the problem — a TEXT→TEXT
@@ -695,6 +745,19 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 sev = str(col.get("severity") or "").lower()
                 if sev != "block":
                     continue
+                # Empty cells and ordinary cast misses are a sample-transform
+                # root. Folding them in here labeled INTEGER→BIGINT as collapse.
+                if not col.get("fidelity_collapse") and str(
+                    col.get("failure_class") or ""
+                ) in {
+                    "EMPTY_VALUE_NOT_NULLABLE",
+                    "TYPE_CAST_FAILURE",
+                    "INVALID_TIMESTAMP",
+                    "INVALID_BOOLEAN",
+                    "INVALID_NUMERIC",
+                    "SEMANTIC_TRANSFORM_FAILURE",
+                }:
+                    continue
                 src = col.get("source") or col.get("column")
                 if src:
                     cols.append(str(src))
@@ -935,14 +998,21 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                         cols.append(left)
             cols.extend(_columns_from_details(details))
         cols = list(dict.fromkeys(cols))
+        named = ", ".join(cols[:8])
+        more = f" (+{len(cols) - 8} more)" if len(cols) > 8 else ""
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("mapping_confidence", cols, absorbed),
                 kind="mapping_confidence",
                 title="Mapping confidence below floor",
                 summary=(
-                    f"{len(cols) or 'Some'} mapping(s) below the Map confidence floor "
-                    f"— owned by g4_mapping_confidence (not re-blocked by proof/G9)"
+                    (
+                        f"{len(cols)} mapping(s) below the Map confidence floor: "
+                        f"{named}{more}"
+                        if cols
+                        else "Some mapping(s) below the Map confidence floor"
+                    )
+                    + " — owned by g4_mapping_confidence (not re-blocked by proof/G9)"
                 ),
                 business_impact=(
                     "Low semantic confidence increases wrong-column risk. Execute stays "
@@ -1251,18 +1321,30 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         absorbed = sorted({str(i.get("id")) for i in collision_findings if i.get("id")})
         details = collision_findings[0].get("details") or {}
         key = str((details.get("primary_key") or {}).get("target") or "") or "the identity key"
-        stored = len(details.get("sample_collisions") or [])
+        if details.get("collision_count") is not None:
+            stored = int(details.get("collision_count") or 0)
+        else:
+            stored = len(details.get("sample_collisions") or [])
         sync_mode = str(details.get("sync_mode") or "append")
+        enforced = bool(details.get("key_enforced", True))
+        if enforced:
+            summary = (
+                f"{stored or 'Some'} key value(s) in this batch are already at rest "
+                f"in the destination on {key}, which enforces uniqueness — "
+                f"a {sync_mode} insert aborts on the first one"
+            )
+        else:
+            summary = (
+                f"{stored or 'Some'} key value(s) in this batch are already at rest "
+                f"in the destination on {key}. That table does not enforce the key, "
+                f"so a {sync_mode} insert would store a second copy"
+            )
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("destination_key_collision", [key], absorbed),
                 kind="destination_key_collision",
                 title="Destination already stores these keys",
-                summary=(
-                    f"{stored or 'Some'} key value(s) in this batch are already at rest "
-                    f"in the destination on {key}, which enforces uniqueness — "
-                    f"a {sync_mode} insert aborts on the first one"
-                ),
+                summary=summary,
                 business_impact=(
                     "The write fails outright, so no rows land. Nothing is "
                     "duplicated and nothing at the destination is damaged."

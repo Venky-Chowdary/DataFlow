@@ -19,6 +19,26 @@ def _file_store(monkeypatch, tmp_path: Path):
     return cs, store
 
 
+def test_sftp_create_keeps_host_from_the_uri(monkeypatch, tmp_path: Path) -> None:
+    cs, _store = _file_store(monkeypatch, tmp_path)
+    saved = cs.create_connector(
+        {
+            "name": "Daily drop",
+            "type": "sftp",
+            "role": "source",
+            "host": "",
+            "connection_string": "sftp://alice:secret@ftp.example.com:2222/incoming/book.xlsx",
+        }
+    )
+    assert saved.host == "ftp.example.com"
+    assert saved.port == 2222
+    assert saved.username == "alice"
+    loaded = cs.get_connector(saved.id)
+    assert loaded is not None
+    assert loaded.host == "ftp.example.com"
+    assert loaded.port == 2222
+
+
 def test_same_name_create_keeps_id_and_takes_new_config(monkeypatch, tmp_path: Path) -> None:
     cs, store = _file_store(monkeypatch, tmp_path)
     first = cs.create_connector(

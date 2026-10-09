@@ -11,7 +11,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.reconcile_coverage import NO_OP_DEST_UNCHANGED
+from services.reconcile_coverage import (
+    LAST_STREAM_CHECKSUM,
+    NO_OP_DEST_UNCHANGED,
+    PER_STREAM_CHECKSUM,
+)
 
 _TERMINAL = frozenset({
     "completed",
@@ -56,6 +60,12 @@ def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
         return False
     if is_append_delta_proof(recon):
         return False
+    # A last-table digest can match and still not be the multi-table job.
+    # Assurance may still say full_checksum on a report that also carries
+    # this scope; the scope wins.
+    scope = str(recon.get("checksum_scope") or "").strip().lower()
+    if scope == LAST_STREAM_CHECKSUM:
+        return False
     assurance = str(recon.get("assurance_level") or recon.get("coverage") or "").strip().lower()
     if assurance == "full_checksum":
         return True
@@ -64,6 +74,7 @@ def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
         "writer_ack",
         "sample",
         "write_pass_dest_readback",
+        PER_STREAM_CHECKSUM,
         NO_OP_DEST_UNCHANGED,
         "none",
     }:
@@ -118,7 +129,13 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
     )
 
     fidelity = recon.get("row_fidelity_score")
-    if isinstance(fidelity, (int, float)) and fidelity == fidelity:
+    last_stream = (
+        str(recon.get("checksum_scope") or "").strip().lower() == LAST_STREAM_CHECKSUM
+    )
+    # A perfect score on the last table is not a perfect score for the job.
+    if last_stream and passed is not False:
+        recon_score = 70.0
+    elif isinstance(fidelity, (int, float)) and fidelity == fidelity:
         recon_score = max(0.0, min(100.0, float(fidelity) * (100.0 if float(fidelity) <= 1.0 else 1.0)))
         if float(fidelity) <= 1.0:
             recon_score = float(fidelity) * 100.0
@@ -167,6 +184,11 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
         r_note = (
             "Gate-8 append delta verified — whole-table checksums are not "
             "comparable; per-cell fidelity is not proven."
+        )
+    elif str(recon.get("checksum_scope") or "").strip().lower() == LAST_STREAM_CHECKSUM:
+        r_note = (
+            "Checksum matches the last stream only — not a single digest "
+            "for the multi-table job."
         )
     elif missing or extra:
         r_note = f"Keys missing={missing} extra={extra}."
@@ -576,6 +598,19 @@ def _next_action(
                 "detail": (
                     "Dest grew by this run. Overwrite to replace existing rows, "
                     "or add a PK and upsert."
+                ),
+            }
+        if (
+            recon
+            and recon.get("passed") is True
+            and str(recon.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM
+        ):
+            return {
+                "code": "last_stream_checksum",
+                "label": "Per-stream checksums — not one job digest",
+                "detail": (
+                    "The job checksum is the last table. Each stream's COUNT(*) "
+                    "is on the stream ledger. Not migration_proven."
                 ),
             }
         assurance = str((recon or {}).get("assurance_level") or (recon or {}).get("coverage") or "").lower()

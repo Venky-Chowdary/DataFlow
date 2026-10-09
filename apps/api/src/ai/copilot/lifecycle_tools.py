@@ -1,5 +1,5 @@
 """Lifecycle operations Pilot can stage: job cancel/retry/resume/replay, connector
-test/delete, schedule pause/resume/delete.
+test/delete, schedule pause/resume/cadence/delete.
 
 Every mutation here follows the same contract as ``run_schedule_now``: the tool
 resolves the object, writes a redacted preview, stages an ack on the server
@@ -94,12 +94,26 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "replay_quarantine",
         "description": (
-            "Stage a replay of a job's open quarantine rows through the destination "
-            "with the original mapping. Pending action until Confirm."
+            "Stage a replay of a job's open quarantine rows through the same writer "
+            "the screen uses. Pass transform_overrides to replace the cast that "
+            "quarantined the cell, and rows to send edited cell values. Without "
+            "those, the original mapping is used. Pending action until Confirm."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}, "selector": {"type": "string"}},
+            "properties": {
+                "job_id": {"type": "string"},
+                "selector": {"type": "string"},
+                "transform_overrides": {
+                    "type": "object",
+                    "description": "Source column to transform, applied on Confirm.",
+                },
+                "rows": {
+                    "type": "array",
+                    "description": "Edited quarantine records. Empty replays every open row.",
+                    "items": {"type": "object"},
+                },
+            },
             "required": [],
         },
     },
@@ -155,6 +169,61 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
             "required": [],
         },
     },
+    {
+        "name": "update_schedule",
+        "description": (
+            "Stage a cadence or name change on one existing pipeline. The route, "
+            "the mapping, and the sync mode stay as they are — this does not "
+            "re-plan the transfer. An interval with no clock (hourly) clears a "
+            "previous cron. Pending action until Confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "schedule_id": {"type": "string"},
+                "name": {"type": "string", "description": "Current pipeline name"},
+                "cadence": {
+                    "type": "string",
+                    "description": "New cadence in the operator's words, e.g. daily at 03:00 UTC or hourly",
+                },
+                "new_name": {"type": "string", "description": "Rename the pipeline. Omit to keep the name."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "prepare_cdc_source",
+        "description": (
+            "Stage the server settings continuous CDC needs on one saved database. "
+            "PostgreSQL: write wal_level=logical (slots and WAL senders at 10) to "
+            "postgresql.auto.conf. Restart PostgreSQL from the host so the "
+            "postmaster reads it. MySQL: GRANT REPLICATION SLAVE, "
+            "REPLICATION CLIENT to the saved user, then persist gtid_mode=ON when "
+            "that user is allowed to. Nothing changes until Confirm. A role that "
+            "cannot run the statement is reported; a GTID is not invented."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string", "description": "Saved connector name"},
+                "restart": {
+                    "type": "boolean",
+                    "description": (
+                        "Record that the operator will restart PostgreSQL from the "
+                        "host after ALTER SYSTEM. Confirm writes postgresql.auto.conf only."
+                    ),
+                    "default": True,
+                },
+                "enable_gtid": {
+                    "type": "boolean",
+                    "description": "Persist MySQL GTID after the replication grant. Default true.",
+                    "default": True,
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 LIFECYCLE_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in LIFECYCLE_TOOL_DEFINITIONS)
@@ -169,6 +238,8 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "delete_connector": "delete_connector",
     "set_schedule_enabled": "set_schedule_enabled",
     "delete_schedule": "delete_schedule",
+    "update_schedule": "update_schedule",
+    "prepare_cdc_source": "prepare_cdc_source",
 }
 
 
@@ -239,7 +310,44 @@ def _stage(tool: str, *, payload: dict[str, Any], preview: dict[str, Any], label
     )
 
 
-def _job_tool(tool: str, job_id: str, selector: str) -> ToolResult:
+def normalize_quarantine_replay_edits(
+    transform_overrides: Any = None,
+    rows: Any = None,
+) -> tuple[dict[str, str], list[dict[str, Any]], str]:
+    """The edits Confirm will hand to the screen's quarantine replay.
+
+    An empty result means replay the open rows with the original mapping.
+    A non-empty error string refuses the stage — a bad edit must not become
+    an ack that Confirm then applies as the original integer cast.
+    """
+    raw_overrides = transform_overrides or {}
+    if not isinstance(raw_overrides, dict):
+        return {}, [], "transform_overrides must name each source column and its transform."
+    overrides: dict[str, str] = {}
+    for key, value in raw_overrides.items():
+        column = str(key or "").strip()
+        transform = str(value or "").strip()
+        if not column or not transform:
+            return {}, [], "Each transform override needs a source column and a transform."
+        overrides[column] = transform
+    raw_rows = rows or []
+    if not isinstance(raw_rows, list):
+        return {}, [], "rows must be a list of quarantine records."
+    edited: list[dict[str, Any]] = []
+    for item in raw_rows:
+        if not isinstance(item, dict):
+            return {}, [], "Each edited quarantine row must be an object."
+        edited.append(dict(item))
+    return overrides, edited, ""
+
+
+def _job_tool(
+    tool: str,
+    job_id: str,
+    selector: str,
+    transform_overrides: Any = None,
+    rows: Any = None,
+) -> ToolResult:
     job, clarify = resolve_job(job_id, selector)
     if not job:
         return _tool_result(tool, success=False, output=None, error=clarify)
@@ -273,8 +381,22 @@ def _job_tool(tool: str, job_id: str, selector: str) -> ToolResult:
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} has no quarantined rows to replay.",
             )
-        return _stage(tool, payload={"job_id": jid}, preview=brief,
-                      label=f"Replay quarantine rows of job {short}", destructive=False)
+        overrides, edited, edit_error = normalize_quarantine_replay_edits(
+            transform_overrides, rows
+        )
+        if edit_error:
+            return _tool_result(tool, success=False, output=None, error=edit_error)
+        payload = {"job_id": jid}
+        if overrides:
+            brief["transform_overrides"] = overrides
+            payload["transform_overrides"] = overrides
+        if edited:
+            brief["edited_rows"] = len(edited)
+            payload["rows"] = edited
+        label = f"Replay quarantine rows of job {short}"
+        if overrides or edited:
+            label += " with the staged cell edits"
+        return _stage(tool, payload=payload, preview=brief, label=label, destructive=False)
     return _tool_result(tool, success=False, output=None, error=f"Unknown job tool {tool}")
 
 
@@ -302,6 +424,121 @@ def _connector(tool: str, connector_id: str, name: str) -> tuple[dict[str, Any] 
             error=f"No connector matched “{name or connector_id}”. Name a saved connector from Connectors.",
         )
     return conn, None
+
+
+def describe_cdc_prepare(engine: str) -> dict[str, Any]:
+    """Operator text for CDC setup. Only Postgres and MySQL-family engines are staged.
+
+    SQL Server, Oracle, and TimescaleDB used to receive the MySQL grant
+    preview, marked destructive, even though Confirm cannot run that SQL
+    on those engines.
+    """
+    key = (engine or "").strip().lower()
+    if key in {"postgresql", "postgres"}:
+        return {
+            "stage": True,
+            "change": (
+                "ALTER SYSTEM wal_level=logical, max_replication_slots=10, "
+                "max_wal_senders=10. Restart PostgreSQL from the host afterward"
+            ),
+        }
+    if key == "mysql":
+        return {
+            "stage": True,
+            "change": (
+                "GRANT REPLICATION SLAVE, REPLICATION CLIENT, then persist "
+                "gtid_mode when allowed"
+            ),
+        }
+    if key == "mariadb":
+        return {
+            "stage": True,
+            "change": (
+                "GRANT REPLICATION SLAVE, REPLICATION CLIENT on MariaDB. "
+                "gtid_mode is MySQL-only and is not applied."
+            ),
+        }
+    if key in {
+        "sqlserver",
+        "mssql",
+        "microsoft_sql_server",
+        "sql_server",
+        "azure_sql",
+        "azure_sql_database",
+        "amazon_rds_sql_server",
+    }:
+        return {
+            "stage": False,
+            "change": (
+                "SQL Server CDC is enabled with sys.sp_cdc_enable_db and "
+                "sys.sp_cdc_enable_table. No MySQL replication grant was staged."
+            ),
+        }
+    if key == "oracle":
+        return {
+            "stage": False,
+            "change": (
+                "Oracle CDC needs supplemental logging and LogMiner privileges. "
+                "No MySQL replication grant was staged."
+            ),
+        }
+    if key in {"timescaledb", "timescale"}:
+        return {
+            "stage": False,
+            "change": (
+                "CDC is not supported for source type 'timescaledb'. "
+                "No server change was staged."
+            ),
+        }
+    label = key or "this engine"
+    return {
+        "stage": False,
+        "change": (
+            f"CDC server prerequisites are not defined for {label}. "
+            "No grant was staged."
+        ),
+    }
+
+
+def prepare_cdc_source(
+    connector_id: str = "",
+    name: str = "",
+    restart: bool = True,
+    enable_gtid: bool = True,
+) -> ToolResult:
+    """Stage logical decoding or the MySQL replication grant. Confirm applies it."""
+    conn, err = _connector("prepare_cdc_source", connector_id, name)
+    if err:
+        return err
+    assert conn is not None
+    brief = _connector_brief(conn)
+    engine = str(brief.get("type") or conn.get("type") or "")
+    described = describe_cdc_prepare(engine)
+    if not described.get("stage"):
+        return _tool_result(
+            "prepare_cdc_source",
+            success=False,
+            output={**brief, "change": described.get("change"), "staged": False},
+            error=str(described.get("change") or "CDC setup was not staged."),
+        )
+    preview = {
+        **brief,
+        "restart": bool(restart),
+        "enable_gtid": bool(enable_gtid) and engine.strip().lower() == "mysql",
+        "change": described["change"],
+    }
+    return _stage(
+        "prepare_cdc_source",
+        payload={
+            "connector_id": brief["connector_id"],
+            "name": brief["name"],
+            "restart": bool(restart),
+            "enable_gtid": bool(preview["enable_gtid"]),
+        },
+        preview=preview,
+        label=f"Prepare CDC on {brief['name']}",
+        destructive=True,
+    )
 
 
 def test_connector(connector_id: str = "", name: str = "") -> ToolResult:
@@ -407,6 +644,105 @@ def delete_schedule(resolver: Any, schedule_id: str = "", name: str = "") -> Too
         preview=preview,
         label=f"Delete pipeline “{sched.name}”",
         destructive=True,
+    )
+
+
+def update_schedule(
+    resolver: Any,
+    schedule_id: str = "",
+    name: str = "",
+    cadence: str = "",
+    new_name: str = "",
+) -> ToolResult:
+    """Stage a clock or name change. The route is not re-planned.
+
+    Confirm applies the patch through ``patch_pipeline_schedule``. A cadence
+    that has no cron sends ``cron=""`` so a previous clock is cleared — omitting
+    the field would keep the old cron. Mappings, connectors, and sync mode are
+    left off the payload, so a down source cannot block a clock change and a
+    later re-map cannot replace the approved contract.
+    """
+    sched, err = _schedule("update_schedule", resolver, schedule_id, name)
+    if err:
+        return err
+    from .schedule_cadence import parse_cadence
+
+    cadence_text = (cadence or "").strip()
+    renamed = (new_name or "").strip()
+    current_name = str(getattr(sched, "name", "") or "")
+    if not cadence_text and not renamed:
+        return _tool_result(
+            "update_schedule",
+            success=False,
+            output=None,
+            error=(
+                "What should change? Give a cadence (hourly, daily at 03:00 UTC) "
+                "or a new name. The route and the mapping stay as they are."
+            ),
+        )
+
+    current_interval = str(getattr(sched, "interval", "") or "")
+    current_cron = str(getattr(sched, "cron", "") or "")
+    current_tz = str(getattr(sched, "timezone", "") or "UTC")
+    payload: dict[str, Any] = {"schedule_id": sched.id}
+    preview: dict[str, Any] = {
+        "schedule_id": sched.id,
+        "name": current_name,
+        "interval": current_interval,
+        "cron": current_cron,
+        "timezone": current_tz,
+        "enabled": bool(getattr(sched, "enabled", True)),
+    }
+    label_bits: list[str] = []
+
+    if cadence_text:
+        spec = parse_cadence(cadence_text)
+        if not spec.resolved:
+            return _tool_result("update_schedule", success=False, output=None, error=spec.question)
+        same_clock = (spec.interval, spec.cron, spec.timezone) == (
+            current_interval,
+            current_cron,
+            current_tz,
+        )
+        if not same_clock:
+            # cron is always present, including "" — an hourly spec must clear
+            # a previous "0 2 * * *" rather than leave it beside interval=hourly.
+            payload["interval"] = spec.interval
+            payload["cron"] = spec.cron
+            payload["timezone"] = spec.timezone
+            preview["interval_after"] = spec.interval
+            preview["cron_after"] = spec.cron
+            preview["timezone_after"] = spec.timezone
+            preview["cadence"] = spec.description
+            if spec.timezone_assumed:
+                preview["timezone_note"] = (
+                    "No timezone was given, so this is UTC. Say e.g. “in Asia/Kolkata” to change it."
+                )
+            label_bits.append(spec.description)
+
+    if renamed and renamed != current_name:
+        payload["name"] = renamed
+        preview["name_after"] = renamed
+        label_bits.append(f"rename to “{renamed}”")
+
+    if "interval" not in payload and "name" not in payload:
+        if cadence_text and renamed:
+            detail = f"Pipeline “{current_name}” already has that cadence and that name."
+        elif cadence_text:
+            detail = f"Pipeline “{current_name}” is already on that cadence."
+        else:
+            detail = f"Pipeline “{current_name}” already has that name."
+        return _tool_result("update_schedule", success=False, output=None, error=detail)
+
+    label = f"Update pipeline “{current_name}”"
+    if label_bits:
+        label = f"{label} — {', '.join(label_bits)}"
+    return _stage(
+        "update_schedule",
+        payload=payload,
+        preview=preview,
+        label=label,
+        destructive=False,
     )
 
 
@@ -533,6 +869,38 @@ def plan_lifecycle_operation(message: str) -> list[tuple[str, dict[str, Any]]] |
         return [("delete_connector", {"name": name} if name else {})]
 
     # --- schedules ------------------------------------------------------
+    # Cadence and rename are a patch of the existing pipeline. They are
+    # matched before pause/delete so "change the cadence of pipeline X" is
+    # not read as a new schedule or as a delete.
+    rename = re.search(
+        rf"\brename\s+{_ART}{_SCHED_NOUN}\s+(?P<name>.+?)\s+to\s+(?P<new>.+?)\s*$",
+        lower,
+    )
+    if rename:
+        new_label = text[rename.start("new"):rename.end("new")].strip(" .,!?\"'“”")
+        args: dict[str, Any] = {"new_name": new_label}
+        named = _named(text, rename)
+        if named:
+            args["name"] = named
+        return [("update_schedule", args)]
+    cadence_change = re.search(
+        rf"\b(?:change|update|reschedule)\s+(?:the\s+)?cadence\s+of\s+{_ART}{_SCHED_NOUN}\s+"
+        rf"(?P<name>.+?)\s+to\s+(?P<cadence>.+?)\s*$",
+        lower,
+    ) or re.search(
+        rf"\breschedule\s+{_ART}{_SCHED_NOUN}\s+(?P<name>.+?)\s+to\s+(?P<cadence>.+?)\s*$",
+        lower,
+    )
+    if cadence_change:
+        cadence_label = text[cadence_change.start("cadence"):cadence_change.end("cadence")].strip(
+            " .,!?\"'“”"
+        )
+        args = {"cadence": cadence_label}
+        named = _named(text, cadence_change)
+        if named:
+            args["name"] = named
+        return [("update_schedule", args)]
+
     for tool, verb, enabled in (
         ("set_schedule_enabled", _PAUSE, False),
         ("set_schedule_enabled", _ENABLE, True),

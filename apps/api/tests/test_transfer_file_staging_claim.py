@@ -98,6 +98,9 @@ def test_run_fleet_job_executes_when_path_staged(tmp_path, monkeypatch):
     calls: list[str] = []
 
     class _Mongo:
+        def is_cancel_requested(self, job_id):
+            return False
+
         def get_job(self, job_id):
             return {
                 "_id": job_id,
@@ -147,6 +150,9 @@ def test_run_fleet_job_fails_when_bytes_unreachable(monkeypatch):
     statuses: list[str] = []
 
     class _Mongo:
+        def is_cancel_requested(self, job_id):
+            return False
+
         def get_job(self, job_id):
             return {"_id": job_id, "status": "pending", "transfer_request": payload}
 

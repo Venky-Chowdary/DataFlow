@@ -93,6 +93,21 @@ def _store_path() -> Path:
 _backend_choice: str | None = None
 
 
+def listen_port_for_connector(conn_type: str, raw: Any) -> int:
+    """Listen port stored on a connector.
+
+    Delegates to :func:`stored_listen_port`, the same rule the dial path uses.
+    Missing, ``0``, historical ``5432``, and Neo4j Bolt ``7687`` become the
+    driver port. An explicit other port is kept.
+    """
+    try:
+        from src.transfer.connector_capabilities import stored_listen_port
+    except ImportError:
+        from transfer.connector_capabilities import stored_listen_port
+
+    return stored_listen_port(conn_type, raw)
+
+
 @dataclass
 class SavedConnector:
     id: str
@@ -125,6 +140,9 @@ class SavedConnector:
     last_tested_at: str | None = None
     last_test_ok: bool | None = None
     last_used_at: str | None = None
+    #: Set when a transfer that used this connector completed. A failed probe
+    #: older than this is stale — the connection has since moved data.
+    last_transfer_ok_at: str | None = None
     credentials_rotated_at: str | None = None
     created_at: str = field(default_factory=lambda: _now())
 
@@ -140,15 +158,29 @@ class SavedConnector:
         password = decrypt_secret(data.get("password", "") or "", tenant_id=tenant_id)
         conn_str = decrypt_secret(data.get("connection_string", "") or "", tenant_id=tenant_id)
         conn_type = data["type"]
+        from connectors.sftp_common import apply_sftp_uri_endpoint
+
+        lifted = apply_sftp_uri_endpoint(
+            {
+                "type": conn_type,
+                "host": data.get("host", "") or "",
+                "port": data.get("port"),
+                "username": data.get("username", "") or "",
+                "password": password,
+                "database": data.get("database", "") or "",
+                "connection_string": conn_str,
+            }
+        )
+        password = str(lifted.get("password") or "")
         return cls(
             id=data["id"],
             name=data["name"],
             type=conn_type,
             role=normalize_connector_role(conn_type, data.get("role")),
-            host=data.get("host", ""),
-            port=int(data.get("port", 5432)),
-            database=data.get("database", ""),
-            username=data.get("username", ""),
+            host=str(lifted.get("host") or ""),
+            port=listen_port_for_connector(conn_type, lifted.get("port")),
+            database=str(lifted.get("database") or ""),
+            username=str(lifted.get("username") or ""),
             password=password,
             schema=_resolve_connector_schema(conn_type, data.get("schema"), data.get("username")),
             connection_string=conn_str,
@@ -167,6 +199,7 @@ class SavedConnector:
             last_tested_at=data.get("last_tested_at"),
             last_test_ok=data.get("last_test_ok") if "last_test_ok" in data else None,
             last_used_at=data.get("last_used_at"),
+            last_transfer_ok_at=data.get("last_transfer_ok_at"),
             credentials_rotated_at=data.get("credentials_rotated_at"),
             created_at=data.get("created_at", _now()),
         )
@@ -394,6 +427,30 @@ def _list_mongo(role: str | None, workspace_id: str | None = None) -> list[Saved
     return [_doc_to_connector(c) for c in coll.find(query)]
 
 
+def connector_name_conflict_message(name: str) -> str:
+    shown = (name or "").strip() or "that name"
+    return (
+        f'A connector named "{shown}" already exists. '
+        "Choose a different name, or open the existing connector."
+    )
+
+
+def connector_name_taken(name: str, workspace_id: str | None = None) -> bool:
+    """True when this workspace already has a connector with this name.
+
+    Pilot create used to fall through into an in-place update, and a plaintext
+    secret on that update surfaced as a Fernet error. A create is not an update.
+    """
+    target = (name or "").strip().casefold()
+    if not target:
+        return False
+    scope = (workspace_id or "").strip() or None
+    for existing in list_connectors(workspace_id=scope):
+        if str(existing.name or "").strip().casefold() == target:
+            return True
+    return False
+
+
 def list_connectors(role: str | None = None, workspace_id: str | None = None) -> list[SavedConnector]:
     if _use_mongo():
         try:
@@ -429,6 +486,9 @@ def get_connector(connector_id: str, workspace_id: str | None = None) -> SavedCo
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
+    from connectors.sftp_common import apply_sftp_uri_endpoint
+
+    data = apply_sftp_uri_endpoint(data)
     conn_type = data["type"]
     conn = SavedConnector(
         id=str(uuid.uuid4()),
@@ -436,7 +496,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         type=conn_type,
         role=normalize_connector_role(conn_type, data.get("role")),
         host=data.get("host", ""),
-        port=int(data.get("port", 5432)),
+        port=listen_port_for_connector(conn_type, data.get("port")),
         database=data.get("database", ""),
         username=data.get("username", ""),
         password=data.get("password", ""),
@@ -604,6 +664,80 @@ def mark_tested(connector_id: str, ok: bool) -> None:
             connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
             _save_all(connectors)
             return
+
+
+def note_transfer_succeeded(*connector_ids: str | None) -> int:
+    """Stamp a completed transfer. This is not a probe pass.
+
+    ``last_test_ok`` stays false until the operator tests again. Health
+    treats a later successful transfer as newer evidence than that probe.
+    """
+    now = _now()
+    patch = {"last_transfer_ok_at": now}
+    seen: set[str] = set()
+    stamped = 0
+    for raw in connector_ids:
+        cid = str(raw or "").strip()
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        if _use_mongo():
+            try:
+                coll = _mongo_collection()
+                result = coll.update_one({"_id": cid}, {"$set": patch})
+                if result.matched_count:
+                    stamped += 1
+                    continue
+            except Exception as exc:  # noqa: BLE001 - file store is the fallback
+                logger.warning("MongoDB note_transfer_succeeded failed, falling back to file: %s", exc)
+        connectors = _load_all()
+        for i, c in enumerate(connectors):
+            if c.id == cid:
+                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
+                _save_all(connectors)
+                stamped += 1
+                break
+    return stamped
+
+
+def _parse_instant(raw: Any) -> datetime | None:
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def connector_health(conn: Any) -> str:
+    """``passed`` / ``failed`` / ``untested`` — the one health rule for every reader.
+
+    A failed probe is overruled only by a transfer that completed after it;
+    the web client (``connectorHealth.ts``) applies the same rule.
+    """
+    get = conn.get if isinstance(conn, Mapping) else (lambda k: getattr(conn, k, None))
+    ok = get("last_test_ok")
+    if ok in (True, 1, "true", "1"):
+        return "passed"
+    if ok in (False, 0, "false", "0"):
+        used = _parse_instant(get("last_transfer_ok_at"))
+        if used is not None:
+            probed = _parse_instant(get("last_tested_at"))
+            if probed is None or used > probed:
+                return "passed"
+        return "failed"
+    return "untested"
+
+
+def connector_ui_status(conn: Any) -> str:
+    get = conn.get if isinstance(conn, Mapping) else (lambda k: getattr(conn, k, None))
+    if connector_health(conn) == "failed" and get("last_tested_at"):
+        return "error"
+    return "configured"
 
 
 def mark_used(*connector_ids: str | None) -> int:

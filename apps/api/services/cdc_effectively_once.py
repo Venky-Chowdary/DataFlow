@@ -413,10 +413,11 @@ def honesty_dict() -> dict[str, Any]:
                 "algorithm": "dest_owned_watermark_txn",
                 "note": (
                     "Platform never claims all CDC is exactly-once. "
-                    "Opt-in delivery_guarantee=exactly_once uses a dest-owned "
-                    "watermark in the same dest transaction as apply (Flink / "
-                    "Estuary sink pattern). Ineligible routes fail closed. "
-                    "Default remains at-least-once upsert."
+                    "delivery_guarantee=auto selects a dest-owned watermark "
+                    "in the same dest transaction as apply when the route is "
+                    "eligible (Flink / Estuary sink pattern). An explicit "
+                    "at_least_once pin stays. Ineligible exactly_once fails "
+                    "closed. Ineligible routes stay at-least-once upsert."
                 ),
             },
             DELIVERY_CLASS_AT_LEAST_ONCE: {

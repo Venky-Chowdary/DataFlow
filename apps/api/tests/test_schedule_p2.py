@@ -713,6 +713,353 @@ def test_manual_run_missing_connector_raises_honest_error(temp_store, monkeypatc
     assert exc.value.http_status == 400
 
 
+def test_terminal_job_releases_the_claim_without_waiting(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    assert store.set_running_job(sched.id, "job-done") is not None
+    monkeypatch.setattr(store, "_job_is_live", lambda job_id: False if job_id else None)
+    reclaimed = store.mark_schedule_running(sched.id, "inst-2")
+    assert reclaimed is not None
+    assert reclaimed.running_instance == "inst-2"
+
+
+def test_missed_callback_is_recorded_on_the_next_beat(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    assert store.set_running_job(sched.id, "job-1") is not None
+    frozen = store.get_schedule(sched.id).next_run_at
+    monkeypatch.setattr(store, "_job_is_live", lambda _job_id: False)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda _job_id: {"status": "completed", "records_transferred": 10},
+    )
+    runner._finalize_finished_schedule_claims()
+    done = store.get_schedule(sched.id)
+    assert done.running is False
+    assert done.run_count == 1
+    assert done.last_job_id == "job-1"
+    assert done.next_run_at != frozen
+    runner._finalize_finished_schedule_claims()
+    assert store.get_schedule(sched.id).run_count == 1
+
+
+def test_enqueue_ack_does_not_close_the_schedule(temp_store, monkeypatch):
+    import concurrent.futures
+
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    monkeypatch.setattr(runner, "_resolve_connector", lambda cid: {"id": cid, "type": "postgresql"})
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        runner,
+        "build_schedule_request",
+        lambda *_a, **_k: SimpleNamespace(acknowledgment_actor=""),
+    )
+    monkeypatch.setattr(runner, "_guard_source_schema_drift", lambda *_a, **_k: False)
+
+    class _Engine:
+        def _create_pending_job(self, _request):
+            return "job-q"
+
+    monkeypatch.setattr("src.transfer.engine.get_transfer_engine", lambda: _Engine())
+    future = concurrent.futures.Future()
+    future.set_result(None)
+    monkeypatch.setattr("src.transfer.background.run_transfer_async", lambda *_a, **_k: future)
+    calls = {"n": 0}
+    monkeypatch.setattr(
+        runner,
+        "_finalize_run",
+        lambda *_a, **_k: calls.__setitem__("n", calls["n"] + 1),
+    )
+    assert runner._dispatch_transfer(sched.id) == "job-q"
+    assert calls["n"] == 0
+    assert store.get_schedule(sched.id).run_count == 0
+    assert store.get_schedule(sched.id).running is True
+
+
+def test_overrun_schedules_one_catch_up_instead_of_skipping_the_slot(temp_store):
+    """A run that finishes after later */5 slots counts them and waits for the next boundary.
+
+    The finished run is the catch-up. Pinning next_run to the completion instant
+    left the schedule stuck on that clock time and every later tick was missed.
+    """
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({**store.get_schedule(sched.id).to_dict(), "next_run_at": past})
+    ])
+    store.mark_schedule_run(sched.id, "job-late", status="completed", run_entry={"status": "completed"})
+    done = store.get_schedule(sched.id)
+    assert done.missed_window_count >= 1
+    assert done.run_count == 1
+    nxt = store._parse_ts(done.next_run_at)
+    now = datetime.now(timezone.utc)
+    assert nxt is not None and nxt > now
+    assert nxt.second == 0
+    assert done.id not in {item.id for item in store.due_schedules()}
+
+
+def test_completion_pin_does_not_fire_before_the_cron_grid(temp_store, monkeypatch):
+    """DEF-B-013: a catch-up that stored next_run_at = last_run_at fired again.
+
+    The extra run was 23 seconds before the real */5 tick. The beat must move
+    that pin onto the next boundary and not start a load.
+    """
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    pinned = "2026-10-08T01:19:32.636921+00:00"
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "enabled": True,
+            "last_run_at": pinned,
+            "next_run_at": pinned,
+            "run_count": 1,
+            "last_job_id": "job-catchup",
+        })
+    ])
+    started: list[str] = []
+    monkeypatch.setattr(runner, "_acquire_scheduler_lock", lambda: True)
+    monkeypatch.setattr(runner, "_release_scheduler_lock", lambda: None)
+    monkeypatch.setattr(runner, "_run_schedule", lambda sid, manual=False: started.append(sid) or "job-extra")
+    assert runner._run_due_schedules() == 0
+    assert started == []
+    done = store.get_schedule(sched.id)
+    nxt = store._parse_ts(done.next_run_at)
+    last = store._parse_ts(done.last_run_at)
+    assert nxt is not None and last is not None
+    assert nxt > datetime.now(timezone.utc)
+    assert nxt.second == 0 and nxt.microsecond == 0
+    assert abs((nxt - last).total_seconds()) > 2
+    assert done.id not in {item.id for item in store.due_schedules()}
+
+
+def test_resume_catch_up_lands_on_the_next_boundary(temp_store):
+    """Enabling a paused cron whose slot is past runs one catch-up, then the grid."""
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = "2026-10-08T01:10:00+00:00"
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "enabled": False,
+            "next_run_at": past,
+        })
+    ])
+    resumed = store.update_schedule(sched.id, {"enabled": True})
+    assert resumed is not None
+    assert resumed.next_run_at == past
+    claimed = store.mark_schedule_running(sched.id, "beat")
+    assert claimed is not None
+    claimed_next = store._parse_ts(claimed.next_run_at)
+    assert claimed_next is not None
+    assert claimed_next > datetime.now(timezone.utc)
+    assert claimed_next.second == 0 and claimed_next.microsecond == 0
+    store.set_running_job(sched.id, "job-catchup")
+    done = store.mark_schedule_run(
+        sched.id, "job-catchup", status="completed", run_entry={"status": "completed"}
+    )
+    assert done is not None
+    final = store._parse_ts(done.next_run_at)
+    last = store._parse_ts(done.last_run_at)
+    assert final is not None and last is not None
+    assert final > datetime.now(timezone.utc)
+    assert final.second == 0 and final.microsecond == 0
+    assert abs((final - last).total_seconds()) > 2
+    assert done.id not in {item.id for item in store.due_schedules()}
+
+
+def test_queued_claim_is_kept_when_the_next_slot_is_due(temp_store, monkeypatch):
+    """A queued fire has not read yet. The next slot must not cancel it."""
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": "job-q",
+            "running_started_at": past,
+        })
+    ])
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda job_id: "queued" if job_id == "job-q" else "unknown")
+    released = store.release_superseded_queued_claim(sched.id)
+    assert released is None
+    kept = store.get_schedule(sched.id)
+    assert kept.running is True
+    assert kept.running_job_id == "job-q"
+    assert kept.run_count == 0
+
+
+def test_fleet_queued_claims_are_not_cancelled(temp_store, monkeypatch):
+    """A beat behind a large job keeps every queued schedule fire."""
+    queued = _make(store, name="q", dest_table="q_tbl", cron="*/5 * * * *", interval="hourly")
+    other = _make(
+        store, name="q2", dest_table="q2_tbl", source_connector_id="src-2",
+        cron="*/5 * * * *", interval="hourly",
+    )
+    live = _make(
+        store, name="live", dest_table="live_tbl", source_connector_id="src-3",
+        cron="*/5 * * * *", interval="hourly",
+    )
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    parked = {
+        queued.id: "job-q1",
+        other.id: "job-q2",
+        live.id: "job-live",
+    }
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched_id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": job_id,
+            "running_started_at": past,
+        })
+        for sched_id, job_id in parked.items()
+    ])
+    loads = {"n": 0}
+    real_load = store._load_all
+
+    def _counting():
+        loads["n"] += 1
+        return real_load()
+
+    monkeypatch.setattr(store, "_load_all", _counting)
+    released = store.release_all_superseded_queued_claims()
+    assert released == 0
+    assert loads["n"] == 0
+    for sched_id, job_id in parked.items():
+        kept = store.get_schedule(sched_id)
+        assert kept.running is True
+        assert kept.running_job_id == job_id
+        assert kept.run_count == 0
+
+
+def test_a_future_slot_does_not_read_the_job(temp_store, monkeypatch):
+    """The beat must not round-trip the job store while the next slot is still ahead."""
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    future = datetime(2099, 1, 1, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": future,
+            "running": True,
+            "running_job_id": "job-future",
+            "running_started_at": future,
+        })
+    ])
+    calls = {"n": 0}
+
+    def _state(_job_id: str) -> str:
+        calls["n"] += 1
+        return "queued"
+
+    monkeypatch.setattr(store, "_job_dispatch_state", _state)
+    assert store.release_all_superseded_queued_claims() == 0
+    assert calls["n"] == 0
+    assert store.get_schedule(sched.id).running is True
+    assert store.get_schedule(sched.id).running_job_id == "job-future"
+
+
+def test_scheduler_beat_releases_the_fleet_once(monkeypatch):
+    called = {"n": 0}
+    monkeypatch.setattr(
+        store,
+        "release_all_superseded_queued_claims",
+        lambda *_args, **_kwargs: called.__setitem__("n", called["n"] + 1),
+    )
+    runner._release_superseded_queued_claims()
+    assert called["n"] == 1
+
+
+def test_running_claim_is_not_replaced_when_the_next_slot_is_due(temp_store, monkeypatch):
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": "job-live",
+            "running_started_at": past,
+        })
+    ])
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda _job: "running")
+    assert store.release_superseded_queued_claim(sched.id) is None
+    assert store.get_schedule(sched.id).running is True
+    assert store.get_schedule(sched.id).running_job_id == "job-live"
+
+
+def test_second_beat_dispatches_after_the_first_run_is_recorded(temp_store, monkeypatch):
+    sched = _make(store, cron="*/5 * * * *", interval="hourly")
+    past = datetime(2026, 10, 7, 3, 50, tzinfo=timezone.utc).isoformat()
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "next_run_at": past,
+            "running": True,
+            "running_job_id": "job-1",
+            "running_started_at": past,
+        })
+    ])
+    monkeypatch.setattr(store, "_job_is_live", lambda _job: False)
+    monkeypatch.setattr(runner, "_job_doc", lambda _job: {"status": "completed", "records_transferred": 4})
+    monkeypatch.setattr(runner, "_acquire_scheduler_lock", lambda: True)
+    monkeypatch.setattr(runner, "_release_scheduler_lock", lambda: None)
+    started = {"ids": []}
+
+    def _fake_run(sid, manual=False):
+        started["ids"].append(sid)
+        return "job-2"
+
+    monkeypatch.setattr(runner, "_run_schedule", _fake_run)
+    # The finished run is the catch-up for the overdue slot. The same beat
+    # records it and waits for the next cron boundary instead of starting
+    # another load immediately.
+    assert runner._run_due_schedules() == 0
+    assert started["ids"] == []
+    recorded = store.get_schedule(sched.id)
+    assert recorded.run_count == 1
+    assert recorded.last_job_id == "job-1"
+    nxt = store._parse_ts(recorded.next_run_at)
+    assert nxt is not None and nxt > datetime.now(timezone.utc)
+
+
+def test_manual_run_records_a_finished_claim_before_starting(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    assert store.set_running_job(sched.id, "job-done") is not None
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda _job: "terminal")
+    monkeypatch.setattr(runner, "_job_doc", lambda _job: {"status": "completed", "records_transferred": 2})
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "inst-2")
+    monkeypatch.setattr(runner, "_dispatch_transfer", lambda *_a, **_k: "job-next")
+    assert runner._run_schedule(sched.id, manual=True) == "job-next"
+    done = store.get_schedule(sched.id)
+    assert done.run_count == 1
+    assert done.last_job_id == "job-done"
+    assert done.running is True
+
+
+def test_manual_run_after_an_orphaned_claim_with_a_naive_start(temp_store, monkeypatch):
+    """DEF-B2-011: Mongo returns the claim's start naive; Run now raised TypeError."""
+    sched = _make(store)
+    store._save_all([
+        store.PipelineSchedule.from_dict({
+            **store.get_schedule(sched.id).to_dict(),
+            "running": True,
+            "running_job_id": "job-orphan",
+            "running_started_at": datetime(2026, 10, 7, 23, 50),
+        })
+    ])
+    monkeypatch.setattr(store, "_job_dispatch_state", lambda _job: "terminal")
+    monkeypatch.setattr(runner, "_job_doc", lambda _job: {"status": "cancelled"})
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "inst-2")
+    monkeypatch.setattr(runner, "_dispatch_transfer", lambda *_a, **_k: "job-next")
+    assert runner._run_schedule(sched.id, manual=True) == "job-next"
+    assert store.get_schedule(sched.id).last_job_id == "job-orphan"
+
+
 def test_manual_run_already_running_is_conflict(temp_store, monkeypatch):
     sched = _make(store)
     assert store.mark_schedule_running(sched.id, "inst-1") is not None
@@ -1140,6 +1487,48 @@ def test_list_summary_exposes_advanced_write_knobs():
     assert summary.row_limit == 2500
     assert summary.date_locale == "DMY"
     assert summary.number_locale == "EU"
+
+
+def test_five_minute_cron_is_the_interval_operators_read(temp_store):
+    """DEF-A-014 / DEF-B-006. GET says every 5 minutes. The runner token stays daily.
+
+    Echoing the label on update must not raise Invalid interval and must not
+    retarget the preset. interval_preset is how an edit changes the token.
+    """
+    from src.routers.schedules_router import ScheduleResponse
+
+    sched = store.create_schedule({
+        "name": "Every five",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "cron": "*/5 * * * *",
+        "timezone": "UTC",
+        "mappings": _MAPPINGS,
+    })
+    body = ScheduleResponse.from_schedule(sched)
+    assert body.interval == "Every 5 minutes UTC"
+    assert body.interval_preset == "daily"
+    assert body.cadence_label == "Every 5 minutes UTC"
+    assert store.get_schedule(sched.id).interval == "daily"
+    echoed = store.update_schedule(
+        sched.id,
+        {"interval": "Every 5 minutes UTC", "cron": "*/5 * * * *"},
+    )
+    assert echoed is not None
+    assert echoed.interval == "daily"
+    assert echoed.cron == "*/5 * * * *"
+    moved = store.update_schedule(
+        sched.id,
+        {"interval_preset": "hourly", "interval": "Every 5 minutes UTC"},
+    )
+    assert moved is not None
+    assert moved.interval == "hourly"
+    assert moved.cron == "*/5 * * * *"
+    with pytest.raises(ValueError, match="Invalid interval"):
+        store.update_schedule(sched.id, {"interval": "fortnightly"})
 
 
 def test_patch_empty_preserves_validate_identity_hashes(temp_store):

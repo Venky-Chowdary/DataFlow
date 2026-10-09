@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Any, NamedTuple, Callable
 
@@ -325,7 +326,21 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
                 f"DynamoDB {upper} refused empty string {value!r} "
                 "(refuse silent null invent / attribute wipe)"
             )
-        return coerce_sql_temporal(value, upper)
+        parsed = coerce_sql_temporal(value, upper)
+        # DynamoDB AttributeValue has no datetime. TypeSerializer rejects a
+        # datetime object, so the S wire is RFC 3339 text. coerce_sql_temporal
+        # UTC-normalizes TIMESTAMPTZ when no offset-storing engine is named,
+        # which would rewrite +05:30 as +00:00. The text carrier can keep the
+        # originating offset, so put that label back before isoformat.
+        if isinstance(parsed, datetime):
+            from services.offset_label import attach_offset_label, extract_offset_label
+
+            label = extract_offset_label(value)
+            if label is not None:
+                parsed = attach_offset_label(parsed, label)
+        if hasattr(parsed, "isoformat"):
+            return parsed.isoformat()
+        return parsed
     if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
         if isinstance(value, bytes):
             return value

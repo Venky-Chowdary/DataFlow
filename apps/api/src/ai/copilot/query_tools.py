@@ -66,6 +66,15 @@ def resolve_table_name(
     wanted = (table or "").strip()
     if not wanted:
         return None, None, []
+    # ``file.xlsx#Data`` names a sheet. Fuzzy-matching the whole string to
+    # ``file.xlsx`` dropped the sheet and read a different object.
+    sheet = ""
+    if "#" in wanted:
+        wanted, sheet = wanted.split("#", 1)
+        wanted = wanted.strip()
+        sheet = sheet.strip()
+        if not wanted:
+            return None, None, []
     # Resolution is not a display concern: ask for the whole inventory rather
     # than the page size a chat reply would render.
     listed = list_connector_objects(
@@ -75,20 +84,28 @@ def resolve_table_name(
     )
     names = _object_names_from_list(listed)
     if not names:
-        return wanted, None, []
+        shown = f"{wanted}#{sheet}" if sheet else wanted
+        return shown, None, []
     truncated = bool((getattr(listed, "output", None) or {}).get("truncated"))
     lower_map = {n.lower(): n for n in names}
+    def _with_sheet(name: str) -> str:
+        return f"{name}#{sheet}" if sheet else name
+
     if wanted in names:
-        return wanted, None, names
+        return _with_sheet(wanted), None, names
     if wanted.lower() in lower_map:
         resolved = lower_map[wanted.lower()]
         note = f"Using `{resolved}` (matched case-insensitively)." if resolved != wanted else None
-        return resolved, note, names
+        return _with_sheet(resolved), note, names
     # Unqualified vs schema.table
     bare = wanted.split(".")[-1].lower()
     bare_hits = [n for n in names if n.split(".")[-1].lower() == bare]
     if len(bare_hits) == 1:
-        return bare_hits[0], f"Using `{bare_hits[0]}`.", names
+        return _with_sheet(bare_hits[0]), f"Using `{bare_hits[0]}`.", names
+    # A named sheet that did not match a real object is not a typo of another
+    # file. Substituting the closest workbook would drop the sheet.
+    if sheet:
+        return None, None, names[:12]
     close = difflib.get_close_matches(wanted.lower(), list(lower_map.keys()), n=5, cutoff=0.72)
     if len(close) == 1:
         resolved = lower_map[close[0]]
@@ -119,16 +136,93 @@ def _quote_ident(name: str, dialect: str) -> str:
     return ".".join(f'"{p}"' for p in parts)
 
 
+# Document / object engines. Their readers live in batch_readers. Sending them
+# through ``SELECT … LIMIT`` makes preflight report "no source sample" for
+# every transfer that starts there.
+_BATCH_SAMPLE_DRIVERS = frozenset({
+    "elasticsearch",
+    "opensearch",
+    "qdrant",
+    "kafka",
+    "neo4j",
+    "redis",
+    "s3",
+    "gcs",
+    "adls",
+    "dynamodb",
+})
+
+
+def _object_name_ok(table: str, *, batch: bool) -> bool:
+    """SQL idents stay strict. Object keys may contain ``-`` and ``/``."""
+    if not table or len(table) > 1024:
+        return False
+    if batch:
+        return not any(ord(ch) < 32 or ch in "\"';" for ch in table)
+    return bool(_SAFE_IDENT.match(table))
+
+
 def _sample_sql(table: str, dialect: str, limit: int) -> str:
-    quoted = _quote_ident(table, dialect)
-    d = (dialect or "").lower()
-    if d in {"mssql", "sqlserver"}:
-        return f"SELECT TOP {int(limit)} * FROM {quoted}"
-    return f"SELECT * FROM {quoted} LIMIT {int(limit)}"
+    from services.dialect_profiles import sample_select_sql
+
+    return sample_select_sql(dialect, _quote_ident(table, dialect), limit)
+
+
+def _sample_batch_source(
+    conn: dict[str, Any],
+    table: str,
+    limit: int,
+) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
+    """One page from the engine reader. Empty is an empty sample, not a SQL error."""
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.connector_capabilities import resolve_driver_type
+    from src.transfer.stream import _read_batch, _source_name, _unwrap_read
+
+    from .schema_tools import _endpoint_from_connector
+
+    endpoint = _endpoint_from_connector(conn, table)
+    src_type = resolve_driver_type(str(endpoint.format or ""))
+    cfg = resolve_connector_config(endpoint)
+    name = _source_name(endpoint) or table
+    if src_type == "kafka":
+        # The transfer reader joins the pipeline group. After a load that
+        # offset is the end of the topic, so a sample came back with 0 rows.
+        from connectors.kafka_reader import sample_topic_batch
+
+        probe = sample_topic_batch(cfg=cfg, topic=name, limit=limit)
+    else:
+        probe, _cursor = _unwrap_read(
+            _read_batch(
+                src_type,
+                cfg,
+                name,
+                None,
+                0,
+                limit,
+                database=str(cfg.get("database") or ""),
+            )
+        )
+    columns = [str(h) for h in (probe.headers or [])]
+    rows = [dict(zip(columns, row)) for row in (probe.rows or [])[:limit]]
+    native = {}
+    meta = getattr(probe, "meta", None) or {}
+    if isinstance(meta, dict):
+        raw = meta.get("native_types") or meta.get("schema") or {}
+        if isinstance(raw, dict):
+            native = raw
+    schema = {c: str(native.get(c) or "string") for c in columns}
+    return rows, columns, schema
 
 
 def _is_nullish(v: Any) -> bool:
-    return v is None or v == ""
+    """Reader NULL, sentinel, and blank. ``0`` and ``False`` stay present.
+
+    ``__DF_SQL_NULL__`` used to look like a value, so a column with seven
+    SQL NULLs profiled at null_rate 0.0.
+    """
+    from services.value_serializer import is_null_evidence
+
+    return is_null_evidence(v)
 
 
 def _try_float(v: Any) -> Decimal | None:
@@ -340,13 +434,12 @@ def sample_connector_object(
     """Sample rows from a saved-connector table/collection (read-only)."""
     tool = "sample_connector_object"
     table = (table or "").strip()
-    if not table or not _SAFE_IDENT.match(table):
+    if not table:
         return _tool_result(
             tool,
             success=False,
             error=(
-                "Provide a simple table/collection name "
-                "(letters, numbers, underscore, optional schema.table)."
+                "Provide a table, collection, topic, index, or object name."
             ),
         )
     limit = max(1, min(int(limit or _DEFAULT_SAMPLE), _MAX_SAMPLE))
@@ -354,7 +447,22 @@ def sample_connector_object(
     if err:
         return err
 
+    from src.transfer.connector_capabilities import resolve_driver_type
+
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
+    driver = resolve_driver_type(ctype)
+    batch_source = driver in _BATCH_SAMPLE_DRIVERS
+    if not _object_name_ok(table, batch=batch_source):
+        return _tool_result(
+            tool,
+            success=False,
+            error=(
+                "Provide a simple table/collection name "
+                "(letters, numbers, underscore, optional schema.table)."
+                if not batch_source
+                else "That object name has quotes, a semicolon, or a control character."
+            ),
+        )
     cid = str(conn.get("id") or conn.get("_id") or "")
     resolve_note = None
     try:
@@ -391,6 +499,41 @@ def sample_connector_object(
                 ),
             )
         table = resolved
+
+        if batch_source:
+            rows, columns, schema = _sample_batch_source(conn, table, limit)
+            preview_rows = rows[: min(limit, 25)]
+            meta = {
+                "connector_id": cid,
+                "connector_name": conn.get("name"),
+                "type": ctype,
+                "table": table,
+                "limit": limit,
+                "truncated": len(rows) >= limit,
+                "column_type_source": "reader",
+            }
+            if resolve_note:
+                meta["resolve_note"] = resolve_note
+            result_id = _store_result(
+                rows=rows,
+                columns=columns,
+                column_schema=schema,
+                meta=meta,
+                session_id=session_id,
+                source=tool,
+            )
+            out = {
+                **meta,
+                "result_id": result_id,
+                "columns": columns,
+                "column_schema": schema,
+                "row_count": len(rows),
+                "rows": preview_rows,
+                "read_only": True,
+            }
+            if analyze and rows:
+                out["analysis"] = _analyze_rows(rows, columns)
+            return _tool_result(tool, success=True, output=out)
 
         if ctype == "mongodb":
             body = QueryExecuteRequest(
@@ -469,6 +612,11 @@ def sample_connector_object(
                     f'Ask "list tables on {label}" to see what is available.'
                 ),
             )
+        from services.excel_parser import explain_unreadable_file
+
+        explained = explain_unreadable_file(exc)
+        if explained != str(exc) or explained.startswith("This "):
+            return _tool_result(tool, success=False, error=explained)
         return _tool_result(tool, success=False, error=f"Sample failed: {exc}")
 
 
@@ -605,15 +753,13 @@ def analyze_stored_result(
     tool = "analyze_result"
     from .result_store import get_result_store
 
-    doc = get_result_store().resolve(result_id=result_id, session_id=session_id)
+    store = get_result_store()
+    doc = store.resolve(result_id=result_id, session_id=session_id)
     if not doc:
         return _tool_result(
             tool,
             success=False,
-            error=(
-                "No stored result to analyze. Sample a table or run a query first "
-                f'(e.g. "sample {_example_table()} on {_example_connector()}").'
-            ),
+            error=store.explain_miss(result_id=result_id, session_id=session_id),
         )
     rows = list(doc.get("rows") or [])
     columns = list(doc.get("columns") or [])
@@ -689,14 +835,13 @@ def filter_stored_result(
     tool = "filter_result"
     from .result_store import get_result_store
 
-    doc = get_result_store().resolve(result_id=result_id, session_id=session_id)
+    store = get_result_store()
+    doc = store.resolve(result_id=result_id, session_id=session_id)
     if not doc:
         return _tool_result(
             tool,
             success=False,
-            error=(
-                "No stored result to filter. Sample a table or run a query first."
-            ),
+            error=store.explain_miss(result_id=result_id, session_id=session_id),
         )
     columns = list(doc.get("columns") or [])
     col = (column or "").strip()

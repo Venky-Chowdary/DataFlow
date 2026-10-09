@@ -6,7 +6,7 @@ import tempfile
 import time
 from typing import Any, Callable
 
-from preflight.constants import is_schemaless_dest
+from preflight.constants import is_schemaless_dest, object_store_put_creates_key
 from preflight.models import (
     ColumnSchema,
     GateId,
@@ -59,6 +59,37 @@ def _source_column(ctx: PreflightContext, name: str) -> Any:
 def _risk_cleared(m: Any) -> bool:
     """Continue-policy Risk Contract only — boolean risk_acknowledged never clears."""
     return mapping_risk_cleared(m)
+
+
+def _document_instant_sample_truncation(
+    ctx: Any, source: str, source_type: str, target_type: str, dest_kind: str
+) -> Any:
+    """First sample cell the document instant would truncate, else ``None``.
+
+    The writer refuses that cell; naming it here keeps Validate from passing a
+    run whose rows the write then quarantines.
+    """
+    try:
+        from services.document_instant import (
+            cell_exceeds_document_instant,
+            is_document_instant_token,
+        )
+        from services.type_system import (
+            LOGICAL_DATE,
+            LOGICAL_DATETIME,
+            normalize_logical_type,
+        )
+    except ImportError:  # pragma: no cover — standalone package
+        return None
+    if not is_document_instant_token(dest_kind, target_type):
+        return None
+    if normalize_logical_type(source_type) not in {LOGICAL_DATE, LOGICAL_DATETIME}:
+        return None
+    for row in getattr(ctx, "sample_rows", None) or []:
+        value = row.get(source) if isinstance(row, dict) else None
+        if value is not None and cell_exceeds_document_instant(value):
+            return value
+    return None
 
 
 def _dest_accepts_empty_string(dest_type: str) -> bool:
@@ -306,7 +337,16 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
 
     # INSERT grant alone must not green-light create-new. Unknown/false create with
     # a missing table is a hard block — otherwise Validate APPROVE invents DDL.
-    if dest.table_exists is False and not dest.can_create_table:
+    # Object stores are the exception: a missing key is created by PUT when
+    # object write is already proven. can_create_table there means bucket or
+    # container CREATE (storage.buckets.create), which objectAdmin does not have
+    # and which the writer does not need.
+    object_put = object_store_put_creates_key(
+        getattr(dest, "db_type", "") or getattr(dest, "kind", "")
+    )
+    if dest.table_exists is False and not dest.can_create_table and not (
+        object_put and dest.can_write
+    ):
         return _block(
             GateId.G2_DESTINATION,
             "Destination table is missing and CREATE is not proven "
@@ -328,6 +368,8 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     create_note = ""
     if dest.table_exists is False and dest.can_create_table:
         create_note = "; CREATE table allowed"
+    elif dest.table_exists is False and object_put and dest.can_write:
+        create_note = "; missing object is created by PUT"
     elif dest.table_exists is True:
         create_note = "; target table exists"
     elif dest.table_exists is None:
@@ -468,6 +510,31 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                             )
                     else:
                         affinity_warnings.append(label)
+                truncated = _document_instant_sample_truncation(
+                    ctx, m.source, src_type, str(tgt_type or src_type), dest_kind
+                )
+                if truncated is not None:
+                    label = (
+                        f"{m.source} → {m.target}: sample value {truncated!r} has "
+                        "digits below the millisecond; this store keeps milliseconds"
+                    )
+                    affinity_detail.append({
+                        "source": m.source,
+                        "target": m.target,
+                        "source_type": src_type,
+                        "target_type": tgt_type,
+                        "kind": "document_instant_truncation",
+                        "severity": "block",
+                        "message": label,
+                        "risk_acknowledged": _risk_cleared(m),
+                    })
+                    if _risk_cleared(m):
+                        affinity_warnings.append(label + " (risk contract)")
+                    else:
+                        affinity_issues.append(
+                            label + " — map to a string, or sign a Migration Risk "
+                            "Contract to accept millisecond truncation"
+                        )
 
         if affinity_issues:
             return GateResult(
@@ -591,6 +658,25 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         )
         pair = (source_type_declared.upper(), target.inferred_type.upper())
         # Prefer type_system SSOT when available; LOSSY_COERCIONS is offline fallback only.
+        # Sample cells travel with the type pair so an ASCII load into a
+        # Latin-1 VARCHAR is not a declared collapse (DEF-R20-001). No sample
+        # leaves population unset and the unread pair stays a collapse.
+        _sample_rows = list(getattr(ctx, "sample_rows", None) or [])
+        try:
+            from services.column_case import column_population
+
+            # Case-fold the source name. row.get("amount") misses AMOUNT and
+            # the unread population stays a Latin-1 collapse.
+            _code_page_population = column_population(_sample_rows, m.source)
+        except Exception:
+            _code_page_population = (
+                [
+                    row.get(m.source) if isinstance(row, dict) else None
+                    for row in _sample_rows[:500]
+                ]
+                if _sample_rows
+                else None
+            )
         if is_lossy_coercion:
             lossy = bool(
                 is_lossy_coercion(
@@ -600,6 +686,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     dest_table_exists=getattr(
                         ctx.plan.destination, "table_exists", None
                     ),
+                    population=_code_page_population,
                 )
             )
         else:
@@ -666,6 +753,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     or ""
                 ),
                 dest_table_exists=_dest_exists,
+                population=_code_page_population,
             )
         ):
             lossy = True
@@ -694,23 +782,42 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         if objectid_text_domain:
             lossy = True
         # Coercion probe may block wire values even when declared types look
-        # safe (naive DATETIME→TIMESTAMPTZ). Never skip those columns.
+        # safe (naive DATETIME→TIMESTAMPTZ, empty cells, bad casts). Examine
+        # those columns. Do not relabel a safe widening (INTEGER→BIGINT) as
+        # "Lossy coercion" just because a sample cell failed — that sent
+        # operators to a fidelity Risk Contract for a nullability problem.
+        probe_only = False
         probe_early = by_source.get(m.source) if value_aware else None
         if not lossy and probe_early:
             sev = str(probe_early.get("severity") or "").lower()
             if sev == "block" or bool(probe_early.get("has_blocking_failures")):
-                lossy = True
+                probe_only = True
             elif int(probe_early.get("json_scalar_wraps") or 0) > 0:
                 # Bare scalar→JSON string is a domain change even when declared
                 # types are not lossy (e.g. INTEGER→VARIANT). Examine wrap path.
                 lossy = True
-        if not lossy:
+        if not lossy and not probe_only:
             continue
 
-        label = (
-            f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
-            f"{m.target} ({target.inferred_type})"
-        )
+        if probe_only and not (
+            declared_lossy
+            or platform_decimal_trunc
+            or nested_collapse
+            or objectid_text_domain
+        ):
+            fix = str((probe_early or {}).get("suggested_fix") or "").strip()
+            failures = (probe_early or {}).get("sample_failures") or []
+            reason = ""
+            if failures and isinstance(failures[0], dict):
+                reason = str(failures[0].get("reason") or "").strip()
+            label = fix or reason or (
+                f"Sample value does not fit {m.target} ({target.inferred_type})"
+            )
+        else:
+            label = (
+                f"Lossy coercion: {m.source} ({source_col.inferred_type}) → "
+                f"{m.target} ({target.inferred_type})"
+            )
         # Surface scale / vector annotations so operators see the real risk.
         if pair and len(pair) == 2 and "[" in str(pair[1]):
             note = str(pair[1]).split("[", 1)[-1].rstrip("]")
@@ -732,6 +839,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     target.inferred_type,
                     dest_db=_dest_db,
                     dest_table_exists=_dest_exists,
+                    population=_code_page_population,
                 )
             )
             or platform_decimal_trunc
@@ -1169,7 +1277,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "contracted_holdout": bool(
                     risk_ack and int(probe.get("failed") or 0) > 0
                 ),
-                "declared_lossy": True,
+                "declared_lossy": bool(declared_lossy),
+                "probe_cast_only": bool(probe_only and not declared_lossy),
+                "fidelity_collapse": bool(
+                    declared_lossy and not probe_only
+                ),
             }
             issues_detail.append(detail)
             if force_block:
@@ -1489,9 +1601,11 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
     ]
     if low_confidence:
         names = [f"{m.source}→{m.target} ({m.confidence:.2f})" for m in low_confidence]
+        shown = ", ".join(names[:8])
+        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
         return _block(
             GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(low_confidence)} mapping(s) below floor {confidence_floor}",
+            f"{len(low_confidence)} mapping(s) below floor {confidence_floor}: {shown}{extra}",
             start,
             _with_scope({"low_confidence": names}, g4_scope),
         )
@@ -1509,9 +1623,11 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             f"{m.source}→{m.target} (gap {m.score_gap:.2f})"
             for m in ambiguous
         ]
+        shown = ", ".join(names[:8])
+        extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
         return _block(
             GateId.G4_MAPPING_CONFIDENCE,
-            f"{len(ambiguous)} ambiguous mapping(s) require review",
+            f"{len(ambiguous)} ambiguous mapping(s) require review: {shown}{extra}",
             start,
             _with_scope({"ambiguous_mappings": names}, g4_scope),
         )
@@ -1621,6 +1737,22 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
             start,
             details,
         )
+    if details.get("source_measured_empty"):
+        details["evidence_scope"] = evidence_scope(
+            kind="transform_dry_run",
+            sample_rows=0,
+            available_rows=0,
+            columns=len(ctx.plan.mappings),
+            coverage="full_selected",
+            note="Source read returned 0 rows — nothing to transform",
+        )
+        return _pass(
+            GateId.G5_DRY_RUN,
+            "Source holds 0 rows (read, not assumed) — no value to transform; "
+            "Execute creates the destination and reconciles 0 = 0",
+            start,
+            details,
+        )
     return _pass(
         GateId.G5_DRY_RUN,
         (
@@ -1646,6 +1778,35 @@ _DRIFT_DDL_NOISE = (
 def _is_drift_noise_issue(text: str) -> bool:
     lower = (text or "").lower()
     return any(marker in lower for marker in _DRIFT_DDL_NOISE)
+
+
+def _g6_sample_identity(ctx: PreflightContext, dest_kind: str) -> tuple[list[str], list[str]]:
+    """Source and target columns of the identity the sample probe must check.
+
+    A composite contract is every column. The comma-joined form is not one
+    column name, and a partial composite does not fall through to a guessed id.
+    """
+    from services.primary_key import resolve_primary_key_columns
+
+    return resolve_primary_key_columns(
+        mappings=ctx.plan.mappings,
+        source_columns=[c.name for c in ctx.plan.source.columns],
+        dest_kind=dest_kind,
+        validation_mode=ctx.plan.validation_mode,
+        purpose="uniqueness",
+        destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None) or None,
+        contract_primary_key=getattr(ctx.plan, "contract_primary_key", None) or None,
+        stream_contracts=getattr(ctx.plan, "stream_contracts", None),
+        stream_name=str(getattr(ctx.plan, "stream_name", "") or ""),
+    )
+
+
+def _g6_identity_label(columns: list[str]) -> str | None:
+    if not columns:
+        return None
+    if len(columns) == 1:
+        return columns[0]
+    return ", ".join(columns)
 
 
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
@@ -1709,26 +1870,18 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     if schemaless:
         # Document stores have no CREATE/ALTER contract. Only identity-key
         # uniqueness in the sample can fail this gate.
-        source_cols = [c.name for c in ctx.plan.source.columns]
-        pk_src = pk_tgt = None
+        pk_sources: list[str] = []
+        pk_targets: list[str] = []
         try:
-            from services.primary_key import resolve_identity_key
-
-            pk_src, pk_tgt = resolve_identity_key(
-                mappings=ctx.plan.mappings,
-                source_columns=source_cols,
-                dest_kind=dest_kind,
-                validation_mode=ctx.plan.validation_mode,
-                purpose="uniqueness",
-                destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None) or None,
-                contract_primary_key=getattr(ctx.plan, "contract_primary_key", None) or None,
-            )
-        except Exception:
+            pk_sources, pk_targets = _g6_sample_identity(ctx, dest_kind)
+        except Exception:  # noqa: BLE001 — identity import must not skip the gate
             for m in ctx.plan.mappings:
                 if m.target and str(m.target).lower() == "_id":
-                    pk_src, pk_tgt = m.source, m.target
+                    pk_sources, pk_targets = [m.source], [m.target]
                     break
-        if pk_tgt:
+        pk_src = _g6_identity_label(pk_sources)
+        pk_tgt = _g6_identity_label(pk_targets)
+        if pk_targets:
             # Append/overwrite: sample uniqueness is not a DDL contract unless dest has PK.
             try:
                 from services.primary_key import sync_requires_unique_identity
@@ -1749,7 +1902,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     )
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-            dupes = ctx.probe_unique_constraint([pk_tgt])
+            dupes = ctx.probe_unique_constraint(list(pk_targets))
             if dupes:
                 return _block(
                     GateId.G6_TARGET_DDL,
@@ -1859,12 +2012,19 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     f"Target DDL compatible — append batch probed against stored "
                     f"{key} values, no collision"
                 )
-            else:
+            elif getattr(collision, "key_enforced", True):
                 collision_unproven = (
                     f"Append key collision on {key} was not probed "
                     f"({getattr(collision, 'message', '') or collision_evidence['status']}) "
                     "— the destination enforces this key, so Execute re-probes it "
                     "and refuses the run if a stored key repeats."
+                )
+            else:
+                collision_unproven = (
+                    f"Append duplicate check on {key} did not run "
+                    f"({getattr(collision, 'message', '') or collision_evidence['status']}). "
+                    "A second copy of a stored row would land. Re-run Validate once "
+                    "the destination can be read."
                 )
     if collision is not None and getattr(collision, "findings", None):
         found = list(collision.findings)
@@ -1897,6 +2057,8 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                 ),
             )
         delta_scope = getattr(collision, "delta_scope", {}) or {}
+        enforced = bool(getattr(collision, "key_enforced", True))
+        collision_count = len(found)
         if delta_scope:
             # The collision is inside the delta this cursor will re-read, so the
             # operator needs to know the key returns with a newer cursor value —
@@ -1904,40 +2066,92 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             cause = (
                 f"The rows after watermark {delta_scope.get('watermark')} on "
                 f"{delta_scope.get('cursor_column')} carry {len(found)} key(s) the "
-                f"destination already stores on {key}, so an append aborts. "
-                "Switch this sync to upsert/merge (key-resolved), which is how an "
-                "updated row is meant to land."
+                f"destination already stores on {key}, so an append cannot store "
+                "them again. Switch this sync to upsert/merge (key-resolved), "
+                "which is how an updated row is meant to land."
             )
-        else:
+        elif enforced:
             cause = (
                 f"Append would duplicate {len(found)} existing destination key(s) on "
                 f"{key} — the destination enforces uniqueness, so the insert aborts. "
                 "Switch this sync to upsert/merge (key-resolved) or overwrite."
+            )
+        else:
+            cause = (
+                f"Append would store a second copy of {collision_count} row(s) the "
+                f"destination already holds on {key}. The destination does not "
+                "reject that insert, so the duplicate would land. Use upsert/merge "
+                "(key-resolved) or overwrite."
+            )
+        details = {
+            "sample_collisions": found[:5],
+            "collision_count": collision_count,
+            "key_enforced": enforced,
+            "primary_key": {"target": key},
+            "sync_mode": getattr(ctx.plan, "sync_mode", ""),
+            "rule_id": "g6_target_ddl.append_key_collision",
+            "remediation_kind": "change_sync_mode",
+            "probe_status": getattr(collision, "status", ""),
+            "values_probed": getattr(collision, "values_probed", 0),
+            "delta_scope": delta_scope,
+        }
+        # A heap stores the second copy. That is what append means on a table
+        # with no key. Resume is the exception: the same batch is re-delivered,
+        # and a heap would store it twice.
+        if not enforced and not delta_scope and not getattr(
+            collision, "resume_redelivery", False
+        ):
+            return _warn(
+                GateId.G6_TARGET_DDL,
+                cause,
+                start,
+                _scope(
+                    details,
+                    coverage="sample",
+                    note="Destination key collision probe on append batch",
+                ),
             )
         return _block(
             GateId.G6_TARGET_DDL,
             cause,
             start,
             _scope(
-                {
-                    "sample_collisions": found[:5],
-                    "primary_key": {"target": key},
-                    "sync_mode": getattr(ctx.plan, "sync_mode", ""),
-                    "rule_id": "g6_target_ddl.append_key_collision",
-                    "remediation_kind": "change_sync_mode",
-                    "probe_status": getattr(collision, "status", ""),
-                    "values_probed": getattr(collision, "values_probed", 0),
-                    "delta_scope": delta_scope,
-                },
+                details,
                 coverage="sample",
                 note="Destination key collision probe on append batch",
             ),
         )
 
-    # Canonical identity key uniqueness probe for SQL destinations.
-    # Append/overwrite: skip unless the destination introspected a real PK
-    # (INSERT would then fail — fail closed with a clear gate).
+    # Append/overwrite without a destination key still compared the batch above.
+    # A finished probe owns the verdict. Falling through to "uniqueness not
+    # required" hid both a clean check and a probe that never ran.
     if not require_unique and not (getattr(ctx.plan, "destination_pk_columns", None) or []):
+        if collision_proven:
+            return _pass(
+                GateId.G6_TARGET_DDL,
+                collision_proven,
+                start,
+                _scope(
+                    {"scrubbed_drift_issues": scrubbed, "collision_probe": collision_evidence},
+                    coverage="sample",
+                    note="Destination collision probe on append batch",
+                ),
+            )
+        if collision_unproven:
+            return _warn(
+                GateId.G6_TARGET_DDL,
+                collision_unproven,
+                start,
+                _scope(
+                    {
+                        "scrubbed_drift_issues": scrubbed,
+                        "rule_id": "g6_target_ddl.append_collision_unproven",
+                        "collision_probe": collision_evidence,
+                    },
+                    coverage="none",
+                    note="Destination collision probe did not run",
+                ),
+            )
         return _pass(
             GateId.G6_TARGET_DDL,
             "Target DDL compatible (uniqueness not required for this sync mode)",
@@ -1948,28 +2162,20 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             ),
         )
 
-    source_cols = [c.name for c in ctx.plan.source.columns]
+    pk_sources: list[str] = []
+    pk_targets: list[str] = []
     try:
-        from services.primary_key import resolve_identity_key
-
-        pk_src, pk_tgt = resolve_identity_key(
-            mappings=ctx.plan.mappings,
-            source_columns=source_cols,
-            dest_kind=dest_kind,
-            validation_mode=ctx.plan.validation_mode,
-            purpose="uniqueness",
-            destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None) or None,
-            contract_primary_key=getattr(ctx.plan, "contract_primary_key", None) or None,
-        )
-    except Exception:
-        pk_src, pk_tgt = None, None
+        pk_sources, pk_targets = _g6_sample_identity(ctx, dest_kind)
+    except Exception:  # noqa: BLE001 — identity import must not skip the gate
         for m in ctx.plan.mappings:
             if m.target and str(m.target).lower() in {"id", "_id"}:
-                pk_src, pk_tgt = m.source, m.target
+                pk_sources, pk_targets = [m.source], [m.target]
                 break
+    pk_src = _g6_identity_label(pk_sources)
+    pk_tgt = _g6_identity_label(pk_targets)
 
-    if pk_tgt:
-        dupes = ctx.probe_unique_constraint([pk_tgt])
+    if pk_targets:
+        dupes = ctx.probe_unique_constraint(list(pk_targets))
         if dupes:
             return _block(
                 GateId.G6_TARGET_DDL,
@@ -2176,6 +2382,98 @@ def _continue_policy_disposition(mapping: Any) -> str:
     return "holdout"
 
 
+def _spreadsheet_blank_is_sql_null(
+    ctx: PreflightContext,
+    raw: Any,
+    err: str | None,
+    mapping: Any,
+) -> bool:
+    """File blank → SQL NULL, same contract as the file writer and G5 dry-run.
+
+    Execute stamps a typed transform (``none`` → ``integer``) before this gate.
+    G5 already clears those blanks when the destination is not proven NOT NULL.
+    G8 used to keep the coerce error and fail the load with zero rows written.
+    """
+    # File blanks opt in. A numeric/temporal/boolean/uuid/binary extract
+    # cannot store ""; that blank is a flattened SQL NULL even when the
+    # file flag is off. The shared contract refuses proven NOT NULL and
+    # refuses a text column's stored empty string.
+    file_blank = bool(getattr(ctx, "empty_cells_as_null", False))
+    try:
+        from services.transform_engine import _blank_is_nullable_absence
+    except Exception:
+        return False
+    target = str(getattr(mapping, "target", "") or "")
+    dest_cols = list(getattr(ctx.plan.destination, "target_columns", None) or [])
+    dest_nullability = {
+        str(getattr(col, "name", "") or ""): bool(getattr(col, "nullable", True))
+        for col in dest_cols
+        if getattr(col, "name", None)
+    }
+    source_col = _source_column(ctx, str(getattr(mapping, "source", "") or ""))
+    mapping_dict: dict[str, Any] = {
+        "source": getattr(mapping, "source", ""),
+        "target": target,
+        "create_new": bool(getattr(mapping, "create_new", False)),
+        "source_type": str(getattr(source_col, "inferred_type", "") or ""),
+    }
+    dest_col = next(
+        (
+            col
+            for col in dest_cols
+            if str(getattr(col, "name", "") or "").lower() == target.lower()
+        ),
+        None,
+    )
+    if dest_col is not None and not bool(getattr(dest_col, "nullable", True)):
+        mapping_dict["target_nullable"] = False
+    return _blank_is_nullable_absence(
+        raw,
+        err,
+        mapping_dict,
+        empty_cells_as_null=file_blank,
+        dest_nullability=dest_nullability,
+        database_extract=str(getattr(ctx.plan.source, "kind", "") or "").lower()
+        == "database",
+        source_type=str(mapping_dict.get("source_type") or ""),
+    )
+
+
+def _write_path_cell_issue(
+    row_idx: int,
+    mapping: Any,
+    err: str,
+    raw_s: str | None,
+    line: str,
+) -> dict[str, Any]:
+    """Structured quarantine payload for one write-path cell failure.
+
+    The prose line ``row N src→dst: reason`` is not enough — Inspect Quarantine
+    only rebuilds a finding when column and sample are stored.
+    """
+    blank = str(err).lower().startswith("empty value cannot coerce")
+    if blank and (raw_s is None or str(raw_s).strip() == ""):
+        sample: Any = ""
+    else:
+        sample = "" if raw_s is None else raw_s
+    issue: dict[str, Any] = {
+        "row": row_idx,
+        "source": getattr(mapping, "source", ""),
+        "column": getattr(mapping, "source", ""),
+        "target": getattr(mapping, "target", ""),
+        "sample": sample,
+        "reason": err,
+        "message": line,
+    }
+    if blank:
+        issue["suggested_fix"] = (
+            "Blank cell. A nullable destination stores SQL NULL and keeps the row. "
+            "A NOT NULL column needs a source value or a nullability change — "
+            "replay cannot invent a typed value from an empty cell."
+        )
+    return issue
+
+
 def _apply_write_path_transform(value: str, transform: str | None) -> tuple[str | None, str | None]:
     """Prefer the real write-path transform so G8 matches coerce/quarantine behavior."""
     try:
@@ -2208,17 +2506,40 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     dest_kind = (ctx.plan.destination.db_type or "").lower()
     sample_rows = getattr(ctx, "sample_rows", None) or []
+    if not sample_rows and getattr(ctx, "source_measured_empty", False):
+        return _pass(
+            GateId.G8_RECONCILIATION,
+            "Source holds 0 rows (read, not assumed) — Execute must land 0 rows "
+            "and reconciles the destination count against 0",
+            start,
+            _with_scope(
+                {"source_rows": 0, "source_measured_empty": True},
+                evidence_scope(
+                    kind="reconciliation",
+                    sample_rows=0,
+                    available_rows=0,
+                    coverage="full_selected",
+                    note="Measured empty source — post-write count must be 0",
+                ),
+            ),
+        )
     if not sample_rows:
         # Fail closed: SKIP used to unlock Execute with zero reconcile proof.
+        reason = str(getattr(ctx, "sample_unavailable_reason", "") or "").strip()
         return _block(
             GateId.G8_RECONCILIATION,
             "Gate-8 cannot prove reconciliation without sample rows — "
-            "load a source sample before Execute",
+            + (
+                f"{reason}. Fix the source read, then re-run Validate"
+                if reason
+                else "load a source sample before Execute"
+            ),
             start,
             _with_scope(
                 {
                     "preview_only": True,
                     "source_rows": 0,
+                    **({"sample_unavailable_reason": reason} if reason else {}),
                     "note": (
                         "Pre-write Gate-8 simulation requires Validate sample rows; "
                         "refusing Execute unlock without evidence"
@@ -2251,15 +2572,17 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         if value is None:
             return None
         try:
-            from services.value_serializer import cell_to_string
+            from services.value_serializer import transform_input_cell
 
-            return cell_to_string(value)
+            return transform_input_cell(value)
         except Exception:
             return str(value)
 
     transform_errors: list[str] = []
+    transform_issue_details: list[dict[str, Any]] = []
     contracted_holdouts: list[str] = []
     contracted_null_cells: list[str] = []
+    file_blank_nulls: list[str] = []
     mapped_rows: list[dict[str, Any]] = []
     # Parallel to mapped_rows: source rows that survive quarantine holdouts.
     # Fingerprint MUST use this list — never sample_rows[i] vs mapped_rows[i]
@@ -2277,8 +2600,18 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 mapped[m.target] = None
                 continue
             transformed, err = _apply_write_path_transform(raw_s, m.transform)
-            if err:
+            if err and _spreadsheet_blank_is_sql_null(ctx, raw_s, err, m):
+                # Same disposition as the file writer: absence, not a cast failure
+                # and not a quarantined reject. Proven NOT NULL stays in ``err``.
+                mapped[m.target] = None
+                file_blank_nulls.append(
+                    f"row {row_idx} {m.source}→{m.target}: blank cell stored as SQL NULL"
+                )
+            elif err:
                 line = f"row {row_idx} {m.source}→{m.target}: {err}"
+                transform_issue_details.append(
+                    _write_path_cell_issue(row_idx, m, err, raw_s, line)
+                )
                 # Continue-policy Risk Contract matches write disposition:
                 # quarantine/skip → omit row; STOP_COLUMN/coerce → NULL cell
                 # (blocked when destination is NOT NULL — same as G3).
@@ -2317,6 +2650,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             start,
             {
                 "errors": transform_errors[:20],
+                "issues_detail": transform_issue_details[:20],
                 "contracted_holdouts": contracted_holdouts[:20],
                 "source_rows": source_count,
                 "preview_only": True,
@@ -2399,7 +2733,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         for row in mapped_rows:
             if not unique_key_row_in_scope(row, pk_target, unique_keys=unique_keys):
                 continue
-            raw = str(row.get(pk_target, "") or "")
+            raw = str(_row_cell(row, pk_target, "") or "")
             val = unique_equality_key(
                 raw if raw else None,
                 dest_ddl,
@@ -2574,9 +2908,18 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 },
             )
 
+        blank_clause = ""
+        if file_blank_nulls:
+            word = "blank" if len(file_blank_nulls) == 1 else "blanks"
+            blank_clause = (
+                f"; {len(file_blank_nulls)} spreadsheet {word} stored as SQL NULL"
+            )
         return _pass(
             GateId.G8_RECONCILIATION,
-            f"Dry-run reconciliation passed — {source_count} row(s) (write-path sample)",
+            (
+                f"Dry-run reconciliation passed — {source_count} row(s) "
+                f"(write-path sample){blank_clause}"
+            ),
             start,
             _with_scope(
                 {
@@ -2587,8 +2930,11 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "contracted_holdout_count": len(contracted_holdouts),
                     "contracted_null_cells": contracted_null_cells[:20],
                     "contracted_null_cell_count": len(contracted_null_cells),
+                    "file_blank_nulls": file_blank_nulls[:20],
+                    "file_blank_null_count": len(file_blank_nulls),
                     "note": (
                         "Pre-write write-path sample check — live Gate-8 checksum runs after load"
+                        + blank_clause
                         + (
                             f"; {len(contracted_holdouts)} row(s) held out under "
                             "quarantine/skip continue-policy"

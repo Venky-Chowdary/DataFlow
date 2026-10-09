@@ -39,7 +39,13 @@ pyhive>=0.7.0  # Presto / Hive via SQLAlchemy
 # Data Processing
 ijson>=3.2.0
 openpyxl>=3.1.0
-paramiko>=3.4.0
+xlrd>=2.0.1,<3
+# SFTP appliances that only offer diffie-hellman-group14-sha1 / ssh-rsa drop
+# the socket during kex, before any auth packet. The client registers those
+# two algorithms when this Paramiko build removed them, and advertises them
+# only after a modern handshake fails. Host-key verification stays on.
+# group1-sha1 is not offered.
+paramiko>=3.5.1
 pyarrow>=23.0.1
 pyiceberg[pyarrow,sql-sqlite,glue,rest-sigv4,s3fs]>=0.11.1
 fastavro>=1.9.0
@@ -93,8 +99,11 @@ pytest-asyncio>=0.23.0
 httpx>=0.25.0
 responses>=0.24.0  # HTTP mocking for SaaS connector tests
 
-# Transitive floors for known CVEs (keep pip-audit green on default install)
-urllib3>=2.6.3
+# Transitive floors for known CVEs (keep pip-audit green on default install).
+# oauthlib stays on 3.3.1 because databricks-sql-connector 4.6.0 requires
+# oauthlib<4. Raising it here fails the install. PYSEC-2026-4114 waits on
+# a connector release that accepts oauthlib 4.
+urllib3>=2.8.0
 python-dotenv>=1.2.2
 
 # OpenTelemetry — opt-in via DATAFLOW_ENABLE_TRACING=1. The product boots

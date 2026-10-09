@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -259,11 +260,16 @@ class SyncContract:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SyncContract:
-        pks = data.get("primary_keys")
-        if isinstance(pks, list) and pks:
-            primary_key = ",".join(str(x).strip() for x in pks if str(x).strip())
+        # Pilot stores ``primary_key`` as a list of source columns. Stringifying
+        # that list made the engine merge on the literal "['id']", so a key
+        # preflight had accepted never reached the write.
+        raw_pk = data.get("primary_key")
+        if raw_pk is None or (isinstance(raw_pk, str) and not str(raw_pk).strip()):
+            raw_pk = data.get("primary_keys")
+        if isinstance(raw_pk, (list, tuple)):
+            primary_key = ",".join(str(x).strip() for x in raw_pk if str(x).strip())
         else:
-            primary_key = str(data.get("primary_key") or "").strip()
+            primary_key = str(raw_pk or "").strip()
         return cls(
             name=str(data.get("name") or data.get("stream") or "stream"),
             # Empty inherits request sync_mode via resolve_effective_sync_mode —
@@ -299,6 +305,36 @@ def resolve_selected_sync_contracts(
     return out
 
 
+# Unquoted identifiers on these engines are one object regardless of the
+# case the operator typed. Oracle stores QA6B_UA_TSOR for qa6b_ua_tsor.
+# A bookmark that kept the typed spelling treated the second run as a new
+# route and re-read the whole table.
+_BOOKMARK_FOLD_UPPER = frozenset({"oracle", "oracledb", "snowflake", "db2"})
+
+
+def bookmark_identifier(engine: str, name: str) -> str:
+    """Fold an unquoted identifier to the engine's stored case.
+
+    A quoted part (``"qa6b_ua_tsor"``) is a different object and stays as
+    written. Other engines keep the operator's spelling: Postgres ``Orders``
+    and ``orders`` are not the same table.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return ""
+    eng = (engine or "").strip().lower()
+    if eng not in _BOOKMARK_FOLD_UPPER:
+        return raw
+    parts: list[str] = []
+    for part in raw.split("."):
+        piece = part.strip()
+        if len(piece) >= 2 and piece[0] == piece[-1] and piece[0] in {'"', "`"}:
+            parts.append(piece)
+        else:
+            parts.append(piece.upper())
+    return ".".join(parts)
+
+
 def build_cursor_key(
     *,
     source_type: str,
@@ -308,11 +344,94 @@ def build_cursor_key(
     dest_database: str,
     dest_object: str,
     stream_name: str = "stream",
+    dest_identity: str = "",
 ) -> str:
-    return (
+    """Route bookmark.
+
+    ``dest_identity`` is empty for a route that has no connector id and no
+    host, which keeps the historical key. Two destinations that share a
+    database name (MySQL and MariaDB both called ``dataflow``) must not share
+    the bookmark: the second load would treat the first destination's
+    watermark as its own and skip rows it has never written.
+    """
+    source_database = bookmark_identifier(source_type, source_database)
+    source_object = bookmark_identifier(source_type, source_object)
+    dest_database = bookmark_identifier(dest_type, dest_database)
+    dest_object = bookmark_identifier(dest_type, dest_object)
+    base = (
         f"{source_type}:{source_database}:{source_object}"
         f"→{dest_type}:{dest_database}:{dest_object}:{stream_name}"
     )
+    ident = (dest_identity or "").strip()
+    if not ident:
+        return base
+    return f"{base}|{ident}"
+
+
+def route_endpoint_identity(endpoint: Any) -> str:
+    """Stable destination identity for a bookmark.
+
+    Connector id wins. Host and port are the fallback when the route was
+    built from a raw connection. A dict's ``id`` is not a connector id —
+    procedure tests pass two payloads that differ only by binds, and those
+    must keep one bookmark.
+    """
+    if endpoint is None:
+        return ""
+    if isinstance(endpoint, dict):
+        cid = str(endpoint.get("connector_id") or "").strip()
+        host = str(endpoint.get("host") or "").strip()
+        port = endpoint.get("port")
+    else:
+        cid = str(getattr(endpoint, "connector_id", "") or "").strip()
+        host = str(getattr(endpoint, "host", "") or "").strip()
+        port = getattr(endpoint, "port", None)
+    ident = ""
+    if cid:
+        ident = f"id:{cid}"
+    elif host:
+        port_s = str(port or "").strip()
+        if port_s and port_s not in {"0", "None"}:
+            ident = f"host:{host}:{port_s}"
+        else:
+            ident = f"host:{host}"
+    return _stamp_engine_identity(endpoint, ident)
+
+
+def _endpoint_format(endpoint: Any) -> str:
+    if endpoint is None:
+        return ""
+    if isinstance(endpoint, dict):
+        raw = endpoint.get("format") or endpoint.get("type") or endpoint.get("db_type") or ""
+    else:
+        raw = (
+            getattr(endpoint, "format", None)
+            or getattr(endpoint, "type", None)
+            or ""
+        )
+    return str(raw or "").strip().lower()
+
+
+def _stamp_engine_identity(endpoint: Any, ident: str) -> str:
+    """MariaDB must not share a MySQL bookmark when the driver alias is mysql.
+
+    The catalog id of MariaDB is ``mysql``. Two connectors on the same
+    database name then build one cursor key, and the second destination
+    looks reset. ``engine:mariadb`` is the distinguisher when host and
+    connector id were not on the endpoint yet.
+    """
+    fmt = _endpoint_format(endpoint)
+    if fmt not in {"mariadb", "maria"}:
+        return ident
+    tag = "engine:mariadb"
+    if not ident:
+        return tag
+    if tag in ident:
+        return ident
+    return f"{ident}|{tag}"
+
+
+_CURSOR_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -364,6 +483,8 @@ def resolve_incremental_read_scope(
     dest_database: str,
     dest_object: str,
     source: Any = None,
+    destination: Any = None,
+    destination_config: Any = None,
 ) -> IncrementalReadScope:
     """Resolve the cursor state of a route — the read side's own view of it.
 
@@ -384,18 +505,43 @@ def resolve_incremental_read_scope(
         token = source_object_for_cursor(source, fallback="")
         if token:
             object_name = token
-    cursor_key = build_cursor_key(
+    stream_name = contract.name if contract else "stream"
+    legacy_key = build_cursor_key(
         source_type=source_type,
         source_database=source_database,
         source_object=object_name,
         dest_type=dest_type,
         dest_database=dest_database,
         dest_object=dest_object,
-        stream_name=contract.name if contract else "stream",
+        stream_name=stream_name,
+    )
+    owner = route_endpoint_identity(destination)
+    if not owner and destination_config is not None:
+        owner = route_endpoint_identity(destination_config)
+    if destination_config is not None and _endpoint_format(destination) in {"mariadb", "maria"}:
+        owner = _stamp_engine_identity(destination, owner)
+    cursor_key = (
+        build_cursor_key(
+            source_type=source_type,
+            source_database=source_database,
+            source_object=object_name,
+            dest_type=dest_type,
+            dest_database=dest_database,
+            dest_object=dest_object,
+            stream_name=stream_name,
+            dest_identity=owner,
+        )
+        if owner
+        else legacy_key
     )
     pk_cols = contract.primary_key_columns() if contract else []
     tiebreak = incremental_tiebreak_column(source_type, cursor_column, pk_cols)
-    watermark, metadata = get_watermark_record(cursor_key)
+    if cursor_key != legacy_key:
+        watermark, metadata = resolve_owned_watermark(
+            cursor_key, legacy_key, owner=owner
+        )
+    else:
+        watermark, metadata = get_watermark_record(cursor_key)
     return IncrementalReadScope(
         cursor_column=cursor_column,
         primary_key=tiebreak,
@@ -435,6 +581,84 @@ def _load() -> dict[str, Any]:
 
 def _save(data: dict[str, Any]) -> None:
     write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
+
+
+def _claim_legacy_owner(legacy_key: str, owner: str) -> bool:
+    """CAS-claim an unscoped watermark for this destination only.
+
+    The first destination to resolve the old shared key keeps it. A second
+    destination sees the owner and does not inherit the bookmark, so it
+    re-reads instead of silently skipping rows it never loaded.
+    """
+    owner = (owner or "").strip()
+    if not legacy_key or not owner:
+        return False
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            doc = coll.find_one_and_update(
+                {
+                    "key": legacy_key,
+                    "$or": [
+                        {"metadata.route_owner": {"$exists": False}},
+                        {"metadata.route_owner": None},
+                        {"metadata.route_owner": ""},
+                        {"metadata.route_owner": owner},
+                    ],
+                },
+                {"$set": {"metadata.route_owner": owner}},
+            )
+            if doc is not None:
+                return True
+            existing = coll.find_one({"key": legacy_key})
+            if not existing:
+                return False
+            meta = existing.get("metadata") if isinstance(existing.get("metadata"), dict) else {}
+            return str(meta.get("route_owner") or "") == owner
+        except Exception:
+            _logger.exception("Mongo legacy cursor claim failed for %s", legacy_key)
+
+    with _CURSOR_LOCK:
+        data = _load()
+        for entry in data.get("cursors", []):
+            if entry.get("key") != legacy_key:
+                continue
+            meta = dict(entry.get("metadata") or {})
+            current = str(meta.get("route_owner") or "")
+            if current and current != owner:
+                return False
+            meta["route_owner"] = owner
+            entry["metadata"] = meta
+            _save(data)
+            return True
+    return False
+
+
+def resolve_owned_watermark(
+    scoped_key: str,
+    legacy_key: str,
+    *,
+    owner: str,
+) -> tuple[str | None, dict[str, Any]]:
+    """Watermark for one destination, adopting an unscoped bookmark once.
+
+    An empty scoped key does not fall through to the shared bookmark. That
+    fall-through is how MariaDB skipped the 20 rows MySQL had already consumed.
+    """
+    watermark, metadata = get_watermark_record(scoped_key)
+    if watermark is not None:
+        return watermark, metadata
+    if not _claim_legacy_owner(legacy_key, owner):
+        return None, {}
+    watermark, metadata = get_watermark_record(legacy_key)
+    if watermark is None:
+        return None, {}
+    copied = dict(metadata)
+    copied.pop("job_id", None)
+    copied["route_owner"] = owner
+    copied["adopted_from"] = legacy_key
+    set_watermark(scoped_key, watermark, metadata=copied)
+    return get_watermark_record(scoped_key)
 
 
 def get_watermark_record(cursor_key: str) -> tuple[str | None, dict[str, Any]]:
@@ -553,6 +777,42 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
         })
     data["cursors"] = entries[-500:]
     _save(data)
+
+
+def cursor_keys_for_job(job_id: str) -> list[str]:
+    """Cursor keys whose stored metadata names this job.
+
+    ``set_watermark`` records ``metadata.job_id``. Slot release uses that
+    when the job document itself has no ``cursor_key``, so dropping the
+    slot also drops the watermark the next run would try to resume.
+    """
+    jid = (job_id or "").strip()
+    if not jid:
+        return []
+    found: list[str] = []
+
+    def _add(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in found:
+            found.append(text)
+
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            for doc in coll.find({"metadata.job_id": jid}, {"key": 1}):
+                _add(doc.get("key"))
+        except Exception:
+            _logger.exception("Mongo cursor_keys_for_job failed for %s", jid)
+    try:
+        for entry in _load().get("cursors", []):
+            if not isinstance(entry, dict):
+                continue
+            meta = entry.get("metadata")
+            if isinstance(meta, dict) and str(meta.get("job_id") or "") == jid:
+                _add(entry.get("key"))
+    except Exception:
+        _logger.exception("File cursor_keys_for_job failed for %s", jid)
+    return found
 
 
 def list_cursor_keys() -> list[str]:
@@ -815,6 +1075,292 @@ def max_cursor_value(
         if best is None or compare_cursor_values(cand, best) > 0:
             best = cand
     return best
+
+
+def checkpoint_watermark(checkpoint: Any) -> str | None:
+    """Cursor saved on a job checkpoint, if that record has one.
+
+    CDC payloads use ``watermark``. The checkpoint record uses
+    ``cursor_value``. A nested ``cdc.watermark`` is the same position.
+    An empty string is a real cursor, not a missing one.
+    """
+    if checkpoint is None:
+        return None
+    data: Any = checkpoint
+    if not isinstance(data, dict):
+        if hasattr(data, "to_dict"):
+            try:
+                data = data.to_dict()
+            except Exception:
+                data = None
+        if not isinstance(data, dict):
+            raw = getattr(checkpoint, "cursor_value", None)
+            if raw is None:
+                raw = getattr(checkpoint, "watermark", None)
+            return None if raw is None else str(raw)
+    wm = data.get("watermark")
+    if wm is None and isinstance(data.get("cdc"), dict):
+        wm = data["cdc"].get("watermark")
+    if wm is None:
+        wm = data.get("cursor_value")
+    if wm is None:
+        return None
+    return str(wm)
+
+
+def _bare_table_name(name: str) -> str:
+    """Table identity without a schema prefix. ``public.orders`` and ``orders`` match."""
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    return text.rsplit(".", 1)[-1].strip()
+
+
+def _same_table(left: str, right: str) -> bool:
+    a = _bare_table_name(left)
+    b = _bare_table_name(right)
+    return bool(a) and a.lower() == b.lower()
+
+
+def cursor_owner_table(watermark: Any) -> str | None:
+    """Single table named inside a resume token.
+
+    Query-CDC scalars name no table. A comma-separated list is one shared
+    route cursor, not a table this token may seek on its own.
+    """
+    if watermark is None:
+        return None
+    from urllib.parse import unquote
+
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    token = watermark if isinstance(watermark, dict) else unwrap_resume_token(watermark)
+    if isinstance(token, dict):
+        raw = token.get("table")
+        if isinstance(raw, list):
+            names = [_bare_table_name(str(item)) for item in raw]
+            names = [item for item in names if item]
+            return names[0] if len(names) == 1 else None
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        if not text or "," in text:
+            return None
+        return _bare_table_name(text) or None
+    text = str(token or "")
+    table = ""
+    for part in text.split("|"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        if key.strip().lower() == "table" and value.strip():
+            table = unquote(value.strip())
+    if not table or "," in table:
+        return None
+    return _bare_table_name(table) or None
+
+
+def checkpoint_stream_name(checkpoint: Any) -> str | None:
+    """Stream a checkpoint record claims, when it claims one."""
+    if checkpoint is None:
+        return None
+    named = getattr(checkpoint, "cdc_stream", None)
+    if isinstance(named, str) and named.strip() and "," not in named:
+        return _bare_table_name(named) or None
+    data: Any = checkpoint
+    if not isinstance(data, dict) and hasattr(checkpoint, "to_dict"):
+        try:
+            data = checkpoint.to_dict()
+        except Exception:
+            data = None
+    if not isinstance(data, dict):
+        return None
+    for key in ("cdc_stream", "stream", "stream_name"):
+        raw = data.get(key)
+        if isinstance(raw, str) and raw.strip() and "," not in raw:
+            return _bare_table_name(raw) or None
+    return None
+
+
+def _checkpoint_is_shared(checkpoint: Any) -> bool:
+    if checkpoint is None:
+        return False
+    if isinstance(checkpoint, dict):
+        return bool(checkpoint.get("cdc_shared_reader"))
+    if getattr(checkpoint, "cdc_shared_reader", False):
+        return True
+    if hasattr(checkpoint, "to_dict"):
+        try:
+            data = checkpoint.to_dict()
+        except Exception:
+            return False
+        return bool(isinstance(data, dict) and data.get("cdc_shared_reader"))
+    return False
+
+
+def _looks_like_log_resume(watermark: str) -> bool:
+    """True when the cursor is a log position, not a query-CDC scalar."""
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    token = unwrap_resume_token(watermark)
+    if isinstance(token, dict):
+        if str(token.get("phase") or "").strip().lower() in {"snapshot", "streaming"}:
+            return True
+        return any(token.get(key) for key in ("kind", "lsn", "scn", "file", "gtid", "gtid_set"))
+    text = str(token or "").strip().lower()
+    return "phase=" in text or "slot=" in text or "lsn=" in text or text.startswith("{")
+
+
+def resume_watermark(
+    stored: str | None,
+    checkpoint: Any,
+    *,
+    stream: str | None = None,
+    allow_unnamed: bool = True,
+    shared: bool = False,
+) -> str | None:
+    """Resume cursor. The cursor store wins when it has a value.
+
+    A job checkpoint is throttled and can be older than the store. Copying
+    it over the store rewinds the next poll and drops a keyset tie-break.
+    When the store is empty, the checkpoint is the only record that a
+    previous run already applied rows.
+
+    That record is one cursor. A sequential multi-table run must not hand
+    it to every stream. Pass ``stream`` and ``allow_unnamed=False`` so an
+    unnamed scalar, or a token that names another table, is left behind
+    and that stream snapshots. A single stream may still adopt an unnamed
+    checkpoint (``allow_unnamed=True``).
+
+    The shared log reader (``shared=True``) adopts a route token onto its
+    one key. A token that names one table is that table's keyset, not the
+    route position, unless the checkpoint is marked ``cdc_shared_reader``.
+    A route streaming token names no table. A single table must not seek
+    it: the next run snapshots (at-least-once upsert) instead of skipping
+    the dump.
+    """
+    if stored is not None:
+        return str(stored)
+    wm = checkpoint_watermark(checkpoint)
+    if wm is None:
+        return None
+    named = checkpoint_stream_name(checkpoint)
+    token_table = cursor_owner_table(wm)
+    if named and token_table and not _same_table(named, token_table):
+        return None
+    owner = named or token_table
+    route = _checkpoint_is_shared(checkpoint)
+    if shared:
+        if route:
+            return wm
+        # A log token with no table and no stream can be a legacy route
+        # cursor. One that names a table belongs to that table.
+        if owner:
+            return None
+        if _looks_like_log_resume(wm):
+            return wm
+        return None
+    if stream and str(stream).strip():
+        if owner and _same_table(owner, stream):
+            return wm
+        if owner:
+            return None
+        # Shared handoff: phase=streaming, no table. Not this table's cursor.
+        if route:
+            return None
+        if allow_unnamed:
+            return wm
+        return None
+    if route and not owner:
+        return None
+    return wm
+
+
+def isolate_stream_checkpoint(checkpoint: Any, stream_name: str) -> Any:
+    """Resume record for one table in a multi-table load.
+
+    The job checkpoint is one position. Passing that same object into the
+    next table seeks it with the previous table's offset or keyset, and the
+    write then stores the new position back onto the shared object. A
+    checkpoint is applied only when it names this stream, and only as a
+    copy. An unnamed checkpoint is not applied: each table reads from the
+    start instead of skipping rows.
+    """
+    if checkpoint is None:
+        return None
+    name = str(stream_name or "").strip()
+    if not name:
+        return None
+    owner = checkpoint_stream_name(checkpoint)
+    if not owner or not _same_table(owner, name):
+        return None
+    from services.checkpoint_service import Checkpoint
+
+    if isinstance(checkpoint, Checkpoint):
+        return Checkpoint.from_dict(checkpoint.to_dict())
+    if isinstance(checkpoint, dict):
+        return Checkpoint.from_dict(checkpoint)
+    return None
+
+
+def advance_stored_cursor(
+    current: str | None,
+    candidate: str | None,
+) -> tuple[str | None, bool]:
+    """Move a stored cursor forward, including a tie-break the old value lacked.
+
+    A composite candidate is compared on its cursor part, then its tie-break.
+    Comparing the whole bookmark as text ranks ``10`` behind ``9`` and would
+    leave the stored cursor on the old value, so the next poll re-reads the
+    same page. A scalar watermark and a composite with the same cursor advance
+    to the composite: the scalar cannot name which peer row was last applied.
+    """
+    if candidate is None or not str(candidate).strip():
+        return current, False
+    cand = str(candidate)
+    if current is None or not str(current).strip():
+        return cand, True
+    cur = str(current)
+    cand_cur, cand_pk = split_cursor_bookmark(cand, has_tiebreak=_is_composite(cand))
+    cur_cur, cur_pk = split_cursor_bookmark(cur, has_tiebreak=_is_composite(cur))
+    base = compare_cursor_values(cand_cur, cur_cur)
+    if base > 0:
+        return cand, True
+    if base < 0:
+        return cur, False
+    if cand_pk and not cur_pk:
+        return cand, True
+    if cand_pk and cur_pk and compare_cursor_values(cand_pk, cur_pk) > 0:
+        return cand, True
+    return cur, False
+
+
+def query_cdc_resume_watermark(
+    records: list[dict[str, Any]],
+    cursor_field: str,
+    tiebreak: str,
+    current: str | None,
+) -> str | None:
+    """Watermark after one query-CDC page.
+
+    When the primary key is not the cursor, the stored value is
+    ``(cursor, pk)``. The next poll seeks past that pair. A cursor-only
+    value would drop every peer row that shared the page's cursor and was
+    not in the page.
+    """
+    field = (cursor_field or "").strip()
+    if not field:
+        return current
+    pk = (tiebreak or "").strip()
+    headers = [field] + ([pk] if pk and pk != field else [])
+    matrix: list[list[str]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        matrix.append(["" if rec.get(col) is None else str(rec.get(col)) for col in headers])
+    batch_max = max_cursor_value(matrix, headers, field, pk or None)
+    new, advanced = advance_stored_cursor(current, batch_max)
+    return new if advanced else current
 
 
 def compare_cursor_values(a: str | None, b: str | None) -> int:

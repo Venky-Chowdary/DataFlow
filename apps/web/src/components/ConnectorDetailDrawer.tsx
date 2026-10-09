@@ -17,6 +17,7 @@ import {
   resolveDisplayRole,
 } from "../lib/topologyUtils";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { scheduleCadenceLabel } from "../lib/scheduleCadence";
 
 interface ConnectorDetailDrawerProps {
   open: boolean;
@@ -34,12 +35,6 @@ interface ConnectorDetailDrawerProps {
   onSelectConnection: (id: string) => void;
   onOpenJob?: (jobId: string) => void;
 }
-
-const INTERVAL_LABEL: Record<string, string> = {
-  hourly: "Hourly",
-  daily: "Daily",
-  weekly: "Weekly",
-};
 
 export function ConnectorDetailDrawer({
   open,
@@ -174,7 +169,7 @@ export function ConnectorDetailDrawer({
                 <li key={s.id} className="df2-drawer-related-row">
                   <span className="df2-drawer-related-main">
                     <strong title={s.name}>{s.name}</strong>
-                    <small>{INTERVAL_LABEL[s.interval] ?? s.interval} · {roleTag}</small>
+                    <small>{scheduleCadenceLabel(s)} · {roleTag}</small>
                   </span>
                   {s.last_status ? (
                     <span className={jobStatusBadgeClass(s.last_status)}>{jobStatusLabel(s.last_status)}</span>

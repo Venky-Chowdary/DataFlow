@@ -111,6 +111,13 @@ class Checkpoint:
     #: so resume must restore them or the population double-counts the pages a
     #: previous pass already bounded.
     rows_cursor_bounded: int = 0
+    #: CDC stream this cursor belongs to. Empty on a legacy single-stream
+    #: checkpoint. A sequential multi-table resume must not apply the cursor
+    #: to every selected table.
+    cdc_stream: str = ""
+    #: True when ``cursor_value`` is the shared log position for the route,
+    #: not one table's query cursor.
+    cdc_shared_reader: bool = False
 
     def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
         """Append rejection evidence, keeping the checkpoint document bounded.
@@ -176,17 +183,135 @@ class Checkpoint:
             "rejected_details": self.rejected_details,
             "rejected_details_truncated": self.rejected_details_truncated,
             "target_rows_before": self.target_rows_before,
+            "cdc_stream": self.cdc_stream,
+            "cdc_shared_reader": self.cdc_shared_reader,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Checkpoint":
         if not data:
             return cls()
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        fields = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        # CDC writes ``watermark``. That key is not a column on this record,
+        # so a resume used to drop the log position and snapshot again.
+        if fields.get("cursor_value") is None and data.get("watermark") is not None:
+            fields["cursor_value"] = data.get("watermark")
+        # The job blob names the stream as ``stream``. This record keeps it
+        # so a later table does not seek with another table's cursor.
+        if not fields.get("cdc_stream"):
+            named = data.get("cdc_stream") or data.get("stream") or data.get("stream_name")
+            if isinstance(named, str) and named.strip():
+                fields["cdc_stream"] = named.strip()
+        if data.get("cdc_shared_reader") and not fields.get("cdc_shared_reader"):
+            fields["cdc_shared_reader"] = True
+        return cls(**fields)
+
+
+class _MappingSidecar:
+    """Dict-backed ``job_checkpoints`` for tests and the in-memory store."""
+
+    def __init__(self, store: dict[str, Any]) -> None:
+        self.store = store
+
+    def replace_one(self, filt: dict[str, Any], doc: dict[str, Any], upsert: bool = False) -> Any:
+        key = str(filt.get("job_id") or "")
+        if not key:
+            return None
+        if key not in self.store and not upsert:
+            return None
+        self.store[key] = dict(doc)
+        return doc
+
+    def find_one(self, filt: dict[str, Any]) -> dict[str, Any] | None:
+        found = self.store.get(str(filt.get("job_id") or ""))
+        return dict(found) if isinstance(found, dict) else None
+
+
+def _checkpoint_collection(mongo: Any) -> Any | None:
+    """Sidecar collection, or None when this store cannot hold one.
+
+    The in-memory job service returns a plain dict from ``get_database``.
+    That is not a collection. A rejecting test double with no ``checkpoints``
+    dict also returns None, so a failed job update still fail-closes.
+    """
+    custom = getattr(mongo, "checkpoints", None)
+    if isinstance(custom, dict):
+        return _MappingSidecar(custom)
+    getter = getattr(mongo, "get_database", None)
+    if not callable(getter):
+        return None
+    try:
+        db = getter()
+    except Exception:  # noqa: BLE001 — sidecar is optional; job update remains
+        logger.debug("checkpoint sidecar database unavailable", exc_info=True)
+        return None
+    if db is None or isinstance(db, dict):
+        return None
+    try:
+        coll = db["job_checkpoints"]
+    except Exception:  # noqa: BLE001 — sidecar is optional; job update remains
+        logger.debug("checkpoint sidecar collection unavailable", exc_info=True)
+        return None
+    if not hasattr(coll, "find_one"):
+        return None
+    return coll
+
+
+def _persist_resume_token(mongo: Any, job_id: str, token: dict[str, Any]) -> bool:
+    """Write the small resume document. False when no sidecar can accept it."""
+    job_id = str(job_id or "").strip()
+    if not job_id:
+        return False
+    coll = _checkpoint_collection(mongo)
+    if coll is None:
+        return False
+    doc = {
+        "job_id": job_id,
+        "checkpoint": token,
+        "updated_at": _now(),
+    }
+    try:
+        if hasattr(coll, "replace_one"):
+            coll.replace_one({"job_id": job_id}, doc, upsert=True)
+        else:
+            coll.update_one({"job_id": job_id}, {"$set": doc}, upsert=True)
+        return True
+    except Exception:  # noqa: BLE001 — a failed sidecar must not abort the job update
+        logger.exception("Resume token write failed for job %s", job_id)
+        return False
+
+
+def _read_resume_token(mongo: Any, job_id: str) -> dict[str, Any] | None:
+    coll = _checkpoint_collection(mongo)
+    if coll is None:
+        return None
+    try:
+        doc = coll.find_one({"job_id": str(job_id or "")})
+    except Exception:  # noqa: BLE001 — fall back to the job document copy
+        logger.exception("Resume token read failed for job %s", job_id)
+        return None
+    if not isinstance(doc, dict):
+        return None
+    token = doc.get("checkpoint")
+    return dict(token) if isinstance(token, dict) else None
+
+
+def durable_resume_token(checkpoint: Checkpoint | dict[str, Any]) -> dict[str, Any]:
+    """Resume slice safe to store beside the job document."""
+    data = checkpoint.to_dict() if isinstance(checkpoint, Checkpoint) else dict(checkpoint or {})
+    from services.job_document_budget import _resume_tokens_only
+
+    return _resume_tokens_only(data)
 
 
 class CheckpointService:
-    """Store and retrieve checkpoints from the MongoDB job record."""
+    """Store and retrieve checkpoints.
+
+    The resume token is written to ``job_checkpoints`` first. The job document
+    still receives the checkpoint for the live theater, but a rejected job
+    update no longer erases the only resume point. Fail closed only when both
+    writes fail.
+    """
 
     def __init__(self, mongo=None) -> None:
         self.mongo = mongo
@@ -219,30 +344,52 @@ class CheckpointService:
     def save(self, checkpoint: Checkpoint) -> bool:
         """Persist the checkpoint without overwriting the job status.
 
-        ``update_job_status`` returns ``False`` rather than raising when the job
-        store is unreachable. Callers **must** treat ``False`` / ``has_failed_saves``
-        as a hard failure (prefer ``require_save``). Returning bool lets unit
-        tests assert the failure counter without catching exceptions.
+        The sidecar resume token is the durable point. ``update_job_status``
+        returns ``False`` rather than raising when the job document is
+        unreachable or over MongoDB's size limit. That rejection used to abort
+        a 120k-row load and keep rewriting the same oversized document on every
+        heartbeat. Callers **must** treat ``False`` / ``has_failed_saves`` as a
+        hard failure (prefer ``require_save``) only when the sidecar also failed.
         """
         mongo = self._mongo()
-        ok = mongo.update_job_status(
-            checkpoint.job_id,
-            checkpoint.status,
-            checkpoint=checkpoint.to_dict(),
-            updated_at=datetime.now(timezone.utc),
-        )
-        if not ok:
-            self.failed_saves += 1
-            if self.failed_saves == 1:
-                logger.error(
-                    "Checkpoint write failed for job %s (chunk %s, %s rows). "
-                    "%s The job store rejected or could not accept the checkpoint.",
+        token = durable_resume_token(checkpoint)
+        sidecar_ok = _persist_resume_token(mongo, checkpoint.job_id, token)
+        job_ok = False
+        try:
+            job_ok = bool(
+                mongo.update_job_status(
+                    checkpoint.job_id,
+                    checkpoint.status,
+                    checkpoint=checkpoint.to_dict(),
+                    updated_at=datetime.now(timezone.utc),
+                )
+            )
+        except Exception:  # noqa: BLE001 — sidecar may already hold the resume token
+            logger.exception(
+                "Job document checkpoint update raised for %s", checkpoint.job_id
+            )
+            job_ok = False
+        if sidecar_ok or job_ok:
+            if sidecar_ok and not job_ok:
+                logger.warning(
+                    "Job document rejected the checkpoint for job %s (chunk %s, %s rows). "
+                    "Resume token is durable in job_checkpoints.",
                     checkpoint.job_id,
                     getattr(checkpoint, "chunk_index", "?"),
                     getattr(checkpoint, "rows_processed", "?"),
-                    CHECKPOINT_PERSISTENCE_FAILED,
                 )
-        return ok
+            return True
+        self.failed_saves += 1
+        if self.failed_saves == 1:
+            logger.error(
+                "Checkpoint write failed for job %s (chunk %s, %s rows). "
+                "%s The job store rejected or could not accept the checkpoint.",
+                checkpoint.job_id,
+                getattr(checkpoint, "chunk_index", "?"),
+                getattr(checkpoint, "rows_processed", "?"),
+                CHECKPOINT_PERSISTENCE_FAILED,
+            )
+        return False
 
     def require_save(self, checkpoint: Checkpoint) -> None:
         """Persist the checkpoint or raise ``CheckpointPersistenceError``.
@@ -254,15 +401,27 @@ class CheckpointService:
             raise CheckpointPersistenceError(CHECKPOINT_PERSISTENCE_FAILED)
 
     def load(self, job_id: str) -> Checkpoint | None:
-        """Load the most recent checkpoint for a job."""
+        """Load the most recent checkpoint for a job.
+
+        The sidecar wins over the copy embedded in the job document. A resume
+        after a rejected job update still sees the token that was accepted.
+        """
         mongo = self._mongo()
-        job = mongo.get_job(job_id)
-        if not job:
+        sidecar = _read_resume_token(mongo, job_id)
+        embedded: dict[str, Any] | None = None
+        try:
+            job = mongo.get_job(job_id) or {}
+            raw = job.get("checkpoint") if isinstance(job, dict) else None
+            if isinstance(raw, dict):
+                embedded = raw
+        except Exception:  # noqa: BLE001 — sidecar still answers resume
+            logger.debug("embedded checkpoint unreadable for %s", job_id, exc_info=True)
+        if not sidecar and not embedded:
             return None
-        cp = job.get("checkpoint")
-        if not cp:
-            return None
-        return Checkpoint.from_dict(cp)
+        merged = dict(embedded or {})
+        if sidecar:
+            merged.update(sidecar)
+        return Checkpoint.from_dict(merged)
 
     def mark_failed(self, job_id: str, error: str, checkpoint: Checkpoint | None = None) -> bool:
         """Mark a job failed with a final checkpoint so retry can resume."""

@@ -969,6 +969,20 @@ def test_mysql_clock_default_matches_column_fsp():
     assert _normalize_default_sql("now()", "sqlite", "TEXT") == "CURRENT_TIMESTAMP"
 
 
+def test_sqlserver_bit_default_is_zero_or_one():
+    """Postgres ``false`` is not legal in ``BIT … DEFAULT`` or Oracle ``NUMBER(1)``."""
+    from services.schema_fidelity import _normalize_default_sql
+
+    assert _normalize_default_sql("false", "sqlserver", "BIT") == "0"
+    assert _normalize_default_sql("true", "sqlserver", "BIT") == "1"
+    assert _normalize_default_sql("'false'", "mssql", "BIT") == "0"
+    assert _normalize_default_sql("false", "oracle", "NUMBER(1)") == "0"
+    assert _normalize_default_sql("true", "oracle", "NUMBER(1,0)") == "1"
+    assert _normalize_default_sql("false", "postgresql", "BOOLEAN") == "false"
+    assert _normalize_default_sql("FALSE", "postgresql", "BOOLEAN") == "FALSE"
+    assert _normalize_default_sql("false", "oracle", "NUMBER(10)") == "false"
+
+
 def test_pg_timestamp_default_now_creates_on_mysql_live():
     """The Transfer Studio route the menu sweep failed on: a PG ``timestamp NOT
     NULL DEFAULT now()`` column, create-new MySQL destination."""

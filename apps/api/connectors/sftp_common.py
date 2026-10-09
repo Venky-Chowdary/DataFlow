@@ -141,6 +141,39 @@ def parse_sftp_config(
     return cfg
 
 
+def apply_sftp_uri_endpoint(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Fill an empty host, port, user, and path from an ``sftp://`` URI.
+
+    Studio can save the URI alone. ``list_connectors`` then showed ``host``
+    as empty, so the daily Excel route had no dial target even though the
+    URI already named one (DEF-A-002). An explicit host is left alone. A
+    password already stored is not replaced by the URI.
+    """
+    out = dict(data)
+    kind = str(out.get("type") or "").strip().lower()
+    if kind not in {"sftp", "ssh"}:
+        return out
+    raw = str(out.get("connection_string") or "").strip()
+    if not raw:
+        return out
+    cfg = parse_sftp_config(connection_string=raw)
+    if not cfg.host:
+        return out
+    if not str(out.get("host") or "").strip():
+        out["host"] = cfg.host
+        # The URI is the only endpoint. Its port wins over a form default
+        # (historical 5432, or 22 stamped because host was blank).
+        if cfg.port:
+            out["port"] = cfg.port
+    if cfg.username and not str(out.get("username") or "").strip():
+        out["username"] = cfg.username
+    if cfg.password and not str(out.get("password") or ""):
+        out["password"] = cfg.password
+    if cfg.path and not str(out.get("database") or "").strip():
+        out["database"] = cfg.path
+    return out
+
+
 def split_remote_path(path: str) -> tuple[str, str]:
     """Return (directory, filename) for a remote SFTP path."""
     path = path.strip()
@@ -267,8 +300,10 @@ def load_private_key(cfg: SFTPConfig) -> Any:
         paramiko.Ed25519Key,
         paramiko.ECDSAKey,
         paramiko.RSAKey,
-        paramiko.DSSKey,
+        getattr(paramiko, "DSSKey", None),
     ):
+        if key_cls is None:
+            continue
         try:
             return key_cls.from_private_key(
                 file_obj=io.StringIO(key_text), password=passphrase
@@ -286,6 +321,200 @@ def load_private_key(cfg: SFTPConfig) -> Any:
     )
 
 
+def _legacy_ssh_available() -> bool:
+    """True when a last-attempt handshake can still speak group14-sha1 / ssh-rsa.
+
+    Paramiko 3.5 ships both names. Paramiko 4 and 5 removed them from the
+    default tables, which closed the socket during kex — before any auth
+    packet — on appliances that offer nothing newer. This process can register
+    those two algorithms on the real Transport class without putting them on
+    the default preferred list. ``group1-sha1`` stays unavailable.
+    A test double that replaced ``Transport`` has no algorithm table; the
+    legacy attempt is then skipped so unit fakes keep the modern retry count.
+    """
+    try:
+        import paramiko
+    except ImportError:
+        return False
+    kex = getattr(paramiko.Transport, "_kex_info", None)
+    if not isinstance(kex, dict):
+        return False
+    if "diffie-hellman-group14-sha1" in kex:
+        return True
+    try:
+        from paramiko.kex_group14 import KexGroup14SHA256  # noqa: F401
+        from paramiko.rsakey import RSAKey  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _register_legacy_ssh(paramiko_mod: Any) -> None:
+    """Register group14-sha1 and ssh-rsa on this Paramiko, if it dropped them.
+
+    Default ``_preferred_kex`` / ``_preferred_keys`` are not extended. Only a
+    transport that calls :func:`_enable_legacy_ssh` advertises them, and only
+    after the modern handshake has already failed. Host-key verification still
+    runs before authentication.
+    """
+    from hashlib import sha1
+
+    from cryptography.hazmat.primitives import hashes
+    from paramiko.kex_group14 import KexGroup14SHA256
+    from paramiko.rsakey import RSAKey
+
+    kex_info = getattr(paramiko_mod.Transport, "_kex_info", None)
+    key_info = getattr(paramiko_mod.Transport, "_key_info", None)
+    if isinstance(kex_info, dict) and "diffie-hellman-group14-sha1" not in kex_info:
+
+        class KexGroup14SHA1(KexGroup14SHA256):
+            """RFC 4253 group14 with SHA-1. Offered only on the last attempt."""
+
+            name = "diffie-hellman-group14-sha1"
+            hash_algo = sha1
+
+        kex_info["diffie-hellman-group14-sha1"] = KexGroup14SHA1
+    if isinstance(key_info, dict) and "ssh-rsa" not in key_info:
+        key_info["ssh-rsa"] = RSAKey
+    # Verification looks the algorithm up on the key class, not the transport.
+    # Advertising ssh-rsa without this entry would fail every host-key check
+    # for that algorithm. Modern attempts never list ssh-rsa, so they cannot
+    # select it.
+    if "ssh-rsa" not in RSAKey.HASHES:
+        RSAKey.HASHES["ssh-rsa"] = hashes.SHA1
+
+
+def _modern_disabled_algorithms() -> dict[str, list[str]]:
+    """Keep sha1 and ssh-rsa out of the first handshake attempts."""
+    try:
+        import paramiko
+    except ImportError:
+        return {}
+    disabled: dict[str, list[str]] = {}
+    preferred_kex = tuple(getattr(paramiko.Transport, "_preferred_kex", ()) or ())
+    weak_kex = [
+        name
+        for name in ("diffie-hellman-group14-sha1", "diffie-hellman-group1-sha1")
+        if name in preferred_kex
+    ]
+    if weak_kex:
+        disabled["kex"] = weak_kex
+    preferred_keys = tuple(getattr(paramiko.Transport, "_preferred_keys", ()) or ())
+    if "ssh-rsa" in preferred_keys:
+        disabled["keys"] = ["ssh-rsa"]
+        disabled["pubkeys"] = ["ssh-rsa"]
+    return disabled
+
+
+def _enable_legacy_ssh(transport: Any) -> None:
+    """Add sha1 group14 and ssh-rsa on this transport only.
+
+    ``group1-sha1`` is not added. Host-key verification is unchanged.
+    """
+    import paramiko
+
+    _register_legacy_ssh(paramiko)
+    kex_info = getattr(paramiko.Transport, "_kex_info", {}) or {}
+    key_info = getattr(paramiko.Transport, "_key_info", {}) or {}
+    options = transport.get_security_options()
+    if "diffie-hellman-group14-sha1" in kex_info:
+        current = tuple(options.kex)
+        if "diffie-hellman-group14-sha1" not in current:
+            options.kex = current + ("diffie-hellman-group14-sha1",)
+    if "ssh-rsa" in key_info:
+        current_keys = tuple(options.key_types)
+        if "ssh-rsa" not in current_keys:
+            options.key_types = current_keys + ("ssh-rsa",)
+
+
+def _open_sftp_transport(cfg: SFTPConfig) -> Any:
+    """Handshake an SSH transport, then verify the host key before auth.
+
+    Paramiko 3.4 advertises OpenSSH strict-kex by default. Tunnels and older
+    sshd close that handshake before authentication (the socket dies during
+    kex, so no password is ever sent). One retry without strict-kex keeps
+    host-key verification and the same credentials. It does not skip auth.
+    """
+    import socket
+
+    import paramiko
+
+    # Paramiko 3.4+ advertises strict kex; 3.x/5 also sends server-sig-algs.
+    # Tunnels and older sshd close the socket during that banner (EOFError,
+    # not SSHException) before any auth packet is written. Each attempt still
+    # verifies the host key. Auth itself happens after this function returns.
+    attempts: list[dict[str, Any]] = [
+        {"strict_kex": True, "server_sig_algs": True, "legacy": False},
+        {"strict_kex": False, "server_sig_algs": True, "legacy": False},
+        {"strict_kex": False, "server_sig_algs": False, "legacy": False},
+    ]
+    if _legacy_ssh_available():
+        # Offered only after a modern handshake is refused. Host-key
+        # verification still runs before any password or key is sent.
+        attempts.append(
+            {"strict_kex": False, "server_sig_algs": False, "legacy": True}
+        )
+    last_exc: Exception | None = None
+    for index, opts in enumerate(attempts):
+        sock = socket.create_connection((cfg.host, int(cfg.port or 22)), timeout=30)
+        transport_kwargs: dict[str, Any] = {
+            "strict_kex": opts["strict_kex"],
+            "server_sig_algs": opts["server_sig_algs"],
+        }
+        if not opts["legacy"]:
+            disabled = _modern_disabled_algorithms()
+            if disabled:
+                transport_kwargs["disabled_algorithms"] = disabled
+        transport = paramiko.Transport(sock, **transport_kwargs)
+        try:
+            if opts["legacy"]:
+                _enable_legacy_ssh(transport)
+            transport.start_client(timeout=30)
+            verify_host_key(cfg, transport)
+            return transport
+        except RuntimeError:
+            # A refused host key is not a kex failure. Retrying it with
+            # strict-kex off would not make the key trusted, and leaving the
+            # socket open would keep a rejected transport alive.
+            try:
+                transport.close()
+            except OSError:
+                logger.debug("SFTP transport close after host-key refusal", exc_info=True)
+            raise
+        except (paramiko.SSHException, OSError, EOFError) as exc:
+            last_exc = exc
+            try:
+                transport.close()
+            except OSError:
+                logger.debug("SFTP transport close after handshake failure", exc_info=True)
+            if index == len(attempts) - 1:
+                raise _handshake_closed_before_auth(cfg, exc) from exc
+            logger.info(
+                "SFTP handshake closed before auth (%s); retrying %s:%s",
+                type(exc).__name__,
+                cfg.host,
+                cfg.port,
+            )
+    if last_exc is not None:
+        raise _handshake_closed_before_auth(cfg, last_exc) from last_exc
+    raise RuntimeError("SFTP handshake failed before authentication")
+
+
+def _handshake_closed_before_auth(cfg: SFTPConfig, exc: BaseException) -> RuntimeError:
+    """The server dropped the socket during key exchange, before any login.
+
+    Auth is not skipped. group1-sha1 is not offered. Host-key verification
+    still runs on a handshake that completes.
+    """
+    return RuntimeError(
+        f"SFTP server {cfg.host}:{cfg.port} closed the connection before "
+        "authentication (preauth). Datawrap tried a modern handshake, then "
+        "one without strict key exchange, then one without server-sig-algs, "
+        "then sha1 group14 and ssh-rsa. group1-sha1 is not offered, and no "
+        f"password was sent. Last error: {type(exc).__name__}: {exc}"
+    )
+
+
 def connect_sftp(cfg: SFTPConfig):
     """Return (transport, sftp) client pair using paramiko, host key verified."""
     try:
@@ -295,10 +524,8 @@ def connect_sftp(cfg: SFTPConfig):
 
     pkey = load_private_key(cfg)
 
-    transport = paramiko.Transport((cfg.host, cfg.port))
+    transport = _open_sftp_transport(cfg)
     try:
-        transport.start_client(timeout=30)
-        verify_host_key(cfg, transport)
         if pkey is not None:
             transport.auth_publickey(cfg.username, pkey)
         elif cfg.password:

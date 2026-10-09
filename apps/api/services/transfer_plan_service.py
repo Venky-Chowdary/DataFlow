@@ -30,8 +30,6 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from src.transfer.adapters import read_source_database
-from src.transfer.models import EndpointConfig
 
 
 def _preflight():
@@ -284,20 +282,19 @@ def run_plan_preflight(
         and plan.source_columns
         and (not sample_rows or len(sample_rows) < PREFLIGHT_SAMPLE_LIMIT)
     ):
-        try:
-            source_endpoint = EndpointConfig.from_dict(
-                plan.source.get("kind", "database"), plan.source
-            )
-            records, _headers, _schema = read_source_database(
-                source_endpoint,
-                limit=PREFLIGHT_SAMPLE_LIMIT,
-                raise_on_truncate=False,
-            )
-            fetched = records[:PREFLIGHT_SAMPLE_LIMIT] if records else None
-            if fetched and (not sample_rows or len(fetched) >= len(sample_rows)):
-                sample_rows = fetched
-        except Exception:
-            pass
+        from services.preflight_sample import engine_sample_rows
+
+        source_cfg = dict(plan.source)
+        fetched = engine_sample_rows(
+            source_kind="database",
+            source_format=str(source_cfg.get("format") or source_cfg.get("type") or ""),
+            source_connector_id=str(source_cfg.get("connector_id") or ""),
+            source_config=source_cfg,
+            source_table=str(source_cfg.get("table") or source_cfg.get("collection") or ""),
+            limit=PREFLIGHT_SAMPLE_LIMIT,
+        ).rows
+        if fetched and (not sample_rows or len(fetched) >= len(sample_rows)):
+            sample_rows = fetched
     if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
         sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
 
@@ -483,6 +480,8 @@ def run_plan_preflight(
             source_read_mode=str(
                 (source.get("source_read_mode") or (source.get("extra") or {}).get("source_read_mode") or "")
             ),
+            source_endpoint=source,
+            destination_endpoint=dest,
         ),
         validation_mode=validation_mode,
         destination_db_type=dest_db_type,

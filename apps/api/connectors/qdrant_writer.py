@@ -16,6 +16,7 @@ from typing import Any, Callable
 from services.value_serializer import (
     cell_to_string,
     json_default,
+    json_dumps_exact_numbers,
     load_http_json,
     sanitize_json_value,
 )
@@ -150,6 +151,38 @@ def _qdrant_live_payload_types(collection_info: dict[str, Any] | None) -> dict[s
 class WriteResult(_WriteResult):
     driver: str = "requests"
     load_method: str = "qdrant_upsert"
+
+
+def list_collections(
+    *,
+    host: str = "",
+    port: int = 6333,
+    api_key: str = "",
+    ssl: bool = False,
+    **_kwargs: Any,
+) -> list[str]:
+    """Collection names. An empty list is an empty cluster.
+
+    A non-200 response raises so the caller can say the list failed
+    instead of reporting a silent empty inventory.
+    """
+    session = _requests_session()
+    resp = session.get(
+        f"{_base_url(host, port, ssl)}/collections",
+        headers=_headers(api_key),
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Qdrant collection list returned {resp.status_code}")
+    body = resp.json() if resp.content else {}
+    result = body.get("result") if isinstance(body, dict) else None
+    rows = (result or {}).get("collections") if isinstance(result, dict) else None
+    names = [
+        str(row.get("name")).strip()
+        for row in (rows or [])
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    ]
+    return sorted(set(names))
 
 
 def test_qdrant(
@@ -300,9 +333,7 @@ def build_qdrant_points(
             point_id = str(uuid_mod.UUID(digest[:32]))
         from connectors.writer_common import vector_prepare_metadata
 
-        payload = vector_prepare_metadata(
-            sanitize_json_value(row.get("metadata") or {}) or {}
-        )
+        payload = vector_prepare_metadata(row.get("metadata") or {})
         if not isinstance(payload, dict):
             payload = {"_meta": payload}
         payload["content"] = vector_cell_token(row.get("content"))
@@ -825,7 +856,7 @@ def write_mapped_rows(
             batch = points[i : i + batch_size]
             resp = session.put(
                 f"{base_url}/collections/{collection}/points?wait=true",
-                data=json.dumps({"points": batch}, default=sanitize_json_value),
+                data=json_dumps_exact_numbers({"points": batch}),
                 headers=hdrs,
                 timeout=30,
             )

@@ -15,7 +15,12 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string, load_http_json, sanitize_json_value
+from services.value_serializer import (
+    cell_to_string,
+    json_dumps_exact_numbers,
+    load_http_json,
+    sanitize_json_value,
+)
 from services.vectorization import vectorize_records
 
 from connectors.writer_common import WriteResult as _WriteResult
@@ -163,9 +168,7 @@ def build_milvus_entities(
     for row in vector_rows:
         from connectors.writer_common import vector_prepare_metadata
 
-        meta = vector_prepare_metadata(
-            sanitize_json_value(row.get("metadata") or {}) or {}
-        )
+        meta = vector_prepare_metadata(row.get("metadata") or {})
         try:
             chunk = coerce_chunk_index(row.get("chunk_index"))
         except ValueError as exc:
@@ -1360,7 +1363,7 @@ def write_mapped_rows(
                 payload["dbName"] = db_name
             resp = session.post(
                 f"{base_url}/v2/vectordb/entities/upsert",
-                data=json.dumps(payload, default=sanitize_json_value),
+                data=json_dumps_exact_numbers(payload),
                 headers=hdrs,
                 timeout=60,
             )

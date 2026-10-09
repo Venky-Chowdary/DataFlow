@@ -397,6 +397,42 @@ def incremental_tiebreak_column(
     return intrinsic_tiebreak_column(src_type, cursor)
 
 
+def catalog_incremental_tiebreak(
+    src_type: str,
+    cursor_column: str,
+    *,
+    contract_pk: Sequence[str] = (),
+    catalog_pk: Sequence[str] = (),
+    unique_keys: list[Any] | None = None,
+    nullable: dict[str, bool] | None = None,
+) -> str:
+    """The tie-break column both pagination owners must use.
+
+    The contract primary key wins. The source catalog primary key is the same
+    evidence the later keyset decision seeks on. A non-null unique key is
+    next. Leaving the catalog key out of the filtered-scan check opened a
+    snapshot scan, then the keyset decision sought on ``[cursor, id]`` and
+    the two owners refused the read (E3-002).
+    """
+    cursor = (cursor_column or "").strip()
+    if not cursor:
+        return ""
+    tied = incremental_tiebreak_column(src_type, cursor, contract_pk)
+    if tied:
+        return tied
+    tied = incremental_tiebreak_column(src_type, cursor, catalog_pk)
+    if tied:
+        return tied
+    names: list[str] = [cursor]
+    for uk in unique_keys or []:
+        if isinstance(uk, dict):
+            names.extend(str(c) for c in (uk.get("columns") or []) if c)
+        elif isinstance(uk, (list, tuple)):
+            names.extend(str(c) for c in uk if c)
+    safe = safe_keyset_unique_columns(list(unique_keys or []), names, nullable)
+    return incremental_tiebreak_column(src_type, cursor, safe)
+
+
 def incremental_read_needs_filtered_scan(
     *,
     src_type: str,

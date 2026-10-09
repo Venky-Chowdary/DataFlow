@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.job_list_scope import job_list_workspace_scope
 from services.jobs import job_store
 
 

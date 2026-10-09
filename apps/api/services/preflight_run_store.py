@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -108,6 +109,8 @@ def _append(record: dict[str, Any]) -> None:
     with _LOCK:
         with STORE_PATH.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         _trim_locked()
 
 

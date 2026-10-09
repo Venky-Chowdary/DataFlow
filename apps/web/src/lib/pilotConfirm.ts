@@ -52,7 +52,8 @@ export type LifecycleOp =
   | "replay_quarantine"
   | "delete_connector"
   | "set_schedule_enabled"
-  | "delete_schedule";
+  | "delete_schedule"
+  | "update_schedule";
 
 export const LIFECYCLE_OPS: readonly LifecycleOp[] = [
   "cancel_job",
@@ -62,6 +63,7 @@ export const LIFECYCLE_OPS: readonly LifecycleOp[] = [
   "delete_connector",
   "set_schedule_enabled",
   "delete_schedule",
+  "update_schedule",
 ];
 
 export function isLifecycleOp(type: string | undefined): type is LifecycleOp {
@@ -191,7 +193,9 @@ export async function confirmPilotPending(
     const result = res as unknown as Record<string, unknown>;
     const screen: "jobs" | "connectors" | "schedules" = action.type === "delete_connector"
       ? "connectors"
-      : action.type === "set_schedule_enabled" || action.type === "delete_schedule"
+      : action.type === "set_schedule_enabled"
+        || action.type === "delete_schedule"
+        || action.type === "update_schedule"
         ? "schedules"
         : "jobs";
     const subject = String(

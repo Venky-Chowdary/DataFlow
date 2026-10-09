@@ -65,6 +65,25 @@ _STATUS_ENUM_TOKENS = frozenset({
 })
 
 
+def _is_leading_zero_code_name(name: str) -> bool:
+    """Zip, postal, account, routing, and SSN names stay text.
+
+    A single ``0`` or an id sequence ``0..49`` is still an integer. This only
+    matches the code-shaped names Excel coerces before the zero can be seen.
+    """
+    raw = (name or "").strip()
+    if not raw or _is_boolean_field_name(raw):
+        return False
+    folded = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", raw).lower()
+    return bool(
+        re.search(
+            r"(?:^|_)(zip_?code|postal_?code|post_?code|postcode|zip|postal|"
+            r"account_?number|routing_?number|ssn)(?:_|$)",
+            folded,
+        )
+    )
+
+
 def _is_boolean_field_name(name: str) -> bool:
     """True only for flag-shaped names — not bare status/lifecycle words.
 
@@ -147,22 +166,16 @@ def _is_base64(value: str) -> bool:
 
 
 def _looks_like_binary_payload(value: str, *, field_name: str | None = None) -> bool:
-    """Promote to BINARY only with name evidence or strong payload evidence.
+    """Promote to BINARY only when the field name says the value is a payload.
 
-    Short base64-looking tokens (session ids, opaque keys) must stay VARCHAR —
-    never invent BINARY DDL from a single 12–20 char sample (Airbyte trap).
+    Letters, digits, and the base64 alphabet are ordinary text. A long note,
+    a token, or a code that happens to decode is not a binary column, and
+    decoding it into bytes is not a preserve. Short base64-looking tokens
+    stay VARCHAR for the same reason.
     """
-    if not _is_base64(value):
+    if not _is_binary_field_name(field_name or ""):
         return False
-    if _is_binary_field_name(field_name or ""):
-        return True
-    s = value.strip()
-    # Strong evidence without a binary-ish name: longer payload + padding or high entropy.
-    if len(s) < 32:
-        return False
-    if s.endswith("=") or s.endswith("=="):
-        return True
-    return len(set(s)) >= 12
+    return _is_base64(value)
 
 
 # Binary payloads only — not generic "data"/"key"/"token" (those are often IDs/JWTs).
@@ -523,8 +536,18 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
 
     if _parse_datetime(s, date_locale=active_locale) is not None:
         # Preserve TZ awareness when the sample carries Z / offset — never invent SRID/cast.
-        if re.search(r"(Z|[+-]\d{2}:?\d{2})$", s, re.I):
+        # pgoutput and some CSV exports use a hours-only offset (``+00``, ``+05``).
+        # Requiring four digits classified those instants as text, and the plan
+        # then blocked the real timestamptz column as a conversion to TEXT.
+        if re.search(r"(Z|[+-]\d{2}:?\d{2})$", s, re.I) or re.search(
+            r"\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2}$", s
+        ):
             return "TIMESTAMPTZ"
+        # Excel stores a date-only cell as midnight and serializes it with
+        # T00:00:00. That is a DATE. A real time-of-day stays TIMESTAMP, and
+        # TIMESTAMP → DATE stays lossy.
+        if re.search(r"(?:[T ])00:00:00(?:\.0+)?$", s):
+            return "DATE"
         return "TIMESTAMP"
 
     for fmt in ("%H:%M:%S", "%H:%M:%S.%f", "%H:%M:%S%z"):
@@ -536,6 +559,14 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
 
     decimal_parsed = _parse_decimal(s)
     if decimal_parsed is not None:
+        from services.transform_engine import numeric_text_without_markers
+
+        marked = numeric_text_without_markers(s) or s
+        digits_only = marked[1:] if marked[:1] in "+-" else marked
+        # "0" and "0.5" are numbers. "02115" and "007" are codes: a numeric
+        # carrier drops the zero and the later VARCHAR check then blocks.
+        if len(digits_only) > 1 and digits_only[:1] == "0" and digits_only[1:2] != ".":
+            return "VARCHAR"
         if "." in decimal_parsed or "e" in s.lower():
             return "DECIMAL"
         try:
@@ -811,11 +842,10 @@ def safe_ddl_logical_type(
     carrier_src = ddl_carrier_type(proposed or source_type or "VARCHAR")
     if normalize_logical_type(carrier_src) == LOGICAL_DECIMAL:
         precision, _scale = parse_numeric_precision_scale(carrier_src)
+        # Declared DECIMAL(p,s) is the carrier. A sample that does not fit
+        # quarantines on write — it must not rewrite the column as text.
         if precision is not None:
-            if not samples or samples_fit_logical_type(
-                samples, "DECIMAL", field_name=field_name
-            ):
-                return carrier_src
+            return carrier_src
     if normalize_logical_type(carrier_src) == "vector":
         dim = parse_vector_dimension(carrier_src)
         # Keep declared width even when samples are opaque float arrays as text.
@@ -1032,6 +1062,18 @@ def infer_column(
         role = "boolean_flag"
         notes.append("0/1 on flag-shaped field name → BOOLEAN")
 
+    # Excel already dropped the leading zero (2115 in a zip_code column).
+    # The name is the remaining evidence. Bare id/code stay numeric.
+    if (
+        field_name
+        and inferred != "BOOLEAN"
+        and (inferred in {"INTEGER", "DECIMAL"} or str(inferred).startswith("DECIMAL"))
+        and _is_leading_zero_code_name(field_name)
+    ):
+        inferred = "VARCHAR"
+        role = "text"
+        notes.append("code-shaped name keeps leading zeros — VARCHAR")
+
     # Never keep BOOLEAN if any sample is status vocabulary
     if inferred == "BOOLEAN" and any(v.lower() in _STATUS_ENUM_TOKENS for v in non_empty):
         inferred = "VARCHAR"
@@ -1039,18 +1081,28 @@ def infer_column(
         notes.append("status vocabulary present — demoted BOOLEAN → VARCHAR")
 
     if field_name and _is_binary_field_name(field_name):
+        # A name like ``payload`` is not a license to decode. Hex digests are
+        # valid base64 and were written as BYTEA labelled preserve (DEF-C-033).
+        # Pure hex stays text. Real base64, including a short token in the
+        # same column, still promotes.
         valid = 0
         for v in non_empty:
             s = v.strip()
-            if len(s) >= 4 and len(s) % 4 == 0 and _BASE64_RE.match(s):
-                try:
-                    import base64
+            if len(s) < 4 or len(s) % 4 != 0 or not _BASE64_RE.match(s):
+                continue
+            if all(c in "0123456789abcdefABCDEF" for c in s):
+                continue
+            if len(s) > 64 and len(set(s)) <= 3:
+                continue
+            if s.isalpha() and len(s) > 32:
+                continue
+            try:
+                import base64
 
-                    base64.b64decode(s, validate=True)
-                    valid += 1
-                except (ValueError, TypeError):
-                    # Invalid base64 padding/alphabet — treat as non-binary below.
-                    continue
+                base64.b64decode(s, validate=True)
+                valid += 1
+            except (ValueError, TypeError):
+                continue
         if valid == len(non_empty):
             inferred = "BINARY"
             role = "binary"

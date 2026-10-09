@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { isReplayable } from "./quarantineReplay";
+import { isReplayable, quarantineEvidenceSource } from "./quarantineReplay";
 
 describe("isReplayable", () => {
   it("accepts a finding that names the bad cell", () => {
@@ -27,5 +27,34 @@ describe("isReplayable", () => {
     );
     assert.equal(isReplayable({ column: "   ", values: {} }), false);
     assert.equal(isReplayable({}), false);
+  });
+});
+
+describe("quarantineEvidenceSource", () => {
+  it("treats preflight policy rows as Validate findings before the API answers", () => {
+    assert.equal(
+      quarantineEvidenceSource([
+        { policy: "preflight_quarantine", column: "phone", value: "" },
+      ]),
+      "preflight",
+    );
+  });
+
+  it("keeps an explicit API source", () => {
+    assert.equal(
+      quarantineEvidenceSource(
+        [{ policy: "preflight_quarantine" }],
+        "write",
+      ),
+      "write",
+    );
+    assert.equal(quarantineEvidenceSource(undefined, "preflight"), "preflight");
+  });
+
+  it("keeps write-time rows on the job source until the API answers", () => {
+    assert.equal(
+      quarantineEvidenceSource([{ column: "phone", value: "x", policy: "quarantine" }]),
+      "job",
+    );
   });
 });

@@ -14,6 +14,20 @@ _PAIR_RE = re.compile(
     r"(?P<source>[A-Za-z_][\w.]*)\s*\((?P<source_type>[^)]+)\)\s*→\s*"
     r"(?P<target>[A-Za-z_][\w.]*)\s*\((?P<target_type>[^)]+)\)",
 )
+# Gate-8 / dry-run cell line: ``row 1 phone→phone: Empty value cannot coerce to integer``.
+# Type-pair prose (``name (TYPE) → name (TYPE)``) is handled by ``_PAIR_RE`` first.
+_GATE_CELL_RE = re.compile(
+    r"^(?:row\s+(?P<row>\d+)\s+)?"
+    r"(?P<source>[A-Za-z_][\w.]*)\s*→\s*"
+    r"(?P<target>[A-Za-z_][\w.]*)\s*:\s*"
+    r"(?P<reason>.+)$",
+    re.IGNORECASE,
+)
+_BLANK_CELL_FIX = (
+    "Blank cell. A nullable destination stores SQL NULL and keeps the row. "
+    "A NOT NULL column needs a source value or a nullability change — "
+    "replay cannot invent a typed value from an empty cell."
+)
 
 
 def _as_issue_dict(item: Any) -> dict[str, Any] | None:
@@ -30,14 +44,35 @@ def _enrich_from_message(issue: dict[str, Any]) -> dict[str, Any]:
         return issue
     text = str(issue.get("reason") or issue.get("message") or "")
     m = _PAIR_RE.search(text)
-    if not m:
+    if m:
+        enriched = dict(issue)
+        enriched.setdefault("source", m.group("source"))
+        enriched.setdefault("column", m.group("source"))
+        enriched.setdefault("target", m.group("target"))
+        enriched.setdefault("source_type", m.group("source_type"))
+        enriched.setdefault("target_type", m.group("target_type"))
+        return enriched
+    cell = _GATE_CELL_RE.match(text.strip())
+    if not cell:
         return issue
     enriched = dict(issue)
-    enriched.setdefault("source", m.group("source"))
-    enriched.setdefault("column", m.group("source"))
-    enriched.setdefault("target", m.group("target"))
-    enriched.setdefault("source_type", m.group("source_type"))
-    enriched.setdefault("target_type", m.group("target_type"))
+    source = cell.group("source").strip()
+    target = cell.group("target").strip()
+    inner = cell.group("reason").strip()
+    enriched.setdefault("source", source)
+    enriched.setdefault("column", source)
+    enriched.setdefault("target", target)
+    if cell.group("row") and enriched.get("row") is None:
+        enriched["row"] = int(cell.group("row"))
+    enriched["reason"] = inner
+    enriched["message"] = inner
+    if inner.lower().startswith("empty value cannot coerce"):
+        if enriched.get("sample") is None and enriched.get("value") is None:
+            # The cell was blank. Wiring a missing sample as SQL NULL told the
+            # operator the probe saw ``__DF_SQL_NULL__`` and that replay had
+            # no payload.
+            enriched["sample"] = ""
+        enriched.setdefault("suggested_fix", _BLANK_CELL_FIX)
     return enriched
 
 
@@ -105,6 +140,11 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
             parsed = _as_issue_dict(item)
             if parsed and not _issue_is_non_blocking_warn(parsed):
                 out.append(_enrich_from_message(parsed))
+        # A collapsed root cause explains the gate. It is not a cell, and
+        # wiring a missing sample as SQL NULL invented a rejected row of
+        # ``__DF_SQL_NULL__`` on a load the destination accepted in full.
+        if (details or {}).get("root_cause"):
+            continue
         msg = blocker.get("message")
         if msg and not out:
             parsed = _enrich_from_message({"message": str(msg), "reason": str(msg)})
@@ -148,6 +188,7 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
             row_i = int(row_num) if row_num is not None else None
         except (TypeError, ValueError):
             row_i = None
+        had_cell = "sample" in issue or "value" in issue
         value = issue.get("sample")
         if value is None:
             value = issue.get("value")
@@ -183,7 +224,8 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
                 suggested_transform = "strip_controls"
             else:
                 suggested_transform = None
-        wired = quarantine_cell_wire(value)
+        # No sample means the finding is a policy sentence, not a SQL NULL cell.
+        wired = quarantine_cell_wire(value) if had_cell else ""
         detail: dict[str, Any] = {
             "row": row_i,
             "column": column or None,
@@ -203,12 +245,77 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
         rows.append(detail)
         if len(rows) >= 200:
             break
+    # A column-level dry-run line (no row index) duplicates the per-row Gate-8
+    # findings for the same cell. Keep the row that names the source record.
+    located = {
+        (str(r.get("column") or ""), str(r.get("target") or ""))
+        for r in rows
+        if r.get("row") is not None and r.get("column")
+    }
+    if located:
+        rows = [
+            r
+            for r in rows
+            if r.get("row") is not None
+            or (str(r.get("column") or ""), str(r.get("target") or "")) not in located
+        ]
+    rows = drop_phantom_identity_rows(rows)
     try:
         from services.quarantine_row_contract import normalize_quarantine_rows
 
         return normalize_quarantine_rows(rows, job_id="", connector="preflight")
     except Exception:
         return rows
+
+
+def drop_phantom_identity_rows(details: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Drop a Validate identity sentence that was stored as a rejected cell.
+
+    The row has no source record and no column. Its value is the SQL NULL
+    wire sentinel because nothing was sampled. A destination that holds every
+    row is not missing that cell.
+    """
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    kept: list[dict[str, Any]] = []
+    for detail in details or []:
+        if not isinstance(detail, dict):
+            continue
+        reason = str(detail.get("reason") or "")
+        value = str(detail.get("value") or "")
+        column = detail.get("column")
+        if (
+            detail.get("row") is None
+            and not column
+            and value in {"", SQL_NULL_SENTINEL}
+            and reason.lower().startswith("duplicate identity keys")
+        ):
+            continue
+        kept.append(detail)
+    return kept
+
+
+def quarantine_evidence_source(
+    job: dict[str, Any] | None,
+    details: list[dict[str, Any]] | None,
+) -> str:
+    """Label preflight findings that were stored before any destination write.
+
+    A blocked Execute persists those rows on ``rejected_details``. Calling that
+    a write-time reject offered replay for a load that committed nothing.
+    """
+    job = job or {}
+    rows = [d for d in (details or []) if isinstance(d, dict)]
+    summary = job.get("destination_summary")
+    wrote = bool(summary.get("rejected_details")) if isinstance(summary, dict) else False
+    if wrote:
+        return "write"
+    policies = {str(d.get("policy") or "") for d in rows}
+    if rows and policies <= {"preflight_quarantine"}:
+        return "preflight"
+    if job.get("rejected_details"):
+        return "write"
+    return "preflight" if rows else "none"
 
 
 def merge_job_quarantine(
@@ -227,6 +334,7 @@ def merge_job_quarantine(
     dest = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
     if not details:
         details = list((dest or {}).get("rejected_details") or [])
+    details = drop_phantom_identity_rows(details)
 
     # Job documents identify themselves with ``_id``; ``id``/``job_id`` are the
     # API-shaped aliases. Reading only the aliases meant a raw Mongo document
@@ -266,7 +374,12 @@ def merge_job_quarantine(
             details = dlq_rows
 
     if not details:
-        details = quarantine_rows_from_preflight(job.get("preflight"))
+        status = str(job.get("status") or "").strip().lower()
+        # A completed load with no write rejects did not quarantine the
+        # Validate root. Hydrating that root made get_job report rejected_rows
+        # while list_jobs, which reads the stored counter, reported 0.
+        if status not in {"completed", "succeeded", "success"}:
+            details = quarantine_rows_from_preflight(job.get("preflight"))
 
     if details:
         try:

@@ -920,6 +920,7 @@ def write_mapped_rows(
     def _run_setup(cursor) -> None:
         nonlocal target_types, dest_types, additive_refuse
         nonlocal transform_errors, rejected_details
+        instant_fraction_guard: list[tuple[str, str, str]] = []
         nonlocal insert_sql
         nonlocal scanned_dest_sig, source_row_count, rejected_rows, coerced_null_rows
         nonlocal deferred_map_abort
@@ -946,6 +947,7 @@ def write_mapped_rows(
                     table_already_exists=bool(table_existed),
                     dest_table=table_name,
                     dest_schema="",
+                    carry_keys=write_mode != "insert",
                 )
             except Exception as exc:  # noqa: BLE001 — planner failure is types-only + certificate
                 logger.warning(
@@ -976,6 +978,15 @@ def write_mapped_rows(
                     plan=(None if table_existed else fidelity_plan),
                     dialect="mysql",
                 )
+                if not table_existed:
+                    from services.overwrite_keep import append_kept_column_sql
+
+                    col_defs = append_kept_column_sql(
+                        col_defs,
+                        list(_kwargs.get("preserve_columns") or []),
+                        dialect="mysql",
+                        existing=list(target_cols),
+                    )
                 if (
                     write_mode == "upsert"
                     and conflict_columns
@@ -1019,6 +1030,15 @@ def write_mapped_rows(
                     f"{quote_sql_identifier(c, '`')} {t}"
                     for c, t in zip(target_cols, target_types)
                 )
+                if not table_existed:
+                    from services.overwrite_keep import append_kept_column_sql
+
+                    col_defs = append_kept_column_sql(
+                        col_defs,
+                        list(_kwargs.get("preserve_columns") or []),
+                        dialect="mysql",
+                        existing=list(target_cols),
+                    )
                 if write_mode == "upsert" and conflict_columns:
                     conflict_cols = [c for c in conflict_columns if c in target_cols]
                     if conflict_cols:
@@ -1134,6 +1154,9 @@ def write_mapped_rows(
                 skip_cols=conflict_columns or [],
                 source_types=source_type_by_col,
                 suppressed_out=suppressed_widens,
+                # A BSON datetime on TIMESTAMP(0) must MODIFY to DATETIME(3)
+                # even when the operator did not ask to backfill new columns.
+                temporal_fsp_without_backfill=True,
             )
             if suppressed_widens:
                 desired_types = [
@@ -1141,6 +1164,23 @@ def write_mapped_rows(
                     for col, typ in zip(target_cols, desired_types)
                 ]
             target_types = desired_types
+            from services.type_system import (
+                destination_temporal_fractional_digits,
+                normalize_logical_type,
+            )
+
+            for col, planned in zip(target_cols, target_types):
+                source = source_type_by_col.get(col) or ""
+                planned_p = destination_temporal_fractional_digits(
+                    planned, dest_db="mysql"
+                )
+                if (
+                    source
+                    and planned_p is not None
+                    and planned_p >= 3
+                    and normalize_logical_type(source) == "datetime"
+                ):
+                    instant_fraction_guard.append((col, str(planned), source))
             reflection_cache.invalidate_by_identity(_identity, "", table_name)
 
         # Map VARCHAR + live DATE/INT/BOOL/JSON — shared overlay before bind refuse.
@@ -1161,6 +1201,34 @@ def write_mapped_rows(
         )
         if overlay_err:
             raise RuntimeError(overlay_err)
+        if physical and instant_fraction_guard:
+            from services.decision_kernel import is_lossy_coercion
+            from services.type_system import destination_temporal_fractional_digits
+
+            for col, planned, source in instant_fraction_guard:
+                live = (
+                    physical.get(col)
+                    or physical.get(col.lower())
+                    or physical.get(col.upper())
+                    or ""
+                )
+                live_p = destination_temporal_fractional_digits(
+                    str(live), dest_db="mysql"
+                )
+                planned_p = destination_temporal_fractional_digits(
+                    planned, dest_db="mysql"
+                )
+                if (
+                    planned_p is not None
+                    and live_p is not None
+                    and live_p < planned_p
+                    and is_lossy_coercion(source, str(live), dest_db="mysql")
+                ):
+                    raise RuntimeError(
+                        f"MySQL column {col} is {live}, which drops fractional "
+                        f"seconds from {source}. ALTER to {planned} did not "
+                        "apply, so the write was refused."
+                    )
         if not physical and deferred_map_abort:
             raise RuntimeError(deferred_map_abort)
         if physical:
@@ -1335,6 +1403,41 @@ def write_mapped_rows(
                     rejected_details=rejected_details,
                     warnings=transform_errors,
                 )
+
+            if write_mode == "insert" and table_existed and data_rows:
+                from services.destination_key_collision_probe import (
+                    refuse_enforced_append_before_write,
+                )
+
+                refusal = refuse_enforced_append_before_write(
+                    destination_config={
+                        "type": "mysql",
+                        "host": host,
+                        "port": port,
+                        "database": database,
+                        "username": username,
+                        "password": password,
+                        "connection_string": connection_string,
+                        "ssl": ssl,
+                    },
+                    destination_db_type="mysql",
+                    destination_table=table_name,
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                )
+                if refusal:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=database,
+                        checksum="",
+                        chunks_completed=0,
+                        error=refusal,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
 
             rows_skipped = 0
 
@@ -1599,6 +1702,9 @@ def write_mapped_rows(
                         )
                         _land_dense_chunk(sub, chunk_idx, sub_nums)
                         chunk_idx += 1
+                    write_acc.note_collapsed_duplicates(
+                        finished.collapsed_duplicate_rows
+                    )
                     write_acc.add_accepted(dense)
                 del finished
             chunks = chunk_idx
@@ -1608,6 +1714,7 @@ def write_mapped_rows(
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,
+                collapsed_duplicates=write_acc.collapsed_duplicate_rows,
             )
             coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 

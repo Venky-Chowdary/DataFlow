@@ -39,7 +39,11 @@ from typing import Any
 from services.decision_kernel.findings import FailureClass as _FailureClass
 from services.mapping_constraints import write_mappings
 from services.shape_contract import DEST_TYPE_UNREAD_REASON
-from services.transform_engine import apply_transform
+from services.transform_engine import (
+    apply_transform,
+    bind_column_date_locale,
+    reset_active_date_locale,
+)
 from services.transform_resolver import resolve_transform
 from services.decision_kernel import (
     ddl_type,
@@ -304,6 +308,17 @@ def _build_suggestion(
     return "", None, None, None
 
 
+def _probe_target_not_null(
+    mapping: dict[str, Any],
+    tgt_name: str,
+    dest_nullability: dict[str, bool],
+) -> bool:
+    """True only when Map or live DDL proves NOT NULL. Unknown stays nullable."""
+    from connectors.writer_common import _target_explicitly_not_null
+
+    return _target_explicitly_not_null(mapping, tgt_name, dest_nullability)
+
+
 def analyze_coercion(
     *,
     sample_rows: list[dict[str, Any]] | None,
@@ -314,6 +329,9 @@ def analyze_coercion(
     sample_limit: int = DEFAULT_SAMPLE_LIMIT,
     table_exists: bool | None = None,
     validation_mode: str = "strict",
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
 ) -> dict[str, Any]:
     """Predict per-value write coercion for each mapping against sampled rows.
 
@@ -537,212 +555,259 @@ def analyze_coercion(
         use_uuid_wire = tgt_logical == "uuid" and dest_l in _uuid_binary_dests
         use_binary_wire = tgt_logical == "binary" and dest_l in _uuid_binary_dests
 
-        for idx, row in enumerate(rows):
-            raw_cell = lookup_row_value(row, src, DF_MISSING_SENTINEL)
-            # Sparse schemaless docs (Mongo/Dynamo): absent / SQL-null sentinels
-            # are real NULLs at write — never cast failures or silent-loss blocks.
-            # Never use ``raw_cell in {…}`` for arbitrary cells — list/dict values
-            # (arrays, nested JSON) are unhashable and crashed Validate mid-probe.
-            if is_missing_sentinel(raw_cell) or raw_cell is None:
-                nulls += 1
-                observed_values.append("")
-                continue
-            if isinstance(raw_cell, str) and raw_cell in {
-                DF_MISSING_SENTINEL,
-                SQL_NULL_SENTINEL,
-                "__df_ddb_null__",
-            }:
-                nulls += 1
-                observed_values.append("")
-                continue
-            cell = cell_to_string(raw_cell)
-            if cell.strip() in {"", DF_MISSING_SENTINEL, SQL_NULL_SENTINEL, "__df_ddb_null__"}:
-                # Numeric / money destinations: empty is not a natural NULL — write
-                # bind refuses silent invent. Count as coercion failure so Validate
-                # matches write (VARCHAR Map + INT physical is the classic cliff).
-                #
-                # Existing table + missing live DDL for this target: fail-closed —
-                # Map VARCHAR stamp must not green empties when physical may be typed.
-                tgt_name = str(m.get("target") or "").strip()
-                live_present = bool(
-                    (tgt_name and tgt_name in dest_types)
-                    or (
-                        tgt_name
-                        and any(
-                            str(k).lower() == tgt_name.lower() for k in dest_types
+        from services.timezone_policy import mysql_catalog_instant_sample
+
+        _date_token = bind_column_date_locale(
+            (
+                lookup_row_value(row, src, None) if isinstance(row, dict) else None
+                for row in rows
+            ),
+            src,
+            transform=transform,
+        )
+        try:
+            for idx, row in enumerate(rows):
+                raw_cell = lookup_row_value(row, src, DF_MISSING_SENTINEL)
+                # Sparse schemaless docs (Mongo/Dynamo): absent / SQL-null sentinels
+                # are real NULLs at write — never cast failures or silent-loss blocks.
+                # Never use ``raw_cell in {…}`` for arbitrary cells — list/dict values
+                # (arrays, nested JSON) are unhashable and crashed Validate mid-probe.
+                if is_missing_sentinel(raw_cell) or raw_cell is None:
+                    nulls += 1
+                    observed_values.append("")
+                    continue
+                if isinstance(raw_cell, str) and raw_cell in {
+                    DF_MISSING_SENTINEL,
+                    SQL_NULL_SENTINEL,
+                    "__df_ddb_null__",
+                }:
+                    nulls += 1
+                    observed_values.append("")
+                    continue
+                cell = cell_to_string(raw_cell)
+                if cell.strip() in {"", DF_MISSING_SENTINEL, SQL_NULL_SENTINEL, "__df_ddb_null__"}:
+                    # Numeric / money destinations: empty is not a natural NULL — write
+                    # bind refuses silent invent. Count as coercion failure so Validate
+                    # matches write (VARCHAR Map + INT physical is the classic cliff).
+                    #
+                    # Existing table + missing live DDL for this target: fail-closed —
+                    # Map VARCHAR stamp must not green empties when physical may be typed.
+                    tgt_name = str(m.get("target") or "").strip()
+                    live_present = bool(
+                        (tgt_name and tgt_name in dest_types)
+                        or (
+                            tgt_name
+                            and any(
+                                str(k).lower() == tgt_name.lower() for k in dest_types
+                            )
                         )
                     )
-                )
-                unknown_physical = (
-                    table_exists is not False
-                    and not live_present
-                    and not bool(m.get("create_new"))
-                    and tgt_logical in _TEXTUAL_LOGICALS
-                    and not specialty_base
-                )
-                if unknown_physical or tgt_logical in {
-                    "integer",
-                    "float",
-                    "decimal",
-                    "number",
-                    "money",
-                    "uuid",
-                    "boolean",
-                    "json",
-                    "array",
-                    "struct",
-                    "map",
-                    "date",
-                    "datetime",
-                    "time",
-                    "timestamp",
-                } or (
-                    specialty_base
-                    and specialty_base not in {"CITEXT", "TSVECTOR"}
-                ):
-                    failed += 1
-                    if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
-                        sample_failures.append({
-                            "row": idx,
-                            "value": cell[:120],
-                            "reason": (
-                                "Empty value into existing table with unknown "
-                                "physical DDL — refuse silent NULL invent "
-                                "(re-introspect destination or remap)"
-                                if unknown_physical
-                                else (
-                                    f"Empty value cannot coerce to "
-                                    f"{specialty_base or tgt_logical} — "
-                                    "refuse silent NULL invent (quarantine or remap)"
-                                )
-                            ),
-                        })
-                        raw_failure_values.append(cell[:120])
-                    continue
-                nulls += 1
-                observed_values.append(cell)
-                continue
-            observed_values.append(cell)
-            converted, err = apply_transform(cell, transform)
-            # Transform refuse of null sentinels (N/A, "null", …) is non-null →
-            # NULL loss, not a bind failure. Count as sentinel_nulls so strict
-            # blocks and balanced warns — matching the severity model below.
-            if err and "Null sentinel" in err:
-                sentinel_nulls += 1
-                if len(sentinel_examples) < SAMPLE_FAILURE_LIMIT:
-                    sentinel_examples.append({"row": idx, "value": cell[:120]})
-                if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
-                    sample_failures.append({"row": idx, "value": cell[:120], "reason": err})
-                    raw_failure_values.append(cell[:120])
-            elif err:
-                failed += 1
-                if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
-                    sample_failures.append({"row": idx, "value": cell[:120], "reason": err})
-                    raw_failure_values.append(cell[:120])
-            elif converted is None:
-                if cell.strip() == "":
+                    unknown_physical = (
+                        table_exists is not False
+                        and not live_present
+                        and not bool(m.get("create_new"))
+                        and tgt_logical in _TEXTUAL_LOGICALS
+                        and not specialty_base
+                    )
+                    if unknown_physical or tgt_logical in {
+                        "integer",
+                        "float",
+                        "decimal",
+                        "number",
+                        "money",
+                        "uuid",
+                        "boolean",
+                        "json",
+                        "array",
+                        "struct",
+                        "map",
+                        "date",
+                        "datetime",
+                        "time",
+                        "timestamp",
+                    } or (
+                        specialty_base
+                        and specialty_base not in {"CITEXT", "TSVECTOR"}
+                    ):
+                        # File/Excel blanks are absence. The writer stores SQL NULL
+                        # on a nullable typed column (``empty_cells_as_null``).
+                        # A numeric/temporal/boolean/uuid/binary extract cannot
+                        # store ""; that blank is a flattened SQL NULL and must
+                        # not block overwrite, including lenient mode.
+                        # Proven NOT NULL and unknown physical DDL stay blocked.
+                        # A text column's empty string stays a stored value.
+                        from services.blank_cell_contract import (
+                            nullable_typed_blank_is_absence,
+                        )
+
+                        if (
+                            not unknown_physical
+                            and nullable_typed_blank_is_absence(
+                                cell,
+                                m,
+                                tgt_name,
+                                empty_cells_as_null=empty_cells_as_null,
+                                dest_nullability=dest_nullability,
+                                source_type=src_type,
+                                database_extract=database_extract,
+                            )
+                        ):
+                            nulls += 1
+                            observed_values.append("")
+                            continue
+                        failed += 1
+                        if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                            sample_failures.append({
+                                "row": idx,
+                                "value": cell[:120],
+                                "reason": (
+                                    "Empty value into existing table with unknown "
+                                    "physical DDL — refuse silent NULL invent "
+                                    "(re-introspect destination or remap)"
+                                    if unknown_physical
+                                    else (
+                                        f"Empty value cannot coerce to "
+                                        f"{specialty_base or tgt_logical} — "
+                                        "refuse silent NULL invent (quarantine or remap)"
+                                    )
+                                ),
+                            })
+                            raw_failure_values.append(cell[:120])
+                        continue
                     nulls += 1
-                else:
+                    observed_values.append(cell)
+                    continue
+                observed_values.append(cell)
+                # A MySQL TIMESTAMP sample is UTC digits with the offset
+                # stripped by the driver. Wiring it here matches the reader.
+                # DATETIME stays a wall clock.
+                bind_cell = mysql_catalog_instant_sample(cell, src_type)
+                if not isinstance(bind_cell, str):
+                    bind_cell = cell
+                converted, err = apply_transform(bind_cell, transform)
+                # Transform refuse of null sentinels (N/A, "null", …) is non-null →
+                # NULL loss, not a bind failure. Count as sentinel_nulls so strict
+                # blocks and balanced warns — matching the severity model below.
+                if err and "Null sentinel" in err:
                     sentinel_nulls += 1
                     if len(sentinel_examples) < SAMPLE_FAILURE_LIMIT:
                         sentinel_examples.append({"row": idx, "value": cell[:120]})
-            elif is_missing_sentinel(converted) or str(converted) in {
-                DF_MISSING_SENTINEL,
-                SQL_NULL_SENTINEL,
-            }:
-                nulls += 1
-            else:
-                # Domain change: bare scalar → JSON string literal (VARIANT/JSON).
-                if tgt_logical in _STRUCTURAL_LOGICALS and _is_json_scalar_wrap(
-                    cell, converted
-                ):
-                    json_scalar_wraps += 1
-                    if len(wrap_examples) < SAMPLE_FAILURE_LIMIT:
-                        wrap_examples.append({
-                            "row": idx,
-                            "value": cell[:120],
-                            "wire_form": str(converted)[:120],
-                            "reason": (
-                                "Bare scalar wrapped as JSON string literal "
-                                "(domain change — Accept risk if intentional)"
-                            ),
-                        })
-                # Destination-wire probe: transform-engine ISO-Z ≠ SQL/warehouse bind.
-                if use_wire and wire_check_fn is not None:
-                    probe_val = converted if converted is not None else cell
-                    wire = wire_check_fn(probe_val, tgt_type)
-                    if not wire.get("ok"):
-                        wire_failures += 1
-                        failed += 1
-                        if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
-                            sample_failures.append({
+                    if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                        sample_failures.append({"row": idx, "value": cell[:120], "reason": err})
+                        raw_failure_values.append(cell[:120])
+                elif err:
+                    failed += 1
+                    if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                        sample_failures.append({"row": idx, "value": cell[:120], "reason": err})
+                        raw_failure_values.append(cell[:120])
+                elif converted is None:
+                    if cell.strip() == "":
+                        nulls += 1
+                    else:
+                        sentinel_nulls += 1
+                        if len(sentinel_examples) < SAMPLE_FAILURE_LIMIT:
+                            sentinel_examples.append({"row": idx, "value": cell[:120]})
+                elif is_missing_sentinel(converted) or str(converted) in {
+                    DF_MISSING_SENTINEL,
+                    SQL_NULL_SENTINEL,
+                }:
+                    nulls += 1
+                else:
+                    # Domain change: bare scalar → JSON string literal (VARIANT/JSON).
+                    if tgt_logical in _STRUCTURAL_LOGICALS and _is_json_scalar_wrap(
+                        cell, converted
+                    ):
+                        json_scalar_wraps += 1
+                        if len(wrap_examples) < SAMPLE_FAILURE_LIMIT:
+                            wrap_examples.append({
                                 "row": idx,
                                 "value": cell[:120],
-                                "reason": wire.get("reason") or "Destination wire bind failed",
-                                "wire_form": wire.get("wire_value"),
+                                "wire_form": str(converted)[:120],
+                                "reason": (
+                                    "Bare scalar wrapped as JSON string literal "
+                                    "(domain change — Accept risk if intentional)"
+                                ),
                             })
-                            raw_failure_values.append(cell[:120])
-                        continue
-                    if wire.get("wire_value") and sample_wire_form is None:
-                        sample_wire_form = str(wire["wire_value"])
-                    if wire.get("needs_normalize"):
-                        wire_normalize += 1
-                        if len(wire_examples) < SAMPLE_FAILURE_LIMIT:
-                            wire_examples.append({
-                                "row": idx,
-                                "value": cell[:120],
-                                "wire_form": wire.get("wire_value"),
-                                "reason": wire.get("reason") or "Will normalize for destination",
-                            })
-                if use_json_wire or use_bool_wire or use_uuid_wire or use_binary_wire or use_specialty_wire:
-                    try:
-                        from connectors.sql_bind import normalize_sql_bind_value
+                    # Destination-wire probe: transform-engine ISO-Z ≠ SQL/warehouse bind.
+                    if use_wire and wire_check_fn is not None:
+                        probe_val = converted if converted is not None else cell
+                        wire = wire_check_fn(probe_val, tgt_type)
+                        if not wire.get("ok"):
+                            wire_failures += 1
+                            failed += 1
+                            if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                                sample_failures.append({
+                                    "row": idx,
+                                    "value": cell[:120],
+                                    "reason": wire.get("reason") or "Destination wire bind failed",
+                                    "wire_form": wire.get("wire_value"),
+                                })
+                                raw_failure_values.append(cell[:120])
+                            continue
+                        if wire.get("wire_value") and sample_wire_form is None:
+                            sample_wire_form = str(wire["wire_value"])
+                        if wire.get("needs_normalize"):
+                            wire_normalize += 1
+                            if len(wire_examples) < SAMPLE_FAILURE_LIMIT:
+                                wire_examples.append({
+                                    "row": idx,
+                                    "value": cell[:120],
+                                    "wire_form": wire.get("wire_value"),
+                                    "reason": wire.get("reason") or "Will normalize for destination",
+                                })
+                    if use_json_wire or use_bool_wire or use_uuid_wire or use_binary_wire or use_specialty_wire:
+                        try:
+                            from connectors.sql_bind import normalize_sql_bind_value
 
-                        bind_type = tgt_type or (
-                            "JSON"
-                            if use_json_wire
-                            else (
-                                "BOOLEAN"
-                                if use_bool_wire
+                            bind_type = tgt_type or (
+                                "JSON"
+                                if use_json_wire
                                 else (
-                                    "UUID"
-                                    if use_uuid_wire
-                                    else ("BYTEA" if use_binary_wire else tgt_type)
+                                    "BOOLEAN"
+                                    if use_bool_wire
+                                    else (
+                                        "UUID"
+                                        if use_uuid_wire
+                                        else ("BYTEA" if use_binary_wire else tgt_type)
+                                    )
                                 )
                             )
-                        )
-                        bound = normalize_sql_bind_value(
-                            converted,
-                            bind_type,
-                            engine=dest_l or "mysql",
-                        )
-                        # Informal yes/no pass through without raising — writers
-                        # still refuse non-bool. Fail Validate to match write.
-                        if use_bool_wire and not isinstance(bound, bool) and not (
-                            isinstance(bound, int) and bound in (0, 1)
-                        ):
-                            raise ValueError(
-                                f"BOOLEAN refused informal wire {cell[:64]!r} "
-                                "(refuse invent — use true/false/0/1)"
+                            bound = normalize_sql_bind_value(
+                                converted,
+                                bind_type,
+                                engine=dest_l or "mysql",
                             )
-                        if sample_wire_form is None and bound is not None:
-                            sample_wire_form = (
-                                bound.hex()[:120]
-                                if isinstance(bound, (bytes, bytearray))
-                                else str(bound)[:120]
-                            )
-                    except Exception as wire_exc:
-                        wire_failures += 1
-                        failed += 1
-                        if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
-                            sample_failures.append({
-                                "row": idx,
-                                "value": cell[:120],
-                                "reason": f"SQL bind failed: {wire_exc}",
-                            })
-                            raw_failure_values.append(cell[:120])
-                        continue
-                ok += 1
+                            # Informal yes/no pass through without raising — writers
+                            # still refuse non-bool. Fail Validate to match write.
+                            if use_bool_wire and not isinstance(bound, bool) and not (
+                                isinstance(bound, int) and bound in (0, 1)
+                            ):
+                                raise ValueError(
+                                    f"BOOLEAN refused informal wire {cell[:64]!r} "
+                                    "(refuse invent — use true/false/0/1)"
+                                )
+                            if sample_wire_form is None and bound is not None:
+                                sample_wire_form = (
+                                    bound.hex()[:120]
+                                    if isinstance(bound, (bytes, bytearray))
+                                    else str(bound)[:120]
+                                )
+                        except Exception as wire_exc:
+                            wire_failures += 1
+                            failed += 1
+                            if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                                sample_failures.append({
+                                    "row": idx,
+                                    "value": cell[:120],
+                                    "reason": f"SQL bind failed: {wire_exc}",
+                                })
+                                raw_failure_values.append(cell[:120])
+                            continue
+                    ok += 1
+        finally:
+            if _date_token is not None:
+                reset_active_date_locale(_date_token)
+
 
         # Only report columns that carry real coercion risk: a typed target with
         # values that fail or get placeholder-nulled, or where source disagrees
@@ -750,18 +815,23 @@ def analyze_coercion(
         # Structural JSON/array pairs are always surfaced so Validate can label
         # them as serialization (not a scary cast) when they round-trip cleanly.
         # Same-logical YEAR/MONEY/width/IEEE collapses must not early-continue.
+        # Measured cells decide a code-page sink. An unread column stays a
+        # collapse; an ASCII zip code into Latin-1 VARCHAR does not.
+        code_page_population = observed_values or None
         fidelity_collapse = bool(
             is_precision_collapse_coercion(
                 src_type,
                 tgt_type,
                 dest_db=dest_db_type,
                 dest_table_exists=table_exists,
+                population=code_page_population,
             )
             or is_lossy_coercion(
                 src_type,
                 tgt_type,
                 dest_db=dest_db_type,
                 dest_table_exists=table_exists,
+                population=code_page_population,
             )
             or is_nested_shape_collapse(src_type, tgt_type, dest_db=dest_db_type)
         )

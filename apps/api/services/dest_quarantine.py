@@ -95,15 +95,67 @@ def dlq_endpoint(destination: Any, *, dest_table: str | None = None) -> Any:
     return sibling_table_endpoint(destination, dlq_table_name(str(table)))
 
 
+def operator_quarantine_json_cell(value: Any) -> Any:
+    """Operator-visible cell. SQL NULL is JSON null. Empty string stays empty.
+
+    ``__DF_SQL_NULL__`` is the internal transfer wire so NULL and ``""`` stay
+    distinct inside the writer. The quarantine payload and the job API must
+    not show that token. ``__DF_MISSING__`` stays the missing token — it is
+    not SQL NULL.
+    """
+    from services.value_serializer import (
+        DF_MISSING_SENTINEL,
+        SQL_NULL_SENTINEL,
+        cell_to_string,
+        is_missing_sentinel,
+    )
+
+    if is_missing_sentinel(value):
+        return DF_MISSING_SENTINEL
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if value.strip() == SQL_NULL_SENTINEL:
+            return None
+        return value
+    text = cell_to_string(value, preserve_sql_null=True)
+    if text == SQL_NULL_SENTINEL:
+        return None
+    return text
+
+
+def project_operator_quarantine_details(details: list[Any]) -> list[Any]:
+    """Copy findings so the API shows JSON null. Stored rows stay the wire."""
+    projected: list[Any] = []
+    for detail in details or []:
+        if not isinstance(detail, dict):
+            projected.append(detail)
+            continue
+        copied = dict(detail)
+        if "value" in copied:
+            copied["value"] = operator_quarantine_json_cell(copied.get("value"))
+        for key in ("values", "source_values"):
+            payload = copied.get(key)
+            if isinstance(payload, dict):
+                copied[key] = {
+                    str(k): operator_quarantine_json_cell(v) for k, v in payload.items()
+                }
+        projected.append(copied)
+    return projected
+
+
 def rejected_details_to_dlq_records(
     details: list[dict[str, Any]],
     *,
     job_id: str,
-) -> list[dict[str, str]]:
-    """Map writer ``rejected_details`` into DLQ table rows (string cells)."""
-    from connectors.writer_common import quarantine_cell_wire
+) -> list[dict[str, Any]]:
+    """Map writer ``rejected_details`` into DLQ table rows.
 
-    rows: list[dict[str, str]] = []
+    ``_df_payload`` is JSON the operator can query: SQL NULL is JSON null and
+    an empty string stays ``""``. ``_df_value`` is SQL NULL for a null cell.
+    The internal wire token is not stored in either column.
+    """
+    rows: list[dict[str, Any]] = []
     created = _now()
     for detail in details or []:
         if not isinstance(detail, dict):
@@ -117,11 +169,11 @@ def rejected_details_to_dlq_records(
             "_df_row": str(detail.get("row") if detail.get("row") is not None else ""),
             "_df_column": str(detail.get("column") or ""),
             "_df_target": str(detail.get("target") or ""),
-            "_df_value": quarantine_cell_wire(detail.get("value")),
+            "_df_value": operator_quarantine_json_cell(detail.get("value")),
             "_df_reason": str(detail.get("reason") or ""),
             "_df_policy": str(detail.get("policy") or ""),
             "_df_payload": json.dumps(
-                {str(k): quarantine_cell_wire(v) for k, v in payload.items()},
+                {str(k): operator_quarantine_json_cell(v) for k, v in payload.items()},
                 ensure_ascii=False,
             ),
             "_df_created_at": created,

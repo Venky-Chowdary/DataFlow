@@ -25,7 +25,7 @@ path keeps quarantine). Excel nested cells are already strings on the
 row path. XML that is not a unique record path (document XML, XXE,
 ambiguous siblings) declines. Windowed ``ReadOptions`` (skip_rows /
 skip_footer / non-default header_row) decline. gzip is decompressed,
-then the same mapped COPY. Legacy ``.xls`` declines.
+then the same mapped COPY. BIFF ``.xls`` and OOXML ``.xlsx`` share the Excel reader.
 """
 
 from __future__ import annotations
@@ -1831,7 +1831,13 @@ def try_copy_local_csv(
                         replace_destination=replace_destination,
                         declared_types=declared_types,
                     )
+            identity_digest = write_pass.identity_digest()
+            fingerprint_rows = int(write_pass.total)
             result = _with_source_digest(result, write_pass.digest())
+            snap = dict(result.source_snapshot or {})
+            snap["write_pass_identity_digest"] = identity_digest
+            snap["write_pass_fingerprint_rows"] = fingerprint_rows
+            result = result._replace(source_snapshot=snap)
     except FastPathUnavailable as exc:
         logger.info("CSV COPY declined: %s", exc)
         return None

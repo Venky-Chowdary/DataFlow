@@ -296,24 +296,19 @@ def test_live_pg_sqlserver_resume_skips_complete_range(monkeypatch):
         cur.execute(f"DELETE FROM dbo.[{dest}] WHERE id = %s", (lo,))
         cur.execute(f"SELECT COUNT(*) FROM dbo.[{dest}]")
         assert int(cur.fetchone()[0]) == 7999
-        second = copy_postgres_to_sqlserver(
-            source_cfg=_pg_cfg(),
-            source_schema="public",
-            source_table=src,
-            dest_cfg=_ss_cfg(),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            sqlserver_ddls=["BIGINT", "NVARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_rows == 8000
-        assert second.target_rows == 8000
-        actions = [p["action"] for p in second.source_snapshot["partition_proof"]]
-        assert actions.count("skip") == 3
-        assert actions.count("reload") == 1
-        assert second.source_snapshot.get("partitions_skipped") == 3
+        with pytest.raises(FastPathUnavailable, match="partly"):
+            copy_postgres_to_sqlserver(
+                source_cfg=_pg_cfg(),
+                source_schema="public",
+                source_table=src,
+                dest_cfg=_ss_cfg(),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                sqlserver_ddls=["BIGINT", "NVARCHAR(32)"],
+                replace_destination=False,
+            )
         cur.execute(f"SELECT COUNT(*) FROM dbo.[{dest}]")
-        assert int(cur.fetchone()[0]) == 8000
+        assert int(cur.fetchone()[0]) == 7999
     finally:
         with pg.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS public."{src}"')

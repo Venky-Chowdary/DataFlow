@@ -27,6 +27,7 @@ from services.cdc_exactly_once import (
     assert_bundle_members_reached,
     batch_apply_checksum,
     combine_change_batch,
+    committed_apply_checksum,
     decide_from_view,
     encode_resume_blob,
     extract_cdc_phase,
@@ -396,16 +397,91 @@ def _ensure_wm_columns(conn: Any, dialect: str) -> None:
             conn.execute(text(f"ALTER TABLE {table_q} ADD COLUMN {col} {typ}"))
 
 
-def _col_sql_type(dialect: str, col: str, pk_cols: list[str]) -> str:
-    """Bounded PK / LSN types — MySQL/Oracle/MSSQL refuse unbounded TEXT keys."""
-    keyed = col in pk_cols or col == DF_LSN_COL
+def _ddl_db(dialect: str) -> str:
+    if dialect in {"postgres", "postgresql"}:
+        return "postgresql"
     if dialect in _MSSQL_LIKE:
-        return "NVARCHAR(512)" if keyed else "NVARCHAR(MAX)"
-    if dialect in _MYSQL_LIKE:
-        return "VARCHAR(512)" if keyed else "LONGTEXT"
+        return "sqlserver"
     if dialect in _ORACLE_LIKE:
-        return "VARCHAR2(512)" if keyed else "CLOB"
+        return "oracle"
+    return dialect or "postgresql"
+
+
+def _unbounded_lob(typ: str) -> bool:
+    """True when this engine cannot put the type in a primary key."""
+    base = " ".join((typ or "").strip().upper().split())
+    if base in {
+        "TEXT",
+        "LONGTEXT",
+        "MEDIUMTEXT",
+        "TINYTEXT",
+        "CLOB",
+        "NCLOB",
+        "NTEXT",
+        "NVARCHAR(MAX)",
+        "VARCHAR(MAX)",
+    }:
+        return True
+    return base.startswith("NVARCHAR(MAX)") or base.startswith("VARCHAR(MAX)")
+
+
+def _bounded_key_type(dialect: str) -> str:
+    if dialect in _MSSQL_LIKE:
+        return "NVARCHAR(512)"
+    if dialect in _MYSQL_LIKE:
+        return "VARCHAR(512)"
+    if dialect in _ORACLE_LIKE:
+        return "VARCHAR2(512)"
     return "TEXT"
+
+
+def _planned_sql_type(dialect: str, logical: str | None) -> str:
+    """Destination DDL for one planned column. Same owner as the table writers."""
+    from services.decision_kernel import materialize_dest_ddl
+
+    db = _ddl_db(dialect)
+    emitted = materialize_dest_ddl(db, logical or "string")
+    if dialect in _MYSQL_LIKE:
+        compact = "".join((emitted or "").split()).upper()
+        if compact in {"VARCHAR", "CHAR", "VARBINARY", "BINARY"}:
+            emitted = materialize_dest_ddl(db, "string")
+    return emitted or "TEXT"
+
+
+def _col_sql_type(
+    dialect: str,
+    col: str,
+    pk_cols: list[str],
+    logical: str | None = None,
+) -> str:
+    """Planned BIGINT/TIMESTAMP DDL, with a bounded key only for a LOB primary key.
+
+    A missing plan uses the string carrier from ``materialize_dest_ddl``, the
+    same function the MySQL and Postgres writers use. A LOB primary key on
+    MySQL, SQL Server, or Oracle stays a bounded indexable type. Existing
+    columns are never altered.
+    """
+    emitted = _planned_sql_type(dialect, logical)
+    keyed = col in pk_cols
+    if (
+        keyed
+        and _unbounded_lob(emitted)
+        and dialect in _MYSQL_LIKE | _MSSQL_LIKE | _ORACLE_LIKE
+    ):
+        return _bounded_key_type(dialect)
+    return emitted
+
+
+def _logical_for(col: str, logical_by_col: dict[str, str] | None) -> str | None:
+    if not logical_by_col:
+        return None
+    if col in logical_by_col:
+        return logical_by_col[col]
+    low = col.lower()
+    for key, value in logical_by_col.items():
+        if str(key).lower() == low:
+            return value
+    return None
 
 
 def _add_column_sql(dialect: str, table_q: str, col: str, typ: str) -> str:
@@ -417,11 +493,24 @@ def _add_column_sql(dialect: str, table_q: str, col: str, typ: str) -> str:
     return f"ALTER TABLE {table_q} ADD COLUMN {col_q} {typ}"
 
 
-def _ensure_dest_table(conn: Any, dialect: str, table_name: str, columns: list[str], pk_cols: list[str]) -> None:
+def _ensure_dest_table(
+    conn: Any,
+    dialect: str,
+    table_name: str,
+    columns: list[str],
+    pk_cols: list[str],
+    logical_by_col: dict[str, str] | None = None,
+) -> None:
+    """Create a missing dest table from the planned types.
+
+    ``CREATE TABLE IF NOT EXISTS`` does not change a column that already
+    exists. A table created by an older run as varchar/text stays that way
+    until it is recreated; this path does not ALTER those types.
+    """
     table_q = _q(table_name, dialect)
     col_sql = []
     for col in columns:
-        typ = _col_sql_type(dialect, col, pk_cols)
+        typ = _col_sql_type(dialect, col, pk_cols, _logical_for(col, logical_by_col))
         suffix = " PRIMARY KEY" if pk_cols == [col] else ""
         col_sql.append(f"{_q(col, dialect)} {typ}{suffix}")
     if len(pk_cols) > 1:
@@ -447,7 +536,12 @@ def _ensure_dest_table(conn: Any, dialect: str, table_name: str, columns: list[s
             continue
         conn.execute(text(
             _add_column_sql(
-                dialect, table_q, col, _col_sql_type(dialect, col, pk_cols)
+                dialect,
+                table_q,
+                col,
+                _col_sql_type(
+                    dialect, col, pk_cols, _logical_for(col, logical_by_col)
+                ),
             )
         ))
 
@@ -482,6 +576,32 @@ def _sa_load_dest_rows(
         pk = _pk_value(rec, pk_cols)
         if pk:
             out[str(pk)] = rec
+    return out
+
+
+def _coerce_eos_row(
+    values: dict[str, Any],
+    logical_by: dict[str, str],
+    dialect: str,
+) -> dict[str, Any]:
+    """Bind each cell with the destination DDL the CREATE used.
+
+    pgoutput emits ``2026-10-08 00:26:39.458238+00``. A temporal MySQL column
+    rejects that literal (1292). ``normalize_sql_bind_value`` turns it into
+    naive UTC when the planned type is temporal, and leaves a real text
+    column that stores an offset string untouched.
+    """
+    from connectors.sql_bind import normalize_sql_bind_value
+    from services.type_system import materialize_dest_ddl
+
+    out: dict[str, Any] = {}
+    for col, raw in values.items():
+        logical = str((logical_by or {}).get(col) or "")
+        ddl = materialize_dest_ddl(dialect, logical) if logical else ""
+        if not ddl:
+            out[col] = raw
+            continue
+        out[col] = normalize_sql_bind_value(raw, ddl, engine=dialect)
     return out
 
 
@@ -589,11 +709,12 @@ def _eos_write_shape(
     dialect: str,
     mappings: list[dict[str, Any]],
     column_types: dict[str, str],
-) -> tuple[list[dict[str, Any]], dict[str, str], list[str]]:
-    """Mappings, types and destination columns this apply will write.
+) -> tuple[list[dict[str, Any]], dict[str, str], list[str], dict[str, str]]:
+    """Mappings, source types, destination columns, and planned column types.
 
     Shared by the DDL preparation step and the apply itself so the table that
-    gets created is exactly the table that gets written.
+    gets created is exactly the table that gets written. The planned type is
+    the Map ``target_type`` when the plan named one.
     """
     from connectors.writer_common import resolve_target_columns
 
@@ -602,24 +723,33 @@ def _eos_write_shape(
     if not any(m.get("source") == DF_LSN_COL for m in mappings):
         mappings.append({"source": DF_LSN_COL, "target": DF_LSN_COL, "confidence": 1.0})
     column_types.setdefault(DF_LSN_COL, "string")
-    target_cols, _logical = resolve_target_columns(
+    target_cols, logical = resolve_target_columns(
         mappings,
         column_types,
         preserve_case=True,
         table_exists=None,
         dest_db=dialect if dialect != "generic_sql" else "generic_sql",
     )
+    logical_by = {
+        col: (logical[i] if i < len(logical) else "string")
+        for i, col in enumerate(target_cols)
+    }
     if DF_LSN_COL not in target_cols:
         target_cols = list(target_cols) + [DF_LSN_COL]
-    return mappings, column_types, list(target_cols)
+    logical_by.setdefault(DF_LSN_COL, column_types.get(DF_LSN_COL, "string"))
+    return mappings, column_types, list(target_cols), logical_by
 
 
 def _prepare_eos_schema(
     engine: Any,
     dialect: str,
-    members: list[tuple[str, list[str], list[str]]],
+    members: list[tuple],
 ) -> None:
     """Create/extend the watermark and dest tables *before* the apply txn.
+
+    Each member is ``(table, columns, pk_cols)`` or
+    ``(table, columns, pk_cols, logical_by)``. A missing plan still creates
+    through ``materialize_dest_ddl``; it does not fall back to LONGTEXT.
 
     MySQL commits implicitly on DDL, so a ``CREATE TABLE IF NOT EXISTS`` issued
     inside the apply transaction committed whatever earlier bundle members had
@@ -630,8 +760,10 @@ def _prepare_eos_schema(
     with engine.begin() as conn:
         conn.execute(text(_wm_ddl(dialect)))
         _ensure_wm_columns(conn, dialect)
-        for table, columns, pk_cols in members:
-            _ensure_dest_table(conn, dialect, table, columns, pk_cols)
+        for member in members:
+            table, columns, pk_cols = member[0], member[1], member[2]
+            logical_by = member[3] if len(member) > 3 else None
+            _ensure_dest_table(conn, dialect, table, columns, pk_cols, logical_by)
 
 
 def _sa_apply_member(
@@ -651,7 +783,7 @@ def _sa_apply_member(
 ) -> EosApplyResult:
     from services.cdc_snapshot_window import _pk_row_dict
 
-    mappings, column_types, target_cols = _eos_write_shape(
+    mappings, column_types, target_cols, logical_by = _eos_write_shape(
         dialect, mappings, column_types
     )
     if not pk_target_cols:
@@ -725,7 +857,9 @@ def _sa_apply_member(
             fence_epoch=fence,
             prev_lsn=dest.committed_lsn,
             phase="streaming",
-            apply_checksum=incoming_checksum or dest.apply_checksum,
+            apply_checksum=committed_apply_checksum(
+                incoming_checksum, dest.apply_checksum, change
+            ),
             resume_blob=resume_blob or dest.resume_blob,
             apply_seq=dest_seq,
             window_id=window_id,
@@ -740,7 +874,9 @@ def _sa_apply_member(
             already_committed=True,
             fence_epoch=fence,
             phase="streaming",
-            apply_checksum=incoming_checksum or dest.apply_checksum,
+            apply_checksum=committed_apply_checksum(
+                incoming_checksum, dest.apply_checksum, change
+            ),
             apply_seq=dest_seq,
             window_id=window_id,
             snapshot_signal_id=signal_id,
@@ -776,7 +912,11 @@ def _sa_apply_member(
             incoming_lsn=incoming_lsn,
         )
     for rec in records:
-        values = _row_values(rec, target_cols, tgt_to_src, incoming_lsn)
+        values = _coerce_eos_row(
+            _row_values(rec, target_cols, tgt_to_src, incoming_lsn),
+            logical_by,
+            dialect,
+        )
         rows_written += _upsert_row(
             conn, table_q, target_cols, pk_target_cols, values, dialect
         )
@@ -865,9 +1005,9 @@ def apply_eos_sqlalchemy(
     cfg.setdefault("type", dialect if dialect != "generic_sql" else (dest_cfg.get("type") or dest_type))
     engine = _engine(cfg)
     try:
-        _, _, target_cols = _eos_write_shape(dialect, mappings, column_types)
+        _, _, target_cols, logical_by = _eos_write_shape(dialect, mappings, column_types)
         _prepare_eos_schema(
-            engine, dialect, [(dest_table, target_cols, pk_target_cols)]
+            engine, dialect, [(dest_table, target_cols, pk_target_cols, logical_by)]
         )
         with engine.begin() as conn:
             result = _sa_apply_member(
@@ -932,8 +1072,9 @@ def apply_eos_sa_bundle(
             [
                 (
                     s.dest_table,
-                    _eos_write_shape(dialect, s.mappings, s.column_types)[2],
+                    (shape := _eos_write_shape(dialect, s.mappings, s.column_types))[2],
                     s.pk_target_cols,
+                    shape[3],
                 )
                 for s in streams
             ],
@@ -1047,6 +1188,11 @@ def open_eos_sa_session(
             conn.execute(text(_wm_ddl(dialect)))
             _ensure_wm_columns(conn, dialect)
             view = _lock_watermark(conn, dialect, stream_key)
+            from services.cdc_slot_resume import without_retired_slot_resume
+
+            view, job_resume = without_retired_slot_resume(
+                view, job_resume, cursor_key=stream_key
+            )
             opened = plan_open_session(
                 dest=view, incoming_fence=incoming_fence, job_resume=job_resume
             )
@@ -1148,6 +1294,57 @@ def sa_dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str, dest_type: 
             except Exception:
                 return None
             return str(row[0]) if row and row[0] else None
+    finally:
+        release_engine(engine)
+
+
+def sa_blank_eos_resume(
+    dest_cfg: dict[str, Any],
+    stream_key: str,
+    dest_type: str,
+    *,
+    lsn: str,
+) -> bool:
+    """Blank a dest resume that belonged to a dropped Postgres slot.
+
+    The fence epoch stays. A newer committed LSN is left alone. An empty
+    string satisfies NOT NULL; the next Open treats it as no resume.
+    """
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+
+    target = str(lsn or "").strip()
+    key = str(stream_key or "").strip()
+    if not target or not key:
+        return False
+    dialect = normalize_eos_dialect(dest_type, dest_cfg)
+    cfg = dict(dest_cfg)
+    cfg.setdefault("type", dialect)
+    engine = _engine(cfg)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(_wm_ddl(dialect)))
+            _ensure_wm_columns(conn, dialect)
+            result = conn.execute(
+                text(
+                    f"UPDATE {_wm_ref(dialect)} SET committed_lsn = '' "  # nosec B608
+                    f"WHERE stream_key = :k AND committed_lsn = :lsn"
+                ),
+                {"k": key, "lsn": target},
+            )
+            cleared = int(result.rowcount or 0) > 0
+            try:
+                with conn.begin_nested():
+                    conn.execute(
+                        text(
+                            f"UPDATE {_wm_ref(dialect)} SET resume_blob = '' "  # nosec B608
+                            f"WHERE stream_key = :k AND committed_lsn = ''"
+                        ),
+                        {"k": key},
+                    )
+            except Exception:
+                pass
+            return cleared
     finally:
         release_engine(engine)
 

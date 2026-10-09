@@ -2004,6 +2004,35 @@ def test_key_census_splits_inserts_from_updates():
     assert KeyCensus.from_mapping({"unique_batch_keys": 2, "dest_preexisting": 5}) is None
 
 
+def test_a_batch_that_wrote_nothing_is_not_an_insert():
+    from services.row_conservation import KeyCensusAccumulator
+
+    acc = KeyCensusAccumulator()
+    acc.add_batch([(1,), (2,)], 0)
+    probed = acc.to_census()
+    assert probed is not None
+    assert probed.inserts == 2
+    assert probed.expected_delta == 2
+    acc.reverse_last_live_batch()
+    assert acc.to_census() is None
+
+
+def test_a_later_zero_write_keeps_keys_that_already_landed():
+    from services.row_conservation import KeyCensusAccumulator
+
+    acc = KeyCensusAccumulator()
+    acc.add_batch([(1,), (2,)], 0)
+    acc.keep_last_live_batch()
+    acc.begin_live_batch()
+    acc.add_batch([(3,)], 0)
+    acc.reverse_last_live_batch()
+    census = acc.to_census()
+    assert census is not None
+    assert census.inserts == 2
+    assert census.expected_delta == 2
+    assert census.unique_batch_keys == 2
+
+
 def test_keyed_census_closes_on_dest_delta_not_writer_ack():
     from services.row_conservation import KeyCensus
 
@@ -2252,9 +2281,9 @@ def test_sqlite_prepare_keyed_upsert_hard_deletes_dest_held_keys(tmp_path: Path)
     live, payload = prepare_keyed_upsert(
         [
             {"id": 1, "label": "A", "is_deleted": 0},
-            {"id": 2, "label": "b", "is_deleted": 1},
-            {"id": 4, "label": "d", "is_deleted": 0},
-            {"id": 9, "label": "ghost", "is_deleted": 1},
+            {"id": 2, "label": "b", "__deleted": True},
+            {"id": 4, "label": "d", "is_deleted": 1},
+            {"id": 9, "label": "ghost", "__deleted": True},
         ],
         key_columns=["id"],
         mappings=None,
@@ -2400,6 +2429,111 @@ def test_ledger_from_transfer_result_does_not_close_on_writer_ack():
     assert ledger["writer_ack"] == 10_000
     assert ledger["rows_written"] != ledger["writer_ack"]
     assert ledger["balanced"] is True
+
+
+def test_write_refused_ledger_keeps_a_counted_read():
+    """A file peek of 10 rows that preflight stops is not an unmeasured read.
+
+    Full append wrote nothing. Blank→NULL is absence, not coerced loss.
+    Rebuilding the ledger from records_transferred=0 must not replace it.
+    """
+    from dataclasses import dataclass, field
+
+    from services.row_conservation import (
+        KIND_WRITE_REFUSED,
+        account_job,
+        ledger_from_transfer_result,
+        write_refused_ledger,
+    )
+
+    stamped = write_refused_ledger(
+        rows_read=10,
+        quarantined_rows=3,
+        blank_cells_as_null=0,
+        sync_mode="full_refresh_append",
+    )
+    payload = stamped.to_dict()
+    assert payload["conservation_kind"] == KIND_WRITE_REFUSED
+    assert payload["rows_read"] == 10
+    assert payload["rows_read_source"] == "measured_read"
+    assert payload["rows_written"] == 0
+    assert payload["writer_ack"] == 0
+    assert payload["dest_count"] is None
+    assert payload["rows_quarantined"] == 3
+    assert payload["rows_coerced_null"] == 0
+    assert payload["blank_cells_as_null"] == 0
+    assert payload["balanced"] is False
+    note = payload["note"].lower()
+    assert "unmeasured" not in note
+    assert "not measured" not in note
+    assert "upsert" not in note
+    assert "exactly-once" not in note
+    assert "exactly once" not in note
+    assert "full append" in note
+    assert "no row was committed" in note
+    assert "not a balance failure" in note
+
+    kept = account_job(
+        {
+            "status": "failed",
+            "records_processed": 0,
+            "sync_mode": "full_refresh_append",
+            "rejected_rows": 3,
+            "row_accounting": payload,
+        }
+    )
+    assert kept.conservation_kind == KIND_WRITE_REFUSED
+    assert kept.rows_read == 10
+    assert "unmeasured" not in kept.note.lower()
+
+    resumed = account_job(
+        {
+            "status": "completed",
+            "records_processed": 10,
+            "sync_mode": "full_refresh_append",
+            "row_accounting": payload,
+            "reconciliation": {
+                "source_rows": 10,
+                "target_rows": 10,
+                "target_checksum": "abc",
+                "source_checksum": "abc",
+                "phase": "post_write_verified",
+                "coverage": "full",
+                "assurance_level": "full_checksum",
+            },
+            "destination_summary": {"dest_count_before": 0},
+        }
+    )
+    assert resumed.conservation_kind != KIND_WRITE_REFUSED
+    assert resumed.rows_read == 10
+
+    blanks = write_refused_ledger(
+        rows_read=10,
+        quarantined_rows=0,
+        blank_cells_as_null=3,
+        sync_mode="full_refresh_append",
+    )
+    assert blanks.rows_coerced_null == 0
+    assert blanks.blank_cells_as_null == 3
+    assert "sql null" in blanks.note.lower()
+    assert "coerced away" in blanks.note.lower()
+
+    @dataclass
+    class _Result:
+        records_transferred: int = 0
+        operation: str = "full_refresh_append"
+        destination_summary: dict = field(default_factory=dict)
+        reconciliation: dict = field(default_factory=dict)
+        row_accounting: dict = field(default_factory=dict)
+        error_details: dict = field(default_factory=dict)
+
+    rebuilt = ledger_from_transfer_result(
+        _Result(row_accounting=payload),
+        sync_mode="full_refresh_append",
+    )
+    assert rebuilt["conservation_kind"] == KIND_WRITE_REFUSED
+    assert rebuilt["rows_read"] == 10
+    assert rebuilt["dest_count"] is None
 
 
 def test_mirror_kind_is_not_overwrite_even_on_empty_dest():

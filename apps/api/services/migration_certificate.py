@@ -147,7 +147,12 @@ def _rejected_details(
     return hydrated if len(hydrated) > len(rows) else rows
 
 
-def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
+def physical_state_findings(
+    recon: dict[str, Any],
+    *,
+    source_schema: str = "",
+    dest_schema: str = "",
+) -> dict[str, Any]:
     """Destination state a row checksum cannot prove, as certificate evidence.
 
     Today that is generator watermarks: keys can be byte-identical while the
@@ -163,6 +168,14 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
         "verified": False,
         "reason": "constraints and indexes were not compared for this run",
     }
+    if source_schema and dest_schema:
+        from services.physical_state_diff import requalify_schema_move_foreign_keys
+
+        schema_objects = requalify_schema_move_foreign_keys(
+            schema_objects,
+            source_schema=source_schema,
+            dest_schema=dest_schema,
+        )
     referential = _dict(state.get("referential_integrity")) or {
         "verified": False,
         "reason": "destination referential integrity was not scanned for this run",
@@ -173,6 +186,7 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
             "verified": bool(schema_objects.get("verified")),
             "reason": str(schema_objects.get("reason") or ""),
             "absent": list(schema_objects.get("absent") or []),
+            "unchecked": list(schema_objects.get("unchecked") or []),
             "unreadable": list(schema_objects.get("unreadable") or []),
             "aspects": _dict(schema_objects.get("aspects")),
             "advisory": _dict(schema_objects.get("advisory")),
@@ -217,24 +231,96 @@ _SCHEMA_ASPECT_LABEL = {
 
 
 def _schema_object_blockers(physical: dict[str, Any]) -> list[str]:
-    """Structure the source enforced and the destination demonstrably lacks.
+    """Structure the source enforced and the destination did not prove.
 
     Matching checksums prove the rows, not the database around them: a load
     that lands every byte into a table whose foreign keys, uniqueness or CHECK
     constraints were never created leaves the destination accepting data the
-    source would have rejected. Only *absent* aspects block — an aspect the
-    catalog could not be read for stays unknown, and unknown is reported as
-    unproven rather than as a violation.
+    source would have rejected. Absent aspects block. A foreign key that is
+    stored and does not prove existing rows also blocks, and that sentence
+    does not call the object missing. An aspect the catalog could not be read
+    for stays unknown, and unknown is reported as unproven rather than as a
+    violation.
     """
     schema_objects = _dict(physical.get("schema_objects"))
     absent = [str(a) for a in schema_objects.get("absent") or []]
-    if not absent:
-        return []
-    named = ", ".join(_SCHEMA_ASPECT_LABEL.get(a, a) for a in absent)
-    return [
-        f"Source {named} did not survive the move - the destination accepts "
-        "rows the source would have rejected."
-    ]
+    out: list[str] = []
+    if absent:
+        named = ", ".join(_SCHEMA_ASPECT_LABEL.get(a, a) for a in absent)
+        out.append(
+            f"Source {named} did not survive the move - the destination accepts "
+            "rows the source would have rejected."
+        )
+    aspects = _dict(schema_objects.get("aspects"))
+    unchecked = [str(a) for a in schema_objects.get("unchecked") or []]
+    proof_lines = {
+        "foreign_keys": (
+            "Destination foreign key is present and is not proof existing "
+            "rows were checked",
+            "the relationship is stored and the catalog does not prove "
+            "existing rows were checked",
+        ),
+        "primary_key": (
+            "Destination primary key is present and is not proof the loaded "
+            "rows are unique",
+            "the primary key is stored and the catalog does not prove the "
+            "rows are unique",
+        ),
+        "unique_constraints": (
+            "Destination unique constraint is present and is not proof the "
+            "loaded rows are unique",
+            "the unique constraint is stored and the catalog does not prove "
+            "the rows are unique",
+        ),
+    }
+    for aspect, (headline, fallback) in proof_lines.items():
+        info = _dict(aspects.get(aspect))
+        if aspect not in unchecked and not info.get("unchecked") and info.get("status") != "unchecked":
+            continue
+        if aspect == "foreign_keys" and (
+            "proof_reasons" in info
+            or "match_reasons" in info
+            or "action_reasons" in info
+            or "deferral_reasons" in info
+        ):
+            proof_reasons = [
+                str(reason) for reason in (info.get("proof_reasons") or []) if reason
+            ]
+            match_reasons = [
+                str(reason) for reason in (info.get("match_reasons") or []) if reason
+            ]
+            action_reasons = [
+                str(reason) for reason in (info.get("action_reasons") or []) if reason
+            ]
+            deferral_reasons = [
+                str(reason) for reason in (info.get("deferral_reasons") or []) if reason
+            ]
+            if proof_reasons:
+                out.append(f"{headline}: {'; '.join(proof_reasons)}")
+            elif not match_reasons and not action_reasons and not deferral_reasons:
+                out.append(f"{headline}: {fallback}")
+            if match_reasons:
+                out.append(
+                    "Destination foreign key is present and does not keep the "
+                    f"source match rule: {'; '.join(match_reasons)}"
+                )
+            if action_reasons:
+                out.append(
+                    "Destination foreign key is present and does not keep the "
+                    "source referential action: "
+                    f"{'; '.join(action_reasons)}"
+                )
+            if deferral_reasons:
+                out.append(
+                    "Destination foreign key is present and does not keep the "
+                    "source deferral mode: "
+                    f"{'; '.join(deferral_reasons)}"
+                )
+            continue
+        reasons = [str(reason) for reason in (info.get("reasons") or []) if reason]
+        detail = "; ".join(reasons) if reasons else fallback
+        out.append(f"{headline}: {detail}")
+    return out
 
 
 def _foreign_key_carry_blockers(job: dict[str, Any]) -> list[str]:
@@ -391,7 +477,16 @@ def build_migration_certificate(
         expected=_as_int(ledger.get("rows_quarantined")),
     )
     recon = _dict(job.get("reconciliation"))
-    physical = physical_state_findings(recon)
+    request = _dict(job.get("transfer_request"))
+    source_schema = str(_dict(request.get("source")).get("schema") or "")
+    dest_schema = str(
+        dest.get("schema") or _dict(request.get("destination")).get("schema") or ""
+    )
+    physical = physical_state_findings(
+        recon,
+        source_schema=source_schema,
+        dest_schema=dest_schema,
+    )
     status = str(job.get("status") or "")
 
     body: dict[str, Any] = {
@@ -637,6 +732,18 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
                     f"| {label} | {info.get('status', '')} | {missing} |"
                 )
             lines.append("")
+            for aspect, detail in aspects.items():
+                info = _dict(detail)
+                reasons = [str(reason) for reason in (info.get("reasons") or []) if reason]
+                if info.get("status") != "unchecked" and not reasons:
+                    continue
+                for reason in reasons:
+                    lines.append(f"- {aspect.replace('_', ' ')}: {reason}")
+            if any(
+                _dict(detail).get("reasons")
+                for detail in aspects.values()
+            ):
+                lines.append("")
             recreate = list(objects.get("cutover_recreate") or [])
             if not recreate:
                 for aspect, detail in aspects.items():

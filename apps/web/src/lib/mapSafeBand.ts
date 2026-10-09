@@ -86,6 +86,15 @@ export function shouldCollapseSafeBand(
   return partition.safe.length >= minSafe;
 }
 
+/**
+ * Fold approved rows only when other rows stay on screen.
+ * Folding the only rows hides the contract and leaves an empty table.
+ */
+export function shouldCollapseReadyBand(partition: MapBandPartition): boolean {
+  if (partition.ready.length < 2) return false;
+  return partition.attention.length > 0 || partition.safe.length > 0;
+}
+
 export function mapBandLabel(id: MapBandId, count: number): string {
   switch (id) {
     case "attention":

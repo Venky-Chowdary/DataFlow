@@ -141,6 +141,12 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
     warnings = list(getattr(result, "warnings", []) or [])
+    try:
+        from services.vectorization import attach_embedding_fallback_warning
+
+        warnings = attach_embedding_fallback_warning(warnings)
+    except ImportError:
+        pass
     # GA: never truncate rejected_details before quarantine / proof harvest.
     rejected_details = list(getattr(result, "rejected_details", []) or [])
     out: dict[str, Any] = {
@@ -403,67 +409,56 @@ def _find_implicit_connector_id(
     return None
 
 
+# Form defaults and EndpointConfig parsing stamp these when the operator did
+# not type a host. They are not an override of a saved connector.
+_LOOPBACK_HOSTS = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",
+        "host.docker.internal",
+    }
+)
+
+
+def _loopback_host(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    return text in _LOOPBACK_HOSTS
+
+
+def _saved_host_wins_placeholder(inline: Any, saved: Any) -> bool:
+    """True when the inline host is a loopback placeholder and the saved host is not.
+
+    Studio and job payloads send ``localhost`` whenever the form default was
+    not replaced. The saved connector (bore.pub, a cloud host) is the endpoint
+    Test already proved. A real non-loopback inline host remains an override.
+    A connector that is actually localhost stays localhost.
+    """
+    return (
+        _loopback_host(inline)
+        and bool(str(saved or "").strip())
+        and not _loopback_host(saved)
+    )
+
+
 def resolve_connector_config(
     endpoint: EndpointConfig, workspace_id: str | None = None
 ) -> dict[str, Any]:
     """Merge saved connector with inline overrides."""
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import (
+        effective_port,
+        prefer_listen_port,
+        resolve_driver_type,
+        stored_listen_port,
+    )
 
     driver = resolve_driver_type(endpoint.format or "")
     fmt = driver
-    default_port = (
-        27017
-        if fmt == "mongodb"
-        else 3306
-        if fmt == "mysql"
-        else 1433
-        if fmt == "sqlserver"
-        else 1521
-        if fmt == "oracle"
-        else 9092
-        if fmt == "kafka"
-        else 6379
-        if fmt == "redis"
-        else 9200
-        if fmt == "elasticsearch"
-        else 5439
-        if fmt == "redshift"
-        else 0
-        if fmt in ("sqlite", "generic_sql", "iceberg")
-        else 22
-        if fmt == "sftp"
-        else 587
-        if fmt == "email"
-        else 6333
-        if fmt == "qdrant"
-        else 8080
-        if fmt == "weaviate"
-        else 19530
-        if fmt == "milvus"
-        else 443
-        if fmt
-        in (
-            "snowflake",
-            "bigquery",
-            "dynamodb",
-            "s3",
-            "gcs",
-            "adls",
-            "salesforce",
-            "hubspot",
-            "stripe",
-            "shopify",
-            "zendesk",
-            "notion",
-            "airtable",
-            "rest_api",
-            "influxdb",
-            "neo4j",
-            "couchbase",
-            "pinecone",
-        )
-        else 5432
-    )
+    # One owner with the writer. Neo4j is 7474, InfluxDB 8086, Redis 6379.
+    default_port = effective_port(fmt, 0)
     from services.dialect_profiles import normalize_schema
 
     # Start with inline endpoint values only; driver defaults are applied after the
@@ -518,9 +513,30 @@ def resolve_connector_config(
                 else (saved if saved is not None else "")
             )
 
+        inline_host = cfg.get("host")
+        saved_host = conn_dict.get("host")
+        placeholder_host = _saved_host_wins_placeholder(inline_host, saved_host)
+        chosen_host = (
+            saved_host if placeholder_host else _pick(inline_host, saved_host)
+        )
+        inline_port = cfg.get("port")
+        saved_port = conn_dict.get("port")
+        # A discarded localhost is not an instruction to keep the driver
+        # default port. The tunnel port on the saved connector is the one
+        # Test dialed. A non-default inline port is still an override.
+        if placeholder_host:
+            try:
+                inline_port_num = int(inline_port or 0)
+            except (TypeError, ValueError):
+                inline_port_num = 0
+            if inline_port_num in (0, int(default_port or 0)):
+                inline_port = 0
+        dial_driver = resolve_driver_type(str(conn_dict.get("type") or fmt or ""))
         merged_cfg = {
-            "host": _pick(cfg.get("host"), conn_dict.get("host")),
-            "port": _pick(cfg.get("port"), conn_dict.get("port")),
+            "host": chosen_host,
+            # Inline 5432 is the old form default, not an instruction to
+            # ignore a saved Redis 6380 / Elasticsearch 9200 / Kafka 9092.
+            "port": prefer_listen_port(dial_driver, inline_port, saved_port),
             "database": chosen_database,
             "schema": _pick(cfg.get("schema"), conn_dict.get("schema")),
             "username": _pick(cfg.get("username"), conn_dict.get("username")),
@@ -580,7 +596,10 @@ def resolve_connector_config(
         cfg["host"] = cfg["host"] or "localhost"
     else:
         cfg["host"] = cfg.get("host") or ""
-    cfg["port"] = cfg["port"] or default_port
+    cfg["port"] = stored_listen_port(
+        resolve_driver_type(str(cfg.get("type") or fmt or "")),
+        cfg.get("port"),
+    )
     driver_type = (cfg.get("type") or fmt or "").lower()
     # Always resolve against the *merged* driver — never the pre-merge fmt default alone.
     cfg["schema"] = normalize_schema(
@@ -1237,6 +1256,36 @@ def read_source_database(
             "Email cannot be a transfer source; configure it as a destination only."
         )
 
+    if db_type == "kafka":
+        # Buffered reads (kafka → file, or a destination that is not in the
+        # streaming set) previously raised "read not implemented". The topic
+        # reader is the same one the checkpointed stream uses. Offsets are
+        # not committed here — delivery stays at-least-once until the
+        # destination apply commits them on the streaming path.
+        from connectors.kafka_reader import read_topic_batch
+
+        topic = endpoint.table or endpoint.database or endpoint.collection or ""
+        if not topic:
+            raise ValueError("Kafka source topic name required")
+        batch, _cursor = read_topic_batch(cfg=cfg, topic=topic, limit=limit or 500)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, topic)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        native = batch.meta if isinstance(batch.meta, dict) else {}
+        typed = native.get("native_types") if isinstance(native, dict) else None
+        schema = (
+            dict(typed)
+            if isinstance(typed, dict) and typed
+            else (
+                FileParser.infer_schema(records)
+                if records
+                else {c: "string" for c in batch.headers}
+            )
+        )
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
+
     raise ValueError(f"Database source '{db_type}' read not implemented")
 
 
@@ -1427,7 +1476,7 @@ def _write_destination_database(
     zone, which must land every source row for inspection even when the job is
     strict. Callers that omit it keep the validation-mode-derived policy.
     """
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import effective_port, resolve_driver_type
     from connectors.write_resilience import build_write_batch_key
 
     cfg = resolve_connector_config(endpoint)
@@ -1472,34 +1521,7 @@ def _write_destination_database(
 
     common = {
         "host": cfg["host"],
-        "port": cfg["port"]
-        or (
-            5439
-            if db_type == "redshift"
-            else 5432
-            if db_type == "postgresql"
-            else 3306
-            if db_type == "mysql"
-            else 1433
-            if db_type == "sqlserver"
-            else 1521
-            if db_type == "oracle"
-            else 9092
-            if db_type == "kafka"
-            else 6333
-            if db_type == "qdrant"
-            else 8080
-            if db_type == "weaviate"
-            else 19530
-            if db_type == "milvus"
-            else 22
-            if db_type == "sftp"
-            else 587
-            if db_type == "email"
-            else 0
-            if db_type in ("generic_sql", "iceberg", "sqlite")
-            else 443
-        ),
+        "port": effective_port(db_type, cfg.get("port")),
         "database": cfg["database"],
         "username": cfg.get("username", ""),
         "password": cfg.get("password", ""),
@@ -1836,7 +1858,11 @@ def _write_destination_database(
 
         for col in columns:
             ddl_log.append(f"REDIS FIELD {col}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+        )
         if not result.ok:
             raise_writer_failure(result, "Redis write failed")
         ddl_log.insert(0, f"SET keys under prefix {result.table_name}")
@@ -1846,6 +1872,9 @@ def _write_destination_database(
             {
                 "type": "redis",
                 "prefix": result.table_name,
+                # Reconcile reads dest_summary["table"]. The prefix-only key
+                # left the table name empty and Gate-8 scanned the whole database.
+                "table": result.table_name,
                 "checksum": result.checksum,
                 "driver": result.driver,
                 **_writer_diagnostics(result),

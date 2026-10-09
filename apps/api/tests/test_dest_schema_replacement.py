@@ -155,7 +155,9 @@ def test_crm_overwrite_does_not_recreate_schema() -> None:
 
     assert dest_schema_is_recreated_on_overwrite("salesforce") is False
     assert dest_schema_is_recreated_on_overwrite("hubspot") is False
-    assert dest_schema_is_recreated_on_overwrite("postgresql") is True
+    # Relational overwrite empties in place. Snowflake still replaces the object.
+    assert dest_schema_is_recreated_on_overwrite("postgresql") is False
+    assert dest_schema_is_recreated_on_overwrite("snowflake") is True
     gate = _gate(
         destination_db_type="salesforce",
         destination_column_types={"amount": "DECIMAL(18,2)"},

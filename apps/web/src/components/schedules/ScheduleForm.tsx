@@ -39,6 +39,7 @@ import type {
   ScheduleInput,
   ScheduleIntervals,
 } from "../../lib/types";
+import { storedSchedulePreset } from "../../lib/scheduleCadence";
 import {
   CDC_DELIVERY_AT_LEAST_ONCE,
   exactlyOnceWiredDest,
@@ -106,7 +107,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   // Cadence
   const [cadenceMode, setCadenceMode] = useState<"preset" | "cron">(initial?.cron ? "cron" : "preset");
   const [interval, setIntervalValue] = useState<"hourly" | "daily" | "weekly">(
-    (initial?.interval as "hourly" | "daily" | "weekly") ?? "daily",
+    storedSchedulePreset(initial),
   );
   const [cron, setCron] = useState(initial?.cron ?? "");
   const [timezone, setTimezone] = useState(initial?.timezone ?? "UTC");
@@ -320,6 +321,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       dest_connector_id: destId,
       dest_table: destTable.trim(),
       interval,
+      interval_preset: interval,
       cron: cadenceMode === "cron" ? cron.trim() : "",
       timezone,
       sync_mode: syncMode,

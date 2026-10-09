@@ -22,6 +22,7 @@ from __future__ import annotations
 _INFORMATIONAL_WARN_KINDS = frozenset({
     "instant_range_cap",
     "uuid_carrier_equivalent",
+    "objectid_carrier_equivalent",
     "fixed_width_not_enforced",
 })
 

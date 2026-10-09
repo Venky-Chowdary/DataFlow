@@ -116,7 +116,11 @@ def input_has_timezone(value: Any) -> bool:
     if text.isdigit() or (text[0] in "+-" and text[1:].isdigit()):
         return True
     # Trailing ±HH:MM / ±HHMM after a datetime body.
-    return bool(re.search(r"[+-]\d{2}:?\d{2}$", text))
+    if re.search(r"[+-]\d{2}:?\d{2}$", text):
+        return True
+    # pgoutput prints hours-only offsets (``2024-06-01 12:00:00+00``, ``+05``).
+    # The date's own hyphens must not count: the offset has to follow a clock.
+    return bool(re.search(r"\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2}$", text))
 
 
 def parse_sql_datetime(
@@ -392,9 +396,30 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
             return value
         from services.offset_label import restore_offset_after_utc
 
-        return restore_offset_after_utc(
+        restored = restore_offset_after_utc(
             value, parsed, engine=engine, dest_type=source_type
         )
+        # MySQL TIMESTAMP / MariaDB have no offset marker. An aware datetime
+        # is escaped by pymysql as civil digits plus an offset literal, and
+        # the server rejects that with 1292. Session time_zone is pinned to
+        # UTC, so the naive UTC clock is the same instant.
+        if _is_mysql_engine(engine) and isinstance(restored, datetime):
+            if restored.tzinfo is not None:
+                return restored.astimezone(timezone.utc).replace(tzinfo=None)
+            return restored
+        return restored
+    if base == "DATETIME" and _is_mysql_engine(engine):
+        # MariaDB/MySQL DATETIME has no zone marker. The timezone policy names
+        # this utc_normalized_wall_clock: an offset-bearing instant is stored
+        # as UTC digits (session time_zone is pinned to +00:00). Stripping the
+        # offset off the civil clock shifted every timestamptz on the way to
+        # Maria. A naive value stays a wall clock — UTC is not invented.
+        parsed = parse_sql_datetime(value)
+        if parsed is None:
+            return value
+        if isinstance(parsed, datetime) and parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
     if base in {
         "DATETIME",
         "DATETIME64",
@@ -605,6 +630,11 @@ def format_wire_value(value: Any, source_type: str, *, engine: str = "") -> str 
     if isinstance(coerced, datetime):
         if base == "DATE":
             return coerced.date().isoformat()
+        # Aware instants keep their offset. ``strftime`` drops ``tzinfo``, so a
+        # CSV/export of a timestamptz cell wrote a naive clock and the offset
+        # was gone even though the value had one.
+        if coerced.tzinfo is not None and coerced.utcoffset() is not None:
+            return coerced.isoformat(sep=" ")
         if coerced.microsecond:
             return coerced.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
         return coerced.strftime("%Y-%m-%d %H:%M:%S")

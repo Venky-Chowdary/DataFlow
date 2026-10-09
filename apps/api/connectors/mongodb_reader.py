@@ -16,7 +16,7 @@ if str(_api_root) not in sys.path:
 from services.json_intelligence import expand_mongo_documents
 from services.value_serializer import cell_to_string
 
-from .mongodb_common import _mongo_client
+from .mongodb_common import _mongo_client, _new_mongo_client
 
 
 def _cursor_boolean(value: str) -> bool | None:
@@ -415,13 +415,19 @@ def read_collection_scan_batch(
 
     state = scan_state if scan_state is not None else {}
     if not state.get("started"):
-        client = _mongo_client(_connection_string(cfg))
+        # The scan closes this client when the extract finishes. A cached
+        # client is shared with every other job on the URI, so closing it
+        # kills their sockets mid-getMore. This scan owns its client.
+        # no_cursor_timeout keeps the server cursor alive while a slow
+        # destination write sits between pages (the default 10-minute idle
+        # kill dropped a long snapshot around the pages already committed).
+        client = _new_mongo_client(_connection_string(cfg))
         coll = client[database][collection]
         if known_total_rows is not None:
             total = known_total_rows
         else:
             total = coll.count_documents({})
-        cursor = coll.find({}).sort("_id", 1)
+        cursor = coll.find({}, no_cursor_timeout=True).sort("_id", 1)
         try:
             cursor = cursor.batch_size(max(1, int(limit)))
         except Exception:

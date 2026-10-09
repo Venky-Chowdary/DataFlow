@@ -7,10 +7,12 @@ import type { CatalogConnector } from "../lib/api";
 import type { Connector } from "../lib/types";
 import { saveConnector, testConnection, updateConnector } from "../lib/api";
 import {
+  connectorListenPort,
   getConnectorDefaults,
   isAwsConnector,
   isGcpConnector,
   isGenericSql,
+  portInEndpointUrl,
   resolveCatalogIdToType,
 } from "../lib/connectorTypes";
 import {
@@ -200,6 +202,13 @@ export function ConnectorModal({
     }
   }, [isMongo, isSnowflake, authMode, connectionString, host, port, username, password, database, schema, warehouse, authRole, authSource, resolvedType]);
 
+  // An endpoint URL that names a port is the port the probe dials. Leaving the
+  // field at the AWS default made the saved preview say 443.
+  useEffect(() => {
+    const fromUrl = portInEndpointUrl(endpointUrl);
+    if (fromUrl > 0 && fromUrl !== port) setPort(fromUrl);
+  }, [endpointUrl, port]);
+
   const applyType = (nextType: string) => {
     const d = getConnectorDefaults(nextType);
     const cfg = getConnectorFormConfig(nextType);
@@ -313,7 +322,7 @@ export function ConnectorModal({
       name,
       type,
       host: isGcpConnector(resolvedType) ? "bigquery.googleapis.com" : isAwsConnector(resolvedType) ? host || "us-east-1" : host,
-      port: isGcpConnector(resolvedType) || isAwsConnector(resolvedType) ? 443 : port,
+      port: connectorListenPort(resolvedType, port, endpointUrl),
       database,
       schema: resolvedType === "bigquery" || resolvedType === "snowflake" ? schema : undefined,
       ssl,

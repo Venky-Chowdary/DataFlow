@@ -466,6 +466,16 @@ def _normalize_columns(info: dict[str, Any]) -> list[dict[str, Any]]:
     refuses SUM/AVG on NUMERIC and "by month" on DATE.
     """
     schema_map = info.get("schema") if isinstance(info.get("schema"), dict) else {}
+    # Object stores and keyspaces return the profile under ``column_types``.
+    # ``schema`` is the namespace string on those engines, so ignoring
+    # ``column_types`` stamped every column TEXT while integrity re-inferred
+    # DECIMAL from the same rows and blocked the route.
+    column_types = (
+        info.get("column_types") if isinstance(info.get("column_types"), dict) else {}
+    )
+    if column_types:
+        typed_map = {str(k): str(v) for k, v in column_types.items() if k}
+        schema_map = {**typed_map, **{str(k): str(v) for k, v in schema_map.items()}}
     nullability = (
         info.get("schema_nullability")
         if isinstance(info.get("schema_nullability"), dict)
@@ -926,12 +936,9 @@ def saved_connector_name(needle: str) -> str:
 
 
 def _connector_health(conn: dict[str, Any]) -> str:
-    ok = conn.get("last_test_ok")
-    if ok is True:
-        return "passed"
-    if ok is False:
-        return "failed"
-    return "untested"
+    from services.connector_store import connector_health
+
+    return connector_health(conn)
 
 
 def _connector_facts(conn: dict[str, Any]) -> dict[str, Any]:

@@ -293,6 +293,8 @@ _OPERATOR_COPY_PREFIXES = (
     "ssl/tls error",
     "the connection string format is invalid",
     "sftp authentication failed",
+    "sftp host key",
+    "sftp server ",
     "sftp path not found",
     "smtp authentication failed",
     "email recipient is invalid",
@@ -430,6 +432,19 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
             "Use Username & password, or a login URL with an encoded password "
             "(use %40 for @)."
         )
+
+    # SFTP host-key and preauth failures contain "key" / "authentication".
+    # The generic auth rewrite below would tell the operator to rotate a
+    # password that was never sent (DEF-A-001). The probe text already names
+    # the fingerprint or the preauth close.
+    if driver == "sftp" and re.search(
+        r"host key|not trusted|fingerprint|known_hosts|preauth|before authentication",
+        text,
+    ):
+        cleaned = " ".join(raw_s.split())
+        if len(cleaned) > 500:
+            cleaned = cleaned[:497] + "..."
+        return cleaned
 
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):

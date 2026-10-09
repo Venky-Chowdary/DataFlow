@@ -238,7 +238,18 @@ class MongoDBService:
             raise ConnectionError(
                 f"MongoDB unavailable at {self.connection_string}"
             )
-        return self.client[db_name or self.db_name]
+        name = db_name or self.db_name
+        # Decimal has no BSON wire. Profiling stats and numeric coercion put
+        # Decimal('1') on the job document, and insert_one then raises
+        # InvalidDocument before the transfer can start. The codec is the
+        # one carrier for every collection opened through this database.
+        from services.value_serializer import control_plane_codec_options
+
+        base = self.client[name]
+        return self.client.get_database(
+            name,
+            codec_options=control_plane_codec_options(base.codec_options),
+        )
 
     def test_connection(self) -> dict:
         """Test connection and return server info"""
@@ -468,6 +479,9 @@ class MongoDBService:
 
         # Pop fence flags before they leak onto the job document.
         allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
+        only_from_status = kwargs.pop("only_from_status", None)
+        # An operator cancel is a control-plane command, not worker progress.
+        operator_command = bool(kwargs.pop("operator_command", False))
 
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
         updates.update(kwargs)
@@ -519,6 +533,15 @@ class MongoDBService:
                 refuse_reason,
             )
             return False
+        only_from_allowed: set[str] | None = None
+        if only_from_status is not None:
+            only_from_allowed = {
+                str(item).strip().lower()
+                for item in only_from_status
+                if str(item or "").strip()
+            }
+            if str(previous_status or "").strip().lower() not in only_from_allowed:
+                return False
 
         try:
             from services.job_trust import attach_trust_to_updates
@@ -612,7 +635,9 @@ class MongoDBService:
 
         # Fencing: reject stale worker progress when lease_fence is provided.
         fence = updates.pop("lease_fence", None)
-        if fence is None:
+        if operator_command:
+            fence = None
+        elif fence is None:
             try:
                 from services.worker_leases import active_fence
 
@@ -620,19 +645,25 @@ class MongoDBService:
             except Exception:
                 fence = None
         filt: dict = dict(key)
+        if only_from_allowed is not None:
+            # Compare-and-set: a worker that already left the queue must not
+            # be cancelled by a schedule slot that only replaces queued work.
+            filt = {"$and": [filt, {"status": {"$in": sorted(only_from_allowed)}}]}
         if fence is not None:
             updates["lease_fence"] = fence
-            # Allow first write (no fence yet) or matching fence only. The key
-            # itself may already be an `$or`, so both go under `$and` rather
-            # than one silently replacing the other.
+            # Fencing tokens are monotonic: a newer lease supersedes the one
+            # the document last saw, and only a lower token is a stale
+            # writer. Equality-only froze a reclaimed job at the dead
+            # worker's progress. The key itself may already be an `$or`, so
+            # both go under `$and`.
             filt = {
                 "$and": [
-                    key,
+                    filt,
                     {
                         "$or": [
                             {"lease_fence": {"$exists": False}},
                             {"lease_fence": None},
-                            {"lease_fence": fence},
+                            {"lease_fence": {"$lte": fence}},
                         ]
                     },
                 ]
@@ -676,6 +707,12 @@ class MongoDBService:
                     quarantined=int(updates.get("rejected_rows") or (prev_doc or {}).get("rejected_rows") or 0),
                     reconcile_ok=reconcile_ok,
                 )
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            try:
+                from services.job_terminal_effects import apply_job_terminal_effects
+
+                apply_job_terminal_effects(job_id, status)
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return ok
@@ -1039,6 +1076,45 @@ class MongoDBService:
             jobs.append(slim_job_for_list(doc))
         return jobs
 
+    def list_unfinished_jobs(self, limit: int = 500) -> list[dict]:
+        """Every non-terminal job across workspaces, oldest heartbeat first.
+
+        Unlike :meth:`list_jobs` this keeps ``transfer_request`` and the
+        checkpoint, which resume needs, and is not a page of recent jobs.
+        """
+        from services.job_status import UNFINISHED_JOB_STATUSES
+
+        try:
+            db = self.get_database()
+        except ConnectionError:
+            return []
+        projection = {
+            "rejected_details": 0,
+            "logs": 0,
+            "log_lines": 0,
+            "events": 0,
+            "event_log": 0,
+            "mapping_proof": 0,
+            "sample_rows": 0,
+            "preview_rows": 0,
+            "quarantine_rows": 0,
+            "quarantine_samples": 0,
+            "preflight": 0,
+            "destination_summary.rejected_details": 0,
+            "destination_summary.sample_rows": 0,
+        }
+        out: list[dict] = []
+        cursor = (
+            db["transfer_jobs"]
+            .find({"status": {"$in": sorted(UNFINISHED_JOB_STATUSES)}}, projection)
+            .sort("updated_at", 1)
+            .limit(max(1, int(limit)))
+        )
+        for doc in cursor:
+            doc["_id"] = str(doc["_id"])
+            out.append(doc)
+        return out
+
 
 class MemoryMongoDBService:
     """In-memory fallback for tests and DATAFLOW_JOB_STORE=memory.
@@ -1230,7 +1306,11 @@ class MemoryMongoDBService:
         return oid
 
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
+        only_from_status = kwargs.pop("only_from_status", None)
+        operator_command = bool(kwargs.pop("operator_command", False))
         rec = self._jobs.get(job_id)
+        if only_from_status is not None and rec is None:
+            return False
         if not rec:
             # Fail-closed resume requires a job shell — mint one for programmatic
             # execute_tracked(job_id=…) callers (memory store / tests / CLI).
@@ -1256,8 +1336,18 @@ class MemoryMongoDBService:
                 refuse_reason,
             )
             return False
+        if only_from_status is not None:
+            allowed = {
+                str(item).strip().lower()
+                for item in only_from_status
+                if str(item or "").strip()
+            }
+            if str(previous_status or "").strip().lower() not in allowed:
+                return False
         fence = kwargs.pop("lease_fence", None)
-        if fence is None:
+        if operator_command:
+            fence = None
+        elif fence is None:
             try:
                 from services.worker_leases import active_fence
 
@@ -1266,7 +1356,7 @@ class MemoryMongoDBService:
                 fence = None
         if fence is not None:
             existing_fence = rec.get("lease_fence")
-            if existing_fence is not None and existing_fence != fence:
+            if existing_fence is not None and int(existing_fence) > int(fence):
                 return False
             kwargs["lease_fence"] = fence
 
@@ -1380,6 +1470,12 @@ class MemoryMongoDBService:
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        try:
+            from services.job_terminal_effects import apply_job_terminal_effects
+
+            apply_job_terminal_effects(job_id, status)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return True
 
     def request_job_cancel(self, job_id: str) -> bool:
@@ -1489,6 +1585,19 @@ class MemoryMongoDBService:
                     job[key] = job[key].isoformat()
             out.append(slim_job_for_list(job))
         return out
+
+    def list_unfinished_jobs(self, limit: int = 500) -> list[dict]:
+        from services.job_status import UNFINISHED_JOB_STATUSES
+
+        items = [
+            dict(rec)
+            for rec in self._jobs.values()
+            if str(rec.get("status") or "") in UNFINISHED_JOB_STATUSES
+        ]
+        items.sort(key=lambda j: str(j.get("updated_at") or ""))
+        for job in items:
+            job["_id"] = str(job["_id"])
+        return items[: max(1, int(limit))]
 
 
 # Global instance

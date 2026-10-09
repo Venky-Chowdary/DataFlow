@@ -77,6 +77,17 @@ def transform_fidelity(transform: str | None) -> str:
     return "mutate"
 
 
+def _mapping_population(mapping: dict, population: list | None) -> list | None:
+    """Measured cells for this column, or None when nobody sampled it."""
+    if population is not None:
+        return list(population)
+    for key in ("samples", "sample_values", "preview_values"):
+        raw = mapping.get(key)
+        if isinstance(raw, (list, tuple)) and raw:
+            return list(raw)[:256]
+    return None
+
+
 def mapping_fidelity(
     mapping: dict,
     *,
@@ -84,6 +95,7 @@ def mapping_fidelity(
     declared_target_type: str = "",
     destination_db_type: str = "",
     dest_table_exists: bool | None = None,
+    population: list | None = None,
 ) -> dict[str, object]:
     """Canonical per-column fidelity verdict for one mapping.
 
@@ -218,6 +230,7 @@ def mapping_fidelity(
         tgt_type,
         dest_db=dest,
         dest_table_exists=dest_table_exists,
+        population=_mapping_population(mapping, population),
     ):
         from services.conversion_contract import classify_conversion
 
@@ -292,6 +305,7 @@ def stamp_mapping_fidelity(
     target_types: dict[str, str] | None = None,
     destination_db_type: str = "",
     dest_table_exists: bool | None = None,
+    samples_by_source: dict[str, list] | None = None,
 ) -> list[dict]:
     """Attach the canonical verdict to every mapping, in place of guessing.
 
@@ -303,12 +317,17 @@ def stamp_mapping_fidelity(
     tgt_declared = target_types or {}
     out: list[dict] = []
     for m in mappings:
+        source_name = str(m.get("source") or "")
+        sampled = None
+        if samples_by_source is not None and source_name in samples_by_source:
+            sampled = list(samples_by_source[source_name])
         verdict = mapping_fidelity(
             m,
-            declared_source_type=str(src_declared.get(str(m.get("source") or "")) or ""),
+            declared_source_type=str(src_declared.get(source_name) or ""),
             declared_target_type=str(tgt_declared.get(str(m.get("target") or "")) or ""),
             destination_db_type=destination_db_type,
             dest_table_exists=dest_table_exists,
+            population=sampled,
         )
         out.append({
             **m,
@@ -987,6 +1006,38 @@ def mapping_proof_or_build(
     )
 
 
+def mappings_from_request(request: Any) -> list[dict[str, Any]]:
+    """Mappings this run applies.
+
+    A single-table request stores them on the request. A multi-table request
+    stores them on each selected stream contract and leaves the top-level list
+    empty. The top-level list wins when it is non-empty so a contract draft
+    cannot hide an explicit map. Each contract row keeps its stream name.
+    """
+    if isinstance(request, dict):
+        top = request.get("mappings")
+        contracts = request.get("stream_contracts")
+    else:
+        top = getattr(request, "mappings", None)
+        contracts = getattr(request, "stream_contracts", None)
+    rows = [dict(item) for item in (top or []) if isinstance(item, dict)]
+    if rows:
+        return rows
+    out: list[dict[str, Any]] = []
+    for contract in contracts or []:
+        if not isinstance(contract, dict) or contract.get("selected") is False:
+            continue
+        stream = str(contract.get("name") or contract.get("stream") or "").strip()
+        for raw in contract.get("mappings") or []:
+            if not isinstance(raw, dict):
+                continue
+            row = dict(raw)
+            if stream and not str(row.get("stream") or "").strip():
+                row["stream"] = stream
+            out.append(row)
+    return out
+
+
 def build_mapping_proof(
     mappings: list[dict],
     *,
@@ -1115,6 +1166,9 @@ def build_mapping_proof(
             "sample_preview": evidence.get("sample_preview") or [],
             "sample_preview_clear": evidence.get("sample_preview_clear") or [],
         })
+        stream_name = str(m.get("stream") or "").strip()
+        if stream_name:
+            rows[-1]["stream"] = stream_name
 
     # Unique global risks by code+message
     seen_g: set[str] = set()

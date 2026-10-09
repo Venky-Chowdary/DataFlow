@@ -178,18 +178,37 @@ export type LineageEventView = {
   summary: string;
 };
 
-export function readJobLineage(events: LineageEvent[] | null | undefined): LineageEventView[] {
+export function readJobLineage(
+  events: LineageEvent[] | null | undefined,
+  options?: { checksumScope?: string | null },
+): LineageEventView[] {
   if (!Array.isArray(events)) return [];
+  const lastStream = String(options?.checksumScope || "").toLowerCase() === "last_stream";
   return events
     .filter((e): e is LineageEvent => Boolean(e) && typeof e === "object")
     .map((event) => {
       const payload = event.payload && typeof event.payload === "object" ? event.payload : {};
       const eventType = text(event.event_type) || "event";
+      const reconcile = eventType === "reconciliation";
       const parts: string[] = [];
-      if (payload.source_count != null) parts.push(`src ${payload.source_count}`);
-      if (payload.target_count != null) parts.push(`dest ${payload.target_count}`);
+      if (payload.source_count != null) {
+        parts.push(
+          lastStream && reconcile
+            ? `last stream src ${payload.source_count}`
+            : `src ${payload.source_count}`,
+        );
+      }
+      if (payload.target_count != null) {
+        parts.push(
+          lastStream && reconcile
+            ? `last stream dest ${payload.target_count}`
+            : `dest ${payload.target_count}`,
+        );
+      }
       if (payload.quarantine_count != null) parts.push(`q ${payload.quarantine_count}`);
-      if (payload.checksum_ok === true) parts.push("checksum ok");
+      if (payload.checksum_ok === true) {
+        parts.push(lastStream && reconcile ? "last stream checksum ok" : "checksum ok");
+      }
       if (payload.checksum_ok === false) parts.push("checksum mismatch");
       if (payload.cdc_lag_seconds != null) parts.push(`lag ${payload.cdc_lag_seconds}s`);
       if (payload.cdc_lag_basis) parts.push(String(payload.cdc_lag_basis));

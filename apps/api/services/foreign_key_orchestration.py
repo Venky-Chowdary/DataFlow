@@ -25,6 +25,7 @@ from services.foreign_key_carry import (
     plan_foreign_keys,
     verify_foreign_keys,
 )
+from services.foreign_key_identity import same_parent_table, select_job_table
 from services.foreign_key_metadata import (
     SUPPORTED_DIALECTS,
     ForeignKeys,
@@ -85,15 +86,28 @@ def measure_source_foreign_keys(
 def dependency_order(
     tables: list[str], source_keys: dict[str, ForeignKeys]
 ) -> tuple[list[str], list[str]]:
-    """Order the selected tables parents-first. Returns (order, cycle members)."""
-    dependencies = {
-        table: {
-            fk.referenced_table
-            for fk in keys.items
-            if fk.referenced_table and fk.referenced_table.lower() != table.lower()
-        }
-        for table, keys in source_keys.items()
-    }
+    """Order the selected tables parents-first. Returns (order, cycle members).
+
+    An edge is the selected stream :func:`select_job_table` resolves, not the
+    parent's leaf name. ``archive.customers`` is not the local ``customers``
+    table. A self-reference is not an edge to a second table. An unqualified
+    name that matches two selected relations is left unordered rather than
+    bound to one of them.
+    """
+    dependencies: dict[str, set[str]] = {}
+    for table, keys in source_keys.items():
+        deps: set[str] = set()
+        for fk in keys.items:
+            parent = select_job_table(
+                fk.referenced_schema,
+                fk.referenced_table,
+                tables,
+                job_schema=keys.schema,
+            )
+            if parent is None or same_parent_table(parent, table):
+                continue
+            deps.add(parent)
+        dependencies[table] = deps
     return order_tables_by_dependency(tables, dependencies)
 
 
@@ -114,6 +128,35 @@ def _destination_tables(engine: Any, dialect: str, schema: str) -> set[str] | No
     except Exception as exc:  # noqa: BLE001 — unreadable catalog is a state
         logger.debug("destination table list failed on %s: %s", dialect, exc)
         return None
+
+
+def _parent_schemas_on_destination(
+    engine: Any,
+    dialect: str,
+    source_keys: dict[str, ForeignKeys],
+    job_schema: str,
+) -> dict[str, set[str] | None] | None:
+    """Tables in each parent schema that is not the job schema.
+
+    The job-schema list cannot answer for those parents. ``None`` for a schema
+    means that list was not read.
+    """
+    job = (job_schema or "").strip().casefold()
+    schemas: list[str] = []
+    seen: set[str] = set()
+    for keys in source_keys.values():
+        for fk in getattr(keys, "items", ()) or ():
+            schema = str(getattr(fk, "referenced_schema", "") or "").strip()
+            folded = schema.casefold()
+            if not schema or (job and folded == job) or folded in seen:
+                continue
+            seen.add(folded)
+            schemas.append(schema)
+    if not schemas:
+        return None
+    return {
+        schema: _destination_tables(engine, dialect, schema) for schema in schemas
+    }
 
 
 def carry_foreign_keys(
@@ -159,6 +202,9 @@ def carry_foreign_keys(
         ]
 
     known = _destination_tables(engine, dest_dialect, catalog_ns)
+    by_schema = _parent_schemas_on_destination(
+        engine, dest_dialect, source_keys, catalog_ns
+    )
     for source_table, keys in source_keys.items():
         dest_table = table_map.get(source_table, source_table)
         plan = plan_foreign_keys(
@@ -166,10 +212,13 @@ def carry_foreign_keys(
             dest_dialect=dest_dialect,
             dest_schema=qual_schema,
             dest_table=dest_table,
+            source_table=source_table,
+            source_schema=keys.schema,
             dest_columns=dest_columns.get(source_table, []),
             column_map=column_maps.get(source_table, {}),
             table_map=table_map,
             dest_existing_tables=known,
+            dest_tables_by_schema=by_schema,
             referenced_column_maps=column_maps,
             cycle_tables=cycle_tables,
         )
@@ -184,11 +233,33 @@ def carry_foreign_keys(
         else:
             settled = list(plan.decisions)
         if any(d.status == "planned" for d in settled):
+            from services.foreign_key_metadata import (
+                _dialect_key,
+                read_snowflake_index_proof,
+                read_snowflake_table_kind,
+            )
+
+            table_kind = ""
+            index_status = ""
+            index_detail = ""
             with engine.connect() as conn:
                 dest_keys = probe_foreign_keys(
                     dest_dialect, conn, catalog_ns, dest_table
                 )
-            settled = verify_foreign_keys(settled, dest_keys)
+                if _dialect_key(dest_dialect) == "snowflake":
+                    table_kind = read_snowflake_table_kind(
+                        conn, catalog_ns, dest_table
+                    )
+                    index_status, index_detail = read_snowflake_index_proof(
+                        conn, catalog_ns, dest_table
+                    )
+            settled = verify_foreign_keys(
+                settled,
+                dest_keys,
+                table_kind=table_kind,
+                index_status=index_status,
+                index_detail=index_detail,
+            )
         decisions.extend(settled)
 
     return [{"table": d.dest_table, **d.__dict__} for d in decisions]
@@ -205,18 +276,26 @@ def summarize(
         counts[status] = counts.get(status, 0) + 1
     violations = [d for d in decisions if d.get("integrity_violation")]
     resolution = classify_cycle_resolution(cycle, decisions)
-    verdict = (
-        "referential_integrity_violated"
-        if violations
-        else (
-            "carried"
-            if counts.get("carried")
-            and not counts.get("unsupported")
-            and not counts.get("unknown")
-            and resolution["resolved"]
-            else "partial"
-        )
+    carried_n = counts.get("carried", 0)
+    open_findings = (
+        counts.get("unsupported", 0)
+        + counts.get("unknown", 0)
+        + counts.get("planned", 0)
     )
+    if violations:
+        verdict = "referential_integrity_violated"
+    elif carried_n and not open_findings and resolution["resolved"]:
+        verdict = "carried"
+    elif (
+        not carried_n
+        and not open_findings
+        and counts.get("skipped")
+        and resolution["resolved"]
+    ):
+        # Every table was measured and none declared a foreign key.
+        verdict = "none"
+    else:
+        verdict = "partial"
     out: dict[str, Any] = {
         "decisions": decisions,
         "counts": counts,

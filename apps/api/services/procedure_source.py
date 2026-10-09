@@ -96,6 +96,40 @@ _SELECT_FUNC_RE = re.compile(
     rf"^\s*SELECT\s+\*\s+FROM\s+({_QUALIFIED})\s*\((.*)\)\s*;?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_SOURCE_QUERY_RE = re.compile(
+    r"^\s*(SELECT|WITH|VALUES)\b",
+    re.IGNORECASE,
+)
+_DEST_DML_RE = re.compile(
+    r"^\s*(INSERT|MERGE|UPDATE|UPSERT|REPLACE)\b",
+    re.IGNORECASE,
+)
+
+
+def leading_statement_kind(text: str) -> str:
+    """``procedure`` | ``query`` | ``dest_dml`` | ``""``.
+
+    The first statement after comments, using the same shapes the parsers
+    already accept. A PostgreSQL ``SELECT * FROM schema.fn(...)`` is a
+    procedure. A general SELECT/WITH is a source extract. INSERT/MERGE is a
+    destination write. Unrecognized text returns ``""`` so the declared mode
+    stays in charge and the parser can refuse it in its own words.
+    """
+    stripped = _strip_comments(text)
+    if not stripped:
+        return ""
+    if _DDL_DEFINITION.match(stripped):
+        return ""
+    if _SELECT_FUNC_RE.match(stripped) or _CALL_RE.match(stripped) or _EXEC_RE.match(stripped):
+        return "procedure"
+    if _SOURCE_QUERY_RE.match(stripped):
+        return "query"
+    if _DEST_DML_RE.match(stripped):
+        return "dest_dml"
+    if _BARE_IDENT_RE.match(stripped):
+        return "procedure"
+    return ""
+
 
 _DENIED_NAME_PREFIXES = (
     "xp_",
@@ -1145,11 +1179,22 @@ def _execute_live(
 
     engine = None
     conn = None
+    description = None
     try:
         engine, conn, result, headers = _open_callable_result(cfg, spec, peek=limit is not None)
+        description = _copy_cursor_description(result)
         cap = int(limit) if limit is not None else None
         fetched = result.fetchmany(cap) if cap is not None else result.fetchall()
         rows = [[_cell(v) for v in row] for row in fetched]
+        # The type lookup is a second statement. Close the extract first, or
+        # PostgreSQL rejects it while that cursor is still open.
+        try:
+            result.close()
+        except Exception:
+            pass
+        description = _describe_resolved(
+            conn, description, spec.dialect or str(cfg.get("type") or "")
+        )
     except ProcedureSourceError:
         raise
     except Exception as exc:
@@ -1161,6 +1206,7 @@ def _execute_live(
             release_engine(engine)
 
     schema, _intel = peek_callable_schema(headers, rows)
+    schema = _overlay_declared_numerics(headers, description, schema)
     return headers, rows, schema
 
 
@@ -1176,8 +1222,10 @@ def _execute_to_jsonl(
     conn = None
     sample: list[list[str]] = []
     total = 0
+    description = None
     try:
         engine, conn, result, headers = _open_callable_result(cfg, spec, peek=False)
+        description = _copy_cursor_description(result)
         with path.open("w", encoding="utf-8") as fh:
             while True:
                 chunk = result.fetchmany(2_000)
@@ -1197,6 +1245,13 @@ def _execute_to_jsonl(
                     )
                     fh.write("\n")
                     total += 1
+        try:
+            result.close()
+        except Exception:
+            pass
+        description = _describe_resolved(
+            conn, description, spec.dialect or str(cfg.get("type") or "")
+        )
     except ProcedureSourceError:
         raise
     except Exception as exc:
@@ -1208,7 +1263,51 @@ def _execute_to_jsonl(
             release_engine(engine)
 
     schema, _intel = peek_callable_schema(headers, sample)
+    schema = _overlay_declared_numerics(headers, description, schema)
     return headers, total, schema
+
+
+def _describe_resolved(conn: Any, description: tuple | None, dialect: str) -> tuple | None:
+    """Name custom enum and array OIDs from pg_type while the connection is open.
+
+    Call this only after the extract result has been consumed. A second
+    statement on a live PostgreSQL cursor cancels that result.
+    """
+    from services.decimal_observe import annotate_unresolved_pg_types
+
+    return annotate_unresolved_pg_types(conn, description, dialect=dialect)
+
+
+def _copy_cursor_description(result: Any) -> tuple | None:
+    """Snapshot PEP 249 description before the connection is closed."""
+    raw = getattr(getattr(result, "cursor", None), "description", None)
+    if not raw:
+        return None
+    copied = []
+    for col in raw:
+        if col is None:
+            copied.append(None)
+            continue
+        copied.append(tuple(col))
+    return tuple(copied)
+
+
+def _overlay_declared_numerics(
+    headers: list[str],
+    description: Any,
+    schema: dict[str, str],
+) -> dict[str, str]:
+    """Driver type and precision win over the sample envelope.
+
+    ``CAST(col AS DATE)`` and a MariaDB text column are in the cursor
+    description. Guessing from the peeked rows rewrote both.
+    """
+    from services.decimal_observe import cursor_declared_carriers
+
+    declared = cursor_declared_carriers(headers, description)
+    if not declared:
+        return schema
+    return {**schema, **declared}
 
 
 def _apply_timeout(conn: Any, dialect: str, timeout_s: int) -> None:

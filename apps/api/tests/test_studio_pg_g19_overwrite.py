@@ -116,9 +116,12 @@ def test_studio_pg_overwrite_g19_blocks_and_dest_stays_integer(monkeypatch):
             f"g19-{tag}",
         )
         assert result.success is False, result.error
-        assert "g19" in (result.error or "").lower() or "replace" in (
-            result.error or ""
-        ).lower(), result.error
+        # The INTEGER column stays, so the refusal is the live narrowing,
+        # not a G19 "we will replace this column" block.
+        err = (result.error or "").lower()
+        assert any(
+            token in err for token in ("int4", "integer", "fidelity", "narrow")
+        ), result.error
 
         with pg.cursor() as cur:
             cur.execute(

@@ -20,9 +20,13 @@ compare like for like.
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
+from services.dialect_profiles import normalize_driver
+from services.fk_tuple_scan import normalize_match
 from services.physical_storage_metadata import as_driver_cursor
 
 logger = logging.getLogger(__name__)
@@ -57,6 +61,20 @@ class ForeignKey:
     referenced_columns: list[str]
     on_delete: str = ""
     on_update: str = ""
+    #: True when the catalog records that existing rows were checked.
+    #: False when it records that they were not (PostgreSQL NOT VALID,
+    #: SQL Server untrusted or disabled, Oracle NOT VALIDATED).
+    #: None when this dialect has no separate validation bit.
+    validated: bool | None = None
+    #: ``""`` when the catalog did not name a match type. ``simple``,
+    #: ``full``, ``partial``, and ``unknown`` are :func:`normalize_match`.
+    match: str = ""
+    #: ``""`` when this read did not name a deferral mode.
+    #: ``not_deferrable``, ``immediate``, ``deferred``, and ``unknown`` are
+    #: :func:`normalize_deferral`. The relationship identity does not include
+    #: it: NOT DEFERRABLE and INITIALLY DEFERRED are one relationship with
+    #: two check times.
+    deferral: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -102,6 +120,156 @@ def normalize_action(action: str | None) -> str:
     return text if text in KNOWN_ACTIONS else text
 
 
+def _as_bool(value: Any) -> bool | None:
+    """A catalog boolean, or None when the value is not a yes/no bit."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().casefold()
+    if text in {"1", "t", "true", "y", "yes"}:
+        return True
+    if text in {"0", "f", "false", "n", "no"}:
+        return False
+    return None
+
+
+def _deferral_spelling(value: Any) -> str:
+    """One deferral token. ``""`` when this read did not name a mode."""
+    if value is None:
+        return ""
+    text = " ".join(str(value).strip().casefold().replace("_", " ").split())
+    if not text or text == "unreported":
+        return ""
+    if text in {"not deferrable", "nondeferrable", "non deferrable"}:
+        return "not_deferrable"
+    if text in {"immediate", "initially immediate", "deferrable initially immediate"}:
+        return "immediate"
+    if text in {"deferred", "initially deferred", "deferrable initially deferred"}:
+        return "deferred"
+    if text == "deferrable":
+        return "immediate"
+    if text == "unknown":
+        return "unknown"
+    if "not deferrable" in text:
+        rest = text.replace("not deferrable", " ")
+        if "deferrable" in rest:
+            return "unknown"
+        return "not_deferrable"
+    if "initially deferred" in text or text.endswith(" deferred"):
+        return "deferred"
+    if "deferrable" in text or "initially immediate" in text:
+        return "immediate"
+    return "unknown"
+
+
+def _deferral_pair(deferrable: Any, initially_deferred: Any) -> str | None:
+    """Postgres ``condeferrable``/``condeferred`` or Oracle DEFERRABLE/DEFERRED."""
+    defer_text = "" if deferrable is None else str(deferrable).strip()
+    initial_text = "" if initially_deferred is None else str(initially_deferred).strip()
+    if not defer_text and not initial_text and deferrable is None and initially_deferred is None:
+        return ""
+    if not defer_text and not initial_text:
+        return ""
+    flag = _as_bool(deferrable)
+    initial = _as_bool(initially_deferred)
+    folded_defer = " ".join(defer_text.casefold().replace("_", " ").split())
+    folded_initial = " ".join(initial_text.casefold().replace("_", " ").split())
+    if folded_defer in {"not deferrable", "non deferrable"}:
+        if folded_initial in {"deferred", "initially deferred"} or initial is True:
+            return "unknown"
+        return "not_deferrable"
+    if flag is False:
+        if initial is True or folded_initial in {"deferred", "initially deferred"}:
+            return "unknown"
+        return "not_deferrable"
+    if folded_defer == "deferrable" or flag is True:
+        if initial is True or folded_initial in {"deferred", "initially deferred"}:
+            return "deferred"
+        return "immediate"
+    return None
+
+
+def normalize_deferral(
+    deferrable: Any = None,
+    initially_deferred: Any = None,
+    *,
+    spelling: Any = None,
+) -> str:
+    """Catalog deferral mode.
+
+    ``""`` when this read did not name one. ``not_deferrable`` checks at the
+    end of the statement and cannot be postponed. ``immediate`` is DEFERRABLE
+    INITIALLY IMMEDIATE (including bare DEFERRABLE, whose SQL default is
+    IMMEDIATE). ``deferred`` is DEFERRABLE INITIALLY DEFERRED. ``unknown`` is
+    a pair or a spelling this rule does not recognize, including a constraint
+    that is both deferred and not deferrable.
+    """
+    if deferrable is None and initially_deferred is None:
+        return _deferral_spelling(spelling)
+    parsed = _deferral_pair(deferrable, initially_deferred)
+    if parsed is not None:
+        return parsed
+    if spelling is not None:
+        return _deferral_spelling(spelling)
+    return "unknown"
+
+
+def deferral_label(mode: str) -> str:
+    """Operator name for a deferral mode. Unreported is the SQL default."""
+    kind = normalize_deferral(spelling=mode)
+    if kind == "deferred":
+        return "DEFERRABLE INITIALLY DEFERRED"
+    if kind == "immediate":
+        return "DEFERRABLE INITIALLY IMMEDIATE"
+    if kind == "unknown":
+        return "an unreadable deferral mode"
+    if kind == "not_deferrable":
+        return "NOT DEFERRABLE"
+    return "NOT DEFERRABLE (unreported)"
+
+
+def deferral_modes_agree(planned: str, measured: str) -> bool:
+    """True when the destination checks at the same time as the source.
+
+    Unreported is NOT DEFERRABLE, the SQL default. Neither direction is a
+    stricter rule that still keeps the promise. A destination that can
+    postpone the check accepts a state the source would reject at the
+    statement. A destination that cannot postpone rejects an intermediate
+    state the source accepts until commit.
+    """
+    want = normalize_deferral(spelling=planned) or "not_deferrable"
+    got = normalize_deferral(spelling=measured) or "not_deferrable"
+    if want == "unknown" or got == "unknown":
+        return False
+    return want == got
+
+
+def deferral_disagreement(planned: str, measured: str) -> str:
+    """Why the destination deferral mode does not keep the source rule.
+
+    Empty when :func:`deferral_modes_agree` is true. An unreported mode is
+    NOT DEFERRABLE. ``unknown`` means the catalog named two modes, or a pair
+    that cannot exist, so the rule was not certified.
+    """
+    want = normalize_deferral(spelling=planned)
+    got = normalize_deferral(spelling=measured)
+    if want == "unknown" or got == "unknown":
+        return (
+            "Foreign key deferral mode could not be read, so the "
+            "relationship was not certified."
+        )
+    if deferral_modes_agree(planned, measured):
+        return ""
+    return (
+        f"Destination checks this relationship as {deferral_label(measured)}; "
+        f"the source rule is {deferral_label(planned)}. "
+        "A different deferral mode is not the source rule."
+    )
+
+
 def _rows(cursor: Any, sql: str, params: tuple | dict) -> list[tuple]:
     cursor.execute(sql, params)
     return list(cursor.fetchall() or [])
@@ -118,17 +286,985 @@ def _rows_any_paramstyle(cursor: Any, sql: str, params: tuple) -> list[tuple]:
     raise last if last else RuntimeError("no paramstyle attempted")
 
 
+def coerce_validated(value: Any) -> bool | None:
+    """The catalog's existing-row bit, or None when this value does not say.
+
+    ``NOT VALIDATED`` is checked before ``VALIDATED`` so the longer Oracle
+    spelling is not read as a yes.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"", "none"}:
+        return None
+    if text in {"0", "f", "false", "no", "not validated", "not_validated"}:
+        return False
+    if text in {"1", "t", "true", "yes", "validated"}:
+        return True
+    return None
+
+
+# These catalogs record whether existing rows were checked. MySQL and SQLite
+# do not: the constraint itself is the check they report.
+_VALIDATION_BIT_DIALECTS = frozenset(
+    {"postgresql", "sqlserver", "mssql", "oracle"}
+)
+
+# These engines store a primary key, a unique constraint, and a foreign key
+# and do not check rows against them. The object is planner metadata.
+# A stored bit cannot override that: there is no check to report.
+# Redshift: never enforced.
+# BigQuery: only NOT ENFORCED is supported.
+# Databricks: primary, foreign, and unique keys are informational.
+# Snowflake: not enforced on a standard table. A hybrid table does enforce
+# them. INFORMATION_SCHEMA.TABLES.IS_HYBRID is the measurement (YES or NO).
+# SHOW TABLES is_hybrid is the same fact as a boolean. The dialect string
+# is not that column. An unreported kind stays unenforced. The orphan scan
+# still runs until the kind is hybrid, and a carried unique on a standard
+# table is not a duplicate-row count.
+_INFORMATIONAL_KEY_DIALECTS = frozenset(
+    {"redshift", "snowflake", "bigquery", "databricks"}
+)
+_UNENFORCED_FK_DIALECTS = _INFORMATIONAL_KEY_DIALECTS
+
+# Hosted Databricks names that are this engine. Hive, Spark, and Flink are
+# not in this set. ``databricks_sql`` is already folded by normalize_driver.
+_DATABRICKS_FAMILY = frozenset(
+    {
+        "databricks",
+        "databricks_azure",
+        "databricks_aws",
+        "databricks_gcp",
+        "unity_catalog",
+    }
+)
+
+
+def _dialect_key(dialect: str) -> str:
+    """Engine family for the row-proof rule.
+
+    Hosted twins use the family their copy path already names, so
+    ``snowflake_aws`` and ``google_bigquery`` are not a second rule.
+    """
+    key = normalize_driver(dialect)
+    if key == "postgres":
+        key = "postgresql"
+    from services.copy_bigquery_common import bigquery_family_name
+    from services.copy_snowflake_common import snowflake_family_name
+
+    key = snowflake_family_name(key)
+    key = bigquery_family_name(key)
+    if key in _DATABRICKS_FAMILY:
+        return "databricks"
+    return key
+
+
+def normalize_snowflake_table_kind(value: Any) -> str:
+    """Measured Snowflake table kind. Empty when this read did not say.
+
+    ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` is ``YES`` or ``NO``.
+    ``SHOW TABLES`` ``is_hybrid`` is a boolean. A dialect name, a constraint
+    ``ENFORCED`` flag, and ``TABLE_TYPE`` (``BASE TABLE`` for both kinds)
+    are not this value. An unrecognized spelling stays unreported.
+    """
+    if value is True:
+        return "hybrid"
+    if value is False:
+        return "standard"
+    if value is None:
+        return ""
+    text = str(value).strip().lower()
+    if text in {"hybrid", "yes", "y", "true"}:
+        return "hybrid"
+    if text in {"standard", "no", "n", "false"}:
+        return "standard"
+    if text == "iceberg":
+        return "iceberg"
+    if text == "dynamic":
+        return "dynamic"
+    if text in {"immutable", "read only", "readonly"}:
+        return "immutable"
+    return ""
+
+
+def _snowflake_flag_yes(value: Any) -> bool:
+    """True for the documented ``YES`` flag and a boolean true."""
+    if value is True:
+        return True
+    text = str(value or "").strip().lower()
+    return text in {"yes", "y", "true"}
+
+
+def snowflake_table_kind_from_row(row: Any) -> str:
+    """Kind from one ``INFORMATION_SCHEMA.TABLES`` row.
+
+    Four cells are ``IS_HYBRID``, ``IS_ICEBERG``, ``IS_DYNAMIC``,
+    ``IS_IMMUTABLE``. One cell is the hybrid-only read. Hybrid wins when
+    ``IS_HYBRID`` is ``YES``, because that is the table that enforces keys.
+    Iceberg, dynamic, and read-only tables do not.
+    """
+    if row is None:
+        return ""
+    if not isinstance(row, (tuple, list)):
+        return normalize_snowflake_table_kind(row)
+    cells = list(row)
+    if len(cells) == 1:
+        return normalize_snowflake_table_kind(cells[0])
+    if len(cells) < 4:
+        return ""
+    hybrid, iceberg, dynamic, immutable = cells[:4]
+    if _snowflake_flag_yes(hybrid):
+        return "hybrid"
+    if _snowflake_flag_yes(iceberg):
+        return "iceberg"
+    if _snowflake_flag_yes(dynamic):
+        return "dynamic"
+    if _snowflake_flag_yes(immutable):
+        return "immutable"
+    if normalize_snowflake_table_kind(hybrid) == "standard":
+        return "standard"
+    return ""
+
+
+def _snowflake_measured_kind_reason(kind: str, *, foreign_key: bool) -> str:
+    """Sentence for a measured non-hybrid Snowflake table. Empty when unreported."""
+    if foreign_key:
+        stored = "Destination stores this foreign key and does not enforce it. "
+        proof = "The catalog fact is not proof the loaded rows match."
+    else:
+        stored = (
+            "Destination stores this primary key or unique constraint and "
+            "does not enforce it. "
+        )
+        proof = "The catalog object is not proof the loaded rows are unique."
+    if kind == "standard":
+        return (
+            stored
+            + "INFORMATION_SCHEMA.TABLES.IS_HYBRID is NO, so this standard "
+            "table keeps the key for the planner. "
+            + proof
+        )
+    if kind == "iceberg":
+        return (
+            stored
+            + "INFORMATION_SCHEMA.TABLES.IS_ICEBERG is YES. An Iceberg table "
+            "keeps the key for the planner. "
+            + proof
+        )
+    if kind == "dynamic":
+        return (
+            stored
+            + "INFORMATION_SCHEMA.TABLES.IS_DYNAMIC is YES. A dynamic table "
+            "is a pipeline result, and its key is planner metadata. "
+            + proof
+        )
+    if kind == "immutable":
+        return (
+            stored
+            + "INFORMATION_SCHEMA.TABLES.IS_IMMUTABLE is YES. A read-only "
+            "table still does not prove the stored rows with this key. "
+            + proof
+        )
+    return ""
+
+
+def informational_key_engine(dialect: str) -> bool:
+    """True when this engine stores PK, UNIQUE, and FK and does not check rows.
+
+    Snowflake hybrid tables do enforce those keys. The dialect name does not
+    say the table is hybrid. :func:`normalize_snowflake_table_kind` is the
+    catalog fact that does.
+    """
+    return _dialect_key(dialect) in _INFORMATIONAL_KEY_DIALECTS
+
+
+def normalize_snowflake_index_status(value: Any) -> str:
+    """``SHOW INDEXES`` status, or empty when this cell was not a known status.
+
+    ``ACTIVE`` is the only status that proves rows already stored.
+    ``BUILD IN PROGRESS`` is still building. ``BUILD FAILURE`` and
+    ``BUILD VALIDATION FAILURE`` mean the build did not validate existing
+    rows. ``SUSPENDED`` is not a completed check. New writes can still be
+    rejected while the status is a validation failure.
+    """
+    text = " ".join(str(value or "").strip().upper().split())
+    if text == "ACTIVE":
+        return "active"
+    if text in {"BUILD IN PROGRESS", "BUILDING"}:
+        return "building"
+    if text in {"BUILD VALIDATION FAILURE", "BUILD FAILURE", "FAILED"}:
+        return "failed"
+    if text == "SUSPENDED":
+        return "suspended"
+    return ""
+
+
+def snowflake_index_proof_gap(index_status: str) -> str:
+    """Existing-row gap from one summarized ``SHOW INDEXES`` status.
+
+    Empty only for ``ACTIVE``. A failed or suspended index was measured and
+    is not that proof. Any other spelling, including an unread command, stays
+    unreported.
+    """
+    status = normalize_snowflake_index_status(index_status)
+    if status == "active":
+        return ""
+    if status in {"failed", "suspended"}:
+        return "not_checked"
+    return "unreported"
+
+
+def _snowflake_index_status_reason(index_status: str, *, foreign_key: bool) -> str:
+    """Sentence for a hybrid table whose index build is not ACTIVE."""
+    status = normalize_snowflake_index_status(index_status)
+    noun = "foreign key" if foreign_key else "primary key or unique constraint"
+    if status == "building":
+        return (
+            f"Destination stores this {noun} on a hybrid table. "
+            "SHOW INDEXES status is BUILD IN PROGRESS. The index does not "
+            "yet prove the rows already stored. New writes are still enforced."
+        )
+    if status == "failed":
+        return (
+            f"Destination stores this {noun} on a hybrid table. "
+            "SHOW INDEXES did not finish as ACTIVE (BUILD FAILURE or "
+            "BUILD VALIDATION FAILURE). Existing rows were not validated. "
+            "New writes are still rejected."
+        )
+    if status == "suspended":
+        return (
+            f"Destination stores this {noun} on a hybrid table. "
+            "SHOW INDEXES status is SUSPENDED. That index is not proof the "
+            "rows already stored were checked."
+        )
+    return (
+        f"Destination stores this {noun} on a hybrid table. "
+        "SHOW INDEXES did not report ACTIVE. "
+        "INFORMATION_SCHEMA.TABLE_CONSTRAINTS can list ENFORCED YES while "
+        "the index is still building or was not read. That is not proof "
+        "the rows already stored were checked."
+    )
+
+
+def sqlserver_disabled_unique_gap(
+    disabled: bool | None, filtered: bool | None = None
+) -> str:
+    """Existing-row gap from ``is_disabled`` and ``filter_definition``.
+
+    An enabled unique index with no filter is the check SQL Server reports.
+    A non-empty ``filter_definition`` is ``partial``: the index rejects a
+    new duplicate only for rows that match it, and it does not prove every
+    stored row is unique. A disabled index was measured and is not that
+    proof, and it does not reject a new duplicate. Disabled wins inside
+    one index. A missing disabled cell stays unreported.
+    """
+    if disabled is True:
+        return "not_checked"
+    if disabled is None:
+        return "unreported"
+    if filtered is True:
+        return "partial"
+    return ""
+
+
+def sqlserver_disabled_unique_reason(gap: str) -> str:
+    """Operator sentence for a non-empty SQL Server disabled-index gap."""
+    if gap == "not_checked":
+        return (
+            "Destination stores this primary key or unique index. "
+            "sys.indexes.is_disabled is 1. The index does not reject a "
+            "new duplicate and does not prove the rows already stored "
+            "are unique."
+        )
+    if gap == "partial":
+        return (
+            "Destination stores this primary key or unique index. "
+            "sys.indexes.filter_definition is set. The index rejects a "
+            "new duplicate only for rows that match that predicate. It "
+            "does not prove every stored row is unique."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this primary key or unique index. "
+            "sys.indexes.is_disabled was not read. A disabled unique "
+            "index does not reject a new duplicate, so this catalog "
+            "object is not proof the rows already stored are unique."
+        )
+    return ""
+
+
+def oracle_constraint_enabled(value: Any) -> bool | None:
+    """``ALL_CONSTRAINTS.STATUS``. None when this cell did not say."""
+    if value is None:
+        return None
+    text = str(value).strip().casefold()
+    if text == "enabled":
+        return True
+    if text == "disabled":
+        return False
+    return None
+
+
+def oracle_uniqueness_validation_gap(validated: bool | None) -> str:
+    """Existing-row gap from ``ALL_CONSTRAINTS.VALIDATED``.
+
+    ``VALIDATED`` is the only value that proves rows already stored.
+    ``NOT VALIDATED`` was measured and is not that proof. A missing cell
+    stays unreported. ``STATUS`` ``ENABLED`` can still reject a new row
+    while this gap is set.
+    """
+    if validated is True:
+        return ""
+    if validated is False:
+        return "not_checked"
+    return "unreported"
+
+
+def oracle_uniqueness_status_gap(
+    enabled: bool | None, validated: bool | None
+) -> str:
+    """Existing-row gap from ``STATUS`` and ``VALIDATED``.
+
+    ``DISABLED`` does not reject a new duplicate. A missing ``STATUS``
+    cell keeps the older ``VALIDATED`` rule, so a five-column row does
+    not invent a disabled constraint.
+    """
+    if enabled is False:
+        return "disabled"
+    return oracle_uniqueness_validation_gap(validated)
+
+
+def oracle_uniqueness_validation_reason(gap: str) -> str:
+    """Operator sentence for a non-empty Oracle uniqueness validation gap."""
+    if gap == "disabled":
+        return (
+            "Destination stores this primary key or unique constraint. "
+            "ALL_CONSTRAINTS.STATUS is DISABLED. The constraint does not "
+            "reject a new duplicate and does not prove the rows already "
+            "stored are unique."
+        )
+    if gap == "not_checked":
+        return (
+            "Destination stores this primary key or unique constraint. "
+            "ALL_CONSTRAINTS.VALIDATED is NOT VALIDATED. Existing rows "
+            "were not checked. New rows are still rejected while STATUS "
+            "is ENABLED."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this primary key or unique constraint. "
+            "ALL_CONSTRAINTS.VALIDATED was not read. An ENABLED constraint "
+            "can still be NOT VALIDATED, so this catalog object is not "
+            "proof the rows already stored are unique."
+        )
+    return ""
+
+
+# PostgreSQL wire catalogs that store ``pg_index.indisvalid`` and
+# ``indisready``. Streaming engines folded into the Postgres DDL family
+# do not. Redshift is not in this set.
+_POSTGRES_INDEX_DIALECTS = frozenset(
+    {
+        "pg",
+        "timescaledb",
+        "timescale",
+        "alloydb",
+        "citus",
+        "supabase",
+        "supabase_db",
+        "neon",
+        "neon_serverless",
+        "azure_postgres",
+        "aws_rds_postgres",
+        "rds_postgres",
+        "aurora_postgres",
+        "aurora-postgresql",
+        "cloudsql_postgres",
+        "gcp_cloud_sql_postgres",
+        "cloud_sql_postgres",
+        "greenplum",
+        "greenplum_cloud",
+        "yugabytedb",
+        "yugabyte",
+        "opengauss",
+        "open_gauss",
+    }
+)
+
+
+def postgres_index_catalog(dialect: str) -> bool:
+    """True when this engine's unique indexes live in ``pg_index``.
+
+    ``postgres`` and ``postgresql`` fold through :func:`_dialect_key`.
+    Hosted twins keep their own names and still use that catalog.
+    """
+    if _dialect_key(dialect) == "postgresql":
+        return True
+    return normalize_driver(dialect) in _POSTGRES_INDEX_DIALECTS
+
+
+def postgres_unique_index_gap(
+    valid: bool | None,
+    ready: bool | None,
+    partial: bool | None = None,
+) -> str:
+    """Existing-row gap from ``pg_index`` validity, readiness, and predicate.
+
+    A valid index with no ``indpred`` is the check. A predicate is
+    ``partial``: the index rejects a new duplicate only for rows that
+    match it, and it does not prove every stored row is unique.
+    ``indisvalid`` false is ``not_checked``: a failed ``CREATE INDEX
+    CONCURRENTLY`` does not prove stored rows, and inserts still maintain
+    the index while ``indisready`` is true. ``indisready`` false is
+    ``not_ready``: inserts ignore the index, so it is not a write rule
+    either. A missing validity cell stays unreported. An absent predicate
+    cell does not invent ``partial``.
+    """
+    if ready is False:
+        return "not_ready"
+    if partial is True and valid is True:
+        return "partial"
+    if valid is True:
+        return ""
+    if valid is False:
+        return "not_checked"
+    return "unreported"
+
+
+def postgres_check_validation_gap(not_valid: bool | None) -> str:
+    """Existing-row gap from a PostgreSQL ``CHECK`` ``NOT VALID`` flag.
+
+    A check that is not ``NOT VALID`` is the scan. ``NOT VALID`` was
+    measured and is not that proof. New rows are still rejected. A missing
+    cell stays unreported.
+    """
+    if not_valid is False:
+        return ""
+    if not_valid is True:
+        return "not_checked"
+    return "unreported"
+
+
+def postgres_check_validation_reason(gap: str) -> str:
+    """Operator sentence for a non-empty PostgreSQL check validation gap."""
+    if gap == "not_checked":
+        return (
+            "Destination stores this check constraint. "
+            "pg_get_constraintdef says NOT VALID. Existing rows were not "
+            "checked. New rows are still rejected."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this check constraint. NOT VALID was not "
+            "read. A PostgreSQL check can still be NOT VALID, so this "
+            "catalog object is not proof the rows already stored match."
+        )
+    return ""
+
+
+def sqlserver_check_validation_gap(
+    disabled: bool | None, not_trusted: bool | None
+) -> str:
+    """Existing-row gap from ``sys.check_constraints``.
+
+    An enabled trusted check is the scan. ``is_disabled`` true means
+    inserts ignore the constraint: it is not a write rule and not
+    existing-row proof. ``is_not_trusted`` true while the constraint is
+    enabled is ``not_checked``: existing rows were not verified, and new
+    rows are still rejected. A missing cell stays unreported. Disabled
+    wins over an unread trust bit.
+    """
+    if disabled is True:
+        return "disabled"
+    if disabled is None or not_trusted is None:
+        return "unreported"
+    if not_trusted is True:
+        return "not_checked"
+    return ""
+
+
+def sqlserver_check_validation_reason(gap: str) -> str:
+    """Operator sentence for a non-empty SQL Server check validation gap."""
+    if gap == "disabled":
+        return (
+            "Destination stores this check constraint. "
+            "sys.check_constraints.is_disabled is 1. The constraint does "
+            "not reject a new row and does not prove the rows already "
+            "stored match."
+        )
+    if gap == "not_checked":
+        return (
+            "Destination stores this check constraint. "
+            "sys.check_constraints.is_not_trusted is 1. Existing rows were "
+            "not checked. New rows are still rejected."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this check constraint. is_disabled and "
+            "is_not_trusted were not read. A SQL Server check can be "
+            "disabled or untrusted, so this catalog object is not proof "
+            "the rows already stored match."
+        )
+    return ""
+
+
+def oracle_check_validation_gap(
+    enabled: bool | None, validated: bool | None
+) -> str:
+    """Existing-row gap from ``ALL_CONSTRAINTS.STATUS`` and ``VALIDATED``.
+
+    ``ENABLED`` and ``VALIDATED`` is the scan. ``ENABLED`` and
+    ``NOT VALIDATED`` is ``not_checked``: existing rows were not checked,
+    and new rows are still rejected. ``DISABLED`` does not reject a new
+    row. A missing cell stays unreported. Disabled wins over an unread
+    ``VALIDATED`` cell.
+    """
+    if enabled is False:
+        return "disabled"
+    if enabled is None or validated is None:
+        return "unreported"
+    if validated is False:
+        return "not_checked"
+    return ""
+
+
+def oracle_check_validation_reason(gap: str) -> str:
+    """Operator sentence for a non-empty Oracle check validation gap."""
+    if gap == "disabled":
+        return (
+            "Destination stores this check constraint. "
+            "ALL_CONSTRAINTS.STATUS is DISABLED. The constraint does not "
+            "reject a new row and is not existing-row proof."
+        )
+    if gap == "not_checked":
+        return (
+            "Destination stores this check constraint. "
+            "ALL_CONSTRAINTS.VALIDATED is NOT VALIDATED. Existing rows "
+            "were not checked. New rows are still rejected while STATUS "
+            "is ENABLED."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this check constraint. STATUS and "
+            "VALIDATED were not read. An ENABLED check can still be "
+            "NOT VALIDATED, so this catalog object is not proof the "
+            "rows already stored match."
+        )
+    return ""
+
+
+# MySQL Server 8.0.16 stores CHECK enforcement on TABLE_CONSTRAINTS.ENFORCED.
+# MariaDB enforces CHECK and has no ENFORCED column. A session variable is
+# not a per-constraint bit. TiDB, SingleStore, and the analytical engines
+# that share a MySQL writer are not this catalog.
+_MYSQL_CHECK_ENFORCED_DIALECTS = frozenset(
+    {
+        "mysql",
+        "mysql8",
+        "amazon_rds_mysql",
+        "amazon_aurora_mysql",
+        "azure_mysql",
+        "azure_database_for_mysql",
+        "aurora_mysql",
+        "aurora-mysql",
+        "cloudsql_mysql",
+        "gcp_cloud_sql_mysql",
+        "google_cloud_sql_mysql",
+        "rds_mysql",
+        "mysql_rds",
+        "mysql_cloud_sql",
+        "mysql_azure",
+        "mysql_aurora_global",
+        "mysql_planetscale",
+        "percona",
+    }
+)
+
+
+def mysql_check_enforced_catalog(dialect: str) -> bool:
+    """True when CHECK enforcement is ``TABLE_CONSTRAINTS.ENFORCED``.
+
+    Hosted MySQL twins keep their own names and still use that column.
+    ``mariadb`` does not.
+    """
+    return normalize_driver(dialect) in _MYSQL_CHECK_ENFORCED_DIALECTS
+
+
+def mysql_check_enforced(value: Any) -> bool | None:
+    """``TABLE_CONSTRAINTS.ENFORCED``. None when this cell did not say.
+
+    MySQL stores ``YES`` or ``NO``. An empty cell is not ``NO``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().upper()
+    if text in {"YES", "Y", "1", "TRUE"}:
+        return True
+    if text in {"NO", "N", "0", "FALSE"}:
+        return False
+    return None
+
+
+def mysql_check_enforced_gap(enforced: bool | None) -> str:
+    """Existing-row gap from ``TABLE_CONSTRAINTS.ENFORCED``.
+
+    ``YES`` is the scan. ``NO`` is ``NOT ENFORCED``: the constraint does
+    not reject a new row and does not prove the rows already stored
+    match. A missing cell stays unreported. MySQL has no separate
+    ``NOT VALIDATED`` bit for CHECK.
+    """
+    if enforced is True:
+        return ""
+    if enforced is False:
+        return "disabled"
+    return "unreported"
+
+
+def mysql_check_enforced_reason(gap: str) -> str:
+    """Operator sentence for a non-empty MySQL check enforcement gap."""
+    if gap == "disabled":
+        return (
+            "Destination stores this check constraint. "
+            "information_schema.table_constraints.enforced is NO. The "
+            "constraint does not reject a new row and does not prove the "
+            "rows already stored match."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this check constraint. ENFORCED was not "
+            "read. A MySQL check can be NOT ENFORCED, so this catalog "
+            "object is not proof the rows already stored match."
+        )
+    return ""
+
+
+def postgres_unique_index_reason(gap: str) -> str:
+    """Operator sentence for a non-empty PostgreSQL unique-index gap."""
+    if gap == "not_ready":
+        return (
+            "Destination stores this primary key or unique index. "
+            "pg_index.indisready is false. The index does not reject a "
+            "new duplicate and does not prove the rows already stored "
+            "are unique."
+        )
+    if gap == "partial":
+        return (
+            "Destination stores this primary key or unique index. "
+            "pg_index.indpred is set. The index rejects a new duplicate "
+            "only for rows that match that predicate. It does not prove "
+            "every stored row is unique."
+        )
+    if gap == "not_checked":
+        return (
+            "Destination stores this primary key or unique index. "
+            "pg_index.indisvalid is false. Existing rows were not checked. "
+            "New rows are still rejected while indisready is true."
+        )
+    if gap == "unreported":
+        return (
+            "Destination stores this primary key or unique index. "
+            "pg_index.indisvalid was not read. An invalid unique index "
+            "does not prove the rows already stored are unique."
+        )
+    return ""
+
+
+def uniqueness_proof_gap(
+    dialect: str, *, table_kind: str = "", index_status: str = ""
+) -> str:
+    """Why a catalog primary key or unique constraint does not prove the rows.
+
+    Empty when the engine rejects a duplicate and the existing rows were
+    checked. ``unenforced`` when the catalog object is planner metadata.
+    A stray ``enforced=True`` on the key dict cannot override a Snowflake
+    dialect. A measured ``IS_HYBRID`` of ``YES`` can reject a new duplicate.
+    Existing rows on that hybrid table are proven only when ``SHOW INDEXES``
+    status is ``ACTIVE``. The same hybrid label on BigQuery, Redshift, or
+    Databricks does not.
+    """
+    if (
+        _dialect_key(dialect) == "snowflake"
+        and normalize_snowflake_table_kind(table_kind) == "hybrid"
+    ):
+        return snowflake_index_proof_gap(index_status)
+    if informational_key_engine(dialect):
+        return "unenforced"
+    return ""
+
+
+def uniqueness_proof_reason(
+    dialect: str, *, table_kind: str = "", index_status: str = ""
+) -> str:
+    """Operator sentence for a non-empty :func:`uniqueness_proof_gap`.
+
+    Empty when this engine rejects a duplicate and the index build is
+    ACTIVE. The sentence is not emitted for Postgres, SQL Server, or an
+    unnamed dialect.
+    """
+    gap = uniqueness_proof_gap(
+        dialect, table_kind=table_kind, index_status=index_status
+    )
+    if not gap:
+        return ""
+    if gap != "unenforced" and _dialect_key(dialect) == "snowflake":
+        return _snowflake_index_status_reason(index_status, foreign_key=False)
+    if gap != "unenforced":
+        return ""
+    key = _dialect_key(dialect)
+    if key == "redshift":
+        return (
+            "Destination stores this primary key or unique constraint and "
+            "does not enforce it. A Redshift key is visible to the planner "
+            "and is not proof the loaded rows are unique."
+        )
+    if key == "bigquery":
+        return (
+            "Destination stores this primary key or unique constraint and "
+            "does not enforce it. BigQuery accepts only NOT ENFORCED, so "
+            "the catalog object is not proof the loaded rows are unique."
+        )
+    if key == "databricks":
+        return (
+            "Destination stores this primary key or unique constraint and "
+            "does not enforce it. A Databricks primary key or unique "
+            "constraint is informational and is not proof the loaded rows "
+            "are unique."
+        )
+    if key == "snowflake":
+        measured = _snowflake_measured_kind_reason(
+            normalize_snowflake_table_kind(table_kind), foreign_key=False
+        )
+        if measured:
+            return measured
+        return (
+            "Destination stores this primary key or unique constraint and "
+            "does not enforce it. A Snowflake key on a standard table is "
+            "not proof the loaded rows are unique. A hybrid table does "
+            "enforce the key; this dialect name does not say the table "
+            "is hybrid."
+        )
+    return (
+        "Destination stores this primary key or unique constraint and does "
+        "not enforce it. Redshift, BigQuery, and Databricks keep the key "
+        "for the planner. Snowflake does the same on a standard table. "
+        "This catalog object is not proof the loaded rows are unique."
+    )
+
+
+def row_proof_gap(
+    dialect: str,
+    validated: bool | None,
+    *,
+    table_kind: str = "",
+    index_status: str = "",
+) -> str:
+    """Why a catalog foreign key does not prove the rows already stored.
+
+    Empty when it does. ``unenforced`` is an engine that never checks the
+    constraint. ``not_checked`` is a bit that says the check was skipped.
+    ``unreported`` is an engine that has the bit and did not return it.
+    A Snowflake hybrid table enforces a foreign key. Existing rows are
+    proven only when ``IS_HYBRID`` is ``YES``, ``ENFORCED`` is ``YES``, and
+    ``SHOW INDEXES`` status is ``ACTIVE``.
+    """
+    key = _dialect_key(dialect)
+    if key == "snowflake" and normalize_snowflake_table_kind(table_kind) == "hybrid":
+        if validated is True:
+            return snowflake_index_proof_gap(index_status)
+        if validated is False:
+            return "not_checked"
+        return "unreported"
+    if key in _UNENFORCED_FK_DIALECTS:
+        return "unenforced"
+    if key in _VALIDATION_BIT_DIALECTS:
+        if validated is True:
+            return ""
+        if validated is False:
+            return "not_checked"
+        return "unreported"
+    if validated is False:
+        return "not_checked"
+    return ""
+
+
+def covers_existing_rows(
+    dialect: str,
+    validated: bool | None,
+    *,
+    table_kind: str = "",
+    index_status: str = "",
+) -> bool:
+    """Whether a catalog foreign key proves the rows already stored."""
+    return (
+        row_proof_gap(
+            dialect, validated, table_kind=table_kind, index_status=index_status
+        )
+        == ""
+    )
+
+
+def row_proof_reason(
+    gap: str,
+    dialect: str = "",
+    *,
+    table_kind: str = "",
+    index_status: str = "",
+) -> str:
+    """Operator sentence for a non-empty :func:`row_proof_gap`.
+
+    Empty when the catalog fact proves the rows. Carry and the catalog diff
+    share this sentence, so one relationship is not described two ways.
+    ``dialect`` names the destination engine. An empty dialect keeps the
+    class sentence, because the caller did not say which engine it was.
+    """
+    if gap == "unenforced":
+        key = _dialect_key(dialect) if dialect else ""
+        if key == "redshift":
+            return (
+                "Destination stores this foreign key and does not enforce "
+                "it. A Redshift constraint is visible to the planner and "
+                "is not proof the loaded rows match."
+            )
+        if key == "bigquery":
+            return (
+                "Destination stores this foreign key and does not enforce "
+                "it. BigQuery accepts only NOT ENFORCED, so the constraint "
+                "is not proof the loaded rows match."
+            )
+        if key == "databricks":
+            return (
+                "Destination stores this foreign key and does not enforce "
+                "it. A Databricks foreign key is informational and is not "
+                "proof the loaded rows match."
+            )
+        if key == "snowflake":
+            measured = _snowflake_measured_kind_reason(
+                normalize_snowflake_table_kind(table_kind), foreign_key=True
+            )
+            if measured:
+                return measured
+            return (
+                "Destination stores this foreign key and does not enforce "
+                "it. A Snowflake foreign key on a standard table is visible "
+                "to the planner and is not proof the loaded rows match. "
+                "A hybrid table does enforce the key; this dialect name does "
+                "not say the table is hybrid."
+            )
+        return (
+            "Destination stores this foreign key and does not enforce "
+            "it. Redshift, BigQuery, and Databricks keep the constraint "
+            "for the planner. Snowflake does the same on a standard table. "
+            "This catalog fact is not proof the loaded rows match."
+        )
+    if gap == "unreported":
+        if (
+            _dialect_key(dialect) == "snowflake"
+            and normalize_snowflake_table_kind(table_kind) == "hybrid"
+        ):
+            if normalize_snowflake_index_status(index_status):
+                return _snowflake_index_status_reason(
+                    index_status, foreign_key=True
+                )
+            return (
+                "Destination table is a hybrid table. Existing rows are "
+                "proven only when ENFORCED is YES and SHOW INDEXES status "
+                "is ACTIVE. This catalog did not report both, so the "
+                "relationship is not proof the loaded rows match."
+            )
+        return (
+            "Destination reports this relationship, and the catalog did "
+            "not say whether existing rows were checked. The constraint "
+            "is not that proof."
+        )
+    if gap == "not_checked":
+        if (
+            _dialect_key(dialect) == "snowflake"
+            and normalize_snowflake_table_kind(table_kind) == "hybrid"
+        ):
+            if normalize_snowflake_index_status(index_status) in {
+                "failed",
+                "suspended",
+            }:
+                return _snowflake_index_status_reason(
+                    index_status, foreign_key=True
+                )
+            return (
+                "Destination reports this relationship on a hybrid table, "
+                "and INFORMATION_SCHEMA.TABLE_CONSTRAINTS.ENFORCED is NO. "
+                "That catalog fact does not prove the loaded rows match."
+            )
+        return (
+            "Destination reports this relationship, and the catalog records "
+            "that existing rows were not checked. A PostgreSQL NOT VALID "
+            "constraint, a SQL Server foreign key that is untrusted or "
+            "disabled, or an Oracle NOT VALIDATED constraint does not prove "
+            "the loaded rows."
+        )
+    return ""
+
+
+def validation_catalog_dialect(dialect: str) -> str | None:
+    """Probe dialect for the validation bit, or None when no probe is required.
+
+    Redshift, Snowflake, BigQuery, and Databricks are not asked for a
+    validation bit here. Redshift has no ``convalidated`` column. A Snowflake
+    hybrid table enforces foreign keys, and that proof is
+    ``IS_HYBRID`` plus ``TABLE_CONSTRAINTS.ENFORCED``, not this probe.
+    Asking the other engines for a validation bit would fail the catalog
+    read or invent a yes. The unenforced rule covers them without a probe.
+    """
+    key = _dialect_key(dialect)
+    if key in _UNENFORCED_FK_DIALECTS:
+        return None
+    if key in _VALIDATION_BIT_DIALECTS:
+        return "sqlserver" if key == "mssql" else key
+    return None
+
+
+def catalog_probe_dialect(dialect: str) -> str | None:
+    """Probe dialect for foreign-key actions and match, or None when unsupported.
+
+    This is wider than :func:`validation_catalog_dialect`. SQLite and MySQL
+    have no separate validation bit, and they do name ON DELETE and ON UPDATE.
+    Redshift is unenforced and still names the actions the planner stored.
+    """
+    key = _dialect_key(dialect)
+    if key == "mssql":
+        key = "sqlserver"
+    return key if key in _PROBES else None
+
+
 def _collect(
     rows: list[tuple],
 ) -> list[ForeignKey]:
-    """Group ``(name, col, ref_schema, ref_table, ref_col, on_del, on_upd)`` rows.
+    """Group catalog rows into one foreign key per constraint name.
 
-    Rows must already be ordered by constraint then ordinal position: a
-    composite key whose columns arrive out of order would build a constraint
-    that references the wrong column pairs.
+    Each row is ``(name, col, ref_schema, ref_table, ref_col, on_del, on_upd)``
+    plus an optional existing-row flag, an optional match type, and an
+    optional deferral mode. Rows must already be ordered by
+    constraint then ordinal position: a composite key whose columns arrive
+    out of order would reference the wrong column pairs. A False flag on any
+    row of the constraint wins.
     """
     by_name: dict[str, dict[str, Any]] = {}
-    for name, col, ref_schema, ref_table, ref_col, on_delete, on_update in rows:
+    for raw in rows:
+        fields = tuple(raw)
+        if len(fields) >= 8:
+            name, col, ref_schema, ref_table, ref_col, on_delete, on_update, flag = fields[:8]
+            validated = coerce_validated(flag)
+        elif len(fields) >= 7:
+            name, col, ref_schema, ref_table, ref_col, on_delete, on_update = fields[:7]
+            validated = None
+        else:
+            continue
+        match = normalize_match(fields[8]) if len(fields) >= 9 else ""
+        deferral = normalize_deferral(spelling=fields[9]) if len(fields) >= 10 else ""
         key = str(name or "").strip()
         if not key:
             continue
@@ -141,8 +1277,23 @@ def _collect(
                 "referenced_table": str(ref_table or "").strip(),
                 "on_delete": normalize_action(on_delete),
                 "on_update": normalize_action(on_update),
+                "validated": validated,
+                "match": match,
+                "deferral": deferral,
             },
         )
+        if bucket["validated"] is not False and validated is False:
+            bucket["validated"] = False
+        elif bucket["validated"] is None:
+            bucket["validated"] = validated
+        if match and bucket["match"] and bucket["match"] != match:
+            bucket["match"] = "unknown"
+        elif match and not bucket["match"]:
+            bucket["match"] = match
+        if deferral and bucket["deferral"] and bucket["deferral"] != deferral:
+            bucket["deferral"] = "unknown"
+        elif deferral and not bucket["deferral"]:
+            bucket["deferral"] = deferral
         col_s = str(col or "").strip()
         ref_s = str(ref_col or "").strip()
         if col_s:
@@ -158,12 +1309,15 @@ def _collect(
             referenced_columns=list(b["referenced_columns"]),
             on_delete=str(b["on_delete"]),
             on_update=str(b["on_update"]),
+            validated=b["validated"],
+            match=str(b.get("match") or ""),
+            deferral=str(b.get("deferral") or ""),
         )
         for name, b in by_name.items()
     ]
 
 
-_PG_SQL = """
+_PG_SQL_REDSHIFT = """
 SELECT con.conname,
        att.attname,
        nsp_ref.nspname,
@@ -172,6 +1326,35 @@ SELECT con.conname,
        con.confdeltype,
        con.confupdtype,
        ord.n
+  FROM pg_constraint con
+  JOIN pg_class cls ON cls.oid = con.conrelid
+  JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
+  JOIN pg_class cls_ref ON cls_ref.oid = con.confrelid
+  JOIN pg_namespace nsp_ref ON nsp_ref.oid = cls_ref.relnamespace
+  JOIN LATERAL generate_subscripts(con.conkey, 1) AS ord(n) ON TRUE
+  JOIN pg_attribute att
+    ON att.attrelid = con.conrelid AND att.attnum = con.conkey[ord.n]
+  JOIN pg_attribute att_ref
+    ON att_ref.attrelid = con.confrelid AND att_ref.attnum = con.confkey[ord.n]
+ WHERE con.contype = 'f' AND nsp.nspname = %s AND cls.relname = %s
+ ORDER BY con.conname, ord.n
+"""
+
+# ``convalidated`` is PostgreSQL 9.1+. Redshift stores foreign keys and does
+# not expose that column; its probe keeps the older select.
+_PG_SQL = """
+SELECT con.conname,
+       att.attname,
+       nsp_ref.nspname,
+       cls_ref.relname,
+       att_ref.attname,
+       con.confdeltype,
+       con.confupdtype,
+       con.convalidated,
+       ord.n,
+       con.confmatchtype,
+       con.condeferrable,
+       con.condeferred
   FROM pg_constraint con
   JOIN pg_class cls ON cls.oid = con.conrelid
   JOIN pg_namespace nsp ON nsp.oid = cls.relnamespace
@@ -202,6 +1385,7 @@ _DEFAULT_NAMESPACE_SQL = {
     "mysql": "SELECT DATABASE()",
     "sqlserver": "SELECT SCHEMA_NAME()",
     "oracle": "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') FROM dual",
+    "snowflake": "SELECT CURRENT_SCHEMA()",
 }
 
 
@@ -228,11 +1412,21 @@ def _resolve_namespace(cursor: Any, dialect: str, schema: str) -> str:
     return resolved
 
 
-def _probe_postgres(cursor: Any, schema: str, table: str) -> ForeignKeys:
+def _probe_pg(
+    cursor: Any,
+    schema: str,
+    table: str,
+    *,
+    dialect: str,
+    sql: str,
+    with_validated: bool,
+) -> ForeignKeys:
     schema = _resolve_namespace(cursor, "postgresql", schema)
-    rows = _rows(cursor, _PG_SQL, (schema, table))
-    mapped = [
-        (
+    rows = _rows(cursor, sql, (schema, table))
+    mapped: list[tuple] = []
+    for row in rows:
+        name, col, ref_schema, ref_table, ref_col, on_del, on_upd = row[:7]
+        item = (
             name,
             col,
             ref_schema,
@@ -241,14 +1435,44 @@ def _probe_postgres(cursor: Any, schema: str, table: str) -> ForeignKeys:
             _PG_ACTIONS.get(str(on_del or "").strip(), ""),
             _PG_ACTIONS.get(str(on_upd or "").strip(), ""),
         )
-        for name, col, ref_schema, ref_table, ref_col, on_del, on_upd, _n in rows
-    ]
+        if with_validated:
+            item = (*item, row[7])
+            # Ordinal stays at index 8. Match is the column after it, so an
+            # older 9-tuple fixture (validated, ordinal) does not become a
+            # match type. Deferral is the pair after match, so a 10-tuple
+            # fixture (match, no deferral) stays unreported.
+            if len(row) > 9:
+                item = (*item, row[9])
+            if len(row) > 11:
+                item = (*item, normalize_deferral(row[10], row[11]))
+        elif len(row) > 9:
+            # Redshift selects the ordinal, then condeferrable, condeferred.
+            # An older fixture that stops at the ordinal does not become a mode.
+            item = (*item, None, "", normalize_deferral(row[8], row[9]))
+        mapped.append(item)
     return ForeignKeys(
-        dialect="postgresql",
+        dialect=dialect,
         status="measured",
         schema=schema,
         table=table,
         items=_collect(mapped),
+    )
+
+
+def _probe_postgres(cursor: Any, schema: str, table: str) -> ForeignKeys:
+    return _probe_pg(
+        cursor, schema, table, dialect="postgresql", sql=_PG_SQL, with_validated=True
+    )
+
+
+def _probe_redshift(cursor: Any, schema: str, table: str) -> ForeignKeys:
+    return _probe_pg(
+        cursor,
+        schema,
+        table,
+        dialect="redshift",
+        sql=_PG_SQL_REDSHIFT,
+        with_validated=False,
     )
 
 
@@ -282,7 +1506,11 @@ def _probe_mysql(cursor: Any, schema: str, table: str) -> ForeignKeys:
         status="measured",
         schema=schema,
         table=table,
-        items=_collect([tuple(r) for r in rows]),
+        # InnoDB has no DEFERRABLE foreign key. That is a measured fact, not
+        # an unread column: the check cannot be postponed until commit.
+        items=_collect(
+            [(*tuple(r)[:7], None, "", "not_deferrable") for r in rows]
+        ),
     )
 
 
@@ -293,7 +1521,9 @@ SELECT fk.name,
        tref.name,
        cref.name,
        fk.delete_referential_action_desc,
-       fk.update_referential_action_desc
+       fk.update_referential_action_desc,
+       fk.is_disabled,
+       fk.is_not_trusted
   FROM sys.foreign_keys fk
   JOIN sys.tables t ON t.object_id = fk.parent_object_id
   JOIN sys.schemas s ON s.schema_id = t.schema_id
@@ -313,12 +1543,23 @@ SELECT fk.name,
 def _probe_sqlserver(cursor: Any, schema: str, table: str) -> ForeignKeys:
     schema = _resolve_namespace(cursor, "sqlserver", schema)
     rows = _rows_any_paramstyle(cursor, _SQLSERVER_SQL, (schema, table))
+    mapped = []
+    for row in rows:
+        fields = tuple(row)
+        disabled = coerce_validated(fields[7]) if len(fields) > 7 else None
+        untrusted = coerce_validated(fields[8]) if len(fields) > 8 else None
+        # Either bit means the engine did not check the rows already stored.
+        # A missing bit is not a yes.
+        checked = disabled is False and untrusted is False
+        # SQL Server has no DEFERRABLE foreign key. The check cannot be
+        # postponed, so the mode is measured rather than left unread.
+        mapped.append((*fields[:7], checked, "", "not_deferrable"))
     return ForeignKeys(
         dialect="sqlserver",
         status="measured",
         schema=schema,
         table=table,
-        items=_collect([tuple(r) for r in rows]),
+        items=_collect(mapped),
     )
 
 
@@ -329,7 +1570,10 @@ SELECT c.constraint_name,
        rc.table_name,
        rcc.column_name,
        c.delete_rule,
-       'NO ACTION'
+       'NO ACTION',
+       c.validated,
+       c.deferrable,
+       c.deferred
   FROM all_constraints c
   JOIN all_cons_columns cc
     ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name
@@ -351,23 +1595,203 @@ def _probe_oracle(cursor: Any, schema: str, table: str) -> ForeignKeys:
     rows = _rows(
         cursor, _ORACLE_SQL, {"owner": schema.upper(), "tab": table.upper()}
     )
+    mapped = []
+    for row in rows:
+        fields = tuple(row)
+        flag = fields[7] if len(fields) > 7 else None
+        checked = coerce_validated(flag)
+        if checked is None:
+            checked = False
+        # DEFERRABLE and DEFERRED sit after VALIDATED. An older fixture that
+        # stops at the validation flag does not become NOT DEFERRABLE.
+        deferral = (
+            normalize_deferral(fields[8], fields[9]) if len(fields) > 9 else ""
+        )
+        mapped.append((*fields[:7], checked, "", deferral))
     return ForeignKeys(
         dialect="oracle",
         status="measured",
         schema=schema,
         table=table,
-        items=_collect([tuple(r) for r in rows]),
+        items=_collect(mapped),
     )
 
 
+_SQL_IDENT = re.compile(
+    r'"(?:[^"]|"")+"|\[(?:[^\]]|\]\])+\]|`(?:[^`]|``)+`|[A-Za-z_][A-Za-z0-9_]*'
+)
+
+
+def _sql_idents(text: str) -> list[str]:
+    """Identifiers in ``text``, quotes removed, compared case-insensitively."""
+    names: list[str] = []
+    for match in _SQL_IDENT.finditer(text):
+        token = match.group(0)
+        if token[0] in {'"', "[", "`"}:
+            inner = token[1:-1].replace(token[0] * 2, token[0])
+            names.append(inner.casefold())
+        else:
+            names.append(token.casefold())
+    return names
+
+
+def _strip_sql_strings(text: str) -> str:
+    """Replace single-quoted literals so a default cannot look like a clause."""
+    out: list[str] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        if text[index] != "'":
+            out.append(text[index])
+            index += 1
+            continue
+        index += 1
+        while index < length:
+            if text[index] == "'":
+                if index + 1 < length and text[index + 1] == "'":
+                    index += 2
+                    continue
+                index += 1
+                break
+            index += 1
+        out.append("''")
+    return "".join(out)
+
+
+def _sqlite_table_segments(ddl: str) -> list[str]:
+    """Top-level column and table constraints inside one CREATE TABLE."""
+    segments: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    started = False
+    in_string = False
+    index = 0
+    length = len(ddl)
+    while index < length:
+        char = ddl[index]
+        if in_string:
+            if started:
+                buf.append(char)
+            if char == "'":
+                if index + 1 < length and ddl[index + 1] == "'":
+                    if started:
+                        buf.append("'")
+                    index += 2
+                    continue
+                in_string = False
+            index += 1
+            continue
+        if char == "'":
+            in_string = True
+            if started:
+                buf.append(char)
+            index += 1
+            continue
+        if char == "(":
+            depth += 1
+            if depth == 1 and not started:
+                started = True
+                buf = []
+                index += 1
+                continue
+            if started:
+                buf.append(char)
+            index += 1
+            continue
+        if char == ")":
+            if depth == 1 and started:
+                segment = "".join(buf).strip()
+                if segment:
+                    segments.append(segment)
+                return segments
+            depth = max(0, depth - 1)
+            if started:
+                buf.append(char)
+            index += 1
+            continue
+        if char == "," and depth == 1 and started:
+            segment = "".join(buf).strip()
+            if segment:
+                segments.append(segment)
+            buf = []
+            index += 1
+            continue
+        if started:
+            buf.append(char)
+        index += 1
+    return segments
+
+
+def _deferral_in_clause(segment: str) -> str:
+    """Mode named by one foreign-key clause. Absent keyword is NOT DEFERRABLE."""
+    scrubbed = _strip_sql_strings(segment).casefold()
+    without_not = re.sub(r"\bnot\s+deferrable\b", " ", scrubbed)
+    has_not = without_not != scrubbed
+    has_deferrable = re.search(r"\bdeferrable\b", without_not) is not None
+    if has_not and has_deferrable:
+        return "unknown"
+    if has_not or not has_deferrable:
+        return "not_deferrable"
+    if re.search(r"\binitially\s+deferred\b", scrubbed):
+        return "deferred"
+    return "immediate"
+
+
+def sqlite_clause_deferral(ddl: str, column: str, referenced_table: str) -> str:
+    """Deferral of one SQLite foreign key, read from its CREATE TABLE text.
+
+    ``""`` when the CREATE text is missing or no clause binds this column to
+    that parent. SQLite can postpone a check, so an unread clause is not
+    NOT DEFERRABLE. A clause that binds and does not say DEFERRABLE is
+    NOT DEFERRABLE, which is the SQL default.
+    """
+    if not str(ddl or "").strip() or not str(column or "").strip():
+        return ""
+    wanted_column = column.casefold()
+    wanted_table = referenced_table.casefold()
+    found: list[str] = []
+    for segment in _sqlite_table_segments(ddl):
+        marker = re.search(r"\breferences\b", segment, re.IGNORECASE)
+        if marker is None:
+            continue
+        if wanted_column not in _sql_idents(segment[: marker.start()]):
+            continue
+        head = segment[marker.end() :].split("(", 1)[0]
+        if wanted_table not in _sql_idents(head):
+            continue
+        found.append(_deferral_in_clause(segment))
+    if not found:
+        return ""
+    if any(mode != found[0] for mode in found):
+        return "unknown"
+    return found[0]
+
+
 def _probe_sqlite(cursor: Any, schema: str, table: str) -> ForeignKeys:
-    """``PRAGMA foreign_key_list`` — id, seq, table, from, to, on_update, on_delete."""
+    """``PRAGMA foreign_key_list`` — id, seq, table, from, to, on_update, on_delete.
+
+    The pragma does not name DEFERRABLE. ``sqlite_master.sql`` does. A missing
+    CREATE text stays unreported: SQLite can postpone a check, so an unread
+    clause is not NOT DEFERRABLE.
+    """
     from connectors.writer_common import quote_sql_identifier
 
     rows = _rows(cursor, f"PRAGMA foreign_key_list({quote_sql_identifier(table)})", ())
+    ddl = ""
+    try:
+        ddl_rows = _rows(
+            cursor,
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        )
+    except Exception:  # noqa: BLE001 — an unread CREATE is not a mode
+        ddl_rows = []
+    if ddl_rows and ddl_rows[0] and ddl_rows[0][0]:
+        ddl = str(ddl_rows[0][0])
     mapped: list[tuple] = []
     for row in rows:
         fk_id, _seq, ref_table, from_col, to_col, on_update, on_delete = list(row)[:7]
+        deferral = sqlite_clause_deferral(ddl, str(from_col or ""), str(ref_table or ""))
         mapped.append(
             (
                 f"fk_{table}_{fk_id}",
@@ -378,6 +1802,9 @@ def _probe_sqlite(cursor: Any, schema: str, table: str) -> ForeignKeys:
                 to_col if to_col is not None else "",
                 on_delete,
                 on_update,
+                None,
+                "",
+                deferral,
             )
         )
     return ForeignKeys(
@@ -389,23 +1816,528 @@ def _probe_sqlite(cursor: Any, schema: str, table: str) -> ForeignKeys:
     )
 
 
+_SNOWFLAKE_TABLE_KIND_SQL = """
+SELECT is_hybrid, is_iceberg, is_dynamic, is_immutable
+  FROM information_schema.tables
+ WHERE UPPER(table_schema) = UPPER(%s)
+   AND table_name = %s
+"""
+
+_SNOWFLAKE_IS_HYBRID_SQL = """
+SELECT is_hybrid
+  FROM information_schema.tables
+ WHERE UPPER(table_schema) = UPPER(%s)
+   AND table_name = %s
+"""
+
+
+def read_snowflake_table_kind(cursor_or_connection: Any, schema: str, table: str) -> str:
+    """Table kind from ``INFORMATION_SCHEMA.TABLES``. Empty when unread.
+
+    The first read asks for hybrid, Iceberg, dynamic, and read-only. When
+    that select fails, the hybrid column is read alone so an older account
+    still reports a hybrid table. A failed read stays unreported.
+    """
+    params = (schema or "", table)
+    try:
+        cursor = as_driver_cursor(cursor_or_connection)
+    except Exception:  # noqa: BLE001 — an unread kind is not a standard table
+        return ""
+    rows: list[tuple] = []
+    try:
+        rows = _rows(cursor, _SNOWFLAKE_TABLE_KIND_SQL, params)
+    except Exception:  # noqa: BLE001 — fall back to the hybrid column
+        try:
+            rows = _rows(cursor, _SNOWFLAKE_IS_HYBRID_SQL, params)
+        except Exception:  # noqa: BLE001 — an unread kind is not a standard table
+            return ""
+    if not rows or rows[0] is None:
+        return ""
+    return snowflake_table_kind_from_row(rows[0])
+
+
+def _quote_snowflake_ident(name: str) -> str:
+    """One Snowflake identifier, quoted so ``SHOW INDEXES`` cannot be rewritten."""
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def snowflake_index_detail(value: Any) -> str:
+    """One line of ``SHOW INDEXES.status_info``. Empty when the cell was blank.
+
+    The warehouse writes the reason a build failed. Control characters and
+    extra blanks are removed, and the text is capped so a catalog sentence
+    stays one line.
+    """
+    text = " ".join(str(value or "").split())
+    return text[:180]
+
+
+def with_snowflake_index_detail(sentence: str, detail: str) -> str:
+    """Append a measured ``status_info`` to an existing-row sentence."""
+    cleaned = snowflake_index_detail(detail)
+    if not sentence or not cleaned:
+        return sentence
+    return f"{sentence} SHOW INDEXES status_info: {cleaned}."
+
+
+def summarize_snowflake_index_proof(rows: Any, columns: list[str]) -> tuple[str, str]:
+    """Worst ``SHOW INDEXES`` status, and that row's ``status_info``.
+
+    Empty status when no status column or no index row was returned.
+    ``active`` only when every reported index is ``ACTIVE``. A secondary
+    index that is still building or failed validation keeps the table
+    unproven, because ``TABLE_CONSTRAINTS`` does not say which index failed.
+    ``status_info`` is kept from the worst row, and dropped when the table
+    is ``active``.
+    """
+    names = [str(name).strip().lower() for name in columns]
+    if "status" not in names:
+        return "", ""
+    status_at = names.index("status")
+    info_at = names.index("status_info") if "status_info" in names else -1
+    rank = {"": 1, "active": 0, "building": 2, "suspended": 3, "failed": 4}
+    worst = ""
+    worst_info = ""
+    worst_rank = -1
+    saw = False
+    for row in rows or []:
+        cells = list(row)
+        if status_at >= len(cells):
+            continue
+        saw = True
+        status = normalize_snowflake_index_status(cells[status_at])
+        info = ""
+        if info_at >= 0 and info_at < len(cells):
+            info = snowflake_index_detail(cells[info_at])
+        score = rank.get(status, 1)
+        if score > worst_rank:
+            worst = status
+            worst_rank = score
+            worst_info = info
+    if not saw:
+        return "", ""
+    if worst == "active":
+        return "active", ""
+    return worst, worst_info
+
+
+def summarize_snowflake_index_statuses(rows: Any, columns: list[str]) -> str:
+    """Worst ``SHOW INDEXES`` status on this table."""
+    return summarize_snowflake_index_proof(rows, columns)[0]
+
+
+def read_snowflake_index_proof(
+    cursor_or_connection: Any, schema: str, table: str
+) -> tuple[str, str]:
+    """``(status, status_info)``. Both empty when ``SHOW INDEXES`` was not read.
+
+    A failed read stays unreported. It does not invent ``ACTIVE``.
+    """
+    if not str(table or "").strip():
+        return "", ""
+    try:
+        cursor = as_driver_cursor(cursor_or_connection)
+    except Exception:  # noqa: BLE001 — an unread index is not ACTIVE
+        return "", ""
+    ident = _quote_snowflake_ident(table)
+    if str(schema or "").strip():
+        ident = f"{_quote_snowflake_ident(schema)}.{ident}"
+    try:
+        cursor.execute(f"SHOW INDEXES IN TABLE {ident}")
+        rows = list(cursor.fetchall() or [])
+    except Exception:  # noqa: BLE001 — an unread index is not ACTIVE
+        return "", ""
+    description = getattr(cursor, "description", None) or []
+    columns: list[str] = []
+    for col in description:
+        if isinstance(col, (tuple, list)) and col:
+            columns.append(str(col[0]))
+        else:
+            columns.append(str(getattr(col, "name", col)))
+    return summarize_snowflake_index_proof(rows, columns)
+
+
+def read_snowflake_index_status(
+    cursor_or_connection: Any, schema: str, table: str
+) -> str:
+    """Summarized ``SHOW INDEXES`` status. Empty when the command was not read."""
+    return read_snowflake_index_proof(cursor_or_connection, schema, table)[0]
+
+
+_SNOWFLAKE_FK_SQL = """
+SELECT tc.constraint_name,
+       kcu.column_name,
+       rc.unique_constraint_schema,
+       pk_tc.table_name,
+       pk_kcu.column_name,
+       rc.delete_rule,
+       rc.update_rule,
+       tc.enforced,
+       rc.match_option,
+       tc.is_deferrable,
+       tc.initially_deferred
+  FROM information_schema.table_constraints tc
+  JOIN information_schema.referential_constraints rc
+    ON tc.constraint_catalog = rc.constraint_catalog
+   AND tc.constraint_schema = rc.constraint_schema
+   AND tc.constraint_name = rc.constraint_name
+  JOIN information_schema.key_column_usage kcu
+    ON tc.constraint_catalog = kcu.constraint_catalog
+   AND tc.constraint_schema = kcu.constraint_schema
+   AND tc.constraint_name = kcu.constraint_name
+   AND tc.table_schema = kcu.table_schema
+   AND tc.table_name = kcu.table_name
+  JOIN information_schema.table_constraints pk_tc
+    ON rc.unique_constraint_catalog = pk_tc.constraint_catalog
+   AND rc.unique_constraint_schema = pk_tc.constraint_schema
+   AND rc.unique_constraint_name = pk_tc.constraint_name
+  JOIN information_schema.key_column_usage pk_kcu
+    ON pk_tc.constraint_catalog = pk_kcu.constraint_catalog
+   AND pk_tc.constraint_schema = pk_kcu.constraint_schema
+   AND pk_tc.constraint_name = pk_kcu.constraint_name
+   AND pk_tc.table_schema = pk_kcu.table_schema
+   AND pk_tc.table_name = pk_kcu.table_name
+   AND pk_kcu.ordinal_position = kcu.position_in_unique_constraint
+ WHERE UPPER(tc.table_schema) = UPPER(%s)
+   AND tc.table_name = %s
+   AND tc.constraint_type = 'FOREIGN KEY'
+ ORDER BY tc.constraint_name, kcu.ordinal_position
+"""
+
+
+def _probe_snowflake(cursor: Any, schema: str, table: str) -> ForeignKeys:
+    """Foreign keys from Snowflake information_schema.
+
+    ``ENFORCED`` is the existing-row bit. Hybrid tables record ``YES``.
+    A standard table records ``NO``. ``MATCH_OPTION`` and the deferral pair
+    are the rule the catalog stored. This probe does not read ``IS_HYBRID``;
+    the table kind is a separate measurement.
+    """
+    schema = _resolve_namespace(cursor, "snowflake", schema)
+    rows = _rows(cursor, _SNOWFLAKE_FK_SQL, (schema, table))
+    mapped: list[tuple] = []
+    for row in rows:
+        name, col, ref_schema, ref_table, ref_col, on_del, on_upd = row[:7]
+        enforced = row[7] if len(row) > 7 else None
+        match = row[8] if len(row) > 8 else ""
+        deferral = (
+            normalize_deferral(row[9], row[10]) if len(row) > 10 else ""
+        )
+        mapped.append(
+            (
+                name,
+                col,
+                ref_schema,
+                ref_table,
+                ref_col,
+                on_del,
+                on_upd,
+                enforced,
+                match,
+                deferral,
+            )
+        )
+    return ForeignKeys(
+        dialect="snowflake",
+        status="measured",
+        schema=schema,
+        table=table,
+        items=_collect(mapped),
+    )
+
+
 _PROBES = {
     "postgresql": _probe_postgres,
-    "redshift": _probe_postgres,
     "mysql": _probe_mysql,
     "mariadb": _probe_mysql,
     "sqlserver": _probe_sqlserver,
     "mssql": _probe_sqlserver,
     "oracle": _probe_oracle,
+    "redshift": _probe_redshift,
     "sqlite": _probe_sqlite,
+    "snowflake": _probe_snowflake,
 }
+
+
+def _inspector_action(fk: Mapping[str, Any], *keys: str) -> str:
+    """One referential action from an inspector foreign key, or empty."""
+    for key in keys:
+        if key in fk and str(fk.get(key) or "").strip():
+            return normalize_action(fk.get(key))
+    options = fk.get("options")
+    if isinstance(options, Mapping):
+        for key in keys:
+            if key in options and str(options.get(key) or "").strip():
+                return normalize_action(options.get(key))
+    return ""
+
+
+def relationship_actions(
+    identity: tuple[Any, ...] | None,
+    measured: ForeignKeys | None,
+    inspector_fks: list[Any],
+) -> tuple[str, str]:
+    """``(on_delete, on_update)`` the catalog recorded for this relationship.
+
+    The metadata probe wins when it names an action. Inspector ``ondelete``
+    and ``onupdate`` are the fallback SQLAlchemy keeps. Empty means
+    unreported, which matches only the engine default NO ACTION. Two different
+    actions on the probe are ``unknown``.
+    """
+    from services.foreign_key_identity import fk_identity, same_relationship
+
+    if identity is None:
+        return "", ""
+    if measured is not None and measured.measured:
+        seen: tuple[str, str] | None = None
+        for item in measured.items:
+            ident = fk_identity(
+                {
+                    "constrained_columns": item.columns,
+                    "referred_schema": item.referenced_schema,
+                    "referred_table": item.referenced_table,
+                    "referred_columns": item.referenced_columns,
+                }
+            )
+            if not same_relationship(identity, ident):
+                continue
+            pair = (
+                normalize_action(item.on_delete),
+                normalize_action(item.on_update),
+            )
+            if seen is not None and pair != seen:
+                return "unknown", "unknown"
+            seen = pair
+        if seen is not None and (seen[0] or seen[1]):
+            return seen
+    for fk in inspector_fks:
+        if not isinstance(fk, dict):
+            continue
+        if not same_relationship(identity, fk_identity(fk)):
+            continue
+        return (
+            _inspector_action(fk, "ondelete", "on_delete"),
+            _inspector_action(fk, "onupdate", "on_update"),
+        )
+    return "", ""
+
+
+def relationship_match_type(
+    identity: tuple[Any, ...] | None,
+    measured: ForeignKeys | None,
+    inspector_fks: list[Any],
+) -> str:
+    """Match type the catalog recorded for this relationship.
+
+    The metadata probe wins. Inspector ``options["match"]`` is the fallback
+    SQLAlchemy keeps when the DDL names the clause. Empty means unreported,
+    which a scan treats as MATCH SIMPLE. Two different spellings on the probe
+    are ``unknown``: the catalog did not name one rule.
+    """
+    from services.foreign_key_identity import (
+        fk_identity,
+        parse_foreign_key,
+        same_relationship,
+    )
+
+    if identity is None:
+        return ""
+    if measured is not None and measured.measured:
+        named = ""
+        for item in measured.items:
+            ident = fk_identity(
+                {
+                    "constrained_columns": item.columns,
+                    "referred_schema": item.referenced_schema,
+                    "referred_table": item.referenced_table,
+                    "referred_columns": item.referenced_columns,
+                    "match": item.match,
+                }
+            )
+            if not same_relationship(identity, ident):
+                continue
+            kind = normalize_match(item.match)
+            if kind and named and kind != named:
+                return "unknown"
+            if kind:
+                named = kind
+        if named:
+            return named
+    for fk in inspector_fks:
+        if not isinstance(fk, dict):
+            continue
+        parsed = parse_foreign_key(fk)
+        if parsed.conflict or not same_relationship(identity, fk_identity(fk)):
+            continue
+        return normalize_match(parsed.match)
+    return ""
+
+
+def relationship_deferral(
+    identity: tuple[Any, ...] | None,
+    measured: ForeignKeys | None,
+    inspector_fks: list[Any],
+) -> str:
+    """Deferral mode the catalog recorded for this relationship.
+
+    The metadata probe wins. Empty means unreported, which a comparison
+    treats as NOT DEFERRABLE. Two different modes on the probe are
+    ``unknown``: the catalog did not name one rule. Inspector options are
+    the fallback only when the probe did not see this relationship.
+    """
+    from services.foreign_key_identity import fk_identity, same_relationship
+
+    if identity is None:
+        return ""
+    if measured is not None and measured.measured:
+        named = ""
+        found = False
+        for item in measured.items:
+            ident = fk_identity(
+                {
+                    "constrained_columns": item.columns,
+                    "referred_schema": item.referenced_schema,
+                    "referred_table": item.referenced_table,
+                    "referred_columns": item.referenced_columns,
+                }
+            )
+            if not same_relationship(identity, ident):
+                continue
+            found = True
+            kind = normalize_deferral(spelling=item.deferral)
+            if kind and named and kind != named:
+                return "unknown"
+            if kind:
+                named = kind
+        if named or found:
+            return named
+    for fk in inspector_fks:
+        if not isinstance(fk, dict):
+            continue
+        if not same_relationship(identity, fk_identity(fk)):
+            continue
+        options = fk.get("options") if isinstance(fk.get("options"), Mapping) else {}
+        if "deferral" in fk:
+            return normalize_deferral(spelling=fk.get("deferral"))
+        if "deferrable" in fk or "deferrable" in options:
+            flag = fk.get("deferrable", options.get("deferrable"))
+            initial = fk.get("initially", options.get("initially"))
+            return normalize_deferral(flag, initial)
+    return ""
+
+
+def inspector_row_proof_gaps(
+    dialect: str,
+    inspector_fks: list[Any],
+    measured: ForeignKeys | None,
+    *,
+    table_kind: str = "",
+    index_status: str = "",
+) -> list[str]:
+    """One :func:`row_proof_gap` per inspector foreign key, in that order.
+
+    Carry, the destination scan, and the catalog diff all read this list.
+    Redshift, Snowflake, BigQuery, and Databricks are ``unenforced`` without
+    a validation query. A measured Snowflake ``IS_HYBRID`` of ``YES`` uses
+    each constraint's ``validated`` bit (``TABLE_CONSTRAINTS.ENFORCED``)
+    and ``SHOW INDEXES`` status. ``ACTIVE`` is the existing-row proof.
+    PostgreSQL, SQL Server, and Oracle match the metadata probe
+    by relationship identity.
+    SQLAlchemy's PostgreSQL reflection omits ``NOT VALID``, so an inspector
+    hit alone is ``unreported``, not a yes. An unreadable probe is the same.
+    MySQL and SQLite have no separate bit: the constraint itself is the check.
+    """
+    from services.foreign_key_identity import fk_identity, same_relationship
+
+    hybrid = (
+        _dialect_key(dialect) == "snowflake"
+        and normalize_snowflake_table_kind(table_kind) == "hybrid"
+    )
+    if not hybrid and row_proof_gap(dialect, True) == "unenforced":
+        return ["unenforced"] * len(inspector_fks)
+    requires_bit = hybrid or validation_catalog_dialect(dialect) is not None
+    flags: list[tuple[Any, bool | None]] = []
+    if requires_bit and measured is not None and measured.measured:
+        for item in measured.items:
+            ident = fk_identity(
+                {
+                    "constrained_columns": item.columns,
+                    "referred_schema": item.referenced_schema,
+                    "referred_table": item.referenced_table,
+                    "referred_columns": item.referenced_columns,
+                }
+            )
+            if ident is not None:
+                flags.append((ident, item.validated))
+    gaps: list[str] = []
+    for fk in inspector_fks:
+        if not requires_bit:
+            gaps.append("")
+            continue
+        if measured is None or not measured.measured or not isinstance(fk, dict):
+            gaps.append("unreported")
+            continue
+        ident = fk_identity(fk)
+        if ident is None:
+            gaps.append("unreported")
+            continue
+        matched = [flag for known, flag in flags if same_relationship(ident, known)]
+        if any(flag is False for flag in matched):
+            gaps.append(
+                row_proof_gap(
+                    dialect, False, table_kind=table_kind, index_status=index_status
+                )
+            )
+        elif any(flag is True for flag in matched):
+            gaps.append(
+                row_proof_gap(
+                    dialect, True, table_kind=table_kind, index_status=index_status
+                )
+            )
+        else:
+            gaps.append("unreported")
+    return gaps
+
+
+def enforced_relationship_identities(
+    dialect: str,
+    inspector_fks: list[Any],
+    measured: ForeignKeys | None,
+    *,
+    table_kind: str = "",
+    index_status: str = "",
+) -> list[tuple[str, tuple[tuple[str, str], ...]]]:
+    """Inspector foreign keys that prove the rows already stored.
+
+    The gap comes from :func:`inspector_row_proof_gaps`. An empty gap is the
+    proof. Anything else is scanned by the caller.
+    """
+    from services.foreign_key_identity import fk_identity
+
+    enforced: list[tuple[str, tuple[tuple[str, str], ...]]] = []
+    for fk, gap in zip(
+        inspector_fks,
+        inspector_row_proof_gaps(
+            dialect,
+            inspector_fks,
+            measured,
+            table_kind=table_kind,
+            index_status=index_status,
+        ),
+    ):
+        if gap or not isinstance(fk, dict):
+            continue
+        ident = fk_identity(fk)
+        if ident is not None:
+            enforced.append(ident)
+    return enforced
 
 
 def probe_foreign_keys(
     dialect: str, cursor_or_connection: Any, schema: str, table: str
 ) -> ForeignKeys:
     """Measure the foreign keys of ``schema.table``, or report why it could not."""
-    key = (dialect or "").strip().lower()
+    key = _dialect_key(dialect)
     probe = _PROBES.get(key)
     if probe is None:
         return _unavailable(
@@ -451,6 +2383,26 @@ def foreign_keys_from_payload(payload: Any) -> list[ForeignKey]:
                 referenced_columns=ref_columns,
                 on_delete=normalize_action(entry.get("on_delete")),
                 on_update=normalize_action(entry.get("on_update")),
+                validated=(
+                    coerce_validated(entry.get("validated"))
+                    if "validated" in entry
+                    else None
+                ),
+                match=normalize_match(
+                    entry.get("match")
+                    if entry.get("match") not in (None, "")
+                    else entry.get("confmatchtype")
+                    or (
+                        entry.get("options").get("match")
+                        if isinstance(entry.get("options"), dict)
+                        else ""
+                    )
+                ),
+                deferral=(
+                    normalize_deferral(spelling=entry.get("deferral"))
+                    if "deferral" in entry
+                    else ""
+                ),
             )
         )
     return out

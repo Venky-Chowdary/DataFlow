@@ -2,8 +2,14 @@
 
 Honesty
 -------
-Platform-wide CDC remains **at-least-once upsert** until a route opts in
-*and* the dest can commit apply + watermark in one transaction.
+Platform-wide CDC is not exactly-once. ``EXACTLY_ONCE_CLAIMED`` stays False.
+
+When the operator leaves delivery on ``auto`` (the product default), an
+eligible CDC route — primary key, durable LSN, transactional dest that
+can commit apply and the watermark together — selects dest-owned
+exactly-once. An ineligible route stays at-least-once and records why.
+An explicit ``at_least_once`` pin is never upgraded. An explicit
+``exactly_once`` on an ineligible route fails closed.
 
 This is not Kafka transactional-id EOS and not XA across heterogeneous
 sinks. It is dest-authoritative fenced materialization — Estuary Open
@@ -94,6 +100,9 @@ WATERMARK_TABLE = "_df_cdc_eos_watermarks"
 WATERMARK_TABLE_ORACLE = "df_cdc_eos_watermarks"
 DELIVERY_SEMANTICS_EOS = "exactly_once_dest_owned_watermark_txn"
 DELIVERY_SEMANTICS_ALO = "at_least_once_idempotent_apply"
+# Operator did not pin a guarantee. Eligible CDC resolves to dest-owned EOS.
+DELIVERY_AUTO = "auto"
+_AUTO_TOKENS = frozenset({"", "auto", "default"})
 
 # Destinations that can host a transactional watermark table in principle.
 # Aliases stay listed so classify never invents a miss on catalog ids.
@@ -331,10 +340,15 @@ def already_committed(incoming_lsn: str | None, dest_lsn: str | None) -> bool:
 
 
 def assert_writer_fence(incoming_fence: int, dest_fence: int) -> None:
-    """Estuary Open fence — a stolen-lease zombie cannot commit dest EOS.
+    """Refuse a stolen-lease zombie that presents a lower generation.
 
-    Fence 0 means unleased / single-writer tests. A positive dest fence
-    refuses a lower incoming generation.
+    Apply always calls this with the real lease generation. A positive dest
+    fence refuses a lower positive generation, and also refuses 0 — an apply
+    that has not acquired the lease must not commit over a fenced dest.
+
+    Open is different: CDC Open runs before the lease exists and passes 0.
+    ``plan_open_session`` keeps the stored dest fence in that case instead
+    of calling this check. Do not weaken this function for that opener.
     """
     incoming = int(incoming_fence or 0)
     dest = int(dest_fence or 0)
@@ -473,9 +487,25 @@ def plan_open_session(
     incoming_fence: int,
     job_resume: Any,
 ) -> EosOpenResult:
-    """Decide Open fence + dest-authoritative resume (no data)."""
-    assert_writer_fence(incoming_fence, dest.fence_epoch)
-    fence = next_dest_fence(incoming_fence, dest.fence_epoch)
+    """Decide Open fence + dest-authoritative resume (no data).
+
+    Incoming fence 0 is the unleased opener. The lease is acquired after
+    Open, and a finished run deletes it, so the next run also opens at 0.
+    The dest fence from the previous apply (lease generation, at least 1)
+    must be kept. Treating 0 as a stale writer refused every second CDC
+    run on a route that had already committed.
+
+    A positive generation lower than the dest fence is still a zombie and
+    is refused here. Apply (``decide_eos_apply``) always presents the real
+    lease generation and still calls ``assert_writer_fence``.
+    """
+    dest_fence = int(dest.fence_epoch or 0)
+    incoming = int(incoming_fence or 0)
+    if incoming == 0:
+        fence = dest_fence
+    else:
+        assert_writer_fence(incoming, dest_fence)
+        fence = next_dest_fence(incoming, dest_fence)
     resume, _proof = clamp_job_resume_to_dest(
         job_resume, dest.committed_lsn, dest.resume_blob or None
     )
@@ -1103,6 +1133,76 @@ def next_handoff_phase(incoming_phase: str, dest_phase: str | None) -> str:
     return "snapshot"
 
 
+def is_position_heartbeat(change: Any) -> bool:
+    """True when a batch was supplied and it has no inserts, updates, or deletes.
+
+    Log readers re-yield the committed file:pos / LSN when the log is idle.
+    ``None`` is not a heartbeat: a caller that passed only checksums still
+    compares them.
+    """
+    if change is None:
+        return False
+    for attr in ("inserts", "updates", "deletes"):
+        if list(getattr(change, attr, None) or []):
+            return False
+    return True
+
+
+def committed_apply_checksum(incoming: str, dest: str | None, change: Any) -> str:
+    """Checksum to store with the watermark.
+
+    A position heartbeat has a digest of the empty payload. Writing that
+    digest over the committed batch makes a later redelivery of the real
+    rows look like a conflict. The committed payload identity stays.
+    """
+    kept = dest or ""
+    if is_position_heartbeat(change) and kept:
+        return kept
+    return incoming or kept
+
+
+def _checksum_cell(value: Any) -> Any:
+    """One canonical JSON value so a restart hashes the same row twice.
+
+    A snapshot SELECT and a binlog redelivery of the same LSN do not share
+    a Python type: ``datetime`` versus its ISO text, ``Decimal`` versus
+    digits, SQL NULL versus the extract sentinel. Hashing those spellings
+    separately made MySQL CDC refuse to restart (E3-008) on a row the
+    destination had already committed.
+    """
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    if value is None or value == SQL_NULL_SENTINEL:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        import base64
+
+        return base64.b64encode(bytes(value)).decode("ascii")
+    if isinstance(value, str):
+        text = value.strip()
+        if text == SQL_NULL_SENTINEL:
+            return None
+        # Binlog isoformat and a snapshot ``YYYY-MM-DD HH:MM:SS`` are one instant.
+        if len(text) >= 19 and text[4] == "-" and text[7] == "-" and text[10] in {" ", "T"}:
+            return text.replace(" ", "T", 1)
+        return value
+    return value
+
+
 def batch_apply_checksum(
     change: Any,
     *,
@@ -1120,10 +1220,15 @@ def batch_apply_checksum(
     for rec in list(combined.inserts or []) + list(combined.updates or []):
         if not isinstance(rec, dict):
             continue
+        cols = {
+            str(k): _checksum_cell(rec.get(k))
+            for k in sorted(rec)
+            if not str(k).startswith("_df_")
+        }
         updates.append(
             {
                 "pk": _pk_value(rec, pk_cols) or "",
-                "cols": {str(k): rec.get(k) for k in sorted(rec)},
+                "cols": cols,
             }
         )
     updates.sort(key=lambda row: str(row.get("pk") or ""))
@@ -1241,12 +1346,13 @@ def decide_eos_apply(
         ):
             return "handoff_phase", fence
         # The dest checksum describes the batch dest committed *at* its
-        # watermark, so it is only comparable to a redelivery of that same LSN.
-        # A strictly older LSN is an ordinary at-least-once replay from a
-        # restart, whose payload legitimately differs from the newest committed
-        # batch; comparing it refused every recovery replay as a payload
-        # conflict and failed the job on a correct stream.
-        if compare_lsn(incoming_lsn, dest_lsn or "") == 0:
+        # watermark, so it is only comparable to a redelivery of that same LSN
+        # that still carries rows. A strictly older LSN is an at-least-once
+        # replay of an earlier batch. An idle poll repeats this LSN with no
+        # rows; its empty digest is not a second version of the event.
+        if compare_lsn(incoming_lsn, dest_lsn or "") == 0 and not is_position_heartbeat(
+            change
+        ):
             assert_redelivery_checksum(
                 incoming_checksum,
                 dest_checksum or None,
@@ -1306,7 +1412,7 @@ def classify_exactly_once_route(
     callable_source: bool = False,
     source_type: str = "",
 ) -> EosEligibility:
-    """Fail-closed eligibility. Default CDC path does not call this for ALO."""
+    """Fail-closed eligibility. ``auto`` calls this; an explicit at-least-once pin does not."""
     dest = (dest_type or "").strip().lower().replace("-", "_")
     if dest == "postgres":
         dest = "postgresql"
@@ -1361,6 +1467,12 @@ def classify_exactly_once_route(
     if dest not in EOS_TRANSACTIONAL_DESTS:
         return EosEligibility(
             False, REASON_DEST_NOT_TXN, dest, None, False, tuple(notes)
+        )
+    # False is a measured absence. None/True means the caller already
+    # established a log position (or is proving the algorithm with one).
+    if has_lsn_column is False:
+        return EosEligibility(
+            False, REASON_NO_LSN, dest, None, False, tuple(notes)
         )
     sink = classify_sink_delivery(
         dest_type=sink_dest,
@@ -1446,6 +1558,88 @@ def assert_requested_cdc_delivery(
             reason=eligibility.reason,
         )
     return raw
+
+
+def select_route_delivery(
+    requested: str | None,
+    *,
+    sync_mode: str = "",
+    dest_type: str = "",
+    source_type: str = "",
+    has_primary_key: bool = False,
+    write_mode: str = "upsert",
+    allow_append_only: bool = False,
+    callable_source: bool = False,
+    has_lsn_column: bool | None = True,
+) -> str:
+    """Resolve delivery for one route.
+
+    ``auto`` (and an empty token) selects dest-owned exactly-once when the
+    route can commit apply and the watermark in one transaction. Otherwise
+    it stays at-least-once. An explicit pin is not rewritten. Exactly-once
+    on an ineligible route still fails closed.
+    """
+    raw = (requested or "").strip().lower().replace("-", "_")
+    if raw in {"eos", "exactlyonce"}:
+        raw = DELIVERY_CLASS_EXACTLY_ONCE
+    if raw in _AUTO_TOKENS:
+        eligibility = classify_exactly_once_route(
+            dest_type=dest_type,
+            sync_mode=sync_mode,
+            has_primary_key=has_primary_key,
+            write_mode=write_mode,
+            allow_append_only=allow_append_only,
+            has_lsn_column=has_lsn_column,
+            callable_source=callable_source,
+            source_type=source_type,
+        )
+        if eligibility.eligible:
+            return DELIVERY_CLASS_EXACTLY_ONCE
+        return DELIVERY_CLASS_AT_LEAST_ONCE
+    return assert_requested_cdc_delivery(
+        raw,
+        sync_mode=sync_mode,
+        dest_type=dest_type,
+        source_type=source_type,
+        has_primary_key=has_primary_key,
+        write_mode=write_mode,
+        allow_append_only=allow_append_only,
+        callable_source=callable_source,
+        has_lsn_column=has_lsn_column,
+    )
+
+
+def operator_pinned_delivery(requested: str | None) -> bool:
+    """True when the operator named a guarantee. ``auto`` / empty is not a pin."""
+    raw = (requested or "").strip().lower().replace("-", "_")
+    if raw in {"eos", "exactlyonce"}:
+        raw = DELIVERY_CLASS_EXACTLY_ONCE
+    return raw not in _AUTO_TOKENS
+
+
+def delivery_for_batch(
+    guarantee: str | None,
+    resume_token: Any,
+    *,
+    pinned: bool,
+) -> str:
+    """One batch's delivery. Unpinned EOS without a log position stays at-least-once.
+
+    ``auto`` may already have been rewritten to ``exactly_once`` because the
+    contract declared ``cdc_position``. That declaration is not a captured
+    LSN, GTID, SCN, or change-stream resume token. Query CDC and a snapshot
+    page that has not captured a log position must not fail the job, and
+    must not invent a position. An operator pin of ``exactly_once`` still
+    fails closed.
+    """
+    raw = normalize_delivery_guarantee(guarantee)
+    if raw != DELIVERY_CLASS_EXACTLY_ONCE:
+        return DELIVERY_CLASS_AT_LEAST_ONCE
+    if batch_lsn(resume_token):
+        return DELIVERY_CLASS_EXACTLY_ONCE
+    if pinned:
+        require_batch_lsn(resume_token)
+    return DELIVERY_CLASS_AT_LEAST_ONCE
 
 
 def require_batch_lsn(resume_token: Any) -> str:
@@ -1621,6 +1815,32 @@ def chaos_crash_after_commit_redelivery(
     return store
 
 
+def route_declares_log_position(stream_contracts: list[Any] | None) -> bool:
+    """True only when every selected contract declares a change-stream position.
+
+    ``modification_timestamp``, ``monotonic_sequence``, ``insert_only``, and a
+    blank declaration are not an LSN/GTID/SCN. Exactly-once compares those
+    positions. A route that has not declared ``cdc_position`` stays
+    at-least-once. One non-log stream keeps the whole route there: the
+    request carries one delivery guarantee.
+    """
+    saw = False
+    for raw in stream_contracts or []:
+        if isinstance(raw, dict):
+            if raw.get("selected", True) is False:
+                continue
+            semantics = raw.get("cursor_semantics") or ""
+        else:
+            if getattr(raw, "selected", True) is False:
+                continue
+            semantics = getattr(raw, "cursor_semantics", "") or ""
+        saw = True
+        token = str(semantics).strip().lower().replace("-", "_").replace(" ", "_")
+        if token != "cdc_position":
+            return False
+    return saw
+
+
 def route_has_cdc_pk(stream_contracts: list[Any] | None, primary_key: str = "") -> bool:
     if (primary_key or "").strip():
         return True
@@ -1657,11 +1877,57 @@ def preflight_delivery_gate(
     allow_append_only: bool = False,
     callable_source: bool = False,
     source_type: str = "",
+    has_lsn_column: bool | None = True,
 ) -> dict[str, Any] | None:
     """Validate-time EOS gate. Absent when the route is not CDC and did not opt in."""
-    requested = normalize_delivery_guarantee(delivery_guarantee)
+    raw = (delivery_guarantee or "").strip().lower().replace("-", "_")
+    if raw in {"eos", "exactlyonce"}:
+        raw = DELIVERY_CLASS_EXACTLY_ONCE
     mode = (sync_mode or "").strip().lower().replace("-", "_")
     is_cdc = mode in {"cdc", "cdc_incremental"}
+    if raw in _AUTO_TOKENS:
+        eligibility = classify_exactly_once_route(
+            dest_type=dest_type,
+            sync_mode=sync_mode,
+            has_primary_key=has_primary_key,
+            allow_append_only=allow_append_only,
+            callable_source=callable_source,
+            source_type=source_type,
+            has_lsn_column=has_lsn_column,
+        )
+        if eligibility.eligible:
+            details = eligibility.to_dict()
+            details["delivery_guarantee"] = DELIVERY_CLASS_EXACTLY_ONCE
+            details["selected_by"] = "route_default"
+            return {
+                "id": "g16_cdc_delivery",
+                "status": "pass",
+                "message": (
+                    "Eligible CDC selects dest-owned exactly-once "
+                    "(apply and watermark commit together). "
+                    "The platform does not claim this for every route."
+                ),
+                "duration_ms": 0,
+                "details": details,
+            }
+        if not is_cdc:
+            return None
+        details = eligibility.to_dict()
+        details["delivery_guarantee"] = DELIVERY_CLASS_AT_LEAST_ONCE
+        details["selected_by"] = "route_default"
+        return {
+            "id": "g16_cdc_delivery",
+            "status": "pass",
+            "message": (
+                "CDC stays at-least-once upsert "
+                f"({eligibility.reason}). Dest-owned exactly-once is the "
+                "default only when this route can commit apply and the "
+                "watermark together."
+            ),
+            "duration_ms": 0,
+            "details": details,
+        }
+    requested = raw or DELIVERY_CLASS_AT_LEAST_ONCE
     if requested != DELIVERY_CLASS_EXACTLY_ONCE and not is_cdc:
         return None
     if requested != DELIVERY_CLASS_EXACTLY_ONCE:
@@ -1669,14 +1935,16 @@ def preflight_delivery_gate(
             "id": "g16_cdc_delivery",
             "status": "pass",
             "message": (
-                "CDC delivery default is at-least-once upsert — "
-                "exactly-once is opt-in dest-owned watermark, not platform-wide"
+                "Operator pinned at-least-once upsert. Dest-owned exactly-once "
+                "stays available when this route can commit apply and the "
+                "watermark together. The platform does not claim it for every route."
             ),
             "duration_ms": 0,
             "details": {
                 "delivery_guarantee": DELIVERY_CLASS_AT_LEAST_ONCE,
                 "platform_claimed": PLATFORM_EXACTLY_ONCE_CLAIMED,
                 "algorithm": ALGORITHM,
+                "selected_by": "operator_pin",
             },
         }
     eligibility = classify_exactly_once_route(
@@ -1686,6 +1954,7 @@ def preflight_delivery_gate(
         allow_append_only=allow_append_only,
         callable_source=callable_source,
         source_type=source_type,
+        has_lsn_column=has_lsn_column,
     )
     details = eligibility.to_dict()
     details["delivery_guarantee"] = DELIVERY_CLASS_EXACTLY_ONCE

@@ -20,6 +20,7 @@ export interface ToastItem {
 interface ToastContextValue {
   toast: (opts: { title: string; message?: string; tone?: ToastTone }) => void;
   dismiss: (id: string) => void;
+  dismissMatching: (title: string) => void;
 }
 
 const ToastContext = createContext<ToastContextValue | null>(null);
@@ -54,6 +55,21 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [dismiss],
   );
 
+  const dismissMatching = useCallback((title: string) => {
+    const match = title.trim();
+    setItems((prev) => {
+      for (const item of prev) {
+        if (item.title !== match) continue;
+        const handle = timers.current.get(item.id);
+        if (handle != null) {
+          window.clearTimeout(handle);
+          timers.current.delete(item.id);
+        }
+      }
+      return prev.filter((item) => item.title !== match);
+    });
+  }, []);
+
   const toast = useCallback(
     ({ title, message, tone = "info" }: { title: string; message?: string; tone?: ToastTone }) => {
       const cleanTitle = title.trim();
@@ -79,7 +95,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [scheduleDismiss],
   );
 
-  const value = useMemo(() => ({ toast, dismiss }), [toast, dismiss]);
+  const value = useMemo(() => ({ toast, dismiss, dismissMatching }), [toast, dismiss, dismissMatching]);
 
   return (
     <ToastContext.Provider value={value}>
@@ -116,6 +132,7 @@ export function useToast() {
         console.warn("[toast]", tone ?? "info", title, message ?? "");
       },
       dismiss: (_id: string) => {},
+      dismissMatching: (_title: string) => {},
     };
   }
   return ctx;

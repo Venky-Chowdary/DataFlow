@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +60,30 @@ class RedisScanState:
         return cls()
 
 
+def redis_dial_endpoint(host: str, port: int | None) -> tuple[str, int]:
+    """Host and port for ``redis.Redis``.
+
+    A connector form stores the tunnel as ``http://bore.pub:20988`` in host
+    and the driver default ``443`` in port. Passing that string as the Redis
+    host never dials the tunnel.
+    """
+    from urllib.parse import urlparse
+
+    text = (host or "").strip()
+    fallback = int(port or 6379)
+    if "://" in text:
+        from connectors.aws_common import normalize_service_endpoint
+
+        normalized = normalize_service_endpoint(text, port=port)
+        parsed = urlparse(normalized)
+        return parsed.hostname or "localhost", int(parsed.port or fallback)
+    if text.count(":") == 1:
+        name, _, raw_port = text.partition(":")
+        if raw_port.isdigit():
+            return name or "localhost", int(raw_port)
+    return text or "localhost", fallback
+
+
 def _redis_client(cfg: dict[str, Any]):
     import redis
 
@@ -74,9 +99,13 @@ def _redis_client(cfg: dict[str, Any]):
                 password=str(cfg.get("password") or parsed.password),
             )
         return redis.from_url(raw, socket_timeout=30)
+    host, port = redis_dial_endpoint(
+        str(cfg.get("host") or ""),
+        int(cfg.get("port") or 6379),
+    )
     return redis.Redis(
-        host=cfg.get("host") or "localhost",
-        port=int(cfg.get("port") or 6379),
+        host=host,
+        port=port,
         db=int(cfg.get("database") or 0) if str(cfg.get("database") or "0").isdigit() else 0,
         username=cfg.get("username") or None,
         password=cfg.get("password") or None,
@@ -188,6 +217,9 @@ def redis_key_for(prefix: str, identity: Any) -> str:
     return f"{prefix}:{sanitize_identifier(text or '', preserve_case=True)}"
 
 
+_DB_INDEX_RE = re.compile(r"^db\d+$", re.I)
+
+
 def resolve_key_pattern(name: str | None) -> str:
     """Turn a configured keyspace name into a SCAN MATCH pattern.
 
@@ -195,11 +227,58 @@ def resolve_key_pattern(name: str | None) -> str:
     ``prefix:something`` — so scanning for the bare prefix matches only a key of
     exactly that name, which is almost never what exists. Callers that skipped
     this saw an empty keyspace and concluded the destination had no fields.
+
+    ``db0`` / ``db12`` is the INFO keyspace label, not a key prefix. Scanning
+    ``db0:*`` reads nothing while the hashes in that database sit under other
+    names. That label means the whole selected database.
     """
     pattern = (name or "").strip() or "*"
+    if _DB_INDEX_RE.match(pattern):
+        return "*"
     if pattern != "*" and "*" not in pattern and "?" not in pattern:
         return f"{pattern}:*"
     return pattern
+
+
+def keys_for_prefix(keys: list[str], prefix: str) -> list[str]:
+    """Keys this destination owns. Other prefixes in the same database are not rows.
+
+    SCAN MATCH is a hint the server may not apply the way a caller assumes.
+    A count of every key in db0 reported pre-existing hashes as rows of an
+    empty prefix. The writer's address is ``prefix:identity``; nothing else counts.
+    """
+    head = f"{(prefix or '').strip()}:"
+    if head == ":":
+        return []
+    return [key for key in keys if key.startswith(head)]
+
+
+def redis_prefix_inventory(client: Any, *, limit: int = 2000, max_prefixes: int = 100) -> list[str]:
+    """Distinct key prefixes in this database, in scan order.
+
+    INFO keyspace only names ``db0``. Operators then sampled ``db0`` and read
+    zero rows. The objects they can open are the prefixes the keys actually use.
+    A key with no colon is its own object name.
+    """
+    prefixes: list[str] = []
+    seen: set[str] = set()
+    cursor = 0
+    scanned = 0
+    cap = max(int(limit or 0), 1)
+    while scanned < cap and len(prefixes) < max_prefixes:
+        cursor, batch = client.scan(cursor=cursor, count=min(500, cap))
+        for raw in batch:
+            key = raw.decode() if isinstance(raw, bytes) else str(raw)
+            scanned += 1
+            prefix = key.split(":", 1)[0] if ":" in key else key
+            if prefix and prefix not in seen:
+                seen.add(prefix)
+                prefixes.append(prefix)
+            if scanned >= cap or len(prefixes) >= max_prefixes:
+                break
+        if cursor == 0:
+            break
+    return prefixes
 
 
 def scan_all_keys(client: Any, pattern: str, *, page: int = 1000) -> list[str]:

@@ -217,6 +217,7 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   rest_api: { host: "", port: 443 },
   influxdb: { host: "localhost", port: 8086 },
   neo4j: { host: "localhost", port: 7474 },
+  kafka: { host: "localhost", port: 9092 },
   couchbase: { host: "localhost", port: 8093 },
 };
 
@@ -426,6 +427,41 @@ export function getRestApiDefaultObject(type: string): string {
 
 export function isAwsConnector(type: string): boolean {
   return ["dynamodb", "s3", "redshift", "kinesis"].includes(type);
+}
+
+/** Port written into an http(s) endpoint, or 0 when the URL names none. */
+export function portInEndpointUrl(endpointUrl: string): number {
+  const raw = (endpointUrl || "").trim();
+  if (!raw) return 0;
+  try {
+    const withScheme = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`;
+    const parsed = new URL(withScheme);
+    const port = Number(parsed.port);
+    return Number.isFinite(port) && port > 0 ? port : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Listen port saved with the connector.
+ *
+ * AWS and GCP forms used to stamp 443 even when the operator typed 9000, so
+ * MinIO host+port never reached the process that was listening. An endpoint
+ * URL that names a port is that port: the preview must match the URL the
+ * probe actually dials.
+ */
+export function connectorListenPort(
+  type: string,
+  port: number | string | null | undefined,
+  endpointUrl = "",
+): number {
+  const fromUrl = portInEndpointUrl(endpointUrl);
+  if (fromUrl > 0) return fromUrl;
+  const chosen = Number(port);
+  if (Number.isFinite(chosen) && chosen > 0) return chosen;
+  if (isGcpConnector(type) || isAwsConnector(type)) return 443;
+  return 0;
 }
 
 export function isGcpConnector(type: string): boolean {

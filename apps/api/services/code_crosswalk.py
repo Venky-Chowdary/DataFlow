@@ -181,6 +181,34 @@ def coverage_for_column(
     }
 
 
+def _declared_population_size(row_count: object) -> int | None:
+    """Known source size, or None when the caller did not measure one."""
+    try:
+        size = int(row_count)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    if size < 0:
+        return None
+    return size
+
+
+def _sample_is_declared_population(
+    rows: Sequence[Mapping[str, Any]] | None,
+    row_count: object,
+) -> bool:
+    """True when the scanned set is every declared source row.
+
+    A 5-row workbook whose Validate sample is those 5 rows is the population.
+    A 10_000-row table whose sample is 500 rows is not.
+    """
+    known = _declared_population_size(row_count)
+    if known is None or rows is None:
+        return False
+    if isinstance(rows, (str, bytes)) or not isinstance(rows, Sequence):
+        return False
+    return len(rows) >= known
+
+
 def build_code_crosswalk_report(
     *,
     mappings: Sequence[Mapping[str, Any]],
@@ -188,6 +216,7 @@ def build_code_crosswalk_report(
     population_rows: Sequence[Mapping[str, Any]] | None = None,
     rows_are_population: bool = False,
     observed_codes: Mapping[str, Mapping[str, int]] | None = None,
+    row_count: int | None = None,
 ) -> dict[str, Any]:
     """Auditor-facing coverage report. Never stores a full row."""
     coded = coded_mappings(list(mappings or []))
@@ -206,6 +235,7 @@ def build_code_crosswalk_report(
     columns = [c["source"] for c in coded]
     truncated = False
     evidence = EVIDENCE_UNMEASURED
+    sample_is_population = False
     counts: dict[str, dict[str, int]] = {c: {} for c in columns}
 
     if observed_codes:
@@ -225,16 +255,19 @@ def build_code_crosswalk_report(
             population_rows, (str, bytes)
         ):
             rows = population_rows
-            evidence = EVIDENCE_EXACT if rows_are_population else EVIDENCE_SAMPLED
         elif isinstance(sample_rows, Sequence) and not isinstance(
             sample_rows, (str, bytes)
         ):
             rows = sample_rows
-            evidence = EVIDENCE_EXACT if rows_are_population else EVIDENCE_SAMPLED
+        sample_is_population = _sample_is_declared_population(rows, row_count)
         if rows is None:
             evidence = EVIDENCE_UNMEASURED
         else:
             counts, truncated = collect_observed_codes(rows, columns)
+            if rows_are_population or sample_is_population:
+                evidence = EVIDENCE_EXACT
+            else:
+                evidence = EVIDENCE_SAMPLED
 
     if truncated:
         evidence = EVIDENCE_UNMEASURED
@@ -271,6 +304,8 @@ def build_code_crosswalk_report(
         "scan_method": (
             "observed_codes"
             if observed_codes
+            else "sample_is_population"
+            if sample_is_population and evidence == EVIDENCE_EXACT
             else "population_rows"
             if evidence == EVIDENCE_EXACT
             else "sample_rows"
@@ -279,7 +314,8 @@ def build_code_crosswalk_report(
         ),
         "honesty": (
             "Coverage is proven only when evidence=exact and no unmapped "
-            "code remains. A covered sample is not a population proof. "
+            "code remains. A covered sample is not a population proof "
+            "unless the scanned set is the declared row_count. "
             "Unmapped codes are never passed through as identity."
         ),
     }
@@ -349,13 +385,19 @@ def build_code_crosswalk_gate(report: Mapping[str, Any]) -> dict[str, Any]:
             if report.get("truncated")
             else "only a sample was scanned"
         )
+        named = ", ".join(
+            str(c.get("source") or "")
+            for c in columns
+            if isinstance(c, Mapping) and c.get("source")
+        ) or "coded column(s)"
         return {
             "id": GATE_ID,
             "status": "block",
             "message": (
-                f"Code crosswalk coverage is unproven ({reason}). A covered "
-                "sample is not population proof — add the missing codes after a "
-                "full distinct scan, or re-run Validate against the population."
+                f"Code crosswalk coverage is unproven ({reason}) on {named}. "
+                "A covered sample is not population proof — add the missing "
+                "codes after a full distinct scan, or re-run Validate against "
+                "the population."
             ),
             "duration_ms": 0,
             "details": {
@@ -395,6 +437,7 @@ def build_code_crosswalk_evidence(
     population_rows: Sequence[Mapping[str, Any]] | None = None,
     rows_are_population: bool = False,
     observed_codes: Mapping[str, Mapping[str, int]] | None = None,
+    row_count: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Return ``(report, gate)`` for preflight / proof pack."""
     report = build_code_crosswalk_report(
@@ -403,6 +446,7 @@ def build_code_crosswalk_evidence(
         population_rows=population_rows,
         rows_are_population=rows_are_population,
         observed_codes=observed_codes,
+        row_count=row_count,
     )
     return report, build_code_crosswalk_gate(report)
 

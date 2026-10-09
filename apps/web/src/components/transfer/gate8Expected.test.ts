@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8IdentityUnproven, isGate8KeyedBatch, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./gate8Status";
+import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8IdentityUnproven, isGate8KeyedBatch, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly, presentMultiStreamGate8 } from "./gate8Status";
 
 /** Mirror of Gate8ProofCard expected-dest math (quarantine hold-out). */
 function gate8ExpectedDest(sourceRows: number, rejectedRows: number, coercedNullRows: number) {
@@ -306,6 +306,50 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
     assert.equal(id.written, 200);
     assert.equal(id.expected, 200);
     assert.equal(id.deltaOk, true);
+  });
+
+  it("last-stream checksum is not an independent re-read of the job", () => {
+    const stored = {
+      passed: true,
+      phase: "post_write_verified",
+      assurance_level: "full_checksum",
+      coverage: "full_checksum",
+      source_checksum: "aaa",
+      target_checksum: "aaa",
+      source_checksum_provenance: "independent_source_reread",
+      source_rows: 2,
+      target_rows: 2,
+      migration_proven: true,
+      message: "Row fidelity verified — source and target checksums match (2 rows)",
+    };
+    const presented = presentMultiStreamGate8(stored, {
+      multi_stream: true,
+      streams: [
+        { name: "customers", row_accounting: { dest_count: 2, balanced: true } },
+        { name: "orders", row_accounting: { dest_count: 2, balanced: true } },
+      ],
+    });
+    assert.equal(presented?.job_dest_count, 4);
+    assert.equal(presented?.checksum_scope, "last_stream");
+    const view = classifyGate8Status(presented);
+    assert.equal(view.fullPass, false);
+    assert.equal(view.tone, "warn");
+    assert.equal(view.label, "Last stream checksum");
+  });
+
+  it("leaves a single-table full checksum as an independent re-read", () => {
+    const report = {
+      passed: true,
+      assurance_level: "full_checksum",
+      coverage: "full_checksum",
+      source_checksum_provenance: "independent_source_reread",
+      source_rows: 2,
+      target_rows: 2,
+    };
+    assert.equal(presentMultiStreamGate8(report, { multi_stream: false, streams: [] }), report);
+    const view = classifyGate8Status(report);
+    assert.equal(view.fullPass, true);
+    assert.equal(view.label, "Independent re-read");
   });
 
   it("keyed-batch extra dest is batch verified, not fullPass", () => {

@@ -97,6 +97,94 @@ def _create_logical_slot(cur: Any, slot_name: str, plugin: str) -> tuple[str | N
     return lsn, plugin
 
 
+def _peek_slot_has_change(
+    cur: Any,
+    *,
+    slot_name: str,
+    target_lsn: str,
+    output_plugin: str,
+    publication_name: str,
+) -> bool:
+    """True when the slot still has a change at or before ``target_lsn``.
+
+    The peek is publication-scoped for pgoutput, so WAL from other tables does
+    not count. It does not advance the slot.
+    """
+    peek_fn = (
+        "pg_logical_slot_peek_binary_changes"
+        if output_plugin == "pgoutput"
+        else "pg_logical_slot_peek_changes"
+    )
+    if output_plugin == "pgoutput":
+        if not publication_name:
+            raise ValueError("pgoutput peek requires a publication name")
+        cur.execute(
+            f"SELECT 1 FROM {peek_fn}("  # nosec: B608 — peek_fn is one of two literals
+            "%s, %s::pg_lsn, 1, 'proto_version', '1', "
+            "'publication_names', %s) LIMIT 1",
+            (slot_name, target_lsn, publication_name),
+        )
+    else:
+        cur.execute(
+            f"SELECT 1 FROM {peek_fn}(%s, %s::pg_lsn, 1) LIMIT 1",  # nosec: B608 — peek_fn is one of two literals
+            (slot_name, target_lsn),
+        )
+    return cur.fetchone() is not None
+
+
+def pg_slot_has_pending_changes(
+    cfg: dict[str, Any],
+    *,
+    slot_name: str,
+    publication_name: str = "",
+    output_plugin: str = "pgoutput",
+) -> bool | None:
+    """Whether ``slot_name`` still holds a change up to the current WAL head.
+
+    ``None`` means the source could not be read. A missing slot is not pending.
+    """
+    slot_name = str(slot_name or "").strip()
+    if not slot_name:
+        return None
+    database = str(cfg.get("database") or "postgres")
+    conn = get_connection(
+        host=cfg.get("host") or "localhost",
+        port=cfg.get("port") or 5432,
+        database=database,
+        username=cfg.get("username") or "",
+        password=cfg.get("password") or "",
+        connection_string=cfg.get("connection_string") or "",
+        ssl=bool(cfg.get("ssl")),
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s",
+                (slot_name,),
+            )
+            if cur.fetchone() is None:
+                return False
+            cur.execute("SELECT pg_current_wal_lsn()::text")
+            row = cur.fetchone()
+            target = str(row[0]) if row and row[0] else ""
+            if not target:
+                return None
+            pending = _peek_slot_has_change(
+                cur,
+                slot_name=slot_name,
+                target_lsn=target,
+                output_plugin=output_plugin or "pgoutput",
+                publication_name=publication_name,
+            )
+        conn.commit()
+        return pending
+    except Exception as exc:
+        _logger.debug("Postgres CDC pending peek failed for %s: %s", slot_name, exc)
+        return None
+    finally:
+        conn.close()
+
+
 def release_pg_capture(
     cfg: dict[str, Any],
     *,
@@ -494,8 +582,56 @@ class PostgreSqlChangeStreamCdc:
         self._lease.ensure()
 
     def close(self) -> None:
-        """Release the CDC lease so another worker can attach."""
+        """Release the replication connection and the CDC lease.
+
+        The streaming transport is the connection Postgres keeps attached to
+        the slot. Closing it makes the slot inactive so a terminal job can
+        drop it. The slot itself stays until that terminal release.
+        """
+        transport = getattr(self, "_streaming_transport", None)
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception as exc:
+                _logger.debug("CDC streaming transport close: %s", exc)
+            self._streaming_transport = None
         self._lease.release()
+
+    def capture_has_pending(self) -> bool | None:
+        """True when this slot still has an unread change up to the WAL head.
+
+        An empty poll is not caught up while this is true. ``None`` means the
+        head could not be read, so the caller must not invent a green catch-up.
+        """
+        transport = getattr(self, "_streaming_transport", None)
+        if transport is not None and getattr(transport, "_started", False):
+            # A second SQL peek races the replication connection. Buffered
+            # messages are unread. Byte lag alone is other sessions' WAL, so
+            # it is not proof this publication still has a change.
+            buf = getattr(transport, "_buffer", None)
+            if buf is not None and list(getattr(buf, "items", None) or []):
+                return True
+            return None
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_current_wal_lsn()::text")
+                    row = cur.fetchone()
+                    target = str(row[0]) if row and row[0] else ""
+                    if not target:
+                        return None
+                    pending = _peek_slot_has_change(
+                        cur,
+                        slot_name=self.slot_name,
+                        target_lsn=target,
+                        output_plugin=self.output_plugin,
+                        publication_name=self.publication_name,
+                    )
+                conn.commit()
+            return pending
+        except Exception as exc:
+            _logger.debug("Postgres CDC pending peek failed: %s", exc)
+            return None
 
     def _select_plugin(self) -> str:
         """Select logical decoding plugin.
@@ -971,11 +1107,6 @@ class PostgreSqlChangeStreamCdc:
         from connectors.writer_common import compare_lsn
 
         current = ""
-        peek_fn = (
-            "pg_logical_slot_peek_binary_changes"
-            if self.output_plugin == "pgoutput"
-            else "pg_logical_slot_peek_changes"
-        )
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
@@ -985,19 +1116,13 @@ class PostgreSqlChangeStreamCdc:
                     if not target:
                         return
 
-                    if self.output_plugin == "pgoutput":
-                        cur.execute(
-                            f"SELECT 1 FROM {peek_fn}("  # nosec: B608 — peek_fn is one of two literals above
-                            "%s, %s::pg_lsn, 1, 'proto_version', '1', "
-                            "'publication_names', %s) LIMIT 1",
-                            (self.slot_name, target, self.publication_name),
-                        )
-                    else:
-                        cur.execute(
-                            f"SELECT 1 FROM {peek_fn}(%s, %s::pg_lsn, 1) LIMIT 1",  # nosec: B608 — peek_fn is one of two literals above
-                            (self.slot_name, target),
-                        )
-                    if cur.fetchone() is not None:
+                    if _peek_slot_has_change(
+                        cur,
+                        slot_name=self.slot_name,
+                        target_lsn=target,
+                        output_plugin=self.output_plugin,
+                        publication_name=self.publication_name,
+                    ):
                         # Real changes are waiting. The normal poll will decode
                         # and apply them; advancing here would discard them.
                         return

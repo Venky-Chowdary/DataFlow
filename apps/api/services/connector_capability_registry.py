@@ -609,7 +609,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": True,
         "common_issues": [
             "Upload .xlsx (Office Open XML). Datawrap streams sheets via openpyxl and writes typed rows to Postgres/Snowflake — Excel is not a warehouse native; conversion is automatic.",
-            "Legacy .xls (BIFF) is weakly supported — save as .xlsx for production loads.",
+            "BIFF .xls is read. A sheet holds at most 65,536 rows, and a formula cell is the cached value Excel stored; larger workbooks must be .xlsx.",
             "Excel stores dates as serial numbers; Datawrap normalizes them to ISO dates.",
         ],
         "recommended_batch_size": 5000,

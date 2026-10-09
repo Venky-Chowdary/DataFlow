@@ -464,37 +464,49 @@ def run_integrity_audit(
         report.checks_passed += 1
         stats["primary_key"] = None
     else:
-        pk_idx = header_index.get(pk_source, 0)
-        pk_values = [
-            present_cell_text(row[pk_idx] if pk_idx < len(row) else "")
-            for row in rows
-        ]
-        stats["primary_key"] = pk_source
+        from services.column_case import header_index as folded_header_index
 
-        dup_counts = Counter(pk_values)
-        duplicates = {v: c for v, c in dup_counts.items() if v is not None and c > 1}
-        if duplicates:
-            examples = ", ".join(list(duplicates)[:3])
-            if require_unique_identity:
-                _hard(
-                    f"Duplicate primary key values in '{pk_source}': "
-                    f"{len(duplicates)} keys repeat (e.g. {examples})"
-                )
-            else:
-                # Full append / overwrite on SQL: Validate already unlocked Execute.
-                # Writing every row is intentional; inventing a PK uniqueness hard
-                # block here is Validate→Run parity failure (client-deploy blocker).
-                mode_label = sync_mode or "append"
-                _warn(
-                    f"Duplicate values in identity column '{pk_source}': "
-                    f"{len(duplicates)} keys repeat (e.g. {examples}). "
-                    f"Sync mode '{mode_label}' does not require unique identity — "
-                    "all rows will be written. Prefer overwrite/upsert with a unique "
-                    "key, or dedupe upstream, if that is not intended."
-                )
-                report.checks_passed += 1
-        else:
+        pk_idx = folded_header_index(headers, pk_source)
+        if pk_idx is None:
+            # Never audit column 0 in place of a missing identity column.
+            # That reported duplicate keys for a unique primary key.
+            _warn(
+                f"Identity column '{pk_source}' is not in this batch — "
+                "duplicate check skipped"
+            )
             report.checks_passed += 1
+            stats["primary_key"] = pk_source
+        else:
+            pk_values = [
+                present_cell_text(row[pk_idx] if pk_idx < len(row) else "")
+                for row in rows
+            ]
+            stats["primary_key"] = pk_source
+
+            dup_counts = Counter(pk_values)
+            duplicates = {v: c for v, c in dup_counts.items() if v is not None and c > 1}
+            if duplicates:
+                examples = ", ".join(list(duplicates)[:3])
+                if require_unique_identity:
+                    _hard(
+                        f"Duplicate primary key values in '{pk_source}': "
+                        f"{len(duplicates)} keys repeat (e.g. {examples})"
+                    )
+                else:
+                    # Full append / overwrite on SQL: Validate already unlocked Execute.
+                    # Writing every row is intentional; inventing a PK uniqueness hard
+                    # block here is Validate→Run parity failure (client-deploy blocker).
+                    mode_label = sync_mode or "append"
+                    _warn(
+                        f"Duplicate values in identity column '{pk_source}': "
+                        f"{len(duplicates)} keys repeat (e.g. {examples}). "
+                        f"Sync mode '{mode_label}' does not require unique identity — "
+                        "all rows will be written. Prefer overwrite/upsert with a unique "
+                        "key, or dedupe upstream, if that is not intended."
+                    )
+                    report.checks_passed += 1
+            else:
+                report.checks_passed += 1
 
     # 2. Per-column checks
     null_spike_threshold = 0.90

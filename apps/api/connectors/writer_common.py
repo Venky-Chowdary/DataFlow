@@ -336,6 +336,14 @@ def append_write_quarantine_detail(
     Module 9: stamp first-class quarantine contract fields before append.
     """
     d = dict(detail)
+    # The NULL wire token is not a rejected cell. Upsert quarantine was
+    # recording one ``__DF_SQL_NULL__`` row on every load after the nullable
+    # blank fix. A NOT NULL refusal still names nullability and is kept.
+    raw_value = d.get("value")
+    if isinstance(raw_value, str) and raw_value.strip() == SQL_NULL_SENTINEL:
+        reason = str(d.get("reason") or "").lower()
+        if "not null" not in reason and "non-null" not in reason and "nullability" not in reason:
+            return
     # Normalize the fault-cell sample so replay overwrite cannot re-invent "".
     d["value"] = quarantine_cell_wire(d.get("value"))
     # Full mapped-row image first (SQL NULL polarity), then overlay any CRM
@@ -747,7 +755,7 @@ def normalize_temporal_cells(
             if not ddl:
                 continue
             try:
-                cells[i] = coerce_sql_temporal(cells[i], ddl)
+                cells[i] = coerce_sql_temporal(cells[i], ddl, engine=eng)
             except ValueError:
                 # Leave raw for bind_sql_mapped_rows_with_quarantine — do not
                 # abort the whole batch on one empty DATE/TIMESTAMP cell.
@@ -1085,15 +1093,86 @@ def vector_prepare_cell(val: Any) -> Any:
 
     ``SQL_NULL_SENTINEL`` is a string, so a None/Missing-only omit leaked the
     wire token into metadata. ``str(Decimal("1E+2"))`` invented ``1E+2``.
-    Native ``0`` / ``False`` stay present.
+    A Decimal stays a Decimal on the canonical text (``1E+2`` → ``100``) so a
+    vector payload can emit a JSON number. Native ``0`` / ``False`` stay present.
     """
     from services.value_serializer import is_reader_null_cell, present_cell_text
 
     if is_reader_null_cell(val):
         return None
+    if isinstance(val, Decimal):
+        if val.is_nan() or val.is_infinite():
+            return present_cell_text(val)
+        text = present_cell_text(val)
+        if not text:
+            return None
+        try:
+            return Decimal(text)
+        except Exception:
+            return text
     if isinstance(val, (str, int, float, bool)):
         return val
     return present_cell_text(val)
+
+
+_VECTOR_NUMERIC_LOGICAL = frozenset({"integer", "decimal", "float"})
+_VECTOR_STRING_LOGICAL = frozenset({"", "string", "text"})
+_VECTOR_JSON_NUMBER = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def vector_payload_declared_type(dest_type: str, source_type: str) -> str:
+    """Which declaration owns a vector payload cell.
+
+    A schemaless destination stamps VARCHAR because it has no column DDL.
+    That stamp is not an operator choice to store a numeric source as text.
+    An explicit numeric destination type still wins.
+    """
+    try:
+        from services.type_system import normalize_logical_type
+    except ImportError:
+        return dest_type or source_type
+    dest_l = normalize_logical_type(dest_type) if dest_type else ""
+    src_l = normalize_logical_type(source_type) if source_type else ""
+    if dest_l in _VECTOR_NUMERIC_LOGICAL:
+        return dest_type
+    if dest_l in _VECTOR_STRING_LOGICAL and src_l in _VECTOR_NUMERIC_LOGICAL:
+        return source_type
+    return dest_type or source_type
+
+
+def vector_payload_number(val: Any, declared_type: str) -> Any:
+    """Restore a numeric source literal that arrived as text.
+
+    Stream pages are ``list[list[str]]``. Leaving ``"2.36"`` in the payload
+    makes every downstream reader treat a numeric column as text. Only a
+    declared integer, decimal, or float is parsed, and only when the text is
+    a JSON number. Anything else stays text so a sku of ``"2.36"`` is unchanged.
+    """
+    prepared = vector_prepare_cell(val)
+    if prepared is None or isinstance(prepared, (int, float, bool, Decimal)):
+        return prepared
+    if not isinstance(prepared, str) or not declared_type:
+        return prepared
+    try:
+        from services.type_system import normalize_logical_type
+
+        logical = normalize_logical_type(declared_type)
+    except ImportError:
+        return prepared
+    if logical not in _VECTOR_NUMERIC_LOGICAL:
+        return prepared
+    text = prepared.strip()
+    if not _VECTOR_JSON_NUMBER.match(text):
+        return prepared
+    if logical == "integer" and "." not in text and "e" not in text.lower():
+        try:
+            return int(text, 10)
+        except ValueError:
+            return prepared
+    try:
+        return Decimal(text)
+    except Exception:
+        return prepared
 
 
 def vector_prepare_metadata(meta: Any) -> dict[str, Any]:
@@ -1378,13 +1457,16 @@ def _rejected_row_count(
     *,
     sparse_rows: list[tuple] | None = None,
     source_row_count: int | None = None,
+    collapsed_duplicates: int = 0,
 ) -> int:
     """Return the number of rows that were rejected or quarantined.
 
     For ``fail`` / ``quarantine`` the held-out rows are
-    ``source_count - len(mapped_rows) - len(sparse_rows)`` (quarantine never
-    writes NULL into the primary table for a bad cell; sparse CDC rows are
-    still written via omit-from-SET and must not inflate rejected counts).
+    ``source_count - len(mapped_rows) - len(sparse_rows) - collapsed``.
+    Quarantine never writes NULL into the primary table for a bad cell.
+    Sparse CDC rows are still written via omit-from-SET. In-bundle last-wins
+    keeps one image of a key and must not charge the earlier image as a
+    rejected duplicate — the survivor is the write.
     ``source_row_count`` is the expanded STRUCT/explode count when the writer
     ingested through ``SourceRowSpool`` — ``len(data_rows)`` is the unexpanded
     engine chunk and must not be used after explode.
@@ -1393,7 +1475,11 @@ def _rejected_row_count(
     """
     if policy == "coerce_null":
         return len({d["row"] for d in rejected_details})
-    kept = len(mapped_rows) + len(sparse_rows or [])
+    kept = (
+        len(mapped_rows)
+        + len(sparse_rows or [])
+        + max(0, int(collapsed_duplicates or 0))
+    )
     n = int(source_row_count) if source_row_count is not None else len(data_rows)
     return max(0, n - kept)
 
@@ -1617,8 +1703,10 @@ def build_mapped_rows_with_details(
 
     ``empty_cells_as_null`` (file/Excel/CSV sources): blank cells into nullable
     typed columns become SQL NULL — spreadsheet absence, not silent loss of a
-    present value. NOT NULL destinations still fail/quarantine. DB→DB empty
-    strings keep requiring a Risk Contract unless this flag is set.
+    present value. A numeric, temporal, boolean, uuid, or binary source cannot
+    store ``""``; that blank is a flattened SQL NULL on a nullable destination
+    even when the flag is off. NOT NULL destinations still fail/quarantine.
+    A text column's empty string stays a stored value.
     """
     from services.json_intelligence import materialize_struct_policies
 
@@ -1697,6 +1785,7 @@ def build_mapped_rows_with_details(
     # — billions of them on a large transfer.
     # Risk Contract module is in-tree: hard-require it. Soft-import previously
     # demoted FAIL_JOB / SKIP_ROW / CAST contracts to bare job policy.
+    from services.blank_cell_contract import blank_typed_cell_is_sql_null
     from services.migration_risk_contract import (
         disposition_for_execution_policy,
         resolve_write_action_for_mapping,
@@ -1732,19 +1821,15 @@ def build_mapped_rows_with_details(
                     converted, xwalk_err = apply_code_crosswalk(converted, mapping)
                     if xwalk_err:
                         err = xwalk_err
-                # File/spreadsheet path: blank cell → SQL NULL on nullable typed cols
-                # (Airbyte-class empty→null for non-string). Never invent NULL into
-                # proven NOT NULL destinations.
-                if (
-                    err
-                    and empty_cells_as_null
-                    and _is_empty_typed_coerce_error(err)
-                    and _is_blank_cell(val)
-                    and not _target_explicitly_not_null(
-                        mapping if isinstance(mapping, dict) else None,
-                        tgt_name,
-                        dest_nullability,
-                    )
+                # File/spreadsheet path: blank cell → SQL NULL on nullable typed cols.
+                # Same function Validate and Gate-8 use. Proven NOT NULL stays an error.
+                if blank_typed_cell_is_sql_null(
+                    val,
+                    err,
+                    mapping if isinstance(mapping, dict) else None,
+                    empty_cells_as_null=empty_cells_as_null,
+                    dest_nullability=dest_nullability,
+                    target=tgt_name,
                 ):
                     converted, err = None, None
             cell_policy = policy
@@ -2228,18 +2313,33 @@ def prepare_records_for_vector_write(
         tup = mapped[mapped_i]
         mapped_i += 1
         # Preserve unmapped source headers for metadata_columns / content_column.
+        source_types = {
+            str(k).lower(): str(v)
+            for k, v in (column_types or {}).items()
+            if k and v
+        }
+        dest_type_map = {
+            str(k).lower(): str(v) for k, v in (dest_types or {}).items() if k
+        }
         row: dict[str, Any] = {}
         for i, h in enumerate(headers):
-            cell = vector_prepare_cell(raw[i] if i < len(raw) else None)
+            declared = vector_payload_declared_type("", source_types.get(h.lower(), ""))
+            cell = vector_payload_number(
+                raw[i] if i < len(raw) else None, declared
+            )
             if cell is not None:
                 row[h] = cell
         for i, tgt in enumerate(target_cols):
-            val = vector_prepare_cell(tup[i] if i < len(tup) else None)
+            src = source_for_target[i] if i < len(source_for_target) else ""
+            declared = vector_payload_declared_type(
+                dest_type_map.get(tgt.lower(), ""),
+                source_types.get((src or tgt).lower(), ""),
+            )
+            val = vector_payload_number(tup[i] if i < len(tup) else None, declared)
             if val is None:
                 # Omit DF_MISSING / null overlay — do not invent "" into metadata.
                 continue
             row[tgt] = val
-            src = source_for_target[i] if i < len(source_for_target) else ""
             if src:
                 row[src] = val
         records.append(row)
@@ -3203,6 +3303,21 @@ def _mysql_timestamp_range_violation(
     return mysql_timestamp_out_of_range(value)
 
 
+def _mysql_datetime_utc_normalizes(typ: str, dest_db: str) -> bool:
+    """True when MySQL DATETIME will store the UTC clock, not strip an offset.
+
+    ``coerce_sql_temporal`` converts an aware wire to naive UTC before bind
+    and the session ``time_zone`` is pinned to ``+00:00``. Quarantining that
+    wire as an NTZ strip held out every timestamptz row the column can hold.
+    """
+    from connectors.sql_temporal import sql_base_type
+    from services.dest_dialect_facts import _normalize_dest_db
+
+    if _normalize_dest_db(dest_db) != "mysql":
+        return False
+    return sql_base_type(typ) == "DATETIME"
+
+
 def quarantine_unfit_temporals(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -3242,6 +3357,7 @@ def quarantine_unfit_temporals(
         check_tz = (
             logical == "datetime"
             and datetime_timezone_polarity(typ, dest_db=dest_db) == "ntz"
+            and not _mysql_datetime_utc_normalizes(typ, dest_db)
         )
         # Always include temporal columns so empty refuse runs even without FSP/TZ.
         temporal_cols.append((i, typ, check_fsp, check_tz))
@@ -3750,11 +3866,14 @@ def quarantine_unfit_floats(
     policy: str,
     *,
     dialect_label: str = "FLOAT",
+    dest_db: str = "",
 ) -> list[tuple]:
     """Hold out empty / non-finite / non-numeric cells into FLOAT/DOUBLE sinks.
 
-    Matrix SSOT for Kafka/S3/GCS/Iceberg — SQL bind already refuses via
-    ``coerce_float_wire``. Empty ``\"\"`` must never invent JSON null / 0.0.
+    Matrix SSOT for Kafka/S3/GCS/Iceberg. SQL bind quarantines the same
+    non-finite values in :func:`bind_rows_keeping_numbers` — MySQL DOUBLE
+    would otherwise store NaN as NULL. Empty ``\"\"`` must never invent
+    JSON null / 0.0.
     """
     from services.type_system import normalize_logical_type
 
@@ -3768,6 +3887,7 @@ def quarantine_unfit_floats(
 
     from connectors.sql_bind import coerce_float_wire
 
+    engine = (dest_db or "").strip() or _infer_dest_db_from_dialect_label(dialect_label)
     out: list[tuple] = []
     for row_idx, row in enumerate(mapped_rows):
         cells = list(row)
@@ -3778,7 +3898,7 @@ def quarantine_unfit_floats(
             raw = cells[col_idx]
             reason = ""
             try:
-                coerced = coerce_float_wire(raw, ddl_type=typ)
+                coerced = coerce_float_wire(raw, ddl_type=typ, engine=engine)
             except ValueError as exc:
                 reason = str(exc)
                 coerced = None
@@ -3917,7 +4037,15 @@ def bind_rows_keeping_numbers(
             if not ddl:
                 continue
             try:
-                cells[idx] = normalize_sql_bind_value(val, ddl, engine=engine)
+                bound = normalize_sql_bind_value(val, ddl, engine=engine)
+                if isinstance(bound, float) and (
+                    bound != bound or bound in {float("inf"), float("-inf")}
+                ):
+                    raise ValueError(
+                        f"non-finite float into {dialect_label}({ddl}) "
+                        "— quarantined (refuse silent NULL)"
+                    )
+                cells[idx] = bound
             except ValueError as exc:
                 sample = cell_to_string(val)[:120]
                 col = target_cols[idx] if idx < len(target_cols) else f"col_{idx}"
@@ -4517,6 +4645,7 @@ def apply_write_quarantine_matrix(
             rejected_details,
             policy,
             dialect_label=f"{label} FLOAT",
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_bitstrings(
             mapped_rows, target_cols, target_types, rejected_details, policy

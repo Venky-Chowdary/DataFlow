@@ -124,6 +124,34 @@ class FastPathUnavailable(Exception):
         note_copy_decline(str(message), log=False)
 
 
+def occupied_pk_range_action(
+    already: int, expected: int, *, replace_destination: bool
+) -> str:
+    """How an occupied primary-key range may be loaded.
+
+    ``skip`` — dest already holds this range's source count.
+    ``load`` — the range is empty, so rows can be inserted.
+    ``reload`` — overwrite may delete the partial range and load it again.
+
+    Append never returns ``reload``. A count that is neither empty nor
+    complete is not proof the rows are a crashed shard of this run. Deleting
+    them drops rows this run did not write, the delete is committed, and the
+    append conservation proof then fails on the missing growth
+    (E3-001: dest 50 → 54, growth 4, 50 source rows unaccounted).
+    """
+    if int(already) == int(expected):
+        return "skip"
+    if int(already) == 0:
+        return "load"
+    if not replace_destination:
+        raise FastPathUnavailable(
+            "append into an occupied destination whose key range is only partly "
+            "present stays on the row path — deleting that range would drop rows "
+            "this run did not write"
+        )
+    return "reload"
+
+
 class _CreateScope:
     """Source catalog handed to a fast path, and the certificate it earned."""
 
@@ -1440,6 +1468,7 @@ def copy_between_postgres(
                         elif already == 0:
                             part["action"] = "load"
                         else:
+                            occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                             from services.copy_pg_mysql import _pg_quoted_literal
 
                             pred = pk_range_predicate(

@@ -1,10 +1,12 @@
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
+import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
 import { clearSession, getAuthToken, getSessionActor } from "./session";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
 import { readOptionsPayload } from "./readOptions";
+import type { RuleCompileReport } from "./businessRules";
 import type {
   ShapeCatalog,
   ShapePreviewResponse,
@@ -607,6 +609,10 @@ export async function previewShapeRecipe(payload: {
   column_types?: Record<string, string>;
   target_schema?: Record<string, string>;
   include_profile?: boolean;
+  /** Sample's table when several streams share one recipe. */
+  focus_table?: string;
+  source_tables?: string[];
+  source_catalog?: Record<string, string[]>;
 }): Promise<ShapePreviewResponse> {
   const res = await apiFetch(`${API_BASE}/shape/preview`, {
     method: "POST",
@@ -615,6 +621,42 @@ export async function previewShapeRecipe(payload: {
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw await apiErrorFrom(res, "Shape preview failed");
+  return res.json();
+}
+
+export async function importBusinessRules(payload: {
+  file: File;
+  sourceColumns?: string[];
+  destColumns?: string[];
+  sourceTable?: string;
+  destTable?: string;
+  sourceTables?: string[];
+  sourceCatalog?: Record<string, string[]>;
+  destTables?: string[];
+  destCatalog?: Record<string, string[]>;
+  sourceTypes?: Record<string, string>;
+  destTypes?: Record<string, string>;
+  syncMode?: string;
+}): Promise<RuleCompileReport> {
+  const form = new FormData();
+  form.append("file", payload.file);
+  form.append("source_columns", JSON.stringify(payload.sourceColumns ?? []));
+  form.append("dest_columns", JSON.stringify(payload.destColumns ?? []));
+  form.append("source_table", payload.sourceTable ?? "");
+  form.append("dest_table", payload.destTable ?? "");
+  form.append("source_tables", JSON.stringify(payload.sourceTables ?? []));
+  form.append("source_catalog", JSON.stringify(payload.sourceCatalog ?? {}));
+  form.append("dest_tables", JSON.stringify(payload.destTables ?? []));
+  form.append("dest_catalog", JSON.stringify(payload.destCatalog ?? {}));
+  form.append("source_types", JSON.stringify(payload.sourceTypes ?? {}));
+  form.append("dest_types", JSON.stringify(payload.destTypes ?? {}));
+  form.append("sync_mode", payload.syncMode ?? "");
+  const res = await apiFetch(`${API_BASE}/transfer/rules/import`, {
+    method: "POST",
+    body: form,
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not read the rule file");
   return res.json();
 }
 
@@ -1128,7 +1170,9 @@ export async function fetchConnectors(): Promise<Connector[]> {
       created_at: String(c.created_at ?? new Date().toISOString()),
       // Preserve tri-state: true / false / undefined (never tested).
       last_test_ok: lastTestOk,
+      last_tested_at: c.last_tested_at ? String(c.last_tested_at) : null,
       last_used_at: c.last_used_at ? String(c.last_used_at) : null,
+      last_transfer_ok_at: c.last_transfer_ok_at ? String(c.last_transfer_ok_at) : null,
     };
   };
 
@@ -1417,6 +1461,14 @@ export function streamJobProgress(
     const ds = raw.destination_summary && typeof raw.destination_summary === "object"
       ? raw.destination_summary as Record<string, unknown>
       : undefined;
+    const evidence = {
+      streams: raw.streams,
+      rejected_rows: raw.rejected_rows,
+      coerced_null_rows: raw.coerced_null_rows,
+      rejected_details: raw.rejected_details,
+      destination_summary: ds,
+    };
+    const streamHealth = readJobStreams(evidence);
     const rpsFromRoot = raw.records_per_second != null ? Number(raw.records_per_second) : undefined;
     const rpsFromDs = ds?.records_per_second != null ? Number(ds.records_per_second) : undefined;
     return {
@@ -1450,9 +1502,9 @@ export function streamJobProgress(
         : ds?.chunk_size != null
           ? Number(ds.chunk_size)
           : undefined,
-      rejected_rows: raw.rejected_rows != null ? Number(raw.rejected_rows) : undefined,
-      coerced_null_rows: raw.coerced_null_rows != null ? Number(raw.coerced_null_rows) : undefined,
-      rejected_details: Array.isArray(raw.rejected_details) ? raw.rejected_details as JobProgress["rejected_details"] : undefined,
+      rejected_rows: readRejectedRows(evidence),
+      coerced_null_rows: readCoercedNullRows(evidence),
+      rejected_details: readRejectedDetails(evidence),
       destination_summary: ds,
       load_history_report: raw.load_history_report && typeof raw.load_history_report === "object"
         ? raw.load_history_report as JobProgress["load_history_report"]
@@ -1582,7 +1634,7 @@ export function streamJobProgress(
       row_accounting: raw.row_accounting && typeof raw.row_accounting === "object"
         ? raw.row_accounting as JobProgress["row_accounting"]
         : undefined,
-      streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
+      streams: streamHealth.length ? streamHealth : undefined,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
         : undefined,
@@ -1645,6 +1697,7 @@ export function streamJobProgress(
       ? `${API_BASE}/connectors/jobs/${jobId}/stream?token=${encodeURIComponent(token)}`
       : `${API_BASE}/connectors/jobs/${jobId}/stream`;
     const es = new EventSource(streamUrl);
+    let closedTerminal = false;
     es.onmessage = (ev) => {
       if (stopped) return;
       try {
@@ -1656,6 +1709,7 @@ export function streamJobProgress(
           || job.status === "failed"
           || job.status === "cancelled"
         ) {
+          closedTerminal = true;
           es.close();
         }
       } catch {
@@ -1664,6 +1718,9 @@ export function streamJobProgress(
     };
     es.onerror = () => {
       es.close();
+      // Closing a completed stream fires onerror in some browsers. Do not
+      // reconnect — that re-appends the last log line and makes it jump.
+      if (stopped || closedTerminal) return;
       startPolling();
     };
     return () => {
@@ -3319,27 +3376,39 @@ export async function updatePilotEngine(engine: PilotEngineChoice): Promise<Pilo
   return res.json();
 }
 
+export type WorkspaceApiKeyRole = "viewer" | "operator" | "editor" | "admin";
+
+export type WorkspaceApiKeyLifetime = "7d" | "30d" | "60d" | "90d" | "365d" | "never";
+
 export type WorkspaceApiKey = {
   id: string;
   name: string;
   prefix: string;
+  role?: WorkspaceApiKeyRole | string;
   created_at?: string;
   created_by?: string;
   last_used_at?: string | null;
+  expires_at?: string | null;
+  lifetime?: WorkspaceApiKeyLifetime | string;
+  expired?: boolean;
 };
 
 export async function fetchWorkspaceApiKeys(): Promise<WorkspaceApiKey[]> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys`);
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to list API keys"));
   const data = await res.json();
   return data.keys ?? [];
 }
 
-export async function createWorkspaceApiKey(name: string): Promise<WorkspaceApiKey & { key: string }> {
+export async function createWorkspaceApiKey(
+  name: string,
+  role: WorkspaceApiKeyRole = "editor",
+  expiresIn: WorkspaceApiKeyLifetime = "90d",
+): Promise<WorkspaceApiKey & { key: string }> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, role, expires_in: expiresIn }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to create API key"));
   return res.json();
@@ -3680,10 +3749,10 @@ export interface QuarantineInfo {
     row?: number;
     column?: string;
     target?: string;
-    value?: string;
+    value?: string | null;
     reason?: string;
     policy?: string;
-    values?: Record<string, string>;
+    values?: Record<string, string | null>;
     chars?: string[];
     suggested_transform?: string;
     suggested_fix?: string;

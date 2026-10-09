@@ -8,6 +8,8 @@ are cached by content hash to avoid re-embedding unchanged rows.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 import hashlib
 import json
 import logging
@@ -128,6 +130,51 @@ class _HashEmbedder:
         return out
 
 
+class _CatalogFallbackEmbedder:
+    """TF-IDF vectors when sentence-transformers is not installed.
+
+    The RAG embedding service already falls back this way. Transfer destinations
+    used to raise ``ModuleNotFoundError`` and fail the job. The row metadata is
+    stamped ``_df_embedding_backend=tfidf_fallback`` so the write is not described
+    as MiniLM. A pinned ``hash/`` or ``openai/`` model never uses this class.
+    """
+
+    def __init__(self) -> None:
+        from src.ai.rag.embedding_service import get_embedding_service
+
+        self._svc = get_embedding_service()
+        self.backend = str(getattr(self._svc, "backend", "") or "tfidf_fallback")
+
+    @property
+    def dimension(self) -> int:
+        return int(self._svc.dimension)
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        raw = self._svc.embed(texts)
+        data = raw.tolist() if hasattr(raw, "tolist") else list(raw)
+        if data and isinstance(data[0], (int, float)):
+            return [[float(x) for x in data]]
+        return [[float(x) for x in row] for row in data]
+
+
+def _sentence_transformer_or_fallback(model_name: str) -> Embedder:
+    """Local MiniLM when the library is installed; otherwise the TF-IDF fallback."""
+    short = model_name.split("/", 1)[1] if model_name.startswith("sentence-transformers/") else model_name
+    try:
+        import sentence_transformers  # noqa: F401
+    except ImportError:
+        logging.getLogger(__name__).warning(
+            "sentence_transformers is not installed; vector destinations use the "
+            "TF-IDF fallback (%s). Install requirements-rag.txt for MiniLM.",
+            model_name,
+        )
+        note_embedding_fallback("tfidf_fallback", model_name)
+        return _CatalogFallbackEmbedder()
+    return _SentenceTransformerEmbedder(model_name=short)
+
+
 @lru_cache(maxsize=8)
 def _get_embedder(name: str | None = None) -> Embedder:
     """Return a cached embedder instance by model name or env default."""
@@ -144,24 +191,10 @@ def _get_embedder(name: str | None = None) -> Embedder:
             dim = int(suffix)
         return _HashEmbedder(dimension=dim)
     if model_name.startswith("sentence-transformers/"):
-        try:
-            import sentence_transformers  # noqa: F401
-        except ImportError as exc:
-            raise ModuleNotFoundError(
-                f"sentence_transformers is required for embedding model {model_name!r}; "
-                "install sentence-transformers or set DATAFLOW_EMBEDDING_MODEL=hash/32"
-            ) from exc
-        return _SentenceTransformerEmbedder(model_name=model_name.split("/", 1)[1])
+        return _sentence_transformer_or_fallback(model_name)
     if model_name in {"text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"}:
         return _OpenAIEmbedder(model_name=model_name)
-    try:
-        import sentence_transformers  # noqa: F401
-    except ImportError as exc:
-        raise ModuleNotFoundError(
-            f"sentence_transformers is required for embedding model {model_name!r}; "
-            "install sentence-transformers or set DATAFLOW_EMBEDDING_MODEL=hash/32"
-        ) from exc
-    return _SentenceTransformerEmbedder(model_name=model_name)
+    return _sentence_transformer_or_fallback(model_name)
 
 
 def chunk_text(
@@ -233,9 +266,69 @@ def chunk_text(
 # In-process L1 cache for repeated identical content within a process.
 _EMBEDDING_CACHE: dict[str, list[float]] = {}
 
+# Set when this task embedded with a fallback instead of the configured model.
+# ``_writer_diagnostics`` copies it onto the job warning list and clears it,
+# so the operator sees the substitution on the run rather than only inside
+# row metadata.
+_embedding_fallback_notice: ContextVar[str | None] = ContextVar(
+    "df_embedding_fallback_notice", default=None
+)
 
-def _cache_key(text: str, model: str | None) -> str:
-    return hashlib.sha256(f"{model or 'default'}:{text}".encode("utf-8")).hexdigest()
+
+def note_embedding_fallback(backend: str, model: str | None = None) -> None:
+    """Record that this write did not use the configured semantic model."""
+    name = str(backend or "").strip()
+    if not name or name == "sentence_transformers":
+        return
+    configured = str(model or "sentence-transformers/all-MiniLM-L6-v2")
+    _embedding_fallback_notice.set(
+        f"Vector embeddings used the {name} fallback instead of {configured}. "
+        "Install requirements-rag.txt for MiniLM. Each row is stamped "
+        "_df_embedding_backend so this is not a silent model substitution."
+    )
+
+
+def take_embedding_fallback_notice() -> str | None:
+    """Return the fallback warning once, for the job that just embedded."""
+    notice = _embedding_fallback_notice.get()
+    if notice:
+        _embedding_fallback_notice.set(None)
+    return notice
+
+
+def attach_embedding_fallback_warning(warnings: list[Any] | None) -> list[Any]:
+    """Put this write's fallback notice on the job warning list.
+
+    The embedder is cached, so construction notes the substitution only once
+    per process. Each embed re-notes it. The notice is inserted first so a
+    ten-warning cap cannot drop the only line that says MiniLM was not used.
+    """
+    out = list(warnings or [])
+    notice = take_embedding_fallback_notice()
+    if notice and notice not in out:
+        out.insert(0, notice)
+    return out
+
+
+def _note_cached_fallback(embedder: Any, model: str | None) -> None:
+    """Re-arm the job warning when a cached embedder is already the fallback."""
+    backend = str(getattr(embedder, "backend", "") or "")
+    if backend and backend != "sentence_transformers":
+        note_embedding_fallback(backend, model)
+
+
+def _cache_key(text: str, model: str | None, backend: str = "") -> str:
+    return hashlib.sha256(
+        f"{backend}|{model or 'default'}|{text}".encode("utf-8")
+    ).hexdigest()
+
+
+def _annotate_embed_backend(meta: dict[str, Any], model: str | None) -> None:
+    """Name a non-semantic fallback on the row the destination stores."""
+    backend = str(getattr(_get_embedder(model), "backend", "") or "")
+    if backend and backend != "sentence_transformers":
+        meta["_df_embedding_backend"] = backend
+        note_embedding_fallback(backend, model)
 
 
 def clear_memory_cache() -> int:
@@ -269,13 +362,15 @@ def embed(
 
     use_durable = durable_cache_enabled_by_default() if durable is None else bool(durable)
     embedder = _get_embedder(model)
+    _note_cached_fallback(embedder, model)
     if not use_cache:
         return embedder.embed(texts)
 
     results: list[list[float] | None] = [None] * len(texts)
     missing_l1: list[tuple[int, str, str]] = []  # idx, text, key
     for i, text in enumerate(texts):
-        key = _cache_key(text, model)
+        embedder_backend = str(getattr(embedder, "backend", "") or "")
+        key = _cache_key(text, model, embedder_backend)
         if key in _EMBEDDING_CACHE:
             results[i] = list(_EMBEDDING_CACHE[key])
         else:
@@ -523,6 +618,7 @@ def vectorize_records(
             vectors = embed([content], model=model, durable=durable_embedding_cache)
             vector = vectors[0] if vectors else None
             bounded, meta = _bounded_vector_content(content, metadata)
+            _annotate_embed_backend(meta, model)
             rows.append({
                 "id": _stable_vector_row_id(
                     source_id, existing_chunk_index, bounded, multi_chunk=False
@@ -541,6 +637,7 @@ def vectorize_records(
             embeddings = embed(chunks, model=model, durable=durable_embedding_cache)
             for idx, (chunk, vector) in enumerate(zip(chunks, embeddings)):
                 bounded, meta = _bounded_vector_content(chunk, metadata)
+                _annotate_embed_backend(meta, model)
                 rows.append({
                     "id": _stable_vector_row_id(
                         source_id, idx, bounded, multi_chunk=multi

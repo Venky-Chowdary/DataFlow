@@ -339,7 +339,7 @@ async def list_connectors(
         _api_root = Path(__file__).resolve().parents[2]
         if str(_api_root) not in sys.path:
             sys.path.insert(0, str(_api_root))
-        from services.connector_store import list_connectors as fs_list
+        from services.connector_store import connector_ui_status, list_connectors as fs_list
         items = fs_list(workspace_id=workspace_id)
         if items:
             return {
@@ -351,9 +351,11 @@ async def list_connectors(
                         "host": c.host,
                         "port": c.port,
                         "database": c.database,
-                        "status": "configured" if c.last_test_ok is True else ("error" if c.last_tested_at and c.last_test_ok is False else "configured"),
+                        "status": connector_ui_status(c),
                         "created_at": c.created_at,
                         "last_test_ok": c.last_test_ok,
+                        "last_tested_at": c.last_tested_at,
+                        "last_transfer_ok_at": c.last_transfer_ok_at,
                         "workspace_id": c.workspace_id or "",
                         "role": getattr(c, "role", None) or "both",
                     }
@@ -365,17 +367,10 @@ async def list_connectors(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     try:
+        from services.connector_store import connector_ui_status
+
         mongo = get_mongodb_service()
         connectors = mongo.list_connectors()
-
-        def _status_from_doc(c: dict) -> str:
-            last_ok = c.get("last_test_ok")
-            last_at = c.get("last_tested_at")
-            if last_ok is True:
-                return "configured"
-            if last_ok is False and last_at:
-                return "error"
-            return "configured"
 
         result = []
         for c in connectors:
@@ -389,9 +384,11 @@ async def list_connectors(
                 "host": c.get("host", ""),
                 "port": c.get("port", 0),
                 "database": c.get("database", ""),
-                "status": _status_from_doc(c),
+                "status": connector_ui_status(c),
                 "created_at": created.isoformat() if created and hasattr(created, "isoformat") else created,
                 "last_test_ok": c.get("last_test_ok"),
+                "last_tested_at": c.get("last_tested_at"),
+                "last_transfer_ok_at": c.get("last_transfer_ok_at"),
                 "workspace_id": c.get("workspace_id", ""),
                 "role": c.get("role") or "both",
             })
@@ -809,13 +806,60 @@ async def cancel_transfer_job(job_id: str, request: Request):
         # path ever overwrites it — so a cancel cannot be lost to a race with
         # the worker's next chunk update.
         mongo.request_job_cancel(job_id)
-        mongo.update_job_status(
+        queue_release: dict[str, Any] = {"queue": "not_attempted"}
+        try:
+            from services.worker_fleet import cancel_queued_job
+
+            queue_release = cancel_queued_job(job_id)
+        except Exception as exc:
+            logger.warning("Queue cancel failed for %s: %s", job_id, exc)
+            queue_release = {"queue": "unavailable"}
+        recorded = mongo.update_job_status(
             job_id, "cancelled",
             phase="cancelled",
             message="Transfer cancelled by user",
             progress_pct=job.get("progress_pct", 0),
+            operator_command=True,
         )
-        return {"success": True, "job_id": job_id, "status": "cancelled", "message": "Cancellation requested"}
+        if not recorded:
+            current = mongo.get_job(job_id) or {}
+            actual = str(current.get("status") or job.get("status") or "")
+            if actual != "cancelled":
+                return {
+                    "success": False,
+                    "job_id": job_id,
+                    "status": actual,
+                    "message": (
+                        "Cancel was requested but the job status was not changed "
+                        f"(it is {actual or 'unknown'}). The running worker stops "
+                        "at its next checkpoint; nothing was rolled back."
+                    ),
+                    "cancel_requested": True,
+                    "queue_release": queue_release,
+                }
+        # The worker drops the slot after it closes the replication connection.
+        # While that worker still holds the CDC lease, peek mode leaves the
+        # slot inactive between polls — this call then refuses to drop it.
+        # A worker that has already exited has no live lease, and this call
+        # drops the idle slot.
+        slot_release: dict[str, Any] = {"released": False, "reason": "not_attempted"}
+        try:
+            from services.cdc_catchup import release_finished_cdc_slot
+
+            slot_release = release_finished_cdc_slot(
+                job, reason="cancelled", job_id=job_id
+            )
+        except Exception as exc:
+            logger.warning("CDC slot release on cancel failed for %s: %s", job_id, exc)
+            slot_release = {"released": False, "reason": "release_failed"}
+        return {
+            "success": True,
+            "job_id": job_id,
+            "status": "cancelled",
+            "message": "Cancellation requested",
+            "cdc_slot_release": slot_release,
+            "queue_release": queue_release,
+        }
     except HTTPException:
         raise
     except Exception as e:
@@ -863,6 +907,23 @@ async def stream_transfer_job(job_id: str, request: Request):
     )
 
 
+def _operator_quarantine_rows(details: list) -> list:
+    """Response copy. Stored rejected_details keep the internal NULL wire."""
+    from services.dest_quarantine import project_operator_quarantine_details
+
+    return project_operator_quarantine_details(details)
+
+
+def _operator_csv_cell(value: object) -> str:
+    """CSV has no NULL token. SQL NULL is an empty field; ``""`` stays empty."""
+    from services.dest_quarantine import operator_quarantine_json_cell
+
+    cell = operator_quarantine_json_cell(value)
+    if cell is None:
+        return ""
+    return str(cell)
+
+
 @router.get("/jobs/{job_id}/quarantine")
 async def get_job_quarantine(job_id: str, request: Request):
     """Return quarantined rows for a job with their rejection reasons.
@@ -870,7 +931,10 @@ async def get_job_quarantine(job_id: str, request: Request):
     Includes write-time rejects and preflight integrity findings (encoding, etc.)
     so Inspect Quarantine is never empty when Validate/Run reported bad cells.
     """
-    from services.quarantine_from_preflight import merge_job_quarantine
+    from services.quarantine_from_preflight import (
+        merge_job_quarantine,
+        quarantine_evidence_source,
+    )
 
     mongo = get_mongodb_service()
     job = mongo.get_job(job_id)
@@ -907,11 +971,9 @@ async def get_job_quarantine(job_id: str, request: Request):
         or job.get("rejected_rows")
         or 0
     ) or finding_rows
-    has_write = bool(
-        job.get("rejected_details")
-        or (job.get("destination_summary") or {}).get("rejected_details")
-    )
-    source = "write" if has_write else ("preflight" if details else "none")
+    summary = job.get("destination_summary")
+    has_write = bool(summary.get("rejected_details")) if isinstance(summary, dict) else False
+    source = quarantine_evidence_source(job, details)
     # DLQ hydrate when job sample was truncated / incomplete.
     if details and (
         job.get("rejected_details_truncated")
@@ -974,7 +1036,7 @@ async def get_job_quarantine(job_id: str, request: Request):
         "rows_unaccounted": rows_unaccounted,
         "open_count": open_n,
         "source": source,
-        "quarantine": details,
+        "quarantine": _operator_quarantine_rows(details),
         "dest_dlq": dest_dlq,
         "quarantine_durable": quarantine_durable,
         "dest_dlq_durable": dest_dlq_durable,
@@ -1027,7 +1089,7 @@ async def export_job_quarantine(job_id: str, request: Request):
             str(d.get("row", "")),
             str(d.get("column", "")),
             str(d.get("target", "")),
-            str(d.get("value", "")),
+            _operator_csv_cell(d.get("value", "")),
             str(d.get("reason", "")),
             str(d.get("policy", "")),
             str(d.get("suggested_transform", "")),

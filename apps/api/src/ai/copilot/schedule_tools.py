@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .query_tools import _tool_result
-from .schedule_cadence import CadenceSpec, parse_cadence
+from .schedule_cadence import CadenceSpec, describe_stored_cadence, parse_cadence
 from .transfer_tools import (
     _is_execute_cleared,
     _stage_bound_contract,
@@ -68,6 +68,7 @@ def create_schedule(
     cadence: str = "",
     name: str = "",
     cursor_column: str = "",
+    cursor_semantics: str = "",
     source_timezone: str = "",
     source_read_mode: str = "",
     procedure_call: str = "",
@@ -77,6 +78,7 @@ def create_schedule(
     require_signed_contract: Any = None,
     source_filter: dict[str, Any] | None = None,
     upsert_key: str = "",
+    primary_key: str = "",
     dedupe_key: str = "",
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
@@ -109,17 +111,15 @@ def create_schedule(
                 "transfer once."
             ),
         )
-    mode = (sync_mode or "").strip()
-    if mode in _CURSOR_MODES and not (cursor_column or "").strip():
-        return _tool_result(
-            tool,
-            success=False,
-            error=(
-                f"An {mode} schedule needs the watermark column it advances on — "
-                "without it every run would re-read the whole table. Tell me which "
-                "column carries the change time (e.g. “incremental on updated_at”)."
-            ),
-        )
+    from services.sync_cursor import normalize_sync_mode
+
+    raw_mode = (sync_mode or "").strip()
+    # incremental_upsert is the tool spelling of incremental_deduped. The raw
+    # token is not in _CURSOR_MODES, so a schedule of that mode used to skip
+    # the watermark check and then fail preflight with no cursor to bind.
+    mode = normalize_sync_mode(raw_mode) if raw_mode else ""
+    # The watermark is resolved on the live schema. A sole modification-timestamp
+    # column is bound there; refusing here would hide that column from the schedule.
 
     planned = plan_transfer(
         source_connector_id=source_connector_id,
@@ -139,8 +139,11 @@ def create_schedule(
         contract_id=contract_id,
         require_signed_contract=require_signed_contract,
         source_filter=source_filter,
-        upsert_key=upsert_key,
+        upsert_key=upsert_key or primary_key,
+        primary_key=primary_key,
         dedupe_key=dedupe_key,
+        cursor_column=cursor_column,
+        cursor_semantics=cursor_semantics,
         rule_questions=rule_questions,
         applied_rules=applied_rules,
     )
@@ -148,6 +151,21 @@ def create_schedule(
         return _tool_result(tool, success=False, error=planned.error)
 
     plan = planned.output or {}
+    bound_cursor = str(
+        (plan.get("data_rules") or {}).get("cursor_column") or cursor_column or ""
+    ).strip()
+    if mode in _CURSOR_MODES and not bound_cursor:
+        return _tool_result(
+            tool,
+            success=False,
+            error=(
+                f"An {mode} schedule needs the watermark column it advances on — "
+                "without it every run would re-read the whole table. Tell me which "
+                "column carries the change time (e.g. “incremental on updated_at”). "
+                "A single updated_at on the source is selected automatically; "
+                "two candidates are not guessed."
+            ),
+        )
     preflight = plan.get("preflight") or {}
     if not _is_execute_cleared(preflight):
         decision = _transfer_decision(preflight) or (
@@ -182,6 +200,15 @@ def create_schedule(
         # Same fail-closed bind as a chat-started run: an unsigned or tripped
         # contract must not become a standing unattended instruction.
         bound = _stage_bound_contract(contract_id, require_signed_contract)
+        from services.schedule_store import mappings_bound_to_signed_contract
+
+        # The signed rows travel with the schedule when they name the same
+        # columns. Storing a re-planned copy with a different confidence made
+        # the runner refuse the contract this call just bound.
+        engine_mappings = mappings_bound_to_signed_contract(
+            str(bound.get("contract_id") or ""),
+            engine_mappings,
+        )
     except ValueError as exc:
         return _tool_result(tool, success=False, error=str(exc))
 
@@ -208,7 +235,12 @@ def create_schedule(
         # writes the columns preflight judged — not a later re-derivation.
         "mappings": engine_mappings,
         "stream_contracts": plan.get("stream_contracts") or [],
-        "cursor_column": (cursor_column or "").strip(),
+        "cursor_column": str(
+            (plan.get("data_rules") or {}).get("cursor_column") or cursor_column or ""
+        ).strip(),
+        "cursor_semantics": str(
+            (plan.get("data_rules") or {}).get("cursor_semantics") or cursor_semantics or ""
+        ).strip().lower(),
         "primary_key": upsert,
         "source_read_mode": source.get("source_read_mode") or "",
         "procedure_call": source.get("procedure_call") or "",
@@ -223,7 +255,13 @@ def create_schedule(
         "source": f"{source['connector_name']}.{source['table']}",
         "destination": f"{destination['connector_name']}.{destination['table']}",
         "cadence": spec.description,
-        "interval": spec.interval,
+        # The stored interval stays a preset the runner accepts. The label the
+        # operator reads follows the cron, so */5 is not shown as daily/hourly.
+        "interval": (
+            describe_stored_cadence(spec.interval, spec.cron, spec.timezone)
+            if spec.cron
+            else spec.interval
+        ),
         "cron": spec.cron or "(preset interval)",
         "timezone": spec.timezone,
         "sync_mode": resolved_mode,

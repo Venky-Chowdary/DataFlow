@@ -11,6 +11,9 @@ import { ProgressRing } from "../../components/ui/ProgressRing";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
+import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
+import type { RuleCompileReport } from "../../lib/businessRules";
+import { ruleCensus } from "../../lib/businessRules";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
 import { destCatalogExists } from "../../lib/destSchemaIdentity";
@@ -79,6 +82,9 @@ interface TransferMapStepProps {
   destShapeHeadline?: string;
   /** Re-probe the destination catalog and re-map — the only exit from an unread dest schema. */
   onReloadDestSchema?: () => void | Promise<void>;
+  /** Compiled workbook — shown as evidence on each mapped column. */
+  ruleReport?: RuleCompileReport | null;
+  onAcceptRuleDirect?: (index: number) => void;
 }
 
 
@@ -133,6 +139,8 @@ export function TransferMapStep({
   extraSourceColumns = [],
   destShapeHeadline = "",
   onReloadDestSchema,
+  ruleReport = null,
+  onAcceptRuleDirect,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("review");
@@ -230,6 +238,14 @@ export function TransferMapStep({
     && (uniqueKeySuggestions.length > 0 || compositeKeySuggestions.length > 0),
   );
 
+  // Census stays on the closed summary so review/conflict counts are visible
+  // without pushing the mapping table below the fold.
+  const ruleBannerLine = useMemo(() => {
+    if (!ruleReport) return "";
+    const census = ruleCensus(ruleReport);
+    return `${census.total} total · ${census.mapping} mapping · ${census.validation} validation · ${census.executable} executable · ${census.review} review · ${census.conflict} conflict`;
+  }, [ruleReport]);
+
   const continueToValidate = (
     <button
       type="button"
@@ -289,64 +305,92 @@ export function TransferMapStep({
         </div>
       </div>
 
-      {extraSourceColumns.length > 0 && (
-        <details className="df2-map-stream-diverge is-compact" role="status">
-          <summary>
-            <DtIcon name="layers" size={16} />
-            <strong>{destShapeHeadline || "Extra source columns — remap or omit"}</strong>
-            <span> · {extraSourceColumns.length}</span>
-          </summary>
-          <p>
-            {extraSourceColumns.join(", ")} — dest-exists write is name-addressed.
-            These columns are not dropped. Use Remap dest or mark omit.
-          </p>
-        </details>
-      )}
-
-      {streamNames.length > 1 && (
-        <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">
-          {streamNames.map((name) => (
-            <button
-              key={name}
-              type="button"
-              role="tab"
-              aria-selected={activeStream === name}
-              className={`df2-map-stream-tab${activeStream === name ? " is-active" : ""}${streamBusy === name ? " is-busy" : ""}`}
-              onClick={() => onActiveStreamChange?.(name)}
-              disabled={Boolean(streamBusy)}
-            >
-              {name}
-              {streamBusy === name ? "…" : ""}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {streamsDiverge && streamNames.length > 1 && (
-        <div className="df2-map-stream-diverge" role="alert">
-          <DtIcon name="alert" size={16} />
-          <div>
-            <strong>Stream schemas differ</strong>
-            <p>
-              Each tab has its own column mapping (sent as per-stream write contracts).
-              Review every stream before Validate — incompatible shared destinations still
-              need separate routes.
-            </p>
-            {onRematchAllStreams && (
-              <button
-                type="button"
-                className="df2-btn df2-btn-sm"
-                disabled={Boolean(streamBusy)}
-                onClick={() => void onRematchAllStreams()}
-              >
-                {streamBusy === "all" ? "Rematching…" : "Rematch all streams"}
-              </button>
-            )}
-          </div>
-        </div>
-      )}
-
       <div className="df2-card-body df2-map-step-body">
+        {extraSourceColumns.length > 0 && (
+          <details className="df2-map-stream-diverge is-compact" role="status">
+            <summary>
+              <DtIcon name="layers" size={16} />
+              <strong>{destShapeHeadline || "Extra source columns — remap or omit"}</strong>
+              <span> · {extraSourceColumns.length}</span>
+            </summary>
+            <p>
+              {extraSourceColumns.join(", ")} — dest-exists write is name-addressed.
+              These columns are not dropped. Use Remap dest or mark omit.
+            </p>
+          </details>
+        )}
+
+        {streamNames.length > 1 && (
+          <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">
+            {streamNames.map((name) => (
+              <button
+                key={name}
+                type="button"
+                role="tab"
+                aria-selected={activeStream === name}
+                className={`df2-map-stream-tab${activeStream === name ? " is-active" : ""}${streamBusy === name ? " is-busy" : ""}`}
+                onClick={() => onActiveStreamChange?.(name)}
+                disabled={Boolean(streamBusy)}
+              >
+                {name}
+                {streamBusy === name ? "…" : ""}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {streamsDiverge && streamNames.length > 1 && (
+          <div className="df2-map-stream-diverge" role="alert">
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Stream schemas differ</strong>
+              <p>
+                Each tab has its own column mapping (sent as per-stream write contracts).
+                Review every stream before Validate — incompatible shared destinations still
+                need separate routes.
+              </p>
+              {onRematchAllStreams && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm"
+                  disabled={Boolean(streamBusy)}
+                  onClick={() => void onRematchAllStreams()}
+                >
+                  {streamBusy === "all" ? "Rematching…" : "Rematch all streams"}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {ruleReport && (
+          <details className="df2-rule-map-banner">
+            <summary title={ruleBannerLine}>
+              <span className="df2-rule-map-chevron" aria-hidden="true" />
+              <DtIcon name="book" size={16} />
+              <strong>Business rules</strong>
+              <span className="df2-rule-map-census">{ruleBannerLine}</span>
+            </summary>
+            <div className="df2-rule-map-body">
+              <p className="df2-rule-map-kicker">
+                Destination names, write transforms, and lookups land here.
+                Transform kept the pre-load image. Validate contracts never write.
+                Click a rule for provenance — customer document → compiled IR → dest.
+              </p>
+              {ruleReport.honesty ? (
+                <details className="df2-rule-honesty">
+                  <summary>Compiler contract</summary>
+                  <p>{ruleReport.honesty}</p>
+                </details>
+              ) : null}
+              <BusinessRuleLedger
+                report={ruleReport}
+                embedded
+                onAcceptDirect={onAcceptRuleDirect}
+              />
+            </div>
+          </details>
+        )}
         {blockerSummary.blockers.length > 0 && (
           <div className="df2-map-blocker-bar" role="status">
             <div className="df2-map-blocker-bar-head">

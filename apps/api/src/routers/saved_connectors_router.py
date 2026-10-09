@@ -21,6 +21,7 @@ if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from services.connector_store import (
+    connector_ui_status,
     create_connector,
     delete_connector,
     get_connector,
@@ -90,12 +91,7 @@ def _require_write_workspace(
 def _to_ui(c) -> dict[str, Any]:
     d = mask_connector(c)
     d["id"] = d["id"]
-    if c.last_test_ok is True:
-        d["status"] = "configured"
-    elif c.last_test_ok is False and c.last_tested_at:
-        d["status"] = "error"
-    else:
-        d["status"] = "configured"
+    d["status"] = connector_ui_status(c)
     return d
 
 

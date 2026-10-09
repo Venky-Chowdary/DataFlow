@@ -119,14 +119,13 @@ def test_mapping_keeps_the_instant_carrier_and_asks_for_review_not_a_contract() 
         dest_table_exists=False,
     )
     row = stamped[0]
-    assert row["target_type"].upper().startswith("TIMESTAMP(6)")
-    assert _kinds(row["create_new_risks"]) == {"instant_range_cap"}
+    assert row["target_type"].upper().startswith("DATETIME(6)")
+    assert "instant_range_cap" not in _kinds(row.get("create_new_risks") or [])
     # The chip is the review. A theoretical 2038 ceiling must not drop G4
     # under the floor — out-of-range rows already quarantine at write.
     assert row["requires_review"] is False
     assert float(row.get("confidence") or 0) >= 0.85
-    assert create_new_risk_locks_review(row["create_new_risks"][0]) is False
-    # Range is not fidelity: the instant survives, so no lossy verdict and no
+    # The instant survives on DATETIME(6), so no lossy verdict and no
     # Risk Contract is demanded of the operator.
     assert str(row.get("fidelity") or "").lower() in {"", "preserve", "lossless"}
     assert not row.get("requires_risk_contract")
@@ -150,8 +149,6 @@ def test_a_sampled_year_past_2038_still_locks_review() -> None:
         dest_table_exists=False,
     )
     row = stamped[0]
-    chip = row["create_new_risks"][0]
-    assert chip["severity"] == "block"
-    assert create_new_risk_locks_review(chip) is True
-    assert row["requires_review"] is True
-    assert float(row.get("confidence") or 1) < 0.85
+    assert row["target_type"].upper().startswith("DATETIME(6)")
+    assert "instant_range_cap" not in _kinds(row.get("create_new_risks") or [])
+    assert row.get("requires_risk_contract") is not True

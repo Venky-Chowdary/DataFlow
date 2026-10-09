@@ -422,7 +422,20 @@ def get_capabilities() -> dict:
             "Catalog tiles are not transfer-live."
         ),
         "production_sku_note": sku_note,
+        "cdc_capable_sources": sorted(_cdc_capable_sources()),
+        "cdc_note": (
+            "CDC preflight blocks every source not in cdc_capable_sources. "
+            "timescaledb is not CDC-capable. Delivery stays at-least-once upsert."
+        ),
     }
+
+
+def _cdc_capable_sources() -> list[str]:
+    try:
+        from services.preflight_cursor_gate import CDC_CAPABLE_SOURCES
+    except Exception:  # noqa: BLE001 — capabilities still render without the gate module
+        return []
+    return list(CDC_CAPABLE_SOURCES)
 
 
 def _source_only_driver_types() -> list[str]:

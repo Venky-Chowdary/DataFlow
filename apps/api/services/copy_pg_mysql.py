@@ -13,7 +13,7 @@ and spill to a file where it does not (Windows).
 A mapped single PK is the dest-COUNT proof (integer: Spark-style min/max
 cuts; else ``percentile_disc``). An **empty** dest COPYs by ``ctid`` heap
 page ranges (sequential I/O). A **non-empty** dest resumes by PK range
-(skip complete, DELETE+reload partial). No mapped single PK: ctid COPY
+(skip a complete range; append declines a partial range; overwrite may DELETE+reload). No mapped single PK: ctid COPY
 and total dest COUNT only. Workers share ``pg_export_snapshot()``. A
 missed PK range fails dest COUNT.
 
@@ -38,6 +38,7 @@ from typing import Any
 from services.brand_env import getenv_brand
 from services.code_crosswalk import declared_crosswalk
 from services.copy_fast_path import (
+    occupied_pk_range_action,
     FastPathResult,
     FastPathUnavailable,
     plan_fast_path_create,
@@ -814,6 +815,7 @@ def copy_postgres_to_mysql(
                         elif already == 0:
                             part["action"] = "load"
                         else:
+                            occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                             _delete_mysql_range(
                                 dst_cur, table_q, dest_ident, part
                             )

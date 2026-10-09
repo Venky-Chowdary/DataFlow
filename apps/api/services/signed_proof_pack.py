@@ -114,7 +114,11 @@ def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
     Operational ``passed`` (rows landed) is a different question — a coerced
     write can complete and still be forbidden from claiming ``migration_proven``.
     """
-    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT, WRITTEN_BATCH_KEYS
+    from services.reconcile_coverage import (
+        CDC_SOURCE_IMAGE_COUNT,
+        CDC_SOURCE_IMAGE_VALUES,
+        WRITTEN_BATCH_KEYS,
+    )
 
     ladder = recon.get("verification_ladder") if isinstance(recon.get("verification_ladder"), dict) else {}
     if ladder and not ladder.get("skipped") and ladder.get("passed") is False:
@@ -136,7 +140,10 @@ def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
             # CDC COUNT-only: leftover dest keys sit outside the source-image
             # COUNT proof. Changelog is not S; leftover MERGE is a hard no-op.
             # checksum_match is False by design — do not claim full_checksum.
-            elif str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
+            elif str(recon.get("checksum_scope") or "") in {
+                CDC_SOURCE_IMAGE_COUNT,
+                CDC_SOURCE_IMAGE_VALUES,
+            }:
                 skip_veto = True
         if not skip_veto:
             return _ladder_fail_veto(ladder)
@@ -421,20 +428,53 @@ def classify_post_write_assurance(
             ),
         }
 
-    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT
+    from services.reconcile_coverage import (
+        CDC_SOURCE_IMAGE_COUNT,
+        CDC_SOURCE_IMAGE_VALUES,
+        LAST_STREAM_CHECKSUM,
+    )
 
-    if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT and passed:
+    if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_VALUES and passed:
         return {
-            "claim_level": CDC_SOURCE_IMAGE_COUNT,
+            "claim_level": CDC_SOURCE_IMAGE_VALUES,
             "post_write_verified": True,
+            "migration_proven": False,
+            "population_proof": bool(checksum_match),
+            "referential_integrity_proven": ri_proven,
+            "checksum_match": bool(checksum_match),
+            "note": (
+                "CDC source-image value fingerprints are present on the destination. "
+                "Dest extras are not a failure. Not full_checksum. "
+                "At-least-once upsert. Not platform exactly-once."
+            ),
+        }
+
+    if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
+        return {
+            "claim_level": "failed",
+            "post_write_verified": False,
             "migration_proven": False,
             "population_proof": False,
             "referential_integrity_proven": ri_proven,
             "checksum_match": False,
             "note": (
-                "CDC dest COUNT vs live source-table COUNT. Leftover MERGE is a "
-                "no-op. At-least-once upsert — not platform exactly-once. "
-                "Not full_checksum / migration proven."
+                "CDC dest COUNT vs live source-table COUNT is not a cell proof. "
+                "A matching count does not complete the job. Leftover MERGE is a "
+                "no-op. At-least-once upsert — not platform exactly-once."
+            ),
+        }
+
+    if str(recon.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM and passed:
+        return {
+            "claim_level": "per_stream_checksum",
+            "post_write_verified": True,
+            "migration_proven": False,
+            "population_proof": False,
+            "referential_integrity_proven": ri_proven,
+            "checksum_match": checksum_match,
+            "note": (
+                "Checksum covers the last stream only, not the multi-table job. "
+                "Not migration_proven."
             ),
         }
 
@@ -672,6 +712,34 @@ def proof_pack_evidence_completeness_errors(
     versions = connector_versions if isinstance(connector_versions, dict) else {}
     if claim_migration_proven and not versions:
         errors.append("migration_proven refused: connector_versions absent")
+    elif claim_migration_proven:
+        from services.connector_versions import versions_include_release
+
+        if not versions_include_release(versions):
+            errors.append(
+                "migration_proven refused: connector_versions lack a captured "
+                "release (format or kind is not a version)"
+            )
+    if claim_migration_proven:
+        recon = reconciliation if isinstance(reconciliation, dict) else {}
+        from services.reconcile_coverage import LAST_STREAM_CHECKSUM
+
+        if str(recon.get("checksum_scope") or "") == LAST_STREAM_CHECKSUM:
+            errors.append(
+                "migration_proven refused: checksum covers the last stream only, "
+                "not the multi-table job"
+            )
+        provenance = str(recon.get("source_checksum_provenance") or "")
+        independent_reread = (
+            provenance == "independent_source_reread"
+            or recon.get("source_independently_reread") is True
+            or str(recon.get("checksum_mode") or "") == "source_reread"
+        )
+        if independent_reread and recon.get("identity_hash_aligned") is not True:
+            errors.append(
+                "migration_proven refused: source re-read identity/hash "
+                "alignment is required"
+            )
     return errors
 
 
@@ -697,6 +765,7 @@ def build_signed_proof_pack(
     require_risk_completeness: bool | None = None,
     anchor_in_chain: bool = False,
     governance_operations: dict[str, Any] | None = None,
+    timing: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a signed proof pack for a completed (or failed) job.
 
@@ -788,14 +857,17 @@ def build_signed_proof_pack(
             else None,
         },
         "prev_audit_hash": prev_audit_hash,
+        "timing": timing if isinstance(timing, dict) else {},
         "delivery_semantics": {
-            "cdc_default": "at_least_once",
+            "cdc_default": "auto",
             "exactly_once": False,
             "at_least_once": True,
             "at_most_once": False,
             "note": (
-                "Destinations must upsert with PK/LSN guards under at-least-once capture; "
-                "exactly-once and at-most-once are not claimed."
+                "auto selects dest-owned exactly-once when the route can commit "
+                "apply and the watermark together. exactly_once here is the "
+                "platform-wide claim and stays false. A run's resolved guarantee "
+                "is on the job. At-most-once is not offered."
             ),
         },
         "governance_operations": _governance_operations_for_pack(governance_operations),
@@ -882,6 +954,22 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
     return {"ok": not errors, "errors": errors, "content_sha256": actual_hash}
 
 
+def _timing_for_pack(dest: dict[str, Any] | None) -> dict[str, Any]:
+    """Elapsed and phase split from the run. Empty when the engine did not measure."""
+    summary = dest if isinstance(dest, dict) else {}
+    timing: dict[str, Any] = {}
+    elapsed = summary.get("elapsed_seconds")
+    if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+        timing["elapsed_seconds"] = elapsed
+    rate = summary.get("records_per_second")
+    if isinstance(rate, (int, float)) and not isinstance(rate, bool):
+        timing["records_per_second"] = rate
+    profile = summary.get("phase_profile")
+    if isinstance(profile, dict) and profile.get("phases"):
+        timing["phase_profile"] = profile
+    return timing
+
+
 def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> dict[str, Any]:
     """Convenience: pull Gate-8 + mapping proof + risk contracts off a job document."""
     from services.audit_log import latest_event_hash
@@ -903,10 +991,28 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
     rollback = dest.get("rollback_plan") if isinstance(dest.get("rollback_plan"), dict) else {}
     if not rollback and isinstance(job.get("rollback_plan"), dict):
         rollback = job["rollback_plan"]
-    connector_versions = {}
-    if isinstance(job.get("connector_versions"), dict):
-        connector_versions = dict(job["connector_versions"])
-    else:
+    from services.connector_versions import versions_include_release
+
+    connector_versions: dict[str, Any] = {}
+    candidates: list[Any] = [
+        job.get("connector_versions"),
+        dest.get("connector_versions"),
+        (job.get("reconciliation") or {}).get("connector_versions")
+        if isinstance(job.get("reconciliation"), dict)
+        else None,
+    ]
+    fallback: dict[str, Any] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        if versions_include_release(candidate):
+            connector_versions = dict(candidate)
+            break
+        if not fallback:
+            fallback = dict(candidate)
+    if not connector_versions:
+        connector_versions = fallback
+    if not connector_versions:
         for key in ("source_connector_version", "destination_connector_version"):
             if job.get(key):
                 connector_versions[key] = job[key]
@@ -934,9 +1040,29 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         "success",
         "succeeded",
     }
+    reconciliation = (
+        dict(job["reconciliation"]) if isinstance(job.get("reconciliation"), dict) else None
+    )
+    if reconciliation is not None and dest:
+        from services.reconcile_coverage import qualify_multi_stream_reconciliation
+
+        reconciliation = qualify_multi_stream_reconciliation(reconciliation, dest)
+    if reconciliation is not None:
+        if (
+            "identity_hash_aligned" not in reconciliation
+            and "identity_hash_aligned" in dest
+        ):
+            reconciliation["identity_hash_aligned"] = bool(dest.get("identity_hash_aligned"))
+        if dest.get("source_independently_reread") is True:
+            reconciliation.setdefault("source_independently_reread", True)
+        if (
+            not reconciliation.get("source_checksum_provenance")
+            and str(dest.get("checksum_mode") or "") == "source_reread"
+        ):
+            reconciliation["source_checksum_provenance"] = "independent_source_reread"
     return build_signed_proof_pack(
         job_id=str(job.get("_id") or job.get("id") or ""),
-        reconciliation=job.get("reconciliation") if isinstance(job.get("reconciliation"), dict) else None,
+        reconciliation=reconciliation,
         mapping_proof=mapping_proof or None,
         preflight_summary=(
             {
@@ -990,4 +1116,5 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
         or bool(job_success and not accepted and expected_risks),
         anchor_in_chain=True,
         governance_operations=_collect_governance_for_pack(job),
+        timing=_timing_for_pack(dest),
     )

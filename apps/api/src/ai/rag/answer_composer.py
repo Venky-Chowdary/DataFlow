@@ -320,6 +320,10 @@ class Candidate:
     #: its rarest typed word, or a phrase expansion restating it in the
     #: corpus's own spelling. See ``subject_words``.
     names_subject: bool = False
+    #: True when the section heading itself names that subject, not only the
+    #: sentence. "Procedure: connect a MySQL database" is the procedure for
+    #: MySQL. "Procedure: add a connector" merely lists MySQL among every driver.
+    heading_names_subject: bool = False
     #: True when the sentence is a step of a retrieved ``Procedure:`` section
     #: that matched none of the question. It is kept for ``_complete_procedure``
     #: only — it may follow a step that answered, never speak on its own.
@@ -760,7 +764,11 @@ def build_candidates(
     )
     if subject:
         candidates = [
-            replace(cand, names_subject=bool(words & subject))
+            replace(
+                cand,
+                names_subject=bool(words & subject),
+                heading_names_subject=bool(set(content_terms(cand.section_title)) & subject),
+            )
             for cand, words in zip(candidates, prose)
         ]
     # A step of a procedure the question did not ask for — its heading does
@@ -1109,6 +1117,17 @@ def _lead(pool: Sequence[Candidate]) -> Candidate:
     named = [
         c for c in pool if c.names_subject and not c.list_item and c.score >= bar
     ]
+    # A heading that names the engine is the procedure for that engine.
+    # A generic add-connector caption also contains the engine, inside a list
+    # of every driver, and must not open "how do I add a MySQL connector".
+    headed = [
+        c
+        for c in named
+        if c.heading_names_subject
+        and c.section_title.lower().startswith("procedure: connect a ")
+    ]
+    if headed:
+        return max(headed, key=lambda c: c.score)
     return max(named, key=lambda c: c.score) if named else top
 
 
@@ -1186,10 +1205,14 @@ def _complete_procedure(
                 break
             out.remove(min(spare, key=lambda c: c.score))
         out.append(step)
-    # Steps read in source order, after the lead.
-    lead_steps = sorted((c for c in out if c.section_title == lead.section_title), key=lambda c: c.order)
+    # Later steps of the lead's section follow it, in source order. An earlier
+    # caption in that section must not move in front of the sentence that answered.
+    lead_steps = sorted(
+        (c for c in out if c.section_title == lead.section_title and c.order != lead.order),
+        key=lambda c: c.order,
+    )
     others = [c for c in out if c.section_title != lead.section_title]
-    return [*lead_steps, *others]
+    return [lead, *lead_steps, *others]
 
 
 def compose_answer(

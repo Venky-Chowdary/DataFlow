@@ -52,6 +52,42 @@ CURSOR_SEMANTICS: frozenset[str] = frozenset(
     }
 )
 
+#: Conventional names for a column the source maintains on every change.
+#: Matching the name is not proof a trigger exists. Zero matches and two
+#: matches are both "no selection" — a missing watermark stays missing, and
+#: two candidates are not a guess. ``created_at`` is absent on purpose.
+_MODIFICATION_TIMESTAMP_COLUMNS: frozenset[str] = frozenset(
+    {
+        "updated_at",
+        "updatedat",
+        "last_updated",
+        "last_modified",
+        "modified_at",
+        "modified_on",
+        "updated_on",
+        "update_timestamp",
+        "modification_timestamp",
+        "row_updated_at",
+    }
+)
+
+
+def sole_modification_timestamp_column(columns: list[str] | None) -> str:
+    """Source spelling of the only modification-timestamp column, or ``""``.
+
+    Used when an incremental upsert was asked for and no cursor was named.
+    The caller must declare ``modification_timestamp`` and show the operator
+    the assumption. A column that is not on the source is never invented.
+    """
+    found: list[str] = []
+    for col in columns or []:
+        name = str(col or "").strip()
+        if name and name.lower() in _MODIFICATION_TIMESTAMP_COLUMNS:
+            found.append(name)
+    if len(found) != 1:
+        return ""
+    return found[0]
+
 #: Semantics under which a row that changes after it was read is read again.
 _CAPTURES_UPDATES: frozenset[str] = frozenset({MODIFICATION_TIMESTAMP, CDC_POSITION})
 

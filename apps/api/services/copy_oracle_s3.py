@@ -2,8 +2,8 @@
 
 Oracle has no ``COPY TO STDOUT`` and this host has no client ``sqlldr``
 / Data Pump. One ``LOCK TABLE src IN SHARE MODE`` transaction streams
-``SELECT`` into a CSV tempfile (HEADER, ``\\N`` = NULL, ``""`` = empty
-string), then ``upload_file``. Dest COUNT is object-store artifact COUNT
+``SELECT`` into a CSV tempfile (HEADER, NULL is an empty field, ``""``
+= empty string), then ``upload_file``. Dest COUNT is object-store artifact COUNT
 of that CSV (header skipped) — never writer PUT ack, never ListObjects
 length. Empty dest is PUT, **not** sqlldr / Data Pump / ``aws s3 cp``.
 Occupied dest whose COUNT already equals the source snapshot is
@@ -13,7 +13,7 @@ Occupancy is counted **before** delete.
 
 Oracle ``VARCHAR2`` stores ``''`` as ``NULL`` (engine law). Source cells
 that were originally empty strings therefore arrive here as ``None`` and
-CSV as ``\\N``. That is not a row drop.
+CSV as an empty field. That is not a row drop.
 
 Declines (row path keeps quarantine): transforms that change values,
 BLOB/RAW/XMLTYPE/CLOB/JSON, public proxy, occupied dest with dest COUNT

@@ -23,6 +23,7 @@ from services.dest_precount import (
 )
 from services.reconcile_coverage import (
     CDC_SOURCE_IMAGE_COUNT,
+    CDC_SOURCE_IMAGE_VALUES,
     NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
@@ -33,6 +34,7 @@ from services.reconcile_coverage import (
     WRITTEN_BATCH_KEYS,
     is_cdc_source_image_count_report,
     is_no_op_report,
+    qualify_multi_stream_reconciliation,
 )
 from services.destination_key_collision_probe import (
     destination_enforces_key,
@@ -65,6 +67,16 @@ def _finalize_reconcile(
     out = stamp_post_write_phase(payload)
     snap = None
     if isinstance(dest_summary, dict):
+        if "identity_hash_aligned" in dest_summary:
+            out["identity_hash_aligned"] = bool(dest_summary.get("identity_hash_aligned"))
+        alignment = dest_summary.get("identity_alignment")
+        if isinstance(alignment, dict):
+            out["identity_alignment"] = dict(alignment)
+        versions = dest_summary.get("connector_versions")
+        if isinstance(versions, dict) and versions:
+            out["connector_versions"] = dict(versions)
+        if dest_summary.get("source_independently_reread") is True:
+            out["source_independently_reread"] = True
         snap = dest_summary.get("source_snapshot")
         raw_before = dest_summary.get(PRECOUNT_KEY)
         if out.get(PRECOUNT_KEY) is None and isinstance(raw_before, int):
@@ -845,23 +857,19 @@ def _schema_state_evidence(
     )
 
 
-def _source_foreign_keys(schema_state: dict[str, Any]) -> list[dict[str, Any]]:
-    """Relationships the source guaranteed, from its own catalog read."""
-    rendered = ((schema_state.get("source") or {}).get("foreign_keys")) or []
-    keys: list[dict[str, Any]] = []
-    for item in rendered:
-        parts = str(item).split("->")
-        if len(parts) != 3:
-            continue
-        child, parent, parent_cols = parts
-        keys.append(
-            {
-                "constrained_columns": [c for c in child.split("+") if c],
-                "referred_table": parent,
-                "referred_columns": [c for c in parent_cols.split("+") if c],
-            }
-        )
-    return keys
+def _source_foreign_keys(
+    schema_state: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Relationships the source guaranteed, and tokens that could not be read.
+
+    Structured catalog facts are the relationship. The rendered ``child->parent``
+    string is only a fallback. A token that does not parse is returned, not
+    dropped: dropping it would make Gate-8 say the source declared no foreign key.
+    """
+    from services.physical_state_diff import foreign_keys_from_catalog_state
+
+    source = schema_state.get("source") if isinstance(schema_state, dict) else None
+    return foreign_keys_from_catalog_state(source if isinstance(source, dict) else {})
 
 
 def _referential_integrity_evidence(
@@ -871,15 +879,25 @@ def _referential_integrity_evidence(
     schema: str,
     table: str,
     schema_state: dict[str, Any],
+    source_schema: str = "",
 ) -> dict[str, Any]:
     """Orphan proof for every source relationship the destination does not enforce."""
-    foreign_keys = _source_foreign_keys(schema_state)
-    if not foreign_keys:
+    foreign_keys, unparsed = _source_foreign_keys(schema_state)
+    if not foreign_keys and not unparsed:
         return {
             "verified": False,
             "asked": False,
             "reason": "source declares no foreign keys",
             "relations": [],
+            "orphan_rows": 0,
+        }
+    if not foreign_keys:
+        return {
+            "verified": False,
+            "asked": True,
+            "reason": "source foreign key could not be read",
+            "relations": [],
+            "unavailable_relations": list(unparsed),
             "orphan_rows": 0,
         }
 
@@ -891,8 +909,15 @@ def _referential_integrity_evidence(
         schema=schema,
         table=table,
         foreign_keys=foreign_keys,
+        source_schema=source_schema,
     )
     evidence["asked"] = True
+    if unparsed:
+        evidence["verified"] = False
+        unavailable = list(evidence.get("unavailable_relations") or [])
+        unavailable.extend(unparsed)
+        evidence["unavailable_relations"] = unavailable
+        evidence["unparsed_foreign_keys"] = list(unparsed)
     return evidence
 
 
@@ -1497,6 +1522,7 @@ def run_reconciliation(
             )
             stamped["message"] = f"{str(stamped.get('message') or '').rstrip()}{note}"
         stamped = _localize_checksum_mismatch(stamped, dest_summary)
+        stamped = qualify_multi_stream_reconciliation(stamped, dest_summary)
         stamped = _attach_match_summary(stamped, dest_summary)
         return stamped
 
@@ -1633,7 +1659,14 @@ def run_reconciliation(
     from services.dialect_profiles import schema_from_cfg
 
     schema = dest_summary.get("schema") or schema_from_cfg(db_type, cfg)
-    table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""
+    table_name = (
+        dest_summary.get("table")
+        or dest_summary.get("prefix")
+        or dest_summary.get("index")
+        or endpoint.table
+        or endpoint.collection
+        or ""
+    )
     if db_type in VECTOR_IDENTITY_ENGINES:
         vector_stamp_ctx.update(
             cfg=cfg,
@@ -1859,7 +1892,8 @@ def run_reconciliation(
         )
         if schema_state:
             physical_state["schema_objects"] = schema_state
-            n5_ctx["source_has_fks"] = bool(_source_foreign_keys(schema_state))
+            keys, unparsed = _source_foreign_keys(schema_state)
+            n5_ctx["source_has_fks"] = bool(keys or unparsed)
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "physical schema comparison skipped: %s", exc, exc_info=exc
@@ -1871,12 +1905,24 @@ def run_reconciliation(
         }
 
     try:
+        ri_source_schema = ""
+        if source_endpoint is not None and source_endpoint.kind == "database":
+            from services.dialect_profiles import schema_from_cfg
+
+            from .connector_capabilities import resolve_driver_type
+
+            ri_src_cfg = resolve_connector_config(source_endpoint)
+            ri_src_type = resolve_driver_type(
+                str(ri_src_cfg.get("type") or source_endpoint.format or "")
+            ).lower()
+            ri_source_schema = str(schema_from_cfg(ri_src_type, ri_src_cfg) or "")
         ri_state = _referential_integrity_evidence(
             db_type=db_type,
             cfg=cfg,
             schema=str(schema or ""),
             table=str(table_name or ""),
             schema_state=schema_state,
+            source_schema=ri_source_schema,
         )
         physical_state["referential_integrity"] = ri_state
         n5_ctx["source_has_fks"] = bool(
@@ -2185,7 +2231,11 @@ def run_reconciliation(
 
     strict_checksum = validation_mode in ("strict", "maximum")
 
-    if source_checksum_scope_note and target_rows >= 0:
+    if (
+        source_checksum_scope_note
+        and target_rows >= 0
+        and not _cdc_source_image_gate(dest_summary)
+    ):
         # Resumed streaming pass: the destination digest covers the whole
         # population, the source digest could only cover the resumed tail. Prove
         # cardinality and say plainly that population fidelity is not proven —
@@ -2473,7 +2523,14 @@ def run_reconciliation(
         return _finalize(report.to_dict())
 
     # Data loss signal: the target table holds fewer rows than we just wrote.
-    if target_rows < rows_written_accounted:
+    # A CDC update of an existing key is a write that does not add a row, so
+    # dest COUNT is below the event ack on a correct stream. The source image
+    # count further down is the population. Comparing the blank CDC source
+    # digest to the full-table dest digest here failed MySQL→Postgres after
+    # the snapshot and the live update had both landed.
+    if target_rows < rows_written_accounted and not _cdc_source_image_gate(
+        dest_summary
+    ):
         report = reconcile(
             source_rows=source_rows,
             target_rows=target_rows,
@@ -2646,7 +2703,56 @@ def run_reconciliation(
     ):
         # Same-engine catch-up used engine digest above. Cross-engine (or
         # digest unavailable) must not compare last-batch ack to full dest.
+        # A finished value scan checks that each source row's fingerprint
+        # is on the dest. If the scan cannot finish, stay on COUNT and say
+        # value fidelity was not compared.
         keyed_scope = CDC_SOURCE_IMAGE_COUNT
+        if source_endpoint is not None and source_endpoint.kind == "database":
+            from services.cdc_value_digest import (
+                CdcValueScanIncomplete,
+                prove_cdc_values,
+            )
+            from services.reconciliation import ReconciliationReport
+
+            src_cfg_v = resolve_connector_config(source_endpoint)
+            src_type_v = resolve_driver_type(
+                str(src_cfg_v.get("type") or source_endpoint.format or "")
+            )
+            try:
+                proof = prove_cdc_values(
+                    source_type=src_type_v,
+                    source_cfg=src_cfg_v,
+                    source_table=str(
+                        source_endpoint.table or source_endpoint.collection or ""
+                    ),
+                    dest_type=str(db_type or ""),
+                    dest_cfg=dict(cfg),
+                    dest_table=str(table_name or ""),
+                    mappings=list(mapping_dicts or []),
+                    dest_types=dest_types,
+                )
+            except CdcValueScanIncomplete as exc:
+                return _finalize(
+                    ReconciliationReport(
+                        passed=False,
+                        source_rows=source_rows,
+                        target_rows=target_rows if isinstance(target_rows, int) else 0,
+                        source_checksum="",
+                        target_checksum="",
+                        message=(
+                            f"{exc} A matching row count does not prove the "
+                            "destination cells. At-least-once upsert. Not "
+                            "platform exactly-once."
+                        ),
+                        checksum_scope=CDC_SOURCE_IMAGE_COUNT,
+                        checksum_match=False,
+                        population_proof=False,
+                    ).to_dict()
+                )
+            if proof is not None:
+                keyed_scope = CDC_SOURCE_IMAGE_VALUES
+                source_checksum = proof.source_digest
+                target_checksum = proof.dest_digest
 
     # A keyed merge into an occupied destination grows it by ``inserts -
     # deletes``, not by the batch. When the batch digest could not be re-scoped

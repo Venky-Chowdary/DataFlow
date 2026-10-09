@@ -27,7 +27,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     },
     "pgvector": {"test": True, "read": False, "write": True, "introspect": True, "preflight": True, "dest_only": True},
     "qdrant": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "weaviate": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
+    "weaviate": {"test": True, "read": False, "write": True, "introspect": True, "preflight": True, "dest_only": True},
     "pinecone": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "milvus": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
@@ -56,7 +56,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "airtable": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
-    "neo4j": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "neo4j": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
     "couchbase": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "singer_tap": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
@@ -314,6 +314,97 @@ def default_port(driver_type: str) -> int:
         "yaml": 0,
         "fixed_width": 0,
     }.get((driver_type or "").lower(), 5432)
+
+
+def effective_port(driver_type: str, port: Any) -> int:
+    """Listen port for a driver: an explicit port, otherwise :func:`default_port`.
+
+    ``0`` and empty mean the caller did not choose a port. A second fallback
+    chain used to send that case to 443, so Redis and Elasticsearch dialed
+    the HTTPS port instead of 6379 and 9200.
+    """
+    parsed = _parse_port(port)
+    return parsed or default_port(_driver_key(driver_type))
+
+
+# The connector store and the transfer form both used to stamp 5432 whenever
+# the operator had not picked a port. Redis, Elasticsearch, Kafka and Neo4j
+# then dialed Postgres. 5432 is a real choice only for drivers that listen there.
+_HISTORICAL_PORT_FALLBACK = 5432
+# This reader speaks HTTP Cypher. A saved Bolt port never answers a health check.
+_NEO4J_BOLT_PORT = 7687
+
+
+def _parse_port(raw: Any) -> int:
+    try:
+        parsed = int(raw) if raw not in (None, "") else 0
+    except (TypeError, ValueError):
+        parsed = 0
+    return 0 if parsed < 0 else parsed
+
+
+def _driver_key(driver_type: str) -> str:
+    resolved = resolve_driver_type(driver_type or "")
+    if resolved in ("", "unknown"):
+        return (driver_type or "").lower()
+    return resolved
+
+
+def port_was_chosen(driver_type: str, raw: Any) -> bool:
+    """True when ``raw`` is a listen port this driver can actually be told to use.
+
+    Missing, ``0``, Neo4j Bolt ``7687``, and the old store-wide ``5432`` are
+    not a choice for a driver that does not listen there. Postgres and
+    pgvector keep ``5432``. An explicit tunnel port such as Redis ``6380``
+    stays chosen.
+    """
+    parsed = _parse_port(raw)
+    if parsed <= 0:
+        return False
+    driver = _driver_key(driver_type)
+    if driver == "neo4j" and parsed == _NEO4J_BOLT_PORT:
+        return False
+    if parsed == _HISTORICAL_PORT_FALLBACK and default_port(driver) != parsed:
+        return False
+    return True
+
+
+def stored_listen_port(driver_type: str, raw: Any) -> int:
+    """Port to persist and to dial.
+
+    One owner for the connector store and ``resolve_connector_config``.
+    Historical ``5432`` and Neo4j ``7687`` become the driver port. Any other
+    explicit port is kept, including Postgres ``5432`` and Redis ``6380``.
+    """
+    parsed = _parse_port(raw)
+    driver = _driver_key(driver_type)
+    if driver == "neo4j" and parsed == _NEO4J_BOLT_PORT:
+        return 7474
+    driver_default = default_port(driver)
+    if parsed in (0, _HISTORICAL_PORT_FALLBACK) and driver_default != parsed:
+        return driver_default
+    return parsed or driver_default
+
+
+def prefer_listen_port(driver_type: str, inline: Any, saved: Any) -> int:
+    """Pick the port the dial will use before the driver default is applied.
+
+    An inline historical ``5432`` must not override a saved tunnel port.
+    A form that stamps the driver default (DynamoDB ``443``, Redis ``6379``)
+    must not override a saved tunnel either. Returns ``0`` when neither side
+    chose a port, so the caller applies :func:`stored_listen_port`.
+    """
+    inline_port = _parse_port(inline) if port_was_chosen(driver_type, inline) else 0
+    saved_port = _parse_port(saved) if port_was_chosen(driver_type, saved) else 0
+    if inline_port and saved_port and inline_port != saved_port:
+        if inline_port == default_port(_driver_key(driver_type)):
+            return saved_port
+        return inline_port
+    if inline_port:
+        return inline_port
+    if saved_port:
+        return saved_port
+    return 0
 
 
 def resolve_driver_type(catalog_id: str) -> str:

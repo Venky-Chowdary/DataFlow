@@ -10,7 +10,6 @@ after restart. Lag is exposed via ``replication_lag_seconds()``.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from collections.abc import Iterator
@@ -38,6 +37,116 @@ _DDL_RE = re.compile(
 )
 
 _logger = logging.getLogger(__name__)
+
+
+def _binlog_file_index(name: str) -> tuple[str, int] | None:
+    """``mysql-bin.000123`` → ``("mysql-bin", 123)``. None when unordered."""
+    text = str(name or "")
+    prefix, dot, suffix = text.rpartition(".")
+    if not dot or not prefix or not suffix.isdigit():
+        return None
+    return prefix, int(suffix)
+
+
+def resume_token_from_consumed(
+    previous: dict[str, Any] | None,
+    consumed: dict[str, Any] | None,
+    *,
+    tables: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Next resume position is a binlog point this poll actually read.
+
+    ``SHOW MASTER STATUS`` and ``gtid_executed`` move when other sessions
+    commit. Stamping that live head onto an empty poll made the next
+    ``auto_position`` start past an update that was never applied
+    (DEF-C-005: source id 7 is 7777, destination still 17, job completed
+    with 0 records).
+    """
+    base = dict(previous) if isinstance(previous, dict) else {}
+    if not consumed:
+        return base or None
+    token = dict(base)
+    file_name = consumed.get("file")
+    pos = consumed.get("pos")
+    if file_name:
+        token["file"] = file_name
+    if pos is not None:
+        token["pos"] = pos
+    if consumed.get("tables"):
+        token["tables"] = list(consumed["tables"])
+    elif tables and "tables" not in token:
+        token["tables"] = list(tables)
+    # File and position are the resume. A GTID copied from the live master
+    # includes transactions this poll did not apply, and the next reader
+    # uses it whenever the file is missing.
+    if file_name and pos is not None:
+        token.pop("gtid", None)
+        token.pop("gtid_set", None)
+    return token or None
+
+
+def published_resume_token(
+    previous: dict[str, Any] | None,
+    last_position: dict[str, Any] | None,
+    *,
+    emitted: bool,
+    captured_row_dropped: bool,
+) -> dict[str, Any] | None:
+    """Watermark this poll may publish.
+
+    An Xid moves the binlog even when this table emitted nothing. Publishing
+    that head made the next read start past an insert, update, or delete
+    that was never applied (DEF-B2-009). A captured-table row that could not
+    be applied also refuses the advance. Returns None unless a captured-table
+    batch was emitted and no captured row was dropped.
+    """
+    if not emitted or captured_row_dropped or not last_position:
+        return None
+    return resume_token_from_consumed(previous, last_position)
+
+
+def binlog_schema_matches(event_schema: str, database: str) -> bool:
+    """Row events for this database, case-insensitive.
+
+    A case mismatch used to drop the row and still let the following Xid
+    advance the resume position past it. An empty configured database does
+    not filter (the reader was not told a schema).
+    """
+    wanted = str(database or "").casefold()
+    if not wanted:
+        return True
+    return str(event_schema or "").casefold() == wanted
+
+
+def consumed_reached_binlog_head(
+    consumed_file: str,
+    consumed_pos: int,
+    head_file: str,
+    head_pos: int,
+) -> bool | None:
+    """True when this poll read up to the head captured before the stream opened.
+
+    A later file with the same prefix is past that head. Two names that cannot
+    be ordered return None so a busy server is not failed on a guess.
+    """
+    try:
+        consumed_at = int(consumed_pos)
+        head_at = int(head_pos)
+    except (TypeError, ValueError):
+        return None
+    if str(consumed_file) == str(head_file):
+        return consumed_at >= head_at
+    consumed_idx = _binlog_file_index(consumed_file)
+    head_idx = _binlog_file_index(head_file)
+    if (
+        consumed_idx is None
+        or head_idx is None
+        or consumed_idx[0] != head_idx[0]
+    ):
+        return None
+    if consumed_idx[1] != head_idx[1]:
+        return consumed_idx[1] > head_idx[1]
+    return consumed_at >= head_at
 
 
 def _serialize(value: Any) -> str:
@@ -120,13 +229,12 @@ class MySqlChangeStreamCdc:
             )
         except Exception:
             self._signal_poll_interval_sec = 15.0
-        if isinstance(resume_token, str) and resume_token:
-            try:
-                self.resume_token = json.loads(resume_token)
-            except Exception:
-                self.resume_token = None
-        else:
-            self.resume_token = resume_token or None
+        from services.cdc_resume_tokens import unwrap_resume_token
+
+        parsed = unwrap_resume_token(resume_token) if resume_token else None
+        # A double-encoded watermark used to fail one json.loads and start
+        # the reader at the current end of the binlog, skipping the gap.
+        self.resume_token = parsed if isinstance(parsed, dict) else None
         from services.cdc_lease import CdcLeaseGuard
 
         self._lease = CdcLeaseGuard(
@@ -187,6 +295,37 @@ class MySqlChangeStreamCdc:
 
     def close(self) -> None:
         self._lease.release()
+
+    def capture_has_pending(self) -> bool | None:
+        """True when this poll stopped before the head captured at poll start.
+
+        The head is ``SHOW MASTER STATUS`` taken before the stream opens.
+        Writes that land after that snapshot belong to the next poll. Comparing
+        to the live master instead keeps a busy server pending until the round
+        budget fails a catch-up that already read this table.
+        ``None`` when this reader has not consumed a position, no head was
+        captured, or the two binlog names cannot be ordered.
+        """
+        consumed_file = getattr(self, "_consumed_file", None)
+        consumed_pos = getattr(self, "_consumed_pos", None)
+        head_file = getattr(self, "_poll_head_file", None)
+        head_pos = getattr(self, "_poll_head_pos", None)
+        if (
+            not consumed_file
+            or consumed_pos is None
+            or not head_file
+            or head_pos is None
+        ):
+            return None
+        reached = consumed_reached_binlog_head(
+            str(consumed_file),
+            int(consumed_pos),
+            str(head_file),
+            int(head_pos),
+        )
+        if reached is None:
+            return None
+        return not reached
 
     def is_available(self) -> bool:
         """True when binlog is ON + ROW format and pymysqlreplication is importable.
@@ -1378,7 +1517,10 @@ class MySqlChangeStreamCdc:
                         or ""
                     )
                     continue
-                if getattr(binlog_event, "schema", "") != self.database:
+                if not binlog_schema_matches(
+                    str(getattr(binlog_event, "schema", "") or ""),
+                    str(self.database or ""),
+                ):
                     continue
                 event_table = getattr(binlog_event, "table", "") or ""
                 if self._canonical_table(event_table) != peek_table:
@@ -1486,6 +1628,7 @@ class MySqlChangeStreamCdc:
         deadline = datetime.now(timezone.utc).timestamp() + self.max_wait_seconds
         buf = MultiTableTransactionBuffer()
         emitted = False
+        captured_row_dropped = False
         event_count = 0
 
         def _pos_now() -> dict[str, Any]:
@@ -1497,39 +1640,59 @@ class MySqlChangeStreamCdc:
             return {k: v for k, v in pos.items() if v is not None}
 
         def _token_at(pos: dict[str, Any] | None) -> dict[str, Any]:
-            # Only advance the resume token to a position we actually read.
-            # If a poll window reads no events, falling back to the previous
-            # resume token prevents BinLogStreamReader from jumping past events
-            # that were committed while the (non-blocking) stream was open.
-            fallback = self.resume_token if isinstance(self.resume_token, dict) else {}
-            token = dict(fallback)
-            if pos:
-                token.update(pos)
-            if not token:
-                token = {"tables": list(self.tables)}
-            try:
-                current = self._current_binlog_position() or {}
-                # Keep GTID as metadata, but _binlog_kwargs uses file/pos when
-                # present so the next BinLogStreamReader never jumps past unread
-                # rows based on a GTID that raced ahead during the poll window.
-                if current.get("gtid"):
-                    token["gtid"] = current["gtid"]
-                if not token.get("file") and current.get("file"):
-                    token["file"] = current["file"]
-                    token["pos"] = current.get("pos")
-            except Exception as exc:
-                _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-            return token
+            # Only a position this poll read. Live gtid_executed is not a cursor.
+            token = resume_token_from_consumed(
+                self.resume_token if isinstance(self.resume_token, dict) else None,
+                pos,
+                tables=list(self.tables),
+            )
+            return token or {"tables": list(self.tables)}
 
         def _emit_commit():
             nonlocal emitted
+            if captured_row_dropped:
+                return
             for batch in buf.commit(
                 resume_token=_token_at(last_position),
                 table_order=self.tables,
             ):
+                # A commit that touched no captured table is not a cursor.
+                # Publishing it moved the watermark past unread changes.
+                if int(batch.total_changes or 0) <= 0:
+                    continue
+                token = published_resume_token(
+                    self.resume_token if isinstance(self.resume_token, dict) else None,
+                    last_position,
+                    emitted=True,
+                    captured_row_dropped=False,
+                )
+                if token is None:
+                    continue
+                batch.resume_token = token
                 emitted = True
-                self.resume_token = batch.resume_token
+                self.resume_token = token
                 yield batch
+
+        # Seed the consumed point from the cursor we opened at. An empty
+        # iterator must not look caught-up just because the library's
+        # log_pos sits on the live head.
+        prior = self.resume_token if isinstance(self.resume_token, dict) else {}
+        if prior.get("file"):
+            self._consumed_file = prior.get("file")
+            self._consumed_pos = prior.get("pos")
+
+        # Head first, then read. A commit after this snapshot is the next poll.
+        # The live master moves under other sessions; it is not this poll's debt.
+        self._poll_head_file = None
+        self._poll_head_pos = None
+        head = self._current_binlog_position()
+        if head and head.get("file") and head.get("pos") is not None:
+            try:
+                self._poll_head_file = str(head["file"])
+                self._poll_head_pos = int(head["pos"])
+            except (TypeError, ValueError):
+                self._poll_head_file = None
+                self._poll_head_pos = None
 
         # Row changes + rotation + QueryEvent (DDL/BEGIN) + XidEvent (COMMIT).
         kwargs = self._binlog_kwargs(
@@ -1585,7 +1748,10 @@ class MySqlChangeStreamCdc:
                         }
                     yield from _emit_commit()
                     continue
-                if getattr(binlog_event, "schema", "") != self.database:
+                if not binlog_schema_matches(
+                    str(getattr(binlog_event, "schema", "") or ""),
+                    str(self.database or ""),
+                ):
                     continue
                 event_table = getattr(binlog_event, "table", "") or ""
                 if not self._table_allowed(event_table):
@@ -1636,6 +1802,16 @@ class MySqlChangeStreamCdc:
                         if pk:
                             buf.delete(tbl, pk, lsn=str(stream.log_pos or ""))
                             event_count += 1
+                        else:
+                            # A delete with no key cannot be applied. Advancing
+                            # past it drops the row. Raising keeps the cursor
+                            # and fails the poll instead of spinning "behind".
+                            captured_row_dropped = True
+                            raise RuntimeError(
+                                f"MySQL CDC delete on {tbl} has no primary key, "
+                                "so the change was not applied and the binlog "
+                                "position was not advanced"
+                            )
 
                 if stream.log_pos:
                     last_position = {
@@ -1647,6 +1823,16 @@ class MySqlChangeStreamCdc:
                 if event_count >= self.batch_size and buf.open_xid is None:
                     break
         finally:
+            # The library's log_pos walks to the head even when this poll
+            # applied nothing. A dropped captured row must stay unconsumed so
+            # the drain does not report caught up. An other-table commit may
+            # mark this poll's head consumed without publishing a watermark:
+            # the next run re-reads from the last applied change.
+            if last_position and not captured_row_dropped:
+                if last_position.get("file"):
+                    self._consumed_file = last_position.get("file")
+                if last_position.get("pos") is not None:
+                    self._consumed_pos = last_position.get("pos")
             stream.close()
 
         # Mid-window open txn: hold only when BEGIN was seen (explicit txn).
@@ -1665,8 +1851,15 @@ class MySqlChangeStreamCdc:
                 )
             return
 
-        token = _token_at(last_position)
-        if token.get("file") or token.get("gtid") or token.get("pos") is not None:
-            self.resume_token = token
-        if not emitted and (token.get("file") or token.get("gtid") or token.get("pos") is not None):
-            yield ChangeBatch(resume_token=token)
+        # Nothing applied: do not publish a cursor. An Xid on another table,
+        # or a live master read, used to become the next resume and the
+        # following run started past a change it never applied.
+        token = published_resume_token(
+            self.resume_token if isinstance(self.resume_token, dict) else None,
+            last_position,
+            emitted=emitted,
+            captured_row_dropped=captured_row_dropped,
+        )
+        if token is None:
+            return
+        self.resume_token = token

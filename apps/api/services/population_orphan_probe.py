@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from services.foreign_key_identity import parse_foreign_key
 from services.sample_orphan_probe import (
     _fk_display,
     _fk_parts,
@@ -45,8 +46,9 @@ def _sql_population_orphan_scan(
     parent_column: str = "",
     child_columns: list[str] | None = None,
     parent_columns: list[str] | None = None,
+    match: str = "",
 ) -> dict[str, Any]:
-    """Full-table orphan COUNT + examples via MATCH SIMPLE anti-join."""
+    """Full-table orphan COUNT + examples via the catalog match type."""
     from services.fk_tuple_scan import sql_population_orphan_scan
 
     kids = list(child_columns or ([child_column] if child_column else []))
@@ -58,6 +60,7 @@ def _sql_population_orphan_scan(
         child_columns=kids,
         parent_columns=parents,
         max_examples=_MAX_ORPHAN_EXAMPLES,
+        match=match,
     )
 
 
@@ -231,7 +234,35 @@ def probe_population_fk_orphans(
     )
 
     for fk in fks:
-        cols, ref_table, ref_cols = _fk_parts(fk)
+        parsed = parse_foreign_key(fk)
+        if parsed.conflict:
+            complete = False
+            checks.append(
+                {
+                    "skipped": True,
+                    "reason": "foreign_key_alias_conflict",
+                    "fk": fk,
+                    "coverage": "population_orphan_probe",
+                    "population_proof": False,
+                }
+            )
+            findings.append(
+                {
+                    "code": "foreign_key_alias_conflict",
+                    "severity": sev,
+                    "columns": list(parsed.child_columns),
+                    "coverage": "population_orphan_probe",
+                    "population_proof": False,
+                    "message": (
+                        f"{parsed.conflict} Population orphan scan did not run — "
+                        "referential integrity is not proven."
+                    ),
+                }
+            )
+            continue
+        cols = list(parsed.child_columns)
+        ref_table = parsed.scan_label
+        ref_cols = list(parsed.parent_columns)
         if not cols or not ref_table or not ref_cols:
             complete = False
             checks.append({"skipped": True, "reason": "incomplete_fk_metadata", "fk": fk})
@@ -290,6 +321,7 @@ def probe_population_fk_orphans(
                 parent_table=ref_table,
                 child_columns=child_cols,
                 parent_columns=parent_cols,
+                match=parsed.match,
             )
         except Exception as exc:
             logger.warning(
@@ -325,8 +357,38 @@ def probe_population_fk_orphans(
             )
             continue
 
+        if result.get("available") is False:
+            complete = False
+            reason = str(result.get("reason") or "population orphan scan unavailable")
+            findings.append(
+                {
+                    "code": "population_orphan_probe_unavailable",
+                    "severity": sev,
+                    "columns": child_cols,
+                    "referenced_table": ref_table,
+                    "coverage": "population_orphan_probe",
+                    "population_proof": False,
+                    "message": (
+                        f"Population orphan scan did not run for {child}.({label}) → "
+                        f"{ref_table}.({parent_label}): {reason}"
+                    ),
+                }
+            )
+            checks.append(
+                {
+                    "columns": child_cols,
+                    "referenced_table": ref_table,
+                    "coverage": "population_orphan_probe",
+                    "population_proof": False,
+                    "match": result.get("match") or "",
+                    "reason": reason,
+                }
+            )
+            continue
+
         orphan_count = int(result.get("orphan_count") or 0)
         examples = list(result.get("examples") or [])
+        scanned_match = str(result.get("match") or "simple")
         total_orphans += orphan_count
         checks.append(
             {
@@ -339,7 +401,9 @@ def probe_population_fk_orphans(
                 "examples": [_fk_display(v) for v in examples[:5]],
                 "coverage": "population_orphan_probe",
                 "population_proof": orphan_count == 0,
-                "match_simple": True,
+                "match": scanned_match,
+                "match_simple": scanned_match != "full",
+                "match_full": scanned_match == "full",
             }
         )
         if orphan_count > 0:

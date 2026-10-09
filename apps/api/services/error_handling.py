@@ -19,7 +19,32 @@ from services.brand_env import getenv_brand
 
 
 class TransferCancelled(Exception):
-    """Raised when a user cancels a running transfer job."""
+    """Raised when a user cancels a running transfer job.
+
+    ``rows_written`` is the count already committed when the writer noticed
+    the cancel. Leaving it off made the job report 0 while the destination
+    held the table.
+    """
+
+    def __init__(
+        self,
+        message: str = "Transfer cancelled by user",
+        *,
+        rows_written: int | None = None,
+    ) -> None:
+        text = message
+        if rows_written is not None:
+            try:
+                count = max(0, int(rows_written))
+            except (TypeError, ValueError):
+                count = 0
+            self.rows_written = count
+            if count:
+                text = (
+                    f"{message}. {count} row(s) were already written "
+                    "and were not removed."
+                )
+        super().__init__(text)
 
 
 class FullRefreshDropFailed(Exception):
@@ -309,6 +334,41 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     ),
     (
         (
+            "nosuchkey",
+            "no such key",
+            "object store has no object",
+        ),
+        {
+            "code": "object_missing",
+            "category": "source",
+            "confidence": "high",
+            "title": "The file is not in the object store",
+            "fix": (
+                "The named object is not in the bucket. Check the path and that "
+                "the file has finished uploading, then run the load again."
+            ),
+            "primary_action": "open_source",
+        },
+    ),
+    (
+        (
+            "keyerror: 'primary_key'",
+            'keyerror: "primary_key"',
+        ),
+        {
+            "code": "missing_primary_key",
+            "category": "mapping",
+            "confidence": "high",
+            "title": "This run needs an identity column",
+            "fix": (
+                "Open Map and set the stream contract primary_key to the column "
+                "that identifies a row. The load did not guess one."
+            ),
+            "primary_action": "open_map",
+        },
+    ),
+    (
+        (
             "duplicate redis key",
             "duplicate primary key",
             "keys repeat",
@@ -482,18 +542,55 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "invalid object name",
         ),
         {
-            "code": "destination_table_missing",
+            "code": "table_not_found",
             "category": "schema_mismatch",
             "confidence": "high",
-            "title": "Destination table/relation was not found at write time",
+            "title": "Table was not found",
             "fix": (
-                "Confirm Database + Table on Destination (same namespace Validate probed). "
-                "If the table should be created, Destination must show create-on-write and "
-                "the connector role needs CREATE. If it should already exist, pick it from "
-                "the table list — do not rely on a name that only exists in another database "
-                "on the same host."
+                "The driver names a table and does not say whether it is the source "
+                "or the destination. Confirm the source object exists and is the one "
+                "selected, and confirm Database + Table on the destination. "
+                "This is not a capacity problem."
             ),
             "primary_action": "open_destination",
+        },
+    ),
+    (
+        (
+            "replication client",
+            "replication slave",
+            "(1227,",
+            "error 1227",
+        ),
+        {
+            "code": "cdc_log_privilege",
+            "category": "source_cdc",
+            "confidence": "high",
+            "title": "MySQL CDC cannot read the binary log",
+            "fix": (
+                "GRANT REPLICATION SLAVE, REPLICATION CLIENT ON *.* TO the source "
+                "user. Privileges on one schema do not include them, and that user "
+                "cannot grant them to itself. gtid_mode and enforce_gtid_consistency "
+                "are separate server settings; file and position CDC does not invent "
+                "a GTID. After the grant, re-run."
+            ),
+        },
+    ),
+    (
+        (
+            "wal_level",
+        ),
+        {
+            "code": "cdc_wal_level",
+            "category": "source_cdc",
+            "confidence": "high",
+            "title": "Postgres CDC needs wal_level=logical",
+            "fix": (
+                "Set wal_level=logical (max_replication_slots and max_wal_senders "
+                "above 0) and restart PostgreSQL. A reload does not apply wal_level. "
+                "Until that restart, logical decoding cannot write a resume LSN, so "
+                "dest-owned watermarks stay empty and delivery stays at-least-once upsert."
+            ),
         },
     ),
     (
@@ -615,6 +712,13 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     """
     raw = format_exception_message(error)
     text = raw.lower()
+    # KeyError('primary_key') renders as the quoted token alone. Matching that
+    # token as a substring rewrote unrelated errors. Only the KeyError itself
+    # is an identity-column failure.
+    if isinstance(error, KeyError) and "primary_key" in text:
+        text = "keyerror: 'primary_key'"
+    elif text.strip() in {"'primary_key'", '"primary_key"'}:
+        text = "keyerror: 'primary_key'"
     # Type-aware match when str(exc) is empty (decimal.Overflow).
     if isinstance(error, Exception) and type(error).__name__ == "Overflow":
         text = f"decimal.overflow {text}"
@@ -694,6 +798,29 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             "retriable": False,
             "confidence": "high",
         }
+
+    try:
+        from services.cdc_catchup import CdcStreamBehind
+
+        if isinstance(error, CdcStreamBehind):
+            return {
+                "code": "cdc_stream_behind",
+                "category": "cdc_ops",
+                "title": "CDC catch-up still has an unread change",
+                "message": raw,
+                "fix": (
+                    "Resume this job. The replication slot was kept so the "
+                    "unread change can be applied. A row-count check cannot "
+                    "see an UPDATE that is still in the log. Delivery stays "
+                    "at-least-once."
+                ),
+                "raw": raw,
+                "retriable": True,
+                "confidence": "high",
+                "slot_name": error.slot_name,
+            }
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     try:
         from services.cdc_lease import CdcLeaseConflict
@@ -798,6 +925,13 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 f"{title}. Driver reported: {raw}. "
                 "Open Map and set Primary key to a column that is unique in the source "
                 "(or use append without that PK / dedupe upstream) before Resume."
+            )
+        elif matched.get("code") in {"cdc_log_privilege", "cdc_wal_level"}:
+            message = f"{title}. Driver reported: {raw}."
+        elif matched.get("code") == "table_not_found":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "This does not say the destination was missing, and it is not a capacity problem."
             )
         else:
             message = (
@@ -962,6 +1096,22 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
             "message": text,
             "class": exc_name,
         }
+
+    # The slot still has the change. Resume is safe; the slot was kept.
+    try:
+        from services.cdc_catchup import CdcStreamBehind
+
+        if isinstance(error, CdcStreamBehind):
+            return {
+                "retriable": True,
+                "evidence": ["cdc_stream_behind"],
+                "message": text,
+                "class": exc_name,
+                "code": "cdc_stream_behind",
+                "slot_name": error.slot_name,
+            }
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     # Structured CDC lease conflict — never auto-retry into a live holder.
     try:

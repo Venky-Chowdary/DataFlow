@@ -26,7 +26,7 @@ import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, uniqueListKey } from
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
-import { classifyGate8Status } from "../components/transfer/gate8Status";
+import { classifyGate8Status, presentMultiStreamGate8 } from "../components/transfer/gate8Status";
 import { CdcLeaseConflictPanel } from "../components/transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
@@ -34,6 +34,11 @@ import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrement
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
 import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
+import { readCoercedNullRows, formatJobRoute, formatStreamNames, isRestoredEndpointTitle, jobEndpointLabels, presentChecksumNote, presentJobPhases, presentStoredEventLog, presentStoredExplanation, readJobMappings, readJobStreamNames, readJobStreams, readRejectedDetails, readRejectedDetailsTotal, readRejectedRows } from "../lib/jobEvidence";
+import { StreamHealthTable } from "../components/jobs/StreamHealthTable";
+import { IdentityAlignmentNote } from "../components/jobs/IdentityAlignmentNote";
+import { RunCarryNotes } from "../components/jobs/RunCarryNotes";
+import { SchemaFidelityNotes } from "../components/jobs/SchemaFidelityNotes";
 import {
   formatSchemaPolicyLabel,
   formatSyncModeLabel,
@@ -188,14 +193,10 @@ function jobSourceLabel(job: Pick<TransferJob, "source_name" | "source_type">) {
 function jobRouteLabel(
   job: Pick<
     TransferJob,
-    "source_name" | "source_type" | "destination_database" | "destination_collection" | "destination_type"
+    "source_name" | "source_type" | "destination_database" | "destination_collection" | "destination_type" | "stream_names"
   >,
 ) {
-  const dest =
-    [job.destination_database, job.destination_collection].filter(Boolean).join(".")
-    || job.destination_type
-    || "destination";
-  return `${jobSourceLabel(job)} → ${dest}`;
+  return formatJobRoute(job);
 }
 
 function jobDisplayName(
@@ -207,11 +208,20 @@ function jobDisplayName(
     | "destination_database"
     | "destination_collection"
     | "destination_type"
+    | "stream_names"
   >,
   override?: string | null,
 ) {
   const named = (override ?? job.name)?.trim();
-  return named || jobRouteLabel(job);
+  if (named && !isRestoredEndpointTitle(named, job)) return named;
+  return formatJobRoute(job);
+}
+
+function checkpointCommittedPhrase(checkpoint: TransferJob["checkpoint"] | null | undefined): string {
+  if (checkpoint?.rows_processed == null) return "";
+  const rows = `${checkpoint.rows_processed.toLocaleString()} rows committed`;
+  const stream = (checkpoint.cdc_stream || "").trim();
+  return stream ? `${rows} on ${stream}` : rows;
 }
 
 function normalizeJobName(value: string) {
@@ -265,15 +275,14 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   }, [onStartTransfer]);
 
   const jobRepairMappings = useMemo((): RepairMapping[] => {
-    const maps = liveJob?.transfer_request?.mappings;
-    if (!Array.isArray(maps)) return [];
-    return maps.map((m) => ({
-      source: m.source || m.source_column || "",
-      destination: m.target || m.target_column || "",
-      destination_type: m.target_type || m.source_type,
-      target_type: m.target_type || m.source_type,
+    return readJobMappings(liveJob).map((m) => ({
+      source: m.source,
+      destination: m.target,
+      destination_type: m.targetType || m.sourceType,
+      target_type: m.targetType || m.sourceType,
+      stream: m.stream || undefined,
     })).filter((m) => m.source);
-  }, [liveJob?.transfer_request?.mappings]);
+  }, [liveJob]);
 
   // Counted over the whole history, not the page of rows below: counting the rows
   // showed "All (50)" for a 90-job history and disagreed with Pilot.
@@ -507,7 +516,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             ? (gapRecovery
               ? "CDC cursor-gap recovery restarted — not a checkpoint continuation. Purged-window events are gone."
               : "Full refresh re-run from the beginning — it replaces the destination.")
-            : `Resuming from batch ${liveJob?.checkpoint?.chunk_index ?? 0} (${(liveJob?.checkpoint?.rows_processed ?? 0).toLocaleString()} rows already committed).`),
+            : `Resuming from batch ${liveJob?.checkpoint?.chunk_index ?? 0} (${checkpointCommittedPhrase(liveJob?.checkpoint) || "no rows committed yet"}).`),
         tone: "success",
       });
       onRefresh?.();
@@ -599,15 +608,35 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     setRenameError(null);
   }, [selectedId]);
 
-  const jobMappings = liveJob?.transfer_request?.mappings ?? [];
+  const jobMappings = readJobMappings(liveJob);
   const columnTypes = liveJob?.transfer_request?.column_types ?? {};
   const ddlLog = liveJob?.ddl_executed ?? liveJob?.ddl_log ?? [];
   const sessionEvents = selectedId ? readJobEventLog(selectedId) : [];
-  const eventLog = (liveJob?.event_log?.length ? liveJob.event_log : sessionEvents) ?? [];
+  const eventLog = presentStoredEventLog(
+    (liveJob?.event_log?.length ? liveJob.event_log : sessionEvents) ?? [],
+    liveJob,
+  );
   const logLineCount = eventLog.length + ddlLog.length;
   const mappingCount = jobMappings.length || Object.keys(columnTypes).length;
-  const rejectedCount = liveJob?.rejected_rows ?? 0;
-  const recon = liveJob?.reconciliation;
+  const streamHealth = readJobStreams(liveJob);
+  const streamNames = readJobStreamNames(liveJob);
+  const multiStream = streamNames.length >= 2;
+  const routeLabels = jobEndpointLabels(liveJob ?? selected, {
+    source: liveJob?.source_name || selected?.source_name || "",
+    dest: liveJob
+      ? `${liveJob.destination_database}.${liveJob.destination_collection}`
+      : selected
+        ? `${selected.destination_database}.${selected.destination_collection}`
+        : "",
+  });
+  const explanationText = presentStoredExplanation(liveJob?.explanation, liveJob);
+  const rejectedCount = readRejectedRows(liveJob);
+  const coercedCount = readCoercedNullRows(liveJob);
+  const rejectedDetails = readRejectedDetails(liveJob);
+  const recon = presentMultiStreamGate8(
+    liveJob?.reconciliation,
+    liveJob?.destination_summary,
+  );
   const gate8 = classifyGate8Status(recon);
   const destMetric = destHeadline(liveJob);
   const jobDuration = formatJobDuration(liveJob?.started_at, liveJob?.completed_at);
@@ -643,6 +672,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);
   const destSummary = (liveJob?.destination_summary ?? {}) as Record<string, unknown>;
+  const checksumNote = presentChecksumNote(destSummary.checksum_note, liveJob);
   const loadHistory =
     liveJob?.load_history_report
     || (destSummary.load_history_report && typeof destSummary.load_history_report === "object"
@@ -711,10 +741,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             completedAt: liveJob.completed_at,
             status: selected.status,
             retryOf: selected.retry_of,
-            phases: liveJob.phases,
+            phases: presentJobPhases(liveJob.phases, liveJob),
             notifications: liveJob.notifications,
             rejectedRows: liveJob.rejected_rows,
-            coercedNullRows: liveJob.coerced_null_rows,
+            coercedNullRows: coercedCount,
           })
         : [],
     [liveJob, selected],
@@ -792,8 +822,11 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                   />
                 ) : (
                   filtered.map((job, index) => {
-                    const route = jobRouteLabel(job);
+                    const fullRoute = jobRouteLabel(job);
                     const displayName = jobDisplayName(job, nameOverrides[job._id]);
+                    const route = displayName === fullRoute
+                      ? `${job.source_type || "source"} → ${job.destination_type || "destination"}`
+                      : fullRoute;
                     const isLiveRow = job.status === "running" || job.status === "pending";
                     return (
                       <button
@@ -821,7 +854,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                             </span>
                           </div>
                           <div className="df2-job-row-meta">
-                            <span className="df2-job-row-route-meta" title={route}>{route}</span>
+                            <span className="df2-job-row-route-meta" title={fullRoute}>{route}</span>
                             {(() => {
                               const rows = formatJobRowMetric(job);
                               return (
@@ -879,8 +912,8 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                     </div>
                     <JobTheater
                       jobId={selectedId!}
-                      sourceLabel={selected.source_name}
-                      destLabel={`${selected.destination_database}.${selected.destination_collection}`}
+                      sourceLabel={routeLabels.source}
+                      destLabel={routeLabels.dest}
                       sourceType={selected.source_type}
                       destType={selected.destination_type}
                       onComplete={handleComplete}
@@ -911,13 +944,17 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                           <ConnectorIcon id={selected.source_type} size={22} />
                           <div>
                             <span>Source</span>
-                            <strong>{liveJob.source_name || selected.source_name}</strong>
+                            <strong title={multiStream ? streamNames.join(", ") : undefined}>
+                              {routeLabels.source}
+                            </strong>
                           </div>
                           <DtIcon name="transfer" size={14} />
                           <ConnectorIcon id={selected.destination_type} size={22} />
                           <div>
                             <span>Destination</span>
-                            <strong>{liveJob.destination_database}.{liveJob.destination_collection}</strong>
+                            <strong title={multiStream ? streamNames.join(", ") : undefined}>
+                              {routeLabels.dest}
+                            </strong>
                           </div>
                         </div>
                       </div>
@@ -978,8 +1015,12 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               job={liveJob}
                               onOpenValidate={() => openValidateInStudio()}
                             />
+                            <RunCarryNotes job={liveJob} />
+                            <SchemaFidelityNotes job={liveJob} />
+                            <IdentityAlignmentNote job={liveJob} />
                             <JobTrustScoreCard
                               job={liveJob}
+                              onOpenGate8={recon ? () => setEvidenceDrawer("gate8") : undefined}
                               onOpenQuarantine={
                                 showQuarantineTab ? () => setDetailTab("quarantine") : undefined
                               }
@@ -1217,7 +1258,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                               <CdcIncrementalSnapshotPanel jobId={selected._id} enabled />
                             )}
 
-                            {isJobSuccess(selected.status) && ((rejectedCount - (liveJob.coerced_null_rows ?? 0)) > 0 || (liveJob.coerced_null_rows ?? 0) > 0) && (
+                            {isJobSuccess(selected.status) && ((rejectedCount - coercedCount) > 0 || coercedCount > 0) && (
                               <div className="df2-data-integrity" role="note">
                                 <header className="df2-data-integrity-head">
                                   <DtIcon name="alert" size={16} />
@@ -1228,12 +1269,12 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                 </header>
                                 <div className="df2-data-integrity-metrics">
                                   <article className="df2-data-integrity-metric is-dropped">
-                                    <strong>{Math.max(rejectedCount - (liveJob.coerced_null_rows ?? 0), 0).toLocaleString()}</strong>
+                                    <strong>{Math.max(rejectedCount - coercedCount, 0).toLocaleString()}</strong>
                                     <span>Rows held out (quarantine)</span>
                                     <small>Not written to the primary table — not silently dropped or NULL-invented.</small>
                                   </article>
                                   <article className="df2-data-integrity-metric is-coerced">
-                                    <strong>{(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
+                                    <strong>{coercedCount.toLocaleString()}</strong>
                                     <span>Values coerced to NULL</span>
                                     <small>coerce_null policy only — row kept with a NULL cell; original value not in primary.</small>
                                   </article>
@@ -1337,7 +1378,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                 </article>
                                 <article className="df2-jobs-quarantine-metric">
                                   <span>Coerced to NULL</span>
-                                  <strong>{Number(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
+                                  <strong>{coercedCount.toLocaleString()}</strong>
                                 </article>
                               </div>
                             </section>
@@ -1384,15 +1425,13 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                   title: "Streams",
                                   description: "Per-stream dest COUNT(*) and watermarks",
                                   icon: "zap",
-                                  meta: Array.isArray(liveJob.streams) && liveJob.streams.length
-                                    ? `${liveJob.streams.length}`
-                                    : undefined,
-                                  disabled: !(Array.isArray(liveJob.streams) && liveJob.streams.length > 0),
+                                  meta: streamHealth.length ? `${streamHealth.length}` : undefined,
+                                  disabled: streamHealth.length === 0,
                                   onOpen: () => setEvidenceDrawer("streams"),
                                 },
                               ]}
                             />
-                            {eventLog.length === 0 && ddlLog.length === 0 && !liveJob.explanation && (
+                            {eventLog.length === 0 && ddlLog.length === 0 && !liveJob.explanation && streamHealth.length === 0 && (
                               <EmptyState
                                 compact
                                 icon="jobs"
@@ -1530,7 +1569,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
         >
           <Gate8ProofCard
             report={recon}
-            explanation={liveJob.explanation}
+            explanation={explanationText}
             jobId={selectedId || liveJob._id}
             onOpenValidate={() => {
               setEvidenceDrawer(null);
@@ -1644,7 +1683,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                 <dd>
                   batch {liveJob.checkpoint.chunk_index ?? 0}
                   {liveJob.checkpoint.rows_processed != null
-                    ? ` · ${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows committed`
+                    ? ` · ${checkpointCommittedPhrase(liveJob.checkpoint)}`
                     : ""}
                   {liveJob.checkpoint.updated_at
                     ? ` · updated ${String(liveJob.checkpoint.updated_at)}`
@@ -1689,22 +1728,49 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             )}
             {(typeof destSummary.table === "string" || typeof destSummary.collection === "string") && (
               <div>
-                <dt>Table / collection</dt>
-                <dd>{String(destSummary.table || destSummary.collection)}</dd>
+                <dt>{multiStream ? "Last stream table" : "Table / collection"}</dt>
+                <dd>
+                  {String(destSummary.table || destSummary.collection)}
+                  {multiStream ? ` · job is ${formatStreamNames(streamNames)}` : ""}
+                </dd>
               </div>
             )}
             {typeof destSummary.checksum === "string" && destSummary.checksum && (
-              <div><dt>Writer checksum</dt><dd className="df2-mono">{String(destSummary.checksum)}</dd></div>
+              <div>
+                <dt>{multiStream ? "Last stream writer checksum" : "Writer checksum"}</dt>
+                <dd className="df2-mono">{String(destSummary.checksum)}</dd>
+              </div>
+            )}
+            {checksumNote && (
+              <div>
+                <dt>{multiStream ? "Last stream checksum note" : "Checksum note"}</dt>
+                <dd>{checksumNote}</dd>
+              </div>
             )}
           </dl>
           <PhaseProfileCard
+            scopeNote={
+              multiStream
+                ? `Timing is the last stream (${typeof destSummary.table === "string" && destSummary.table ? destSummary.table : streamNames[streamNames.length - 1]}). A re-read is counted again. These phase rows are not the job total.`
+                : null
+            }
             profile={
               destSummary.phase_profile && typeof destSummary.phase_profile === "object"
                 ? (destSummary.phase_profile as PhaseProfileReport)
                 : null
             }
+            engineSeconds={
+              typeof destSummary.elapsed_seconds === "number" && Number.isFinite(destSummary.elapsed_seconds)
+                ? destSummary.elapsed_seconds
+                : null
+            }
           />
           <ReplaySafetyCard
+            scopeNote={
+              multiStream
+                ? `This verdict is the last stream (${typeof destSummary.table === "string" && destSummary.table ? destSummary.table : streamNames[streamNames.length - 1]}). It is not a retry guarantee for every table.`
+                : null
+            }
             report={
               destSummary.replay_safety && typeof destSummary.replay_safety === "object"
                 ? (destSummary.replay_safety as ReplaySafetyReport)
@@ -1874,6 +1940,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
               <table className="df2-table">
                 <thead>
                   <tr>
+                    {jobMappings.some((m) => m.stream) ? <th>Stream</th> : null}
                     <th>Source</th>
                     <th>Target</th>
                     <th>Type</th>
@@ -1883,21 +1950,22 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                 <tbody>
                   {jobMappings.length > 0
                     ? jobMappings.map((m, i) => {
-                        const src = String(m.source ?? m.source_column ?? "").trim() || "—";
-                        const tgt = String(m.target ?? m.target_column ?? "").trim() || "—";
+                        const src = m.source || "—";
+                        const tgt = m.target || "—";
                         const typ =
                           columnTypes[src]
-                          ?? m.source_type
-                          ?? m.target_type
-                          ?? columnTypes[tgt]
-                          ?? columnTypes[src.toLowerCase()]
-                          ?? columnTypes[tgt.toLowerCase()]
-                          ?? "—";
-                        const conf = typeof m.confidence === "number"
+                          || m.sourceType
+                          || m.targetType
+                          || columnTypes[tgt]
+                          || columnTypes[src.toLowerCase()]
+                          || columnTypes[tgt.toLowerCase()]
+                          || "—";
+                        const conf = m.confidence != null
                           ? `${Math.round(m.confidence * 100)}%`
                           : "—";
                         return (
-                          <tr key={`${src}-${tgt}-${i}`}>
+                          <tr key={`${m.stream}-${src}-${tgt}-${i}`}>
+                            {jobMappings.some((row) => row.stream) ? <td>{m.stream || "—"}</td> : null}
                             <td title={src}>{src}</td>
                             <td title={tgt}>{tgt}</td>
                             <td className="df2-cell-mono" title={typ}>{typ}</td>
@@ -1930,11 +1998,15 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             setMappingProofOpen(false);
           }}
           proof={mappingProof}
-          sourceLabel={liveJob.source_name}
+          sourceLabel={routeLabels.multi ? routeLabels.source : liveJob.source_name}
           destLabel={
-            liveJob.destination_collection
-            || liveJob.destination_database
-            || liveJob.destination_type
+            routeLabels.multi
+              ? routeLabels.dest
+              : (
+                liveJob.destination_collection
+                || liveJob.destination_database
+                || liveJob.destination_type
+              )
           }
         />
       )}
@@ -1974,59 +2046,20 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
           icon={<DtIcon name="book" size={18} />}
           size="lg"
         >
-          <JobExplanationView text={liveJob.explanation} />
+          <JobExplanationView text={explanationText} />
         </Drawer>
       )}
 
-      {liveJob && evidenceDrawer === "streams" && Array.isArray(liveJob.streams) && (
+      {liveJob && evidenceDrawer === "streams" && streamHealth.length > 0 && (
         <Drawer
           open
           onClose={() => setEvidenceDrawer(null)}
           title="Stream conservation"
-          subtitle={`${liveJob.streams.length} stream(s)`}
+          subtitle={`${streamHealth.length} stream(s)`}
           icon={<DtIcon name="zap" size={18} />}
           size="lg"
         >
-          <table className="df2-table df2-jobs-cdc-table">
-            <thead>
-              <tr>
-                <th>Stream</th>
-                <th>Status</th>
-                <th>Conserved</th>
-                <th>Events written</th>
-                <th>Lag</th>
-                <th>Watermark</th>
-              </tr>
-            </thead>
-            <tbody>
-              {liveJob.streams.map((s) => (
-                <tr key={s.name}>
-                  <td>{s.name}</td>
-                  <td>{s.status || "—"}</td>
-                  <td>
-                    {destMetricCompact(
-                      destHeadline({
-                        status: s.status,
-                        records_processed: s.records_processed,
-                        row_accounting: s.row_accounting,
-                      }),
-                    )}
-                  </td>
-                  <td>{Number(s.records_processed ?? 0).toLocaleString()}</td>
-                  <td>
-                    {s.cdc_lag_seconds != null && Number.isFinite(Number(s.cdc_lag_seconds))
-                      ? `${Number(s.cdc_lag_seconds).toFixed(1)}s`
-                      : "—"}
-                  </td>
-                  <td className="df2-cell-mono" title={s.watermark || ""}>
-                    {s.watermark
-                      ? `${String(s.watermark).slice(0, 40)}${String(s.watermark).length > 40 ? "…" : ""}`
-                      : "—"}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <StreamHealthTable streams={streamHealth} />
         </Drawer>
       )}
 
@@ -2045,18 +2078,10 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
         >
           <QuarantinePanel
             jobId={selectedId}
-            rejectedRows={liveJob.rejected_rows}
-            coercedNullRows={liveJob.coerced_null_rows}
-            initialDetails={Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details : undefined}
-            truncatedDetails={Math.max(
-              0,
-              Number(
-                liveJob.rejected_details_total
-                  ?? (liveJob.destination_summary as { rejected_details_total?: number } | undefined)
-                    ?.rejected_details_total
-                  ?? 0,
-              ) - (Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details.length : 0),
-            )}
+            rejectedRows={rejectedCount}
+            coercedNullRows={coercedCount}
+            initialDetails={rejectedDetails}
+            truncatedDetails={Math.max(0, readRejectedDetailsTotal(liveJob) - (rejectedDetails?.length ?? 0))}
             autoLoad
             initiallyOpen
             repairMappings={jobRepairMappings}

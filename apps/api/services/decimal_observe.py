@@ -12,9 +12,12 @@ Migration honesty (Airbyte/Fivetran-class):
 
 from __future__ import annotations
 
+import logging
 import re
 from decimal import Decimal, InvalidOperation, Overflow, localcontext
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Significant fractional digits beyond this → likely IEEE binary residue.
 _IEEE_SCALE_HARD = 12
@@ -708,3 +711,429 @@ def ieee_float_create_new_risk(observation: dict[str, Any] | None) -> dict[str, 
             "only if the business domain is truly IEEE, then remap to FLOAT."
         ),
     }
+
+
+_TEXT_TYPE_CODES = frozenset(
+    {
+        15,  # MySQL VARCHAR
+        245,  # JSON
+        252,  # BLOB
+        253,  # VAR_STRING
+        254,  # STRING
+        18,  # Postgres char
+        25,  # text
+        1042,  # bpchar
+        1043,  # varchar
+        3802,  # jsonb
+        114,  # json
+    }
+)
+
+
+def _cursor_type_code_is_text(type_code: Any) -> bool:
+    """True for a driver type that is character data, not a DECIMAL."""
+    if isinstance(type_code, bool) or type_code is None:
+        return False
+    if isinstance(type_code, int):
+        return type_code in _TEXT_TYPE_CODES
+    name = str(getattr(type_code, "__name__", "") or type_code).lower()
+    return any(
+        token in name
+        for token in ("varchar", "char", "text", "string", "blob", "json")
+    )
+
+
+def cursor_declared_numeric_types(
+    headers: list[str],
+    description: Any,
+) -> dict[str, str]:
+    """``DECIMAL(p,s)`` from a DBAPI ``cursor.description``, by result position.
+
+    PEP 249 puts precision at index 4 and scale at index 5. Oracle
+    ``NUMBER(10,2)`` reports those; a sample of ``12.34`` would otherwise
+    invent ``numeric(5,2)`` and reject a later ``12345678.90``. Unconstrained
+    ``NUMBER`` (precision 0, scale -127) is omitted so inference stays the
+    owner of a type the catalog never sized.
+    """
+    if not headers or not description:
+        return {}
+    out: dict[str, str] = {}
+    for idx, header in enumerate(headers):
+        if idx >= len(description):
+            break
+        col = description[idx]
+        if not col or len(col) < 6:
+            continue
+        type_code = col[1] if len(col) > 1 else None
+        if _cursor_type_code_is_text(type_code):
+            continue
+        # DATE / DATETIME / TINYINT carry a display width in the precision
+        # slot. Reading it as DECIMAL(10,0) made every MariaDB query column
+        # look numeric (DEF-B-019).
+        carrier = _carrier_for_cursor_column(col)
+        if carrier and carrier not in {"DECIMAL", "NUMERIC"}:
+            continue
+        try:
+            precision = int(col[4])
+            scale = int(col[5])
+        except (TypeError, ValueError):
+            continue
+        name = str(header or "").strip()
+        if not name:
+            continue
+        # PostgreSQL typmod -1 (unconstrained numeric) arrives as 65535/65535.
+        # That is not a size; DECIMAL(65535,65535) cannot be created and was
+        # rewritten to TEXT, which then blocked the route (DEF-C-026).
+        if precision >= 65535 or scale >= 65535:
+            out[name] = "NUMERIC"
+            continue
+        if precision <= 0 or scale < 0 or scale > precision:
+            continue
+        exact_numeric = (
+            isinstance(type_code, int)
+            and not isinstance(type_code, bool)
+            and type_code in _CURSOR_EXACT_NUMERIC_CODES
+        )
+        # A real PostgreSQL NUMERIC(100,2) must survive. Junk widths on a
+        # type code that is not numeric (MariaDB text at 400,39) must not.
+        if exact_numeric:
+            if precision > 1000 or scale > 1000:
+                continue
+        elif precision > 76 or scale > 38:
+            continue
+        out[name] = f"DECIMAL({precision},{scale})"
+    return out
+
+
+# Driver type codes that name a carrier. MySQL FIELD_TYPE and PostgreSQL
+# OIDs do not share these values. Code 16 is MySQL BIT and Postgres bool,
+# so it is left to the sample.
+_CURSOR_TEMPORAL_CODES: dict[int, str] = {
+    7: "TIMESTAMP",
+    10: "DATE",
+    11: "TIME",
+    12: "DATETIME",
+    13: "YEAR",
+    1082: "DATE",
+    1083: "TIME",
+    1114: "TIMESTAMP",
+    1184: "TIMESTAMPTZ",
+    1266: "TIME",
+}
+_CURSOR_INTEGER_CODES: dict[int, str] = {
+    1: "INTEGER",
+    2: "INTEGER",
+    3: "INTEGER",
+    8: "BIGINT",
+    9: "INTEGER",
+    20: "BIGINT",
+    21: "INTEGER",
+    23: "INTEGER",
+}
+_CURSOR_FLOAT_CODES: dict[int, str] = {
+    4: "FLOAT",
+    5: "DOUBLE",
+    700: "FLOAT",
+    701: "DOUBLE",
+}
+_CURSOR_JSON_CODES = frozenset({114, 245, 3802})
+_CURSOR_TEXT_CODES = frozenset({15, 18, 25, 247, 248, 253, 254, 1042, 1043})
+# Exact numeric type codes. Precision on any other code (DATE is 10, DATETIME
+# is 26,6) is a display width, not a DECIMAL.
+_CURSOR_EXACT_NUMERIC_CODES = frozenset({0, 246, 1700})
+_CURSOR_BINARY_CODES = {17: "BYTEA"}
+_CURSOR_UUID_CODES = {2950: "UUID"}
+_CURSOR_INTERVAL_CODES = {1186: "INTERVAL"}
+# PostgreSQL array OIDs. These are fixed in pg_type. A custom enum's array
+# OID is not, so that one is resolved from the catalog.
+_CURSOR_ARRAY_CODES: dict[int, str] = {
+    1000: "BOOLEAN[]",
+    1001: "BYTEA[]",
+    1005: "INTEGER[]",
+    1007: "INTEGER[]",
+    1009: "VARCHAR[]",
+    1014: "VARCHAR[]",
+    1015: "VARCHAR[]",
+    1016: "BIGINT[]",
+    1021: "FLOAT[]",
+    1022: "DOUBLE[]",
+    1028: "INTEGER[]",
+    1115: "TIMESTAMP[]",
+    1182: "DATE[]",
+    1183: "TIME[]",
+    1185: "TIMESTAMPTZ[]",
+    1187: "INTERVAL[]",
+    1231: "NUMERIC[]",
+    199: "JSON[]",
+    2951: "UUID[]",
+    3807: "JSON[]",
+}
+_PG_CATALOG_DIALECTS = frozenset({
+    "postgresql",
+    "postgres",
+    "pgvector",
+    "redshift",
+    "greenplum",
+    "cockroachdb",
+    "timescaledb",
+    "citus",
+    "alloydb",
+    "yugabytedb",
+    "supabase",
+})
+_PG_ELEMENT_CARRIERS = {
+    "bool": "BOOLEAN",
+    "int2": "INTEGER",
+    "int4": "INTEGER",
+    "int8": "BIGINT",
+    "oid": "INTEGER",
+    "float4": "FLOAT",
+    "float8": "DOUBLE",
+    "numeric": "NUMERIC",
+    "text": "VARCHAR",
+    "varchar": "VARCHAR",
+    "bpchar": "VARCHAR",
+    "uuid": "UUID",
+    "json": "JSON",
+    "jsonb": "JSON",
+    "bytea": "BYTEA",
+    "date": "DATE",
+    "timestamp": "TIMESTAMP",
+    "timestamptz": "TIMESTAMPTZ",
+    "time": "TIME",
+    "timetz": "TIME",
+    "interval": "INTERVAL",
+}
+
+
+def _carrier_for_cursor_column(col: Any) -> str:
+    """Logical carrier a cursor column declared, or ``""`` when it did not.
+
+    A CAST and a catalog type show up here. Fifty sample rows must not
+    re-guess them. An unknown type code stays empty so Oracle NUMBER with
+    no precision remains the sample's problem.
+    """
+    if not col or len(col) < 2:
+        return ""
+    type_code = col[1]
+    # A catalog lookup stamps this when the driver only had an OID (a custom
+    # enum, or that enum's array). An int never carries it.
+    explicit = getattr(type_code, "carrier", None)
+    if (
+        isinstance(explicit, str)
+        and explicit.strip()
+        and not isinstance(type_code, (int, float))
+    ):
+        return explicit.strip()
+    if isinstance(type_code, int) and not isinstance(type_code, bool):
+        if type_code in _CURSOR_ARRAY_CODES:
+            return _CURSOR_ARRAY_CODES[type_code]
+        if type_code in _CURSOR_JSON_CODES:
+            return "JSON"
+        if type_code in _CURSOR_TEXT_CODES:
+            return "VARCHAR"
+        if type_code in _CURSOR_BINARY_CODES:
+            return _CURSOR_BINARY_CODES[type_code]
+        if type_code in _CURSOR_UUID_CODES:
+            return _CURSOR_UUID_CODES[type_code]
+        if type_code in _CURSOR_INTERVAL_CODES:
+            return _CURSOR_INTERVAL_CODES[type_code]
+        if type_code in _CURSOR_TEMPORAL_CODES:
+            return _CURSOR_TEMPORAL_CODES[type_code]
+        if type_code in _CURSOR_INTEGER_CODES:
+            return _CURSOR_INTEGER_CODES[type_code]
+        if type_code in _CURSOR_FLOAT_CODES:
+            return _CURSOR_FLOAT_CODES[type_code]
+        # MariaDB TEXT shares the BLOB code. A real blob has no decimal
+        # scale; precision 400 scale 39 is the text-column junk.
+        if type_code == 252 and len(col) >= 6:
+            try:
+                precision = int(col[4])
+                scale = int(col[5])
+            except (TypeError, ValueError):
+                return ""
+            if precision > 76 or scale > 38:
+                return "VARCHAR"
+        return ""
+    # oracledb.DbType exposes ``name`` (``DB_TYPE_NUMBER``). Its class
+    # ``__name__`` is ``DbType`` for every column, which hid the carrier and
+    # left 0/1 samples free to invent BOOLEAN (DEF-B-011). A real class
+    # name (``int``, ``INTEGER``) still wins so exact-code checks stay exact.
+    class_name = str(getattr(type_code, "__name__", "") or "")
+    named = getattr(type_code, "name", None)
+    if class_name and class_name.lower() not in {"dbtype", "type"}:
+        name = class_name.lower()
+    elif named:
+        name = str(named).lower()
+    else:
+        name = str(type_code).lower()
+    if "json" in name:
+        return "JSON"
+    if "number" in name or "numeric" in name or name.endswith("decimal"):
+        return "DECIMAL"
+    if any(token in name for token in ("varchar", "char", "text", "string")):
+        return "VARCHAR"
+    if "timestamptz" in name or "timestamp with time zone" in name:
+        return "TIMESTAMPTZ"
+    if "datetime" in name:
+        return "DATETIME"
+    if "timestamp" in name:
+        return "TIMESTAMP"
+    if name == "date" or name.endswith(".date"):
+        return "DATE"
+    if name in {"int", "int4", "integer", "int8", "int2", "bigint"}:
+        return "BIGINT" if "8" in name or "big" in name else "INTEGER"
+    if "[]" in name:
+        return name.upper().replace(" ", "")
+    tokens = set(re.split(r"[^a-z0-9]+", name))
+    if "enum" in tokens:
+        return "ENUM"
+    return ""
+
+
+class CursorDeclaredType:
+    """A carrier the catalog named when the driver only reported an OID."""
+
+    def __init__(self, name: str, carrier: str) -> None:
+        self.name = name
+        self.carrier = carrier
+
+    def __repr__(self) -> str:
+        return f"CursorDeclaredType({self.carrier!r})"
+
+
+def carrier_from_pg_type_row(
+    *,
+    typname: str,
+    typtype: str,
+    typelem: int,
+    elem_name: str = "",
+    elem_type: str = "",
+) -> str:
+    """Carrier for one ``pg_type`` row. Empty means the sample stays the owner.
+
+    ``typtype = e`` is an enum. An array has a non-zero ``typelem``. A
+    composite, domain, or range is not relabelled from this row.
+    """
+    kind = (typtype or "").strip().lower()
+    if kind == "e":
+        return "ENUM"
+    try:
+        element_oid = int(typelem or 0)
+    except (TypeError, ValueError):
+        element_oid = 0
+    if element_oid == 0:
+        return ""
+    if (elem_type or "").strip().lower() == "e":
+        return "VARCHAR[]"
+    element = _PG_ELEMENT_CARRIERS.get((elem_name or "").lstrip("_").lower(), "")
+    if element:
+        return f"{element}[]"
+    # The catalog says this OID is an array. The element is not a builtin
+    # we name, so the carrier stays an array and does not become text.
+    if (typname or "").startswith("_"):
+        return "ARRAY"
+    return ""
+
+
+def _fetch_pg_type_rows(conn: Any, oids: list[int]) -> list[Any]:
+    """``pg_type`` rows for these OIDs. A failed lookup leaves the sample in charge."""
+    if not oids:
+        return []
+    if any((not isinstance(oid, int)) or isinstance(oid, bool) or oid < 0 for oid in oids):
+        return []
+    id_list = ",".join(str(int(oid)) for oid in oids)
+    sql = (
+        "SELECT t.oid, t.typname, t.typtype, t.typelem, "
+        "COALESCE(e.typname, ''), COALESCE(e.typtype, '') "
+        "FROM pg_type t LEFT JOIN pg_type e ON e.oid = t.typelem "
+        f"WHERE t.oid IN ({id_list})"
+    )
+    try:
+        import sqlalchemy as sa
+
+        return list(conn.execute(sa.text(sql)))
+    except Exception as exc:
+        logger.debug("pg_type lookup skipped: %s", exc)
+        return []
+
+
+def annotate_unresolved_pg_types(conn: Any, description: Any, *, dialect: str) -> Any:
+    """Replace unknown PostgreSQL OIDs with the catalog carrier.
+
+    Built-in arrays already have a type code. A custom enum does not: its
+    OID is assigned per database, and the sample then guessed INTERVAL or
+    BOOLEAN from the label. A lookup that fails leaves the description
+    unchanged.
+    """
+    if description is None:
+        return None
+    if (dialect or "").strip().lower() not in _PG_CATALOG_DIALECTS:
+        return description
+    unknown: list[int] = []
+    for col in description:
+        if not col or len(col) < 2:
+            continue
+        code = col[1]
+        if isinstance(code, int) and not isinstance(code, bool) and _carrier_for_cursor_column(col) == "":
+            unknown.append(int(code))
+    if not unknown:
+        return description
+    rows = _fetch_pg_type_rows(conn, sorted(set(unknown)))
+    if not rows:
+        return description
+    by_oid: dict[int, Any] = {}
+    for row in rows:
+        try:
+            by_oid[int(row[0])] = row
+        except (TypeError, ValueError, IndexError):
+            continue
+    copied = []
+    for col in description:
+        if not col or len(col) < 2:
+            copied.append(col)
+            continue
+        code = col[1]
+        found = by_oid.get(int(code)) if isinstance(code, int) and not isinstance(code, bool) else None
+        if found is None:
+            copied.append(tuple(col) if not isinstance(col, tuple) else col)
+            continue
+        try:
+            carrier = carrier_from_pg_type_row(
+                typname=str(found[1] or ""),
+                typtype=str(found[2] or ""),
+                typelem=int(found[3] or 0),
+                elem_name=str(found[4] or ""),
+                elem_type=str(found[5] or ""),
+            )
+        except (TypeError, ValueError, IndexError):
+            carrier = ""
+        if not carrier:
+            copied.append(tuple(col) if not isinstance(col, tuple) else col)
+            continue
+        updated = list(col)
+        updated[1] = CursorDeclaredType(str(found[1] or ""), carrier)
+        copied.append(tuple(updated))
+    return tuple(copied)
+
+
+def cursor_declared_carriers(
+    headers: list[str],
+    description: Any,
+) -> dict[str, str]:
+    """Cursor-declared carriers. A sized DECIMAL wins over a family name.
+
+    Sample inference runs first at the call site. This map replaces it.
+    """
+    numeric = cursor_declared_numeric_types(headers, description)
+    if not headers or not description:
+        return numeric
+    out = dict(numeric)
+    for idx, header in enumerate(headers):
+        name = str(header or "").strip()
+        if not name or name in out or idx >= len(description):
+            continue
+        carrier = _carrier_for_cursor_column(description[idx])
+        if carrier:
+            out[name] = carrier
+    return out

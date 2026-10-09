@@ -19,6 +19,36 @@ from services.connector_store import SavedConnector
 from src.transfer.connector_registry import humanize_connection_error
 
 
+def test_sftp_host_key_refusal_is_not_called_an_auth_failure():
+    raw = (
+        "SFTP test failed: SFTP host key for files.example:22 is not trusted "
+        "(ssh-ed25519 SHA256:abc). Pin it with DATAFLOW_SFTP_HOST_KEY."
+    )
+    msg = humanize_connection_error("sftp", raw)
+    assert "authentication failed" not in msg.lower()
+    assert "host key" in msg.lower()
+    assert "SHA256:abc" in msg
+    assert humanize_connection_error("sftp", msg) == msg
+
+
+def test_sftp_preauth_close_is_not_called_an_auth_failure():
+    raw = (
+        "SFTP server 10.0.0.8:22 closed the connection before authentication "
+        "(preauth). Datawrap tried a modern handshake. No password was sent."
+    )
+    msg = humanize_connection_error("sftp", raw)
+    assert "authentication failed" not in msg.lower()
+    assert "preauth" in msg.lower()
+    assert "no password was sent" in msg.lower()
+
+
+def test_sftp_bad_password_is_still_an_auth_failure():
+    msg = humanize_connection_error(
+        "sftp", "Authentication failed: password rejected for alice"
+    )
+    assert "authentication failed" in msg.lower()
+
+
 def test_engine_login_role_drops_topology_tokens():
     assert engine_login_role("both") == ""
     assert engine_login_role("source", "destination") == ""

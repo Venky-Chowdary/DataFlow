@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import sanitize_json_value
+from services.value_serializer import json_dumps_exact_numbers
 from services.vectorization import vectorize_records
 
 from connectors.postgresql_conn import get_connection
@@ -106,7 +107,99 @@ def pgvector_extension_unavailable_reason(exc: BaseException) -> str | None:
     )
 
 
-def _exec_schema_table(cur: Any, schema: str, table_name: str, dimension: int) -> None:
+_PGVECTOR_RESERVED = frozenset(
+    {
+        "id",
+        "content",
+        "embedding",
+        "metadata",
+        "source_id",
+        "chunk_index",
+        "created_at",
+    }
+)
+_PG_DDL_TOKEN = re.compile(
+    r"^[A-Za-z][A-Za-z0-9_ ]*(\(\d+(,\s*\d+)?\))?$"
+)
+
+
+def _pgvector_typed_extras(
+    mappings: list[dict] | None,
+    column_types: dict[str, str] | None,
+) -> list[tuple[str, str]]:
+    """Mapped scalars that must be real Postgres columns, not only JSON text.
+
+    The skeleton table keeps id/content/embedding/metadata. A price mapped as
+    DECIMAL used to survive only as text inside ``content`` / ``metadata``
+    because the unknown-dialect DDL path stamped TEXT. ``ddl_type`` now
+    returns NUMERIC; this adds that column and the writer binds it by name.
+    """
+    from services.type_system import ddl_type
+
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for mapping in mappings or []:
+        source = str(mapping.get("source") or "").strip()
+        target = str(mapping.get("target") or source).strip()
+        folded = target.casefold()
+        if not target or folded in _PGVECTOR_RESERVED or folded in seen:
+            continue
+        declared = str(
+            mapping.get("target_type") or mapping.get("dest_type") or ""
+        ).strip()
+        if not declared and column_types:
+            declared = str(
+                column_types.get(target) or column_types.get(source) or ""
+            ).strip()
+        if not declared:
+            continue
+        try:
+            token = str(ddl_type("pgvector", declared) or "").strip()
+        except (TypeError, ValueError):
+            continue
+        if not token or not _PG_DDL_TOKEN.fullmatch(token):
+            continue
+        # Strings and JSON already live in content / metadata. A JSONB extra
+        # would bind a dict the adapter cannot send, and a TEXT extra would
+        # recreate the defect this function exists to avoid.
+        base = token.split("(", 1)[0].strip().upper()
+        if base in {
+            "TEXT",
+            "VARCHAR",
+            "CHAR",
+            "CHARACTER",
+            "CHARACTER VARYING",
+            "JSON",
+            "JSONB",
+        }:
+            continue
+        seen.add(folded)
+        out.append((target, token))
+    return out
+
+
+def _pgvector_extra_cells(
+    metadata: dict[str, Any] | None,
+    extras: list[tuple[str, str]],
+) -> list[Any]:
+    """Bind each typed extra by destination column name.
+
+    Vector metadata is keyed by the mapped target (and the source header).
+    Oracle-style case fold is unambiguous only: two different casings of the
+    same name do not pick a value.
+    """
+    from services.column_case import lookup_row_value
+
+    return [lookup_row_value(metadata, name) for name, _ddl in extras]
+
+
+def _exec_schema_table(
+    cur: Any,
+    schema: str,
+    table_name: str,
+    dimension: int,
+    extras: list[tuple[str, str]] | None = None,
+) -> None:
     from psycopg2 import sql
 
     schema_id = sql.Identifier(schema)
@@ -136,6 +229,15 @@ def _exec_schema_table(cur: Any, schema: str, table_name: str, dimension: int) -
         ).format(schema_id, table_id),
         (dimension,),
     )
+    for name, ddl in extras or []:
+        cur.execute(
+            sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS {} {}").format(
+                schema_id,
+                table_id,
+                sql.Identifier(name),
+                sql.SQL(ddl),
+            )
+        )
 
 
 def _pgvector_gate_existing_physical(
@@ -441,8 +543,17 @@ def write_mapped_rows(
         with conn.cursor() as cur:
             from psycopg2 import sql
 
+            typed_extras = (
+                _pgvector_typed_extras(mappings, column_types) if create_table else []
+            )
             if create_table:
-                _exec_schema_table(cur, schema or "public", table_name, dimension)
+                _exec_schema_table(
+                    cur,
+                    schema or "public",
+                    table_name,
+                    dimension,
+                    typed_extras,
+                )
             else:
                 # Respect create_table=False — never contradict preflight deny-create.
                 cur.execute(
@@ -605,34 +716,68 @@ def write_mapped_rows(
                         row["id"],
                         vector_cell_token(row.get("content")),
                         vector,
-                        json.dumps(metadata, ensure_ascii=False, default=sanitize_json_value),
+                        json_dumps_exact_numbers(metadata),
                         vector_cell_token(row.get("source_id")),
                         chunk_idx,
+                        *_pgvector_extra_cells(metadata, typed_extras),
                     ))
                     batch_written.append(row)
 
                 if not values:
                     continue
+                placeholders = "(%s, %s, %s::vector, %s::jsonb, %s, %s" + (
+                    "".join(", %s" for _ in typed_extras)
+                ) + ")"
                 args_str = ",".join(
                     cur.mogrify(
-                        "(%s, %s, %s::vector, %s::jsonb, %s, %s)",
-                        (row[0], row[1], row[2] if row[2] is not None else None, row[3], row[4], row[5]),
+                        placeholders,
+                        (
+                            row[0],
+                            row[1],
+                            row[2] if row[2] is not None else None,
+                            row[3],
+                            row[4],
+                            row[5],
+                            *row[6:],
+                        ),
                     ).decode("utf-8")
                     for row in values
                 )
+                insert_cols = sql.SQL(", ").join(
+                    sql.Identifier(name)
+                    for name in (
+                        "id",
+                        "content",
+                        "embedding",
+                        "metadata",
+                        "source_id",
+                        "chunk_index",
+                        *[name for name, _ddl in typed_extras],
+                    )
+                )
+                assignments = [
+                    sql.SQL("content = EXCLUDED.content"),
+                    sql.SQL("embedding = EXCLUDED.embedding"),
+                    sql.SQL("metadata = EXCLUDED.metadata"),
+                    sql.SQL("source_id = EXCLUDED.source_id"),
+                    sql.SQL("chunk_index = EXCLUDED.chunk_index"),
+                    *[
+                        sql.SQL("{} = EXCLUDED.{}").format(
+                            sql.Identifier(name), sql.Identifier(name)
+                        )
+                        for name, _ddl in typed_extras
+                    ],
+                    sql.SQL("created_at = now()"),
+                ]
                 insert_sql = sql.SQL(
-                    """
-                    INSERT INTO {}.{} (id, content, embedding, metadata, source_id, chunk_index)
-                    VALUES {}
-                    ON CONFLICT (id) DO UPDATE SET
-                        content = EXCLUDED.content,
-                        embedding = EXCLUDED.embedding,
-                        metadata = EXCLUDED.metadata,
-                        source_id = EXCLUDED.source_id,
-                        chunk_index = EXCLUDED.chunk_index,
-                        created_at = now()
-                    """
-                ).format(schema_id, table_id, sql.SQL(args_str))
+                    "INSERT INTO {}.{} ({}) VALUES {} ON CONFLICT (id) DO UPDATE SET {}"
+                ).format(
+                    schema_id,
+                    table_id,
+                    insert_cols,
+                    sql.SQL(args_str),
+                    sql.SQL(", ").join(assignments),
+                )
                 cur.execute(insert_sql)
                 inserted += len(values)
                 written_rows.extend(batch_written)

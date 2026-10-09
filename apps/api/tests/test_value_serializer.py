@@ -110,6 +110,34 @@ def test_exact_number_dump_keeps_scale_and_digits_unquoted():
     assert json.loads(text, parse_float=Decimal)["amount"] == Decimal("1000.00")
 
 
+def test_control_plane_codec_round_trips_decimal_one():
+    """The exact value that blocked start_transfer must encode and come back."""
+    import bson
+    from bson.errors import InvalidDocument
+
+    from services.value_serializer import control_plane_codec_options
+
+    doc = {"statistics": {"min": Decimal("1")}, "amount": Decimal("10.50")}
+    try:
+        bson.BSON.encode(doc)
+    except InvalidDocument as exc:
+        assert "Decimal('1')" in str(exc)
+    else:
+        raise AssertionError("bare Decimal must be rejected by BSON")
+
+    opts = control_plane_codec_options()
+    encoded = bson.BSON.encode(doc, codec_options=opts)
+    decoded = bson.BSON(encoded).decode(codec_options=opts)
+    assert decoded["statistics"]["min"] == Decimal("1")
+    assert decoded["amount"] == Decimal("10.50")
+    # On disk the carrier is Decimal128, not a float and not a string.
+    raw = bson.BSON(encoded).decode()
+    assert raw["statistics"]["min"].to_decimal() == Decimal("1")
+    wide = Decimal("1." + "1" * 40)
+    wide_doc = bson.BSON.encode({"n": wide}, codec_options=opts).decode()
+    assert wide_doc["n"] == str(wide)
+
+
 def test_bson_safe_document_encodes_decimals_exactly():
     """A metadata document carrying Decimals must reach BSON without loss."""
     import bson

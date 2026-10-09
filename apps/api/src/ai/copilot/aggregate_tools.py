@@ -844,9 +844,9 @@ def _mongo_pipeline(
 
 
 def _limit_clause(sql: str, dialect: str, limit: int) -> str:
-    if (dialect or "").lower() in {"mssql", "sqlserver"}:
-        return sql.replace("SELECT ", f"SELECT TOP {int(limit)} ", 1)
-    return f"{sql} LIMIT {int(limit)}"
+    from services.dialect_profiles import append_result_limit
+
+    return append_result_limit(dialect, sql, limit)
 
 
 def _column_names(columns: list[dict[str, Any]]) -> list[str]:

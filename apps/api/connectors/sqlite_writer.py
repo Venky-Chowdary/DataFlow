@@ -1226,6 +1226,7 @@ def write_mapped_rows(
                             dest_dialect="sqlite",
                             table_already_exists=bool(table_existed),
                             dest_table=table_name,
+                            carry_keys=write_mode != "insert",
                         )
                     except Exception as exc:
                         logger.warning(
@@ -1446,6 +1447,9 @@ def write_mapped_rows(
                         if on_checkpoint:
                             on_checkpoint(chunk_idx + 1, max(chunks, chunk_idx + 1), written)
                         chunk_idx += 1
+                    write_acc.note_collapsed_duplicates(
+                        finished.collapsed_duplicate_rows
+                    )
                     write_acc.add_accepted(dense)
                     row_offset += len(dense)
                 del finished
@@ -1462,6 +1466,7 @@ def write_mapped_rows(
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,
+                collapsed_duplicates=write_acc.collapsed_duplicate_rows,
             )
             coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
             _final_abort = reject_on_strict_policy(policy, rejected_details, "SQLite")

@@ -181,8 +181,11 @@ except (
 
 from services.batch_progress import (
     ThrottledCheckpoint,
+    batch_write_message,
     compute_transfer_progress_pct,
     effective_backfill_new_fields,
+    opening_analysis_message,
+    opening_batch_message,
     row_count_label,
 )
 from services.read_options import ReadOptions, ReadOptionsError
@@ -202,6 +205,7 @@ from src.transfer.resume_state import resolve_resume_checkpoint
 logger = logging.getLogger("dataflow.transfer")
 
 from src.transfer.reconcile_heartbeat import (  # noqa: E402
+    reconcile_heartbeat_scope as _reconcile_heartbeat_scope,
     reconcile_phase_heartbeat as _reconcile_phase_heartbeat,
 )
 
@@ -306,100 +310,6 @@ def _persist_load_history_profile(
         logger.debug("load-history save_profile skipped: %s", exc, exc_info=exc)
 
 
-def _validation_plan_for_result(pf: dict | None) -> dict:
-    """Checklist plus live gate outcomes so operators see float→decimal etc. warnings."""
-    if not pf:
-        return {}
-    plan = dict(pf.get("validation_plan") or {})
-    if pf.get("gates") is not None:
-        plan["gates"] = pf.get("gates") or []
-    if "passed" in pf:
-        plan["passed"] = pf.get("passed")
-    if pf.get("warnings") is not None:
-        plan["warnings"] = pf.get("warnings") or []
-    if pf.get("blockers") is not None:
-        plan["blockers"] = pf.get("blockers") or []
-    if pf.get("readiness_score") is not None:
-        plan["readiness_score"] = pf.get("readiness_score")
-    return plan
-
-
-
-
-def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, dict]:
-    """Mark job failed at preflight and persist inspectable quarantine rows."""
-    from services.quarantine_from_preflight import quarantine_rows_from_preflight
-
-    decision = (pf.get("proof_bundle") or {}).get("transfer_decision", {}) or {}
-    blocker_reasons = [
-        b.get("message") for b in pf.get("blockers", []) if isinstance(b, dict)
-    ]
-    qrows = quarantine_rows_from_preflight(pf)
-    row_ids = {d.get("row") for d in qrows if d.get("row") is not None}
-    rejected_rows = len(row_ids) if row_ids else len(qrows)
-    error_details = {
-        "reason": "Preflight blocked transfer",
-        "blockers": blocker_reasons,
-        "guidance": [
-            {
-                "gate": b.get("id"),
-                "message": b.get("message"),
-                "why": (b.get("guidance") or {}).get("why", ""),
-                "fix": (b.get("guidance") or {}).get("fix", ""),
-            }
-            for b in pf.get("blockers", [])
-            if isinstance(b, dict) and b.get("guidance")
-        ],
-        "proof_bundle": {
-            "decision": decision.get("decision"),
-            "reason": decision.get("reason"),
-            "semantic_mapping_score": pf.get("proof_bundle", {}).get(
-                "semantic_mapping_score"
-            ),
-            "min_confidence": pf.get("proof_bundle", {}).get("min_confidence"),
-            "quality_score": pf.get("proof_bundle", {}).get("quality_score"),
-            "compliance_risk": (pf.get("proof_bundle", {}).get("compliance") or {}).get(
-                "risk_score"
-            ),
-        },
-        "readiness_score": pf.get("readiness_score"),
-        "validation_plan": _validation_plan_for_result(pf),
-        "payload_shape": pf.get("payload_shape"),
-        "quarantine_issue_count": len(qrows),
-        "quarantine_row_count": rejected_rows,
-    }
-    error_message = (
-        decision.get("reason")
-        or "; ".join(str(x) for x in blocker_reasons if x)
-        or "Preflight blocked transfer"
-    )
-    lineage.emit_preflight_completed(
-        run_id=job_id,
-        passed=False,
-        readiness_score=pf.get("readiness_score", 0),
-        blockers=pf.get("blockers", []),
-        validation_plan=_validation_plan_for_result(pf),
-    )
-    lineage.emit_run_failed(
-        run_id=job_id,
-        job_id=job_id,
-        error=error_message,
-        error_details=error_details,
-    )
-    mongo.update_job_status(
-        job_id,
-        "failed",
-        error=error_message,
-        phase="failed",
-        progress_pct=0,
-        error_details=error_details,
-        preflight=pf,
-        rejected_details=qrows,
-        rejected_rows=rejected_rows,
-    )
-    return error_message, error_details
-
-
 def _coalesce_sort_value(value: Any) -> Any:
     """Return a tuple that sorts None/empty values last regardless of direction.
 
@@ -482,9 +392,9 @@ def _build_explanation(
 
 def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     """Durable per-mapping evidence for Theater/Jobs — rebuilt from the run request."""
-    from services.mapping_proof import build_mapping_proof
+    from services.mapping_proof import build_mapping_proof, mappings_from_request
 
-    mappings = list(request.mappings or [])
+    mappings = mappings_from_request(request)
     if not mappings:
         return {}
     dest_extra = getattr(request.destination, "extra", None) or {}
@@ -730,17 +640,21 @@ def _destination_schema_probe(
             extra.pop("schema_types", None)
             destination.extra = extra
             return {}, exists
-        # Dest-exists overwrite keeps nullability/defaults so G14/G15 write by
-        # dest column name and never invent create-new on a listed table, but
-        # its *types* are stale too: the table is dropped and recreated from
-        # the source shape, so stamping the doomed carrier onto the mappings
-        # refused a route for loss it cannot suffer (``TEXT → VARCHAR(64)`` on
-        # a run whose own CREATE declares ``LONGTEXT``).
-        overwrite_recreates_existing = is_overwrite_sync(sync_mode) and exists is True
-        # Kept for G19 alone: the carrier the operator declared, which this run
-        # is about to drop. No typing decision may read it — that is the bug
-        # clearing the types above fixes — but the operator is owed the fact
-        # that their declaration is being replaced.
+        # Dest-exists overwrite on a relational engine empties rows and keeps
+        # the table, so the live types, nullability and constraints are the
+        # contract. Engines that still DROP+CREATE must not bind the doomed
+        # carrier (a stale VARCHAR(64) refused a TEXT source whose CREATE
+        # would have been LONGTEXT).
+        from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+
+        overwrite_recreates_existing = (
+            is_overwrite_sync(sync_mode)
+            and exists is True
+            and dest_schema_is_recreated_on_overwrite(
+                str(getattr(destination, "format", "") or "")
+            )
+        )
+        # G19 reads this only when the run really replaces the declaration.
         extra["overwrite_replaced_column_types"] = (
             dict(schema) if overwrite_recreates_existing else {}
         )
@@ -817,7 +731,9 @@ def _destination_filler_metadata(extra: dict[str, Any] | None) -> dict[str, Any]
         "destination_identity_columns": list(meta.get("identity_columns") or []),
         "destination_generated_columns": list(meta.get("generated_columns") or []),
         "destination_live_column_types": dict(
-            meta.get("overwrite_replaced_column_types") or {}
+            meta.get("schema_types")
+            or meta.get("overwrite_replaced_column_types")
+            or {}
         ),
     }
 
@@ -1147,6 +1063,39 @@ def _settle_locales(
         set_active_number_locale(settled)
 
 
+def _catalog_pk_for_policy(
+    request: TransferRequest,
+    source_table: str,
+) -> list[str] | None:
+    """Catalog key when this mode needs one and the contract did not name it.
+
+    ``None`` means the contract already carries the key, so Validate must not
+    replace it. An empty list means the catalog was read and has no key —
+    the same refusal Execute raises.
+    """
+    from services.preflight_cursor_gate import (
+        MODES_REQUIRING_PRIMARY_KEY,
+        contract_declares_primary_key,
+    )
+    from services.sync_cursor import normalize_sync_mode
+
+    sync = normalize_sync_mode(str(getattr(request, "sync_mode", "") or ""), default="")
+    if sync not in MODES_REQUIRING_PRIMARY_KEY:
+        return None
+    selected = [
+        c
+        for c in (getattr(request, "stream_contracts", None) or [])
+        if isinstance(c, dict) and c.get("selected", True)
+    ]
+    if selected and all(contract_declares_primary_key(c) for c in selected):
+        return None
+    if not source_table:
+        return []
+    from services.source_schema_authority import endpoint_primary_key_columns
+
+    return endpoint_primary_key_columns(getattr(request, "source", None))
+
+
 def _execute_policy_gates_for_request(
     request: TransferRequest,
     *,
@@ -1163,6 +1112,20 @@ def _execute_policy_gates_for_request(
     dest = getattr(request, "destination", None)
     src = getattr(request, "source", None)
     src_extra = getattr(src, "extra", None) or {}
+    mappings = list(getattr(request, "mappings", None) or [])
+    source_table = str(
+        getattr(src, "table", None) or getattr(src, "collection", None) or ""
+    )
+    catalog_pk = _catalog_pk_for_policy(request, source_table)
+    source_config = None
+    if src is not None:
+        try:
+            from src.transfer.adapters import resolve_connector_config
+
+            source_config = resolve_connector_config(src)
+        except Exception as exc:
+            logger.debug("CDC policy source config unread: %s", exc)
+            source_config = None
     return run_transfer_policy_gates(
         sync_mode=str(getattr(request, "sync_mode", "") or ""),
         schema_policy=str(getattr(request, "schema_policy", "") or "manual_review"),
@@ -1183,6 +1146,12 @@ def _execute_policy_gates_for_request(
         priority_column=str(getattr(request, "priority_column", "") or ""),
         priority_direction=str(getattr(request, "priority_direction", "") or "desc"),
         row_limit=max(0, int(getattr(request, "limit", 0) or 0)),
+        source_endpoint=src,
+        destination_endpoint=dest,
+        catalog_primary_key_columns=catalog_pk,
+        mappings=mappings,
+        source_table=source_table,
+        source_config=source_config if isinstance(source_config, dict) else None,
     )
 
 
@@ -1191,9 +1160,8 @@ def _destination_schema_types(
 ) -> dict[str, str]:
     """Introspect destination column types for schema-aware preflight and transforms.
 
-    For full-refresh overwrite sync modes the destination table will be dropped
-    and recreated, so any existing schema is irrelevant and should not influence
-    mapping or preflight decisions.
+    Relational overwrite keeps an existing table, so its live types stay in
+    force. Engines that still drop and recreate return an empty type map.
     """
     schema, _exists = _destination_schema_probe(destination, sync_mode=sync_mode)
     return schema
@@ -1211,9 +1179,14 @@ def _apply_schema_auto_propagate(
     from services.schema_drift import apply_propagate_mappings, detect_schema_drift
 
     contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
-    dest_recreated = should_drop_destination_for_sync(
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+
+    clears_rows = should_drop_destination_for_sync(
         request_sync_mode=getattr(request, "sync_mode", None),
         contract_sync_mode=contract.sync_mode if contract else None,
+    )
+    dest_recreated = clears_rows and dest_schema_is_recreated_on_overwrite(
+        str(getattr(getattr(request, "destination", None), "format", "") or "")
     )
     drift = detect_schema_drift(
         source_columns=columns,
@@ -1326,6 +1299,85 @@ def _checkpoint_has_progress(checkpoint: Any) -> bool:
         return False
 
 
+def _raise_if_job_cancelled(
+    mongo: Any, job_id: str, *, rows_written: int | None = None
+) -> None:
+    """Stop the writer when the operator or a lost lease asked it to stop.
+
+    Progress writes that the cancel fence refuses are the same signal: the
+    loop used to ignore a False return and keep inserting. ``rows_written``
+    is whatever this chunk already committed, so the cancelled job does not
+    report 0 rows for a table that now holds them.
+    """
+    if mongo is None or not job_id:
+        return
+    try:
+        job = mongo.get_job(job_id)
+    except Exception as exc:  # noqa: BLE001 - a failed read must not hide the transfer
+        logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
+        return
+    if job and (job.get("cancel_requested") or str(job.get("status") or "") == "cancelled"):
+        raise TransferCancelled(
+            "Transfer cancelled by user", rows_written=rows_written
+        )
+
+
+def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
+    accepted = mongo.update_job_status(job_id, "running", **update)
+    if accepted is False:
+        _raise_if_job_cancelled(
+            mongo,
+            job_id,
+            rows_written=update.get("records_processed"),
+        )
+
+
+def _pin_overwrite_rows_before(
+    destination: EndpointConfig,
+    checkpoint: Any = None,
+    checkpoint_service: Any = None,
+) -> None:
+    """Count the destination before overwrite removes it.
+
+    The stream measures COUNT after the drop, so a table that held rows
+    looks empty and the failure path deletes the replacement. The count
+    taken here is the one undo and Gate-8 must keep.
+    """
+    extra = dict(getattr(destination, "extra", None) or {})
+    pinned = extra.get("overwrite_rows_before")
+    if isinstance(pinned, int):
+        return
+    if checkpoint is not None and getattr(checkpoint, "target_rows_before", None) is not None:
+        extra["overwrite_rows_before"] = int(checkpoint.target_rows_before)
+        destination.extra = extra
+        return
+    counted: int | None = None
+    try:
+        from services.dest_precount import precount_destination
+
+        from .adapters import resolve_connector_config
+
+        raw = precount_destination(destination, resolve_connector_config(destination))
+        if isinstance(raw, int):
+            counted = int(raw)
+    except Exception as exc:  # noqa: BLE001 - a missed count must not skip the overwrite
+        logger.warning("Overwrite pre-count failed: %s", exc, exc_info=exc)
+        return
+    if counted is None:
+        return
+    extra["overwrite_rows_before"] = counted
+    destination.extra = extra
+    if checkpoint is None:
+        return
+    checkpoint.target_rows_before = counted
+    if checkpoint_service is None:
+        return
+    try:
+        checkpoint_service.require_save(checkpoint)
+    except Exception as exc:  # noqa: BLE001 - the in-memory pin still guards this process
+        logger.warning("Overwrite pre-count was not checkpointed: %s", exc, exc_info=exc)
+
+
 def _apply_post_load_transforms(request: Any, dest_summary: dict[str, Any]) -> None:
     """Run configured transformation models and fold the result into the summary.
 
@@ -1411,15 +1463,136 @@ from .engine_shape import (  # noqa: E402,F401 — re-export
 # historical ``engine`` import surface.
 from .job_failure import (  # noqa: E402,F401 — re-export
     _CDC_JOB_FIELDS,
+    _blank_cells_as_null_from_preflight,
     _cdc_fields_from_summary,
+    _fail_job_preflight,
     _fail_runtime_job,
     _job_failure_fields,
     _promote_cdc_job_fields,
+    _validation_plan_for_result,
 )
 
 
 
-def _drop_destination_table(destination: EndpointConfig) -> bool:
+def _note_failed_batch_undo(request: Any, dest_summary: Any, message: str) -> str:
+    """Clear a partial SQL batch when this run found the destination empty.
+
+    A MySQL overwrite renamed the previous table aside. Restoring that
+    backup is the rollback. Deleting the replacement after the rename
+    leaves the live name empty and the pre-run rows only in the backup
+    — or gone, if a second start already dropped the backup.
+    """
+    if not isinstance(dest_summary, dict):
+        return message or "Reconciliation failed"
+    destination = getattr(request, "destination", None)
+    extra = dict(getattr(destination, "extra", None) or {})
+    backup_engine = str(extra.get("overwrite_backup_engine") or "")
+    if extra.get("overwrite_backup") and backup_engine in {"mysql", "mongodb"}:
+        backup_name = str(extra.get("overwrite_backup") or "")
+        restored = _settle_overwrite_backup(destination, restore=True)
+        if restored:
+            note = (
+                "The previous destination table was restored. "
+                "This run's replacement was removed."
+            )
+            dest_summary["partial_batch_undo"] = "restored"
+        else:
+            note = (
+                "The previous destination table could not be restored. "
+                f"The backup {backup_name} was left in place."
+            )
+            dest_summary["partial_batch_undo"] = "restore_failed"
+        dest_summary["partial_batch_undo_note"] = note
+        base = message or "Reconciliation failed"
+        if note not in base:
+            return f"{base} {note}"
+        return base
+    from services.batch_undo import undo_failed_batch_if_dest_was_empty
+
+    note = undo_failed_batch_if_dest_was_empty(
+        destination=getattr(request, "destination", None),
+        dest_summary=dest_summary,
+        sync_mode=str(getattr(request, "sync_mode", "") or ""),
+    )
+    base = message or "Reconciliation failed"
+    if note and note not in base:
+        return f"{base} {note}"
+    return base
+
+
+def _remember_preserved_columns(destination: EndpointConfig, kept: list[dict]) -> None:
+    if not kept:
+        return
+    extra = dict(destination.extra or {})
+    extra["preserve_columns"] = kept
+    destination.extra = extra
+
+
+def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> bool:
+    """Drop a rename-aside backup after success, or put it back after failure.
+
+    MySQL and Mongo leave the previous object under ``__df_bak``. A failed
+    load must not leave the live name missing. Relational overwrite empties
+    in place and has no backup — TRUNCATE on MySQL commits, so the previous
+    rows are not restored. The constraints on that table stay.
+    """
+    extra = dict(getattr(destination, "extra", None) or {})
+    backup = extra.get("overwrite_backup")
+    engine_name = str(extra.get("overwrite_backup_engine") or "")
+    if not backup or engine_name not in {"mysql", "mongodb"}:
+        return False
+    from .adapters import resolve_connector_config, resolve_dest_table
+    from .connector_capabilities import resolve_driver_type
+
+    ok = False
+    try:
+        db_type = resolve_driver_type(destination.format)
+        cfg = resolve_connector_config(destination)
+        table_name = resolve_dest_table(db_type, destination)
+        if engine_name == "mongodb":
+            from connectors.table_manager import (
+                discard_mongodb_overwrite,
+                restore_mongodb_overwrite,
+            )
+
+            if restore:
+                restore_mongodb_overwrite(cfg, table_name, str(backup))
+            else:
+                discard_mongodb_overwrite(cfg, str(backup))
+        elif restore:
+            from connectors.table_manager import restore_mysql_overwrite
+
+            restore_mysql_overwrite(cfg, table_name, str(backup))
+        else:
+            from connectors.table_manager import discard_mysql_overwrite
+
+            discard_mysql_overwrite(cfg, str(backup))
+        ok = True
+    except Exception as exc:  # noqa: BLE001 - backup settle must not hide the transfer result
+        logger.error(
+            "Overwrite backup %s failed for %s: %s",
+            "restore" if restore else "discard",
+            backup,
+            exc,
+            exc_info=exc,
+        )
+        ok = False
+    finally:
+        extra.pop("overwrite_backup", None)
+        extra.pop("overwrite_backup_engine", None)
+        destination.extra = extra
+    return ok
+
+
+def _drop_destination_table(
+    destination: EndpointConfig,
+    *,
+    mappings: list[dict] | None = None,
+    checkpoint: Any = None,
+    checkpoint_service: Any = None,
+    mongo: Any = None,
+    job_id: str = "",
+) -> bool:
     """Drop the destination object for full-refresh overwrite sync modes.
 
     Raises :class:`FullRefreshDropFailed` when a drop was attempted and failed.
@@ -1433,6 +1606,9 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
     """
     if destination.kind != "database":
         return False
+
+    _raise_if_job_cancelled(mongo, job_id)
+    _pin_overwrite_rows_before(destination, checkpoint, checkpoint_service)
 
     from connectors.table_manager import TableDropError, drop_table
 
@@ -1456,6 +1632,44 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
         ) from exc
 
     carry_dest_spelling_across_drop(destination, db_type, cfg, table_name, schema)
+    from connectors.table_manager import overwrite_clear_kind
+
+    clear_kind = overwrite_clear_kind(db_type)
+    if clear_kind == "rename_collection":
+        from connectors.table_manager import retire_mongodb_overwrite
+
+        try:
+            backup = retire_mongodb_overwrite(cfg, table_name)
+        except TableDropError as exc:
+            logger.error("full_refresh mongo retire failed for %s: %s", table_name, exc)
+            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+        if backup:
+            extra = dict(destination.extra or {})
+            extra["overwrite_backup"] = backup
+            extra["overwrite_backup_engine"] = "mongodb"
+            destination.extra = extra
+        return True
+    if clear_kind == "empty":
+        from connectors.table_manager import empty_existing_for_overwrite
+
+        try:
+            empty_existing_for_overwrite(db_type, cfg, table_name, schema)
+        except TableDropError as exc:
+            logger.error("full_refresh empty failed for %s: %s", table_name, exc)
+            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+        return True
+    if db_type in ("postgresql", "redshift"):
+        try:
+            from connectors.table_manager import postgres_columns_to_keep
+
+            kept = postgres_columns_to_keep(cfg, table_name, schema, mappings)
+            _remember_preserved_columns(destination, kept)
+        except Exception as exc:  # noqa: BLE001 - keep-column read must not block the overwrite
+            logger.warning(
+                "Could not read destination columns to keep on %s: %s",
+                table_name,
+                exc,
+            )
     try:
         return drop_table(db_type, cfg, table_name, schema)
     except TableDropError as exc:
@@ -1557,7 +1771,7 @@ def _auto_map(
                             "name": c,
                             "inferred_type": schema.get(c, "string"),
                             "samples": [
-                                cell_to_string(r.get(c, ""))
+                                cell_to_string(r.get(c, ""), preserve_sql_null=True)
                                 for r in (sample_rows or [])[:8]
                             ],
                         }
@@ -1565,7 +1779,7 @@ def _auto_map(
                     ]
                     source_samples = {
                         c: [
-                            cell_to_string(r.get(c, ""))
+                            cell_to_string(r.get(c, ""), preserve_sql_null=True)
                             for r in (sample_rows or [])[:8]
                         ]
                         for c in columns
@@ -1638,7 +1852,7 @@ def _auto_map(
                             "name": c,
                             "inferred_type": schema.get(c, "string"),
                             "samples": [
-                                cell_to_string(r.get(c, ""))
+                                cell_to_string(r.get(c, ""), preserve_sql_null=True)
                                 for r in (sample_rows or [])[:8]
                             ],
                         }
@@ -1655,7 +1869,7 @@ def _auto_map(
                     ]
                     source_samples = {
                         c: [
-                            cell_to_string(r.get(c, ""))
+                            cell_to_string(r.get(c, ""), preserve_sql_null=True)
                             for r in (sample_rows or [])[:8]
                         ]
                         for c in columns
@@ -1960,25 +2174,32 @@ class UniversalTransferEngine:
             logger.debug("job shell bootstrap skipped for %s", job_id, exc_info=True)
         # Hard-block Execute when Map still has unresolved requires_review rows —
         # skip_preflight must never green-path ambiguous remaps into a write.
-        # Delivery: at_least_once default; exactly_once opt-in and fail-closed
-        # on ineligible routes. at_most_once is never offered.
+        # auto selects dest-owned exactly-once on an eligible CDC route.
+        # An explicit at_least_once pin stays. Ineligible exactly_once fails closed.
         from services.cdc_exactly_once import (
             ExactlyOnceRouteError,
-            assert_requested_cdc_delivery,
             dest_allow_append_only,
+            operator_pinned_delivery,
+            route_declares_log_position,
             route_has_cdc_pk,
+            select_route_delivery,
         )
         from services.execution_engine_contract import DeliveryGuaranteeError
         from services.mapping_pipeline import assert_mappings_executable
         from services.procedure_source import is_callable_source
 
         try:
-            assert_requested_cdc_delivery(
-                getattr(request, "delivery_guarantee", None) or "at_least_once",
+            requested_delivery = getattr(request, "delivery_guarantee", None) or "auto"
+            request.delivery_pinned = operator_pinned_delivery(requested_delivery)
+            request.delivery_guarantee = select_route_delivery(
+                requested_delivery,
                 sync_mode=getattr(request, "sync_mode", "") or "",
                 dest_type=str(getattr(request.destination, "format", "") or ""),
                 source_type=str(getattr(request.source, "format", "") or ""),
                 has_primary_key=route_has_cdc_pk(
+                    getattr(request, "stream_contracts", None),
+                ),
+                has_lsn_column=route_declares_log_position(
                     getattr(request, "stream_contracts", None),
                 ),
                 allow_append_only=dest_allow_append_only(request.destination),
@@ -2477,6 +2698,10 @@ class UniversalTransferEngine:
                 request.limit,
             )
             if not records and request.source.kind != "database":
+                if columns and str(getattr(request.source, "kind", "") or "") == "file":
+                    from .incremental_no_op import empty_file_success_result
+
+                    return empty_file_success_result(request, job_id)
                 mongo.update_job_status(
                     job_id, "failed", error="No records to transfer", phase="failed"
                 )
@@ -2646,8 +2871,10 @@ class UniversalTransferEngine:
                     # discover an unfit value mid-load. A just-approved Studio
                     # Validate already asked that question; write-time fit
                     # still binds every row.
-                    population_rows=None if reuse_fit else records,
-                    rows_are_population=not reuse_fit,
+                    # An empty batch stays the population even on a reused
+                    # Validate: it is what proves a header-only file is empty.
+                    population_rows=None if reuse_fit and records else records,
+                    rows_are_population=not reuse_fit or not records,
                     skip_population_fit=reuse_fit,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
@@ -2674,6 +2901,11 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     source_filename=request.source_filename or "",
+                    source_file_id=str(
+                        (getattr(request.source, "extra", None) or {}).get("file_id")
+                        or getattr(request, "source_file_id", "")
+                        or ""
+                    ).strip(),
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
@@ -2712,7 +2944,12 @@ class UniversalTransferEngine:
                     )
                 if not pf["passed"]:
                     error_message, error_details = _fail_job_preflight(
-                        mongo, job_id, pf, lineage=lineage
+                        mongo,
+                        job_id,
+                        pf,
+                        lineage=lineage,
+                        rows_read=total_rows,
+                        sync_mode=str(getattr(request, "sync_mode", "") or ""),
                     )
                     return TransferResult(
                         success=False,
@@ -2722,6 +2959,7 @@ class UniversalTransferEngine:
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
+                        row_accounting=dict(error_details.get("row_accounting") or {}),
                     )
 
             # A stamped hash/artifact is always checked against the operator
@@ -2863,28 +3101,20 @@ class UniversalTransferEngine:
                 message=f"Writing {row_count_label(total_rows)} rows…",
             )
 
-            def _check_cancelled() -> None:
-                try:
-                    job = mongo.get_job(job_id)
-                    # Honour the durable cancel flag as well as the status. The
-                    # status field is rewritten by this very loop on every
-                    # chunk, so a cancel that landed mid-chunk could be
-                    # overwritten before it was ever read.
-                    if job and (
-                        job.get("cancel_requested") or job.get("status") == "cancelled"
-                    ):
-                        raise TransferCancelled("Transfer cancelled by user")
-                except TransferCancelled:
-                    raise
-                except Exception as exc:
-                    logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
+            def _check_cancelled(committed_rows: int | None = None) -> None:
+                # After the chunk commits. The count has to travel with the
+                # cancel: the status was often already "cancelled" at 0 rows
+                # while this table held the batch.
+                _raise_if_job_cancelled(
+                    mongo, job_id, rows_written=committed_rows
+                )
 
             _quarantine_persisted = [0]
 
             def on_checkpoint(
                 chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
             ) -> None:
-                _check_cancelled()
+                _check_cancelled(rows)
                 pct = compute_transfer_progress_pct(
                     phase="writing",
                     rows_processed=rows,
@@ -2896,7 +3126,13 @@ class UniversalTransferEngine:
                     records_processed=rows,
                     chunk_current=chunk,
                     chunk_total=chunks,
-                    message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
+                    message=batch_write_message(
+                        chunk,
+                        chunks,
+                        rows,
+                        checkpoint=checkpoint,
+                        stream_contracts=request.stream_contracts,
+                    ),
                 )
                 if pct is not None:
                     update["progress_pct"] = pct
@@ -2921,7 +3157,7 @@ class UniversalTransferEngine:
                         checkpoint, details, preview, total, truncated
                     )
                     _promote_cdc_job_fields(checkpoint, update)
-                mongo.update_job_status(job_id, "running", **update)
+                _progress_write_or_cancel(mongo, job_id, **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
             backfill_fields = effective_backfill_new_fields(
@@ -2944,7 +3180,7 @@ class UniversalTransferEngine:
                 should_drop_full_refresh = should_drop_destination_for_sync(
                     request_sync_mode=request.sync_mode,
                     contract_sync_mode=contract.sync_mode if contract else None,
-                ) and not (resume and checkpoint_has_progress)
+                ) and not checkpoint_has_progress
                 if resume and checkpoint_has_progress:
                     skip_n = max(
                         int(getattr(checkpoint, "rows_processed", 0) or 0),
@@ -3037,7 +3273,14 @@ class UniversalTransferEngine:
                                 "Preparing destination — clearing table for full refresh…"
                             ),
                         )
-                        _drop_destination_table(request.destination)
+                        _drop_destination_table(
+                            request.destination,
+                            mappings=mappings,
+                            checkpoint=checkpoint,
+                            checkpoint_service=checkpoint_service,
+                            mongo=mongo,
+                            job_id=job_id,
+                        )
                         mongo.update_job_status(
                             job_id,
                             "running",
@@ -3276,9 +3519,9 @@ class UniversalTransferEngine:
                     rows_processed=rows_written,
                     total_rows=total_rows,
                 )
-                mongo.update_job_status(
+                _progress_write_or_cancel(
+                    mongo,
                     job_id,
-                    "running",
                     records_processed=rows_written,
                     **(
                         {"progress_pct": write_done_pct}
@@ -3380,9 +3623,7 @@ class UniversalTransferEngine:
                 job_id,
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
-                proof_kind=str((dest_summary or {}).get("checksum_mode") or "full")
-                if isinstance(dest_summary, dict)
-                else "full",
+                **_reconcile_heartbeat_scope(dest_summary),
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
@@ -3439,13 +3680,16 @@ class UniversalTransferEngine:
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
+                fail_message = _note_failed_batch_undo(
+                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                )
                 mongo.update_job_status(
                     job_id,
                     "failed",
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     phase="failed",
                     progress_pct=99,
-                    message=recon.get("message"),
+                    message=fail_message,
                     reconciliation=recon,
                     destination_summary=dest_summary,
                     rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
@@ -3455,7 +3699,7 @@ class UniversalTransferEngine:
                 )
                 return TransferResult(
                     success=False,
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     operation=request.operation,
                     job_id=job_id,
                     records_transferred=rows_written,
@@ -3503,6 +3747,7 @@ class UniversalTransferEngine:
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
+            _settle_overwrite_backup(request.destination, restore=False)
             mongo.update_job_status(
                 job_id,
                 terminal_status,
@@ -3636,6 +3881,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
+            _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -3650,14 +3896,16 @@ class UniversalTransferEngine:
                 request,
                 already_persisted=_quarantine_persisted,
             )
-            block_msg = str(blocked)
+            from src.transfer.job_failure import account_blocked_write
+
+            kept, block_msg = account_blocked_write(mongo, job_id, blocked)
             mongo.update_job_status(
                 job_id,
                 "failed",
                 phase="failed",
                 error=block_msg,
                 message=block_msg,
-                records_processed=int(blocked.rows_written or 0),
+                records_processed=kept,
                 rejected_rows=int(dest_summary.get("rejected_rows") or 0),
                 rejected_details=(
                     dest_summary.get("rejected_details") or []
@@ -3669,13 +3917,14 @@ class UniversalTransferEngine:
                 error=block_msg,
                 job_id=job_id,
                 operation=request.operation,
-                records_transferred=int(blocked.rows_written or 0),
+                records_transferred=kept,
                 destination_summary=dest_summary,
             )
         except Exception as e:
+            _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage
+                mongo, job_id, e, lineage=lineage, request=request
             )
             return TransferResult(
                 success=False,
@@ -3707,15 +3956,19 @@ class UniversalTransferEngine:
                 "running",
                 phase="reading",
                 progress_pct=5,
-                message="Analyzing source table…",
+                message=opening_analysis_message(request.stream_contracts),
             )
-            columns, schema, total_rows, sample_rows = peek_stream_source(
-                request.source
+            # Several tables: the primary sample is that stream's CALL or
+            # SELECT when it has one. Peeking the table would map columns the
+            # writer never reads.
+            from services.execute_shape_route import peek_declared_source
+
+            columns, schema, total_rows, sample_rows = peek_declared_source(
+                request.source, request.stream_contracts
             )
-            schema = _authoritative_source_schema(request.source, schema, columns)
             if request.limit > 0:
                 total_rows = min(total_rows, request.limit)
-            if total_rows == 0:
+            if total_rows == 0 and not columns:
                 mongo.update_job_status(
                     job_id, "failed", error="Source table is empty", phase="failed"
                 )
@@ -3725,6 +3978,12 @@ class UniversalTransferEngine:
                     operation=request.operation,
                     job_id=job_id,
                 )
+            if total_rows == 0 and columns:
+                # A table with columns and no rows is a real object. The stream
+                # creates the destination and completes with a measured 0.
+                extra = dict(request.destination.extra or {})
+                extra["create_empty_source"] = True
+                request.destination.extra = extra
 
             read_columns = list(columns)
             raw_sample_size = len(sample_rows)
@@ -3736,49 +3995,19 @@ class UniversalTransferEngine:
             # will receive. A separate throwaway runner shapes the design-time
             # sample: those effects are not the population's.
             _settle_locales(request, sample_rows, columns)
-            shape_runner = _open_shape_runner(request, columns)
-            declared_contract = resolve_sync_contract(request.stream_contracts)
-            shape_refusal = _shape_stream_refusal(
-                shape_runner,
-                effective_sync=resolve_effective_sync_mode(
-                    request.sync_mode,
-                    declared_contract.sync_mode if declared_contract else None,
-                ),
-                multi_stream=len(
-                    resolve_selected_sync_contracts(request.stream_contracts)
-                ) > 1,
-                cursor_field=(
-                    declared_contract.cursor_field if declared_contract else ""
-                ),
-                key_columns=(
-                    declared_contract.primary_key_columns()
-                    if declared_contract and declared_contract.primary_key
-                    else []
-                ),
-            )
-            if shape_refusal:
-                mongo.update_job_status(
-                    job_id,
-                    "failed",
-                    error=shape_refusal,
-                    phase="failed",
-                    progress_pct=0,
-                )
-                return TransferResult(
-                    success=False,
-                    error=shape_refusal,
-                    error_details={
-                        "reason": "shape_route_unsupported",
-                        "remediation": (
-                            "Remove the Shape recipe for this sync mode, or shape "
-                            "on a full-refresh / incremental-append route."
-                        ),
-                    },
-                    operation=request.operation,
-                    job_id=job_id,
-                )
+            # design_runner shapes the primary sample. The sequential writer
+            # builds one runner per stream from shape_by_stream.
+            from services.execute_shape_route import open_execute_shape
+
+            shape_plan = open_execute_shape(request, columns, job_id=job_id)
+            if shape_plan.failure is not None:
+                return shape_plan.failure
+            design_runner = shape_plan.design_runner
+            shape_runner = shape_plan.shape_runner
+            shape_by_stream = shape_plan.shape_by_stream
+            approved_shape_hash = shape_plan.approved_shape_hash
             sample_probe = (
-                ShapeRunner(shape_runner.recipe) if shape_runner is not None else None
+                ShapeRunner(design_runner.recipe) if design_runner is not None else None
             )
             if sample_probe is not None:
                 sample_rows = sample_probe.records(sample_rows)
@@ -3790,8 +4019,8 @@ class UniversalTransferEngine:
                 # The rewrites emptied the first page, not the table. Read on
                 # rather than let the gates judge a run on no rows at all.
                 widened_probe = (
-                    ShapeRunner(shape_runner.recipe)
-                    if shape_runner is not None
+                    ShapeRunner(design_runner.recipe)
+                    if design_runner is not None
                     else None
                 )
                 sample_rows = _widen_design_sample(
@@ -3879,7 +4108,7 @@ class UniversalTransferEngine:
                             column_types=schema,
                             dest_types=dest_schema_types,
                             dest_db=dst_fmt.lower(),
-                            shape_runner=shape_runner,
+                            shape_runner=design_runner,
                         )
                     ),
                     rows_are_population=not reuse_fit and not _sync_mode_is_cdc(request),
@@ -3910,6 +4139,11 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     source_filename=request.source_filename or "",
+                    source_file_id=str(
+                        (getattr(request.source, "extra", None) or {}).get("file_id")
+                        or getattr(request, "source_file_id", "")
+                        or ""
+                    ).strip(),
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
@@ -3948,7 +4182,12 @@ class UniversalTransferEngine:
                     )
                 if not pf["passed"]:
                     error_message, error_details = _fail_job_preflight(
-                        mongo, job_id, pf, lineage=lineage
+                        mongo,
+                        job_id,
+                        pf,
+                        lineage=lineage,
+                        rows_read=total_rows,
+                        sync_mode=str(getattr(request, "sync_mode", "") or ""),
                     )
                     return TransferResult(
                         success=False,
@@ -3958,6 +4197,7 @@ class UniversalTransferEngine:
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
+                        row_accounting=dict(error_details.get("row_accounting") or {}),
                     )
 
             # A stamped hash/artifact is always checked against the operator
@@ -4083,33 +4323,32 @@ class UniversalTransferEngine:
                     error_details={"load_history_report": load_history_report},
                 )
 
-            def _check_cancelled() -> None:
-                try:
-                    job = mongo.get_job(job_id)
-                    # Honour the durable cancel flag as well as the status. The
-                    # status field is rewritten by this very loop on every
-                    # chunk, so a cancel that landed mid-chunk could be
-                    # overwritten before it was ever read.
-                    if job and (
-                        job.get("cancel_requested") or job.get("status") == "cancelled"
-                    ):
-                        raise TransferCancelled("Transfer cancelled by user")
-                except TransferCancelled:
-                    raise
-                except Exception as exc:
-                    logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
+            def _check_cancelled(committed_rows: int | None = None) -> None:
+                # After the chunk commits. The count has to travel with the
+                # cancel: the status was often already "cancelled" at 0 rows
+                # while this table held the batch.
+                _raise_if_job_cancelled(
+                    mongo, job_id, rows_written=committed_rows
+                )
 
             _quarantine_persisted = [0]
 
             def on_checkpoint(
                 chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
             ) -> None:
-                _check_cancelled()
+                _check_cancelled(rows)
                 # CDC has no finite denominator — never invent a percentage.
-                sync_l = (request.sync_mode or "").lower()
+                # cdc_incremental is the same mode. A raw equality check treated
+                # that alias as a finite batch load and drew a percent mid-snapshot.
+                from services.sync_cursor import normalize_sync_mode
+
+                sync_l = normalize_sync_mode(request.sync_mode or "", default="")
                 contracts = request.stream_contracts or []
                 is_cdc = sync_l == "cdc" or any(
-                    str((c or {}).get("sync_mode") or "").lower() == "cdc"
+                    normalize_sync_mode(
+                        str((c or {}).get("sync_mode") or ""), default=""
+                    )
+                    == "cdc"
                     for c in contracts
                     if isinstance(c, dict)
                 )
@@ -4124,10 +4363,13 @@ class UniversalTransferEngine:
                     records_processed=rows,
                     chunk_current=chunk,
                     chunk_total=chunks,
-                    message=(
-                        f"CDC applied {rows:,} change(s)…"
-                        if is_cdc
-                        else f"Writing batch {chunk}/{chunks} ({rows:,} rows)…"
+                    message=batch_write_message(
+                        chunk,
+                        chunks,
+                        rows,
+                        is_cdc=is_cdc,
+                        checkpoint=checkpoint,
+                        stream_contracts=request.stream_contracts,
                     ),
                 )
                 if is_cdc:
@@ -4155,7 +4397,7 @@ class UniversalTransferEngine:
                         checkpoint, details, preview, total, truncated
                     )
                     _promote_cdc_job_fields(checkpoint, update)
-                mongo.update_job_status(job_id, "running", **update)
+                _progress_write_or_cancel(mongo, job_id, **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
             backfill_fields = effective_backfill_new_fields(
@@ -4172,13 +4414,20 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Streaming {row_count_label(total_rows)} rows in batches…",
+                message=opening_batch_message(total_rows, request.stream_contracts),
             )
 
             is_streaming = True
             stream_contract = resolve_sync_contract(request.stream_contracts)
             selected_streams = resolve_selected_sync_contracts(request.stream_contracts)
             multi_non_cdc = len(selected_streams) > 1
+            from services.execute_shape_route import procedure_replay_failure
+
+            procedure_blocked = procedure_replay_failure(
+                request, selected_streams, job_id=job_id
+            )
+            if procedure_blocked is not None:
+                return procedure_blocked
             # Overwrite DROP once on primary is wrong for multi-stream — sequential
             # path drops each remapped destination instead.
             if not multi_non_cdc and should_drop_destination_for_sync(
@@ -4187,11 +4436,7 @@ class UniversalTransferEngine:
                 if stream_contract
                 else None,
             ):
-                if (
-                    not resume
-                    or not is_streaming
-                    or not _checkpoint_has_progress(checkpoint)
-                ):
+                if not _checkpoint_has_progress(checkpoint):
                     mongo.update_job_status(
                         job_id,
                         "running",
@@ -4204,7 +4449,14 @@ class UniversalTransferEngine:
                             "Preparing destination — clearing table for full refresh…"
                         ),
                     )
-                    _drop_destination_table(request.destination)
+                    _drop_destination_table(
+                        request.destination,
+                        mappings=mappings,
+                        checkpoint=checkpoint,
+                        checkpoint_service=checkpoint_service,
+                        mongo=mongo,
+                        job_id=job_id,
+                    )
                     mongo.update_job_status(
                         job_id,
                         "running",
@@ -4287,6 +4539,7 @@ class UniversalTransferEngine:
                     limit=request.limit,
                     delivery_guarantee=getattr(request, "delivery_guarantee", None)
                     or "at_least_once",
+                    delivery_pinned=bool(getattr(request, "delivery_pinned", False)),
                     workspace_id=str(getattr(request, "workspace_id", "") or ""),
                     schedule_id=str(getattr(request, "schedule_id", "") or ""),
                 )
@@ -4309,6 +4562,8 @@ class UniversalTransferEngine:
                         source_filter=request.source_filter,
                         limit=request.limit,
                         skip_preflight=request.skip_preflight,
+                        shape_by_stream=shape_by_stream or None,
+                        approved_shape_hash=approved_shape_hash,
                     )
                 )
             else:
@@ -4336,9 +4591,7 @@ class UniversalTransferEngine:
                 job_id,
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
-                proof_kind=str((dest_summary or {}).get("checksum_mode") or "full")
-                if isinstance(dest_summary, dict)
-                else "full",
+                **_reconcile_heartbeat_scope(dest_summary),
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
@@ -4365,13 +4618,16 @@ class UniversalTransferEngine:
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
+                fail_message = _note_failed_batch_undo(
+                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                )
                 mongo.update_job_status(
                     job_id,
                     "failed",
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     phase="failed",
                     progress_pct=99,
-                    message=recon.get("message"),
+                    message=fail_message,
                     reconciliation=recon,
                     destination_summary=dest_summary,
                     rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
@@ -4381,7 +4637,7 @@ class UniversalTransferEngine:
                 )
                 return TransferResult(
                     success=False,
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     operation=request.operation,
                     job_id=job_id,
                     records_transferred=rows_written,
@@ -4398,6 +4654,32 @@ class UniversalTransferEngine:
             )
             if lost is not None:
                 return lost
+
+
+            if effective_sync == "cdc" and isinstance(dest_summary, dict):
+                from services.cdc_catchup import unread_postgres_change
+
+                unread = unread_postgres_change(request.source, dest_summary)
+                if unread:
+                    mongo.update_job_status(
+                        job_id,
+                        "failed",
+                        error=unread,
+                        phase="failed",
+                        progress_pct=99,
+                        message=unread,
+                        reconciliation=recon,
+                        destination_summary=dest_summary,
+                    )
+                    return TransferResult(
+                        success=False,
+                        error=unread,
+                        operation=request.operation,
+                        job_id=job_id,
+                        records_transferred=rows_written,
+                        destination_summary=dest_summary,
+                        reconciliation=recon,
+                    )
 
             explanation = _build_explanation(
                 request,
@@ -4434,7 +4716,69 @@ class UniversalTransferEngine:
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
-            mongo.update_job_status(
+            if effective_sync == "cdc" and isinstance(dest_summary, dict):
+                from services.cdc_catchup import release_finished_cdc_slot
+
+                try:
+                    job_doc = mongo.get_job(job_id) or {}
+                except Exception as exc:
+                    logger.warning(
+                        "CDC slot release could not read job %s: %s", job_id, exc
+                    )
+                    job_doc = {}
+                job_doc = dict(job_doc)
+                job_doc.setdefault("cdc_slot_name", dest_summary.get("cdc_slot_name"))
+                job_doc.setdefault(
+                    "cdc_publication_name", dest_summary.get("cdc_publication_name")
+                )
+                if not str(job_doc.get("cursor_key") or "").strip():
+                    named = dest_summary.get("cursor_key")
+                    nested_cdc = dest_summary.get("cdc")
+                    if not named and isinstance(nested_cdc, dict):
+                        named = nested_cdc.get("cursor_key")
+                    if named:
+                        job_doc["cursor_key"] = named
+                try:
+                    from src.transfer.adapters import resolve_connector_config
+
+                    source_cfg = resolve_connector_config(request.source)
+                except Exception as exc:
+                    logger.debug("CDC completion source config unread: %s", exc)
+                    source_cfg = None
+                dest_cfg = None
+                dest_type = ""
+                try:
+                    from src.transfer.adapters import resolve_connector_config
+
+                    dest_cfg = resolve_connector_config(request.destination)
+                    dest_type = str(
+                        getattr(request.destination, "format", "")
+                        or getattr(request.destination, "type", "")
+                        or ""
+                    )
+                except Exception as exc:
+                    logger.debug("CDC completion dest config unread: %s", exc)
+                    dest_cfg = None
+                extra_lsns = [
+                    dest_summary.get("eos_committed_lsn"),
+                    (dest_summary.get("cdc") or {}).get("eos_committed_lsn")
+                    if isinstance(dest_summary.get("cdc"), dict)
+                    else None,
+                ]
+                # Drop the slot only after the job document leaves "running".
+                # Releasing first left the capture gone when this write failed
+                # (DEF-B2-007).
+                release_args = (
+                    job_doc,
+                    source_cfg,
+                    dest_type,
+                    dest_cfg,
+                    [value for value in extra_lsns if value],
+                )
+            else:
+                release_args = None
+            _settle_overwrite_backup(request.destination, restore=False)
+            status_written = mongo.update_job_status(
                 job_id,
                 terminal_status,
                 records_processed=rows_written,
@@ -4463,6 +4807,25 @@ class UniversalTransferEngine:
                 validation_mode=request.validation_mode,
                 **_cdc_fields_from_summary(dest_summary),
             )
+            if release_args is not None and status_written:
+                job_doc, source_cfg, dest_type, dest_cfg, extra_lsns = release_args
+                job_doc["status"] = terminal_status
+                dest_summary["cdc_slot_release"] = release_finished_cdc_slot(
+                    job_doc,
+                    reason="completed",
+                    schedule_id=str(getattr(request, "schedule_id", "") or ""),
+                    source_cfg=source_cfg,
+                    job_id=job_id,
+                    dest_type=dest_type,
+                    dest_cfg=dest_cfg,
+                    extra_lsns=extra_lsns,
+                )
+                mongo.update_job_status(
+                    job_id,
+                    terminal_status,
+                    destination_summary=dest_summary,
+                    **_cdc_fields_from_summary(dest_summary),
+                )
 
             lineage.emit_preflight_completed(
                 run_id=job_id,
@@ -4520,6 +4883,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
+            _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -4534,33 +4898,46 @@ class UniversalTransferEngine:
                 request,
                 already_persisted=_quarantine_persisted,
             )
-            block_msg = str(blocked)
+            from src.transfer.job_failure import account_blocked_write
+
+            kept, block_msg = account_blocked_write(mongo, job_id, blocked)
+            from services.cdc_catchup import capture_identity_from
+
+            capture = capture_identity_from(blocked)
             mongo.update_job_status(
                 job_id,
                 "failed",
                 phase="failed",
                 error=block_msg,
                 message=block_msg,
-                records_processed=int(blocked.rows_written or 0),
+                records_processed=kept,
                 rejected_rows=int(dest_summary.get("rejected_rows") or 0),
                 rejected_details=(
                     dest_summary.get("rejected_details") or []
                 )[:2000],
                 destination_summary=dest_summary,
+                **capture,
             )
+            if capture:
+                from .job_failure import release_cdc_capture_after_failure
+
+                release_cdc_capture_after_failure(
+                    mongo, job_id, request, blocked, retriable=False
+                )
             return TransferResult(
                 success=False,
                 error=block_msg,
                 job_id=job_id,
                 operation=request.operation,
-                records_transferred=int(blocked.rows_written or 0),
+                records_transferred=kept,
                 destination_summary=dest_summary,
                 contract_id=contract_id,
             )
         except Exception as e:
+            _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage
+                mongo, job_id, e, lineage=lineage, request=request
             )
             return TransferResult(
                 success=False,
@@ -4700,13 +5077,13 @@ class UniversalTransferEngine:
                     # do not spend minutes asking the same question again.
                     population_rows=(
                         None
-                        if reuse_fit
+                        if reuse_fit and sample_rows
                         else _shaped_population_rows(
                             shape_runner,
                             _file_population_rows(content, filename, read_options),
                         )
                     ),
-                    rows_are_population=not reuse_fit,
+                    rows_are_population=not reuse_fit or not sample_rows,
                     skip_population_fit=reuse_fit,
                     source_filter=request.source_filter or None,
                     confidence_threshold=confidence_threshold_for_mode(
@@ -4734,6 +5111,11 @@ class UniversalTransferEngine:
                         or ""
                     ),
                     source_filename=request.source_filename or "",
+                    source_file_id=str(
+                        (getattr(request.source, "extra", None) or {}).get("file_id")
+                        or getattr(request, "source_file_id", "")
+                        or ""
+                    ).strip(),
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
@@ -4772,7 +5154,12 @@ class UniversalTransferEngine:
                     )
                 if not pf["passed"]:
                     error_message, error_details = _fail_job_preflight(
-                        mongo, job_id, pf, lineage=lineage
+                        mongo,
+                        job_id,
+                        pf,
+                        lineage=lineage,
+                        rows_read=total_rows,
+                        sync_mode=str(getattr(request, "sync_mode", "") or ""),
                     )
                     return TransferResult(
                         success=False,
@@ -4782,6 +5169,7 @@ class UniversalTransferEngine:
                         payload_shape=pf.get("payload_shape") or {},
                         operation=request.operation,
                         job_id=job_id,
+                        row_accounting=dict(error_details.get("row_accounting") or {}),
                     )
 
             # A stamped hash/artifact is always checked against the operator
@@ -4907,28 +5295,20 @@ class UniversalTransferEngine:
                     error_details={"load_history_report": load_history_report},
                 )
 
-            def _check_cancelled() -> None:
-                try:
-                    job = mongo.get_job(job_id)
-                    # Honour the durable cancel flag as well as the status. The
-                    # status field is rewritten by this very loop on every
-                    # chunk, so a cancel that landed mid-chunk could be
-                    # overwritten before it was ever read.
-                    if job and (
-                        job.get("cancel_requested") or job.get("status") == "cancelled"
-                    ):
-                        raise TransferCancelled("Transfer cancelled by user")
-                except TransferCancelled:
-                    raise
-                except Exception as exc:
-                    logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
+            def _check_cancelled(committed_rows: int | None = None) -> None:
+                # After the chunk commits. The count has to travel with the
+                # cancel: the status was often already "cancelled" at 0 rows
+                # while this table held the batch.
+                _raise_if_job_cancelled(
+                    mongo, job_id, rows_written=committed_rows
+                )
 
             _quarantine_persisted = [0]
 
             def on_checkpoint(
                 chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
             ) -> None:
-                _check_cancelled()
+                _check_cancelled(rows)
                 pct = compute_transfer_progress_pct(
                     phase="writing",
                     rows_processed=rows,
@@ -4940,7 +5320,13 @@ class UniversalTransferEngine:
                     records_processed=rows,
                     chunk_current=chunk,
                     chunk_total=chunks,
-                    message=f"Writing batch {chunk}/{chunks} ({rows:,} rows)…",
+                    message=batch_write_message(
+                        chunk,
+                        chunks,
+                        rows,
+                        checkpoint=checkpoint,
+                        stream_contracts=request.stream_contracts,
+                    ),
                 )
                 if pct is not None:
                     update["progress_pct"] = pct
@@ -4965,7 +5351,7 @@ class UniversalTransferEngine:
                         checkpoint, details, preview, total, truncated
                     )
                     _promote_cdc_job_fields(checkpoint, update)
-                mongo.update_job_status(job_id, "running", **update)
+                _progress_write_or_cancel(mongo, job_id, **update)
 
             throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
             backfill_fields = effective_backfill_new_fields(
@@ -4982,7 +5368,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Streaming {row_count_label(total_rows)} rows in batches…",
+                message=opening_batch_message(total_rows, request.stream_contracts),
             )
 
             is_streaming = True
@@ -4997,11 +5383,7 @@ class UniversalTransferEngine:
                 if stream_contract
                 else None,
             ):
-                if (
-                    not resume
-                    or not is_streaming
-                    or not _checkpoint_has_progress(checkpoint)
-                ):
+                if not _checkpoint_has_progress(checkpoint):
                     mongo.update_job_status(
                         job_id,
                         "running",
@@ -5014,7 +5396,14 @@ class UniversalTransferEngine:
                             "Preparing destination — clearing table for full refresh…"
                         ),
                     )
-                    _drop_destination_table(request.destination)
+                    _drop_destination_table(
+                        request.destination,
+                        mappings=mappings,
+                        checkpoint=checkpoint,
+                        checkpoint_service=checkpoint_service,
+                        mongo=mongo,
+                        job_id=job_id,
+                    )
                     mongo.update_job_status(
                         job_id,
                         "running",
@@ -5049,9 +5438,7 @@ class UniversalTransferEngine:
                 job_id,
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
-                proof_kind=str((dest_summary or {}).get("checksum_mode") or "full")
-                if isinstance(dest_summary, dict)
-                else "full",
+                **_reconcile_heartbeat_scope(dest_summary),
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
@@ -5086,13 +5473,16 @@ class UniversalTransferEngine:
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
+                fail_message = _note_failed_batch_undo(
+                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                )
                 mongo.update_job_status(
                     job_id,
                     "failed",
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     phase="failed",
                     progress_pct=99,
-                    message=recon.get("message"),
+                    message=fail_message,
                     reconciliation=recon,
                     destination_summary=dest_summary,
                     rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
@@ -5102,7 +5492,7 @@ class UniversalTransferEngine:
                 )
                 return TransferResult(
                     success=False,
-                    error=recon.get("message", "Reconciliation failed"),
+                    error=fail_message,
                     operation=request.operation,
                     job_id=job_id,
                     records_transferred=rows_written,
@@ -5119,6 +5509,10 @@ class UniversalTransferEngine:
             )
             if lost is not None:
                 return lost
+            if isinstance(dest_summary, dict) and dest_summary.get("file_digest"):
+                from services.file_load_ledger import record_successful_file_load
+
+                record_successful_file_load(dest_summary)
 
             explanation = _build_explanation(
                 request,
@@ -5155,6 +5549,7 @@ class UniversalTransferEngine:
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
+            _settle_overwrite_backup(request.destination, restore=False)
             mongo.update_job_status(
                 job_id,
                 terminal_status,
@@ -5240,6 +5635,7 @@ class UniversalTransferEngine:
                 mapping_proof=_mapping_proof_for_request(request),
             )
         except WriteBatchBlocked as blocked:
+            _settle_overwrite_backup(request.destination, restore=True)
             dest_summary = {
                 **(blocked.dest_summary or {}),
                 "rejected_details": list(blocked.rejected_details),
@@ -5254,14 +5650,16 @@ class UniversalTransferEngine:
                 request,
                 already_persisted=_quarantine_persisted,
             )
-            block_msg = str(blocked)
+            from src.transfer.job_failure import account_blocked_write
+
+            kept, block_msg = account_blocked_write(mongo, job_id, blocked)
             mongo.update_job_status(
                 job_id,
                 "failed",
                 phase="failed",
                 error=block_msg,
                 message=block_msg,
-                records_processed=int(blocked.rows_written or 0),
+                records_processed=kept,
                 rejected_rows=int(dest_summary.get("rejected_rows") or 0),
                 rejected_details=(
                     dest_summary.get("rejected_details") or []
@@ -5273,14 +5671,15 @@ class UniversalTransferEngine:
                 error=block_msg,
                 job_id=job_id,
                 operation=request.operation,
-                records_transferred=int(blocked.rows_written or 0),
+                records_transferred=kept,
                 destination_summary=dest_summary,
                 contract_id=contract_id,
             )
         except Exception as e:
+            _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
-                mongo, job_id, e, lineage=lineage
+                mongo, job_id, e, lineage=lineage, request=request
             )
             return TransferResult(
                 success=False,

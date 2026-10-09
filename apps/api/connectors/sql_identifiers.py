@@ -81,6 +81,45 @@ def require_safe_identifier(
     return s
 
 
+def _verbatim_quoted_identifier(name: str) -> bool:
+    """True when quoting this spelling is safe and must not rename it.
+
+    A space is legal inside every quoted identifier we emit. Replacing it
+    with an underscore addresses a different table, so a source named
+    ``Order Details`` could not be sampled or transferred (DEF-C-047).
+    A quote, semicolon or other mark still goes through the injection
+    sanitizer: those are not part of a name we will paste verbatim.
+    """
+    if not name or name[0].isdigit() or name != name.strip():
+        return False
+    return all(ch.isalnum() or ch in {"_", " "} for ch in name)
+
+
+def catalog_identifier(
+    name: str,
+    *,
+    preserve_case: bool = False,
+    max_len: int = 63,
+    sanitize: bool = True,
+) -> str:
+    """The identifier to place inside quotes.
+
+    ``sanitize`` still strips injection payloads. A name whose only unusual
+    character is a space is kept, because the quotes make the space legal.
+    """
+    if not sanitize:
+        return require_safe_identifier(name, allow_raw=True, max_len=max_len)
+    raw = (name or "").strip()
+    if _verbatim_quoted_identifier(raw):
+        # A space is only legal when the object was created quoted, so the
+        # stored case is the name. Lowercasing it looks up a different table.
+        kept = raw if preserve_case or " " in raw else raw.lower()
+        return kept[:max_len]
+    return require_safe_identifier(
+        name, preserve_case=preserve_case, max_len=max_len
+    )
+
+
 def quote_sql_identifier(name: str, quote_char: str = '"') -> str:
     """Quote a SQL identifier and escape embedded quote characters.
 
@@ -214,22 +253,16 @@ def quote_table_ref(
         pass
     if dialect in ("mysql", "mariadb", "clickhouse", "databricks"):
         q = "`"
-        tbl = require_safe_identifier(table, preserve_case=True) if sanitize else require_safe_identifier(
-            table, allow_raw=True, max_len=64
-        )
+        tbl = catalog_identifier(table, preserve_case=True, max_len=64, sanitize=sanitize)
         if schema:
-            sch = require_safe_identifier(schema, preserve_case=True) if sanitize else require_safe_identifier(
-                schema, allow_raw=True, max_len=64
-            )
+            sch = catalog_identifier(schema, preserve_case=True, max_len=64, sanitize=sanitize)
             return f"{quote_sql_identifier(sch, q)}.{quote_sql_identifier(tbl, q)}"
         return quote_sql_identifier(tbl, q)
 
     if dialect in ("sqlserver", "mssql"):
         # SQL Server: [schema].[table]
         def _bracket(ident: str) -> str:
-            safe = require_safe_identifier(ident, preserve_case=True) if sanitize else require_safe_identifier(
-                ident, allow_raw=True, max_len=128
-            )
+            safe = catalog_identifier(ident, preserve_case=True, max_len=128, sanitize=sanitize)
             return f"[{safe.replace(']', ']]')}]"
 
         if schema:
@@ -242,10 +275,9 @@ def quote_table_ref(
         for part in (project, dataset or schema, table):
             if not part:
                 continue
-            if sanitize:
-                parts.append(require_safe_identifier(part, preserve_case=True, max_len=1024))
-            else:
-                parts.append(require_safe_identifier(part, allow_raw=True, max_len=1024))
+            parts.append(
+                catalog_identifier(part, preserve_case=True, max_len=1024, sanitize=sanitize)
+            )
         if not parts:
             raise ValueError("BigQuery table reference is empty")
         joined = ".".join(parts)
@@ -254,12 +286,12 @@ def quote_table_ref(
     # ANSI / Postgres / Snowflake / SQLite / DuckDB / Oracle
     q = '"'
     preserve = preserve_case or dialect in ("snowflake", "postgresql", "postgres", "redshift", "oracle")
-    if sanitize:
-        tbl = require_safe_identifier(table, preserve_case=preserve)
-        sch = require_safe_identifier(schema, preserve_case=preserve) if schema else None
-    else:
-        tbl = require_safe_identifier(table, allow_raw=True)
-        sch = require_safe_identifier(schema, allow_raw=True) if schema else None
+    tbl = catalog_identifier(table, preserve_case=preserve, sanitize=sanitize)
+    sch = (
+        catalog_identifier(schema, preserve_case=preserve, sanitize=sanitize)
+        if schema
+        else None
+    )
     # Dialect fold (Snowflake UPPER, etc.) — never leak Postgres lowercase into
     # warehouses. ``preserve_case`` means the caller resolved the stored spelling
     # from the catalog: folding it again would address a different object.

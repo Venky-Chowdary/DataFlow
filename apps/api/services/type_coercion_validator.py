@@ -30,6 +30,8 @@ def validate_mapping_coercions(
     validation_mode: str = "strict",
     dest_db_type: str = "",
     dest_table_exists: bool | None = None,
+    sample_rows: list | None = None,
+    samples_by_source: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Return structured coercion issues for each mapping pair.
 
@@ -106,11 +108,15 @@ def validate_mapping_coercions(
         )
         if wire_ok and not type_locked:
             continue
+        population = _measured_population(
+            src, sample_rows=sample_rows, samples_by_source=samples_by_source
+        )
         precision_collapse = is_precision_collapse_coercion(
             src_type,
             tgt_type,
             dest_db=dest_db_type,
             dest_table_exists=dest_table_exists,
+            population=population,
         )
         lossy = (
             is_lossy_coercion(
@@ -118,6 +124,7 @@ def validate_mapping_coercions(
                 tgt_type,
                 dest_db=dest_db_type,
                 dest_table_exists=dest_table_exists,
+                population=population,
             )
             or precision_collapse
         )
@@ -138,8 +145,17 @@ def validate_mapping_coercions(
             severity = "block"
             locked_block = True
         elif type_locked and precision_collapse:
-            severity = "block"
-            locked_block = True
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            # Logical-type change already blocked above. A same-family collapse
+            # (Latin-1 code page, width, DECIMAL scale) honors a verified
+            # continue-policy contract. Boolean ack never clears.
+            if mapping_has_clearing_risk_contract(m):
+                severity = "warn"
+                locked_block = False
+            else:
+                severity = "block"
+                locked_block = True
         elif uuid_string_create_new:
             from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
@@ -188,6 +204,22 @@ def validate_mapping_coercions(
             ),
         })
     return issues
+
+
+def _measured_population(
+    source: str,
+    *,
+    sample_rows: list | None,
+    samples_by_source: dict | None,
+) -> list | None:
+    """Cells already measured for ``source``, else None (unread stays a collapse)."""
+    from services.column_case import column_population, lookup_column
+
+    if samples_by_source:
+        hit = lookup_column(samples_by_source, source)
+        if isinstance(hit, (list, tuple)) and len(hit) > 0:
+            return list(hit)[:500]
+    return column_population(sample_rows, source)
 
 
 def coercion_blocks_transfer(issues: list[dict[str, Any]]) -> bool:

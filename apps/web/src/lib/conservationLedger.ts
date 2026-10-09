@@ -12,6 +12,7 @@ export type ConservationLedger = {
   rows_quarantined: number;
   rows_skipped: number;
   rows_coerced_null: number;
+  blank_cells_as_null: number;
   writer_ack: number | null;
   dest_count: number | null;
   dest_count_before: number | null;
@@ -99,6 +100,7 @@ export function readConservationLedger(
     rows_quarantined: num(raw.rows_quarantined) ?? 0,
     rows_skipped: num(raw.rows_skipped) ?? 0,
     rows_coerced_null: num(raw.rows_coerced_null) ?? 0,
+    blank_cells_as_null: num(raw.blank_cells_as_null) ?? 0,
     writer_ack: num(raw.writer_ack),
     dest_count: num(raw.dest_count),
     dest_count_before: num(raw.dest_count_before),
@@ -225,6 +227,8 @@ export function conservationKindLabel(kind: string | null | undefined): string {
       return "Empty pass · measured zero";
     case "unmeasured":
       return "Dest unmeasured";
+    case "write_refused":
+      return "Write refused · read measured";
     default:
       return kind ? String(kind) : "Conservation";
   }
@@ -287,6 +291,12 @@ export function ledgerEquation(ledger: ConservationLedger): string {
   }
   if (kind === "unmeasured") {
     return "dest COUNT unmeasured — writer ack is not destination proof";
+  }
+  if (kind === "write_refused") {
+    const blanks = ledger.blank_cells_as_null > 0
+      ? ` · ${fmt(ledger.blank_cells_as_null)} blank cell(s) as NULL`
+      : "";
+    return `read ${fmt(ledger.rows_read)} counted · written 0 · dest COUNT(*) not taken · held out ${fmt(ledger.rows_quarantined)}${blanks}`;
   }
   if (ledger.rows_written_source === ARTIFACT_READBACK) {
     return `read ${fmt(ledger.rows_read)} = artifact ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
@@ -433,6 +443,15 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
       tone: unbalanced ? "danger" : "ok",
     };
   }
+  if (ledger?.conservation_kind === "write_refused") {
+    return {
+      value: "—",
+      label: "Dest COUNT(*)",
+      title: ledger.note || "Write did not start. Source rows were counted. COUNT(*) was not taken.",
+      measured: false,
+      tone: "warn",
+    };
+  }
   if (running) {
     return {
       value: "—",
@@ -544,6 +563,13 @@ export function conservationCompleteCopy(
   const scd2 = isScd2Ledger(ledger);
   const append = isAppendLedger(ledger);
   const keyed = isKeyedLedger(ledger);
+  if (ledger?.conservation_kind === "write_refused") {
+    const read = fmt(ledger.rows_read);
+    const held = ledger.rows_quarantined;
+    return held
+      ? `${read} source rows counted; write did not start; ${held.toLocaleString()} held out`
+      : `${read} source rows counted; write did not start`;
+  }
   if (opts?.quarantine) {
     if (dest.measured) {
       return mirror
@@ -618,7 +644,26 @@ function transformIdentityCells(ledger: ConservationLedger): LedgerIdentityCell[
   return cells;
 }
 
+export function isWriteRefused(ledger: ConservationLedger | null | undefined): boolean {
+  return ledger?.conservation_kind === "write_refused";
+}
+
 function identityCellsForKind(ledger: ConservationLedger): LedgerIdentityCell[] {
+  if (ledger.conservation_kind === "write_refused") {
+    const cells: LedgerIdentityCell[] = [
+      { label: "Read", value: fmt(ledger.rows_read) },
+      { label: "Written", value: "0" },
+      { label: "Held out", value: fmt(ledger.rows_quarantined) },
+      { label: "Dest COUNT(*)", value: "—" },
+    ];
+    if (ledger.blank_cells_as_null > 0) {
+      cells.push({
+        label: "Blank cells as NULL",
+        value: fmt(ledger.blank_cells_as_null),
+      });
+    }
+    return cells;
+  }
   if (ledger.conservation_kind === "job_rollup") {
     const cells: LedgerIdentityCell[] = [
       { label: "Streams", value: fmt(ledger.stream_count) },

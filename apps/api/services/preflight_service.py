@@ -48,7 +48,8 @@ from services.transform_engine import (
     ambiguous_date_columns,
     ambiguous_number_columns,
     assumed_number_locale,
-    infer_date_locale,
+    canonical_date_locale,
+    canonical_number_locale,
     infer_number_locale,
     reset_active_date_locale,
     reset_active_number_locale,
@@ -86,6 +87,40 @@ def _with_date_locale(fn):
     return wrapper
 
 
+def _preflight_source_engine(kwargs: Mapping[str, Any]) -> str:
+    fmt = str(kwargs.get("source_format") or "").strip().lower()
+    if fmt:
+        return fmt
+    cfg = kwargs.get("source_config")
+    if isinstance(cfg, Mapping):
+        fmt = str(cfg.get("type") or cfg.get("format") or "").strip().lower()
+        if fmt:
+            return fmt
+    kind = str(kwargs.get("source_kind") or "file").strip().lower()
+    return "" if kind in {"database", "cloud", ""} else kind
+
+
+def _with_source_engine(fn):
+    """Bind the source engine for every gate, as Execute does for the whole job.
+
+    Binding it only around DDL stamping left the gates judging an unknown
+    engine, so Validate refused (PostgreSQL ``VARCHAR`` → SQL Server
+    ``NVARCHAR``) what Execute's own preflight, run inside the job's binding,
+    accepted.
+    """
+
+    def wrapper(*args, **kwargs):
+        from services.source_engine_scope import active_source_engine, bind_source_engine
+
+        engine = _preflight_source_engine(kwargs)
+        if not engine or active_source_engine():
+            return fn(*args, **kwargs)
+        with bind_source_engine(engine):
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
 class FilePreflightContext(PreflightContext):
     """Preflight context for file → database transfers."""
 
@@ -100,8 +135,12 @@ class FilePreflightContext(PreflightContext):
         source_duplicate_probe_status: str = "",
         source_duplicate_probe_message: str = "",
         source_duplicate_probe_expected: bool = False,
+        empty_cells_as_null: bool = False,
     ):
         super().__init__(plan=plan, sample_rows=sample_rows or [])
+        # Spreadsheet blanks are absence. Only file sources opt in — the same
+        # flag the file writer uses. Database extracts keep it off.
+        self.empty_cells_as_null = bool(empty_cells_as_null)
         self.destination_collision = destination_collision
         self.source_duplicate_findings = source_duplicate_findings or []
         self.source_duplicate_probe_ran = bool(source_duplicate_probe_ran)
@@ -169,8 +208,26 @@ class FilePreflightContext(PreflightContext):
             "code_crosswalk_system": getattr(m, "code_crosswalk_system", None),
         }
 
+    def _dest_nullability(self) -> dict[str, bool]:
+        from services.preflight_source_kind import destination_nullability
+        return destination_nullability(getattr(self.plan.destination, "target_columns", None))
+
     def run_dry_run(self, sample_size: int = 1000) -> tuple[bool, list[str]]:
+        if not self.sample_rows and getattr(self, "source_measured_empty", False):
+            self._last_dry_run_meta = {
+                "sample_rows_scanned": 0,
+                "sample_rows_available": 0,
+                "sample_cap": sample_size,
+                "source_measured_empty": True,
+            }
+            return True, []
         if not self.sample_rows:
+            reason = str(getattr(self, "sample_unavailable_reason", "") or "").strip()
+            if reason:
+                return False, [
+                    f"No sample rows available for dry-run validation — {reason}. "
+                    "Fix the source read, then re-run Validate."
+                ]
             return False, [
                 (
                     "No sample rows available for dry-run validation. "
@@ -185,7 +242,15 @@ class FilePreflightContext(PreflightContext):
         # stays the missing sentinel rather than an empty string the typed
         # transforms would reject as a cast failure.
         scanned = self.sample_rows[:sample_size]
-        rows = [project_row_cells(row, headers) for row in scanned]
+        # A database NULL is None or the reader sentinel. Flattening it to ""
+        # made G5 report EMPTY_VALUE_NOT_NULLABLE on nullable amount/ts.
+        database_extract = (
+            str(getattr(self.plan.source, "kind", "") or "").lower() == "database"
+        )
+        rows = [
+            project_row_cells(row, headers, preserve_sql_null=database_extract)
+            for row in scanned
+        ]
         self._last_dry_run_meta = {
             "sample_rows_scanned": len(scanned),
             "sample_rows_available": len(self.sample_rows),
@@ -208,6 +273,9 @@ class FilePreflightContext(PreflightContext):
                 sample_rows=rows,
                 mappings=mapping_dicts,
                 column_types=column_types,
+                empty_cells_as_null=self.empty_cells_as_null,
+                dest_nullability=self._dest_nullability(),
+                database_extract=database_extract,
             )
         except Exception as exc:
             logger.debug("dry-run sample failed: %s", exc, exc_info=exc)
@@ -250,15 +318,37 @@ class FilePreflightContext(PreflightContext):
                 self._mapping_dict_for_probe(m, dest_types)
                 for m in self.plan.mappings
             ]
-            report = analyze_coercion(
-                sample_rows=self.sample_rows,
-                mappings=mapping_dicts,
-                source_types=source_types,
-                dest_types=dest_types,
-                dest_db_type=self.plan.destination.db_type,
-                table_exists=getattr(self.plan.destination, "table_exists", None),
-                validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
+            from services.source_engine_scope import (
+                active_source_engine,
+                bind_source_engine,
             )
+
+            src_engine = str(getattr(self.plan.source, "db_type", "") or "")
+            # The lossy gate reads the source engine from this scope. Binding
+            # it only around DDL stamping left PostgreSQL VARCHAR → SQL Server
+            # NVARCHAR flagged as a fidelity collapse after the stamp window
+            # had already closed (DEF-B-003).
+            engine_scope = (
+                bind_source_engine(src_engine)
+                if src_engine and not active_source_engine()
+                else nullcontext()
+            )
+            with engine_scope:
+                report = analyze_coercion(
+                    sample_rows=self.sample_rows,
+                    mappings=mapping_dicts,
+                    source_types=source_types,
+                    dest_types=dest_types,
+                    dest_db_type=self.plan.destination.db_type,
+                    table_exists=getattr(self.plan.destination, "table_exists", None),
+                    validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
+                    empty_cells_as_null=self.empty_cells_as_null,
+                    dest_nullability=self._dest_nullability(),
+                    database_extract=str(
+                        getattr(self.plan.source, "kind", "") or ""
+                    ).lower()
+                    == "database",
+                )
             if isinstance(report, dict):
                 from services.validation_coverage import stamp_validation_coverage
 
@@ -284,68 +374,88 @@ class FilePreflightContext(PreflightContext):
     def probe_unique_constraint(self, columns: list[str]) -> list[dict[str, Any]]:
         if not columns or not self.sample_rows:
             return []
-        col = columns[0]
-        source_col = col
-        for m in self.plan.mappings:
-            if m.target == col:
-                source_col = m.source
-                break
         # Case-insensitive dest collations equate A/a — uniqueness must too
         # (MySQL utf8mb4_*_ci / SQL Server *_CI_AS / CITEXT), else Validate false-greens.
-        dest_type = ""
-        for c in getattr(self.plan.destination, "target_columns", None) or []:
-            if getattr(c, "name", None) == col:
-                dest_type = str(getattr(c, "inferred_type", "") or "")
-                break
+        # Every named column is part of the key. The first column alone false-fails
+        # a composite (same id, different tenant) and false-greens the reverse.
         from services.type_system import (
-            unique_equality_key,
+            composite_unique_equality_key,
             unique_key_forces_casefold,
             unique_key_nulls_collide,
             unique_key_row_in_scope,
         )
 
         unique_keys = getattr(self.plan, "destination_unique_keys", None) or []
-        casefold = unique_key_forces_casefold(
-            col,
-            ddl_type=dest_type,
-            unique_keys=unique_keys,
-        )
-        nulls_collide = unique_key_nulls_collide(col, unique_keys=unique_keys)
-        null_sentinel = "\x00NULL\x00" if nulls_collide else None
+        specs: list[dict[str, Any]] = []
+        for col in columns:
+            source_col = col
+            for m in self.plan.mappings:
+                if m.target == col:
+                    source_col = m.source
+                    break
+            dest_type = ""
+            for c in getattr(self.plan.destination, "target_columns", None) or []:
+                if getattr(c, "name", None) == col:
+                    dest_type = str(getattr(c, "inferred_type", "") or "")
+                    break
+            specs.append(
+                {
+                    "col": col,
+                    "source": source_col,
+                    "dest_type": dest_type,
+                    "casefold": unique_key_forces_casefold(
+                        col, ddl_type=dest_type, unique_keys=unique_keys
+                    ),
+                    "nulls_collide": unique_key_nulls_collide(col, unique_keys=unique_keys),
+                }
+            )
+        casefold = any(spec["casefold"] for spec in specs)
+        nulls_collide = any(spec["nulls_collide"] for spec in specs)
+        label = specs[0]["col"] if len(specs) == 1 else ", ".join(spec["col"] for spec in specs)
+        dest_kind = ""
+        try:
+            dest_kind = str(getattr(self.plan.destination, "db_type", "") or "")
+        except Exception:  # noqa: BLE001 — a missing plan field is an empty dest kind
+            dest_kind = ""
         seen: dict[str, int] = {}
         examples: dict[str, str] = {}
         dupes: list[dict[str, Any]] = []
         for row in self.sample_rows:
             scope = dict(row)
-            if col not in scope and source_col in scope:
-                scope[col] = scope.get(source_col)
-            if not unique_key_row_in_scope(scope, col, unique_keys=unique_keys):
+            for spec in specs:
+                if spec["col"] not in scope and spec["source"] in scope:
+                    scope[spec["col"]] = scope.get(spec["source"])
+            if any(
+                not unique_key_row_in_scope(scope, spec["col"], unique_keys=unique_keys)
+                for spec in specs
+            ):
                 continue
-            raw_cell = row.get(source_col, "")
-            raw = cell_to_string(raw_cell) if raw_cell is not None else ""
-            dest_kind = ""
-            try:
-                dest_kind = str(getattr(self.plan.destination, "db_type", "") or "")
-            except Exception:
-                dest_kind = ""
-            key = unique_equality_key(
-                None if raw_cell is None else raw,
-                dest_type,
-                force_casefold=casefold,
-                null_sentinel=null_sentinel,
-                dest_kind=dest_kind,
-            )
-            if not key and not nulls_collide:
-                continue
+            parts: list[tuple[Any, str | None, bool, str | None]] = []
+            displays: list[str] = []
+            for spec in specs:
+                raw_cell = row.get(spec["source"], "")
+                raw = cell_to_string(raw_cell) if raw_cell is not None else ""
+                sentinel = "\x00NULL\x00" if spec["nulls_collide"] else None
+                parts.append(
+                    (
+                        None if raw_cell is None else raw,
+                        spec["dest_type"],
+                        bool(spec["casefold"]),
+                        sentinel,
+                    )
+                )
+                displays.append(raw if raw else "<NULL>")
+            key = composite_unique_equality_key(parts, dest_kind=dest_kind)
             if not key:
                 continue
             seen[key] = seen.get(key, 0) + 1
-            examples.setdefault(key, raw if raw else "<NULL>")
+            shown = displays[0] if len(displays) == 1 else ", ".join(displays)
+            examples.setdefault(key, shown)
         for key, count in seen.items():
             if count > 1 and key:
                 dupes.append(
                     {
-                        "column": col,
+                        "column": label,
                         "value": examples.get(key, key),
                         "count": count,
                         "collation_casefold": casefold,
@@ -397,6 +507,11 @@ class FilePreflightContext(PreflightContext):
             source_duplicate_probe_message=self.source_duplicate_probe_message,
             source_duplicate_probe_expected=self.source_duplicate_probe_expected,
             dest_table_exists=getattr(self.plan.destination, "table_exists", None),
+            empty_cells_as_null=self.empty_cells_as_null,
+            dest_nullability=self._dest_nullability(),
+            database_extract=str(getattr(self.plan.source, "kind", "") or "").lower()
+            == "database",
+            source_measured_empty=bool(getattr(self, "source_measured_empty", False)),
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
         try:
@@ -496,22 +611,51 @@ def run_transfer_policy_gates(
     source_kind: str = "file",
     write_via_staging: bool = False,
     source_read_mode: str = "",
-    delivery_guarantee: str = "at_least_once",
+    delivery_guarantee: str = "auto",
     allow_append_only: bool = False,
     read_scope: Any = None,
     priority_column: str = "",
     priority_direction: str = "desc",
     row_limit: int = 0,
+    source_endpoint: Any = None,
+    destination_endpoint: Any = None,
+    catalog_primary_key_columns: list[str] | None = None,
+    mappings: list[dict[str, Any]] | None = None,
+    source_table: str = "",
+    source_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     from services.schema_drift import schema_policy_honesty_line
 
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
-    sync = (sync_mode or "full_refresh_overwrite").lower()
+    # Aliases such as ``cdc_incremental`` must hit the same contract rules as
+    # ``cdc``. Leaving the raw token here let Validate approve a route Execute
+    # then refused for a missing stream primary key.
+    raw_sync = (sync_mode or "full_refresh_overwrite").strip().lower()
+    try:
+        from services.sync_cursor import normalize_sync_mode
+
+        sync = normalize_sync_mode(raw_sync, default=raw_sync) if raw_sync else raw_sync
+    except Exception:
+        sync = raw_sync
     schema = (schema_policy or "manual_review").lower()
     validation = (validation_mode or "strict").lower()
     dest = (dest_type or "").strip().lower()
     src = (source_type or "").strip().lower()
+    product = str((source_config or {}).get("type") or "").strip().lower()
+    # A TimescaleDB connector must not pass g9 because a driver alias rewrote
+    # the format to postgresql. The product id is the one the operator saved.
+    if product in {
+        "timescaledb",
+        "timescale",
+        "cockroachdb",
+        "citus",
+        "greenplum",
+        "yugabytedb",
+        "redshift",
+        "duckdb",
+    }:
+        src = product
     kind = (source_kind or "file").strip().lower()
     gates: list[dict[str, Any]] = []
     gates.append(
@@ -527,6 +671,9 @@ def run_transfer_policy_gates(
             block_status=GateStatus.BLOCK.value,
             source_read_mode=source_read_mode,
             read_scope=read_scope,
+            catalog_primary_key_columns=catalog_primary_key_columns,
+            mappings=mappings,
+            source_table=source_table,
         )
     )
 
@@ -660,8 +807,8 @@ def run_transfer_policy_gates(
             }
         )
 
-
-    from services.cdc_exactly_once import preflight_delivery_gate, route_has_cdc_pk
+    from services.cdc_exactly_once import (
+        preflight_delivery_gate, route_declares_log_position, route_has_cdc_pk)
 
     eos_gate = preflight_delivery_gate(
         sync_mode=sync,
@@ -671,6 +818,7 @@ def run_transfer_policy_gates(
         has_primary_key=route_has_cdc_pk(contracts),
         allow_append_only=allow_append_only,
         callable_source=(source_read_mode or "").strip().lower() in {"procedure", "query"},
+        has_lsn_column=route_declares_log_position(contracts),
     )
     if eos_gate:
         gates.append(eos_gate)
@@ -678,13 +826,38 @@ def run_transfer_policy_gates(
     from services.cdc_snapshot_mode import build_snapshot_mode_preflight_gate
 
     snap_wm = getattr(read_scope, "watermark", None) if read_scope is not None else None
+    snap_key = str(getattr(read_scope, "cursor_key", "") or "") if read_scope is not None else ""
+    slot_probe = None
+    if sync == "cdc":
+        from services.cdc_slot_resume import probe_postgres_slot_for_preflight
+
+        slot_probe = probe_postgres_slot_for_preflight(
+            source_config,
+            source_type=src,
+            watermark=snap_wm,
+            table=source_table,
+            cursor_key=snap_key,
+        )
     snap_gate = build_snapshot_mode_preflight_gate(
         sync_mode=sync,
         stream_contracts=contracts,
         watermark=snap_wm,
+        retention=slot_probe,
+        cursor_key=snap_key,
     )
     if snap_gate:
         gates.append(snap_gate)
+    if sync == "cdc" and kind not in {"file", "cloud"}:
+        gates.extend(
+            _cdc_log_capture_gates(
+                contracts,
+                source_type=product or src,
+                source_config=source_config,
+                source_table=source_table,
+                catalog_primary_key_columns=catalog_primary_key_columns,
+                mappings=mappings,
+            )
+        )
 
     cap = max(0, int(row_limit or 0))
     priority = str(priority_column or "").strip()
@@ -712,25 +885,92 @@ def run_transfer_policy_gates(
             }
         )
 
-    # Redis KV TTL/EXPIRE is not a first-class transfer guarantee (soft warning).
-    if dest in {"redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis"} or src in {
-        "redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis",
-    }:
-        gates.append({
-            "id": "redis_ttl_semantics",
-            "name": "Redis TTL / EXPIRE",
-            "status": GateStatus.PASS.value,
-            "severity": "warn",
-            "message": (
-                "Redis TTL/EXPIRE is not preserved as a migration guarantee — "
-                "values transfer; set EXPIRE in a post-load job if needed. "
-                "See docs/REDIS_TTL_SEMANTICS.md."
-            ),
-            "blocks_transfer": False,
-            "details": {"honesty": "ttl_not_productized"},
-        })
+    from services.multi_stream_plan import stream_procedure_policy_gate
+    from services.policy_gate_notes import redis_ttl_policy_gate
+
+    redis_gate = redis_ttl_policy_gate(dest, src)
+    if redis_gate:
+        gates.append(redis_gate)
+    procedure_gate = stream_procedure_policy_gate(
+        contracts,
+        sync_mode=sync,
+        source_endpoint=source_endpoint,
+        destination_endpoint=destination_endpoint,
+    )
+    if procedure_gate:
+        gates.append(procedure_gate)
 
     return gates
+
+
+def _cdc_log_capture_gates(
+    contracts: list[dict[str, Any]],
+    *,
+    source_type: str,
+    source_config: dict[str, Any] | None,
+    source_table: str,
+    catalog_primary_key_columns: list[str] | None,
+    mappings: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """One g9c gate per selected stream: can the run read the source change log."""
+    from services.cdc_log_capture_probe import build_log_capture_gate, probe_log_capture
+    from services.preflight_cursor_gate import (
+        catalog_identity_applies,
+        resolved_stream_identity_columns,
+    )
+
+    if not source_config:
+        return []
+    streams = contracts or [{"name": source_table}]
+    gates: list[dict[str, Any]] = []
+    for contract in streams[:5]:
+        table = str(
+            (source_table if len(streams) == 1 else "")
+            or contract.get("name")
+            or contract.get("stream")
+            or ""
+        ).strip()
+        keys = resolved_stream_identity_columns(
+            contract,
+            catalog_primary_key_columns=(
+                catalog_primary_key_columns
+                if catalog_identity_applies(contract, source_table, len(streams))
+                else None
+            ),
+            mappings=mappings,
+        )
+        if not table or not keys:
+            continue
+        probe = probe_log_capture(
+            source_type,
+            dict(source_config),
+            table=table,
+            schema=str(source_config.get("schema") or ""),
+            primary_key=",".join(keys),
+        )
+        gate = build_log_capture_gate(
+            probe,
+            cursor_field=str(contract.get("cursor_field") or contract.get("cursor") or ""),
+            cursor_semantics=str(contract.get("cursor_semantics") or ""),
+            primary_key_columns=keys,
+            pass_status=GateStatus.PASS.value,
+            block_status=GateStatus.BLOCK.value,
+        )
+        if gate is not None:
+            gates.append({**gate, "details": {**gate.get("details", {}), "stream": table}})
+    if len(gates) <= 1:
+        return gates
+    blocked = [g for g in gates if g.get("status") == GateStatus.BLOCK.value]
+    chosen = blocked or [g for g in gates if g.get("severity") == "warn"] or gates
+    return [
+        {
+            **chosen[0],
+            "message": " ".join(
+                f"{g['details'].get('stream')}: {g['message']}" for g in chosen
+            ),
+            "details": {"streams": [g["details"] for g in gates]},
+        }
+    ]
 
 
 def _iter_table_population_for_preflight(
@@ -827,7 +1067,94 @@ from services.preflight_policy_gates import (  # noqa: E402
 )
 
 
+from services.preflight_source_kind import resolve_preflight_source_kind  # noqa: E402
+
+
+def _apply_overwrite_emptied_gate(
+    out: dict[str, Any],
+    *,
+    sync_mode: str,
+    destination_table_exists: bool | None,
+    live_dest_columns: list[str],
+    mappings: list[dict[str, Any]] | None,
+    regenerated: list[str],
+    schema_policy: str,
+    acknowledged: bool,
+    dest_kind: str,
+    validation_mode: str,
+) -> None:
+    """Name the destination values an overwrite will empty (DEF-C-025).
+
+    MySQL and PostgreSQL keep a destination column no mapping writes (other
+    engines recreate without it), but either way the reload replaces every row
+    and the values it holds now are gone. That needs no schema history to see:
+    the live table and the mapping already say it. Under review policies it is a decision, otherwise a
+    warning — never a silent loss.
+    """
+    from services.overwrite_keep import overwrite_emptied_columns
+    from services.sync_cursor import is_overwrite_sync
+
+    from services.db_type_utils import overwrite_replaces_rows
+
+    if (
+        destination_table_exists is not True
+        or not is_overwrite_sync(sync_mode)
+        or not overwrite_replaces_rows(dest_kind)
+    ):
+        return
+    skip = {str(c).casefold() for c in regenerated}
+    emptied = [
+        c for c in overwrite_emptied_columns(live_dest_columns, mappings)
+        if c.casefold() not in skip
+    ]
+    if not emptied:
+        return
+    shown = ", ".join(emptied[:8]) + (f" (+{len(emptied) - 8} more)" if len(emptied) > 8 else "")
+    message = (
+        f"Overwrite empties {len(emptied)} destination column(s) no mapping writes "
+        f"({shown}): every row is replaced and nothing writes these columns, so "
+        "the values they hold now are lost"
+    )
+    details = {
+        "columns": emptied,
+        "sync_mode": sync_mode,
+        "schema_policy": schema_policy,
+        "rule_id": "schema_drift.overwrite_emptied_columns",
+    }
+    policy = (schema_policy or "manual_review").strip().lower()
+    if acknowledged or policy not in {"manual_review", "pause_on_change", "type_locked"}:
+        out.setdefault("warnings", []).append(
+            {"id": "overwrite_emptied_columns", "message": message, "details": details}
+        )
+        return
+    message += " — map a source column to it, or acknowledge the schema change to empty it"
+    details.update({"remediation_kind": "acknowledge_schema_drift", "ack_required": True})
+    gate = {
+        "id": "overwrite_emptied_columns",
+        "status": "block",
+        "message": message,
+        "duration_ms": 0,
+        "details": details,
+    }
+    from services.preflight_rules import enrich_blockers
+
+    out["gates"] = [*out.get("gates", []), gate]
+    out["blockers"] = [
+        *out.get("blockers", []),
+        *enrich_blockers(
+            [{"id": gate["id"], "message": message, "details": details}],
+            dest_kind=dest_kind,
+            validation_mode=validation_mode,
+        ),
+    ]
+    out["passed"] = False
+    out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
+    out["total_gates"] = len(out["gates"])
+    out["readiness_score"] = round(out["passed_count"] / max(out["total_gates"], 1) * 100, 1)
+
+
 @_with_date_locale
+@_with_source_engine
 def run_file_preflight(
     *,
     columns: list[str],
@@ -919,18 +1246,94 @@ def run_file_preflight(
     except Exception:
         sync_mode = (sync_mode or "").strip().lower() or "full_refresh_append"
 
-    # An overwrite drops the destination and recreates it from the source shape,
-    # so the table standing there now is not the carrier the rows land in. Every
-    # type verdict below reads the DDL this run will create, or a route whose own
-    # CREATE declares ``LONGTEXT`` is refused for a ``TEXT → VARCHAR(64)``
-    # collapse against a table it is about to drop. Append/upsert/CDC/mirror keep
-    # the live contract — there the existing column really is authoritative.
+    # Relational overwrite empties the existing table and keeps its constraints,
+    # so the live column types stay the contract. Only an engine that still
+    # DROP+CREATEs (see dest_schema_is_recreated_on_overwrite) replaces the
+    # carrier: there a stale VARCHAR(64) must not refuse a TEXT source whose
+    # own CREATE would have been LONGTEXT. Append/upsert/CDC/mirror keep the
+    # live contract too.
     from services.db_type_utils import dest_schema_is_recreated_on_overwrite
     from services.sync_cursor import is_overwrite_sync
 
     dest_recreated = is_overwrite_sync(sync_mode) and dest_schema_is_recreated_on_overwrite(
         destination_db_type
     )
+    if (
+        destination_table_exists is True
+        and not dest_recreated
+        and destination_live_column_types
+    ):
+        # The table stays, so a planned recreate DDL is not the carrier the
+        # rows hit. Measured types override the plan. A caller that cleared
+        # the plan because it still thought overwrite dropped the table still
+        # has the live catalog.
+        merged = dict(destination_column_types or {})
+        merged.update(destination_live_column_types)
+        destination_column_types = merged
+
+    # Every sample-judging gate below needs rows. A caller that posted none
+    # (failed copilot sampler, a client that never fetched) gets the Execute
+    # reader's own sample; a read that fails is named on Gate-8, not hidden.
+    sample_unavailable_reason = ""
+    source_measured_empty = False
+    if not sample_rows:
+        from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT as _SAMPLE_LIMIT
+        from services.preflight_sample import engine_sample_rows
+
+        _cfg = dict(source_config or {})
+        _extra = _cfg.get("extra") if isinstance(_cfg.get("extra"), dict) else {}
+        engine_sample = engine_sample_rows(
+            source_kind=source_kind,
+            source_format=source_format,
+            source_connector_id=source_connector_id,
+            source_config=source_config,
+            source_table=source_table,
+            limit=_SAMPLE_LIMIT,
+            source_filter=source_filter
+            or (_cfg.get("source_filter") if isinstance(_cfg.get("source_filter"), dict) else None)
+            or (_extra.get("source_filter") if isinstance(_extra.get("source_filter"), dict) else None),
+        )
+        if engine_sample.rows:
+            sample_rows = engine_sample.rows
+        sample_unavailable_reason = engine_sample.unavailable_reason
+        source_measured_empty = engine_sample.measured_empty
+        if not source_error and sample_unavailable_reason:
+            # Catalog columns without SELECT are not a readable source.
+            # Leaving this off source.error made Gate-1 pass and the cast
+            # contract the remediation for a grant the role does not have.
+            from services.preflight_sample import source_read_is_privilege_denial
+
+            if source_read_is_privilege_denial(sample_unavailable_reason):
+                source_error = (
+                    "SELECT was denied on this table. Columns visible in the catalog "
+                    "are not a readable source. Grant SELECT to the connector role, "
+                    f"then re-validate. ({sample_unavailable_reason})"
+                )
+    if (
+        not sample_rows
+        and not source_measured_empty
+        and rows_are_population
+        and not (isinstance(row_count, int) and row_count > 0)
+    ):
+        from services.preflight_sample import peek_population_empty
+
+        population_rows, source_measured_empty = peek_population_empty(population_rows)
+    if source_measured_empty and not source_types_are_authoritative(
+        source_kind, source_format
+    ):
+        from services.source_schema_authority import (
+            empty_source_column_types,
+            restamp_mapping_source_types,
+        )
+
+        column_types = empty_source_column_types(
+            column_types,
+            mappings,
+            declared=declared_source_schema,
+            previous=previous_source_schema,
+            destination=destination_live_column_types or destination_column_types,
+        )
+        mappings = restamp_mapping_source_types(mappings, column_types)
 
     # Sources with no cheap cardinality — a DynamoDB Scan, a Kafka topic, a
     # search index — report ``None`` rather than inventing a total, which is the
@@ -971,15 +1374,20 @@ def run_file_preflight(
     mappings = hydrated_mappings
     _unstamped_additive: list[str] = []
 
-    # If the operator did not specify a locale for ambiguous day/month dates,
-    # scan the sample for an unambiguous majority before any date coercion.
-    if sample_rows and columns:
-        inferred_locale = infer_date_locale(
-            sample_rows, columns, existing_locale=date_locale
-        )
-        if inferred_locale and not date_locale:
-            date_locale = inferred_locale
+    # Only the allowlisted tokens are locales. Anything else is Auto, so a
+    # typo or a non-locale string cannot skip inference or land on the report.
+    date_locale = canonical_date_locale(date_locale)
+    number_locale = canonical_number_locale(number_locale)
+    # Operator locale wins. Otherwise adopt one inferred order only when
+    # every date column agrees.
+    if sample_rows and columns and not date_locale:
+        from services.preflight_source_kind import agreed_sample_date_locale
+
+        agreed = agreed_sample_date_locale(sample_rows, columns)
+        if agreed:
+            date_locale = agreed
             set_active_date_locale(date_locale)
+    if sample_rows and columns:
         inferred_numbers = infer_number_locale(
             sample_rows, columns, existing_locale=number_locale
         )
@@ -1207,12 +1615,20 @@ def run_file_preflight(
         dest_cols.append(
             ColumnSchema(name=tgt, inferred_type=inferred, nullable=nullable)
         )
+
+    from services.transform_resolver import write_plan_transform
+
     plan_mappings = [
         ColumnMapping(
             source=m["source"],
             target=m.get("target") or "",
             confidence=float(m.get("confidence", 0.0)),
-            transform=m.get("transform"),
+            transform=write_plan_transform(
+                m if isinstance(m, dict) else {},
+                column_types=column_types,
+                dest_types=dest_types,
+                destination_table_exists=destination_table_exists,
+            ),
             user_override=bool(m.get("user_override", False)),
             reasoning=m.get("reasoning") or m.get("reason", ""),
             requires_review=bool(m.get("requires_review", False)),
@@ -1282,10 +1698,10 @@ def run_file_preflight(
     # - unknown existence: keep type hints for G6 lossy/width checks, but drift
     #   still treats the dest as non-live (no fingerprint / orphan locks)
     # - existing table: full live contract
-    # - overwrite: the table is dropped and recreated from the source shape, so
-    #   the carrier standing there now is not the one the rows land in. Judging
-    #   against it refused a run for loss that cannot happen (``TEXT →
-    #   VARCHAR(64)`` on a route whose own DDL creates ``LONGTEXT``).
+    # - overwrite that really DROP+CREATEs: the carrier standing there now is
+    #   not the one the rows land in. Judging against it refused a run for loss
+    #   that cannot happen (``TEXT → VARCHAR(64)`` on a route whose own DDL
+    #   creates ``LONGTEXT``). Relational overwrite keeps the live table.
     hinted_dest_types = dict(destination_column_types or {})
     if schemaless or dest_table_exists is False or dest_recreated:
         drift_dest_types: dict[str, str] = {}
@@ -1365,7 +1781,9 @@ def run_file_preflight(
         source=SourceConfig(
             kind=source_kind,
             connected=source_connected and bool(columns),
-            parseable=(is_file_source and has_samples and bool(columns))
+            parseable=(
+                is_file_source and (has_samples or source_measured_empty) and bool(columns)
+            )
             or (not is_file_source and bool(columns)),
             columns=source_cols,
             row_count_estimate=row_count,
@@ -1519,6 +1937,7 @@ def run_file_preflight(
     ctx = FilePreflightContext(
         plan,
         sample_rows,
+        empty_cells_as_null=is_file_source,
         destination_collision=destination_collision,
         source_duplicate_findings=source_duplicate_findings,
         source_duplicate_probe_ran=source_duplicate_probe_ran,
@@ -1527,6 +1946,8 @@ def run_file_preflight(
         source_duplicate_probe_message=source_duplicate_probe_message,
         source_duplicate_probe_expected=source_duplicate_probe_expected,
     )
+    ctx.sample_unavailable_reason = sample_unavailable_reason
+    ctx.source_measured_empty = source_measured_empty
     # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
     # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still
     # refuses to move rows when any blocker remains (passed=False).
@@ -2239,10 +2660,10 @@ def run_file_preflight(
             },
         ]
 
-    # G19 — an overwrite recreates the destination, so the type standing there
-    # now is discarded for every verdict above. Where that discarded type is
-    # narrower than the source, the operator declared a carrier this run
-    # replaces; say so instead of writing through the replacement.
+    # G19 — only an overwrite that DROP+CREATEs replaces the declared carrier.
+    # Relational overwrite keeps the table, so G3/G6 judge the live column and
+    # G19 stays quiet. Where a recreate would discard a narrower type, say so
+    # instead of writing through the replacement.
     from services.dest_schema_replacement import build_dest_schema_replacement_gate
 
     replacement_gate = build_dest_schema_replacement_gate(
@@ -2313,6 +2734,7 @@ def run_file_preflight(
         and observed_codes is None
         and (population_seq is not None or population_rows is None),
         observed_codes=observed_codes,
+        row_count=row_count,
     )
     if scan_method:
         code_crosswalk["scan_method"] = scan_method
@@ -2897,6 +3319,25 @@ def run_file_preflight(
         out["readiness_score"] = round(
             out["passed_count"] / max(out["total_gates"], 1) * 100, 1
         )
+
+    _apply_overwrite_emptied_gate(
+        out,
+        sync_mode=sync_mode,
+        destination_table_exists=destination_table_exists,
+        live_dest_columns=list(
+            (destination_live_column_types or destination_column_types or {}).keys()
+        ),
+        mappings=mappings,
+        regenerated=[
+            *(destination_identity_columns or []),
+            *(destination_generated_columns or []),
+            *(["_id"] if schemaless else []),
+        ],
+        schema_policy=schema_policy,
+        acknowledged=schema_drift_acknowledged,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+    )
 
     from services.root_cause_engine import apply_root_causes_to_preflight
     from services.validation_mode_contract import stamp_validation_mode

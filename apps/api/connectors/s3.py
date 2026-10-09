@@ -2,8 +2,37 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from connectors.aws_common import boto3_client
 from connectors.base import ConnectResult
+
+
+def s3_object_exists(cfg: dict[str, Any], bucket: str, key: str) -> bool | None:
+    """True when the key is in the bucket, False on 404, None when unproven.
+
+    A failed ``ListObjects`` is not proof the key is absent. Create-new
+    requires this head to say the key is not there.
+    """
+    blob = (key or "").strip()
+    bucket_name = (bucket or "").strip()
+    if not blob or not bucket_name:
+        return None
+    try:
+        from botocore.exceptions import ClientError
+    except ImportError:
+        return None
+    try:
+        client = boto3_client("s3", cfg)
+        client.head_object(Bucket=bucket_name, Key=blob)
+        return True
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            return False
+        return None
+    except Exception:
+        return None
 
 
 def test_s3(
@@ -58,17 +87,30 @@ def test_s3(
         client = boto3_client("s3", cfg)
         client.head_bucket(Bucket=bucket)
         keys: list[str] = []
+        list_error = ""
         try:
             from connectors.s3_reader import list_objects
 
             keys = list_objects(cfg, bucket)
-        except Exception:
+        except Exception as exc:
             keys = []
-        objects = keys or [bucket]
+            list_error = str(exc)
+        if list_error:
+            # head_bucket succeeded. Substituting the bucket name for a
+            # failed list made MinIO look like one object and hid the error.
+            return ConnectResult(
+                ok=True,
+                tables=[],
+                message=(
+                    f"S3 bucket `{bucket}` reachable, but listing objects failed: "
+                    f"{list_error}"
+                ),
+                driver="boto3",
+            )
         return ConnectResult(
             ok=True,
-            tables=objects,
-            message=f"S3 bucket `{bucket}` reachable — {len(keys) or 1} object(s) listed.",
+            tables=keys,
+            message=f"S3 bucket `{bucket}` reachable — {len(keys)} object(s) listed.",
             driver="boto3",
         )
     except ClientError as exc:

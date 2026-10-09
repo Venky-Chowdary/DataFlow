@@ -32,6 +32,7 @@ from services.readback_projection import project_readback
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
     CDC_SOURCE_IMAGE_COUNT,
+    CDC_SOURCE_IMAGE_VALUES,
     NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_WRITE_PASS,
     SOURCE_DIGEST_WRITER_ACK,
@@ -278,16 +279,29 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["checksum_match"] = False
         return out
 
-    if str(out.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
-        # Last-batch writer checksum vs dest digest is not a population compare.
-        # Dest extras are leftover MERGE no-op; dest COUNT short already set
-        # passed=False in reconcile(). Never upgrade to full_checksum.
-        dest_short = not bool(out.get("passed"))
-        out["phase"] = "post_write_failed" if dest_short else "post_write_row_count"
+    if str(out.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_VALUES:
+        # Source-row fingerprints found on the dest. Dest extras are allowed.
+        # This is not full_checksum and not platform exactly-once.
+        matched = bool(out.get("passed")) and bool(out.get("checksum_match"))
+        out["phase"] = "post_write_verified" if matched else "post_write_failed"
         out["post_write_pending"] = False
         out["preview"] = False
-        out["coverage"] = "none" if dest_short else CDC_SOURCE_IMAGE_COUNT
-        out["assurance_level"] = "none" if dest_short else CDC_SOURCE_IMAGE_COUNT
+        out["coverage"] = CDC_SOURCE_IMAGE_VALUES if matched else "none"
+        out["assurance_level"] = CDC_SOURCE_IMAGE_VALUES if matched else "none"
+        out["migration_proven"] = False
+        out["population_proof"] = matched
+        out["checksum_match"] = matched
+        return out
+
+    if str(out.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
+        # Row count is not a cell proof. Never upgrade to full_checksum and
+        # never call the phase verified — a matching COUNT completed jobs
+        # whose destination cells had already been corrupted.
+        out["phase"] = "post_write_failed"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = "none"
+        out["assurance_level"] = "none"
         out["migration_proven"] = False
         out["population_proof"] = False
         out["checksum_match"] = False
@@ -851,23 +865,30 @@ def reconcile(
         and expected_rows == 0
         and target_rows == 0
         and target_checksum in {"", EMPTY_POPULATION_DIGEST}
+        and not keyed_expected_delta
     ):
         # Every source row was held out, so this run's projection is the empty
         # population — a digest that is defined, not missing. The writer had no
         # rows to hash and returned "", which then read as a mismatch against
         # the destination's empty digest and failed an all-quarantined run that
         # behaved exactly as the policy asked.
+        # A key census that still expects new rows did not hold those keys out.
+        # Pairing that delta with the empty digest reported checksum_match
+        # while rows_written stayed 0.
         source_checksum = target_checksum
     if checksum_scope == CDC_SOURCE_IMAGE_COUNT:
-        # Dest extras are expected (changelog is not S; leftover MERGE is a
-        # hard no-op). Dest COUNT short of the live source image is a fail.
+        # A matching COUNT does not see an in-place update. Completing the job
+        # here is how a corrupted cell (qty=-1) shipped as "completed" while
+        # the message said value fidelity was not compared. Dest extras are
+        # still not a merge-delete, and a short COUNT is still a fail — but
+        # neither outcome is a cell proof, so the job does not pass.
         dest_short = target_rows < expected_rows
         extra = extra_rows_note(target_rows, expected_rows) if target_rows > expected_rows else ""
         short_note = (
             " Destination is short of the live source image." if dest_short else ""
         )
         return ReconciliationReport(
-            passed=not dest_short,
+            passed=False,
             source_rows=source_rows,
             target_rows=target_rows,
             source_checksum=source_checksum,
@@ -876,6 +897,7 @@ def reconcile(
                 f"CDC catch-up dest COUNT={target_rows:,} vs source image "
                 f"COUNT={expected_rows:,}{extra}{short_note}. Last-batch writer "
                 "checksum is diagnostic — not a source-image population digest. "
+                "Value fidelity was not compared. "
                 "Leftover MERGE is a no-op on CDC. At-least-once upsert. "
                 "Not platform exactly-once."
             ),
@@ -887,6 +909,40 @@ def reconcile(
             population_proof=False,
             assurance_level=CDC_SOURCE_IMAGE_COUNT,
             checksum_scope=CDC_SOURCE_IMAGE_COUNT,
+            target_rows_before=target_rows_before,
+        )
+    if checksum_scope == CDC_SOURCE_IMAGE_VALUES:
+        dest_short = target_rows < expected_rows
+        checksum_match = bool(source_checksum) and source_checksum == target_checksum
+        extra = extra_rows_note(target_rows, expected_rows) if target_rows > expected_rows else ""
+        short_note = (
+            " Destination is short of the live source image." if dest_short else ""
+        )
+        value_note = (
+            " Mapped source-row fingerprints are present on the destination."
+            if checksum_match
+            else " One or more source-row fingerprints are missing on the destination."
+        )
+        return ReconciliationReport(
+            passed=(not dest_short) and checksum_match,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"CDC catch-up dest COUNT={target_rows:,} vs source image "
+                f"COUNT={expected_rows:,}{extra}{short_note}.{value_note} "
+                "Dest extras are not a failure. At-least-once upsert. "
+                "Not platform exactly-once."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=checksum_match and not dest_short,
+            population_proof=checksum_match and not dest_short,
+            assurance_level=CDC_SOURCE_IMAGE_VALUES,
+            checksum_scope=CDC_SOURCE_IMAGE_VALUES,
             target_rows_before=target_rows_before,
         )
     keyed_identity = (
@@ -1881,22 +1937,51 @@ def verify_mysql_table(
             password=password,
             connection_string=connection_string,
             ssl=ssl,
+            purpose="reconcile",
         )
-        from connectors.sql_identifiers import quote_table_ref
+        from connectors.mysql_conn import enable_autocommit
+        from connectors.sql_identifiers import quote_column_list, quote_table_ref
 
+        enable_autocommit(conn)
         table_ref = quote_table_ref(table_name, dialect="mysql")
         with conn.cursor() as cur:
+            # A metadata lock from the writer must fail closed, not sit at 99%.
+            # max_execution_time is MySQL milliseconds; MariaDB uses
+            # max_statement_time in seconds. Either name may be absent.
+            for session_sql in (
+                "SET SESSION lock_wait_timeout = 120",
+                "SET SESSION innodb_lock_wait_timeout = 120",
+                "SET SESSION max_execution_time = 1800000",
+                "SET SESSION max_statement_time = 1800",
+            ):
+                try:
+                    cur.execute(session_sql)
+                except Exception:  # noqa: BLE001 — MariaDB and MySQL name this differently
+                    logger.debug("MySQL reconcile session guard skipped", exc_info=True)
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
         ids, pk = keyed_readback_scope(written_ids, pk_column)
+        select_list = "*"
+        wanted = [str(c) for c in (target_columns or []) if str(c).strip()]
+        if wanted:
+            try:
+                select_list = quote_column_list(wanted, quote_char="`")
+            except Exception:  # noqa: BLE001 — bad identifier falls back to SELECT *
+                select_list = "*"
         with streaming_readback_cursor(conn, engine="mysql") as cur:
+            # One statement on the streaming cursor. A failed projected select
+            # must not be retried on the same cursor — PyMySQL's SSCursor
+            # waits on the unread result and the job sits at 99%.
             if ids:
                 where = keyed_readback_where(
                     pk, ids, dialect="mysql", placeholders=["%s"] * len(ids)
                 )
-                cur.execute(f"SELECT * FROM {table_ref} {where}", ids)  # nosec B608
+                cur.execute(
+                    f"SELECT {select_list} FROM {table_ref} {where}",  # nosec B608
+                    ids,
+                )
             else:
-                cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+                cur.execute(f"SELECT {select_list} FROM {table_ref}")  # nosec B608
             names, rows = dbapi_streaming_rows(cur)
             columns, projected = project_readback(names, target_columns, rows)
             checksum = canonical_checksum_from_iter(
@@ -3156,8 +3241,18 @@ def verify_redis_prefix(
     rows the source never sent. Cardinality stays whole-prefix either way.
     """
     try:
-        from connectors.redis_reader import _redis_client, redis_json_row, scan_all_keys
+        from connectors.redis_reader import (
+            _redis_client,
+            keys_for_prefix,
+            redis_json_row,
+            scan_all_keys,
+        )
 
+        prefix = (prefix or "").strip()
+        if not prefix:
+            # No prefix is not the whole database. dbsize of unrelated hashes
+            # was reported as rows of this destination.
+            return -1, ""
         client = _redis_client(
             {
                 "host": host,
@@ -3169,8 +3264,8 @@ def verify_redis_prefix(
                 "ssl": ssl,
             }
         )
-        pattern = f"{prefix}:*" if prefix else "*"
-        keys: list[str] = scan_all_keys(client, pattern)
+        pattern = f"{prefix}:*"
+        keys: list[str] = keys_for_prefix(scan_all_keys(client, pattern), prefix)
         total = len(keys)
         scoped_ids, _pk = keyed_readback_scope(written_ids, pk_column)
         if scoped_ids:

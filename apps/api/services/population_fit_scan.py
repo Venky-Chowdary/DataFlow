@@ -410,6 +410,7 @@ def _source_cannot_exceed(
     target: BoundedTarget,
     *,
     dest_db: str,
+    source_db: str = "",
 ) -> bool:
     """True when the declared source type provably fits the destination carrier.
 
@@ -440,7 +441,18 @@ def _source_cannot_exceed(
         tgt_width = parse_varchar_width(target.target_type)
         if src_width is None or tgt_width is None:
             return False
-        return src_width <= tgt_width
+        if src_width > tgt_width:
+            return False
+        # Width-identical VARCHAR → SQL Server Latin-1 VARCHAR still substitutes
+        # ``?`` for scalars the code page cannot store. Declaration does not
+        # make that safe (DEF-R1-002).
+        from services.type_system import code_page_sink_would_collapse
+
+        if code_page_sink_would_collapse(
+            src, target.target_type, dest_db=dest_db, source_db=source_db
+        ):
+            return False
+        return True
 
     if target.carrier == CARRIER_INTEGER:
         src_bounds = integer_storage_bounds(src, dest_db=dest_db)
@@ -619,7 +631,10 @@ def bounded_targets(
             declared_domain
             and not parse_in_doubt
             and _source_cannot_exceed(
-                declared_source, candidate, dest_db=dest_db
+                declared_source,
+                candidate,
+                dest_db=dest_db,
+                source_db=source_format,
             )
         ):
             # Width is decided by declaration; a parse is only decided with it
@@ -686,15 +701,31 @@ def _fit_predicate(
         return _decimal_reason
     if target.carrier == CARRIER_STRING:
         width = parse_varchar_width(target.target_type)
-        if width is None:
-            return lambda _value: None
         type_str = target.target_type
         label = dialect_label or dest_db
-        return lambda value: (
-            None
-            if fits_varchar(value, width, type_str, dialect_label=label)
-            else f"value is longer than {type_str}"
+        from services.encoding_capacity import (
+            cell_encoding,
+            cell_fits_capacity,
+            classify_capacity,
         )
+
+        cap = classify_capacity(dest_db, type_str)
+        code_page = cap.form in {"cp1252", "latin1", "ascii"}
+
+        def _string_reason(value: Any) -> str | None:
+            # VARCHAR(MAX) has no width and still cannot store a scalar the
+            # code page replaces with '?'. ASCII fits. U+90CE does not.
+            if code_page:
+                cell = cell_encoding(value)
+                if cell is not None and not cell_fits_capacity(cell.text, cap):
+                    return f"value does not encode in {type_str}"
+            if width is None:
+                return None
+            if fits_varchar(value, width, type_str, dialect_label=label):
+                return None
+            return f"value is longer than {type_str}"
+
+        return _string_reason
     if target.carrier == CARRIER_INTEGER:
         type_str = target.target_type
         return lambda value: integer_fit_failure(value, type_str, dest_db=dest_db)
@@ -1011,15 +1042,23 @@ def scan_rows(
             example_rows[idx].append(row_no)
             example_values.setdefault(idx, []).append(cell_to_string(value)[:120])
 
+    from services.column_case import lookup_row_value
+
+    _absent = object()
+
     def _scan_one_row(row: Any, row_no: int, *, widenable_only: bool) -> None:
         if not isinstance(row, Mapping):
             return
         for idx, source, fit_reason in probes:
             if widenable_only and bounded[idx].carrier not in _WIDENABLE_CARRIERS:
                 continue
-            if source not in row:
+            # Oracle/Snowflake catalogs and Map disagree on case. An exact
+            # ``source not in row`` skipped the cell, and a later exact
+            # ``row.get`` read it as empty — a NOT NULL check on the folded
+            # name then saw every row as null.
+            value = lookup_row_value(row, source, _absent)
+            if value is _absent:
                 continue
-            value = row.get(source)
             if value is None or is_missing_sentinel(value):
                 continue
             # Blank strings are a nullability question for width/typed
@@ -1693,9 +1732,17 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
 
 
 def applyable_widen_actions(report: FitScanReport) -> list[dict[str, Any]]:
-    """change_target_type actions Approve may stamp — proven and not live DDL."""
+    """change_target_type actions Approve may stamp — proven and not live DDL.
+
+    A blocking gate already lists those actions. A continue-policy gate only
+    warns ("N rows will be held out") and omits them, so a create-new table
+    we still own kept the peeked narrow carrier and forecast a quarantine the
+    CREATE should have widened away. Held-out findings with a proven wider
+    type are the same CREATE decision when the destination column does not
+    exist yet.
+    """
     gate = build_population_fit_gate(report)
-    return [
+    actions = [
         a
         for a in (gate.get("details") or {}).get("suggested_actions") or []
         if a.get("kind") == "change_target_type"
@@ -1704,6 +1751,33 @@ def applyable_widen_actions(report: FitScanReport) -> list[dict[str, Any]]:
         and not a.get("requires_ddl")
         and a.get("mapping_applyable") is not False
     ]
+    if actions:
+        return actions
+    for finding in report.findings:
+        target = finding.target
+        if target.binds_live_ddl or not finding.apply_proven:
+            continue
+        if not finding.suggested_target_type:
+            continue
+        if target.carrier not in _WIDENABLE_CARRIERS:
+            continue
+        actions.append(
+            {
+                "kind": "change_target_type",
+                "column": target.source,
+                "target": target.target,
+                "to_type": finding.suggested_target_type,
+                "label": (
+                    f"Widen '{target.source}' CREATE type to "
+                    f"{finding.suggested_target_type}"
+                ),
+                "requires_ddl": False,
+                "mapping_applyable": True,
+                "apply_proven": True,
+                "apply_proven_scope": finding.apply_proven_scope,
+            }
+        )
+    return actions
 
 
 @dataclass(frozen=True)

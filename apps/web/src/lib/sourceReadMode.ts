@@ -68,6 +68,34 @@ export function bindNamesFromSql(text: string): string[] {
   return names;
 }
 
+/** Last identifier of a simple table name, so a placeholder never names a different stream. */
+function exampleIdent(streamName: string): string {
+  const name = String(streamName || "").trim();
+  if (!IDENT.test(name)) return "";
+  const last = name.split(".").pop() || "";
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(last) ? last : "";
+}
+
+/** Empty-state hint for one stream's source extract. Uses that stream's name. */
+export function streamExtractPlaceholder(streamName: string, offersProcedures: boolean): string {
+  const ident = exampleIdent(streamName);
+  if (offersProcedures) {
+    return ident
+      ? `CALL schema.get_${ident}() or SELECT id, email FROM ${ident}`
+      : "CALL schema.procedure() or SELECT id, email FROM this_table";
+  }
+  return ident ? `SELECT id, email FROM ${ident}` : "SELECT id, email FROM this_table";
+}
+
+/** Empty-state hint for one stream's destination CALL or INSERT. */
+export function destStreamPlaceholder(streamName: string): string {
+  const ident = exampleIdent(streamName);
+  if (!ident) {
+    return "CALL schema.land_row(:id) or INSERT INTO dest_table (id) VALUES (:id)";
+  }
+  return `CALL schema.land_${ident}(:id) or INSERT INTO ${ident} (id) VALUES (:id)`;
+}
+
 export function queryHint(driver: string | undefined | null): string {
   const d = String(driver || "").toLowerCase();
   if (d === "sqlite" || d === "duckdb") {
@@ -100,6 +128,28 @@ export function procedureHint(driver: string | undefined | null): string {
     return "CALL get_orders('2024-01-01') — one CALL, no stacked statements.";
   }
   return "CALL schema.name(...) or EXEC schema.name — one statement. Result columns map on the next step.";
+}
+
+const SELECT_FUNC = /^\s*select\s+\*\s+from\s+[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){0,2}\s*\(/i;
+
+/**
+ * The same split the API uses. A PostgreSQL `SELECT * FROM schema.fn()` is a
+ * procedure. A general SELECT is a source extract. INSERT/MERGE is a dest write.
+ */
+export function statementKind(sql: string): "procedure" | "query" | "dest_dml" | "" {
+  const stripped = String(sql || "")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\n]*/g, " ")
+    .trim();
+  if (!stripped) return "";
+  if (/^create\s+(?:or\s+(?:replace|alter)\s+)?(?:temp(?:orary)?\s+|secure\s+)?(?:procedure|proc|function|table|view)\b/i.test(stripped)) {
+    return "";
+  }
+  if (SELECT_FUNC.test(stripped) || /^(?:call|exec(?:ute)?)\b/i.test(stripped)) return "procedure";
+  if (/^(?:select|with|values)\b/i.test(stripped)) return "query";
+  if (/^(?:insert|merge|update|upsert|replace)\b/i.test(stripped)) return "dest_dml";
+  if (/^[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){0,2};?$/.test(stripped)) return "procedure";
+  return "";
 }
 
 export function isCallableSourceMode(mode: SourceReadMode | string | undefined): boolean {

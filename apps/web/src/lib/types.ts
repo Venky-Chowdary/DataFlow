@@ -85,7 +85,9 @@ export interface Connector {
   path_style?: boolean;
   created_at: string;
   last_test_ok?: boolean;
+  last_tested_at?: string | null;
   last_used_at?: string | null;
+  last_transfer_ok_at?: string | null;
 }
 
 export interface TransferCheckpoint {
@@ -95,6 +97,8 @@ export interface TransferCheckpoint {
   offset?: number;
   cursor_value?: unknown;
   cursor_column?: string;
+  /** Named stream this checkpoint belongs to. On a multi-table job this is one table, not the job. */
+  cdc_stream?: string;
   status?: string;
   /** ISO timestamp from checkpoint_service — used for resume-age display. */
   updated_at?: string;
@@ -174,6 +178,11 @@ export interface TransferJob {
   name?: string;
   source_type: string;
   source_name: string;
+  /**
+   * Multi-table jobs. List payloads carry names only; the detail document
+   * still has destination_summary.streams. Absent on a single-table job.
+   */
+  stream_names?: string[];
   source_connector_id?: string;
   dest_connector_id?: string;
   destination_type: string;
@@ -420,6 +429,12 @@ export interface Gate8ReconciliationPayload {
   };
   source_rows?: number;
   target_rows?: number;
+  /**
+   * Sum of per-stream dest COUNT(*) on a sequential multi-table run.
+   * ``source_rows`` / ``target_rows`` stay the last stream. This is not a
+   * second checksum.
+   */
+  job_dest_count?: number;
   /** Pre-write dest COUNT(*) — append identity is dest_after − dest_before. */
   target_rows_before?: number | null;
   rejected_rows?: number;
@@ -824,7 +839,11 @@ export interface CoercionColumn {
   wire_failures?: number;
   /** Bare scalars wrapped as JSON string literals (domain change — Accept risk). */
   json_scalar_wraps?: number;
-  sample_failures: CoercionSampleFailure[];
+  /**
+   * Offending sample cells. Older and partial preflight payloads omit this;
+   * readers must treat a missing list as empty — never assume `.length`.
+   */
+  sample_failures?: CoercionSampleFailure[];
   sentinel_examples?: { row: number; value: string }[];
   wire_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
   wrap_examples?: { row: number; value: string; wire_form?: string | null; reason?: string }[];
@@ -1312,6 +1331,10 @@ export interface TransferResult {
     rejected_details_truncated?: boolean;
     /** Findings the run recorded, whether or not the sample kept them all. */
     rejected_details_total?: number;
+    /** Per-stream health. account_job reads this list, not a second model. */
+    streams?: CdcStreamHealth[];
+    /** Sequential multi-table run. Job Gate-8 is the last stream's digest. */
+    multi_stream?: boolean;
     warnings?: string[];
     /** How many distinct warnings were suppressed past the display sample. */
     warnings_suppressed?: number;
@@ -1331,6 +1354,8 @@ export interface TransferResult {
     chunk_size?: number;
     batches?: number;
     records_per_second?: number;
+    /** Engine monotonic seconds for this execute, the denominator of rows/s. */
+    elapsed_seconds?: number;
     load_history_report?: LoadHistoryReport;
     phase_profile?: PhaseProfileReport;
     transformations?: TransformationsReport;
@@ -1417,6 +1442,8 @@ export interface ScheduleInput {
   dest_connector_id: string;
   dest_table: string;
   interval: ScheduleInterval | string;
+  /** Runner token sent beside a displayed cadence label. */
+  interval_preset?: string;
   cron: string;
   timezone: string;
   sync_mode: ScheduleSyncMode | string;
@@ -1529,7 +1556,11 @@ export interface PipelineSchedule {
   dest_connector_id: string;
   dest_table: string;
   interval: ScheduleInterval | string;
+  /** hourly | daily | weekly. Set when ``interval`` is the displayed label. */
+  interval_preset?: string;
   cron: string;
+  /** Server label. Cron anchors win over the interval preset. */
+  cadence_label?: string;
   timezone: string;
   sync_mode: ScheduleSyncMode | string;
   validation_mode: string;
@@ -1669,7 +1700,7 @@ export const CONNECTOR_CATALOG = [
   { id: "cassandra", label: "Apache Cassandra", port: 9042 },
   { id: "couchbase", label: "Couchbase", port: 8091 },
   { id: "redis", label: "Redis", port: 6379 },
-  { id: "neo4j", label: "Neo4j", port: 7687 },
+  { id: "neo4j", label: "Neo4j", port: 7474 },
   { id: "elasticsearch", label: "Elasticsearch", port: 9200 },
   { id: "firebase", label: "Firebase", port: 443 },
   // Cloud warehouses

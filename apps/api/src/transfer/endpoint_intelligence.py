@@ -17,10 +17,55 @@ from .adapters import (
     parse_file_content,
     resolve_connector_config,
 )
-from .connector_capabilities import resolve_driver_type
+from .connector_capabilities import CATALOG_ID_ALIASES, resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
 from services.procedure_source import is_callable_source
+
+
+def _list_sqlalchemy_tables(
+    endpoint: EndpointConfig, fmt: str
+) -> tuple[bool, list[str], str]:
+    """``(ok, table names, error)`` for engines that list through introspect_schema.
+
+    A failed catalog read is not an empty inventory. Callers must not report
+    "connected, no tables" when the connection itself failed.
+    """
+    from services.dialect_profiles import normalize_schema
+    from services.schema_introspect import introspect_schema
+
+    try:
+        cfg = resolve_connector_config(endpoint)
+        db_type = resolve_driver_type(cfg.get("type") or fmt or "")
+        info = introspect_schema(
+            db_type,
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 0),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            schema=normalize_schema(
+                db_type, cfg.get("schema"), username=cfg.get("username")
+            )
+            or "",
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl")),
+            table="",
+        )
+    except (OSError, RuntimeError, ValueError, TypeError) as exc:
+        logger.warning("SQL object list failed for %s", fmt, exc_info=True)
+        return False, [], str(exc)
+    if not isinstance(info, dict) or not info.get("ok"):
+        return False, [], str((info or {}).get("error") or "object list failed")
+    names: list[str] = []
+    seen: set[str] = set()
+    for raw in info.get("tables") or []:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return True, names, ""
 
 
 def _dest_table_schema_only(endpoint: EndpointConfig) -> bool:
@@ -102,6 +147,20 @@ def _attach_create_on_write_dest(
         return out
     name = endpoint.table or endpoint.collection or ""
     exists = False
+    listed = _specialty_object_list(fmt, cfg)
+    if listed is not None:
+        connected, names, kind, list_message = listed
+        out["objects"] = [{"name": item, "type": kind} for item in names]
+        if not connected:
+            # A failed list is not an empty cluster and not create-new.
+            out["connected"] = False
+            out["message"] = list_message
+            out["table_exists"] = None
+            return out
+        if name:
+            folded = {item.lower() for item in names}
+            exists = name in names or name.lower() in folded
+        out["message"] = list_message
     if fmt in {"iceberg", "apache_iceberg"} and name:
         try:
             from connectors.iceberg_writer import _resolve_iceberg_table_dir
@@ -139,6 +198,79 @@ def _attach_dest_table_schema(out: dict, endpoint: EndpointConfig) -> dict:
     return out
 
 
+def _specialty_object_list(
+    fmt: str, cfg: dict
+) -> tuple[bool, list[str], str, str] | None:
+    """Object names for engines that are not SQL catalogs.
+
+    ``None`` means this helper does not own ``fmt``. A successful call with
+    an empty name list is an empty cluster. Connection and import errors
+    are a failed list, not a silent empty one.
+    """
+    kind = (fmt or "").strip().lower()
+    try:
+        if kind == "kafka":
+            from connectors.kafka_reader import list_topics
+
+            names = list_topics(cfg)
+            return True, names, "topic", f"Kafka connected — {len(names)} topic(s)"
+        if kind == "neo4j":
+            from connectors.neo4j import list_labels
+
+            names = list_labels(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 7474),
+                database=str(cfg.get("database") or "neo4j"),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                ssl=bool(cfg.get("ssl")),
+            )
+            return True, names, "label", f"Neo4j connected — {len(names)} label(s)"
+        if kind == "qdrant":
+            from connectors.qdrant_writer import list_collections
+
+            names = list_collections(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 6333),
+                api_key=str(cfg.get("api_key") or cfg.get("password") or ""),
+                ssl=bool(cfg.get("ssl")),
+            )
+            return (
+                True,
+                names,
+                "collection",
+                f"Qdrant connected — {len(names)} collection(s)",
+            )
+        if kind == "weaviate":
+            from connectors.weaviate_writer import list_classes
+
+            names = list_classes(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 8080),
+                api_key=str(cfg.get("api_key") or cfg.get("password") or ""),
+                ssl=bool(cfg.get("ssl")),
+                connection_string=str(cfg.get("connection_string") or ""),
+            )
+            return True, names, "class", f"Weaviate connected — {len(names)} class(es)"
+    except Exception as exc:
+        label = {
+            "kafka": "Kafka topic",
+            "neo4j": "Neo4j label",
+            "qdrant": "Qdrant collection",
+            "weaviate": "Weaviate class",
+        }.get(kind, kind)
+        return False, [], "object", f"{label} list failed: {exc}"
+    return None
+
+
+def _s3_family_format(fmt: str) -> str:
+    """MinIO, Wasabi, B2, Spaces, and R2 list through the S3 probe."""
+    key = (fmt or "").lower().strip()
+    if key == "s3" or CATALOG_ID_ALIASES.get(key) == "s3":
+        return "s3"
+    return key
+
+
 def introspect_endpoint(
     endpoint: EndpointConfig,
     sample_content: bytes | None = None,
@@ -148,7 +280,7 @@ def introspect_endpoint(
     Probe an endpoint: connection health, available tables/collections,
     column schema, and what will be auto-created on write.
     """
-    fmt = (endpoint.format or "").lower()
+    fmt = _s3_family_format(endpoint.format or "")
     out: dict = {
         "kind": endpoint.kind,
         "format": endpoint.format,
@@ -187,7 +319,7 @@ def introspect_endpoint(
     # When a saved connector is used, its stored driver type is authoritative;
     # ignore an inline format string that may have been sent as a placeholder.
     resolved_fmt = cfg.get("type") or endpoint.format
-    fmt = (resolved_fmt or "").lower()
+    fmt = _s3_family_format(resolved_fmt or "")
     out["format"] = resolved_fmt
 
     # Dest-only / lakehouse: no information_schema. Connectivity + missing
@@ -209,7 +341,11 @@ def introspect_endpoint(
     # connection config. Leaving it out of this branch meant existence and
     # column types were never measured, so Validate refused create-new and
     # overwrite for lack of facts one catalog query answers.
-    if fmt in {"postgresql", "pgvector"}:
+    # TimescaleDB is Postgres wire. Leaving the catalog id off this branch
+    # made destination introspect say "not yet implemented" while the same
+    # connector as a source already read through the Postgres driver.
+    # CockroachDB stays off: the catalog lists it planned.
+    if fmt in {"postgresql", "pgvector", "timescaledb", "timescale"}:
         if _dest_table_schema_only(endpoint):
             return _attach_dest_table_schema(out, endpoint)
         from connectors.postgresql import test_postgresql
@@ -339,7 +475,7 @@ def introspect_endpoint(
             _attach_db_sample(out, endpoint)
         return out
 
-    if fmt == "mysql":
+    if fmt in {"mysql", "mariadb"}:
         if _dest_table_schema_only(endpoint):
             return _attach_dest_table_schema(out, endpoint)
         from connectors.mysql import test_mysql
@@ -356,6 +492,7 @@ def introspect_endpoint(
         )
         out["connected"] = probe.ok
         out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
@@ -423,6 +560,11 @@ def introspect_endpoint(
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         key = endpoint.table or endpoint.collection
         if key and probe.ok:
+            from connectors.s3 import s3_object_exists
+
+            exists = s3_object_exists(cfg, str(cfg.get("database") or ""), str(key))
+            if exists is not None:
+                out["table_exists"] = exists
             _attach_db_sample(out, endpoint)
         return out
 
@@ -441,6 +583,13 @@ def introspect_endpoint(
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         key = endpoint.table or endpoint.collection
         if key and probe.ok:
+            from connectors.gcs import gcs_blob_exists
+
+            exists = gcs_blob_exists(
+                cfg, str(cfg.get("database") or ""), str(key)
+            )
+            if exists is not None:
+                out["table_exists"] = exists
             _attach_db_sample(out, endpoint)
         return out
 
@@ -593,15 +742,31 @@ def introspect_endpoint(
             except Exception as exc:
                 out["message"] = f"SQLite object list failed: {exc}"
             return out
-        # Other SQLAlchemy engines: attempt reflection listing when no table typed.
-        try:
-            _attach_db_sample(out, endpoint)
-        except Exception:
-            pass
+        # No table typed — list the catalog. _attach_db_sample returns immediately
+        # without a table name, which left SQL Server (and the other engines on
+        # this branch) connected with an empty object list while a named table
+        # still sampled and transferred.
+        listed_ok, tables, list_error = _list_sqlalchemy_tables(endpoint, fmt)
+        if listed_ok:
+            out["objects"] = [{"name": name, "type": "table"} for name in tables]
+            out["connected"] = True
+            out["message"] = f"{fmt.title()} connected — {len(tables)} table(s)"
+        else:
+            out["connected"] = False
+            out["objects"] = []
+            out["message"] = list_error or f"{fmt.title()} object list failed"
         return out
 
     if fmt in _SAAS_INTROSPECT_DRIVERS:
         return _saas_introspect(out, endpoint, cfg, fmt)
+
+    specialty = _specialty_object_list(fmt, cfg)
+    if specialty is not None:
+        connected, names, kind, message = specialty
+        out["connected"] = connected
+        out["objects"] = [{"name": name, "type": kind} for name in names]
+        out["message"] = message
+        return out
 
     out["message"] = f"Introspection for `{fmt}` not yet implemented"
     return out
@@ -666,7 +831,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         cfg = resolve_connector_config(endpoint)
         # Use the resolved saved-connector driver type if available, otherwise
         # fall back to the inline format string.
-        fmt = (cfg.get("type") or endpoint.format or "").lower()
+        fmt = _s3_family_format(cfg.get("type") or endpoint.format or "")
 
         if is_callable_source(endpoint) or is_callable_source(cfg):
             _attach_callable_source_sample(out, endpoint, cfg, fmt, sample_limit)

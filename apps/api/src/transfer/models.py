@@ -59,7 +59,10 @@ class EndpointConfig:
             kind=kind,
             format=d.get("format", d.get("type", d.get("db_type", ""))),
             connector_id=d.get("connector_id"),
-            host=d.get("host", "localhost"),
+            # Missing host stays empty so a saved connector can fill it.
+            # Defaulting to localhost here made every job dial 127.0.0.1
+            # while Test still used the stored host.
+            host=d.get("host") or "",
             port=int(d.get("port", 0) or 0),
             database=d.get("database", ""),
             schema=d.get("schema", ""),
@@ -148,9 +151,11 @@ class TransferRequest:
     # fingerprint, letting a caller make its own HTTP retries safe. When empty,
     # the fingerprint still guards against accidental double submission.
     idempotency_key: str = ""
-    # CDC / stream delivery. Default at_least_once. exactly_once is opt-in
-    # dest-owned watermark EOS and fail-closed on ineligible routes.
-    delivery_guarantee: str = "at_least_once"
+    # CDC / stream delivery. ``auto`` selects dest-owned exactly-once when the
+    # route can commit apply and the watermark together; otherwise at-least-once.
+    # An explicit at_least_once pin is not upgraded. exactly_once on an
+    # ineligible route fails closed.
+    delivery_guarantee: str = "auto"
     # Operator acks from Validate — Execute must carry the same trail (Validate≡Execute).
     compliance_acknowledged: bool = False
     schema_drift_acknowledged: bool = False
@@ -372,7 +377,30 @@ def sanitize_job_for_api(job: dict) -> dict:
         if isinstance(tr.get("destination"), dict):
             tr["destination"] = _mask_endpoint_secrets(tr["destination"])
         out["transfer_request"] = tr
+    _project_operator_quarantine(out)
     return out
+
+
+def _project_operator_quarantine(job: dict) -> None:
+    """Copy the job already. Show SQL NULL as null, not the transfer token.
+
+    Replay reads the stored job, which still carries the token so NULL and
+    an empty string stay distinct on the write path.
+    """
+    from services.dest_quarantine import project_operator_quarantine_details
+
+    if isinstance(job.get("rejected_details"), list):
+        job["rejected_details"] = project_operator_quarantine_details(job["rejected_details"])
+    summary = job.get("destination_summary")
+    if isinstance(summary, dict):
+        for key in ("rejected_details", "rejected_details_sample"):
+            if isinstance(summary.get(key), list):
+                summary[key] = project_operator_quarantine_details(summary[key])
+    checkpoint = job.get("checkpoint")
+    if isinstance(checkpoint, dict) and isinstance(checkpoint.get("rejected_details"), list):
+        checkpoint["rejected_details"] = project_operator_quarantine_details(
+            checkpoint["rejected_details"]
+        )
 
 
 def transfer_request_from_dict(data: dict) -> TransferRequest:

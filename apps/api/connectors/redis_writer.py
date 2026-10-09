@@ -403,7 +403,21 @@ def write_mapped_rows(
         "connection_string": connection_string,
         "ssl": ssl,
     }
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    # Redis has no column catalog. A pending_dest_schema stamp means Studio
+    # never loaded dest DDL — dropping those mappings removed `id` and every
+    # row was quarantined as "no id-like column". An empty document is
+    # create-new: the mapping targets, including id, are the JSON fields.
+    pending_doc = any(
+        isinstance(m, dict)
+        and str(m.get("assignment_strategy") or "") == "pending_dest_schema"
+        for m in (mappings or [])
+    )
+    target_cols, logical_types = resolve_target_columns(
+        mappings,
+        column_types,
+        preserve_case=True,
+        table_exists=False if pending_doc else None,
+    )
     from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = _kwargs.get("destination_column_types")

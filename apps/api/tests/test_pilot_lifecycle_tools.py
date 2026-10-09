@@ -45,6 +45,21 @@ from src.ai.copilot.tools import TOOL_DEFINITIONS, infer_tools_from_message
         ("disable schedule Nightly Orders", "set_schedule_enabled", {"name": "Nightly Orders", "enabled": False}),
         ("resume pipeline Nightly Orders", "set_schedule_enabled", {"name": "Nightly Orders", "enabled": True}),
         ("delete pipeline Nightly Orders", "delete_schedule", {"name": "Nightly Orders"}),
+        (
+            "change the cadence of pipeline Nightly Orders to daily at 03:00 UTC",
+            "update_schedule",
+            {"name": "Nightly Orders", "cadence": "daily at 03:00 UTC"},
+        ),
+        (
+            "reschedule pipeline Nightly Orders to hourly",
+            "update_schedule",
+            {"name": "Nightly Orders", "cadence": "hourly"},
+        ),
+        (
+            "rename pipeline Nightly Orders to Morning Load",
+            "update_schedule",
+            {"name": "Nightly Orders", "new_name": "Morning Load"},
+        ),
     ],
 )
 def test_planner_maps_verb_object_to_tool(message, tool, args):
@@ -149,6 +164,35 @@ def test_resume_refuses_completed(monkeypatch, staged):
     assert not tr.success and "only a failed" in tr.error
 
 
+def test_replay_stages_the_cast_and_the_edited_cells(monkeypatch, staged):
+    monkeypatch.setattr(
+        lt,
+        "resolve_job",
+        lambda job_id="", selector="": (_job("completed_with_quarantine", rejected_rows=1), ""),
+    )
+    tr = lt._job_tool(
+        "replay_quarantine",
+        "",
+        "",
+        transform_overrides={"qty": "text"},
+        rows=[{"row": 1, "column": "qty", "value": "12"}],
+    )
+    assert tr.success
+    assert staged[0]["payload"]["transform_overrides"] == {"qty": "text"}
+    assert staged[0]["payload"]["rows"][0]["value"] == "12"
+    assert staged[0]["preview"]["transform_overrides"]["qty"] == "text"
+    assert staged[0]["preview"]["edited_rows"] == 1
+    assert "cell edits" in tr.output["label"]
+    refused = lt._job_tool(
+        "replay_quarantine",
+        "",
+        "",
+        transform_overrides={"qty": "  "},
+    )
+    assert not refused.success
+    assert len(staged) == 1
+
+
 def test_replay_requires_quarantine_rows(monkeypatch, staged):
     monkeypatch.setattr(lt, "resolve_job", lambda job_id="", selector="": (_job("completed"), ""))
     assert "no quarantined rows" in lt._job_tool("replay_quarantine", "", "").error
@@ -195,6 +239,9 @@ class _Sched:
         self.next_run_at = ""
         self.sync_mode = "mirror"
         self.run_history = []
+        self.interval = "daily"
+        self.cron = "0 2 * * *"
+        self.timezone = "UTC"
 
 
 def test_pause_is_noop_when_already_paused(staged):
@@ -209,6 +256,29 @@ def test_delete_schedule_stages(staged):
     tr = lt.delete_schedule(lambda sid, name: (_Sched(True), ""), name="Nightly Orders")
     assert tr.success and staged[0]["kind"] == "delete_schedule"
     assert staged[0]["payload"] == {"schedule_id": "s1", "name": "Nightly Orders"}
+
+
+def test_update_schedule_stages_clock_and_clears_a_previous_cron(staged):
+    resolver = lambda sid, name: (_Sched(True), "")  # noqa: E731
+    same = lt.update_schedule(resolver, name="Nightly Orders", cadence="daily at 02:00 UTC")
+    assert not same.success and "already" in same.error
+    assert staged == []
+
+    unresolved = lt.update_schedule(resolver, name="Nightly Orders", cadence="whenever")
+    assert not unresolved.success and staged == []
+
+    hourly = lt.update_schedule(resolver, name="Nightly Orders", cadence="hourly")
+    assert hourly.success and hourly.output["requires_confirm"]
+    assert staged[0]["kind"] == "update_schedule"
+    assert staged[0]["payload"]["interval"] == "hourly"
+    assert staged[0]["payload"]["cron"] == ""
+    assert staged[0]["payload"]["timezone"] == "UTC"
+    assert "mappings" not in staged[0]["payload"]
+    assert "source_connector_id" not in staged[0]["payload"]
+
+    renamed = lt.update_schedule(resolver, name="Nightly Orders", new_name="Morning Load")
+    assert renamed.success
+    assert staged[1]["payload"] == {"schedule_id": "s1", "name": "Morning Load"}
 
 
 # ------------------------------------------------------- confirm dispatch ---
@@ -231,6 +301,8 @@ from src.ai.copilot.tool_permissions import can_confirm_kind  # noqa: E402
         ("set_schedule_enabled", "editor", True),
         ("delete_schedule", "viewer", False),
         ("delete_schedule", "admin", True),
+        ("update_schedule", "operator", False),
+        ("update_schedule", "editor", True),
     ],
 )
 def test_confirm_rechecks_role_for_lifecycle_kinds(kind, role, allowed):
@@ -304,6 +376,58 @@ def test_confirm_releases_claim_when_owner_route_refuses(monkeypatch):
         _confirm(ack)
     assert "column mappings" in str(exc.value.detail)
     assert get_ack_ledger().peek(ack) is not None  # still spendable after the fix
+
+
+def test_confirm_update_schedule_patches_cadence_once(monkeypatch):
+    from src.ai.copilot.ack_ledger import get_ack_ledger
+    from src.routers import copilot_router
+
+    schedules_router = importlib.import_module("src.routers.schedules_router")
+    calls: list[dict] = []
+
+    class _Updated:
+        name = "Nightly Orders"
+        enabled = True
+        interval = "daily"
+        cron = "0 3 * * *"
+        timezone = "UTC"
+        next_run_at = "2026-10-05T03:00:00+00:00"
+
+    async def _patch(sid, body, http_request, workspace_id):
+        calls.append({"sid": sid, "fields": body.model_dump()})
+        return _Updated()
+
+    monkeypatch.setattr(schedules_router, "patch_pipeline_schedule", _patch)
+    monkeypatch.setattr(copilot_router, "_caller", lambda req: ("editor", "ed@example.com"))
+
+    ack = get_ack_ledger().put(
+        kind="update_schedule",
+        payload={
+            "schedule_id": "s1",
+            "interval": "daily",
+            "cron": "0 3 * * *",
+            "timezone": "UTC",
+        },
+        preview={"name": "Nightly Orders"},
+    )
+    first = _confirm(ack)
+    assert first["ok"] and first["idempotent"] is False
+    assert first["cron"] == "0 3 * * *"
+    assert first["schedule_id"] == "s1"
+    assert len(calls) == 1
+    fields = calls[0]["fields"]
+    assert calls[0]["sid"] == "s1"
+    assert fields["interval"] == "daily"
+    assert fields["cron"] == "0 3 * * *"
+    assert fields["timezone"] == "UTC"
+    assert fields["mappings"] is None
+    assert fields["sync_mode"] is None
+    assert fields["source_connector_id"] is None
+    assert fields["dest_table"] is None
+    assert fields["name"] is None
+    replay = _confirm(ack)
+    assert replay["idempotent"] is True and replay["cron"] == "0 3 * * *"
+    assert len(calls) == 1
 
 
 def test_confirm_denies_lifecycle_kind_to_weaker_role(monkeypatch):

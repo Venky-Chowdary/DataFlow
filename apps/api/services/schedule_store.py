@@ -252,7 +252,13 @@ class PipelineSchedule:
     created_at: str = field(default_factory=lambda: _now())
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        from src.ai.copilot.schedule_cadence import describe_stored_cadence
+
+        payload["cadence_label"] = describe_stored_cadence(
+            self.interval, self.cron, self.timezone
+        )
+        return payload
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PipelineSchedule:
@@ -372,10 +378,31 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _parse_ts(value: str | None) -> datetime | None:
-    if not value:
+def _parse_ts(value: str | datetime | None) -> datetime | None:
+    """UTC-aware instant, or None when the stored value cannot be read.
+
+    Mongo returns ``datetime``; the file store returns ISO text. A naive value
+    is UTC, the same clock ``_now`` writes. Mixing that naive value with
+    ``datetime.now(timezone.utc)`` raised ``TypeError`` inside ``due_schedules``
+    and aborted every schedule on the beat.
+    """
+    if value is None or value == "":
         return None
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def compute_next_run(
@@ -589,11 +616,28 @@ def get_schedule(schedule_id: str) -> PipelineSchedule | None:
     return None
 
 
-def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> None:
+def accepted_schedule_sync_mode(sync_mode: str) -> str:
+    """Schedule spelling, or the canonical mode an alias resolves to.
+
+    Tokens already stored (``incremental``) keep that spelling. ``incremental_upsert``
+    is the Pilot / transfer-tool name for an incremental deduped write; rejecting
+    it made upsert schedules impossible to create.
+    """
+    token = (sync_mode or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if token in SYNC_MODES:
+        return token
+    from services.sync_cursor import normalize_sync_mode
+
+    resolved = normalize_sync_mode(token, default="")
+    if resolved in SYNC_MODES:
+        return resolved
+    raise ValueError(f"Invalid sync_mode: {sync_mode}")
+
+
+def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> str:
     if interval not in INTERVALS:
         raise ValueError(f"Invalid interval: {interval}")
-    if sync_mode not in SYNC_MODES:
-        raise ValueError(f"Invalid sync_mode: {sync_mode}")
+    sync_mode = accepted_schedule_sync_mode(sync_mode)
     cron = (cron or "").strip()
     if cron:
         try:
@@ -602,6 +646,7 @@ def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> None
             _cron_next_run(cron, datetime.now(timezone.utc), tz or "UTC")
         except CronError as exc:
             raise ValueError(str(exc)) from exc
+    return sync_mode
 
 
 def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
@@ -643,6 +688,67 @@ def schedule_bind_summary(sched: Any) -> dict[str, Any]:
         getattr(sched, "contract_id", None) or "",
         require_signed=bool(getattr(sched, "require_signed_contract", False)),
     )
+
+
+def _mapping_binding(mappings: list[dict[str, Any]] | None) -> frozenset[tuple[str, str]]:
+    """Source/target pairs. Column identity, not confidence or transform spelling."""
+    pairs: list[tuple[str, str]] = []
+    for mapping in mappings or []:
+        if not isinstance(mapping, dict):
+            continue
+        source = str(
+            mapping.get("source") or mapping.get("source_column") or ""
+        ).strip().lower()
+        target = str(
+            mapping.get("target") or mapping.get("target_column") or ""
+        ).strip().lower() or source
+        if source:
+            pairs.append((source, target))
+    return frozenset(pairs)
+
+
+def mappings_bound_to_signed_contract(
+    contract_id: str,
+    planned: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Mappings a schedule stores so a later run matches the signed contract.
+
+    The signed rows are the contract when they name the same source and target
+    columns as the plan. A freshly planned confidence or a ``none`` versus
+    empty transform is not a different mapping, and storing the plan's copy
+    made ``run_schedule_now`` refuse a schedule the operator just bound.
+    A different column binding raises the same error the runner raises, so
+    Confirm never stages a schedule that cannot run. A contract with no
+    stored mappings leaves the plan unchanged.
+    """
+    planned_rows = [m for m in (planned or []) if isinstance(m, dict)]
+    cid = (contract_id or "").strip()
+    if not cid:
+        return planned_rows
+    try:
+        from services.contract_store import get_contract_store
+        from services.schema_fingerprint import fingerprint_mappings
+    except ImportError:  # pragma: no cover
+        from src.services.contract_store import get_contract_store
+        from src.services.schema_fingerprint import fingerprint_mappings
+
+    contract = get_contract_store().get_contract(cid)
+    if contract is None:
+        return planned_rows
+    contracted = [
+        m for m in (getattr(contract, "mappings", None) or []) if isinstance(m, dict)
+    ]
+    if not contracted:
+        return planned_rows
+    if _mapping_binding(planned_rows) != _mapping_binding(contracted):
+        expected = fingerprint_mappings(contracted)
+        actual = fingerprint_mappings(planned_rows)
+        raise ValueError(
+            f"Schedule mappings do not match signed contract {cid} "
+            f"(contract {expected[:12]} vs schedule {actual[:12]}). "
+            "Open Validate and persist the approved mapping, or re-sign the contract."
+        )
+    return contracted
 
 
 def assert_schedule_mapping_matches_contract(sched: Any) -> None:
@@ -796,7 +902,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     cron = (payload.get("cron") or "").strip()
     tz = (payload.get("timezone") or "UTC").strip() or "UTC"
     sync_mode = payload.get("sync_mode") or "full_refresh_overwrite"
-    _validate_cadence(interval, cron, tz, sync_mode)
+    sync_mode = _validate_cadence(interval, cron, tz, sync_mode)
     contract_id = (payload.get("contract_id") or "").strip()
     require_signed = bool(payload.get("require_signed_contract", bool(contract_id)))
     if contract_id or require_signed:
@@ -891,17 +997,65 @@ def _route_stamp_is_stale(current: PipelineSchedule, merged: dict[str, Any]) -> 
     return any(merged.get(key) != before.get(key) for key in _STAMPED_ROUTE_KEYS)
 
 
+def resolve_machine_interval(data: dict[str, Any], stored: str) -> str:
+    """Runner token. A displayed cadence label is not a new preset.
+
+    ``interval_preset`` wins. ``hourly`` / ``daily`` / ``weekly`` in
+    ``interval`` is a preset change. A sentence such as ``Every 5 minutes
+    UTC`` is the label a client echoed from GET, and it keeps the stored
+    preset. Any other token is still an invalid interval.
+    """
+    raw_preset = data.get("interval_preset")
+    if raw_preset is not None and str(raw_preset).strip():
+        preset = str(raw_preset).strip().lower()
+        if preset not in INTERVALS:
+            raise ValueError(f"Invalid interval: {raw_preset}")
+        return preset
+    if "interval" not in data:
+        return stored if stored in INTERVALS else "daily"
+    spoken_raw = str(data.get("interval") or "").strip()
+    spoken = spoken_raw.lower()
+    if spoken in INTERVALS:
+        return spoken
+    if " " in spoken_raw:
+        return stored if stored in INTERVALS else "daily"
+    raise ValueError(f"Invalid interval: {spoken_raw}")
+
+
+def project_operator_cadence(data: dict[str, Any]) -> dict[str, Any]:
+    """Outward schedule JSON. Persistence keeps the runner token.
+
+    When a cron is stored, the field operators read (``interval``) is the
+    cadence label. ``interval_preset`` stays hourly/daily/weekly.
+    """
+    preset = str(data.get("interval") or "")
+    cron = str(data.get("cron") or "").strip()
+    label = str(data.get("cadence_label") or "")
+    out = dict(data)
+    out["interval_preset"] = preset
+    if cron and label:
+        out["interval"] = label
+    return out
+
+
 def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule | None:
     data = drop_blank_validate_identity(data)
     schedules = _load_all()
     for i, s in enumerate(schedules):
         if s.id != schedule_id:
             continue
-        interval = data.get("interval", s.interval)
+        interval = resolve_machine_interval(data, s.interval)
+        data = {
+            key: value
+            for key, value in data.items()
+            if key not in {"interval_preset", "cadence_label"}
+        }
+        data["interval"] = interval
         cron = (data.get("cron", s.cron) or "").strip()
         tz = (data.get("timezone", s.timezone) or "UTC").strip() or "UTC"
         sync_mode = data.get("sync_mode", s.sync_mode) or "full_refresh_overwrite"
-        _validate_cadence(interval, cron, tz, sync_mode)
+        sync_mode = _validate_cadence(interval, cron, tz, sync_mode)
+        data = {**data, "sync_mode": sync_mode}
         merged = {**s.to_dict(), **data, "id": schedule_id}
         contract_id = (merged.get("contract_id") or "").strip()
         require_signed = bool(
@@ -994,6 +1148,12 @@ def delete_schedule(schedule_id: str) -> bool:
     return True
 
 
+# A running job document that has not been touched for this long is a dead
+# worker, not a long migration. Checkpoints rewrite ``updated_at``. Leaving
+# the claim held froze ``next_run_at`` in the past with no error.
+_RUNNING_SILENCE = timedelta(minutes=15)
+
+
 def _job_is_live(job_id: str) -> bool | None:
     """Whether the claimed job is still in flight. ``None`` when unknowable."""
     if not job_id:
@@ -1007,7 +1167,19 @@ def _job_is_live(job_id: str) -> bool | None:
         return None
     if not job:
         return False
-    return not is_terminal(job.get("status"))
+    if is_terminal(job.get("status")):
+        return False
+    status = str(job.get("status") or "").strip().lower()
+    if status == "running":
+        stamp = (
+            job.get("updated_at")
+            or job.get("heartbeat_at")
+            or job.get("last_progress_at")
+        )
+        seen = _parse_ts(stamp) if stamp else None
+        if seen is not None and datetime.now(timezone.utc) - seen > _RUNNING_SILENCE:
+            return False
+    return True
 
 
 def _is_running_stale(sched: PipelineSchedule) -> bool:
@@ -1030,14 +1202,71 @@ def _is_running_stale(sched: PipelineSchedule) -> bool:
     if live is True:
         return False
     if live is False:
-        # The run is over (or its job record is gone) but the claim was never
-        # cleared — a crashed or killed worker. Grace covers the window between
-        # job creation and the claim being written.
+        # The bound job already ended. Holding the claim for the grace window
+        # left next_run_at frozen and made Run now answer "already in progress"
+        # after a successful fire. Grace applies only before a job id exists,
+        # which is the gap between the claim and set_running_job.
+        if str(sched.running_job_id or "").strip():
+            return True
         return age > CLAIM_GRACE
     return age > CLAIM_MAX_RUNTIME
 
 
-def _claim_running_mongo(schedule_id: str, instance: str, now: str) -> PipelineSchedule | None:
+def _job_dispatch_state(job_id: str) -> str:
+    """``queued``, ``running``, ``terminal``, or ``unknown``.
+
+    A job that is still waiting for a worker is not a writer. It is kept:
+    cancelling it for a later slot drops a fire that has not read yet.
+    """
+    if not (job_id or "").strip():
+        return "unknown"
+    try:
+        from services.job_status import is_terminal
+
+        job = get_mongodb_service().get_job(job_id)
+    except (OSError, RuntimeError, ValueError, TypeError, ImportError):
+        return "unknown"
+    if not job:
+        return "terminal"
+    status = str(job.get("status") or "").strip().lower()
+    phase = str(job.get("phase") or "").strip().lower()
+    if is_terminal(status):
+        return "terminal"
+    if status in {"pending", "queued"} or phase in {"pending", "queued"}:
+        return "queued"
+    if status == "running":
+        return "running"
+    return "unknown"
+
+
+def release_superseded_queued_claim(
+    schedule_id: str, now: datetime | None = None
+) -> PipelineSchedule | None:
+    """Keep a queued schedule job. Do not cancel it for a later slot.
+
+    The job has not read the source yet, so it is not a stale snapshot.
+    Cancelling it while a large transfer still holds the workers drops the
+    fire: the replacement waits in the same queue and the next slot cancels
+    that one too. Missed slots are counted when this job finishes, and a
+    running writer is still one writer — the overrun is one catch-up.
+    """
+    del schedule_id, now
+    return None
+
+
+def release_all_superseded_queued_claims(now: datetime | None = None) -> int:
+    """Fleet form of :func:`release_superseded_queued_claim`. Never cancels."""
+    del now
+    return 0
+
+
+def _claim_running_mongo(
+    schedule_id: str,
+    instance: str,
+    now: str,
+    *,
+    next_run_at: str | None = None,
+) -> PipelineSchedule | None:
     """CAS the running flag on the per-schedule Mongo document."""
     svc = _mongo_backend()
     if not svc:
@@ -1057,6 +1286,7 @@ def _claim_running_mongo(schedule_id: str, instance: str, now: str) -> PipelineS
                 "running_instance": instance,
                 "running_started_at": now,
                 "running_job_id": "",
+                **({"next_run_at": next_run_at} if next_run_at else {}),
             }
         },
         return_document=True,
@@ -1087,7 +1317,18 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                 s.source_connector_id, s.dest_connector_id, exclude_id=s.id
             ):
                 return None
-            claimed = _claim_running_mongo(schedule_id, instance, now)
+            # One catch-up for a slot already in the past, then the next
+            # cadence boundary. Leaving next_run_at behind made every beat
+            # fire again (a resumed schedule ran three times in one window)
+            # and a crashed finalize left the schedule due forever.
+            nxt = _parse_ts(s.next_run_at)
+            current = _parse_ts(now) or datetime.now(timezone.utc)
+            advanced = s.next_run_at
+            if nxt is None or nxt <= current:
+                advanced = compute_next_run(
+                    s.interval, current, cron=s.cron, tz=s.timezone
+                )
+            claimed = _claim_running_mongo(schedule_id, instance, now, next_run_at=advanced)
             if claimed is not None:
                 return claimed
             updated = PipelineSchedule.from_dict({
@@ -1096,6 +1337,7 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                 "running_instance": instance,
                 "running_started_at": now,
                 "running_job_id": "",
+                "next_run_at": advanced,
             })
             schedules[i] = updated
             _save_all(schedules)
@@ -1153,9 +1395,20 @@ def mark_schedule_run(
     for i, s in enumerate(schedules):
         if s.id != schedule_id:
             continue
+        # A lost callback and the beat that notices the job ended can both
+        # arrive. Recording the same job twice advanced run_count and skipped
+        # a cron slot.
+        if job_id and s.last_job_id == job_id and not s.running:
+            return s
         missed = count_missed_windows(
             cron=s.cron, interval=s.interval, tz=s.timezone, next_run_at=s.next_run_at
         )
+        # Windows that elapsed while this run was busy are counted, not
+        # replayed. Pinning next_run to the completion instant left the
+        # schedule due at a time that is not a cadence boundary, and the
+        # following ticks never advanced (DEF-A-010). The run that just
+        # finished is the catch-up for the overdue slot.
+        next_at = compute_next_run(s.interval, _parse_ts(now), cron=s.cron, tz=s.timezone)
         history = list(s.run_history)
         if run_entry:
             entry = dict(run_entry)
@@ -1167,7 +1420,7 @@ def mark_schedule_run(
         payload = {
             **s.to_dict(),
             "last_run_at": now,
-            "next_run_at": compute_next_run(s.interval, _parse_ts(now), cron=s.cron, tz=s.timezone),
+            "next_run_at": next_at,
             "last_job_id": job_id,
             "last_status": status or s.last_status,
             "run_count": s.run_count + 1,
@@ -1188,6 +1441,65 @@ def mark_schedule_run(
         _save_all(schedules)
         return updated
     return None
+
+
+def _pinned_to_completion(sched: PipelineSchedule, *, now: datetime | None = None) -> bool:
+    """True when next_run was written as the completion instant and is now due.
+
+    A real cadence boundary is not equal to last_run. Interval schedules can
+    legally carry seconds, so the signal is next_run ≈ last_run, not "has seconds".
+    """
+    if sched.running:
+        return False
+    nxt = _parse_ts(sched.next_run_at)
+    last = _parse_ts(sched.last_run_at)
+    if nxt is None or last is None:
+        return False
+    if nxt.tzinfo is None:
+        nxt = nxt.replace(tzinfo=timezone.utc)
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    if abs((nxt - last).total_seconds()) > 2:
+        return False
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    return nxt <= current
+
+
+def unstick_completion_pinned_schedules(now: datetime | None = None) -> int:
+    """Advance schedules whose next run is stuck on a previous completion.
+
+    Does not start a load and does not replay the missed ticks. The next due
+    time becomes the next real cadence boundary from now, and the skipped
+    windows are added to the existing miss count.
+    """
+    current = now or datetime.now(timezone.utc)
+    schedules = _load_all()
+    changed = 0
+    for i, sched in enumerate(schedules):
+        if not _pinned_to_completion(sched, now=current):
+            continue
+        missed = count_missed_windows(
+            cron=sched.cron,
+            interval=sched.interval,
+            tz=sched.timezone,
+            next_run_at=sched.next_run_at,
+            now=current,
+        )
+        next_at = compute_next_run(
+            sched.interval, current, cron=sched.cron, tz=sched.timezone
+        )
+        schedules[i] = PipelineSchedule.from_dict({
+            **sched.to_dict(),
+            "next_run_at": next_at,
+            "missed_window_count": sched.missed_window_count + missed,
+            "last_missed_windows": missed,
+        })
+        changed += 1
+    if changed:
+        _save_all(schedules)
+    return changed
 
 
 def schedule_retry(
@@ -1304,27 +1616,71 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
     from services.schedule_mapping_contract import persisted_mapping_rows
 
     current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
     due: list[PipelineSchedule] = []
     for s in _load_all():
-        if not s.enabled:
-            continue
-        if not persisted_mapping_rows(s.mappings):
-            continue
-        if s.running and not _is_running_stale(s):
-            continue
-        if has_open_approval(s):
-            # A deterministic refusal waiting on a decision is not a cadence
-            # event: the same inputs would produce the same refusal, so running
-            # it again only buries the finding under identical failures.
-            continue
-        retry_at = _parse_ts(s.retry_at)
-        if retry_at is not None:
-            # A parked retry owns the schedule until it runs: the cadence must
-            # not start a fresh attempt on top of the one still owed.
-            if retry_at <= current:
+        try:
+            if not s.enabled:
+                continue
+            if not persisted_mapping_rows(s.mappings):
+                continue
+            if s.running and not _is_running_stale(s):
+                continue
+            if has_open_approval(s):
+                # A deterministic refusal waiting on a decision is not a cadence
+                # event: the same inputs would produce the same refusal, so running
+                # it again only buries the finding under identical failures.
+                continue
+            retry_at = _parse_ts(s.retry_at)
+            if retry_at is not None:
+                # A parked retry owns the schedule until it runs: the cadence must
+                # not start a fresh attempt on top of the one still owed.
+                if retry_at <= current:
+                    due.append(s)
+                continue
+            nxt = _parse_ts(s.next_run_at)
+            if nxt is None or nxt <= current:
                 due.append(s)
-            continue
-        nxt = _parse_ts(s.next_run_at)
-        if nxt is None or nxt <= current:
-            due.append(s)
+        except Exception:  # noqa: BLE001 — one document must not zero the beat
+            logging.getLogger(__name__).exception(
+                "Schedule %s skipped this beat; its due time could not be read",
+                getattr(s, "id", ""),
+            )
     return due
+
+
+def seconds_until_next_schedule(
+    now: datetime | None = None,
+    *,
+    cap: float = 60.0,
+) -> float:
+    """Seconds to sleep before the next enabled schedule is due.
+
+    The beat used to sleep a fixed 60s after every pass, so a schedule that
+    became due one second later waited almost a full minute (measured 25s,
+    then 62s). Sleep until the soonest ``next_run_at``, never longer than
+    ``cap``. An already-due schedule waits 1s so a document that fails to
+    advance ``next_run_at`` cannot busy-loop the process.
+    """
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    soonest: datetime | None = None
+    for s in _load_all():
+        try:
+            if not s.enabled:
+                continue
+            nxt = _parse_ts(getattr(s, "next_run_at", None))
+        except Exception:  # noqa: BLE001 — one document must not pin the sleep
+            continue
+        if nxt is None:
+            continue
+        if soonest is None or nxt < soonest:
+            soonest = nxt
+    if soonest is None:
+        return float(cap)
+    delta = (soonest - current).total_seconds()
+    if delta <= 0:
+        return 1.0
+    return float(min(cap, max(1.0, delta)))

@@ -71,6 +71,71 @@ def row_count_label(total_rows: int | None) -> str:
     return f"{int(total_rows):,}"
 
 
+def selected_contract_names(stream_contracts: list | None) -> list[str]:
+    """Selected stream names, in contract order, with blanks dropped."""
+    names: list[str] = []
+    for raw in stream_contracts or []:
+        if not isinstance(raw, dict) or raw.get("selected", True) is False:
+            continue
+        name = str(raw.get("name") or raw.get("stream") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def opening_analysis_message(stream_contracts: list | None = None) -> str:
+    """The pre-write peek is the restored endpoint when several tables are selected."""
+    if len(selected_contract_names(stream_contracts)) >= 2:
+        return "Analyzing the restored endpoint…"
+    return "Analyzing source table…"
+
+
+def opening_batch_message(
+    total_rows: int | None,
+    stream_contracts: list | None = None,
+) -> str:
+    """Row count on the opening write line.
+
+    For one table that count is the transfer. For several tables the peek is
+    the restored endpoint, and each table is written on its own afterwards.
+    """
+    label = row_count_label(total_rows)
+    count = len(selected_contract_names(stream_contracts))
+    if count >= 2:
+        return (
+            f"Streaming {label} rows on the restored endpoint, "
+            f"then each of {count} tables…"
+        )
+    return f"Streaming {label} rows in batches…"
+
+
+def batch_write_message(
+    chunk: int,
+    chunks: int,
+    rows: int,
+    *,
+    is_cdc: bool = False,
+    checkpoint: dict | None = None,
+    stream_contracts: list | None = None,
+) -> str:
+    """Name the table on a multi-table batch so identical counts stay distinct.
+
+    Two tables of 2 rows otherwise emit the same sentence. The event log keeps
+    a line only when the message changes, so the second table disappeared.
+    """
+    stream = ""
+    if isinstance(checkpoint, dict):
+        stream = str(checkpoint.get("cdc_stream") or "").strip()
+    multi = len(selected_contract_names(stream_contracts)) >= 2 and bool(stream)
+    if is_cdc:
+        base = f"CDC applied {int(rows):,} change(s)"
+    else:
+        base = f"Writing batch {int(chunk)}/{int(chunks)} ({int(rows):,} rows)"
+    if multi:
+        return f"{base} on {stream}…"
+    return f"{base}…"
+
+
 def schema_policy_implies_backfill(schema_policy: str | None) -> bool:
     """propagate_* schema policies require additive destination columns."""
     return (schema_policy or "").strip().lower() in {

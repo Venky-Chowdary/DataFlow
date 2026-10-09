@@ -271,12 +271,15 @@ def _endpoint_from_connector(conn: dict, table: str):
 
 def _normalize_sync_mode(sync_mode: str, primary_key: str) -> str:
     """Map the schedule's coarse sync_mode onto the engine's contract vocabulary."""
-    mode = (sync_mode or "full_refresh_overwrite").lower()
+    mode = (sync_mode or "full_refresh_overwrite").strip().lower().replace("-", "_").replace(" ", "_")
+    # Bare "incremental" is the schedule spelling. A primary key makes the
+    # write idempotent; without one the read stays append. Other tokens,
+    # including a stored incremental_upsert, go through the sync-mode SSOT.
     if mode == "incremental":
         return "incremental_deduped" if primary_key else "incremental_append"
-    if mode in ("scd2", "mirror"):
-        return mode
-    return mode
+    from services.sync_cursor import normalize_sync_mode
+
+    return normalize_sync_mode(mode)
 
 
 def build_schedule_request(sched, src: dict, dst: dict):
@@ -928,6 +931,8 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     sched = get_schedule(schedule_id)
     if not sched:
         return
+    if job_id and sched.last_job_id == job_id and not sched.running:
+        return
     job_doc = _job_doc(job_id)
     status = (job_doc or {}).get("status") or "failed"
     entry = _run_entry(job_id, status, attempt, started_at, job_doc)
@@ -1186,6 +1191,17 @@ def _dispatch_transfer(
         # approval on a job that never started.
         _record_authorization_use(schedule_id, rebind=authorized_drift)
     future = run_transfer_async(job_id, request)
+    # Claim-queue enqueue returns an already-completed future. Treating that
+    # as "the transfer finished" recorded the run while the job was still
+    # pending, or left the claim held when the callback raced the worker.
+    # The beat finalizes once the job document is actually terminal.
+    if future.done():
+        logger.info(
+            "Schedule %s enqueued job %s; cadence records it when the job ends",
+            schedule_id,
+            job_id,
+        )
+        return job_id
     future.add_done_callback(
         lambda _f, sid=schedule_id, jid=job_id, a=attempt, ts=started_at: _finalize_run(sid, jid, a, ts)
     )
@@ -1227,6 +1243,23 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
             )
         return None
 
+    # A finished job can still hold the claim when its callback never ran.
+    # Record it before Run now, or the operator is told a run is in progress
+    # after the transfer already ended.
+    held = str(sched.running_job_id or "").strip()
+    if sched.running and held:
+        from services.schedule_store import _job_dispatch_state, _parse_ts
+
+        if _job_dispatch_state(held) == "terminal":
+            started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
+            _finalize_run(
+                schedule_id,
+                held,
+                sched.retry_attempt if sched.retry_at else 0,
+                started,
+            )
+            sched = get_schedule(schedule_id) or sched
+
     # Concurrency guard: refuse to start when this schedule, another writer
     # on the same dest object, or the same source→dest pair is already live.
     if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
@@ -1259,9 +1292,74 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
     return job_id
 
 
+def _release_superseded_queued_claims() -> None:
+    """Keep a queued schedule job. Do not cancel it for a later slot.
+
+    The job has not read the source yet. Cancelling it while a large transfer
+    still holds the workers drops the fire, and the next slot cancels the
+    replacement too. Missed slots are counted when the job finishes. A running
+    writer stays one writer.
+    """
+    from services.schedule_store import release_all_superseded_queued_claims
+
+    release_all_superseded_queued_claims()
+
+
+def record_schedule_for_finished_job(job_id: str) -> None:
+    """Count a manual or claimed run when its job actually ends.
+
+    The claim-queue path does not attach a completion callback, and a
+    restart used to clear ``running`` without calling ``mark_schedule_run``.
+    ``run_count`` then stayed 0 after a run the operator could see in Jobs.
+    """
+    if not str(job_id or "").strip():
+        return
+    from services.schedule_store import _load_all, _parse_ts
+
+    for sched in _load_all():
+        if str(sched.running_job_id or "") != str(job_id):
+            continue
+        if not sched.running:
+            return
+        started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
+        _finalize_run(
+            sched.id,
+            job_id,
+            sched.retry_attempt if sched.retry_at else 0,
+            started,
+        )
+        return
+
+
+def _finalize_finished_schedule_claims() -> None:
+    """Record runs whose job ended without the in-process callback.
+
+    A worker restart, a claim-queue enqueue, or a callback that never ran
+    leaves ``running`` set and ``next_run_at`` on the slot that already fired.
+    The next beat used to skip that schedule forever, and Run now answered
+    that a run was still in progress.
+    """
+    from services.schedule_store import _load_all, _parse_ts
+
+    for sched in _load_all():
+        if not sched.running or not str(sched.running_job_id or "").strip():
+            continue
+        from services.schedule_store import _job_is_live
+
+        if _job_is_live(sched.running_job_id) is not False:
+            continue
+        started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
+        _finalize_run(
+            sched.id,
+            sched.running_job_id,
+            sched.retry_attempt if sched.retry_at else 0,
+            started,
+        )
+
+
 def _run_due_schedules() -> int:
     if not _acquire_scheduler_lock():
-        logger.debug("Scheduler lock held by another instance; skipping this beat")
+        logger.warning("Scheduler lock held by another instance; skipping this beat")
         return 0
     try:
         from services.schedule_approvals import release_same_declaration_source_drift
@@ -1274,6 +1372,11 @@ def _run_due_schedules() -> int:
         # Dest-exists after the first create-new write is not a plan change.
         # Release only when the operator Map hash still matches.
         release_create_new_dest_exists_false_refuse()
+        _release_superseded_queued_claims()
+        _finalize_finished_schedule_claims()
+        from services.schedule_store import unstick_completion_pinned_schedules
+
+        unstick_completion_pinned_schedules()
         started = 0
         for sched in due_schedules():
             try:
@@ -1292,18 +1395,44 @@ def _clear_stale_running_schedules() -> None:
         PipelineSchedule,
         _is_running_stale,
         _load_all,
+        _parse_ts,
         _save_all,
+        compute_next_run,
     )
 
     schedules = _load_all()
     changed = False
     for i, s in enumerate(schedules):
+        if s.running and str(s.running_job_id or "").strip():
+            from services.schedule_store import _job_dispatch_state, get_schedule
+
+            if _job_dispatch_state(s.running_job_id) == "terminal":
+                started = _parse_ts(s.running_started_at) or datetime.now(timezone.utc)
+                _finalize_run(
+                    s.id,
+                    s.running_job_id,
+                    s.retry_attempt if s.retry_at else 0,
+                    started,
+                )
+                fresh = get_schedule(s.id)
+                if fresh is not None:
+                    schedules[i] = fresh
+                continue
         if s.running and _is_running_stale(s):
+            current = datetime.now(timezone.utc)
+            nxt = _parse_ts(s.next_run_at)
+            advanced = s.next_run_at
+            if nxt is None or nxt <= current:
+                advanced = compute_next_run(
+                    s.interval, current, cron=s.cron, tz=s.timezone
+                )
             schedules[i] = PipelineSchedule.from_dict({
                 **s.to_dict(),
                 "running": False,
                 "running_instance": "",
                 "running_started_at": None,
+                "running_job_id": "",
+                "next_run_at": advanced,
             })
             changed = True
     if changed:
@@ -1313,7 +1442,14 @@ def _clear_stale_running_schedules() -> None:
 async def run_schedule_loop() -> None:
     """Poll for due schedules and enqueue transfers."""
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
-    await asyncio.get_running_loop().run_in_executor(_executor, _clear_stale_running_schedules)
+    try:
+        await asyncio.get_running_loop().run_in_executor(
+            _executor, _clear_stale_running_schedules
+        )
+    except Exception:  # noqa: BLE001 — a bad document must not kill the loop
+        logger.exception(
+            "Startup schedule reclaim failed; the beat will continue"
+        )
     try:
         from services.schedule_store import import_file_schedules_into_mongo
 
@@ -1331,4 +1467,16 @@ async def run_schedule_loop() -> None:
                 logger.info("Scheduler started %s pipeline run(s)", count)
         except Exception:
             logger.exception("Schedule loop error")
-        await asyncio.sleep(CHECK_INTERVAL_SECONDS)
+        wait = float(CHECK_INTERVAL_SECONDS)
+        try:
+            from services.schedule_store import seconds_until_next_schedule
+
+            wait = float(
+                await asyncio.get_running_loop().run_in_executor(
+                    _executor, seconds_until_next_schedule
+                )
+            )
+        except Exception:  # noqa: BLE001 — a bad store falls back to the poll cap
+            logger.exception("Schedule sleep horizon failed; using the poll cap")
+            wait = float(CHECK_INTERVAL_SECONDS)
+        await asyncio.sleep(wait)

@@ -37,6 +37,7 @@ from services.cdc_exactly_once import (  # noqa: E402
     REASON_BUNDLE_LSN,
     REASON_CHECKSUM,
     REASON_DEST_NOT_TXN,
+    REASON_NO_LSN,
     REASON_NOT_CDC,
     REASON_OK,
     REASON_STALE_REPLAY,
@@ -105,6 +106,31 @@ def test_platform_never_claims_all_cdc_is_exactly_once() -> None:
         assert_delivery_guarantee_allowed("at_most_once")
 
 
+def test_unpinned_batch_without_a_log_position_stays_at_least_once() -> None:
+    from services.cdc_exactly_once import (
+        ExactlyOnceRouteError,
+        delivery_for_batch,
+        operator_pinned_delivery,
+    )
+
+    snapshot = {"phase": "snapshot", "table": "orders", "offset": 1}
+    assert operator_pinned_delivery("auto") is False
+    assert operator_pinned_delivery("") is False
+    assert operator_pinned_delivery("exactly_once") is True
+    assert delivery_for_batch("exactly_once", snapshot, pinned=False) == "at_least_once"
+    assert delivery_for_batch("exactly_once", None, pinned=False) == "at_least_once"
+    assert (
+        delivery_for_batch(
+            "exactly_once",
+            {"file": "mysql-bin.000001", "pos": 4, "gtid": "uuid:1-9"},
+            pinned=False,
+        )
+        == "exactly_once"
+    )
+    with pytest.raises(ExactlyOnceRouteError, match="durable LSN"):
+        delivery_for_batch("exactly_once", snapshot, pinned=True)
+
+
 def test_classify_fail_closed_ineligible_routes() -> None:
     csv = classify_exactly_once_route(
         dest_type="csv", sync_mode="cdc", has_primary_key=True
@@ -153,6 +179,94 @@ def test_classify_fail_closed_ineligible_routes() -> None:
     assert duck.wired is True
 
 
+def test_auto_selects_exactly_once_only_when_the_route_can_commit() -> None:
+    from services.cdc_exactly_once import select_route_delivery
+
+    assert (
+        select_route_delivery(
+            "auto",
+            sync_mode="cdc",
+            dest_type="postgresql",
+            has_primary_key=True,
+        )
+        == "exactly_once"
+    )
+    assert (
+        select_route_delivery(
+            None,
+            sync_mode="cdc",
+            dest_type="csv",
+            has_primary_key=True,
+        )
+        == "at_least_once"
+    )
+    assert (
+        select_route_delivery(
+            "at_least_once",
+            sync_mode="cdc",
+            dest_type="postgresql",
+            has_primary_key=True,
+        )
+        == "at_least_once"
+    )
+    assert (
+        select_route_delivery(
+            "auto",
+            sync_mode="full_refresh_overwrite",
+            dest_type="postgresql",
+            has_primary_key=True,
+        )
+        == "at_least_once"
+    )
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        select_route_delivery(
+            "exactly_once",
+            sync_mode="cdc",
+            dest_type="csv",
+            has_primary_key=True,
+        )
+    assert exc.value.reason == REASON_DEST_NOT_TXN
+
+
+def test_auto_refuses_exactly_once_without_a_log_position() -> None:
+    from services.cdc_exactly_once import route_declares_log_position, select_route_delivery
+
+    timestamp = [{
+        "name": "orders",
+        "selected": True,
+        "primary_key": "id",
+        "cursor_semantics": "modification_timestamp",
+    }]
+    log = [{
+        "name": "orders",
+        "selected": True,
+        "primary_key": "id",
+        "cursor_semantics": "cdc_position",
+    }]
+    assert route_declares_log_position(timestamp) is False
+    assert route_declares_log_position(log) is True
+    assert route_declares_log_position([]) is False
+    assert (
+        select_route_delivery(
+            "auto",
+            sync_mode="cdc",
+            dest_type="postgresql",
+            has_primary_key=True,
+            has_lsn_column=False,
+        )
+        == "at_least_once"
+    )
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        select_route_delivery(
+            "exactly_once",
+            sync_mode="cdc",
+            dest_type="postgresql",
+            has_primary_key=True,
+            has_lsn_column=False,
+        )
+    assert exc.value.reason == REASON_NO_LSN
+
+
 def test_assert_requested_refuses_ineligible_exactly_once() -> None:
     assert (
         assert_requested_cdc_delivery("at_least_once", sync_mode="cdc", dest_type="csv")
@@ -197,6 +311,20 @@ def test_dest_authoritative_resume_fast_forwards_job_behind() -> None:
     assert proof["clamped"] is True
     assert proof["reason"] == "job_behind_fast_forward_to_dest"
     assert resume == "0/300"
+
+
+def test_open_keeps_dest_fence_when_incoming_is_unleased() -> None:
+    """A second CDC run opens before the lease exists (incoming fence 0).
+
+    The dest already stored the previous lease generation. Open must keep
+    that fence. Apply still refuses a positive generation below it.
+    """
+    dest = DestWmView(committed_lsn="0/20", fence_epoch=4, apply_seq=2)
+    opened = plan_open_session(dest=dest, incoming_fence=0, job_resume={"lsn": "0/20"})
+    assert opened.fence_epoch == 4
+    assert opened.fence_raised is False
+    with pytest.raises(ExactlyOnceRouteError):
+        plan_open_session(dest=dest, incoming_fence=3, job_resume={"lsn": "0/20"})
 
 
 def test_stale_writer_fence_refuses_zombie() -> None:
@@ -371,6 +499,39 @@ def test_bundle_coordinator_refuses_member_behind() -> None:
     assert_bundle_members_reached(["0/10", "0/20"], "0/10")
 
 
+def test_heartbeat_keeps_the_committed_payload_checksum() -> None:
+    from services.cdc_exactly_once import committed_apply_checksum, is_position_heartbeat
+
+    heartbeat = ChangeBatch(resume_token={"file": "mysql-bin.000003", "pos": 4})
+    rows = ChangeBatch(updates=[{"id": "1", "qty": "3"}])
+    assert is_position_heartbeat(heartbeat) is True
+    assert is_position_heartbeat(rows) is False
+    assert is_position_heartbeat(None) is False
+    assert committed_apply_checksum("empty", "payload", heartbeat) == "payload"
+    assert committed_apply_checksum("next", "payload", rows) == "next"
+    assert committed_apply_checksum("alone", "", None) == "alone"
+
+
+def test_decide_idle_heartbeat_at_committed_lsn_is_not_a_conflict() -> None:
+    """MySQL end-of-poll yields the committed file:pos again with no rows."""
+    action, _fence = decide_eos_apply(
+        incoming_lsn="mysql-bin.000003:000000000000001234",
+        dest_lsn="mysql-bin.000003:000000000000001234",
+        incoming_phase="streaming",
+        dest_phase="streaming",
+        incoming_checksum="empty-poll",
+        dest_checksum="committed-update",
+        change=ChangeBatch(
+            resume_token={
+                "file": "mysql-bin.000003",
+                "pos": 1234,
+                "phase": "streaming",
+            }
+        ),
+    )
+    assert action == "already_committed"
+
+
 def test_decide_same_lsn_payload_mismatch_refuses() -> None:
     with pytest.raises(ExactlyOnceRouteError) as exc:
         decide_eos_apply(
@@ -382,6 +543,49 @@ def test_decide_same_lsn_payload_mismatch_refuses() -> None:
             dest_checksum="bbb",
         )
     assert exc.value.reason == REASON_CHECKSUM
+
+
+def test_snapshot_and_binlog_spellings_of_one_row_share_a_checksum() -> None:
+    """E3-008: a restart re-read the same LSN as text and refused the snapshot image.
+
+    Hashes stored by build 6a2bae9aaa00 were computed before this canonical
+    form. A retest on the new build starts from a fresh watermark.
+    """
+    from datetime import datetime
+    from decimal import Decimal
+
+    from services.cdc_exactly_once import batch_apply_checksum
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    def _sum(row: dict) -> str:
+        return batch_apply_checksum(
+            ChangeBatch(inserts=[row]),
+            incoming_lsn="mysql-bin.000001:100",
+            pk_cols=["id"],
+        )
+
+    snapshot = _sum(
+        {
+            "id": "1",
+            "updated_at": datetime(2024, 1, 1),
+            "note": SQL_NULL_SENTINEL,
+            "qty": Decimal("1.50"),
+        }
+    )
+    binlog = _sum(
+        {
+            "id": "1",
+            "updated_at": "2024-01-01 00:00:00",
+            "note": None,
+            "qty": "1.5",
+        }
+    )
+    assert snapshot == binlog
+    assert _sum({"id": "1", "qty": "9"}) != snapshot
+    assert _sum({"id": "1", "flag": True}) != _sum({"id": "1", "flag": 1})
+    assert _sum({"id": "1", "qty": 3, "_df_lsn": "a"}) == _sum(
+        {"id": "1", "qty": 3, "_df_lsn": "b"}
+    )
 
 
 def test_load_reduce_keeps_dest_columns_absent_from_cdc() -> None:
@@ -887,6 +1091,52 @@ def test_sqlite_eos_checksum_mismatch_refuses_overwrite() -> None:
         assert v == "first"
 
 
+def test_sqlite_eos_idle_position_after_commit_keeps_the_row() -> None:
+    """The poll after a committed update carries the same LSN and no rows."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_idle.db")
+        dest_cfg = {"database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "qty", "target": "qty", "confidence": 1.0},
+        ]
+        types = {"id": "string", "qty": "string"}
+        token = {"file": "mysql-bin.000003", "pos": 1234, "phase": "streaming"}
+        _rows, _ck, landed, _deleted = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=ChangeBatch(updates=[{"id": "1", "qty": "3"}], resume_token=token),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "qty"],
+            pk_target_cols=["id"],
+            cursor_key="idle|orders",
+        )
+        committed = landed["eos_apply_checksum"]
+        assert committed
+        rows, _ck, summary, _deleted = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=ChangeBatch(resume_token=token),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "qty"],
+            pk_target_cols=["id"],
+            cursor_key="idle|orders",
+        )
+        assert summary["eos_already_committed"] is True
+        assert rows == 0
+        assert dest_watermark_view(dest_cfg, "idle|orders").apply_checksum == committed
+        conn = sqlite3.connect(path)
+        try:
+            qty = conn.execute("SELECT qty FROM orders WHERE id = ?", ("1",)).fetchone()[0]
+        finally:
+            conn.close()
+        assert qty == "3"
+
+
 def test_sqlite_eos_snapshot_stream_handoff_no_double_write() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = str(Path(tmp) / "eos_ho.db")
@@ -911,7 +1161,9 @@ def test_sqlite_eos_snapshot_stream_handoff_no_double_write() -> None:
             pk_target_cols=["id"],
             cursor_key="ho|orders",
         )
-        assert dest_watermark_view(dest_cfg, "ho|orders").phase == "snapshot"
+        before = dest_watermark_view(dest_cfg, "ho|orders")
+        assert before.phase == "snapshot"
+        assert before.apply_checksum
         stream = ChangeBatch(
             resume_token={"lsn": "0/90", "phase": "streaming"},
         )
@@ -932,6 +1184,7 @@ def test_sqlite_eos_snapshot_stream_handoff_no_double_write() -> None:
         view = dest_watermark_view(dest_cfg, "ho|orders")
         assert view.phase == "streaming"
         assert view.committed_lsn == "0/90"
+        assert view.apply_checksum == before.apply_checksum
 
 
 def _bundle_stream(table: str, key: str, change: ChangeBatch) -> EosBundleStream:

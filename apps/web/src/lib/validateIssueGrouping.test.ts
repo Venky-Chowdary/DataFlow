@@ -14,6 +14,8 @@ import {
   isDeclaredFidelityCollapse,
   isEncodingIntegritySignal,
   isIsoNormalizeCoercion,
+  coercionCount,
+  coercionSampleFailures,
   partitionCoercionColumns,
   partitionExplainIssues,
   remapToTypeForMismatch,
@@ -186,6 +188,27 @@ describe("ISO normalize grouping", () => {
     assert.equal(parts.blockers.length, 1);
     assert.equal(parts.warnings.length, 0);
     assert.ok(parts.isoGroup);
+  });
+
+  it("treats a missing coercion sample_failures list as empty", () => {
+    const partial = {
+      source: "status",
+      target: "status",
+      source_type: "TEXT",
+      target_type: "INTEGER",
+      severity: "warn" as const,
+    };
+    assert.deepEqual(coercionSampleFailures(partial), []);
+    assert.deepEqual(coercionSampleFailures({ sample_failures: null }), []);
+    assert.equal(coercionSampleFailures({
+      sample_failures: [{ row: 2, value: "x", reason: "not an integer" }],
+    }).length, 1);
+    assert.equal(coercionCount(undefined), 0);
+    assert.equal(coercionCount(null), 0);
+    assert.equal(coercionCount(Number.NaN), 0);
+    assert.equal(coercionCount(4), 4);
+    const { otherActionable } = partitionCoercionColumns([partial as never]);
+    assert.equal(otherActionable.length, 1);
   });
 
   it("partitions coercion warn-normalize rows out of actionable drama", () => {

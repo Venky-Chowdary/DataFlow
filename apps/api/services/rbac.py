@@ -190,6 +190,7 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("POST", "/api/v1/shape/profile", Permission.JOB_READ),
     ("*", "/api/v1/shape/", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/run", Permission.JOB_RUN),
+    ("POST", "/api/v1/transfer/rules/import", Permission.JOB_PLAN),
     ("*", "/api/v1/transfer/plans/", Permission.JOB_PLAN),
     ("GET", "/api/v1/transfer/", Permission.JOB_READ),
     # Reading a schedule is schedule.read — the permission every role already

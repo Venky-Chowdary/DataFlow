@@ -107,8 +107,22 @@ def _delete_key(client, bucket: str, key: str) -> None:
 
 
 def test_sqlite_s3_csv_wire():
-    assert s3_csv_cell(None) == "\\N"
+    """Operator CSV writes NULL as an empty field and booleans as true/false.
+
+    A file that already contains the PostgreSQL COPY token ``\\N`` still
+    reads as NULL. A caller that passes that token as a cell keeps it.
+    """
+    assert s3_csv_cell(None) != "\\N"
     assert s3_csv_cell("") == ""
+    assert s3_csv_cell(True) == "true"
+    assert s3_csv_cell(False) == "false"
+    assert s3_format_delimited_row(
+        ["id", s3_csv_cell(None), s3_csv_cell("")], ","
+    ) == 'id,,""'
+    assert "\\N" not in s3_format_delimited_row(
+        ["id", s3_csv_cell(None), s3_csv_cell(True)], ","
+    )
+    assert s3_format_delimited_row(["id", s3_csv_cell(True), s3_csv_cell(False)], ",") == "id,true,false"
     assert s3_parse_delimited_cell("\\N") is None
     assert s3_parse_delimited_cell("") == ""
     assert s3_format_delimited_row(["id", "\\N", ""], ",") == 'id,\\N,""'
@@ -217,8 +231,9 @@ def test_live_sqlite_s3_empty_string_and_null_preserved(tmp_path):
         assert result.source_rows == 3
         assert _dest_count(bucket, dest) == 3
         body = client.get_object(Bucket=bucket, Key=dest)["Body"].read().decode("utf-8")
-        assert "\\N" in body
+        assert "\\N" not in body
         assert '""' in body
+        assert any(line.endswith(",") or ",," in line for line in body.splitlines())
     finally:
         _delete_key(client, bucket, dest)
 

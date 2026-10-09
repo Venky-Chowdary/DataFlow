@@ -1865,6 +1865,9 @@ def write_mapped_rows(
                             mappings=mappings,
                         )
                         written += len(finished.dense_rows)
+                    write_acc.note_collapsed_duplicates(
+                        finished.collapsed_duplicate_rows
+                    )
                     write_acc.add_accepted(finished.dense_rows)
                     chunk_idx += 1
                     if on_checkpoint:
@@ -1878,6 +1881,7 @@ def write_mapped_rows(
             rejected_details,
             policy,
             source_row_count=source_row_count or None,
+            collapsed_duplicates=write_acc.collapsed_duplicate_rows,
         )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         _final_abort = reject_on_strict_policy(policy, rejected_details, "Snowflake")

@@ -142,7 +142,12 @@ def effective_source_type(source_type: str, transform: str | None) -> str:
     decision that asks "is this zoneless?" has to read it the same way, or the
     declaration changes the written value without changing the verdict — the
     worst of both, a transfer still blocked for a problem it no longer has.
+
+    The zone is all the declaration supplies. The column's fractional digits
+    are kept — a bare ``TIMESTAMPTZ`` read as "no precision" and passed a
+    microsecond column onto a millisecond carrier that truncated it.
     """
+    from services.document_instant import source_fractional_digits
     from services.transform_engine import ASSUME_TIMEZONE_PREFIX
     from services.type_system import datetime_timezone_polarity
 
@@ -153,7 +158,8 @@ def effective_source_type(source_type: str, transform: str | None) -> str:
         return source_type
     if datetime_timezone_polarity(source_type) != "ntz":
         return source_type
-    return "TIMESTAMPTZ"
+    digits = source_fractional_digits(source_type)
+    return f"TIMESTAMPTZ({digits})" if digits is not None else "TIMESTAMPTZ"
 
 
 def declared_source_column_types(
@@ -468,6 +474,28 @@ def mysql_timestamp_instant_wire(value: Any) -> Any:
         if parsed is not None:
             return parsed.replace(tzinfo=timezone.utc)
     return value
+
+
+def mysql_catalog_instant_sample(value: Any, source_type: str) -> Any:
+    """Naive digits of a MySQL TIMESTAMP column, as the reader would emit them.
+
+    The session is pinned to UTC, so those digits are the instant. Validate
+    used to refuse them until the operator set ``source_timezone``, and that
+    declaration also rewrote every DATETIME column. Only a catalog instant
+    is wired. A wall-clock DATETIME is returned unchanged.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.source_engine_scope import active_source_engine
+    from services.type_system import datetime_timezone_polarity
+
+    if _normalize_dest_db(active_source_engine()) != "mysql":
+        return value
+    if datetime_timezone_polarity(source_type) not in {"tz", "ltz"}:
+        return value
+    wired = mysql_timestamp_instant_wire(value)
+    if not isinstance(wired, datetime):
+        return value
+    return wired.isoformat()
 
 
 def is_mysql_timestamp_data_type(data_type: str) -> bool:

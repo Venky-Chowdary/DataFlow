@@ -139,8 +139,8 @@ def test_mysql_parameterized_timestamp_is_a_native_dest_carrier():
     assert materialize_dest_ddl("mysql", "TIMESTAMP(6)") == "TIMESTAMP(6)"
     # The live catalog reports lower case; that is the same physical column.
     assert materialize_dest_ddl("mysql", "timestamp(6)") == "timestamp(6)"
-    # A TZ-aware source still reaches that carrier through Map.
-    assert materialize_dest_ddl("mysql", "TIMESTAMPTZ") == "TIMESTAMP(6)"
+    # A cross-engine TZ-aware source lands on DATETIME(6), not the 2038 cap.
+    assert materialize_dest_ddl("mysql", "TIMESTAMPTZ") == "DATETIME(6)"
 
 
 def test_snowflake_timestamp_becomes_ntz_polarity():

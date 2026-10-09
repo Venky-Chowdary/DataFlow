@@ -20,30 +20,31 @@ import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
-import { gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch } from "./transfer/gate8Status";
+import { gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, isGate8LastStream, presentMultiStreamGate8 } from "./transfer/gate8Status";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
 import { formatProofScope, readGate8Population, readJobLineage } from "../lib/gate8Population";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { ringDasharray } from "../lib/progressRing";
+import { earliestJobStartMs, jobAverageRowsPerSecond, publishedEngineElapsedSeconds, theaterElapsedMs, theaterProgressPct } from "../lib/jobTheaterProgress";
+import { formatSeconds } from "../lib/phaseProfile";
 import { contractIdFromBreakerFailure } from "../lib/contractBreakerUi";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
-import { mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
+import { isTerminalJobLogLine, mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
+import { jobEndpointLabels, presentStoredEventLog, presentStoredExplanation, readCoercedNullRows, readForeignKeyCarry, readJobStreams, readRejectedDetails, readRejectedRows, readWriterWarnings } from "../lib/jobEvidence";
+import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
+import { RunCarryNotes } from "./jobs/RunCarryNotes";
+import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
 import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
-import {
-  earliestJobStartMs,
-  jobAverageRowsPerSecond,
-  theaterProgressPct,
-} from "../lib/jobTheaterProgress";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -180,15 +181,23 @@ export function JobTheater({
   const [resuming, setResuming] = useState(false);
   const startRef = useRef<number>(Date.now());
   const doneRef = useRef(false);
+  const completedLoggedRef = useRef(false);
   const logSeqRef = useRef(0);
   const rateSamplesRef = useRef<{ t: number; rows: number }[]>([]);
   const prevRef = useRef<{ message?: string; phase?: string; chunk?: number; loggedRows: number }>({
     loggedRows: 0,
   });
+  const onCompleteRef = useRef(onComplete);
+  const onFailedRef = useRef(onFailed);
+  const onCancelledRef = useRef(onCancelled);
+  onCompleteRef.current = onComplete;
+  onFailedRef.current = onFailed;
+  onCancelledRef.current = onCancelled;
 
+  const routeLabels = jobEndpointLabels(job, { source: sourceLabel, dest: destLabel });
   useEffect(() => {
     setActiveData((prev) => ({
-      name: prev?.name || sourceLabel || "transfer",
+      name: prev?.name || routeLabels.source || "transfer",
       filename: prev?.filename,
       columns: prev?.columns || [],
       row_count: job?.records_processed ?? prev?.row_count ?? 0,
@@ -197,14 +206,15 @@ export function JobTheater({
       preflight_run_id: preflight?.run_id || prev?.preflight_run_id,
       job_id: jobId,
       validation_status: job?.status || prev?.validation_status,
-      route: `${sourceLabel || "source"} → ${destLabel || "destination"}`,
+      route: `${routeLabels.source} → ${routeLabels.dest}`,
       blockers: job?.error ? [job.error] : prev?.blockers,
     }));
-  }, [destLabel, job?.error, job?.records_processed, job?.status, jobId, preflight?.run_id, setActiveData, sourceLabel]);
+  }, [job?.error, job?.records_processed, job?.status, jobId, preflight?.run_id, routeLabels.dest, routeLabels.source, setActiveData]);
 
   useEffect(() => {
     startRef.current = Date.now();
     doneRef.current = false;
+    completedLoggedRef.current = false;
     prevRef.current = { loggedRows: 0 };
     logSeqRef.current = 0;
     rateSamplesRef.current = [];
@@ -218,6 +228,9 @@ export function JobTheater({
       });
     };
     const persisted = readJobEventLog(jobId);
+    const alreadyTerminal = persisted.some(isTerminalJobLogLine);
+    doneRef.current = alreadyTerminal;
+    completedLoggedRef.current = alreadyTerminal;
     const bootText = `${new Date().toLocaleTimeString()} — Connecting to live job stream…`;
     const initial: LiveLogEntry[] = persisted.length
       ? persisted.map((text) => ({ id: ++logSeqRef.current, text }))
@@ -229,15 +242,15 @@ export function JobTheater({
       (update) => {
         const prev = prevRef.current;
 
-        if (update.phase && update.phase !== prev.phase) {
+        if (!doneRef.current && update.phase && update.phase !== prev.phase) {
           append(`Entered ${update.phase} phase`);
           prev.phase = update.phase;
         }
-        if (update.message && update.message !== prev.message) {
+        if (!doneRef.current && update.message && update.message !== prev.message) {
           append(update.message);
           prev.message = update.message;
         }
-        if (update.chunk_current != null && update.chunk_current !== prev.chunk) {
+        if (!doneRef.current && update.chunk_current != null && update.chunk_current !== prev.chunk) {
           const totalChunks = update.chunk_total ?? 0;
           // High batch counts (proxy loads) — don't spam every chunk line.
           const every = totalChunks > 80 ? 10 : totalChunks > 30 ? 5 : 1;
@@ -256,13 +269,13 @@ export function JobTheater({
         const processed = update.records_processed ?? 0;
         // Log a row milestone at least every 10k rows so the feed keeps moving
         // even when the backend only streams counters.
-        if (processed - prev.loggedRows >= 10000) {
+        if (!doneRef.current && processed - prev.loggedRows >= 10000) {
           prev.loggedRows = processed;
           append(`${processed.toLocaleString()} rows processed`);
         }
 
         setJob(update);
-        if (update.event_log?.length) {
+        if (!doneRef.current && update.event_log?.length) {
           setLog((current) => {
             const merged = mergeEventLogLines(
               current.map((e) => e.text),
@@ -302,34 +315,45 @@ export function JobTheater({
         } else if (averageRps > 0) {
           setThroughput(averageRps);
         }
-        if (!doneRef.current && isJobSuccess(update.status)) {
+        if (isJobSuccess(update.status)) {
+          const first = !doneRef.current;
           doneRef.current = true;
-          const quarantine = update.status === "completed_with_quarantine";
-          append(
-            quarantine
-              ? `Job completed with quarantine — ${conservationCompleteCopy(update, { quarantine: true })}`
-              : `Job completed — ${conservationCompleteCopy(update)}`,
-          );
-          onComplete?.(update);
-        }
-        if (!doneRef.current && update.status === "failed") {
+          if (!completedLoggedRef.current) {
+            completedLoggedRef.current = true;
+            const quarantine = update.status === "completed_with_quarantine";
+            append(
+              quarantine
+                ? `Job completed with quarantine — ${conservationCompleteCopy(update, { quarantine: true })}`
+                : `Job completed — ${conservationCompleteCopy(update)}`,
+            );
+          }
+          if (first) onCompleteRef.current?.(update);
+        } else if (update.status === "failed") {
+          const first = !doneRef.current;
           doneRef.current = true;
-          append(`Job failed${update.error ? ` — ${update.error}` : ""}`);
-          onFailed?.(update);
-        }
-        if (!doneRef.current && update.status === "cancelled") {
+          if (!completedLoggedRef.current) {
+            completedLoggedRef.current = true;
+            append(`Job failed${update.error ? ` — ${update.error}` : ""}`);
+          }
+          if (first) onFailedRef.current?.(update);
+        } else if (update.status === "cancelled") {
+          const first = !doneRef.current;
           doneRef.current = true;
-          append("Job cancelled by user");
-          onCancelled?.(update);
+          if (!completedLoggedRef.current) {
+            completedLoggedRef.current = true;
+            append("Job cancelled by user");
+          }
+          if (first) onCancelledRef.current?.(update);
         }
       },
       () => {
+        if (doneRef.current) return;
         append("Live stream interrupted — connection lost");
         setJob((j) => (j && !isJobTerminal(j.status) ? { ...j, status: "failed", progress_pct: j.progress_pct ?? 0 } : j));
       },
     );
     return stop;
-  }, [jobId, onComplete, onFailed, onCancelled]);
+  }, [jobId]);
 
   const handleCancel = async () => {
     if (cancelling || doneRef.current) return;
@@ -453,6 +477,7 @@ export function JobTheaterView({
   onOpenJob,
 }: JobTheaterViewProps) {
   const { toast } = useToast();
+  const routeLabels = jobEndpointLabels(job, { source: sourceLabel, dest: destLabel });
   const total = job.total_rows ?? 0;
   const processed = job.records_processed ?? 0;
   const destMetric = destHeadline(job);
@@ -463,12 +488,21 @@ export function JobTheaterView({
   const isComplete = isJobSuccess(job.status);
   const isQuarantine = job.status === "completed_with_quarantine";
   const isRunning = !isFailed && !isComplete && !isCancelled;
+  const gate8View = presentMultiStreamGate8(job.reconciliation, job.destination_summary);
   const population = readGate8Population({
     row_accounting: job.row_accounting,
-    reconciliation: job.reconciliation,
+    reconciliation: gate8View ?? job.reconciliation,
     preflight,
   });
-  const lineage = useMemo(() => readJobLineage(job.lineage_events), [job.lineage_events]);
+  const lastStreamPopulation = isGate8LastStream(gate8View);
+  const lineage = useMemo(
+    () => readJobLineage(job.lineage_events, { checksumScope: gate8View?.checksum_scope }),
+    [job.lineage_events, gate8View?.checksum_scope],
+  );
+  const presentedLog = useMemo(() => {
+    const texts = presentStoredEventLog(log.map((entry) => entry.text), job);
+    return texts.map((text, i) => ({ id: log[i]?.id ?? i + 1, text }));
+  }, [log, job]);
   const reconciling = isRunning && isReconcilePhase(job);
   const currentPhase = reconciling
     ? PHASES.findIndex((p) => p.id === "reconcile")
@@ -552,16 +586,33 @@ export function JobTheaterView({
     return () => window.clearTimeout(timer);
   }, [progress, isRunning]);
 
-  const startMs = earliestJobStartMs({
+  const frozenEndRef = useRef<number | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  useEffect(() => {
+    if (!isRunning) return;
+    const id = window.setInterval(() => setNowTick(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [isRunning]);
+  if (isRunning) {
+    frozenEndRef.current = null;
+  } else if (frozenEndRef.current == null) {
+    frozenEndRef.current = toEpochMs(job.completed_at) ?? nowTick;
+  }
+  const elapsed = theaterElapsedMs({
     startedAt: job.started_at,
     createdAt: job.created_at,
-    fallbackMs: startedAtFallback,
+    completedAt: job.completed_at,
+    fallbackStartMs: startedAtFallback,
+    nowMs: nowTick,
+    terminal: !isRunning,
+    frozenEndMs: frozenEndRef.current,
   });
-  const endMs = toEpochMs(job.completed_at) ?? Date.now();
-  const elapsed = Math.max(0, endMs - startMs);
   const averageRps = jobAverageRowsPerSecond(processed, elapsed);
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;
+  const streamHealth = readJobStreams(job);
+  const engineSeconds = publishedEngineElapsedSeconds(destinationSummary.elapsed_seconds);
+  const showEngineElapsed = !isRunning && engineSeconds != null;
   const rollbackPlan = (destinationSummary.rollback_plan ?? null) as {
     strategy?: string;
     executable?: boolean;
@@ -573,21 +624,17 @@ export function JobTheaterView({
     && String(rollbackPlan?.strategy || "") === "DISCARD_STAGING"
     && rollbackPlan?.executable === true
     && Boolean(rollbackPlan?.staging_table);
-  const rejectedRows = Number(job.rejected_rows ?? destinationSummary.rejected_rows ?? 0);
-  const coercedNullRows = Number(job.coerced_null_rows ?? destinationSummary.coerced_null_rows ?? 0);
+  const rejectedRows = readRejectedRows(job);
+  const coercedNullRows = readCoercedNullRows(job);
   const droppedRows = Math.max(rejectedRows - coercedNullRows, 0);
   /** Gate/pre-write fail — hide trust/quarantine/proof theater that has nothing to show. */
   const earlyFail = isFailed && processed === 0 && rejectedRows === 0;
-  const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
+  const writerWarnings = readWriterWarnings(job);
+  const warningCount = writerWarnings.messages.length;
+  const warningsSuppressed = writerWarnings.suppressed;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
-  const fkSummary = (destinationSummary.foreign_keys ?? null) as {
-    cycle?: string[];
-    cycle_resolved?: boolean;
-    cycle_strategy?: string;
-    cycle_note?: string;
-    carried?: number;
-  } | null;
-  const fkCycle = Array.isArray(fkSummary?.cycle) ? fkSummary.cycle : [];
+  const fkCarry = readForeignKeyCarry(job);
+  const fkCycle = fkCarry?.cycle ?? [];
   const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
   const callableNote = callableExtractNote(preflight, job);
   const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
@@ -701,7 +748,7 @@ export function JobTheaterView({
             <ConnectorIcon id={sourceType} size={22} />
             <div className="df2-theater-v3-endpoint-copy">
               <span>Source</span>
-              <strong title={sourceLabel}>{sourceLabel || "Source"}</strong>
+              <strong title={routeLabels.source}>{routeLabels.source}</strong>
             </div>
           </div>
           <div className="df2-theater-v3-arrow" aria-hidden>
@@ -711,7 +758,7 @@ export function JobTheaterView({
             <ConnectorIcon id={destType} size={22} />
             <div className="df2-theater-v3-endpoint-copy">
               <span>Destination</span>
-              <strong title={destLabel}>{destLabel || "Destination"}</strong>
+              <strong title={routeLabels.dest}>{routeLabels.dest}</strong>
             </div>
           </div>
         </div>
@@ -882,11 +929,11 @@ export function JobTheaterView({
           {(population.destCount != null || population.validateRunId || population.coverage) && (
               <div className="df2-theater-pop-strip" aria-label="Gate-8 population">
                 <span>
-                  <strong>Dest COUNT</strong>
+                  <strong>{lastStreamPopulation ? "Job dest COUNT" : "Dest COUNT"}</strong>
                   {population.destCount != null ? population.destCount.toLocaleString() : "—"}
                 </span>
                 <span>
-                  <strong>Checksum</strong>
+                  <strong>{lastStreamPopulation ? "Last stream checksum" : "Checksum"}</strong>
                   {population.destChecksum ? `${population.destChecksum.slice(0, 12)}${population.destChecksum.length > 12 ? "…" : ""}` : "—"}
                 </span>
                 <span>
@@ -913,6 +960,9 @@ export function JobTheaterView({
             onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
             onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
             onResume={duplicateKeyFailure ? undefined : onResume}
+            onOpenGate8={() => {
+              document.querySelector(".df2-theater-gate8")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            }}
           />
           {lineage.length > 0 && (
             <details className="df2-theater-lineage">
@@ -1101,11 +1151,22 @@ export function JobTheaterView({
             </div>
           </article>
         )}
-        <article className="df2-theater-v3-metric">
+        <article
+          className="df2-theater-v3-metric"
+          title={
+            showEngineElapsed && engineSeconds != null
+              ? `Engine monotonic execute time. Job wall clock from start is ${formatDuration(elapsed)}.`
+              : undefined
+          }
+        >
           <DtIcon name="jobs" size={16} />
           <div>
-            <strong>{formatDuration(elapsed)}</strong>
-            <span>Elapsed</span>
+            <strong>
+              {showEngineElapsed && engineSeconds != null
+                ? formatSeconds(engineSeconds)
+                : formatDuration(elapsed)}
+            </strong>
+            <span>{showEngineElapsed ? "Engine time" : "Elapsed"}</span>
           </div>
         </article>
         {typeof destinationSummary.staging_table === "string" && destinationSummary.staging_table && (
@@ -1477,9 +1538,9 @@ export function JobTheaterView({
         )}
       </div>
 
-      {Array.isArray(job.streams) && job.streams.length > 1 && (
+      {streamHealth.length > 0 && (
         <div className="df2-theater-v3-streams" aria-label="Per-stream health">
-          {job.streams.map((stream) => (
+          {streamHealth.map((stream) => (
             <div key={stream.name} className="df2-theater-v3-stream">
               <strong>{stream.name}</strong>
               <span>{stream.status || "—"}</span>
@@ -1593,23 +1654,23 @@ export function JobTheaterView({
               : "Normal type fits (ISO→DATETIME) are not counted here"}
           </small>
         </article>
-        <article className="df2-theater-v3-sla-card">
+        <article className={`df2-theater-v3-sla-card${warningCount > 0 ? " is-warn" : ""}`}>
           <span>Writer warnings</span>
           <strong>{warningCount.toLocaleString()}</strong>
           <small>
             {warningCount
-              ? "Sample of writer messages (capped for display)"
+              ? `${warningCount} destination message${warningCount === 1 ? "" : "s"}${warningsSuppressed > 0 ? ` · ${warningsSuppressed.toLocaleString()} more not listed` : ""}`
               : "No destination warnings"}
           </small>
         </article>
         {fkCycle.length > 0 && (
-        <article className={`df2-theater-v3-sla-card${fkSummary?.cycle_resolved ? "" : " is-warn"}`}>
+        <article className={`df2-theater-v3-sla-card${fkCarry?.cycleResolved ? "" : " is-warn"}`}>
           <span>FK cycle</span>
-          <strong>{fkSummary?.cycle_resolved ? "Recreated" : "Not enforced"}</strong>
+          <strong>{fkCarry?.cycleResolved ? "Recreated" : "Not enforced"}</strong>
           <small>
-            {fkSummary?.cycle_resolved
+            {fkCarry?.cycleResolved
               ? `Post-load ALTER on ${fkCycle.join(", ")} — destination validated the rows`
-              : fkSummary?.cycle_note
+              : fkCarry?.cycleNote
                 || `Cycle ${fkCycle.join(", ")} is not fully enforced on the destination`}
           </small>
         </article>
@@ -1618,7 +1679,7 @@ export function JobTheaterView({
           <span>Checksum evidence</span>
           <strong>
             {(() => {
-              const recon = job.reconciliation;
+              const recon = presentMultiStreamGate8(job.reconciliation, job.destination_summary);
               if (recon && (isGate8AppendDelta(recon) || isGate8KeyedBatch(recon))) {
                 const id = gate8AppendIdentity(recon);
                 if (id.destBefore != null && id.written != null) {
@@ -1633,9 +1694,12 @@ export function JobTheaterView({
           </strong>
           <small>
             {(() => {
-              const recon = job.reconciliation;
+              const recon = presentMultiStreamGate8(job.reconciliation, job.destination_summary);
               if (recon && isGate8KeyedBatch(recon) && recon.passed) {
                 return "This run’s keys verified — extra dest rows outside proof";
+              }
+              if (recon && isGate8LastStream(recon) && recon.passed) {
+                return "Last stream checksum — not the whole job";
               }
               if (recon && isGate8AppendDelta(recon)) {
                 const id = gate8AppendIdentity(recon);
@@ -1655,10 +1719,14 @@ export function JobTheaterView({
       </div>
       )}
 
+      {!earlyFail && <RunCarryNotes job={job} hideCycle />}
+      {!earlyFail && <SchemaFidelityNotes job={job} />}
+      {!earlyFail && <IdentityAlignmentNote job={job} />}
+
       {isComplete && job.reconciliation && (
         <Gate8ProofCard
-          report={job.reconciliation}
-          explanation={job.explanation}
+          report={presentMultiStreamGate8(job.reconciliation, job.destination_summary) ?? job.reconciliation}
+          explanation={presentStoredExplanation(job.explanation, job)}
           jobId={jobId}
           className="df2-theater-gate8"
           onOpenValidate={onBackToValidate}
@@ -1839,7 +1907,7 @@ export function JobTheaterView({
             jobId={jobId}
             rejectedRows={rejectedRows}
             coercedNullRows={coercedNullRows}
-            initialDetails={job.rejected_details}
+            initialDetails={readRejectedDetails(job)}
             autoLoad
             initiallyOpen
             repairMappings={(resolvedProof?.mappings || []).map((m): RepairMapping => ({
@@ -1864,7 +1932,7 @@ export function JobTheaterView({
 
       <div className={`df2-theater-v3-log-section ${isRunning ? "is-live" : ""}`}>
         <LiveEventLog
-          lines={log}
+          lines={presentedLog}
           live={isRunning}
           variant="theater"
           title="Live event log"

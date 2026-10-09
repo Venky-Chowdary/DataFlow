@@ -17,6 +17,10 @@ COMPLETED_STATUSES = frozenset({COMPLETED, COMPLETED_WITH_QUARANTINE})
 # Statuses that mean "the job will not change again".
 TERMINAL_STATUSES = frozenset({COMPLETED, COMPLETED_WITH_QUARANTINE, "failed", "cancelled"})
 
+# Statuses a live worker owns. ``paused`` is an operator state and is not
+# resumed by the orphan sweep.
+UNFINISHED_JOB_STATUSES = frozenset({"pending", "queued", "running", "retrying"})
+
 # A cancel request must not be rewritten to success or live progress. ``failed``
 # is still allowed (the run actually broke). ``cancelled`` is the requested terminal.
 CANCEL_BLOCKS_STATUSES = frozenset(

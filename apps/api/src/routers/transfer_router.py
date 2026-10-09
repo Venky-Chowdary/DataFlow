@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from services.brand_env import getenv_brand
+from services.mapping_proof import mappings_from_request
 from services.shape_preflight import ShapePreflightRefused
 from pathlib import Path
 from typing import Any, Optional
@@ -258,8 +259,9 @@ class ExecuteTransferRequest(BaseModel):
     date_locale: str = ""
     # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''.
     number_locale: str = ""
-    # Delivery guarantee — default at_least_once; exactly_once is opt-in.
-    delivery_guarantee: str = "at_least_once"
+    # Delivery guarantee — auto selects dest-owned exactly-once on an eligible
+    # CDC route. Pin at_least_once to keep upsert redelivery.
+    delivery_guarantee: str = "auto"
     # Validate→Execute ack trail (must match Studio Validate acknowledgments).
     compliance_acknowledged: bool = False
     schema_drift_acknowledged: bool = False
@@ -805,9 +807,10 @@ async def execute_transfer_json(
     """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
     from services.cdc_exactly_once import (
         ExactlyOnceRouteError,
-        assert_requested_cdc_delivery,
         dest_allow_append_only,
+        route_declares_log_position,
         route_has_cdc_pk,
+        select_route_delivery,
     )
     from services.execution_engine_contract import DeliveryGuaranteeError
     from services.procedure_source import is_callable_source
@@ -822,12 +825,16 @@ async def execute_transfer_json(
         body.destination.kind, body.destination.model_dump(by_alias=True)
     )
     try:
-        assert_requested_cdc_delivery(
+        # auto is the product default. select_route_delivery keeps an explicit
+        # pin and resolves auto. assert_requested_cdc_delivery rejects auto,
+        # which 400s every JSON execute that omits the field.
+        select_route_delivery(
             body.delivery_guarantee,
             sync_mode=body.sync_mode or "",
             dest_type=str(getattr(dst_preview, "format", "") or ""),
             source_type=str(getattr(src_preview, "format", "") or ""),
             has_primary_key=route_has_cdc_pk(body.stream_contracts),
+            has_lsn_column=route_declares_log_position(body.stream_contracts),
             allow_append_only=dest_allow_append_only(dst_preview),
             callable_source=is_callable_source(src_preview),
         )
@@ -869,7 +876,7 @@ async def execute_transfer_json(
         number_locale=body.number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
-        delivery_guarantee=body.delivery_guarantee or "at_least_once",
+        delivery_guarantee=body.delivery_guarantee or "auto",
         compliance_acknowledged=bool(body.compliance_acknowledged),
         schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
         fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
@@ -975,7 +982,7 @@ async def execute_transfer_json(
         job_id,
         plan_id=str(body.plan_id).strip() if body.plan_id else None,
         plan_payload=plan_payload,
-        mappings=list(request_obj.mappings or []),
+        mappings=mappings_from_request(request_obj),
         destination_format=dst.format or "",
         source_kind=src.kind or "",
         dest_kind=dst.kind or "",
@@ -1081,7 +1088,7 @@ async def run_universal_transfer(
     data_region: str = Form(""),
     date_locale: str = Form(""),
     number_locale: str = Form(""),
-    delivery_guarantee: str = Form("at_least_once"),
+    delivery_guarantee: str = Form("auto"),
     compliance_acknowledged: str = Form("false"),
     schema_drift_acknowledged: str = Form("false"),
     fk_risk_acknowledged: str = Form("false"),
@@ -1235,7 +1242,7 @@ async def run_universal_transfer(
         number_locale=number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
-        delivery_guarantee=delivery_guarantee or "at_least_once",
+        delivery_guarantee=delivery_guarantee or "auto",
         compliance_acknowledged=compliance_acknowledged.lower() in ("true", "1", "yes"),
         schema_drift_acknowledged=schema_drift_acknowledged.lower() in ("true", "1", "yes"),
         fk_risk_acknowledged=fk_risk_acknowledged.lower() in ("true", "1", "yes"),
@@ -1423,7 +1430,7 @@ async def run_universal_transfer(
         job_id,
         plan_id=plan_id.strip() if plan_id and plan_id.strip() else None,
         plan_payload=plan_payload,
-        mappings=list(request_obj.mappings or []),
+        mappings=mappings_from_request(request_obj),
         destination_format=dest_format or "",
         source_kind=source_kind or "",
         dest_kind=dest_kind or "",

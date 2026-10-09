@@ -2,7 +2,7 @@
 
 SQL Server has no ``COPY TO STDOUT`` and this host has no client
 ``bcp``. One HOLDLOCK (or SNAPSHOT) transaction streams ``SELECT`` into
-a CSV tempfile (HEADER, ``\\N`` = NULL, ``""`` = empty string), then
+a CSV tempfile (HEADER, NULL is an empty field, ``""`` = empty string), then
 ``upload_file``. Dest COUNT is object-store artifact COUNT of that CSV
 (header skipped) — never writer PUT ack, never ListObjects length.
 Empty dest is PUT, **not** BCP / ``aws s3 cp``. Occupied dest whose

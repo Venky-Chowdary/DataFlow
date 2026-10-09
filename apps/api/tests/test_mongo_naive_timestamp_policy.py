@@ -69,6 +69,110 @@ def test_zoneless_source_is_a_stamped_instant_not_a_carried_one():
     assert policy.instant_preserved is False
 
 
+def _capturing_client(captured: dict):
+    class _Result:
+        inserted_ids = [1]
+
+    class _Coll:
+        def insert_many(self, docs, ordered=False):
+            captured["docs"] = list(docs)
+            return _Result()
+
+    class _DB:
+        def list_collection_names(self, **_kwargs):
+            return []
+
+        def __getitem__(self, _name):
+            return _Coll()
+
+    class _Client:
+        def __getitem__(self, _name):
+            return _DB()
+
+    return _Client()
+
+
+def _write_one_temporal(monkeypatch, *, source_type: str, acknowledged: bool = False):
+    from connectors.mongodb_writer import write_mapped_rows
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "connectors.mongodb_common._mongo_client",
+        lambda *_args, **_kwargs: _capturing_client(captured),
+    )
+    mapping = {"source": "created_at", "target": "created_at", "source_type": source_type}
+    if acknowledged:
+        mapping["risk_acknowledged"] = True
+    result = write_mapped_rows(
+        host="localhost",
+        port=27017,
+        database="dataflow_test",
+        username="",
+        password="",
+        connection_string="",
+        ssl=False,
+        schema="dataflow_test",
+        table_name="tz_policy",
+        headers=["created_at"],
+        data_rows=[["2024-03-01 12:00:00"]],
+        mappings=[mapping],
+        column_types={"created_at": source_type},
+        error_policy="fail",
+    )
+    return result, captured
+
+
+def test_timestamptz_naive_wire_keeps_the_clock_as_utc(monkeypatch):
+    """Driver-stripped tzinfo on a declared instant is UTC, not a refused wall clock."""
+    from datetime import timezone
+
+    result, captured = _write_one_temporal(monkeypatch, source_type="TIMESTAMPTZ")
+    assert result.ok is True, result.error
+    stamped = captured["docs"][0]["created_at"]
+    assert stamped.tzinfo is not None
+    utc = stamped.astimezone(timezone.utc)
+    assert utc.hour == 12
+    assert utc.minute == 0
+
+
+def test_schema_timestamptz_without_a_mapping_stamp_keeps_the_clock(monkeypatch):
+    """Live introspect puts TIMESTAMPTZ on the source schema, not always on the mapping."""
+    from connectors.mongodb_writer import write_mapped_rows
+    from datetime import timezone
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "connectors.mongodb_common._mongo_client",
+        lambda *_args, **_kwargs: _capturing_client(captured),
+    )
+    result = write_mapped_rows(
+        host="localhost",
+        port=27017,
+        database="dataflow_test",
+        username="",
+        password="",
+        connection_string="",
+        ssl=False,
+        schema="dataflow_test",
+        table_name="tz_schema",
+        headers=["created_at"],
+        data_rows=[["2024-03-01 12:00:00"]],
+        mappings=[{"source": "created_at", "target": "created_at"}],
+        column_types={"created_at": "TIMESTAMPTZ"},
+        error_policy="fail",
+    )
+    assert result.ok is True, result.error
+    utc = captured["docs"][0]["created_at"].astimezone(timezone.utc)
+    assert utc.hour == 12
+
+
+def test_timestamp_ntz_naive_wire_still_needs_a_contract(monkeypatch):
+    result, captured = _write_one_temporal(monkeypatch, source_type="TIMESTAMP_NTZ")
+    assert result.ok is False
+    assert "naive wall-clock" in (result.error or "")
+    assert "docs" not in captured
+
+
 def test_sql_date_target_is_untouched_by_the_document_rule():
     """A real calendar DATE still drops the time of day."""
     assert document_instant_wire_preserved(

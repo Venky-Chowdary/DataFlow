@@ -84,7 +84,7 @@ def _run(plan_id: str, **kwargs) -> tuple[dict, dict]:
         return {"passed": True, "gates": [], "blockers": []}
 
     with patch("services.transfer_plan_service._preflight") as mock_pf, patch(
-        "services.transfer_plan_service.read_source_database",
+        "src.transfer.adapters.read_source_database",
         side_effect=Exception("skip"),
     ):
         mock_pf.return_value = (

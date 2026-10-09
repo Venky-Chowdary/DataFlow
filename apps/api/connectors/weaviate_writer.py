@@ -18,6 +18,7 @@ from typing import Any, Callable
 from services.value_serializer import (
     cell_to_string,
     json_default,
+    json_dumps_exact_numbers,
     load_http_json,
     sanitize_json_value,
 )
@@ -91,6 +92,38 @@ class WriteResult(_WriteResult):
     load_method: str = "weaviate_upsert"
 
 
+def list_classes(
+    *,
+    host: str = "",
+    port: int = 8080,
+    api_key: str = "",
+    ssl: bool = False,
+    connection_string: str = "",
+    **_kwargs: Any,
+) -> list[str]:
+    """Class names from ``GET /v1/schema``. An empty list is an empty cluster.
+
+    A non-200 response raises. Listing classes does not make Weaviate a
+    supported source.
+    """
+    session = _requests_session()
+    resp = session.get(
+        f"{_base_url(host, port, ssl, connection_string)}/v1/schema",
+        headers=_headers(api_key),
+        timeout=10,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Weaviate schema list returned {resp.status_code}")
+    body = resp.json() if resp.content else {}
+    classes = body.get("classes") if isinstance(body, dict) else None
+    names = [
+        str(row.get("class")).strip()
+        for row in (classes or [])
+        if isinstance(row, dict) and str(row.get("class") or "").strip()
+    ]
+    return sorted(set(names))
+
+
 def test_weaviate(
     *,
     host: str = "",
@@ -141,9 +174,7 @@ def build_weaviate_objects(
     for row in vector_rows:
         from connectors.writer_common import vector_prepare_metadata
 
-        props = vector_prepare_metadata(
-            sanitize_json_value(row.get("metadata") or {}) or {}
-        )
+        props = vector_prepare_metadata(row.get("metadata") or {})
         props["content"] = vector_cell_token(row.get("content"))
         props["source_id"] = vector_cell_token(row.get("source_id"))
         try:
@@ -838,7 +869,7 @@ def write_mapped_rows(
             batch = objects[i : i + batch_size]
             resp = session.post(
                 f"{base_url}/v1/batch/objects",
-                data=json.dumps({"objects": batch}, default=sanitize_json_value),
+                data=json_dumps_exact_numbers({"objects": batch}),
                 headers=hdrs,
                 timeout=60,
             )

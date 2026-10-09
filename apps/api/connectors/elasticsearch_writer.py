@@ -186,6 +186,33 @@ class WriteResult(_WriteResult):
     driver: str = "elasticsearch-py"
 
 
+def _es_exact_json_number(value: Any) -> float | None:
+    """JSON number when the decimal is exact inside a scaled_float long.
+
+    Prices stored as keyword strings cannot be aggregated. A value whose
+    significant digits fit the scaled_float long and whose float form
+    round-trips at the same scale is a number. Wider exact decimals stay
+    text so float64 cannot drop a digit.
+    """
+    from decimal import Decimal
+
+    from connectors.elasticsearch_mapping import _SCALED_FLOAT_MAX_DIGITS
+
+    if not isinstance(value, Decimal) or not value.is_finite():
+        return None
+    _sign, digits, exponent = value.as_tuple()
+    if not digits:
+        return 0.0
+    scale = -int(exponent) if int(exponent) < 0 else 0
+    if len(digits) > _SCALED_FLOAT_MAX_DIGITS or scale > _SCALED_FLOAT_MAX_DIGITS:
+        return None
+    as_float = float(value)
+    quant = Decimal(1).scaleb(-scale) if scale else Decimal(1)
+    if Decimal(str(as_float)).quantize(quant) != value.quantize(quant):
+        return None
+    return as_float
+
+
 def _to_es_value(value: Any, source_type: str) -> Any:
     """Convert transform-engine values to Elasticsearch-native JSON shapes.
 
@@ -245,6 +272,9 @@ def _to_es_value(value: Any, source_type: str) -> Any:
 
         bound_dec = coerce_decimal_wire(value, ddl_type=declared)
         if isinstance(bound_dec, Decimal):
+            number = _es_exact_json_number(bound_dec)
+            if number is not None:
+                return number
             text = safe_decimal_text(bound_dec)
             if text is not None:
                 return text

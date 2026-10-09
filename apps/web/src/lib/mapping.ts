@@ -210,6 +210,24 @@ export interface EditableMapping {
    * the operator asked for, which still requires an ALTER or a remap.
    */
   destTypeDeclared?: string;
+  /**
+   * Compiled business-rule workbook row that produced this pair. Empty when
+   * the operator mapped by hand. Provenance (sheet/line) is the audit trail
+   * for "why this dest column" — not a second confidence score.
+   */
+  businessRule?: MappingBusinessRule;
+}
+
+/** One compiled rule from an uploaded Excel / CSV / JSON workbook. */
+export interface MappingBusinessRule {
+  kind: string;
+  kindLabel: string;
+  text: string;
+  status: "executable" | "needs_confirmation" | "conflict" | string;
+  confidence: number;
+  sheet?: string;
+  row?: number;
+  issues?: string[];
 }
 
 /** Reduction reason codes — keep aligned with ``REDUCTION_DISPOSITIONS``. */
@@ -2271,6 +2289,18 @@ export function buildPreflightMappings(
         // Engine G15 only clears false-friend on this flag — not Approve / user_override.
         false_friend_confirmed: omitted ? undefined : Boolean(safe.falseFriendConfirmed) || undefined,
         control_total: omitted ? undefined : (safe.controlTotal === true ? true : safe.controlTotal === false ? false : undefined),
+        business_rule: safe.businessRule
+          ? {
+              kind: safe.businessRule.kind,
+              kind_label: safe.businessRule.kindLabel,
+              text: safe.businessRule.text,
+              status: safe.businessRule.status,
+              confidence: safe.businessRule.confidence,
+              sheet: safe.businessRule.sheet,
+              row: safe.businessRule.row,
+              issues: safe.businessRule.issues,
+            }
+          : undefined,
       };
     });
   }
@@ -2400,6 +2430,16 @@ export function editableFromPipelineMappings(
     code_crosswalk?: Record<string, string>;
     code_crosswalk_system?: string;
     control_total?: boolean;
+    business_rule?: {
+      kind?: string;
+      kind_label?: string;
+      text?: string;
+      status?: string;
+      confidence?: number;
+      sheet?: string;
+      row?: number;
+      issues?: string[];
+    };
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -2576,6 +2616,21 @@ export function editableFromPipelineMappings(
       controlTotal: typeof m.control_total === "boolean"
         ? m.control_total
         : defaultControlTotal(sourceType, destType, m.semantic_role),
+      businessRule: m.business_rule && typeof m.business_rule === "object"
+        ? {
+            kind: String(m.business_rule.kind || ""),
+            kindLabel: String(m.business_rule.kind_label || m.business_rule.kind || ""),
+            text: String(m.business_rule.text || ""),
+            status: String(m.business_rule.status || ""),
+            confidence: typeof m.business_rule.confidence === "number"
+              && Number.isFinite(m.business_rule.confidence)
+              ? m.business_rule.confidence
+              : 0,
+            sheet: m.business_rule.sheet,
+            row: m.business_rule.row,
+            issues: m.business_rule.issues,
+          }
+        : undefined,
     };
     if (isEnumToBooleanConflict(base)) {
       if (base.existsInDestination) {

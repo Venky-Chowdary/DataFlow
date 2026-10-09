@@ -21,6 +21,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
 from services.collation_carry import destination_column_collations, plan_collation_carry
+from services.default_expression import (
+    default_exprs_equivalent as _default_exprs_equivalent,
+    normalize_default_expr as _normalize_default_expr,
+)
 from services.decimal_identity import plan_decimal_identity_carry
 from services.encoding_capacity import plan_encoding_carry
 from services.identity_carry import plan_identity_carry
@@ -487,6 +491,60 @@ def catalog_to_payload(catalog: SourceSchemaCatalog) -> dict[str, Any]:
     return asdict(catalog)
 
 
+_APPEND_KEY_REASON = (
+    "Append create-new does not declare a key. A second copy of the same row "
+    "is legal on this sync. Upsert or merge is what enforces the source key."
+)
+
+
+def withhold_append_key_constraints(plan: CreateFidelityPlan) -> CreateFidelityPlan:
+    """Drop PK, UNIQUE, and key generators from an append create-new plan.
+
+    The certificate records the skip. Leaving ``primary_key`` set while the
+    writer omitted it made the next append abort on a key the operator never
+    asked this sync to enforce.
+    """
+    for item in plan.report.items:
+        if item.aspect in {"primary_key", "unique"} and item.status == "carried":
+            item.status = "skipped"
+            item.reason = _APPEND_KEY_REASON
+            item.dest_ddl = ""
+        elif item.aspect == "identity" and item.status == "carried":
+            item.status = "skipped"
+            item.reason = (
+                "Append create-new does not declare the source key, so the key "
+                "generator is not emitted. The load writes the source values."
+            )
+            item.dest_ddl = ""
+    plan.primary_key = []
+    plan.unique_constraints = []
+    plan.identity_columns = {}
+    plan.identity_insert_columns = []
+    plan.table_constraints = [
+        clause
+        for clause in plan.table_constraints
+        if not str(clause).strip().upper().startswith(("PRIMARY KEY", "UNIQUE"))
+    ]
+    plan.post_create_sql = [
+        stmt
+        for stmt in plan.post_create_sql
+        if "UNIQUE" not in str(stmt).upper()
+    ]
+    cleaned: dict[str, list[str]] = {}
+    for col, suffixes in (plan.column_suffixes or {}).items():
+        kept = [
+            suffix
+            for suffix in suffixes
+            if "AUTO_INCREMENT" not in str(suffix).upper()
+            and "IDENTITY" not in str(suffix).upper()
+            and not str(suffix).upper().startswith("GENERATED")
+        ]
+        if kept:
+            cleaned[col] = kept
+    plan.column_suffixes = cleaned
+    return plan
+
+
 def resolve_create_fidelity_plan(
     *,
     source_schema_catalog: Any,
@@ -498,6 +556,7 @@ def resolve_create_fidelity_plan(
     dest_table: str = "",
     dest_schema: str = "",
     dest_tablespaces: set[str] | None = None,
+    carry_keys: bool = True,
 ) -> CreateFidelityPlan:
     """Build a create-new fidelity plan; always returns a certificate (never silent)."""
     dest = (dest_dialect or "").strip().lower()
@@ -527,6 +586,8 @@ def resolve_create_fidelity_plan(
         dest_schema=dest_schema,
         dest_tablespaces=dest_tablespaces,
     )
+    if not carry_keys:
+        plan = withhold_append_key_constraints(plan)
     if table_already_exists:
         # CREATE IF NOT EXISTS will not re-apply constraints — certify honestly.
         for item in plan.report.items:
@@ -1533,74 +1594,6 @@ def _fetch_not_null_columns(
     return not_null
 
 
-# Clock/boolean default synonyms treated as equivalent across dialects so a
-# faithfully-carried default is not falsely downgraded on cosmetic differences.
-_CLOCK_DEFAULTS = {
-    "current_timestamp", "current_timestamp()", "now()", "now", "getdate()",
-    "getutcdate()", "sysdate", "systimestamp", "localtimestamp",
-    "localtimestamp()", "statement_timestamp()", "transaction_timestamp()",
-    "clock_timestamp()", "sysdatetime()",
-}
-_TRUE_DEFAULTS = {"true", "t", "1", "b'1'"}
-_FALSE_DEFAULTS = {"false", "f", "0", "b'0'"}
-
-
-def _normalize_default_expr(expr: Any) -> str:
-    """Fold a catalog/planned default into a comparable literal.
-
-    Iteratively strips wrapping parens, trailing type casts (``'x'::text``,
-    ``'x'::character varying``), national/escape/bit/hex string-literal prefixes
-    (``N'x'``, ``E'x'``, ``B'1'``), and surrounding quotes to a fixed point — so
-    ``('active'::character varying)``, ``N'active'`` and ``active`` all unify —
-    then collapses clock precision (``current_timestamp(6)`` -> ``()``) and
-    casefolds.
-    """
-    s = str(expr if expr is not None else "").strip()
-    prev: str | None = None
-    while s and s != prev:
-        prev = s
-        if len(s) >= 2 and s[0] == "(" and s[-1] == ")":
-            s = s[1:-1].strip()
-            continue
-        stripped_cast = re.sub(r"::\s*[A-Za-z0-9_ \"\.\[\]]+\s*$", "", s).strip()
-        if stripped_cast != s:
-            s = stripped_cast
-            continue
-        prefix = re.match(r"^(?:[NnEeBbXx]|[Uu]&)(['\"].*)$", s)
-        if prefix:
-            s = prefix.group(1).strip()
-            continue
-        if len(s) >= 2 and s[0] in "'\"" and s[-1] == s[0]:
-            s = s[1:-1].strip()
-            continue
-    # current_timestamp(6) / localtimestamp(3) → drop precision for clock compare.
-    s = re.sub(r"\(\s*\d+\s*\)", "()", s)
-    return s.casefold()
-
-
-def _default_exprs_equivalent(a: str, b: str) -> bool:
-    if a == b:
-        return True
-    if a in _CLOCK_DEFAULTS and b in _CLOCK_DEFAULTS:
-        return True
-    if a in _TRUE_DEFAULTS and b in _TRUE_DEFAULTS:
-        return True
-    if a in _FALSE_DEFAULTS and b in _FALSE_DEFAULTS:
-        return True
-    try:
-        from decimal import Decimal
-
-        from services.decimal_identity import extract_decimal_identity
-
-        ia = extract_decimal_identity(a)
-        ib = extract_decimal_identity(b)
-    except ValueError:
-        return False
-    if ia is None or ib is None:
-        return False
-    return +Decimal(ia.to_canonical_text()) == +Decimal(ib.to_canonical_text())
-
-
 def _claimed_default_literal(item: Any) -> str:
     """Extract the planned default literal from an item's emitted DDL clause."""
     ddl = str(getattr(item, "dest_ddl", "") or "")
@@ -2304,6 +2297,22 @@ def _normalize_default_sql(expr: str, dest_dialect: str, dest_type: str = "") ->
         if (dest_dialect or "").lower() == "sqlite":
             return "(datetime('now'))"
         return _mysql_clock_default("CURRENT_TIMESTAMP", dest_type) if mysql_family else "CURRENT_TIMESTAMP"
+    # SQL Server BIT and Oracle NUMBER(1) reject the token ``false``.
+    # PostgreSQL boolean defaults arrive as that token.
+    dest_name = (dest_dialect or "").lower()
+    numeric_bool = dest_name in {
+        "sqlserver", "mssql", "sql_server", "azure_sql", "azure_sql_database",
+        "oracle",
+    }
+    type_name = (dest_type or "").upper()
+    number_one = type_name.startswith("NUMBER(1)") or type_name.startswith("NUMBER(1,")
+    if numeric_bool and (
+        "BIT" in type_name or "BOOL" in type_name or number_one
+    ):
+        if lowered in {"false", "f", "'false'", "'f'"}:
+            return "0"
+        if lowered in {"true", "t", "'true'", "'t'"}:
+            return "1"
     return text
 
 

@@ -28,6 +28,8 @@ import {
   buildExecutiveSummary,
   rankAndDedupeSuggestedActions,
   findDuplicateKeyRoot,
+  coercionCount,
+  coercionSampleFailures,
   isDeclaredFidelityCollapse,
   isEncodingIntegritySignal,
   isSampleUniquenessOnly,
@@ -544,10 +546,14 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
           <tbody>
             {visible.map((col) => {
               const key = `${col.source}→${col.target}`;
-              const nulled = (col.nulls ?? 0) + (col.sentinel_nulls ?? 0);
+              const failures = coercionSampleFailures(col);
+              const sampled = coercionCount(col.sampled);
+              const ok = coercionCount(col.ok);
+              const failed = coercionCount(col.failed);
+              const nulled = coercionCount(col.nulls) + coercionCount(col.sentinel_nulls);
               const isOpen = expanded.has(key);
               const hasDetail =
-                col.sample_failures.length > 0
+                failures.length > 0
                 || (col.wire_examples?.length ?? 0) > 0
                 || (col.wrap_examples?.length ?? 0) > 0
                 || Boolean(col.suggested_fix);
@@ -583,7 +589,7 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                           className="df2-vd-coerce-frame is-collapse"
                           title={col.framing?.label || col.suggested_fix || "Declared type path collapses fidelity"}
                         >
-                          {col.failed === 0 && (col.ok ?? 0) > 0
+                          {failed === 0 && ok > 0
                             ? "Sample coerces · declared collapse"
                             : "Fidelity collapse"}
                         </span>
@@ -592,10 +598,10 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                     <td className="df2-vd-coerce-wire">
                       {wireHint ? <code title={wireHint}>{wireHint}</code> : <span className="df2-vd-muted">—</span>}
                     </td>
-                    <td className="df2-vd-num">{col.sampled.toLocaleString()}</td>
-                    <td className="df2-vd-num df2-vd-ok">{col.ok.toLocaleString()}</td>
+                    <td className="df2-vd-num">{sampled.toLocaleString()}</td>
+                    <td className="df2-vd-num df2-vd-ok">{ok.toLocaleString()}</td>
                     <td className="df2-vd-num df2-vd-nulled">{nulled.toLocaleString()}</td>
-                    <td className="df2-vd-num df2-vd-failed">{col.failed.toLocaleString()}</td>
+                    <td className="df2-vd-num df2-vd-failed">{failed.toLocaleString()}</td>
                     <td>
                       <span className={`df2-vd-sev sev-${col.severity}`}>
                         <DtIcon
@@ -630,7 +636,7 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                             <DtIcon name="sparkle" size={13} /> {col.suggested_fix}
                           </p>
                         )}
-                        {col.sample_failures.length > 0 && (
+                        {failures.length > 0 && (
                           <div className="df2-vd-coerce-samples">
                             <span className="df2-vd-coerce-samples-title">Offending values</span>
                             <table>
@@ -643,7 +649,7 @@ function CoercionTable({ columns }: { columns: CoercionColumn[] }) {
                                 </tr>
                               </thead>
                               <tbody>
-                                {col.sample_failures.map((f, i) => (
+                                {failures.map((f, i) => (
                                   <tr key={`${f.row}-${i}`}>
                                     <td className="df2-vd-num">{f.row}</td>
                                     <td><code>{f.value === "" ? "∅ empty" : f.value}</code></td>
@@ -2390,7 +2396,7 @@ export function ValidateDashboard({
                       ? "Schema incomplete — reload destination columns"
                     : "Matched to destination schema"}
                 {" · "}
-                every pair has confidence evidence and fidelity risks
+                every pair carries confidence evidence
               </span>
             </div>
             <Button

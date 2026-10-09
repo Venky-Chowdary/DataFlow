@@ -134,11 +134,310 @@ def drop_table(
     if dt == "clickhouse":
         return _drop_clickhouse(cfg, table_name, schema)
     if _routes_generic_sql_mutate(dt):
-        # Oracle / SQL Server / BigQuery / DuckDB / Databricks: overwrite
-        # must DROP, not leftover-MERGE after insert-append (duplicate PKs
-        # make unique ≠ COUNT and leftover MERGE refuses).
+        # Oracle / SQL Server / BigQuery / DuckDB / Databricks: callers that
+        # still drop (staging, rollback) use this. Overwrite of a relational
+        # table does not — see ``empty_existing_for_overwrite``.
         return _drop_generic_sql(_generic_sql_cfg(cfg, dt), table_name, schema)
     return False
+
+
+# Existing relational tables are emptied, not dropped. DROP+CREATE discarded
+# primary key, unique, NOT NULL, check, foreign key and identity, then loaded
+# rows that those constraints would have refused (DEF-V7-E1-021).
+_EMPTY_IN_PLACE_ENGINES = frozenset({
+    "postgresql",
+    "redshift",
+    "mysql",
+    "mariadb",
+    "sqlite",
+    "oracle",
+    "sqlserver",
+    "generic_sql",
+    "cockroachdb",
+    "greenplum",
+    "timescaledb",
+    "db2",
+    "teradata",
+})
+
+_MISSING_TABLE_TOKENS = (
+    "42p01",
+    "does not exist",
+    "doesn't exist",
+    "no such table",
+    "ora-00942",
+    "invalid object name",
+    "1146",
+    "1051",
+)
+
+
+def overwrite_clear_kind(db_type: str) -> str:
+    """How an overwrite removes the previous generation.
+
+    ``empty`` keeps the table and its constraints. ``rename_collection``
+    parks a Mongo collection aside so a failed load can put it back.
+    ``drop`` is only for engines whose overwrite still replaces the object.
+    """
+    from services.db_type_utils import overwrite_engine_kind
+
+    dt = overwrite_engine_kind(db_type)
+    if dt == "mongodb":
+        return "rename_collection"
+    if dt in _EMPTY_IN_PLACE_ENGINES:
+        return "empty"
+    return "drop"
+
+
+def overwrite_empty_statements(dialect: str, quoted: str) -> tuple[str, str]:
+    """TRUNCATE (may be empty) then DELETE. DELETE runs when TRUNCATE is blocked.
+
+    A foreign key that references this table rejects TRUNCATE. DELETE removes
+    this table's rows and leaves the referencing table, and this table's own
+    primary key, unique, check, NOT NULL and identity, in place.
+    """
+    kind = (dialect or "").lower().strip()
+    if kind in {"postgresql", "redshift", "postgres", "cockroachdb", "greenplum"}:
+        return (
+            f"TRUNCATE TABLE {quoted} RESTART IDENTITY",
+            f"DELETE FROM {quoted}",
+        )
+    if kind == "sqlite":
+        return ("", f"DELETE FROM {quoted}")
+    return (f"TRUNCATE TABLE {quoted}", f"DELETE FROM {quoted}")
+
+
+def _missing_table_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(token in text for token in _MISSING_TABLE_TOKENS)
+
+
+def _execute_empty_statements(run: Any, dialect: str, quoted: str) -> str:
+    """Run TRUNCATE, then DELETE if TRUNCATE is refused. ``run`` executes SQL.
+
+    Returns ``emptied``. A missing table raises the driver's error so the
+    caller can treat create-new as already clear.
+    """
+    truncate_sql, delete_sql = overwrite_empty_statements(dialect, quoted)
+    if truncate_sql:
+        try:
+            run(truncate_sql)
+            return "emptied"
+        except Exception as exc:
+            if _missing_table_error(exc):
+                raise
+            logger.info(
+                "Overwrite TRUNCATE refused for %s (%s); deleting rows in place",
+                quoted,
+                exc,
+            )
+    run(delete_sql)
+    return "emptied"
+
+
+def empty_existing_for_overwrite(
+    db_type: str,
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None = None,
+) -> str:
+    """Remove rows from an existing table. The table and its constraints stay.
+
+    Returns ``absent`` when the object is already gone (create-new may CREATE)
+    and ``emptied`` when rows were removed. A permission or lock failure raises
+    :class:`TableDropError` so the overwrite cannot continue as an append.
+    """
+    from services.db_type_utils import overwrite_engine_kind
+
+    dt = overwrite_engine_kind(db_type)
+    try:
+        if dt in ("postgresql", "redshift"):
+            return _empty_postgresql(cfg, table_name, schema, dialect=dt)
+        if dt in ("mysql", "mariadb"):
+            return _empty_mysql(cfg, table_name)
+        if dt == "sqlite":
+            return _empty_sqlite(cfg, table_name)
+        if dt == "generic_sql" or _routes_generic_sql_mutate(dt):
+            return _empty_generic_sql(_generic_sql_cfg(cfg, dt), table_name, schema)
+    except TableDropError:
+        raise
+    except Exception as exc:
+        if _missing_table_error(exc):
+            return "absent"
+        raise TableDropError(table_name, exc) from exc
+    raise TableDropError(
+        table_name,
+        RuntimeError(f"{dt or 'unknown'} has no in-place empty"),
+    )
+
+
+def _empty_postgresql(
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None,
+    *,
+    dialect: str,
+) -> str:
+    from connectors.postgresql_conn import get_connection
+    from connectors.sql_identifiers import quote_table_ref
+
+    quoted = quote_table_ref(table_name, schema or cfg.get("schema"), dialect=dialect)
+    conn = get_connection(
+        host=cfg.get("host", "") or "127.0.0.1",
+        port=int(cfg.get("port") or 5432),
+        database=cfg.get("database", ""),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        connection_string=cfg.get("connection_string", ""),
+        ssl=bool(cfg.get("ssl")),
+    )
+    conn.autocommit = True
+    try:
+        def _run(sql: str) -> None:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+
+        return _execute_empty_statements(_run, dialect, quoted)
+    except Exception as exc:
+        if _missing_table_error(exc):
+            return "absent"
+        raise TableDropError(table_name, exc) from exc
+    finally:
+        conn.close()
+
+
+def _empty_mysql(cfg: dict[str, Any], table_name: str) -> str:
+    from connectors.mysql_conn import enable_autocommit, get_connection
+    from connectors.sql_identifiers import quote_table_ref
+
+    quoted = quote_table_ref(table_name, dialect="mysql")
+    conn = get_connection(
+        host=cfg.get("host", "") or "127.0.0.1",
+        port=int(cfg.get("port") or 3306),
+        database=cfg.get("database", ""),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        connection_string=cfg.get("connection_string", ""),
+        ssl=bool(cfg.get("ssl")),
+        purpose="ddl",
+    )
+    enable_autocommit(conn)
+    try:
+        def _run(sql: str) -> None:
+            with conn.cursor() as cur:
+                cur.execute(sql)
+
+        return _execute_empty_statements(_run, "mysql", quoted)
+    except Exception as exc:
+        if _missing_table_error(exc):
+            return "absent"
+        raise TableDropError(table_name, exc) from exc
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            logger.warning("MySQL empty connection close failed", exc_info=True)
+
+
+def _empty_sqlite(cfg: dict[str, Any], table_name: str) -> str:
+    import sqlite3
+
+    from connectors.sql_identifiers import quote_table_ref
+
+    database = _sqlite_path_from_cfg(cfg)
+    if not database:
+        return "absent"
+    quoted = quote_table_ref(table_name, dialect="sqlite")
+    conn = sqlite3.connect(database)
+    try:
+        def _run(sql: str) -> None:
+            conn.execute(sql)
+            conn.commit()
+
+        return _execute_empty_statements(_run, "sqlite", quoted)
+    except Exception as exc:
+        if _missing_table_error(exc):
+            return "absent"
+        raise TableDropError(table_name, exc) from exc
+    finally:
+        conn.close()
+
+
+def _empty_generic_sql(
+    cfg: dict[str, Any], table_name: str, schema: str | None
+) -> str:
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from connectors.sql_identifiers import quote_table_ref
+    from services.engine_pool import release_engine
+
+    dialect = str(cfg.get("type") or cfg.get("db_type") or "ansi")
+    quoted = quote_table_ref(
+        table_name, schema or cfg.get("schema"), dialect=dialect
+    )
+    engine = get_sqlalchemy_engine(cfg)
+    try:
+        with engine.connect() as conn:
+            def _run(sql: str) -> None:
+                try:
+                    conn.execute(sa.text(sql))
+                    conn.commit()
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    raise
+
+            try:
+                return _execute_empty_statements(_run, dialect, quoted)
+            except Exception as exc:
+                if _missing_table_error(exc):
+                    return "absent"
+                raise TableDropError(table_name, exc) from exc
+    finally:
+        release_engine(engine)
+
+
+def postgres_columns_to_keep(
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None,
+    mappings: list[Any] | None,
+) -> list[dict[str, str]]:
+    """Destination columns the overwrite CREATE must still declare."""
+    from connectors.postgresql_conn import get_connection
+    from services.overwrite_keep import columns_to_keep
+
+    conn = get_connection(
+        host=cfg.get("host", "") or "127.0.0.1",
+        port=int(cfg.get("port") or 5432),
+        database=cfg.get("database", ""),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        connection_string=cfg.get("connection_string", ""),
+        ssl=bool(cfg.get("ssl")),
+    )
+    try:
+        sch = schema or cfg.get("schema") or "public"
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod)
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = %s AND c.relname = %s
+                  AND a.attnum > 0 AND NOT a.attisdropped
+                ORDER BY a.attnum
+                """,
+                (sch, table_name),
+            )
+            live = [{"name": row[0], "ddl_type": row[1]} for row in cur.fetchall()]
+        return columns_to_keep(live, mappings)
+    finally:
+        conn.close()
 
 
 def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
@@ -246,6 +545,177 @@ def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) ->
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
+def mysql_overwrite_backup_name(table_name: str) -> str:
+    """Backup identifier, at most 64 characters (MySQL's limit)."""
+    suffix = "__df_bak"
+    base = str(table_name or "t")[: 64 - len(suffix)]
+    return f"{base}{suffix}"
+
+
+def _mysql_tables_present(cur: Any, names: list[str]) -> set[str]:
+    if not names:
+        return set()
+    placeholders = ", ".join(["%s"] * len(names))
+    cur.execute(
+        "SELECT table_name FROM information_schema.tables "
+        f"WHERE table_schema = DATABASE() AND table_name IN ({placeholders})",
+        tuple(names),
+    )
+    return {str(row[0]) for row in cur.fetchall()}
+
+
+def retire_mysql_overwrite(
+    cfg: dict[str, Any],
+    table_name: str,
+    mappings: list[Any] | None = None,
+) -> tuple[str | None, list[dict[str, str]]]:
+    """Rename the live table aside so CREATE does not wait on its metadata lock.
+
+    DROP then CREATE left the table missing when CREATE hung, and cancel could
+    not unblock the session that held the statement. The original rows stay in
+    ``<table>__df_bak`` until the load finishes or the job restores them.
+
+    Returns ``(backup_name or None, columns the new table must keep)``.
+    """
+    from connectors.mysql_conn import enable_autocommit, get_connection
+    from connectors.sql_identifiers import quote_sql_identifier
+    from services.overwrite_keep import columns_to_keep
+
+    backup = mysql_overwrite_backup_name(table_name)
+    conn = None
+    try:
+        conn = get_connection(
+            host=cfg.get("host", "") or "127.0.0.1",
+            port=int(cfg.get("port") or 3306),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl")),
+            purpose="ddl",
+        )
+        enable_autocommit(conn)
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+                "ORDER BY ORDINAL_POSITION",
+                (table_name,),
+            )
+            live = [{"name": row[0], "ddl_type": row[1]} for row in cur.fetchall()]
+            kept = columns_to_keep(live, mappings)
+            present = _mysql_tables_present(cur, [table_name, backup])
+            src_q = quote_sql_identifier(table_name, "`")
+            bak_q = quote_sql_identifier(backup, "`")
+            if table_name in present and backup in present:
+                # The live name is this run's replacement and the backup is
+                # the pre-run table. DROP of the backup deletes those rows
+                # (a second start used to do that, then the failure path
+                # emptied the replacement). Drop the replacement, put the
+                # pre-run table back, then retire that restored table.
+                cur.execute(f"DROP TABLE {src_q}")
+                cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+                present.discard(backup)
+                present.add(table_name)
+            elif table_name not in present and backup in present:
+                # The previous overwrite renamed the table and died before
+                # restore. Put it back, then retire it for this run.
+                cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+                present.discard(backup)
+                present.add(table_name)
+            if table_name not in present:
+                return None, kept
+            if backup in present:
+                # Only a backup we just restored would still be here, and the
+                # branch above already renamed it aside. Never DROP a backup
+                # that still holds the pre-run rows.
+                logger.error(
+                    "MySQL overwrite refused to drop backup %s while %s is live",
+                    backup,
+                    table_name,
+                )
+                raise TableDropError(
+                    table_name,
+                    f"backup {backup} still holds the pre-run rows",
+                )
+            cur.execute(f"RENAME TABLE {src_q} TO {bak_q}")
+        return backup, kept
+    except Exception as exc:  # noqa: BLE001 - any DDL failure must fail the overwrite
+        raise TableDropError(table_name, exc) from exc
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - close is best-effort
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
+def restore_mysql_overwrite(cfg: dict[str, Any], table_name: str, backup: str) -> None:
+    """Drop a partial replacement and rename the backup back to the live name."""
+    from connectors.mysql_conn import enable_autocommit, get_connection
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    conn = None
+    try:
+        conn = get_connection(
+            host=cfg.get("host", "") or "127.0.0.1",
+            port=int(cfg.get("port") or 3306),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl")),
+            purpose="ddl",
+        )
+        enable_autocommit(conn)
+        with conn.cursor() as cur:
+            present = _mysql_tables_present(cur, [table_name, backup])
+            src_q = quote_sql_identifier(table_name, "`")
+            bak_q = quote_sql_identifier(backup, "`")
+            if table_name in present:
+                cur.execute(f"DROP TABLE {src_q}")
+            if backup in present:
+                cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+    except Exception as exc:  # noqa: BLE001 - restore must surface every DDL failure
+        raise TableDropError(table_name, exc) from exc
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - close is best-effort
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
+def discard_mysql_overwrite(cfg: dict[str, Any], backup: str) -> None:
+    """Drop the renamed original after the replacement load has committed."""
+    from connectors.mysql_conn import enable_autocommit, get_connection
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    conn = None
+    try:
+        conn = get_connection(
+            host=cfg.get("host", "") or "127.0.0.1",
+            port=int(cfg.get("port") or 3306),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl")),
+            purpose="ddl",
+        )
+        enable_autocommit(conn)
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {quote_sql_identifier(backup, '`')}")
+    except Exception as exc:  # noqa: BLE001 - backup drop must surface every DDL failure
+        raise TableDropError(backup, exc) from exc
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - close is best-effort
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
 def _drop_mysql(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
     from connectors.mysql_conn import enable_autocommit, get_connection
 
@@ -321,21 +791,125 @@ def _drop_clickhouse(cfg: dict[str, Any], table_name: str, schema: str | None) -
         release_engine(engine)
 
 
+def _mongo_db(cfg: dict[str, Any]) -> Any:
+    conn_str = normalize_mongodb_connection_string(
+        connection_string=cfg.get("connection_string", ""),
+        host=cfg.get("host") or "127.0.0.1",
+        port=int(cfg.get("port") or 27017),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        database=cfg.get("database") or "test",
+        auth_source=cfg.get("auth_source", ""),
+        ssl=bool(cfg.get("ssl")),
+    )
+    client = _mongo_client(conn_str)
+    db_name = cfg.get("database") or mongodb_database_from_uri(conn_str) or "test"
+    return client[db_name]
+
+
+def _collection_create_options(db: Any, name: str) -> dict[str, Any]:
+    """Validator and validation level, so the replacement rejects the same docs."""
+    try:
+        listed = db.command("listCollections", filter={"name": name})
+    except Exception:
+        return {}
+    batch = (listed or {}).get("cursor", {}).get("firstBatch") or []
+    if not batch:
+        return {}
+    opts = dict(batch[0].get("options") or {})
+    kept: dict[str, Any] = {}
+    for key in ("validator", "validationLevel", "validationAction"):
+        if key in opts and opts[key] not in (None, {}):
+            kept[key] = opts[key]
+    return kept
+
+
+def _copy_collection_indexes(source: Any, dest: Any) -> None:
+    try:
+        indexes = list(source.list_indexes())
+    except Exception:
+        logger.warning("Mongo overwrite could not read indexes", exc_info=True)
+        return
+    for spec in indexes:
+        if str(spec.get("name") or "") == "_id_":
+            continue
+        keys = list((spec.get("key") or {}).items())
+        if not keys:
+            continue
+        kwargs: dict[str, Any] = {}
+        if spec.get("name"):
+            kwargs["name"] = spec["name"]
+        if spec.get("unique"):
+            kwargs["unique"] = True
+        if spec.get("sparse"):
+            kwargs["sparse"] = True
+        try:
+            dest.create_index(keys, **kwargs)
+        except Exception:
+            logger.warning(
+                "Mongo overwrite could not copy index %s", spec.get("name"), exc_info=True
+            )
+
+
+def retire_mongodb_overwrite(cfg: dict[str, Any], table_name: str) -> str | None:
+    """Rename the live collection aside and recreate it empty.
+
+    ``drop_collection`` deleted the collection before the load. A failed
+    overwrite then had nothing to restore (E1-025). The backup keeps the
+    documents. The new collection keeps the validator and indexes, so a
+    document that breaks them is rejected instead of loaded.
+    """
+    backup = mysql_overwrite_backup_name(table_name)
+    try:
+        db = _mongo_db(cfg)
+        names = set(db.list_collection_names())
+        if table_name not in names and backup not in names:
+            return None
+        if table_name in names and backup in names:
+            db.drop_collection(table_name)
+            db[backup].rename(table_name)
+            names.discard(backup)
+            names.add(table_name)
+        elif table_name not in names and backup in names:
+            db[backup].rename(table_name)
+            names.add(table_name)
+        options = _collection_create_options(db, table_name)
+        indexes_from = db[table_name]
+        db[table_name].rename(backup)
+        db.create_collection(table_name, **options)
+        _copy_collection_indexes(db[backup], db[table_name])
+        return backup
+    except Exception as exc:
+        raise TableDropError(table_name, exc) from exc
+
+
+def restore_mongodb_overwrite(cfg: dict[str, Any], table_name: str, backup: str) -> None:
+    """Drop a partial replacement and rename the backup back to the live name."""
+    try:
+        db = _mongo_db(cfg)
+        names = set(db.list_collection_names())
+        if table_name in names:
+            db.drop_collection(table_name)
+        if backup in names:
+            db[backup].rename(table_name)
+    except Exception as exc:
+        raise TableDropError(table_name, exc) from exc
+
+
+def discard_mongodb_overwrite(cfg: dict[str, Any], backup: str) -> None:
+    """Drop the renamed original after the replacement load has committed."""
+    try:
+        db = _mongo_db(cfg)
+        if backup in set(db.list_collection_names()):
+            db.drop_collection(backup)
+    except Exception as exc:
+        raise TableDropError(backup, exc) from exc
+
+
 def _drop_mongodb(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
     try:
-        conn_str = normalize_mongodb_connection_string(
-            connection_string=cfg.get("connection_string", ""),
-            host=cfg.get("host") or "127.0.0.1",
-            port=int(cfg.get("port") or 27017),
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            database=cfg.get("database") or "test",
-            auth_source=cfg.get("auth_source", ""),
-            ssl=bool(cfg.get("ssl")),
-        )
-        client = _mongo_client(conn_str)
-        db_name = cfg.get("database") or mongodb_database_from_uri(conn_str) or "test"
-        client[db_name].drop_collection(table_name)
+        db = _mongo_db(cfg)
+        db.drop_collection(table_name)
         return True
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc

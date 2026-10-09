@@ -161,16 +161,45 @@ def _synonym_collapsed_types(
     return out
 
 
+def _mapping_transform_token(value: Any) -> str:
+    """Canonical transform for a mapping contract.
+
+    ``None``, ``""``, ``none``, and ``identity`` are the same passthrough.
+    A planner confidence score is not part of the contract: the same
+    source/target/transform re-planned a minute later must still match the
+    signed rows, or a schedule bound to that contract can never run.
+    """
+    text = str(value if value is not None else "").strip().lower()
+    if text in {"", "none", "identity", "passthrough"}:
+        return ""
+    return text
+
+
+def _mapping_endpoint(mapping: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        text = str(mapping.get(key) or "").strip().lower()
+        if text:
+            return text
+    return ""
+
+
 def fingerprint_mappings(mappings: list[dict[str, Any]]) -> str:
-    """Hash of approved mapping contract."""
+    """Hash of the approved column binding: source, target, transform.
+
+    Confidence is a planner estimate and is not hashed. Two lists that name
+    the same columns and the same transforms are the same contract.
+    """
     payload = [
         {
-            "source": str(m.get("source") or "").lower(),
-            "target": str(m.get("target") or "").lower(),
-            "transform": m.get("transform"),
-            "confidence": round(float(m.get("confidence", 0)), 3),
+            "source": _mapping_endpoint(m, "source", "source_column"),
+            "target": _mapping_endpoint(m, "target", "target_column")
+            or _mapping_endpoint(m, "source", "source_column"),
+            "transform": _mapping_transform_token(m.get("transform")),
         }
-        for m in sorted(mappings, key=lambda x: str(x.get("source", "")).lower())
+        for m in sorted(
+            mappings,
+            key=lambda x: _mapping_endpoint(x, "source", "source_column"),
+        )
     ]
     return _hash_payload(payload)
 

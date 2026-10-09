@@ -919,7 +919,7 @@ def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
             "cancel_job": "Cancel asks the worker to stop after the current batch; rows already committed stay.",
             "retry_job": "Retry starts a **new** job from zero with the same request; the failed job is kept for audit.",
             "resume_job": "Resume continues from the last committed checkpoint — no rows are re-read before it.",
-            "replay_quarantine": "Replay re-sends the open quarantine rows through the destination writer with the original mapping.",
+            "replay_quarantine": "Replay re-sends the open quarantine rows. Staged transform overrides and edited cells replace the original cast; without them the original mapping is used.",
         }[name]
         return f"{' · '.join(bits)}.\n{effect}\n\nConfirm to proceed: **{label}**."
     if name == "delete_connector":
@@ -940,6 +940,18 @@ def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
         return (
             f"Pipeline **{p.get('name')}** ({p.get('sync_mode') or 'sync'}, {p.get('runs_recorded', 0)} runs recorded) "
             f"will be deleted; its jobs stay in Jobs.\n\nConfirm to proceed: **{label}**."
+        )
+    if name == "update_schedule":
+        bits = []
+        if p.get("cadence"):
+            bits.append(f"cadence becomes **{p.get('cadence')}**")
+        if p.get("name_after"):
+            bits.append(f"name becomes **{p.get('name_after')}**")
+        change = " and ".join(bits) or "will be updated"
+        note = f"\n{p['timezone_note']}" if p.get("timezone_note") else ""
+        return (
+            f"Pipeline **{p.get('name')}** {change}. The route and the mapping stay as they are."
+            f"{note}\n\nConfirm to proceed: **{label}**."
         )
     return f"Confirm to proceed: **{label}**."
 
@@ -1722,6 +1734,19 @@ class DataPilotAgent:
             return
 
         if tr.name == "remediate_validation":
+            # The tool opens a studio screen. It does not write, so there is
+            # no ack and no Confirm. A caller that still sets requires_confirm
+            # keeps the older staged shape.
+            if out.get("ui_only") or out.get("requires_confirm") is False:
+                turn.actions.append({
+                    "type": "navigate",
+                    "screen": "transfer",
+                    "risk": "safe",
+                    "label": out.get("label") or "Open Transfer Studio",
+                    "kind": out.get("kind"),
+                    "run_id": out.get("run_id"),
+                })
+                return
             turn.pending_actions.append({
                 "id": f"studio:{out.get('kind')}:{out.get('run_id') or ''}",
                 "type": "studio",
@@ -3141,11 +3166,18 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     lines.append(f"• Suggested: **{rem.get('label')}** (`{rem.get('kind')}`)")
                 parts.append("\n".join(lines))
             elif tr.name == "remediate_validation" and tr.success:
-                parts.append(
-                    f"Proposed Studio remediation: **{tr.output.get('label')}**.\n"
-                    "Confirm opens **Fix bad data** in Transfer Studio — "
-                    "it does not rewrite quarantine rows inside this chat."
-                )
+                label = (tr.output or {}).get("label")
+                if (tr.output or {}).get("ui_only"):
+                    parts.append(
+                        f"**{label}** opens in Transfer Studio. "
+                        "Nothing is written from this chat, and there is no confirm step."
+                    )
+                else:
+                    parts.append(
+                        f"Proposed Studio remediation: **{label}**.\n"
+                        "Confirm opens **Fix bad data** in Transfer Studio — "
+                        "it does not rewrite quarantine rows inside this chat."
+                    )
             elif tr.name in ("plan_transfer", "start_transfer") and tr.success:
                 parts.append(_render_transfer(tr.name, tr.output or {}))
             elif tr.name == "start_transfer" and not tr.success and isinstance(tr.output, dict):
@@ -3206,6 +3238,10 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if sibling_docs and cols <= 0:
                     continue
                 if cols <= 0:
+                    named = str(o.get("message") or "").strip()
+                    if named:
+                        parts.append(named)
+                        continue
                     gates = o.get("preflight_gates") or []
                     gate_line = (
                         f"\n\nValidate runs **{len(gates)} preflight gates**: "

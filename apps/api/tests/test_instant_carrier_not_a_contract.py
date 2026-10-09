@@ -86,7 +86,8 @@ def test_create_new_mysql_keeps_the_instant_carrier() -> None:
         "mysql",
         dest_table_exists=False,
     )
-    assert stamped[0]["target_type"].upper().startswith("TIMESTAMP(6)"), stamped[0]
+    assert stamped[0]["target_type"].upper().startswith("DATETIME(6)"), stamped[0]
+    assert not stamped[0].get("requires_risk_contract")
 
 
 def test_mysql_catalog_timestamptz_is_the_dest_instant_spelling() -> None:
@@ -103,19 +104,22 @@ def test_mysql_catalog_timestamptz_is_the_dest_instant_spelling() -> None:
 
 
 def test_create_new_mysql_legalizes_catalog_timestamptz_to_timestamp() -> None:
-    stamped = apply_create_new_risk_stamps(
-        [
-            {
-                "source": "ts_utc",
-                "target": "ts_utc",
-                "source_type": "TIMESTAMPTZ",
-                "target_type": "TIMESTAMPTZ(6)",
-                "create_new": True,
-            }
-        ],
-        "mysql",
-        dest_table_exists=False,
-    )
+    from services.source_engine_scope import bind_source_engine
+
+    with bind_source_engine("mysql"):
+        stamped = apply_create_new_risk_stamps(
+            [
+                {
+                    "source": "ts_utc",
+                    "target": "ts_utc",
+                    "source_type": "TIMESTAMPTZ",
+                    "target_type": "TIMESTAMPTZ(6)",
+                    "create_new": True,
+                }
+            ],
+            "mysql",
+            dest_table_exists=False,
+        )
     assert stamped[0]["target_type"].upper().startswith("TIMESTAMP(6)"), stamped[0]
     assert not stamped[0].get("requires_risk_contract")
 
@@ -126,7 +130,45 @@ def test_dialect_less_timestamp_is_still_a_wall_clock() -> None:
 
 
 def test_explicit_wall_clock_target_is_still_a_collapse() -> None:
-    assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is True
+    # An offset-pinned source loses its label on MySQL DATETIME.
+    assert is_lossy_coercion(
+        "TIMESTAMP WITH TIME ZONE", "DATETIME(6)", dest_db="mysql"
+    ) is True
+    # A session-relative instant keeps its UTC clock on DATETIME(6).
+    assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is False
+
+
+def test_offset_pinned_create_new_on_mysql_keeps_the_offset() -> None:
+    """DEF-B-016: MySQL has no offset type. Create-new stores RFC-3339 text.
+
+    DATETIME(6) and TIMESTAMP(6) stay a collapse. A wider name column does
+    not become a free pass. TIMESTAMPTZ still lands on DATETIME(6).
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from connectors.sql_bind import normalize_sql_bind_value
+    from services.type_system import create_new_mapping_target_type
+
+    for source in (
+        "TIMESTAMP_TZ",
+        "TIMESTAMP WITH TIME ZONE",
+        "DATETIMEOFFSET",
+    ):
+        stamped = create_new_mapping_target_type(source, "mysql")
+        assert stamped.upper().startswith("VARCHAR(64)"), (source, stamped)
+        assert is_lossy_coercion(source, stamped, dest_db="mysql") is False
+        assert is_lossy_coercion(source, "DATETIME(6)", dest_db="mysql") is True
+        assert is_lossy_coercion(source, "TIMESTAMP(6)", dest_db="mysql") is True
+        assert is_lossy_coercion(source, "VARCHAR(100)", dest_db="mysql") is True
+    assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is False
+    assert create_new_mapping_target_type("TIMESTAMPTZ", "mysql") == "DATETIME(6)"
+    aware = datetime(
+        2024, 12, 31, 23, 59, 59, 123456, tzinfo=timezone(timedelta(hours=5, minutes=30))
+    )
+    bound = normalize_sql_bind_value(aware, "VARCHAR(64)", engine="mysql")
+    assert isinstance(bound, str)
+    assert bound.endswith("+05:30")
+    assert "23:59:59" in bound
 
 
 def test_redis_json_wire_writes_the_offset() -> None:
@@ -138,6 +180,36 @@ def test_redis_json_wire_writes_the_offset() -> None:
     round_tripped = datetime.fromisoformat(json.loads(wire)["ts"])
     assert round_tripped.utcoffset() == aware.utcoffset()
     assert round_tripped == aware
+
+
+def test_kafka_json_wire_writes_the_offset() -> None:
+    """Kafka produce serializes an aware datetime with json_default, offset intact."""
+    from connectors.kafka_writer import kafka_json_payload
+
+    aware = datetime(
+        2024, 12, 31, 23, 59, 59, 123456, tzinfo=timezone(timedelta(hours=5, minutes=30))
+    )
+    record = kafka_json_payload(
+        {"created_at": aware},
+        ["created_at"],
+        {"created_at": "TEXT"},
+    )
+    wire = json.dumps(record, default=json_default)
+    round_tripped = datetime.fromisoformat(json.loads(wire)["created_at"])
+    assert round_tripped.utcoffset() == aware.utcoffset()
+    assert round_tripped == aware
+
+
+def test_timestamptz_into_kafka_text_needs_no_contract() -> None:
+    assert keyspace_instant_text_wire_preserved(
+        "TIMESTAMPTZ", "TEXT", dest_db="kafka"
+    ) is True
+    assert is_lossy_coercion("TIMESTAMPTZ", "TEXT", dest_db="kafka") is False
+    assert is_lossy_coercion(
+        "TIMESTAMPTZ", "TEXT", dest_db="apache_kafka"
+    ) is False
+    # A typed engine's TEXT column is still a contract. Kafka does not widen that.
+    assert is_lossy_coercion("TIMESTAMPTZ", "TEXT", dest_db="postgresql") is True
 
 
 def test_timestamptz_into_redis_text_needs_no_contract() -> None:
@@ -193,7 +265,7 @@ def test_overwrite_create_new_mysql_stamps_timestamp_without_a_contract() -> Non
         request=request,
     )
     row = next(m for m in mappings if m.get("source") == "ts_utc")
-    assert str(row.get("target_type") or "").upper().startswith("TIMESTAMP(6)"), row
+    assert str(row.get("target_type") or "").upper().startswith("DATETIME(6)"), row
     assert not row.get("requires_risk_contract")
     issues = validate_mapping_coercions(
         mappings,
@@ -306,4 +378,6 @@ def test_mysql_instant_carrier_does_not_quarantine_offset_wires() -> None:
         "quarantine",
         dest_db="mysql",
     )
-    assert wall, "DATETIME(6) must still hold out offset-bearing wires"
+    assert wall == [], (
+        "DATETIME(6) stores the UTC-normalized clock; the offset wire must land"
+    )

@@ -59,9 +59,11 @@ def test_vector_prepare_metadata_omits_reader_null_keeps_zero():
 
 
 def test_vector_prepare_cell_decimal_is_dest_canonical():
-    assert vector_prepare_cell(Decimal("1E+2")) == "100"
-    assert vector_prepare_cell(Decimal("100")) == "100"
-    assert vector_prepare_cell(Decimal("1E+2")) != str(Decimal("1E+2"))
+    # Canonical digits, still a number. str(Decimal("1E+2")) is "1E+2".
+    assert vector_prepare_cell(Decimal("1E+2")) == Decimal("100")
+    assert vector_prepare_cell(Decimal("100")) == Decimal("100")
+    assert str(vector_prepare_cell(Decimal("1E+2"))) == "100"
+    assert str(vector_prepare_cell(Decimal("1E+2"))) != str(Decimal("1E+2"))
 
 
 def test_prepare_records_omits_sql_null_sentinel():

@@ -17,6 +17,7 @@ when every cycle edge re-reads as ``carried``.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from dataclasses import dataclass, field
 from typing import Any
@@ -26,6 +27,26 @@ from .connector_capabilities import resolve_driver_type
 from .models import EndpointConfig
 
 logger = logging.getLogger(__name__)
+
+# Multi-stream sets this while each table loads. The per-table carry only sees
+# that table, so on one server it binds the foreign key to the source parent.
+# The job carry, after every table has landed, is the one that knows the map.
+_DEFER_SINGLE_TABLE_FK: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "df_defer_single_table_fk",
+    default=False,
+)
+
+
+def push_deferred_single_table_foreign_keys() -> contextvars.Token[bool]:
+    return _DEFER_SINGLE_TABLE_FK.set(True)
+
+
+def pop_deferred_single_table_foreign_keys(token: contextvars.Token[bool]) -> None:
+    _DEFER_SINGLE_TABLE_FK.reset(token)
+
+
+def single_table_foreign_key_carry_deferred() -> bool:
+    return bool(_DEFER_SINGLE_TABLE_FK.get())
 
 
 @dataclass
@@ -116,3 +137,45 @@ def carry_foreign_keys_after_load(
             "verdict": "unknown",
             "error": f"{type(exc).__name__}: {exc}",
         }
+
+
+def carry_single_table_foreign_keys(
+    source: EndpointConfig,
+    destination: EndpointConfig,
+    table: str,
+    dest_table: str,
+    mappings: list[dict] | None,
+    dest_summary: dict[str, Any],
+    ddl_log: list[str],
+) -> None:
+    """Carry one table's references after its load.
+
+    The parent is already on the destination instead of arriving in this run,
+    so without this the child lands with its foreign keys dropped and the run
+    still goes green. A multi-stream job defers this: the per-table map does
+    not know the parent is landing in the destination schema, and a same-server
+    source parent would be bound instead.
+    """
+    if single_table_foreign_key_carry_deferred():
+        return
+    fk_context = foreign_key_context(source, [table])
+    if not fk_context.source_keys:
+        return
+    fk_context.column_maps[table] = {
+        str(m.get("source") or ""): str(m.get("target") or "")
+        for m in (mappings or [])
+        if m.get("source") and m.get("target")
+    }
+    fk_summary = carry_foreign_keys_after_load(
+        destination, fk_context, {table: dest_table}
+    )
+    if fk_summary is None:
+        return
+    dest_summary["foreign_keys"] = fk_summary
+    for decision in fk_summary.get("decisions") or []:
+        if decision.get("status") in {"carried", "unsupported"} and decision.get(
+            "dest_ddl"
+        ):
+            ddl_log.append(
+                f"{str(decision['status']).upper()} FK: {decision['dest_ddl']}"
+            )

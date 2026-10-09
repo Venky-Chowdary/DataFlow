@@ -448,10 +448,13 @@ class DeliveryGuaranteeError(ValueError):
 
 
 def assert_delivery_guarantee_allowed(requested: str | None) -> str:
-    """Normalize delivery selection. Exactly-once is opt-in; route gate is separate."""
-    raw = (requested or DEFAULT_DELIVERY_SEMANTICS).strip().lower().replace("-", "_")
-    if not raw:
-        return DEFAULT_DELIVERY_SEMANTICS
+    """Normalize a delivery token. ``auto`` is resolved per route later.
+
+    Exactly-once on an ineligible route is refused by the route gate, not here.
+    """
+    raw = (requested or "").strip().lower().replace("-", "_")
+    if raw in {"", "auto", "default"}:
+        return "auto"
     if raw in {"eos", "exactlyonce"}:
         raw = "exactly_once"
     if raw == "at_most_once":

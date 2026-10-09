@@ -4,16 +4,32 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import secrets
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from services.api_key_role import parse_requested_api_key_role, resolve_stored_api_key_role
 from services.platform_config import data_dir, is_railway
 from services.secret_vault import SecretVaultError, decrypt_secret, encrypt_secret
 from services.value_serializer import json_default
 
+logger = logging.getLogger(__name__)
+
 STORE_PATH = data_dir() / "integrations.json"
+_API_KEY_COLLECTION = "workspace_api_keys"
+# Same choices a personal access token offers. ``never`` is explicit: a blank
+# request is the 90-day default, not an immortal key.
+API_KEY_LIFETIMES: dict[str, int | None] = {
+    "7d": 7,
+    "30d": 30,
+    "60d": 60,
+    "90d": 90,
+    "365d": 365,
+    "never": None,
+}
+DEFAULT_API_KEY_LIFETIME = "90d"
 
 _SSO_TYPES = ("saml", "oidc", "azure_ad")
 _CLOUD_PROVIDERS = ("openai", "anthropic")
@@ -459,46 +475,231 @@ def _hash_api_key(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def list_api_keys() -> list[dict[str, Any]]:
+def parse_api_key_lifetime(raw: object) -> str:
+    """Lifetime an admin asked to mint. Blank means 90 days."""
+    if raw is None or not str(raw).strip():
+        return DEFAULT_API_KEY_LIFETIME
+    token = str(raw).strip().lower()
+    if token in API_KEY_LIFETIMES:
+        return token
+    allowed = ", ".join(API_KEY_LIFETIMES)
+    raise ValueError(f"expires_in must be one of: {allowed}")
+
+
+def _expires_at(lifetime: str, *, now: datetime | None = None) -> str | None:
+    days = API_KEY_LIFETIMES[lifetime]
+    if days is None:
+        return None
+    moment = now or datetime.now(timezone.utc)
+    return (moment + timedelta(days=days)).isoformat()
+
+
+def _parse_expires_at(raw: object) -> datetime | None:
+    if raw is None or not str(raw).strip():
+        return None
+    text = str(raw).strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _is_revoked(item: dict[str, Any]) -> bool:
+    return bool(str(item.get("revoked_at") or "").strip())
+
+
+def _key_expired(item: dict[str, Any], *, now: datetime | None = None) -> bool:
+    """A missing expiry is a legacy key and stays valid. A corrupt date does not."""
+    if "expires_at" not in item or item.get("expires_at") in (None, ""):
+        return False
+    expires = _parse_expires_at(item.get("expires_at"))
+    if expires is None:
+        return True
+    moment = now or datetime.now(timezone.utc)
+    return moment >= expires
+
+
+def _store_errors() -> tuple[type[BaseException], ...]:
+    try:
+        from pymongo.errors import PyMongoError
+    except ImportError:  # pragma: no cover
+        return (OSError, RuntimeError, ValueError, TypeError)
+    return (OSError, RuntimeError, ValueError, TypeError, PyMongoError)
+
+
+def _keys_collection() -> Any | None:
+    try:
+        from services.control_plane_store import mongo_collection
+
+        return mongo_collection(_API_KEY_COLLECTION)
+    except _store_errors():
+        logger.debug("workspace API key collection unavailable", exc_info=True)
+        return None
+
+
+def _file_key_records() -> list[dict[str, Any]]:
     data = _load_raw()
-    rows = []
-    for item in data.get("api_keys", []):
-        rows.append({
-            "id": item["id"],
-            "name": item.get("name", "API key"),
-            "prefix": item.get("prefix", "dfk_"),
-            "created_at": item.get("created_at"),
-            "created_by": item.get("created_by"),
-            "last_used_at": item.get("last_used_at"),
-        })
+    return [
+        dict(item)
+        for item in data.get("api_keys", [])
+        if isinstance(item, dict) and item.get("id") and item.get("key_hash")
+    ]
+
+
+def _save_file_keys(keys: list[dict[str, Any]]) -> None:
+    data = _load_raw()
+    data["api_keys"] = keys
+    _save(data)
+
+
+def _record_for_store(item: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in item.items() if key != "_id"}
+
+
+def load_api_key_records() -> list[dict[str, Any]]:
+    """Keys this process can authenticate.
+
+    Mongo is the control plane when it is up, so a new API process and a
+    second replica see the key the operator minted. The JSON file is the
+    store when Mongo is down, and any key that exists only there is copied
+    into Mongo so the next session does not lose it.
+    """
+    file_keys = _file_key_records()
+    coll = _keys_collection()
+    if coll is None:
+        return file_keys
+    try:
+        docs = [
+            _record_for_store(doc)
+            for doc in coll.find({})
+            if isinstance(doc, dict) and doc.get("id") and doc.get("key_hash")
+        ]
+    except _store_errors():
+        logger.warning("workspace API key read failed; using the local file", exc_info=True)
+        return file_keys
+    by_id = {str(doc["id"]): doc for doc in docs}
+    file_rewrites: list[dict[str, Any]] = []
+    for item in file_keys:
+        key_id = str(item["id"])
+        stored = _record_for_store(item)
+        current = by_id.get(key_id)
+        if current is None:
+            try:
+                coll.update_one({"id": key_id}, {"$set": stored}, upsert=True)
+            except _store_errors():
+                logger.warning("workspace API key heal into Mongo failed", exc_info=True)
+                return file_keys
+            by_id[key_id] = stored
+            continue
+        # A revoke on either side sticks. A stale file must not mint the secret
+        # again, and a revoke that reached only the file must still reach Mongo.
+        if _is_revoked(stored) and not _is_revoked(current):
+            revoked = dict(current)
+            revoked["revoked_at"] = stored.get("revoked_at")
+            try:
+                coll.update_one({"id": key_id}, {"$set": _record_for_store(revoked)}, upsert=True)
+            except _store_errors():
+                logger.warning("workspace API key revoke sync failed", exc_info=True)
+            by_id[key_id] = revoked
+        elif _is_revoked(current) and not _is_revoked(stored):
+            file_rewrites.append(current)
+    if file_rewrites:
+        merged = {str(item["id"]): item for item in file_keys}
+        for item in file_rewrites:
+            merged[str(item["id"])] = _record_for_store(item)
+        _save_file_keys(list(merged.values()))
+    return list(by_id.values())
+
+
+def _upsert_api_key_record(record: dict[str, Any]) -> None:
+    stored = _record_for_store(record)
+    key_id = str(stored["id"])
+    file_keys = [item for item in _file_key_records() if str(item.get("id")) != key_id]
+    file_keys.append(stored)
+    _save_file_keys(file_keys)
+    coll = _keys_collection()
+    if coll is None:
+        return
+    try:
+        coll.update_one({"id": key_id}, {"$set": stored}, upsert=True)
+    except _store_errors():
+        logger.warning("workspace API key Mongo write failed; file copy kept", exc_info=True)
+
+
+def _public_api_key(item: dict[str, Any], *, secret: str | None = None) -> dict[str, Any]:
+    expires_at = item.get("expires_at")
+    row: dict[str, Any] = {
+        "id": item["id"],
+        "name": item.get("name", "API key"),
+        "prefix": item.get("prefix", "dfk_"),
+        "role": resolve_stored_api_key_role(item.get("role")),
+        "created_at": item.get("created_at"),
+        "created_by": item.get("created_by"),
+        "last_used_at": item.get("last_used_at"),
+        "expires_at": expires_at or None,
+        "lifetime": item.get("lifetime") or ("never" if not expires_at else ""),
+        "expired": _key_expired(item),
+    }
+    if secret is not None:
+        row["key"] = secret
+    return row
+
+
+def list_api_keys() -> list[dict[str, Any]]:
+    rows = [
+        _public_api_key(item)
+        for item in load_api_key_records()
+        if not _is_revoked(item)
+    ]
+    rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
     return rows
 
 
-def create_api_key(name: str, actor: str) -> dict[str, Any]:
-    data = _load_raw()
+def create_api_key(
+    name: str,
+    actor: str,
+    role: str = "editor",
+    expires_in: str = DEFAULT_API_KEY_LIFETIME,
+) -> dict[str, Any]:
+    stored_role = parse_requested_api_key_role(role)
+    lifetime = parse_api_key_lifetime(expires_in)
     raw = f"dfk_{secrets.token_urlsafe(32)}"
     prefix = raw[:12]
     record = {
         "id": str(uuid.uuid4()),
         "name": name.strip()[:64] or "API key",
         "prefix": prefix,
+        "role": stored_role,
         "key_hash": _hash_api_key(raw),
         "created_at": _now(),
         "created_by": actor,
         "last_used_at": None,
+        "lifetime": lifetime,
+        "expires_at": _expires_at(lifetime),
     }
-    data.setdefault("api_keys", []).append(record)
-    _save(data)
-    return {"id": record["id"], "name": record["name"], "prefix": prefix, "key": raw, "created_at": record["created_at"]}
+    _upsert_api_key_record(record)
+    return _public_api_key(record, secret=raw)
 
 
 def revoke_api_key(key_id: str) -> bool:
-    data = _load_raw()
-    before = len(data.get("api_keys", []))
-    data["api_keys"] = [k for k in data.get("api_keys", []) if k.get("id") != key_id]
-    if len(data["api_keys"]) == before:
+    """Mark the key revoked in both stores.
+
+    Deleting it let a replica whose file still held the secret copy that secret
+    back into Mongo on the next read. The hash stays so the old secret is
+    recognized and refused. A second revoke reports that there is nothing left
+    to revoke.
+    """
+    match = next(
+        (item for item in load_api_key_records() if str(item.get("id")) == key_id),
+        None,
+    )
+    if match is None or _is_revoked(match):
         return False
-    _save(data)
+    match["revoked_at"] = _now()
+    _upsert_api_key_record(match)
     return True
 
 
@@ -506,10 +707,17 @@ def verify_workspace_api_key(raw: str) -> dict[str, Any] | None:
     if not raw or not raw.startswith("dfk_"):
         return None
     digest = _hash_api_key(raw)
-    data = _load_raw()
-    for item in data.get("api_keys", []):
-        if item.get("key_hash") == digest:
-            item["last_used_at"] = _now()
-            _save(data)
-            return {"id": item["id"], "name": item.get("name"), "created_by": item.get("created_by")}
+    for item in load_api_key_records():
+        if item.get("key_hash") != digest:
+            continue
+        if _is_revoked(item) or _key_expired(item):
+            return None
+        item["last_used_at"] = _now()
+        _upsert_api_key_record(item)
+        return {
+            "id": item["id"],
+            "name": item.get("name"),
+            "created_by": item.get("created_by"),
+            "role": resolve_stored_api_key_role(item.get("role")),
+        }
     return None

@@ -80,6 +80,45 @@ def connector_ids_from_job(job: dict[str, Any] | None) -> tuple[str | None, str 
     return src, dst
 
 
+def _names_from_stream_rows(raw: list[Any] | None) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or item.get("stream") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _stream_names_for_list(job: dict[str, Any]) -> list[str]:
+    """Named streams, same precedence as the detail reader.
+
+    Two measured health rows win. Until that list exists, the selected
+    contracts on the request name the job. One stamped table must not hide
+    the rest of the selection. The list still ships names only.
+    """
+    from services.batch_progress import selected_contract_names
+    from src.transfer.job_failure import summary_streams
+
+    summary = job.get("destination_summary")
+    raw = summary_streams(summary) if isinstance(summary, dict) else None
+    if raw is None:
+        raw = summary_streams(job)
+    names = _names_from_stream_rows(raw)
+    if len(names) >= 2:
+        return names
+    request = job.get("transfer_request")
+    contracts = request.get("stream_contracts") if isinstance(request, dict) else None
+    selected = selected_contract_names(contracts if isinstance(contracts, list) else None)
+    if len(selected) >= 2:
+        return selected
+    return names
+
+
 def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
     """Return a compact copy for list views — never ship quarantine samples here."""
     if not job:
@@ -93,6 +132,11 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
         out["source_connector_id"] = src_id
     if dst_id:
         out["dest_connector_id"] = dst_id
+    # Names only. The list must not ship per-stream ledgers, and a job whose
+    # stored source_name is the last table must still show the other tables.
+    stream_names = _stream_names_for_list(job)
+    if len(stream_names) >= 2:
+        out["stream_names"] = stream_names
     # Preserve reject count if only nested under destination_summary.
     if "rejected_rows" not in out and isinstance(job.get("destination_summary"), dict):
         ds = job["destination_summary"]

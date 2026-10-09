@@ -18,6 +18,7 @@ from services.schedule_store import (
     delete_schedule,
     get_schedule,
     list_schedules,
+    project_operator_cadence,
     update_schedule,
 )
 from services.workspace_access import (
@@ -80,7 +81,7 @@ class ScheduleCreate(BaseModel):
     priority_column: str = ""
     priority_direction: str = "desc"
     row_limit: int = Field(default=0, ge=0)
-    delivery_guarantee: str = "at_least_once"
+    delivery_guarantee: str = "auto"
     snapshot_mode: str = ""
     allow_append_only: bool = False
     cdc_row_filter: str = ""
@@ -118,7 +119,9 @@ class ScheduleUpdate(BaseModel):
     source_table: Optional[str] = None
     dest_connector_id: Optional[str] = None
     dest_table: Optional[str] = None
-    interval: Optional[IntervalPreset] = None
+    interval: Optional[str] = None
+    #: Runner token when ``interval`` is the displayed cadence label.
+    interval_preset: Optional[str] = None
     cron: Optional[str] = None
     timezone: Optional[str] = None
     sync_mode: Optional[SyncMode] = None
@@ -167,6 +170,10 @@ class ScheduleResponse(BaseModel):
     dest_connector_id: str
     dest_table: str
     interval: str
+    #: hourly | daily | weekly. Present even when ``interval`` is a label.
+    interval_preset: str = ""
+    #: Human cadence. Cron wins over the preset.
+    cadence_label: str = ""
     cron: str = ""
     timezone: str = "UTC"
     sync_mode: str = "full_refresh_overwrite"
@@ -235,7 +242,7 @@ class ScheduleResponse(BaseModel):
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleResponse:
-        data = s.to_dict()
+        data = project_operator_cadence(s.to_dict())
         mappings = list(data.get("mappings") or [])
         data["mappings"] = mappings
         data["mapping_count"] = len(mappings)
@@ -253,6 +260,8 @@ class ScheduleSummaryResponse(BaseModel):
     dest_connector_id: str
     dest_table: str
     interval: str
+    interval_preset: str = ""
+    cadence_label: str = ""
     cron: str = ""
     timezone: str = "UTC"
     sync_mode: str = "full_refresh_overwrite"

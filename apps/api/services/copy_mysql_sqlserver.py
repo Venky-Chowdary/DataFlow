@@ -7,7 +7,7 @@ collapses to NULL on Linux SQL Server). Dest ``COUNT(*)`` must equal the
 source snapshot.
 
 Empty dest SELECTs the table once. Occupied dest with a mapped single PK
-skips complete ranges and DELETE+reloads partial ones. No mapped single
+skips a complete range. Append declines a partial range to the row path; overwrite DELETE+reloads it. No mapped single
 PK on an occupied dest: decline.
 
 Declines (row path keeps quarantine): transforms that change values,
@@ -21,7 +21,7 @@ import logging
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
     _mysql_connect,
@@ -223,6 +223,7 @@ def copy_mysql_to_sqlserver(
                                 )
                             )
                         else:
+                            occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                             _ss_delete_range(
                                 dst_cur, dest_ref, dest_ident, part
                             )

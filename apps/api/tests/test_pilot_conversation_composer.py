@@ -1864,7 +1864,9 @@ def test_what_cant_you_do_answers_with_the_limits():
     agent = get_pilot_agent()
     limits = agent.chat("what can't you do", data_context={"pilot_session_id": "test-limits"})
     assert "will **not** do" in limits.answer
-    assert "Delete connectors, jobs, or data" in limits.answer
+    assert "Delete jobs or warehouse rows from chat" in limits.answer
+    assert "Delete connectors, jobs, or data" not in limits.answer
+    assert "brand-new schedule" not in limits.answer.lower()
 
     can = agent.chat("what can you do", data_context={"pilot_session_id": "test-can"})
     assert "**I can:**" in can.answer

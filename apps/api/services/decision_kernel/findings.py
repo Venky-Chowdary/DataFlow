@@ -584,7 +584,10 @@ def findings_from_coercion_report(
             row_number=row_number,
             operation=str(col.get("transform") or ""),
             dest_db=dest_db,
-            blocking=severity == "block" or fidelity,
+            # A signed continue policy already softened severity to warn.
+            # fidelity_collapse stays on the finding so the column is still
+            # named, and it must not put the block back (DEF-R20-001).
+            blocking=severity == "block",
             gate_ids=("g3_coercion",),
             failure_class=fc,
             suggested_target_type=str(col.get("suggested_target_type") or ""),
