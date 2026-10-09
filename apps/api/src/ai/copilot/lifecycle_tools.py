@@ -348,6 +348,21 @@ def _job_tool(
     transform_overrides: Any = None,
     rows: Any = None,
 ) -> ToolResult:
+    if not (job_id or "").strip() and not (selector or "").strip():
+        # A mutating call with no target must not fall through to the
+        # implicit "latest job" — replay_quarantine {} silently aimed at
+        # whatever job happened to be newest (QA Q06). Naming a selector
+        # ("the last job", "the failed job") stays allowed; an empty call
+        # names nothing.
+        return _tool_result(
+            tool,
+            success=False,
+            output=None,
+            error=(
+                "Which job? Give the job_id, or name a selector like "
+                "“the last job” — a mutating call with no target is refused."
+            ),
+        )
     job, clarify = resolve_job(job_id, selector)
     if not job:
         return _tool_result(tool, success=False, output=None, error=clarify)

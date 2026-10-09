@@ -1120,6 +1120,100 @@ class QuarantineReplayRequest(BaseModel):
     transform_overrides: dict = Field(default_factory=dict, description="Optional per-column transform overrides keyed by source column")
 
 
+_QUARANTINE_DETAIL_KEYS = frozenset({
+    "column", "value", "values", "source_values", "row", "reason",
+    "failure_reason", "policy", "retry_status", "source_pk", "cell",
+    "transform", "gate", "target", "quarantine",
+})
+
+
+def _is_record_payload_row(d: Any) -> bool:
+    """An edited *row payload* carries cell columns only — no finding keys.
+
+    ``{id: 4, flt: '4.0'}`` is a replacement row; ``{row: 2, column: 'flt',
+    value: 'not-a-number'}`` is a finding scrap. The endpoint used to feed
+    both through the detail path and lose every payload cell (QA Q05).
+    """
+    return isinstance(d, dict) and bool(d) and not any(
+        k in d for k in _QUARANTINE_DETAIL_KEYS
+    )
+
+
+def _merge_edited_row_payloads(
+    open_details: list[dict],
+    base_records: list[dict],
+    edits: list[dict],
+    *,
+    job_id: str = "",
+) -> tuple[list[dict], list[dict]]:
+    """Bind each edited row payload to the open finding it remediates.
+
+    The edit replaces cells in the stored row — an edit like
+    ``{id: 4, flt: '4.0'}`` is not a complete record by itself, so replaying
+    it raw would write NULLs for every unmapped field. Binding: a base
+    record is a candidate when at least one shared cell agrees and no
+    shared cell disagrees *outside* the finding's quarantined column —
+    the quarantined cell is exactly what the edit is allowed to change.
+    Zero or ambiguous candidates refuse: writing the wrong row is worse
+    than asking the operator to be more specific.
+    """
+    if len(base_records) != len(open_details):
+        # Details grouped by row can collapse — rebuild 1:1 so each edit
+        # binds to exactly one finding.
+        rebuilt: list[dict] = []
+        for d in open_details:
+            recs, _cols = _quarantine_details_to_records([d])
+            rebuilt.append(recs[0] if recs else {})
+        base_records = rebuilt
+    quarantined_cols = {
+        i: str(d.get("column") or d.get("target") or "").strip()
+        for i, d in enumerate(open_details)
+    }
+    bound: list[tuple[int, dict]] = []
+    used: set[int] = set()
+    for edit in edits:
+        candidates: list[int] = []
+        for i, base in enumerate(base_records):
+            if i in used:
+                continue
+            shared = [k for k in edit if k in base]
+            if not shared:
+                continue
+            qcol = quarantined_cols.get(i) or ""
+            agreeing = [k for k in shared if str(edit[k]) == str(base[k])]
+            disagreeing = [k for k in shared if k not in agreeing and k != qcol]
+            if agreeing and not disagreeing:
+                candidates.append(i)
+        if not candidates:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Edited row does not match any open quarantine finding — "
+                    "keep the unchanged cells from get_job's quarantined row "
+                    "so the edit binds to exactly one finding."
+                ),
+            )
+        if len(candidates) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Edited row matches {len(candidates)} open findings — "
+                    "include the finding's ``row`` index or enough unchanged "
+                    "cells to make the match unique."
+                ),
+            )
+        idx = candidates[0]
+        used.add(idx)
+        merged = dict(base_records[idx])
+        merged.update({str(k): v for k, v in edit.items()})
+        bound.append((idx, merged))
+    # Replay only the bound findings — unedited open rows stay open.
+    return (
+        [merged for _, merged in bound],
+        [open_details[i] for i, _ in bound],
+    )
+
+
 def _quarantine_details_to_records(details: list[dict], transform_overrides: Optional[dict] = None) -> tuple[list[dict], list[str]]:
     """Group rejected_details by row index into records for rewrite.
 
@@ -1308,11 +1402,26 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         for d in durable
         if str(d.get("retry_status") or "").lower() == "promoted"
     }
+    record_rows = False
     if body.rows:
-        details = [
-            d for d in body.rows
-            if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
-        ]
+        raw_rows = [d for d in body.rows if isinstance(d, dict)]
+        if raw_rows and all(_is_record_payload_row(d) for d in raw_rows):
+            # The operator sent edited *row payloads* — {id: 4, flt: '4.0'} —
+            # not quarantine-detail scrap. Bind each edit to the open finding
+            # it remediates and merge over the stored cells (QA Q05). Only
+            # bound findings join the replay attempt — unedited rows stay open.
+            record_rows = True
+            open_details = open_quarantine_details(durable)
+            base_records, _ = _quarantine_details_to_records(open_details)
+            records, details = _merge_edited_row_payloads(
+                open_details, base_records, raw_rows, job_id=job_id
+            )
+            columns = list(dict.fromkeys(k for r in records for k in r))
+        else:
+            details = [
+                d for d in body.rows
+                if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
+            ]
     else:
         details = open_quarantine_details(durable)
     if not details:
@@ -1327,7 +1436,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
     prior_closure = job_quarantine_closure(job) or {}
 
-    records, columns = _quarantine_details_to_records(details, body.transform_overrides)
+    if not record_rows:
+        records, columns = _quarantine_details_to_records(details, body.transform_overrides)
     if not records:
         raise HTTPException(
             status_code=400,
