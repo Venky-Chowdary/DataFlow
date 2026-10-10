@@ -768,12 +768,27 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "pattern": "batch",
         "supports_cdc": False,
         "supports_streaming": False,
-        "supports_upsert": True,
-        "supports_append": True,
+        "supports_upsert": False,
+        "supports_append": False,
         "supports_overwrite": False,
         "supports_merge": False,
         "requires_schema": False,
         "pagination": "cursor",
+        "dest_certification_note": (
+            "The reverse-ETL writer exists in connectors/stripe.py, but the "
+            "destination role is not certified until a production SKU execute "
+            "plus destination COUNT on a named Stripe object."
+        ),
+        "capability_downgrades": [
+            {
+                "fields": ["supports_upsert", "supports_append"],
+                "reason": (
+                    "The reverse-ETL writer exists in connectors/stripe.py, but "
+                    "the destination role is not certified until a production SKU "
+                    "execute plus destination COUNT on a named Stripe object."
+                ),
+            }
+        ],
         "rate_limit_notes": (
             "Stripe list APIs cap at 100 objects per page and rate-limit per account; "
             "starting_after is page walking, not an incremental cursor."
@@ -1258,6 +1273,23 @@ def get_connector_capability(key: str) -> dict[str, Any]:
             cap["supports_append"] = False
             cap["supports_overwrite"] = False
             cap["supports_merge"] = False
+        from services.connector_truth_audit import write_mode_downgrade_reason
+
+        write_flags = (
+            "supports_upsert",
+            "supports_append",
+            "supports_overwrite",
+            "supports_merge",
+        )
+        originally_true = [flag for flag in write_flags if cap.get(flag)]
+        if originally_true:
+            reason = write_mode_downgrade_reason(normalized, driver, caps)
+            if reason:
+                cap["capability_downgrades"] = [
+                    {"fields": originally_true, "reason": reason}
+                ]
+                for flag in write_flags:
+                    cap[flag] = False
         cap["driver_type"] = driver
         cap["driver_capabilities"] = caps
     except Exception:
