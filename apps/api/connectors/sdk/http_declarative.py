@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterator
 
 import requests
+from collections.abc import Mapping
 
 from connectors.sdk import (
     ConnectorDescriptor,
@@ -14,6 +15,7 @@ from connectors.sdk import (
     register_connector,
 )
 from connectors.sdk.declarative.connector import DeclarativeSource
+from connectors.sdk.declarative.errors import PaginationError
 
 __all__ = [
     "DeclarativeHttpConnector",
@@ -25,11 +27,30 @@ __all__ = [
 
 
 class _LegacyRequestsSession:
+    def __init__(self) -> None:
+        self.pagination_detected = False
+
     def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
         request = getattr(requests, method.lower(), None)
         if request is None:
-            return requests.request(method, url, **kwargs)
-        return request(url, **kwargs)
+            response = requests.request(method, url, **kwargs)
+        else:
+            response = request(url, **kwargs)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and not isinstance(status, bool) and status < 400:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            paging = payload.get("paging") if isinstance(payload, Mapping) else None
+            if isinstance(payload, Mapping) and (
+                "next" in payload
+                or "next_page" in payload
+                or payload.get("has_more") is True
+                or (isinstance(paging, Mapping) and "next" in paging)
+            ):
+                self.pagination_detected = True
+        return response
 
 
 @dataclass
@@ -97,7 +118,7 @@ def parse_declarative_spec(raw: dict[str, Any]) -> DeclarativeHttpSpec:
 
 @register_connector
 class DeclarativeHttpConnector(DeclarativeSource):
-    """Backward-compatible config adapter for :class:`DeclarativeSource`."""
+    """Backward-compatible single-page adapter; use DeclarativeSource for pagination."""
 
     name = "declarative_http"
     supports_read = True
@@ -113,6 +134,12 @@ class DeclarativeHttpConnector(DeclarativeSource):
             {"name": "spec", "sensitive": False},
         ),
         evidence="synthetic-fixture",
+        certification_skips={
+            "resume_after_failure": (
+                "legacy spec has no pagination keys; single-page source; recovery is a full "
+                "re-read of that page; use a DeclarativeSource manifest for paginated APIs"
+            )
+        },
     )
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -243,12 +270,22 @@ class DeclarativeHttpConnector(DeclarativeSource):
             params[decl.cursor_param] = cursor_val
         elif offset and decl.offset_param:
             params[decl.offset_param] = str(offset)
+        legacy_session = self.requester.session
+        if isinstance(legacy_session, _LegacyRequestsSession):
+            legacy_session.pagination_detected = False
         for batch in super().read(
             stream,
             state=None,
             limit=limit,
             _request_params=params,
         ):
+            if (
+                isinstance(legacy_session, _LegacyRequestsSession)
+                and legacy_session.pagination_detected
+            ):
+                raise PaginationError(
+                    "legacy declarative spec cannot paginate; migrate to a DeclarativeSource manifest"
+                )
             next_state = dict(current_state)
             if batch.records and decl.cursor_field:
                 last = batch.records[-1].get(decl.cursor_field)
@@ -271,4 +308,11 @@ class DeclarativeHttpConnector(DeclarativeSource):
                 records=batch.records,
                 schema=schema,
                 state=next_state,
+            )
+        if (
+            isinstance(legacy_session, _LegacyRequestsSession)
+            and legacy_session.pagination_detected
+        ):
+            raise PaginationError(
+                "legacy declarative spec cannot paginate; migrate to a DeclarativeSource manifest"
             )
