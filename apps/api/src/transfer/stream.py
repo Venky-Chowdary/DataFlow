@@ -873,8 +873,18 @@ from .stream_catalog import (  # noqa: E402
 )
 
 
-def _fk_orphans_quarantine(validation_mode: str) -> bool:
-    return str(validation_mode or "").strip().lower() not in {"strict", "maximum"}
+def _fk_orphans_fail_closed(validation_mode: str) -> bool:
+    return str(validation_mode or "").strip().lower() in {"strict", "maximum"}
+
+
+def _fk_orphan_violation_message(details: list[dict[str, Any]]) -> str:
+    samples = "; ".join(str(d.get("reason") or "") for d in details[:3])
+    return (
+        f"Referential integrity failed before write: {len(details)} orphan "
+        f"child row(s) in this page reference a parent absent at the destination "
+        f"({samples}). Strict validation refuses to commit an orphan row — load "
+        "the parent rows first or run in balanced mode to quarantine them."
+    )
 
 
 def stream_database_transfer(
@@ -1234,21 +1244,19 @@ def _stream_database_transfer_impl(
     # committed. Built before the COPY decision: a server-to-server copy never
     # brings a row into this process, so it cannot hold an orphan back — a
     # guarded route takes the row path instead of landing orphans unchecked.
-    # Strict/maximum do not quarantine: holding an orphan back lets the row
-    # checksum match the survivors and green a referential-integrity defect.
-    # The row lands and Gate-8 G22 measures the orphan and fails the run.
+    # Strict/maximum fail the run on the first orphan before it is committed;
+    # balanced/warn quarantine it and Gate-8 G22 reports the count as a warn.
     fk_orphan_guard = None
     try:
         from .stream_foreign_keys import build_fk_orphan_guard
 
-        if _fk_orphans_quarantine(validation_mode):
-            fk_orphan_guard = build_fk_orphan_guard(
-                source,
-                destination,
-                _source_name(source),
-                dest_type=dest_type,
-                dest_cfg=dest_cfg,
-            )
+        fk_orphan_guard = build_fk_orphan_guard(
+            source,
+            destination,
+            _source_name(source),
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+        )
     except Exception as exc:
         logger.debug("FK orphan guard not built for %s: %s", _source_name(source), exc)
     if fk_orphan_guard is not None:
@@ -2934,6 +2942,8 @@ def _stream_database_transfer_impl(
             kept_rows, orphan_details = fk_orphan_guard.partition(
                 list(batch.headers or []), list(batch.rows)
             )
+            if orphan_details and _fk_orphans_fail_closed(validation_mode):
+                raise ValueError(_fk_orphan_violation_message(orphan_details))
             if orphan_details:
                 batch.rows = kept_rows
                 try:

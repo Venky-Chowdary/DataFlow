@@ -12,8 +12,7 @@ from typing import Any
 import pytest
 
 from services.destination_ri_probe import apply_dest_ri_to_reconcile, build_dest_ri_gate
-from src.transfer.engine import _note_failed_batch_undo, _ri_is_the_only_failure
-from src.transfer.stream import _fk_orphans_quarantine
+from src.transfer.stream import _fk_orphan_violation_message, _fk_orphans_fail_closed
 
 _REL = {
     "columns": ["customer_id"],
@@ -66,7 +65,6 @@ def test_checksum_match_cannot_green_measured_orphans() -> None:
         has_relationships=True,
     )
     assert out["passed"] is False
-    assert out["passed_before_dest_ri"] is True
     assert "referential integrity failed" in out["message"].lower()
 
 
@@ -90,35 +88,55 @@ def test_clean_scan_passes_and_undeclared_skips() -> None:
     assert build_dest_ri_gate({"asked": False, "relations": []})["status"] == "skip"
 
 
-def _recon(passed_before: bool, rule: str = ".orphans") -> dict[str, Any]:
-    return {
-        "passed": False,
-        "passed_before_dest_ri": passed_before,
-        "g22_dest_referential_integrity": {
-            "status": "block",
-            "details": {"rule_id": f"g22_dest_referential_integrity{rule}"},
-        },
+def test_quarantined_orphans_warn_and_never_certify() -> None:
+    clean = {
+        "verified": True,
+        "asked": True,
+        "orphan_rows": 0,
+        "relations": [{**_REL, "status": "scanned", "orphan_count": 0}],
     }
+    out = apply_dest_ri_to_reconcile(
+        {"passed": True, "message": "checksums match", "migration_proven": True},
+        evidence=clean,
+        has_relationships=True,
+        quarantined_orphans=2,
+    )
+    gate = out["g22_dest_referential_integrity"]
+    assert gate["status"] == "warn"
+    assert gate["details"]["rule_id"].endswith(".quarantined")
+    assert gate["details"]["quarantined_orphan_rows"] == 2
+    assert out["fk_orphans_quarantined"] == 2
+    assert out["migration_proven"] is False
+    assert "2 orphan child row(s) were quarantined" in out["message"]
 
 
-def test_only_an_ri_only_failure_retains_rows() -> None:
-    assert _ri_is_the_only_failure(_recon(True)) is True
-    assert _ri_is_the_only_failure(_recon(False)) is False
-    assert _ri_is_the_only_failure(_recon(True, ".probe_error")) is False
-    assert _ri_is_the_only_failure({"passed": False}) is False
-    assert _ri_is_the_only_failure(None) is False
-
-
-def test_ri_only_failure_note_keeps_batch() -> None:
-    summary: dict[str, Any] = {"table": "orders"}
-    msg = _note_failed_batch_undo(None, summary, "RI failed", recon=_recon(True))
-    assert summary["partial_batch_undo"] == "retained"
-    assert "orphan rows are the evidence" in msg
+def test_quarantined_orphans_do_not_soften_measured_orphans() -> None:
+    out = apply_dest_ri_to_reconcile(
+        {"passed": True, "message": "ok"},
+        evidence=_orphans("destination"),
+        has_relationships=True,
+        quarantined_orphans=1,
+    )
+    assert out["g22_dest_referential_integrity"]["status"] == "block"
+    assert out["passed"] is False
 
 
 @pytest.mark.parametrize(
-    ("mode", "quarantines"),
-    [("strict", False), ("maximum", False), ("balanced", True), ("warn", True)],
+    ("mode", "fails_closed"),
+    [("strict", True), ("maximum", True), ("balanced", False), ("warn", False)],
 )
-def test_strict_routes_land_orphans_for_g22(mode: str, quarantines: bool) -> None:
-    assert _fk_orphans_quarantine(mode) is quarantines
+def test_strict_routes_fail_closed_on_orphans(mode: str, fails_closed: bool) -> None:
+    assert _fk_orphans_fail_closed(mode) is fails_closed
+
+
+def test_strict_orphan_error_names_relationship_and_keys() -> None:
+    msg = _fk_orphan_violation_message(
+        [
+            {
+                "reason": "Orphan foreign key (no parent row): parent_id->parent = ('2',)",
+                "error_class": "orphan_foreign_key",
+            }
+        ]
+    )
+    assert "Referential integrity failed before write" in msg
+    assert "parent_id->parent" in msg and "('2',)" in msg

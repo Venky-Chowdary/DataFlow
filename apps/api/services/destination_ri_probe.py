@@ -562,8 +562,14 @@ def apply_dest_ri_to_reconcile(
     *,
     evidence: Mapping[str, Any] | None = None,
     has_relationships: bool | None = None,
+    quarantined_orphans: int = 0,
 ) -> dict[str, Any]:
-    """Stamp G22 onto a Gate-8 report and fail the job on measured orphans."""
+    """Stamp G22 onto a Gate-8 report and fail the job on measured orphans.
+
+    Orphans the write-path guard quarantined never reach the destination scan,
+    so the survivors' checksum cannot certify the relationship: G22 warns with
+    the quarantined count and the run is not marked proven.
+    """
     phys = stamped.get("physical_state") if isinstance(stamped.get("physical_state"), dict) else {}
     ri = evidence
     if not isinstance(ri, Mapping):
@@ -572,9 +578,32 @@ def apply_dest_ri_to_reconcile(
         ri if isinstance(ri, Mapping) else None,
         has_relationships=has_relationships,
     )
+    quarantined = max(int(quarantined_orphans or 0), 0)
+    if quarantined and str(gate.get("status") or "") in {"pass", "skip", "warn"}:
+        prior_msg = str(gate.get("message") or "") if gate.get("status") == "warn" else ""
+        gate = {
+            "id": GATE_ID,
+            "status": "warn",
+            "message": (
+                f"{quarantined} orphan child row(s) were quarantined before write — "
+                "their parent is absent at the destination. The loaded rows' checksum "
+                "covers the survivors only and does not certify referential integrity."
+                + (f" {prior_msg}" if prior_msg else "")
+            ),
+            "duration_ms": 0,
+            "details": {
+                **dict(gate.get("details") or {}),
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "quarantined_orphan_rows": quarantined,
+                "rule_id": f"{GATE_ID}.quarantined",
+            },
+        }
     out = dict(stamped)
     out["g22_dest_referential_integrity"] = gate
-    out["passed_before_dest_ri"] = bool(stamped.get("passed"))
+    if quarantined:
+        out["fk_orphans_quarantined"] = quarantined
+        out["migration_proven"] = False
     status = str(gate.get("status") or "")
     if status in {"block", "warn"}:
         if status == "block":

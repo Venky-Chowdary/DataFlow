@@ -1051,6 +1051,7 @@ def _apply_n5_gate8_extensions(
         out,
         evidence=ri if isinstance(ri, dict) else None,
         has_relationships=asked,
+        quarantined_orphans=int(n5_ctx.get("orphan_fk_rows") or 0),
     )
 
 
@@ -1838,6 +1839,9 @@ def run_reconciliation(
     n5_ctx["dest_schema"] = str(schema or "")
     n5_ctx["dest_table"] = str(table_name or "")
     n5_ctx["rejected_rows"] = rejected_rows
+    n5_ctx["orphan_fk_rows"] = int(
+        (dest_summary or {}).get("orphan_fk_rows") or 0
+    ) if isinstance(dest_summary, dict) else 0
     if source_endpoint is not None and source_endpoint.kind == "database":
         src_cfg = resolve_connector_config(source_endpoint)
         src_type = resolve_driver_type(
