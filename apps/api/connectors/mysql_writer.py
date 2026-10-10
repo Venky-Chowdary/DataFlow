@@ -947,7 +947,8 @@ def write_mapped_rows(
                     table_already_exists=bool(table_existed),
                     dest_table=table_name,
                     dest_schema="",
-                    carry_keys=write_mode != "insert",
+                    carry_keys=write_mode != "insert"
+                    or bool(_kwargs.get("carry_source_keys")),
                 )
             except Exception as exc:  # noqa: BLE001 — planner failure is types-only + certificate
                 logger.warning(

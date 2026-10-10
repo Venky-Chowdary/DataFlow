@@ -315,6 +315,14 @@ def _write_batch(
         source_handoff["source_spool"] = source_spool
     if records is not None:
         source_handoff["records"] = records
+    from services.sync_cursor import is_overwrite_sync
+
+    # Overwrite rebuilds the table from one source snapshot, so the source key
+    # holds on the copy. Only append create-new withholds it (write_mode alone
+    # cannot tell them apart: both are "insert").
+    key_carry: dict[str, Any] = (
+        {"carry_source_keys": True} if create_table and is_overwrite_sync(sync_mode) else {}
+    )
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
         from connectors.write_resilience import build_write_batch_key
@@ -358,6 +366,7 @@ def _write_batch(
                 (getattr(dest, "extra", None) or {}).get("preserve_columns") or []
             ),
             **source_handoff,
+            **key_carry,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -409,6 +418,7 @@ def _write_batch(
                 (getattr(dest, "extra", None) or {}).get("preserve_columns") or []
             ),
             **source_handoff,
+            **key_carry,
         )
         if not result.ok:
             _raise_write_failure(result, "MySQL batch write failed")
@@ -497,6 +507,7 @@ def _write_batch(
             source_schema_catalog=source_schema_catalog,
             empty_cells_as_null=empty_cells_as_null,
             **source_handoff,
+            **key_carry,
         )
         if not result.ok:
             _raise_write_failure(result, "SQLite batch write failed")
@@ -711,6 +722,7 @@ def _write_batch(
             destination_column_types=dest_column_types,
             **_writer_extra("generic_sql", cfg=cfg, dest=dest),
             **source_handoff,
+            **key_carry,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")

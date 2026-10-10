@@ -6374,7 +6374,8 @@ def write_mapped_rows(
                         dest_tablespaces=list_destination_tablespaces(
                             _fidelity_dialect(dest_db, dialect_name), conn
                         ),
-                        carry_keys=write_mode != "insert",
+                        carry_keys=write_mode != "insert"
+                        or bool(_kwargs.get("carry_source_keys")),
                     )
                     placement_suffix = fidelity_plan.create_suffix
                     table_obj = _build_table_for_write(
