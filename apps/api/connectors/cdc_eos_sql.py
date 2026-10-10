@@ -52,6 +52,7 @@ from services.cdc_exactly_once import (
 from services.cdc_engine import ChangeBatch
 
 _logger = logging.getLogger(__name__)
+_ICEBERG_EOS_DESTS = frozenset({"iceberg", "apache_iceberg", "iceberg_rest", "nessie"})
 
 _WM_DDL = f"""
 CREATE TABLE IF NOT EXISTS {WATERMARK_TABLE} (
@@ -600,6 +601,39 @@ def apply_change_batch_exactly_once(
     ``_apply_change_batch``.
     """
     dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest in _ICEBERG_EOS_DESTS:
+        incoming = require_batch_lsn(change.resume_token)
+        change = combine_change_batch(change, pk_cols=pk_target_cols)
+        stream_key = eos_stream_key(
+            dest_type=dest,
+            dest_database=str(dest_cfg.get("database") or ""),
+            dest_object=dest_table,
+            cursor_key=cursor_key,
+            stream_name=stream_name,
+        )
+        from connectors.iceberg_eos import apply_eos_iceberg
+
+        result = apply_eos_iceberg(
+            dest_type=dest,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            change=change,
+            mappings=mappings,
+            column_types=column_types,
+            pk_target_cols=pk_target_cols,
+            stream_key=stream_key,
+            incoming_lsn=incoming,
+            batch_id=f"eos-{uuid.uuid4().hex[:12]}",
+            crash_after=crash_after,
+            writer_fence=writer_fence,
+        )
+        log_apply_outcome(dest_type=dest, stream_key=stream_key, result=result)
+        return (
+            result.rows_written,
+            "",
+            result.to_dest_summary(),
+            result.deleted,
+        )
     incoming = require_batch_lsn(change.resume_token)
     change = combine_change_batch(change, pk_cols=pk_target_cols)
     stream_key = eos_stream_key(
@@ -741,6 +775,11 @@ def apply_eos_bundle(
     Crash before COMMIT rolls back every member. Source ack happens after.
     """
     dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest in _ICEBERG_EOS_DESTS:
+        raise ExactlyOnceRouteError(
+            "Iceberg exactly-once cannot atomically commit a multi-table bundle.",
+            reason="iceberg_eos_bundle_unsupported",
+        )
     if dest != "sqlite":
         from connectors.cdc_eos_sa import apply_eos_sa_bundle
 
@@ -876,6 +915,16 @@ def open_eos_session(
 ) -> EosOpenResult:
     """Estuary Open: raise dest fence with no data; return dest resume blob."""
     dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest in _ICEBERG_EOS_DESTS:
+        from connectors.iceberg_eos import open_iceberg_eos_session
+
+        return open_iceberg_eos_session(
+            dest_type=dest,
+            dest_cfg=dest_cfg,
+            stream_key=stream_key,
+            incoming_fence=incoming_fence,
+            job_resume=job_resume,
+        )
     if dest != "sqlite":
         from connectors.cdc_eos_sa import open_eos_sa_session
 
@@ -1026,6 +1075,10 @@ def read_route_dest_lsn(
 ) -> str | None:
     """Dest-authoritative watermark read (resume Open)."""
     dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest in _ICEBERG_EOS_DESTS:
+        from connectors.iceberg_eos import iceberg_dest_watermark_lsn
+
+        return iceberg_dest_watermark_lsn(dest_cfg, stream_key)
     # Raises on a failed read: an unreadable dest watermark must not look
     # like "no watermark" (that would let a job cursor invent a resume point).
     if dest == "sqlite":
@@ -1054,6 +1107,10 @@ def blank_route_dest_resume(
     """
     dest = (dest_type or "").strip().lower().replace("-", "_")
     try:
+        if dest in _ICEBERG_EOS_DESTS:
+            from connectors.iceberg_eos import iceberg_blank_eos_resume
+
+            return iceberg_blank_eos_resume(dest_cfg, stream_key, lsn=lsn)
         if dest == "sqlite":
             return blank_sqlite_eos_resume(dest_cfg, stream_key, lsn=lsn)
         from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS
@@ -1080,6 +1137,10 @@ def read_route_dest_resume(
 ) -> Any:
     """Dest-stored resume blob (Estuary Opened checkpoint)."""
     dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest in _ICEBERG_EOS_DESTS:
+        from connectors.iceberg_eos import iceberg_dest_resume_blob
+
+        return iceberg_dest_resume_blob(dest_cfg, stream_key)
     if dest == "sqlite":
         return dest_watermark_view(dest_cfg, stream_key).resume_blob
     from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS

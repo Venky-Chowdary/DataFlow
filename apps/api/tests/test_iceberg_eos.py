@@ -524,3 +524,84 @@ def test_filesystem_iceberg_is_refused(tmp_path: Path) -> None:
     config = {"warehouse": str(tmp_path), "table": "default.orders"}
     with pytest.raises(ExactlyOnceRouteError, match="catalog-backed"):
         _adapter().iceberg_dest_watermark_view(config, "test-stream")
+
+
+@requires_rest
+def test_exactly_once_dispatch_applies_to_catalog_iceberg(
+    rest_dest: dict[str, Any],
+) -> None:
+    from connectors.cdc_eos_sql import apply_change_batch_exactly_once
+
+    _rows, _checksum, summary, _deleted = apply_change_batch_exactly_once(
+        dest_type="iceberg",
+        dest_cfg=rest_dest,
+        dest_table=rest_dest["table"],
+        change=_batch("0/10", inserts=[{"id": "1", "v": "a"}]),
+        mappings=MAPPINGS,
+        column_types=COLUMN_TYPES,
+        headers=["id", "v"],
+        pk_target_cols=["id"],
+        cursor_key="dispatch-test",
+    )
+    assert summary["eos_status"] == "applied"
+    assert _load_table(rest_dest).scan().to_arrow().to_pylist()[0]["v"] == "a"
+
+
+@pytest.mark.parametrize(
+    "dest_type", ["iceberg", "apache_iceberg", "iceberg_rest", "nessie"]
+)
+def test_direct_dispatch_aliases_refuse_filesystem_catalog(
+    tmp_path: Path, dest_type: str
+) -> None:
+    from connectors.cdc_eos_sql import (
+        apply_change_batch_exactly_once,
+        blank_route_dest_resume,
+        open_eos_session,
+        read_route_dest_lsn,
+        read_route_dest_resume,
+    )
+
+    config = {"warehouse": str(tmp_path), "table": "default.orders"}
+    change = _batch("0/10", inserts=[{"id": "1", "v": "a"}])
+    with pytest.raises(ExactlyOnceRouteError, match="catalog-backed"):
+        apply_change_batch_exactly_once(
+            dest_type=dest_type,
+            dest_cfg=config,
+            dest_table="default.orders",
+            change=change,
+            mappings=MAPPINGS,
+            column_types=COLUMN_TYPES,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+        )
+    with pytest.raises(ExactlyOnceRouteError, match="catalog-backed"):
+        open_eos_session(
+            dest_type=dest_type,
+            dest_cfg=config,
+            stream_key="test-stream",
+        )
+    with pytest.raises(ExactlyOnceRouteError, match="catalog-backed"):
+        read_route_dest_lsn(dest_type, config, "test-stream")
+    with pytest.raises(ExactlyOnceRouteError, match="catalog-backed"):
+        read_route_dest_resume(dest_type, config, "test-stream")
+    assert not blank_route_dest_resume(
+        dest_type, config, "test-stream", lsn="0/10"
+    )
+
+
+def test_iceberg_bundle_dispatch_refuses_multi_table_commit() -> None:
+    from connectors.cdc_eos_sql import apply_eos_bundle
+
+    with pytest.raises(ExactlyOnceRouteError, match="multi-table bundle"):
+        apply_eos_bundle(dest_type="iceberg", dest_cfg={}, streams=[])
+
+
+def test_registry_describes_filesystem_and_catalog_delete_paths() -> None:
+    from services.connector_capability_registry import CAPABILITY_REGISTRY
+
+    iceberg = CAPABILITY_REGISTRY["iceberg"]
+    assert iceberg["supports_cdc"] is False
+    assert "filesystem" in iceberg["common_issues"][1].lower()
+    assert "catalog writes use copy-on-write" in iceberg["common_issues"][1]
+    assert "filesystem-equality-delete" in iceberg["write_strategy"]
+    assert "catalog-copy-on-write" in iceberg["write_strategy"]

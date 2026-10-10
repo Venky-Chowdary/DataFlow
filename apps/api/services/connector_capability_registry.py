@@ -939,17 +939,16 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,
-        # Overwrite/replace stay Copy-on-Write. Upserts and CDC/leftover
-        # deletes write v2 equality-delete files. Dest COUNT applies v2
-        # position/equality and v3 deletion-vector-v1.
-        "write_strategy": "merge-on-read-upserts-deletes, copy-on-write-overwrite",
+        # Filesystem writes use v2 equality deletes; catalog writes use
+        # copy-on-write. Overwrite/replace remain copy-on-write.
+        "write_strategy": "filesystem-equality-delete, catalog-copy-on-write",
         "supports_merge_on_read": True,
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
         "common_issues": [
             "Schema evolution is supported but should be declared explicitly.",
-            "Upserts write Iceberg v2 equality-delete files plus a new data file at the same snapshot sequence. CDC/leftover deletes write equality deletes. Overwrite/replace stay copy-on-write.",
+            "Filesystem upserts and deletes use Iceberg v2 equality-delete files; catalog writes use copy-on-write. Overwrite/replace stay copy-on-write.",
         ],
         "recommended_batch_size": 10000,
     },
