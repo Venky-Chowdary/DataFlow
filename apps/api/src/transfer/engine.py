@@ -4205,7 +4205,7 @@ class UniversalTransferEngine:
             else:
                 columns, schema, total_rows, sample_rows = peeked
                 initial_batch = None
-            if request.limit > 0:
+            if request.limit > 0 and total_rows is not None:
                 total_rows = min(total_rows, request.limit)
             if total_rows == 0 and not columns:
                 mongo.update_job_status(
