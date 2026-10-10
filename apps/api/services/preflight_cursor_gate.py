@@ -139,6 +139,36 @@ def contract_declares_primary_key(contract: dict[str, Any]) -> bool:
     return bool(str(raw or "").strip())
 
 
+def _transfer_destination_config(
+    destination_db_type: str, destination_config: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """The destination as the transfer resolves it, so both build one cursor key.
+
+    The transfer keys its watermark on ``route_endpoint_identity`` of the
+    endpoint after ``resolve_connector_config`` (saved connector merged, host
+    defaulted). Validate received the raw/redacted probe config, built the
+    unscoped key, found no watermark and judged the whole table on every rerun
+    (QA MX3-03: "Append would store a second copy of 10 row(s)").
+    """
+    raw = dict(destination_config or {})
+    try:
+        from src.transfer.adapters import resolve_connector_config
+        from src.transfer.models import EndpointConfig
+
+        endpoint = EndpointConfig.from_dict(
+            "database", {"format": destination_db_type, **raw}
+        )
+        return {**raw, **resolve_connector_config(endpoint)}
+    except (ImportError, KeyError, TypeError, ValueError, AttributeError) as exc:
+        logger.warning(
+            "destination identity for the incremental read scope unresolved "
+            "(type=%s): %s — the gate judges the whole sample",
+            destination_db_type,
+            exc,
+        )
+        return raw
+
+
 def resolve_read_scope(
     *,
     sync_mode: str,
@@ -164,7 +194,7 @@ def resolve_read_scope(
     except Exception:
         source_type = (source_format or "").strip().lower()
     src_cfg = source_config or {}
-    dst_cfg = destination_config or {}
+    dst_cfg = _transfer_destination_config(destination_db_type, destination_config)
     try:
         return resolve_incremental_read_scope(
             sync_mode=sync_mode,
