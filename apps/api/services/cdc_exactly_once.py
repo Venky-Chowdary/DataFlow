@@ -1146,7 +1146,7 @@ def next_handoff_phase(incoming_phase: str, dest_phase: str | None) -> str:
 
 
 def is_position_heartbeat(change: Any) -> bool:
-    """True when a batch was supplied and it has no inserts, updates, or deletes.
+    """True when a batch was supplied and it has no data or rejected rows.
 
     Log readers re-yield the committed file:pos / LSN when the log is idle.
     ``None`` is not a heartbeat: a caller that passed only checksums still
@@ -1154,7 +1154,7 @@ def is_position_heartbeat(change: Any) -> bool:
     """
     if change is None:
         return False
-    for attr in ("inserts", "updates", "deletes"):
+    for attr in ("inserts", "updates", "deletes", "rejected"):
         if list(getattr(change, attr, None) or []):
             return False
     return True
@@ -1455,21 +1455,24 @@ def decide_eos_apply(
             and (dest_phase or "") == "snapshot"
         ):
             return "handoff_phase", fence
-        if compare_lsn(incoming_lsn, dest_lsn or "") == 0:
-            if change is not None and all(
-                not list(getattr(change, attr, None) or [])
-                for attr in ("inserts", "updates", "deletes", "rejected")
-            ):
-                _logger.debug(
-                    "cdc_eos: empty heartbeat already committed at position lsn=%s",
-                    incoming_lsn,
-                )
-                return "already_committed", fence
+        # The dest checksum describes the batch dest committed *at* its
+        # watermark, so it is only comparable to a redelivery of that same LSN
+        # that still carries rows. A strictly older LSN is an at-least-once
+        # replay of an earlier batch. An idle poll repeats this LSN with no
+        # rows; its empty digest is not a second version of the event.
+        if compare_lsn(incoming_lsn, dest_lsn or "") == 0 and not is_position_heartbeat(
+            change
+        ):
             assert_redelivery_checksum(
                 incoming_checksum,
                 dest_checksum or None,
                 incoming_lsn=incoming_lsn,
                 change=change,
+            )
+        elif compare_lsn(incoming_lsn, dest_lsn or "") == 0:
+            _logger.debug(
+                "cdc_eos: empty heartbeat already committed at position lsn=%s",
+                incoming_lsn,
             )
         return "already_committed", fence
     _ = dest_epoch
