@@ -358,6 +358,35 @@ async def verify_proof_pack_against_chain(pack: dict):
     }
 
 
+@router.post("/retention/purge")
+async def purge_audit_retention(
+    request: Request,
+    dry_run: bool = Query(False),
+):
+    from services.audit_log import (
+        AuditConfigError,
+        append_audit_event,
+        purge_expired_audit_events,
+    )
+    from services.audit_log import actor_from_request, workspace_id_from_request
+
+    try:
+        result = purge_expired_audit_events(dry_run=dry_run)
+    except AuditConfigError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    append_audit_event(
+        action="audit.retention.purge",
+        resource=request.url.path,
+        actor=actor_from_request(request),
+        level="warn" if result["removed"] else "info",
+        correlation_id=request.headers.get("X-Correlation-ID"),
+        workspace_id=workspace_id_from_request(request),
+        details=result,
+    )
+    return result
+
+
 @router.post("/tip/anchor")
 async def force_anchor_tip():
     """Manually seal the current tip (ops / compliance export)."""

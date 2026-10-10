@@ -184,6 +184,7 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/v1/workspace/settings", Permission.WORKSPACE_READ),
     ("*", "/api/v1/workspace/", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/resource-acls", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/audit/retention/purge", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("POST", "/api/v1/audit/tip/", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/cdc/mapping-reviews", Permission.JOB_READ),
