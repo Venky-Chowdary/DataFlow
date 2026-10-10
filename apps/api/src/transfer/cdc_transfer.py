@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 from services.brand_env import getenv_brand
 import time
@@ -923,7 +922,11 @@ def _gate_cdc_sink(
     dest_cfg: dict[str, Any] | None,
     has_primary_key: bool,
 ) -> dict[str, Any]:
-    """Fail-fast append-only CDC sinks unless operator opts in."""
+    """Fail-fast append-only CDC sinks unless operator opts in.
+
+    ``require_exactly_once`` on the destination config fails closed unless the
+    sink can commit apply + dest offset in one transaction.
+    """
     return gate_cdc_destination(
         dest_type=dest_type,
         has_primary_key=has_primary_key,
@@ -932,6 +935,9 @@ def _gate_cdc_sink(
         has_lsn_column=True,
         allow_append_only=_truthy_cfg(
             dest_cfg, "allow_append_only", "cdc_allow_append_only"
+        ),
+        require_exactly_once=_truthy_cfg(
+            dest_cfg, "require_exactly_once", "cdc_require_exactly_once"
         ),
         require_effectively_once=_truthy_cfg(
             dest_cfg, "require_effectively_once", "cdc_require_effectively_once"
@@ -1639,6 +1645,7 @@ def _run_cdc_multi_stream(
                 validation_mode=validation_mode,
                 limit=limit,
                 delivery_guarantee=delivery_guarantee,
+                delivery_pinned=delivery_pinned,
             )
         except Exception as exc:
             from services.cdc_lease import CdcLeaseConflict
@@ -1690,6 +1697,7 @@ def _run_cdc_shared_multi_table(
     validation_mode: str,
     limit: int,
     delivery_guarantee: str = "at_least_once",
+    delivery_pinned: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """One log consumer for N tables (Debezium-class); demux apply per stream.
 
@@ -1713,12 +1721,22 @@ def _run_cdc_shared_multi_table(
     )
     from services.cdc_snapshot_mode import snapshot_dump_open
 
-    from services.cdc_exactly_once import PROTOCOL, normalize_delivery_guarantee
+    from services.cdc_exactly_once import (
+        PROTOCOL,
+        apply_require_exactly_once,
+        dest_require_exactly_once,
+        normalize_delivery_guarantee,
+    )
 
     src_type = resolve_driver_type(getattr(source, "format", "") or "")
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
+    delivery_guarantee = apply_require_exactly_once(
+        delivery_guarantee,
+        required=dest_require_exactly_once(destination, dest_cfg),
+        pinned=delivery_pinned,
+    )
     eos_active = normalize_delivery_guarantee(delivery_guarantee) == "exactly_once"
 
     tables = [(c.name or "").strip() for c in selected if (c.name or "").strip()]
@@ -2649,11 +2667,18 @@ def _run_cdc_single_stream(
         DELIVERY_SEMANTICS_ALO,
         DELIVERY_SEMANTICS_EOS,
         PROTOCOL,
+        apply_require_exactly_once,
         assert_requested_cdc_delivery,
         dest_allow_append_only,
+        dest_require_exactly_once,
     )
     from services.procedure_source import is_callable_source
 
+    delivery_guarantee = apply_require_exactly_once(
+        delivery_guarantee,
+        required=dest_require_exactly_once(destination, dest_cfg),
+        pinned=delivery_pinned,
+    )
     eos_guarantee = assert_requested_cdc_delivery(
         delivery_guarantee,
         sync_mode=sync_mode or "cdc",
@@ -3103,8 +3128,6 @@ def _run_cdc_single_stream(
             cp_dict = checkpoint.to_dict()  # type: ignore[assignment]
     total_chunks = max(1, int(cp_dict.get("chunk_index") or 0) + 1) if cp_dict else 1
     chunk_idx = int(cp_dict.get("chunk_index") or 0) if cp_dict else 0
-
-    import os
 
     # Continuous CDC: drain snapshot, then poll until idle or budget exhausted.
     max_idle_polls = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))

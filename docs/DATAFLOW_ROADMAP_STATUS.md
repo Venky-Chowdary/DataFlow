@@ -23,7 +23,7 @@ Backend batch reliability is **beta / early production** for batch transfers on 
 
 **Target:** Debezium-style log-based capture from Postgres, MySQL, MongoDB, SQL Server, Oracle.
 
-### Status: strong partial (at-least-once) — load-hardened July 2026
+### Status: strong partial — at-least-once by default; exactly-once **per destination** for transactional SQL sinks only
 
 
 | What is implemented                                                                  | Where                                                                                                                                              |
@@ -41,12 +41,18 @@ Backend batch reliability is **beta / early production** for batch transfers on 
 | Mixed `_df_lsn` upsert guard + effectively-once PK sink contract                     | `connectors/writer_common.py`, `services/cdc_effectively_once.py`                                                                                  |
 | PG TOAST-aware update merge + typed txn buffer overflow                              | `services/cdc_toast.py`, `services/cdc_transaction_buffer.py`, `connectors/pgoutput_decoder.py`                                                    |
 | `ChangeBatch` with `resume_token`                                                    | `services/cdc_engine.py`                                                                                                                           |
+| Dest-owned transactional offset (`_df_cdc_eos_watermarks`, same txn as apply, CAS write) | `services/cdc_exactly_once.py`, `connectors/cdc_eos_sa.py`, `connectors/cdc_eos_sql.py`                                                          |
 | Watermark persistence                                                                | `services/sync_cursor.py`, `services/atomic_file.py`                                                                                               |
 
 
 ### Delivery honesty
 
-- Default apply is **at-least-once upsert** (not exactly-once).
+- Default apply is **at-least-once upsert** (not exactly-once). `EXACTLY_ONCE_CLAIMED` / `PLATFORM_EXACTLY_ONCE_CLAIMED` stay **False**.
+- **Exactly-once per destination** (`delivery_guarantee=exactly_once`, or dest config `require_exactly_once=true`) only for transactional SQL sinks with a PK: PostgreSQL, MySQL/MariaDB, SQL Server, Oracle, Snowflake, DuckDB, SQLite, generic SQLAlchemy SQL. The batch rows and its resume LSN are committed in **one dest transaction** into `_df_cdc_eos_watermarks`; the dest offset is the resume source of truth and the control-plane cursor / source ack advance only after the dest COMMIT is verified.
+  - Redelivery at or below the dest offset (family-aware `compare_lsn`) is a no-op; **cross-family LSNs fail closed** (never treated as equal).
+  - Offset write is compare-and-set (INSERT for first commit, `UPDATE … WHERE epoch AND fence_epoch` with rowcount=1) on top of the lease `writer_fence`, so two workers cannot both commit a batch.
+  - `require_exactly_once=true` **fails closed** with a reason on ClickHouse, Athena/Hive/Impala, BigQuery/Redshift/Databricks routes, object stores, files, Kafka/streams, document/NoSQL sinks, append-only mode, or no PK — these stay **at-least-once**.
+  - Named live matrix: `tests/test_cdc_exactly_once_postgres_restart_live.py` (real PG logical slot through `run_cdc_database_transfer`: crash before dest COMMIT → no partial apply; crash after COMMIT before watermark/ack → redelivery no-op; final dest = source rows exactly once; two writers racing the first offset commit → one wins), `tests/test_cdc_exactly_once_live_engines.py` (PG, MySQL; Oracle/SQL Server when reachable), `tests/test_mysql_cdc_postgres_eos_crash_replay.py`, unit `tests/test_cdc_exactly_once.py` + `tests/test_cdc_exactly_once_txn_offset.py`.
 - Live IT green locally for PG (`wal_level=logical`), MySQL ROW+GTID, Mongo single-node `rs0`.
 - Multi-worker **leases** via `CdcLeaseGuard` + pluggable store:
   - **Redis** (`DATAFLOW_CDC_LEASE_BACKEND=redis` / `auto` + URL) — multi-node, Lua-atomic acquire, fencing `generation`, fail-closed if Redis down.
@@ -62,7 +68,7 @@ Backend batch reliability is **beta / early production** for batch transfers on 
 
 ### What is still missing
 
-- **Exactly-once pipeline delivery** — only PK-sink effectively-once via `_df_lsn`; append-only sinks are **fail-gated** unless `allow_append_only`.
+- **Platform-wide exactly-once** — not claimed. Exactly-once is per destination for transactional SQL sinks; non-transactional / append-only sinks remain at-least-once (append-only is **fail-gated** unless `allow_append_only`). Oracle / SQL Server / Snowflake EOS live proofs run only when those engines are reachable (skipped by default in CI).
 - **Oracle always-on CI** (image/license); optional gated job exists, default forks skip.
 - SQL Server **LSN-gap fail-closed** shipped (unit); Oracle **SCN/redo-gap fail-closed** shipped (unit); source HA role probe shipped; dual-node AG failover IT still thinner.
 - Lease **Redis HA runbook** shipped (`docs/ops/CDC_LEASE_REDIS.md`); freshness SLO alerts on Overview + Pipelines.
@@ -96,7 +102,9 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 | Claim                                                                                                | Status                                                                                                    |
 | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | Better than Airbyte/Debezium **platform-wide**                                                       | **No**                                                                                                    |
-| “100% CDC” / exactly-once                                                                            | **No** — default is at-least-once upsert. Named dest-owned MySQL CDC → Postgres crash-replay exists; `PLATFORM_EXACTLY_ONCE_CLAIMED` stays False. |
+| “100% CDC” / platform-wide exactly-once                                                              | **No** — default is at-least-once upsert; `PLATFORM_EXACTLY_ONCE_CLAIMED` stays False. |
+| Exactly-once for **transactional SQL sinks** (PG, MySQL, SQL Server, Oracle, Snowflake, DuckDB, SQLite) | **Shipped, per destination** — dest-owned offset in the apply txn + CAS + lease fence. Live: PG forced mid-batch restart (`test_cdc_exactly_once_postgres_restart_live.py`), PG/MySQL engine matrix, MySQL CDC → PG crash-replay. Oracle/SQL Server/Snowflake live only when reachable. |
+| Exactly-once for ClickHouse, Athena/Hive/Impala, object stores, files, streams, NoSQL, append-only | **No** — at-least-once; `require_exactly_once=true` fails closed |
 | Better on **integrity wedge** (mapping · preflight · quarantine · reconcile · contracts on CDC path) | **Yes — defensible lead**                                                                                 |
 | PG/MySQL shared multi-table reader                                                                   | **Shipped** — unit chaos + live concurrent-write IT                                                       |
 | SQL Server / Oracle shared multi-table reader                                                        | **Shipped** — unit proofs; SQL Server LSN-gap + Oracle SCN/redo-gap fail-closed                           |

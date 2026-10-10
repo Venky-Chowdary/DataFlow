@@ -7,14 +7,17 @@ SQLite-via-SQLAlchemy, Oracle, Snowflake, generic_sql (URL dialect).
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from connectors.lsn_guards import DF_LSN_COL
 from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 from services.cdc_exactly_once import (
+    concurrent_commit_error,
     WATERMARK_TABLE,
     WATERMARK_TABLE_ORACLE,
     DestWmView,
@@ -48,8 +51,19 @@ from services.cdc_exactly_once import (
 from services.cdc_effectively_once import should_apply_pk_delete, should_apply_pk_row
 from services.cdc_engine import ChangeBatch
 
+_logger = logging.getLogger(__name__)
+
 _CONFLICT_LIKE = frozenset({"postgresql", "postgres", "redshift", "duckdb", "sqlite"})
-_FOR_UPDATE_LIKE = frozenset({"postgresql", "postgres", "mysql", "mariadb"})
+# Oracle SELECT ... FOR UPDATE takes a row lock; Snowflake/DuckDB rely on the CAS write.
+_FOR_UPDATE_LIKE = frozenset({
+    "postgresql",
+    "postgres",
+    "mysql",
+    "mariadb",
+    "oracle",
+    "oracle_db",
+    "oracle_autonomous_warehouse",
+})
 _MYSQL_LIKE = frozenset({"mysql", "mariadb"})
 _MSSQL_LIKE = frozenset({
     "sqlserver",
@@ -208,7 +222,14 @@ def _lock_watermark(conn: Any, dialect: str, stream_key: str) -> DestWmView:
             locked = conn.execute(
                 text(_lock_watermark_sql(dialect, with_seq=True)), {"k": stream_key}
             ).fetchone()
-    except Exception:
+    except SQLAlchemyError as exc:
+        _logger.warning(
+            "cdc_eos: watermark lock read without seq columns for stream_key=%s "
+            "(dialect=%s): %s",
+            stream_key,
+            dialect,
+            exc,
+        )
         locked = conn.execute(
             text(_lock_watermark_sql(dialect, with_seq=False)), {"k": stream_key}
         ).fetchone()
@@ -229,84 +250,31 @@ def _row_to_wm(locked: Any) -> DestWmView:
         window_id=str(locked[7] or "") if len(locked) > 7 else "",
         snapshot_signal_id=str(locked[8] or "") if len(locked) > 8 else "",
         window_hi_pk=str(locked[9] or "") if len(locked) > 9 else "",
+        exists=True,
     )
 
 
-def _upsert_watermark_sql(dialect: str) -> str:
-    cols = (
-        "stream_key, committed_lsn, batch_id, committed_at, dest_object, "
-        "epoch, fence_epoch, prev_lsn, phase, apply_checksum"
-    )
-    if dialect in _MYSQL_LIKE:
-        return (
-            f"INSERT INTO {_wm_ref(dialect)} ({cols}) "
-            f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph, :ck) "
-            f"ON DUPLICATE KEY UPDATE committed_lsn = VALUES(committed_lsn), "
-            f"batch_id = VALUES(batch_id), committed_at = VALUES(committed_at), "
-            f"dest_object = VALUES(dest_object), epoch = VALUES(epoch), "
-            f"fence_epoch = VALUES(fence_epoch), prev_lsn = VALUES(prev_lsn), "
-            f"phase = VALUES(phase), apply_checksum = VALUES(apply_checksum)"
-        )
-    if dialect in _MSSQL_LIKE:
-        return (
-            f"MERGE {_wm_ref(dialect)} WITH (HOLDLOCK) AS t "
-            f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
-            f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
-            f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum) AS s "
-            f"ON t.stream_key = s.stream_key "
-            f"WHEN MATCHED THEN UPDATE SET committed_lsn = s.committed_lsn, "
-            f"batch_id = s.batch_id, committed_at = s.committed_at, "
-            f"dest_object = s.dest_object, epoch = s.epoch, "
-            f"fence_epoch = s.fence_epoch, prev_lsn = s.prev_lsn, phase = s.phase, "
-            f"apply_checksum = s.apply_checksum "
-            f"WHEN NOT MATCHED THEN INSERT ({cols}) "
-            f"VALUES (s.stream_key, s.committed_lsn, s.batch_id, s.committed_at, "
-            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase, "
-            f"s.apply_checksum);"
-        )
-    if dialect in _ORACLE_LIKE:
-        return (
-            f"MERGE INTO {_wm_ref(dialect)} t "
-            f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
-            f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
-            f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum FROM dual) s "
-            f"ON (t.stream_key = s.stream_key) "
-            f"WHEN MATCHED THEN UPDATE SET t.committed_lsn = s.committed_lsn, "
-            f"t.batch_id = s.batch_id, t.committed_at = s.committed_at, "
-            f"t.dest_object = s.dest_object, t.epoch = s.epoch, "
-            f"t.fence_epoch = s.fence_epoch, t.prev_lsn = s.prev_lsn, t.phase = s.phase, "
-            f"t.apply_checksum = s.apply_checksum "
-            f"WHEN NOT MATCHED THEN INSERT ({cols}) "
-            f"VALUES (s.stream_key, s.committed_lsn, s.batch_id, s.committed_at, "
-            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase, "
-            f"s.apply_checksum)"
-        )
-    if dialect in _SNOW_LIKE:
-        return (
-            f"MERGE INTO {_wm_ref(dialect)} t "
-            f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
-            f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
-            f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum) s "
-            f"ON t.stream_key = s.stream_key "
-            f"WHEN MATCHED THEN UPDATE SET t.committed_lsn = s.committed_lsn, "
-            f"t.batch_id = s.batch_id, t.committed_at = s.committed_at, "
-            f"t.dest_object = s.dest_object, t.epoch = s.epoch, "
-            f"t.fence_epoch = s.fence_epoch, t.prev_lsn = s.prev_lsn, t.phase = s.phase, "
-            f"t.apply_checksum = s.apply_checksum "
-            f"WHEN NOT MATCHED THEN INSERT ({cols}) "
-            f"VALUES (s.stream_key, s.committed_lsn, s.batch_id, s.committed_at, "
-            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase, "
-            f"s.apply_checksum)"
-        )
+_WM_BASE_COLS = (
+    "stream_key, committed_lsn, batch_id, committed_at, dest_object, "
+    "epoch, fence_epoch, prev_lsn, phase, apply_checksum"
+)
+
+
+def _insert_watermark_sql(dialect: str) -> str:
+    """First commit for a stream. A duplicate key means a concurrent first commit."""
     return (
-        f"INSERT INTO {_wm_ref(dialect)} ({cols}) "
-        f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph, :ck) "
-        f"ON CONFLICT (stream_key) DO UPDATE SET "
-        f"committed_lsn = excluded.committed_lsn, batch_id = excluded.batch_id, "
-        f"committed_at = excluded.committed_at, dest_object = excluded.dest_object, "
-        f"epoch = excluded.epoch, fence_epoch = excluded.fence_epoch, "
-        f"prev_lsn = excluded.prev_lsn, phase = excluded.phase, "
-        f"apply_checksum = excluded.apply_checksum"
+        f"INSERT INTO {_wm_ref(dialect)} ({_WM_BASE_COLS}) "  # nosec B608
+        f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph, :ck)"
+    )
+
+
+def _cas_update_watermark_sql(dialect: str) -> str:
+    """Compare-and-set: only the writer that read (epoch, fence_epoch) may advance."""
+    return (
+        f"UPDATE {_wm_ref(dialect)} SET committed_lsn = :lsn, batch_id = :bid, "  # nosec B608
+        f"committed_at = :at, dest_object = :obj, epoch = :ep, fence_epoch = :fe, "
+        f"prev_lsn = :prev, phase = :ph, apply_checksum = :ck "
+        f"WHERE stream_key = :k AND epoch = :pe AND fence_epoch = :pf"
     )
 
 
@@ -671,22 +639,58 @@ def _sa_write_watermark(
     window_id: str = "",
     snapshot_signal_id: str = "",
     window_hi_pk: str = "",
+    expected: DestWmView,
 ) -> None:
-    conn.execute(
-        text(_upsert_watermark_sql(dialect)),
-        {
-            "k": stream_key,
-            "lsn": lsn,
-            "bid": batch_id,
-            "at": datetime.now(timezone.utc).isoformat(),
-            "obj": dest_object,
-            "ep": epoch,
-            "fe": fence_epoch,
-            "prev": prev_lsn,
-            "ph": phase,
-            "ck": apply_checksum,
-        },
-    )
+    """Write the dest watermark inside the caller's apply transaction.
+
+    ``expected`` is the view read under lock in this transaction. No row →
+    plain INSERT (a concurrent first commit hits the PK and rolls back). A row
+    → UPDATE guarded by the read (epoch, fence_epoch); zero rows matched means
+    another writer committed in between, so this transaction must not commit.
+    """
+    committed_at = datetime.now(timezone.utc).isoformat()
+    params = {
+        "k": stream_key,
+        "lsn": lsn,
+        "bid": batch_id,
+        "at": committed_at,
+        "obj": dest_object,
+        "ep": epoch,
+        "fe": fence_epoch,
+        "prev": prev_lsn,
+        "ph": phase,
+        "ck": apply_checksum,
+    }
+    if not expected.exists:
+        try:
+            conn.execute(text(_insert_watermark_sql(dialect)), params)
+        except IntegrityError as exc:
+            raise concurrent_commit_error(
+                stream_key, expected_epoch=0, expected_fence=0
+            ) from exc
+    else:
+        params["pe"] = expected.epoch
+        params["pf"] = expected.fence_epoch
+        result = conn.execute(text(_cas_update_watermark_sql(dialect)), params)
+        matched = getattr(result, "rowcount", -1)
+        if matched is None or matched < 0:
+            # Driver without a reliable rowcount: confirm our write landed.
+            row = conn.execute(
+                text(
+                    f"SELECT committed_at, epoch FROM {_wm_ref(dialect)} "  # nosec B608
+                    f"WHERE stream_key = :k"
+                ),
+                {"k": stream_key},
+            ).fetchone()
+            matched = int(
+                bool(row) and str(row[0]) == committed_at and int(row[1] or 0) == epoch
+            )
+        if matched != 1:
+            raise concurrent_commit_error(
+                stream_key,
+                expected_epoch=expected.epoch,
+                expected_fence=expected.fence_epoch,
+            )
     if resume_blob or apply_seq or window_id or snapshot_signal_id or window_hi_pk:
         conn.execute(
             text(
@@ -865,6 +869,7 @@ def _sa_apply_member(
             window_id=window_id,
             snapshot_signal_id=signal_id,
             window_hi_pk=hi_pk,
+            expected=dest,
         )
         return EosApplyResult(
             status="handoff_phase",
@@ -962,6 +967,7 @@ def _sa_apply_member(
         window_id=window_id,
         snapshot_signal_id=signal_id,
         window_hi_pk=hi_pk,
+        expected=dest,
     )
     if crash_after == "after_watermark_before_commit":
         raise EosCrash(crash_after)
@@ -1127,6 +1133,7 @@ def apply_eos_sa_bundle(
                         prev_lsn=dest_wm.committed_lsn,
                         phase="streaming",
                         apply_checksum="",
+                        expected=dest_wm,
                     )
             if crash_after in {
                 "after_apply_before_watermark",
@@ -1214,6 +1221,7 @@ def open_eos_sa_session(
                     window_id=view.window_id,
                     snapshot_signal_id=view.snapshot_signal_id,
                     window_hi_pk=view.window_hi_pk,
+                    expected=view,
                 )
             return opened
     finally:
@@ -1243,7 +1251,13 @@ def sa_dest_watermark_view(
                     ),
                     {"k": stream_key},
                 ).fetchone()
-            except Exception:
+            except SQLAlchemyError as exc:
+                # No readable watermark → empty view → verify_dest_commit fails closed.
+                _logger.warning(
+                    "cdc_eos: post-commit watermark read failed stream_key=%s: %s",
+                    stream_key,
+                    exc,
+                )
                 return DestWmView()
             return _row_to_wm(row)
     finally:
@@ -1267,8 +1281,11 @@ def sa_dest_resume_blob(dest_cfg: dict[str, Any], stream_key: str, dest_type: st
                     ),
                     {"k": stream_key},
                 ).fetchone()
-            except Exception:
-                return ""
+            except SQLAlchemyError as exc:
+                _logger.warning(
+                    "cdc_eos: dest resume blob read failed stream_key=%s: %s", stream_key, exc
+                )
+                raise
             return str(row[0] or "") if row else ""
     finally:
         release_engine(engine)
@@ -1291,8 +1308,11 @@ def sa_dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str, dest_type: 
                     ),
                     {"k": stream_key},
                 ).fetchone()
-            except Exception:
-                return None
+            except SQLAlchemyError as exc:
+                _logger.warning(
+                    "cdc_eos: dest watermark read failed stream_key=%s: %s", stream_key, exc
+                )
+                raise
             return str(row[0]) if row and row[0] else None
     finally:
         release_engine(engine)
@@ -1342,8 +1362,10 @@ def sa_blank_eos_resume(
                         ),
                         {"k": key},
                     )
-            except Exception:
-                pass
+            except SQLAlchemyError as exc:
+                _logger.warning(
+                    "cdc_eos: could not blank resume_blob stream_key=%s: %s", key, exc
+                )
             return cleared
     finally:
         release_engine(engine)
@@ -1361,9 +1383,10 @@ def sa_dest_engine_count(dest_cfg: dict[str, Any], table_name: str, dest_type: s
         with engine.connect() as conn:
             try:
                 row = conn.execute(
-                    text(f"SELECT COUNT(*) FROM {_q(table_name, dialect)}")
+                    text(f"SELECT COUNT(*) FROM {_q(table_name, dialect)}")  # nosec B608
                 ).fetchone()
-            except Exception:
+            except SQLAlchemyError as exc:
+                _logger.debug("cdc_eos: dest count unavailable for %s: %s", table_name, exc)
                 return 0
             return int(row[0] or 0) if row else 0
     finally:
