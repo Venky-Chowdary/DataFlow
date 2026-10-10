@@ -38,6 +38,22 @@ STORE_PATH = data_dir() / "connectors.json"
 
 logger = logging.getLogger(__name__)
 
+
+class ConnectorStoreError(RuntimeError):
+    """The configured connector store failed a write; nothing was saved."""
+
+
+def _mongo_write_failed(op: str, connector_id: str, exc: Exception) -> ConnectorStoreError:
+    # Mongo is the system of record once selected: a local-file fallback would
+    # report success, leave Mongo unchanged and put credentials on local disk.
+    logger.error(
+        "MongoDB %s failed for connector %s; refusing file-store fallback: %s",
+        op, connector_id or "<new>", exc,
+    )
+    return ConnectorStoreError(
+        f"Connector {op} failed in MongoDB (the configured connector store); nothing was saved: {exc}"
+    )
+
 # Databases / warehouses / object stores that are valid as source *and* destination.
 # Catalog UI may pass role=source|destination from the filter tab — that must not
 # lock the saved profile into a one-sided capability.
@@ -557,7 +573,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
             coll.insert_one(_connector_to_doc(conn))
             return conn
         except Exception as exc:
-            logger.warning("MongoDB create_connector failed, falling back to file: %s", exc)
+            raise _mongo_write_failed("create", conn.id, exc) from exc
 
     connectors = _load_all()
     connectors.append(conn)
@@ -610,7 +626,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             coll.replace_one({"_id": connector_id}, _connector_to_doc(updated))
             return updated
         except Exception as exc:
-            logger.warning("MongoDB update_connector failed, falling back to file: %s", exc)
+            raise _mongo_write_failed("update", connector_id, exc) from exc
 
     connectors = _load_all()
     for i, c in enumerate(connectors):
@@ -635,7 +651,7 @@ def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool
             result = coll.delete_one(query)
             return result.deleted_count > 0
         except Exception as exc:
-            logger.warning("MongoDB delete_connector failed, falling back to file: %s", exc)
+            raise _mongo_write_failed("delete", connector_id, exc) from exc
 
     connectors = _load_all()
     before = len(connectors)

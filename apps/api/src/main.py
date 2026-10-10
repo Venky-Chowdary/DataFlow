@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
 from services.platform_config import (
@@ -548,6 +549,16 @@ async def duplicate_transfer_handler(
             "existing_status": exc.existing_status,
             "job_id": exc.existing_job_id,
         },
+    )
+
+
+@app.exception_handler(ConnectorStoreError)
+async def connector_store_error_handler(request: Request, exc: ConnectorStoreError):
+    """A connector write the configured store refused: say so, never a generic 500."""
+    logger.error("Connector store write refused on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"error": "connector_store_unavailable", "detail": str(exc)},
     )
 
 
