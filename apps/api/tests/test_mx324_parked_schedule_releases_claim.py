@@ -103,3 +103,44 @@ def test_failed_then_parked_schedule_releases_claim_and_keeps_cadence(
     third = schedule_runner._run_schedule(sched.id, manual=True)
     assert third, "Run now on a parked schedule was refused as in progress"
     _wait(third)
+
+
+def test_dispatch_exception_after_claim_releases_it_immediately(tmp_path, monkeypatch):
+    """The runner raised between claim and job bind; the beat must not hold it.
+
+    Before: the claim stayed ``running`` with no job for the unbound grace
+    (15 min by default), so every beat skipped the schedule and Run now
+    answered "A run of this schedule is already in progress (no job bound yet)".
+    """
+    import pytest
+
+    _isolate(tmp_path, monkeypatch)
+    from services import schedule_runner
+    from services import schedule_store as store
+    from services.connector_store import create_connector
+
+    src = create_connector({"name": "S2", "type": "sqlite", "role": "source",
+                            "connection_string": f"sqlite:///{tmp_path / 's.sqlite'}",
+                            "workspace_id": ""})
+    dst = create_connector({"name": "D2", "type": "sqlite", "role": "destination",
+                            "connection_string": f"sqlite:///{tmp_path / 'd.sqlite'}",
+                            "workspace_id": ""})
+    sched = store.create_schedule({
+        "name": "QA_sched_exc", "source_connector_id": src.id, "source_table": "s",
+        "dest_connector_id": dst.id, "dest_table": "d", "cron": "*/5 * * * *",
+        "timezone": "UTC", "sync_mode": "full_refresh_overwrite", "primary_key": "id",
+        "enabled": True, "max_retries": 0, "retry_backoff_seconds": 0,
+        "mappings": [{"source": "id", "target": "id", "confidence": 1.0}],
+    })
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("connector registry unavailable")
+
+    monkeypatch.setattr(schedule_runner, "_dispatch_transfer", boom)
+    with pytest.raises(RuntimeError, match="registry unavailable"):
+        schedule_runner._run_schedule(sched.id)
+    after = store.get_schedule(sched.id)
+    assert after.running is False, "claim held after the dispatch raised"
+    assert store.claim_holder(after) is None
+    nxt = datetime.fromisoformat(str(after.next_run_at).replace("Z", "+00:00"))
+    assert nxt > datetime.now(timezone.utc)

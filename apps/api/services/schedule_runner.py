@@ -1327,12 +1327,23 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
 
     # A parked retry resumes its own attempt count; the budget is per run, not
     # per beat, or a schedule that fails every time retries forever.
-    with dispatch_in_flight(schedule_id):
-        job_id = _dispatch_transfer(
+    try:
+        with dispatch_in_flight(schedule_id):
+            job_id = _dispatch_transfer(
+                schedule_id,
+                attempt=sched.retry_attempt if sched.retry_at else 0,
+                allow_paused=manual,
+            )
+    except Exception:
+        # Nothing was submitted, so nothing is writing. Holding the claim for
+        # the unbound grace made every beat skip the schedule and Run now
+        # answer "already in progress" with no running job (QA MX3-24).
+        logger.exception(
+            "Schedule %s dispatch raised after its claim was taken; releasing the claim",
             schedule_id,
-            attempt=sched.retry_attempt if sched.retry_at else 0,
-            allow_paused=manual,
         )
+        clear_schedule_running(schedule_id)
+        raise
     if job_id is None:
         # Fail-closed paths (missing connector / contract) already call
         # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.
