@@ -95,6 +95,7 @@ def analyze_column_quality(
     null_cells = sum(1 for v in values if v == SQL_NULL_SENTINEL)
     empty_cells = sum(1 for v in values if v == "")
     absent = null_cells + (0 if textual else empty_cells)
+    warning_absent = null_cells + empty_cells
     non_empty = [
         v for v in values if v not in {SQL_NULL_SENTINEL, ""}
     ]
@@ -141,8 +142,13 @@ def analyze_column_quality(
         # '' is a stored value on text — call it out as data, not as null.
         issues.append(f"{empty_cells} empty string value(s) stored (not NULL)")
 
-    if not schemaless and null_rate > 0.5 and not re.search(r"optional|note|comment|description", column, re.I):
-        issues.append(f"High null rate ({null_rate:.0%})")
+    warning_null_rate = warning_absent / max(len(values), 1)
+    if (
+        not schemaless
+        and warning_null_rate > 0.5
+        and not re.search(r"optional|note|comment|description", column, re.I)
+    ):
+        issues.append(f"High null rate ({warning_null_rate:.0%})")
         # Sparse source columns are normal in NoSQL and should not block transfer;
         # the target DDL and required-null checks already cover key/NOT-NULL columns.
         if severity == "none":
