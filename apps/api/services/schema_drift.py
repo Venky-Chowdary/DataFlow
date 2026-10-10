@@ -850,6 +850,13 @@ def detect_schema_drift(
         for c in target_columns
         if c.lower() not in mapped_targets and c.lower() not in system_targets
     ]
+    previously_fed_targets = {
+        str(column).lower()
+        for column in [
+            *(previous_source_columns or []),
+            *((previous_source_schema or {}).keys()),
+        ]
+    }
     if not live_ddl_contract:
         orphan_targets = []
 
@@ -1050,7 +1057,10 @@ def detect_schema_drift(
     # QA MX3-17: a live destination column the source no longer feeds is a
     # drop, not a soft note — the policy decides (review / pause; propagate
     # keeps destination history).
-    if live_ddl_contract and orphan_targets:
+    drop_targets = [
+        column for column in orphan_targets if column.lower() in previously_fed_targets
+    ]
+    if live_ddl_contract and drop_targets:
         if not isinstance(classification, dict):
             classification = {
                 "additive": [],
@@ -1061,7 +1071,7 @@ def detect_schema_drift(
         breaking = list(classification.get("breaking") or [])
         named = {str(b.get("column") or "").lower() for b in breaking}
         target_types = {str(k).lower(): v for k, v in (target_schema or {}).items()}
-        for col in orphan_targets:
+        for col in drop_targets:
             if col.lower() in named:
                 continue
             breaking.append({
@@ -1074,7 +1084,7 @@ def detect_schema_drift(
         classification["severity"] = "breaking"
         _logger.info(
             "schema drift: destination column(s) %s not in source — drop under policy %s",
-            orphan_targets,
+            drop_targets,
             schema_policy,
         )
 
