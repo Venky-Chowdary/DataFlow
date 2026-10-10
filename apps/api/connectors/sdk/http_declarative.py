@@ -143,6 +143,11 @@ class DeclarativeHttpConnector(BaseConnector):
                     properties=dict(s.properties) or {"id": "string"},
                     primary_key=list(s.primary_key),
                     cursor_field=s.cursor_field,
+                    supported_sync_modes=(
+                        ["full_refresh", "incremental"]
+                        if s.cursor_field and s.cursor_param
+                        else ["full_refresh"]
+                    ),
                     json_schema={
                         "type": "object",
                         "properties": {

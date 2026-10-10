@@ -17,6 +17,7 @@ import sys
 import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Iterator
 
 # Runtime registry of SDK-loaded connectors (name -> cls)
@@ -46,9 +47,19 @@ class StreamSchema:
     primary_key: list[str] = field(default_factory=list)
     cursor_field: str = ""
     json_schema: dict[str, Any] = field(default_factory=dict)
-    supported_sync_modes: list[str] = field(
-        default_factory=lambda: ["full_refresh", "incremental"]
-    )
+    supported_sync_modes: list[str] = field(default_factory=lambda: ["full_refresh"])
+
+    def __post_init__(self) -> None:
+        valid_modes = {"full_refresh", "incremental"}
+        unknown_modes = [mode for mode in self.supported_sync_modes if mode not in valid_modes]
+        if unknown_modes:
+            raise ValueError(
+                f"Stream {self.name!r} advertises unsupported sync mode(s): {unknown_modes}"
+            )
+        if "incremental" in self.supported_sync_modes and not self.cursor_field:
+            raise ValueError(
+                f"Stream {self.name!r} advertises incremental sync without a cursor_field"
+            )
 
 
 @dataclass
@@ -157,10 +168,57 @@ class SingerTapBridge(BaseConnector):
         if not tap_config:
             return None
         tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
-        json.dump(tap_config, tmp)
-        tmp.flush()
-        tmp.close()
+        try:
+            json.dump(tap_config, tmp)
+            tmp.flush()
+        except BaseException:
+            tmp.close()
+            Path(tmp.name).unlink(missing_ok=True)
+            raise
+        else:
+            tmp.close()
         return tmp.name
+
+    @staticmethod
+    def _parse_streams(output: str | None) -> list[StreamSchema]:
+        streams: list[StreamSchema] = []
+        for line in (output or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            msg = load_sdk_protocol_message(line)
+            if msg is None:
+                continue
+            if msg.get("type") == "SCHEMA":
+                schema = msg.get("schema") or {}
+                props = {
+                    k: str((v or {}).get("type", "string"))
+                    for k, v in schema.get("properties", {}).items()
+                }
+                streams.append(
+                    StreamSchema(
+                        name=msg.get("stream") or "stream",
+                        properties=props,
+                        primary_key=list(msg.get("key_properties") or []),
+                        json_schema=dict(schema),
+                    )
+                )
+            elif msg.get("streams"):
+                for stream in msg["streams"]:
+                    schema = stream.get("schema") or {}
+                    props = {
+                        k: str((v or {}).get("type", "string"))
+                        for k, v in (schema.get("properties") or {}).items()
+                    }
+                    streams.append(
+                        StreamSchema(
+                            name=stream.get("stream") or stream.get("tap_stream_id") or "stream",
+                            properties=props,
+                            primary_key=list(stream.get("key_properties") or []),
+                            json_schema=schema,
+                        )
+                    )
+        return streams
 
     def test_connection(self) -> bool:
         ok, _ = self.check()
@@ -170,69 +228,78 @@ class SingerTapBridge(BaseConnector):
         cmd = self.config.get("tap_command")
         if not cmd:
             return False, "Singer tap requires tap_command"
-        cfg_path = self._config_file()
+        cfg_path = None
         try:
+            cfg_path = self._config_file()
             argv = self._argv("--check")
             if cfg_path:
                 argv.extend(["--config", cfg_path])
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=60)  # nosec: B603 — argv is shell-safe and shell=False
             if proc.returncode == 0:
                 return True, "Singer tap --check OK"
-            # Many taps lack --check; fall back to command presence
             if "unrecognized" in (proc.stderr or "").lower() or proc.returncode == 2:
-                return True, "Singer tap command configured (no --check support)"
+                discover_argv = self._argv("--discover")
+                if cfg_path:
+                    discover_argv.extend(["--config", cfg_path])
+                try:
+                    discover_proc = subprocess.run(
+                        discover_argv,
+                        capture_output=True,
+                        text=True,
+                        timeout=120,
+                    )  # nosec: B603 — argv is shell-safe and shell=False
+                except subprocess.TimeoutExpired:
+                    return False, (
+                        "unverified: tap has no --check and --discover produced no streams "
+                        "(exit timeout): "
+                    )
+                except OSError as exc:
+                    return False, (
+                        "unverified: tap has no --check and --discover produced no streams "
+                        f"(exit error): {str(exc)[:300]}"
+                    )
+                streams = self._parse_streams(discover_proc.stdout)
+                if discover_proc.returncode == 0 and streams:
+                    return True, (
+                        f"Singer tap --discover OK ({len(streams)} streams); "
+                        "tap has no --check"
+                    )
+                stderr = (discover_proc.stderr or "")[:300]
+                return False, (
+                    "unverified: tap has no --check and --discover produced no streams "
+                    f"(exit {discover_proc.returncode}): {stderr}"
+                )
             return False, (proc.stderr or proc.stdout or "tap --check failed")[:500]
         except FileNotFoundError:
             return False, "Singer tap binary not found"
+        except subprocess.TimeoutExpired:
+            return False, "Singer tap --check timed out"
+        except OSError as exc:
+            return False, f"Singer tap execution failed: {exc}"
         except Exception as exc:
             return False, str(exc)
+        finally:
+            if cfg_path:
+                Path(cfg_path).unlink(missing_ok=True)
 
     def discover(self) -> list[StreamSchema]:
-        cfg_path = self._config_file()
-        argv = self._argv("--discover")
-        if cfg_path:
-            argv.extend(["--config", cfg_path])
+        cfg_path = None
         try:
+            cfg_path = self._config_file()
+            argv = self._argv("--discover")
+            if cfg_path:
+                argv.extend(["--config", cfg_path])
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)  # nosec: B603 — argv is shell-safe and shell=False
+            return self._parse_streams(proc.stdout)
+        except subprocess.TimeoutExpired:
+            return []
+        except OSError:
+            return []
         except Exception:
             return []
-        streams: list[StreamSchema] = []
-        for line in (proc.stdout or "").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            msg = load_sdk_protocol_message(line)
-            if msg is None:
-                continue
-            if msg.get("type") == "SCHEMA":
-                props = {
-                    k: str((v or {}).get("type", "string"))
-                    for k, v in (msg.get("schema") or {}).get("properties", {}).items()
-                }
-                streams.append(
-                    StreamSchema(
-                        name=msg.get("stream") or "stream",
-                        properties=props,
-                        primary_key=list(msg.get("key_properties") or []),
-                        json_schema=dict(msg.get("schema") or {}),
-                    )
-                )
-            elif msg.get("streams"):  # catalog document
-                for s in msg["streams"]:
-                    schema = s.get("schema") or {}
-                    props = {
-                        k: str((v or {}).get("type", "string"))
-                        for k, v in (schema.get("properties") or {}).items()
-                    }
-                    streams.append(
-                        StreamSchema(
-                            name=s.get("stream") or s.get("tap_stream_id") or "stream",
-                            properties=props,
-                            primary_key=list(s.get("key_properties") or []),
-                            json_schema=schema,
-                        )
-                    )
-        return streams
+        finally:
+            if cfg_path:
+                Path(cfg_path).unlink(missing_ok=True)
 
     def read(
         self,
@@ -242,33 +309,35 @@ class SingerTapBridge(BaseConnector):
         offset: int = 0,
         limit: int = 1000,
     ) -> Iterator[RecordBatch]:
-        cfg_path = self._config_file()
-        argv = self._argv()
-        if cfg_path:
-            argv.extend(["--config", cfg_path])
+        cfg_path = None
         state_path = None
-        if state:
-            st = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
-            json.dump(state, st)
-            st.flush()
-            st.close()
-            state_path = st.name
-            argv.extend(["--state", state_path])
-
-        proc = subprocess.Popen(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )  # nosec: B603 — argv is shell-safe and shell=False
-        if proc.stdout is None:
-            raise RuntimeError("subprocess stdout is not captured")
-        batch: list[dict[str, Any]] = []
-        schema: StreamSchema | None = None
-        skipped = 0
-        emitted = 0
-        out_state: dict[str, Any] = dict(state or {})
+        proc = None
         try:
+            cfg_path = self._config_file()
+            argv = self._argv()
+            if cfg_path:
+                argv.extend(["--config", cfg_path])
+            if state:
+                st = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+                state_path = st.name
+                json.dump(state, st)
+                st.flush()
+                st.close()
+                argv.extend(["--state", state_path])
+
+            proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )  # nosec: B603 — argv is shell-safe and shell=False
+            if proc.stdout is None:
+                raise RuntimeError("subprocess stdout is not captured")
+            batch: list[dict[str, Any]] = []
+            schema: StreamSchema | None = None
+            skipped = 0
+            emitted = 0
+            out_state: dict[str, Any] = dict(state or {})
             for line in proc.stdout:
                 line = line.strip()
                 if not line:
@@ -315,12 +384,25 @@ class SingerTapBridge(BaseConnector):
                     schema=schema,
                     state=dict(out_state),
                 )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError("Singer tap read timed out") from exc
+        except OSError as exc:
+            raise RuntimeError(f"Singer tap execution failed: {exc}") from exc
         finally:
-            proc.kill()
-            try:
-                proc.wait(timeout=5)
-            except Exception as exc:
-                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+            if proc is not None:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+            if cfg_path:
+                Path(cfg_path).unlink(missing_ok=True)
+            if state_path:
+                Path(state_path).unlink(missing_ok=True)
 
 
 register_connector(SingerTapBridge)
