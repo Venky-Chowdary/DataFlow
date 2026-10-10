@@ -4340,9 +4340,13 @@ def _introspect_sqlite(
                 prow = pragma_by_name.get(name)
                 notnull = int(prow[3] or 0) if prow is not None else 0
                 dflt = prow[4] if prow is not None else None
+                native_type = str(prow[2] or "").strip() if prow is not None else ""
                 col_out: dict[str, Any] = {
                     "name": name,
                     "inferred_type": inferred,
+                    "declared_type": native_type,
+                    "native_type": native_type,
+                    "sample_refined": any(bool(value) for value in values),
                     # Property 6 — never invent nullable=True when PRAGMA says NOT NULL.
                     "nullable": notnull == 0,
                 }

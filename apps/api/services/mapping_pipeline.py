@@ -1214,6 +1214,8 @@ def run_mapping_pipeline(
         # do not let deterministic infer silently re-apply the invent.
         if m.get("llm_invented_transform") and not m.get("user_override"):
             transform = m.get("transform") or "none"
+        elif operator_stamp and m.get("transform") is not None:
+            transform = str(m.get("transform") or "none")
         else:
             transform = infer_transform_for_mapping(
                 m["source"],
