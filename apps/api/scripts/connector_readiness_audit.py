@@ -39,7 +39,7 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.connector_truth_audit import (
-    _NOT_SUPPORTED_FN,
+    _NOT_SUPPORTED_FN,  # noqa: F401
     FILE_FORMATS as _FILE_FORMATS,
     FILE_FORMAT_PATH as _FILE_FORMAT_PATH,
     NON_REGISTRY_PATHS as _NON_REGISTRY_PATHS,

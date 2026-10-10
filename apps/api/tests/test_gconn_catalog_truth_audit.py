@@ -188,7 +188,7 @@ def test_write_mode_downgrade_reason_for_unusable_writer(
 
     assert truth_audit.write_mode_downgrade_reason(
         "connector", "driver", {"write": True}
-    ) == f"No destination writer for driver: writer evidence"
+    ) == "No destination writer for driver: writer evidence"
 
 
 def test_write_mode_downgrade_reason_for_driver_without_write_capability(
