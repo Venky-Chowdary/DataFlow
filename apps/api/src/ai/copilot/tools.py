@@ -1789,7 +1789,9 @@ class DataPilotTools:
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
 
-        from .job_reads import read_transfer_job
+        from services.job_status import job_timestamp_iso
+
+        from .job_reads import job_governance, read_transfer_job
 
         job = read_transfer_job((job_id or "").strip())
         if not job:
@@ -1891,8 +1893,10 @@ class DataPilotTools:
                 "quarantine_samples": samples,
                 "progress_pct": job.get("progress_pct"),
                 "error": job.get("error"),
-                "created_at": str(job.get("created_at", "")),
-                "completed_at": str(job.get("completed_at", "")),
+                "created_at": job_timestamp_iso(job.get("created_at")),
+                "updated_at": job_timestamp_iso(job.get("updated_at")),
+                "completed_at": job_timestamp_iso(job.get("completed_at")),
+                "governance": job_governance(job),
                 "sync_mode": route.get("sync_mode"),
                 "route": route,
                 "live_source_schema": live_schema,

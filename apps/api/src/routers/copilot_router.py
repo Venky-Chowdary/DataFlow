@@ -4,6 +4,8 @@ Datawrap — Copilot API Router
 Customer-facing chat + separate training agent endpoints.
 """
 
+import logging
+
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -11,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from src.services import auth_service
 
+_logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/copilot", tags=["AI Copilot"])
 
 
@@ -159,6 +162,45 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _stamp_confirmation(job_id: str, *, ack_id: str, actor: str, reason: str) -> None:
+    """Record who confirmed the job and why on the job itself (QA MX3-19).
+
+    The ack ledger kept the actor and reason, but get_job and audit readers
+    only see the job document.
+    """
+    if not job_id:
+        return
+    from datetime import datetime, timezone
+
+    from services.mongodb_service import get_mongodb_service
+
+    confirmation = {
+        "approved_by": actor,
+        "reason": reason,
+        "ack_id": ack_id,
+        "confirmed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        stamped = get_mongodb_service().update_job_fields(
+            job_id, {"confirmation": confirmation}
+        )
+    except Exception as exc:  # noqa: BLE001 - the job runs; the audit gap is logged
+        _logger.error(
+            "Job %s: confirmation by %s could not be recorded: %s",
+            job_id,
+            actor,
+            exc,
+            exc_info=exc,
+        )
+        return
+    if not stamped:
+        _logger.error(
+            "Job %s: confirmation by %s was not recorded (job not found)", job_id, actor
+        )
+        return
+    _logger.info("Job %s confirmed by %s (ack %s)", job_id, actor, ack_id)
 
 
 async def _start_confirmed_transfer(payload: dict) -> dict:
@@ -416,6 +458,12 @@ async def copilot_confirm(
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=f"Failed to start transfer: {exc}") from exc
+        _stamp_confirmation(
+            str(result.get("job_id") or ""),
+            ack_id=ack_id,
+            actor=actor,
+            reason=request.reason or "confirmed",
+        )
         ledger.finalize(
             ack_id,
             actor=actor,

@@ -55,6 +55,28 @@ def refuse_job_status_write(
     return None
 
 
+def job_timestamp_iso(value: object) -> str:
+    """ISO-8601 UTC with ``Z`` for a job timestamp; ``""`` when unset.
+
+    Job timestamps are written in UTC, but Mongo hands them back naive, so
+    ``str()`` printed ``2026-10-10 11:27:40.535000`` with no offset (QA MX3-19).
+    """
+    from datetime import datetime, timezone
+
+    if value in (None, ""):
+        return ""
+    if isinstance(value, datetime):
+        ts = value
+    else:
+        try:
+            ts = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        except ValueError:
+            return str(value)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def cancel_outcome_for(rows_committed: int | None) -> dict:
     """What a cancel left behind: committed rows are never rolled back.
 
