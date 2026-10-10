@@ -233,7 +233,13 @@ def test_csv_wire_keeps_timezone_offset() -> None:
     assert "+00:00" in wire
 
 
-def test_overwrite_heap_does_not_block_duplicate_keys() -> None:
+def test_overwrite_blocks_duplicate_identity_even_onto_a_heap() -> None:
+    """Duplicate identity is a source fact; the table being recreated is irrelevant.
+
+    Superseded the round-32 heap relaxation (AUDIT-INTEGRITY A): a resolved
+    identity key that repeats blocks overwrite whether or not the old destination
+    enforced a key. A route with no identity key is not blocked.
+    """
     from services.data_integrity import _check_duplicate_keys
 
     mappings = [{"source": "id", "target": "id"}]
@@ -245,7 +251,15 @@ def test_overwrite_heap_does_not_block_duplicate_keys() -> None:
         primary_key="id",
         destination_pk_columns=[],
     )
-    assert heap["blocks_transfer"] is False
+    assert heap["blocks_transfer"] is True
+    keyless = _check_duplicate_keys(
+        [{"source": "v", "target": "v"}],
+        [{"v": 1}, {"v": 1}],
+        sync_mode="full_refresh_overwrite",
+        primary_key=None,
+        destination_pk_columns=[],
+    )
+    assert keyless["blocks_transfer"] is False
     keyed = _check_duplicate_keys(
         mappings,
         rows,

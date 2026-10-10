@@ -890,6 +890,23 @@ def _check_destination_unique_constraints(
     return issues
 
 
+def _business_identity_columns(identity_cols: list[str], sync: str) -> list[str]:
+    """Drop SCD2 engine-owned history columns from a source identity key.
+
+    An SCD2 destination key is ``(business_key, valid_from)``; the source carries
+    one row per business key and never the history columns, so including them
+    would make every probe tuple incomplete (false green) or compare history
+    versions as duplicates (false block).
+    """
+    if sync != "scd2" or not identity_cols:
+        return identity_cols
+    from services.scd2_engine import SCD2_COLUMNS
+
+    history = {c.lower() for c in SCD2_COLUMNS}
+    business = [c for c in identity_cols if c.lower() not in history]
+    return business or identity_cols
+
+
 def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
@@ -911,8 +928,10 @@ def _check_duplicate_keys(
 
     - Schemaless destinations (Mongo/Redis/Dynamo) and sync modes that require a
       unique identity (upsert/CDC/mirror/SCD2) always enforce duplicates.
-    - Overwrite modes enforce duplicates because the destination table is recreated
-      and the mapped identity key is likely to become the primary key.
+    - Overwrite modes enforce duplicates on any resolved identity key: source
+      duplicate identity blocks before the recreate, whatever the old table held.
+    - SCD2 dedupes on the business key; engine-owned history columns
+      (valid_from/valid_to/is_current/row_hash) are never part of source identity.
     - Append-like modes only enforce duplicates when the destination primary key or
       a UNIQUE index is known to include the mapped target column.
     - Destination CI/AI collations / CITEXT / ``UNIQUE (lower(col))`` equate
@@ -939,6 +958,12 @@ def _check_duplicate_keys(
     ]
     if not identity_cols and primary_key:
         identity_cols = [primary_key]
+    identity_cols = _business_identity_columns(identity_cols, sync)
+    destination_pk_columns = _business_identity_columns(
+        [str(c) for c in (destination_pk_columns or []) if c], sync
+    )
+    if primary_key and identity_cols and primary_key not in identity_cols:
+        primary_key = identity_cols[0]
     composite_identity = len(identity_cols) > 1
     pk_label = " + ".join(identity_cols) if identity_cols else (primary_key or "")
     target_cols = [
@@ -954,16 +979,12 @@ def _check_duplicate_keys(
         target_types=target_types,
     )
 
-    # Overwrite recreates the table. A heap (no destination PK or UNIQUE)
-    # may legally carry duplicate source keys — blocking it as "duplicate
-    # keys" refused a load the write would have accepted. Uniqueness is
-    # required only when the catalog key will still be enforced after the
-    # recreate, or when the sync mode itself is key-addressed.
-    dest_has_enforced_key = bool(destination_pk_columns) or any(
-        _unique_constraint_enforced(uk, dest_kind=dest_kind)
-        for uk in (destination_unique_keys or [])
-    )
-    overwrite_enforces_uniqueness = _is_overwrite_like(sync) and dest_has_enforced_key
+    # Duplicate identity is a fact about the source, not about the table the
+    # overwrite recreates: a declared or resolved identity key that repeats in
+    # the source cannot become the recreated table's key, so overwrite modes
+    # block whenever an identity was resolved. A route with no identity key at
+    # all has nothing to dedupe and is not blocked here.
+    overwrite_enforces_uniqueness = _is_overwrite_like(sync) and bool(identity_cols)
     # Single-column identity enforcement (upsert/CDC/PK/single UNIQUE).
     enforce_identity = bool(identity_cols) and (
         schemaless
