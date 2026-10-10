@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, FrozenSet
 
 # Driver-level capabilities (implemented in connectors/ + adapters.py)
-_DRIVER_CAPS: dict[str, dict[str, bool]] = {
+_DRIVER_CAPS: dict[str, dict[str, Any]] = {
     "postgresql": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "mysql": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "mongodb": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
@@ -62,6 +62,22 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "couchbase": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "singer_tap": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
+
+from connectors.sdk import list_descriptors
+
+for _sdk_descriptor in list_descriptors():
+    if "source" not in _sdk_descriptor.roles or not _sdk_descriptor.catalog_ids:
+        continue
+    _DRIVER_CAPS[_sdk_descriptor.id] = {
+        "test": True,
+        "read": True,
+        "write": False,
+        "introspect": False,
+        "preflight": False,
+        "source_only": True,
+        "incremental": False,
+        "evidence": _sdk_descriptor.evidence,
+    }
 
 # File format capabilities (FileParser + registry)
 _FILE_CAPS: dict[str, dict[str, bool]] = {
@@ -417,6 +433,9 @@ def resolve_driver_type(catalog_id: str) -> str:
     cid = (catalog_id or "").lower().strip()
     if not cid:
         return "unknown"
+    for descriptor in list_descriptors():
+        if cid in descriptor.catalog_ids:
+            return descriptor.id
     if cid == "generic_sql":
         return "generic_sql"
     if cid in CATALOG_ID_ALIASES:
@@ -775,7 +794,7 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
     return _module_is_installed(module)
 
 
-def _declared_capabilities(driver_type: str, _catalog_id: str | None = None) -> dict[str, bool]:
+def _declared_capabilities(driver_type: str, _catalog_id: str | None = None) -> dict[str, Any]:
     """Registry capability bitmap, ignoring whether the package is installed.
 
     Runtime ``get_capabilities`` zeroes this when the DBAPI is missing so
@@ -791,7 +810,7 @@ def _declared_capabilities(driver_type: str, _catalog_id: str | None = None) -> 
     return {"test": False, "read": False, "write": False, "introspect": False, "preflight": False}
 
 
-def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[str, bool]:
+def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[str, Any]:
     try:
         if driver_type == "generic_sql":
             base = _declared_capabilities("generic_sql", catalog_id)
@@ -846,8 +865,10 @@ def connect_only(caps: dict[str, bool]) -> bool:
     return bool(caps.get("test") and not (transfer_ready(caps) or _source_only_ready(caps) or can_rw))
 
 
-def effective_status(caps: dict[str, bool], catalog_status: str = "") -> str:
+def effective_status(caps: dict[str, Any], catalog_status: str = "") -> str:
     if transfer_ready(caps) or _source_only_ready(caps):
+        if caps.get("evidence") == "synthetic-fixture" and _source_only_ready(caps):
+            return "beta"
         return "live"
     if connect_only(caps):
         return "connect_only"

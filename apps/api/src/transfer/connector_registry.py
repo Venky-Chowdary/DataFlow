@@ -257,6 +257,19 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
     ),
 }
 
+from connectors.sdk import list_descriptors
+
+for _sdk_descriptor in list_descriptors():
+    if "source" not in _sdk_descriptor.roles or not _sdk_descriptor.catalog_ids:
+        continue
+    CONNECTOR_MODULES[_sdk_descriptor.id] = ConnectorModules(
+        probe=("connectors.sdk.transfer_bridge", "test_sdk_connector"),
+        reader="connectors.sdk.transfer_bridge",
+        reader_fn="read_object",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    )
+
 
 def registered_driver_types() -> list[str]:
     return sorted(CONNECTOR_MODULES.keys())
