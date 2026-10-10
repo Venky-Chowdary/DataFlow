@@ -82,6 +82,139 @@ def test_population_rows_block_validate_with_the_offending_row_numbers() -> None
     assert blocker["details"]["findings"][0]["example_rows"] == [431, 433]
 
 
+def test_string_width_narrowing_requires_exact_existing_population_fit() -> None:
+    from types import SimpleNamespace
+
+    from services.population_fit_narrowing import (
+        reconcile_population_proven_string_narrowings,
+    )
+
+    target = SimpleNamespace(
+        source="note",
+        target="note",
+        target_type="VARCHAR(64)",
+        carrier="string",
+    )
+    report = SimpleNamespace(
+        evidence="exact",
+        rows_scanned=2,
+        rows_total=2,
+        scanned_population=True,
+        truncated_reason="",
+        targets=[target],
+        findings=[],
+    )
+    mappings = [{"source": "note", "target": "note"}]
+    source_types = {"note": "TEXT"}
+    dest_types = {"note": "VARCHAR(64)"}
+
+    def reconcile(
+        report,
+        *,
+        mapping_list=mappings,
+        source_type_map=source_types,
+        destination_type_map=dest_types,
+        destination_exists=True,
+    ):
+        return reconcile_population_proven_string_narrowings(
+            SimpleNamespace(gates=[], blockers=[], passed=True),
+            report,
+            mappings=mapping_list,
+            source_types=source_type_map,
+            destination_types=destination_type_map,
+            destination_table_exists=destination_exists,
+        )
+
+    assert reconcile(
+        report,
+    ) == {("note", "note")}
+
+    partial = SimpleNamespace(**{**report.__dict__, "evidence": "partial"})
+    truncated = SimpleNamespace(**{**report.__dict__, "truncated_reason": "row"})
+    incomplete = SimpleNamespace(**{**report.__dict__, "rows_scanned": 1})
+    overflow = SimpleNamespace(
+        **{
+            **report.__dict__,
+            "findings": [SimpleNamespace(target=target)],
+        }
+    )
+    assert reconcile(partial) == set()
+    assert reconcile(truncated) == set()
+    assert reconcile(incomplete) == set()
+    assert reconcile(overflow) == set()
+    assert reconcile(report, mapping_list=[{**mappings[0], "create_new": True}]) == set()
+    assert reconcile(report, destination_exists=False) == set()
+
+    numeric_target = SimpleNamespace(
+        source="amount",
+        target="amount",
+        target_type="DECIMAL(8,2)",
+        carrier="decimal",
+    )
+    numeric_report = SimpleNamespace(
+        **{**report.__dict__, "targets": [numeric_target]}
+    )
+    assert reconcile(
+        numeric_report,
+        mapping_list=[{"source": "amount", "target": "amount"}],
+        source_type_map={"amount": "DECIMAL(10,2)"},
+        destination_type_map={"amount": "DECIMAL(8,2)"},
+    ) == set()
+
+    temporal_target = SimpleNamespace(
+        source="event_time",
+        target="event_time",
+        target_type="TIMESTAMP(6)",
+        carrier="temporal",
+    )
+    temporal_report = SimpleNamespace(
+        **{**report.__dict__, "targets": [temporal_target]}
+    )
+    assert reconcile(
+        temporal_report,
+        mapping_list=[{"source": "event_time", "target": "event_time"}],
+        source_type_map={"event_time": "TIMESTAMP(9)"},
+        destination_type_map={"event_time": "TIMESTAMP(6)"},
+    ) == set()
+
+    assert reconcile(
+        report,
+        source_type_map={"note": "DECIMAL(10,2)"},
+    ) == set()
+
+
+def test_file_preflight_reconciles_exact_string_width_blocker() -> None:
+    rows = [{"note": "alice"}, {"note": "bob"}]
+    result = _preflight(
+        columns=["note"],
+        column_types={"note": "TEXT"},
+        row_count=2,
+        mappings=[
+            {
+                "source": "note",
+                "target": "note",
+                "confidence": 0.99,
+                "target_type": "VARCHAR(64)",
+            }
+        ],
+        sample_rows=rows,
+        population_rows=rows,
+        rows_are_population=True,
+        destination_column_types={"note": "VARCHAR(64)"},
+        destination_db_type="mysql",
+        destination_table_exists=True,
+        validation_mode="balanced",
+    )
+
+    schema_gate = next(
+        gate for gate in result["gates"] if gate["id"] == "g3_schema_contract"
+    )
+    assert schema_gate["status"] == "pass"
+    assert not any(
+        blocker["id"] == "g3_schema_contract" for blocker in result["blockers"]
+    )
+
+
 def test_clean_population_does_not_block_and_reports_exact_evidence() -> None:
     rows = _rows(500)
     result = _preflight(

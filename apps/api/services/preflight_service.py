@@ -2254,6 +2254,7 @@ def run_file_preflight(
     population_walk_error = ""
     fit_report_payload: dict[str, Any] = {}
     fit_blocked = False
+    fit_report = None
     try:
         from connectors.writer_common import transform_error_policy_for_validation_mode
         from services.population_fit_scan import (
@@ -2586,6 +2587,16 @@ def run_file_preflight(
             "details": dict(fit_report_payload),
         }
 
+    from services import population_fit_narrowing
+
+    proven_string_narrowings = population_fit_narrowing.reconcile_population_proven_string_narrowings(
+        result, fit_report, mappings, column_types or {},
+        destination_column_types or {}, destination_table_exists,
+        ddl_issues, proof_bundle, blockers,
+    )
+    if proven_string_narrowings:
+        ddl_compatible = not ddl_issues
+
     enriched_blockers = enrich_blockers(
         blockers,
         dest_kind=dest_kind,
@@ -2717,8 +2728,9 @@ def run_file_preflight(
     # A gate that blocks a declared conversion must show up in the report every
     # other surface reads — otherwise Validate blocks while the panel under it
     # says there are no blocking failures.
-    out["coercion_report"] = reconcile_coercion_report(
-        out.get("coercion_report"), out.get("gates")
+    out["coercion_report"] = population_fit_narrowing.reconcile_population_fit_coercion_report(
+        reconcile_coercion_report(out.get("coercion_report"), out.get("gates")),
+        proven_string_narrowings,
     )
 
     # Stamp Decision Kernel ValidationFindings onto Validate SSOT.

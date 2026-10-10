@@ -1024,25 +1024,41 @@ def detect_schema_drift(
             }
 
     if type_mismatches:
+        from services.type_system import string_width_would_narrow
+
         classification = classification or {
             "additive": [],
             "breaking": [],
             "severity": "breaking",
             "renamed": [],
         }
+        added_type_breaking = False
         for tm in type_mismatches:
+            kind = (
+                "narrow_type"
+                if tm.get("reason") == "precision_collapse"
+                else "type_change"
+            )
+            if (
+                kind == "narrow_type"
+                and string_width_would_narrow(
+                    str(tm.get("source_type") or ""),
+                    str(tm.get("target_type") or ""),
+                )
+                and not source_changed
+                and not target_changed
+            ):
+                continue
             classification["breaking"].append({
-                "kind": (
-                    "narrow_type"
-                    if tm.get("reason") == "precision_collapse"
-                    else "type_change"
-                ),
+                "kind": kind,
                 "column": tm.get("source"),
                 "old_type": tm.get("source_type"),
                 "new_type": tm.get("target_type"),
                 "target": tm.get("target"),
             })
-        classification["severity"] = "breaking"
+            added_type_breaking = True
+        if added_type_breaking:
+            classification["severity"] = "breaking"
 
     # Intentional subset maps (operator omitted columns) are not schema drift.
     # Only columns that appeared since the previous revision drive evolution.
