@@ -227,6 +227,240 @@ def test_cdc_transfer_required_filesystem_iceberg_fails_before_write(
     assert calls == []
 
 
+def _cdc_transfer_harness(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    batches: list[Any],
+) -> tuple[Any, Any, dict[str, list[Any]]]:
+    from types import SimpleNamespace
+
+    from connectors import cdc_eos_sql, iceberg_writer
+    from services import cdc_retention_probe, cdc_slot_resume, row_conservation
+    from services import source_ha_probe
+    from services.cdc_snapshot_mode import SnapshotMode
+    from src.transfer import cdc_transfer, stream_dest_procedure
+    from src.transfer.models import EndpointConfig
+
+    calls: dict[str, list[Any]] = {"eos": [], "writer": []}
+
+    class FakeReader:
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            self._batches = list(batches)
+
+        def is_available(self) -> bool:
+            return True
+
+        def poll(self):
+            while self._batches:
+                yield self._batches.pop(0)
+
+        def capture_has_pending(self) -> bool:
+            return False
+
+        def cdc_metadata(self) -> dict[str, Any]:
+            return {}
+
+        def ack(self, _token: Any) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        cdc_transfer,
+        "resolve_connector_config",
+        lambda endpoint: (
+            _catalog_config(tmp_path)
+            if endpoint.format == "iceberg"
+            else {"type": "postgresql", "database": "source", "schema": "public"}
+        ),
+    )
+    monkeypatch.setattr(cdc_transfer, "resolve_driver_type", lambda value: value)
+    monkeypatch.setattr(cdc_transfer, "resolve_dest_table", lambda *_args: "events")
+    monkeypatch.setattr(cdc_transfer, "PostgreSqlChangeStreamCdc", FakeReader)
+    monkeypatch.setattr(
+        stream_dest_procedure,
+        "refuse_cdc_destination_row_apply",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(cdc_transfer, "get_watermark", lambda _key: None)
+    monkeypatch.setattr(cdc_transfer, "set_watermark", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cdc_transfer, "resolve_snapshot_mode", lambda *_a, **_k: SnapshotMode.NEVER)
+    monkeypatch.setattr(
+        cdc_transfer,
+        "resolve_cdc_snapshot_plan",
+        lambda *_a, **_k: {
+            "kind": "stream",
+            "run_snapshot": False,
+            "run_stream": True,
+        },
+    )
+    monkeypatch.setattr(cdc_transfer, "measure_dest_already_keyed", lambda *_a, **_k: False)
+    monkeypatch.setattr(cdc_transfer, "adapter_supports_incremental_interleave", lambda *_a: False)
+    def fake_iceberg_writer(**kwargs: Any) -> Any:
+        calls["writer"].append(kwargs)
+        return SimpleNamespace(
+            ok=True,
+            rows_written=len(kwargs.get("data_rows") or []),
+            table_name=kwargs.get("table_name"),
+            target_schema="default",
+            checksum="writer-checksum",
+            driver="iceberg",
+            rejected_rows=0,
+            rejected_details=[],
+            warnings=[],
+            coerced_null_rows=0,
+            rows_skipped=0,
+        )
+
+    monkeypatch.setattr(iceberg_writer, "write_mapped_rows", fake_iceberg_writer)
+    monkeypatch.setattr(cdc_transfer, "_stamp_cdc_source_image", lambda summary, **_k: summary)
+    monkeypatch.setattr(cdc_transfer, "_cdc_lag_fields", lambda *_a: {})
+    monkeypatch.setattr(cdc_transfer, "_stamp_cdc_poll", lambda *_a, **_k: None)
+    monkeypatch.setattr(cdc_transfer, "stamp_capture_identity", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        cdc_slot_resume, "prepare_resume_for_missing_slot", lambda watermark, *_a, **_k: (watermark, "")
+    )
+    monkeypatch.setattr(source_ha_probe, "attach_source_ha", lambda *_a, **_k: None)
+    monkeypatch.setattr(cdc_retention_probe, "attach_cdc_retention", lambda *_a, **_k: None)
+    monkeypatch.setattr(row_conservation, "record_stream_health", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        cdc_eos_sql,
+        "open_eos_session",
+        lambda **_kwargs: SimpleNamespace(resume=None),
+    )
+    monkeypatch.setattr(
+        cdc_eos_sql,
+        "apply_change_batch_exactly_once",
+        lambda **kwargs: (
+            calls["eos"].append(kwargs) or (1, "eos-checksum", {}, 0)
+        ),
+    )
+    monkeypatch.setattr(
+        "services.cdc_exactly_once.persist_dest_keyset_on_signal",
+        lambda *_a, **_k: None,
+    )
+    monkeypatch.setattr(
+        "services.cdc_snapshot_mode.measure_dest_already_keyed",
+        lambda *_a, **_k: False,
+    )
+
+    source = EndpointConfig(
+        kind="database", format="postgresql", table="source_events"
+    )
+    destination = EndpointConfig(
+        kind="database", format="iceberg", table="events"
+    )
+    return source, destination, calls
+
+
+def test_cdc_transfer_pinned_exactly_once_without_primary_key_refuses_before_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src.transfer import cdc_transfer
+
+    source, destination, calls = _cdc_transfer_harness(monkeypatch, tmp_path, [])
+    monkeypatch.setattr(cdc_transfer, "_catalog_cdc_primary_key", lambda *_a, **_k: "")
+
+    with pytest.raises(ValueError, match="requires primary_key"):
+        cdc_transfer.run_cdc_database_transfer(
+            source,
+            destination,
+            [{"source": "id", "target": "id"}],
+            {"id": "INTEGER"},
+            stream_contracts=[
+                {
+                    "name": "source_events",
+                    "primary_key": "",
+                    "cursor_field": "id",
+                    "cursor_semantics": "cdc_position",
+                }
+            ],
+            delivery_guarantee="exactly_once",
+            delivery_pinned=True,
+        )
+
+    assert calls == {"eos": [], "writer": []}
+
+
+def test_cdc_transfer_pinned_exactly_once_missing_lsn_refuses_before_apply_or_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from services.cdc_exactly_once import REASON_NO_LSN, ExactlyOnceRouteError
+    from services.cdc_engine import ChangeBatch
+    from src.transfer import cdc_transfer
+
+    batch = ChangeBatch(
+        inserts=[{"id": 1, "value": "new"}],
+        resume_token={"kind": "test"},
+    )
+    source, destination, calls = _cdc_transfer_harness(
+        monkeypatch, tmp_path, [batch]
+    )
+
+    with pytest.raises(ExactlyOnceRouteError) as raised:
+        cdc_transfer.run_cdc_database_transfer(
+            source,
+            destination,
+            [
+                {"source": "id", "target": "id"},
+                {"source": "value", "target": "value"},
+            ],
+            {"id": "INTEGER", "value": "VARCHAR"},
+            stream_contracts=[
+                {
+                    "name": "source_events",
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                    "cursor_semantics": "cdc_position",
+                }
+            ],
+            delivery_guarantee="exactly_once",
+            delivery_pinned=True,
+        )
+
+    assert raised.value.reason == REASON_NO_LSN
+    assert calls == {"eos": [], "writer": []}
+
+
+def test_cdc_transfer_auto_without_batch_lsn_uses_writer_not_eos_apply(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from services.cdc_engine import ChangeBatch
+    from src.transfer import cdc_transfer
+
+    batch = ChangeBatch(
+        inserts=[{"id": 1, "value": "new"}],
+        resume_token={"kind": "test"},
+    )
+    source, destination, calls = _cdc_transfer_harness(
+        monkeypatch, tmp_path, [batch]
+    )
+
+    cdc_transfer.run_cdc_database_transfer(
+        source,
+        destination,
+        [
+            {"source": "id", "target": "id"},
+            {"source": "value", "target": "value"},
+        ],
+        {"id": "INTEGER", "value": "VARCHAR"},
+        stream_contracts=[
+            {
+                "name": "source_events",
+                "primary_key": "id",
+                "cursor_field": "id",
+                "cursor_semantics": "cdc_position",
+            }
+        ],
+        delivery_guarantee="auto",
+        delivery_pinned=False,
+    )
+
+    assert calls["writer"]
+    assert calls["eos"] == []
+
+
 def test_engine_uses_resolved_saved_catalog_endpoint_for_route(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
