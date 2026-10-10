@@ -1014,6 +1014,17 @@ def _checksum_arrow_table(pa_table: Any) -> str:
     return hashlib.sha256(out.getvalue().to_pybytes()).hexdigest()[:32]
 
 
+def _prepare_pyiceberg_write(
+    rows: list[dict[str, Any]], schema: Any, pa_mod: Any
+) -> tuple[Any, str]:
+    arrays = []
+    for field in schema:
+        cells = [_coerce_arrow_cell(row.get(field.name), field.type, pa_mod) for row in rows]
+        arrays.append(pa_mod.array(cells, type=field.type))
+    pa_table = pa_mod.Table.from_arrays(arrays, schema=schema)
+    return pa_table, _checksum_arrow_table(pa_table)
+
+
 def _pyiceberg_should_use(endpoint: dict[str, Any]) -> bool:
     """Compatibility shim — prefer :func:`resolve_iceberg_write_path`."""
     return resolve_iceberg_write_path(endpoint) == "catalog"
@@ -1876,13 +1887,7 @@ def _write_mapped_rows_pyiceberg(
                 ),
                 driver="iceberg",
             )
-        arrays = []
-        for field in final_arrow:
-            at = field.type
-            cells = [_coerce_arrow_cell(r.get(field.name), at, pa) for r in dict_rows]
-            arrays.append(pa.array(cells, type=at))
-        pa_table = pa.Table.from_arrays(arrays, schema=final_arrow)
-        checksum = _checksum_arrow_table(pa_table)
+        pa_table, checksum = _prepare_pyiceberg_write(dict_rows, final_arrow, pa)
 
         if mode in upsert_modes:
             pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
