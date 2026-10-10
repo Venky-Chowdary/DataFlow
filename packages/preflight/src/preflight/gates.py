@@ -15,7 +15,6 @@ from preflight.models import (
     PreflightContext,
 )
 from preflight.risk_contract import (
-    is_safe_normalize_mapping,
     mapping_is_lossy,
     mapping_is_structural_review,
     mapping_requires_risk_contract,
@@ -1851,6 +1850,59 @@ def _g6_mysql_key_refusal(ctx: PreflightContext, dest_kind: str) -> str | None:
     return refusal
 
 
+def _g6_dynamodb_key_refusal(
+    ctx: PreflightContext, dest_kind: str
+) -> str | None:
+    if (
+        dest_kind not in {"dynamodb", "amazon_dynamodb", "dynamo", "dyn"}
+        or ctx.plan.destination.table_exists is not True
+    ):
+        return None
+    try:
+        from connectors.dynamodb_schema import (
+            DynamoTableSchema,
+            key_contract_violations,
+        )
+    except ImportError:
+        return None
+
+    rows = list(getattr(ctx.plan, "destination_dynamo_key_schema", []) or [])
+    if not rows:
+        return "DynamoDB existing table key schema is unavailable — refuse Validate without a HASH/RANGE contract"
+    try:
+        schema = DynamoTableSchema.from_key_schema_rows(
+            rows,
+            getattr(ctx.plan, "destination_dynamo_index_attributes", {}) or {},
+        )
+    except (TypeError, ValueError) as exc:
+        return f"DynamoDB existing table key schema is invalid — refuse Validate: {exc}"
+
+    source_types = {
+        str(column.name): str(column.inferred_type or "")
+        for column in (ctx.plan.source.columns or [])
+    }
+    mappings = [
+        {
+            "source": str(getattr(mapping, "source", "") or ""),
+            "target": str(getattr(mapping, "target", "") or ""),
+            "source_type": getattr(mapping, "source_type", None)
+            or source_types.get(str(getattr(mapping, "source", "") or "")),
+            "target_type": getattr(mapping, "target_type", None),
+            "dest_type": getattr(mapping, "dest_type", None),
+            "intentional_omit": bool(
+                getattr(mapping, "intentional_omit", False)
+            ),
+        }
+        for mapping in (ctx.plan.mappings or [])
+    ]
+    violations = key_contract_violations(
+        schema,
+        mappings=mappings,
+        column_types=source_types,
+    )
+    return "; ".join(violations) if violations else None
+
+
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
 
@@ -1923,6 +1975,22 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     break
         pk_src = _g6_identity_label(pk_sources)
         pk_tgt = _g6_identity_label(pk_targets)
+        dynamo_refusal = _g6_dynamodb_key_refusal(ctx, dest_kind)
+        if dynamo_refusal:
+            return _block(
+                GateId.G6_TARGET_DDL,
+                dynamo_refusal,
+                start,
+                _scope(
+                    {
+                        "issues": [dynamo_refusal],
+                        "rule_id": "g6_target_ddl.dynamo_key_contract",
+                        "remediation_kind": "fix_key_mapping",
+                    },
+                    coverage="declared_ddl",
+                    note="DynamoDB table and index key contract",
+                ),
+            )
         if pk_targets:
             # Append/overwrite: sample uniqueness is not a DDL contract unless dest has PK.
             try:

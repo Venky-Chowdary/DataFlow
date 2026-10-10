@@ -940,7 +940,7 @@ def run_transfer_policy_gates(
                 "status": GateStatus.PASS.value,
                 "severity": "warn",
                 "message": (
-                    f"Execute writes"
+                    "Execute writes"
                     + (f" at most {cap} rows" if cap > 0 else " the full mapped population")
                     + (f" after sorting by {priority} {direction}" if priority else "")
                     + ". Validate type-fit still walks the uncapped source (stricter). "
@@ -1132,13 +1132,13 @@ def _fit_scan_deadline(
 
 
 # F8: policy-gate merge lives in preflight_policy_gates (single authority).
-from services.preflight_policy_gates import (  # noqa: E402
+from services.preflight_policy_gates import (  # noqa: E402, F401
     apply_policy_gates,
     is_compliance_only_block,
 )
 
 
-from services.preflight_source_kind import resolve_preflight_source_kind  # noqa: E402
+from services.preflight_source_kind import resolve_preflight_source_kind  # noqa: E402, F401
 
 
 def _apply_overwrite_emptied_gate(
@@ -1283,6 +1283,8 @@ def run_file_preflight(
     previous_source_schema: dict[str, str] | None = None,
     contract_primary_key: str | None = None,
     destination_pk_columns: list[str] | None = None,
+    destination_dynamo_key_schema: list[dict[str, Any]] | None = None,
+    destination_dynamo_index_attributes: dict[str, str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
     destination_config: Mapping[str, Any] | None = None,
@@ -1923,6 +1925,14 @@ def run_file_preflight(
         sync_mode=sync_mode,
         contract_primary_key=str(contract_primary_key or "").strip(),
         destination_pk_columns=list(destination_pk_columns or []),
+        destination_dynamo_key_schema=[
+            dict(row)
+            for row in (destination_dynamo_key_schema or [])
+            if isinstance(row, dict)
+        ],
+        destination_dynamo_index_attributes=dict(
+            destination_dynamo_index_attributes or {}
+        ),
         destination_unique_keys=list(destination_unique_keys or []),
         destination_foreign_keys=list(destination_foreign_keys or []),
         fk_risk_acknowledged=bool(fk_risk_acknowledged),

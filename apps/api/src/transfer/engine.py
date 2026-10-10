@@ -618,6 +618,14 @@ def _destination_schema_probe(
         # Stamp PK/UNIQUE/FK catalog for Execute preflight SSOT with Validate
         # (preflight_router passes dest_meta.primary_key_columns / unique_keys).
         extra["primary_key_columns"] = list(info.get("primary_key_columns") or [])
+        extra["dynamo_key_schema"] = [
+            dict(row)
+            for row in (info.get("dynamo_key_schema") or [])
+            if isinstance(row, dict)
+        ]
+        extra["dynamo_index_attributes"] = dict(
+            info.get("dynamo_index_attributes") or {}
+        )
         extra["unique_keys"] = list(info.get("unique_keys") or [])
         extra["foreign_keys"] = list(
             info.get("foreign_keys") or info.get("destination_foreign_keys") or []
@@ -722,6 +730,14 @@ def _destination_filler_metadata(extra: dict[str, Any] | None) -> dict[str, Any]
         "destination_column_defaults": dict(meta.get("schema_defaults") or {}),
         "destination_identity_columns": list(meta.get("identity_columns") or []),
         "destination_generated_columns": list(meta.get("generated_columns") or []),
+        "destination_dynamo_key_schema": [
+            dict(row)
+            for row in (meta.get("dynamo_key_schema") or [])
+            if isinstance(row, dict)
+        ],
+        "destination_dynamo_index_attributes": dict(
+            meta.get("dynamo_index_attributes") or {}
+        ),
         "destination_live_column_types": dict(
             meta.get("schema_types")
             or meta.get("overwrite_replaced_column_types")
@@ -960,6 +976,20 @@ def _execute_preflight_parity_kwargs(
 
     # Keep destination.extra stamped for later gates / theater honesty.
     extra["primary_key_columns"] = pk_cols
+    extra["dynamo_key_schema"] = [
+        dict(row)
+        for row in (
+            dest_meta.get("dynamo_key_schema")
+            or extra.get("dynamo_key_schema")
+            or []
+        )
+        if isinstance(row, dict)
+    ]
+    extra["dynamo_index_attributes"] = dict(
+        dest_meta.get("dynamo_index_attributes")
+        or extra.get("dynamo_index_attributes")
+        or {}
+    )
     extra["unique_keys"] = unique_keys
     extra["foreign_keys"] = foreign_keys
     if isinstance(table_exists, bool):
