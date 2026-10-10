@@ -73,6 +73,9 @@ def _check_coercion_safety(
         validate_mapping_coercions,
     )
 
+    from services.timezone_policy import declared_source_column_types
+
+    source_types = declared_source_column_types(source_types, mappings)
     floor = float(_mode_config(validation_mode)["confidence"])
     issues = validate_mapping_coercions(
         mappings,

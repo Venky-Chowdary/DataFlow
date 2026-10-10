@@ -392,16 +392,23 @@ def _scannable_transform(
     binds through — so Validate never screens a column with a rule the write
     does not use. A native path resolves to ``none`` and costs nothing.
     """
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
     from services.transform_resolver import resolve_transform
 
-    resolved = str(
+    raw = str(
         resolve_transform(
             dict(mapping),
             column_types=dict(source_types),
             dest_types=dict(dest_types),
         )
         or ""
-    ).strip().lower()
+    ).strip()
+    resolved = raw.lower()
+    # A declared source zone is the write's own transform for a naive column:
+    # screening the raw wall-clock against TIMESTAMPTZ forecast holdouts the
+    # write never makes (MX2-01). The zone name keeps its IANA case.
+    if resolved.startswith(ASSUME_TIMEZONE_PREFIX):
+        return raw
     return resolved if resolved in _SCANNABLE_TRANSFORMS else ""
 
 
