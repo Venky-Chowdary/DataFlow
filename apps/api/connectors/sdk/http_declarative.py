@@ -4,12 +4,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Iterator
-from urllib.parse import urljoin
 
 import requests
 
-from connectors.sdk import BaseConnector, RecordBatch, StreamSchema, register_connector
-from services.value_serializer import load_http_json
+from connectors.sdk import RecordBatch, StreamSchema, register_connector
+from connectors.sdk.declarative.connector import DeclarativeSource
+
+__all__ = [
+    "DeclarativeHttpConnector",
+    "DeclarativeHttpSpec",
+    "DeclarativeStream",
+    "parse_declarative_spec",
+    "requests",
+]
+
+
+class _LegacyRequestsSession:
+    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        request = getattr(requests, method.lower(), None)
+        if request is None:
+            return requests.request(method, url, **kwargs)
+        return request(url, **kwargs)
 
 
 @dataclass
@@ -76,34 +91,67 @@ def parse_declarative_spec(raw: dict[str, Any]) -> DeclarativeHttpSpec:
 
 
 @register_connector
-class DeclarativeHttpConnector(BaseConnector):
-    """Config-driven HTTP source. Config keys: ``spec`` (dict) + ``api_key``/``access_token``."""
+class DeclarativeHttpConnector(DeclarativeSource):
+    """Backward-compatible config adapter for :class:`DeclarativeSource`."""
 
     name = "declarative_http"
     supports_read = True
     supports_write = False
 
-    def _spec(self) -> DeclarativeHttpSpec:
-        raw = self.config.get("spec") or self.config.get("declarative_spec") or {}
+    def __init__(self, config: dict[str, Any]) -> None:
+        raw = config.get("spec") or config.get("declarative_spec") or {}
         if not raw:
             raise ValueError("declarative_http requires config.spec")
-        return parse_declarative_spec(raw)
+        legacy_spec = parse_declarative_spec(raw)
+        manifest = {
+            "name": legacy_spec.name,
+            "base_url": legacy_spec.base_url,
+            "auth": {"type": "none"},
+            "streams": [
+                {
+                    "name": stream.name,
+                    "path": stream.path,
+                    "method": "GET",
+                    "records_path": stream.records_path,
+                    "primary_key": list(stream.primary_key),
+                    "paginator": {"type": "none"},
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {
+                            key: {"type": value}
+                            for key, value in (
+                                stream.properties or {"id": "string"}
+                            ).items()
+                        },
+                    },
+                }
+                for stream in legacy_spec.streams
+            ],
+        }
+        super().__init__({**config, "manifest": manifest})
+        self.requester.session = _LegacyRequestsSession()
+        self._legacy_http_spec = legacy_spec
+        self.auth.headers.setdefault("Accept", "application/json")
+        self.auth.headers.update(legacy_spec.extra_headers)
+        token = self._token()
+        if token:
+            self.auth.headers[legacy_spec.auth_header] = f"{legacy_spec.auth_prefix}{token}"
+
+    def _spec(self) -> DeclarativeHttpSpec:
+        return self._legacy_http_spec
 
     def _token(self) -> str:
+        credentials = self.config.get("credentials")
+        credentials = credentials if isinstance(credentials, dict) else {}
         return str(
             self.config.get("access_token")
             or self.config.get("api_key")
-            or (self.config.get("credentials") or {}).get("access_token")
+            or credentials.get("access_token")
             or ""
         )
 
     def _headers(self) -> dict[str, str]:
-        spec = self._spec()
-        headers = {"Accept": "application/json", **spec.extra_headers}
-        token = self._token()
-        if token:
-            headers[spec.auth_header] = f"{spec.auth_prefix}{token}"
-        return headers
+        return dict(self.auth.headers)
 
     def spec(self) -> dict[str, Any]:
         return {
@@ -119,13 +167,11 @@ class DeclarativeHttpConnector(BaseConnector):
 
     def check(self) -> tuple[bool, str]:
         try:
-            streams = self.discover()
-            if not streams:
+            if not self._legacy_http_spec.streams:
                 return False, "No streams defined in declarative spec"
-            # Probe first stream with limit=1
-            first = streams[0].name
+            first = self._legacy_http_spec.streams[0].name
             next(self.read(first, state=None, limit=1), None)
-            return True, f"OK — {len(streams)} stream(s)"
+            return True, f"OK — {len(self._legacy_http_spec.streams)} stream(s)"
         except Exception as exc:
             return False, str(exc)
 
@@ -134,29 +180,22 @@ class DeclarativeHttpConnector(BaseConnector):
         return ok
 
     def discover(self) -> list[StreamSchema]:
-        spec = self._spec()
-        out: list[StreamSchema] = []
-        for s in spec.streams:
-            out.append(
-                StreamSchema(
-                    name=s.name,
-                    properties=dict(s.properties) or {"id": "string"},
-                    primary_key=list(s.primary_key),
-                    cursor_field=s.cursor_field,
-                    supported_sync_modes=(
-                        ["full_refresh", "incremental"]
-                        if s.cursor_field and s.cursor_param
-                        else ["full_refresh"]
-                    ),
-                    json_schema={
-                        "type": "object",
-                        "properties": {
-                            k: {"type": v} for k, v in (s.properties or {"id": "string"}).items()
-                        },
-                    },
-                )
+        discovered = super().discover()
+        return [
+            StreamSchema(
+                name=stream.name,
+                properties=dict(stream.properties) or dict(schema.properties),
+                primary_key=list(stream.primary_key),
+                cursor_field=stream.cursor_field,
+                supported_sync_modes=(
+                    ["full_refresh", "incremental"]
+                    if stream.cursor_field and stream.cursor_param
+                    else ["full_refresh"]
+                ),
+                json_schema=schema.json_schema,
             )
-        return out
+            for stream, schema in zip(self._legacy_http_spec.streams, discovered)
+        ]
 
     def read(
         self,
@@ -166,36 +205,49 @@ class DeclarativeHttpConnector(BaseConnector):
         offset: int = 0,
         limit: int = 1000,
     ) -> Iterator[RecordBatch]:
-        spec = self._spec()
-        decl = next((s for s in spec.streams if s.name == stream), None)
+        decl = next((item for item in self._legacy_http_spec.streams if item.name == stream), None)
         if decl is None:
             raise ValueError(f"Unknown stream: {stream}")
-        url = urljoin(spec.base_url, decl.path.lstrip("/"))
-        cursor_val = None
-        if state and decl.cursor_field:
-            cursor_val = (state.get(stream) or state).get(decl.cursor_field)
+        if limit <= 0:
+            return
         params: dict[str, Any] = {decl.page_param: min(decl.page_size, limit)}
+        current_state = state or {}
+        stream_state = current_state.get(stream, current_state)
+        cursor_val = (
+            stream_state.get(decl.cursor_field)
+            if isinstance(stream_state, dict) and decl.cursor_field
+            else None
+        )
         if cursor_val and decl.cursor_param:
             params[decl.cursor_param] = cursor_val
         elif offset and decl.offset_param:
             params[decl.offset_param] = str(offset)
-
-        resp = requests.get(url, headers=self._headers(), params=params, timeout=60)
-        resp.raise_for_status()
-        payload = load_http_json(resp)
-        records_raw = _dig(payload, decl.records_path)
-        if records_raw is None and isinstance(payload, list):
-            records_raw = payload
-        records = [dict(r) for r in (records_raw or []) if isinstance(r, dict)][:limit]
-        schema = StreamSchema(
-            name=decl.name,
-            properties=dict(decl.properties) or {k: "string" for k in (records[0] if records else {"id": ""}).keys()},
-            primary_key=list(decl.primary_key),
-            cursor_field=decl.cursor_field,
-        )
-        new_state = dict(state or {})
-        if records and decl.cursor_field:
-            last = records[-1].get(decl.cursor_field)
-            if last is not None:
-                new_state[stream] = {decl.cursor_field: last}
-        yield RecordBatch(stream=stream, records=records, schema=schema, state=new_state)
+        for batch in super().read(
+            stream,
+            state=None,
+            limit=limit,
+            _request_params=params,
+        ):
+            next_state = dict(current_state)
+            if batch.records and decl.cursor_field:
+                last = batch.records[-1].get(decl.cursor_field)
+                if last is not None:
+                    next_state[stream] = {decl.cursor_field: last}
+            schema = StreamSchema(
+                name=decl.name,
+                properties=dict(decl.properties) or dict(batch.schema.properties),
+                primary_key=list(decl.primary_key),
+                cursor_field=decl.cursor_field,
+                supported_sync_modes=(
+                    ["full_refresh", "incremental"]
+                    if decl.cursor_field and decl.cursor_param
+                    else ["full_refresh"]
+                ),
+                json_schema=batch.schema.json_schema,
+            )
+            yield RecordBatch(
+                stream=batch.stream,
+                records=batch.records,
+                schema=schema,
+                state=next_state,
+            )
