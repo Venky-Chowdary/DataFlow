@@ -82,7 +82,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from connectors.lsn_guards import DF_LSN_COL, compare_lsn, extract_cdc_lsn, lsn_family
+from connectors.lsn_guards import (
+    DF_LSN_COL,
+    compare_lsn,
+    extract_cdc_commit_position,
+    extract_cdc_lsn,
+    lsn_family,
+)
 from services.cdc_effectively_once import (
     DELIVERY_CLASS_AT_LEAST_ONCE,
     DELIVERY_CLASS_AT_MOST_ONCE,
@@ -332,7 +338,7 @@ def eos_stream_key(
 
 def batch_lsn(resume_token: Any) -> str | None:
     """Durable LSN for EOS coordination — fail-closed when missing."""
-    return extract_cdc_lsn(resume_token)
+    return extract_cdc_commit_position(resume_token) or extract_cdc_lsn(resume_token)
 
 
 def already_committed(incoming_lsn: str | None, dest_lsn: str | None) -> bool:
@@ -413,14 +419,14 @@ def clamp_job_resume_to_dest(
         "clamped": False,
         "reason": "no_dest_watermark",
         "dest_lsn": dest_lsn,
-        "job_lsn": extract_cdc_lsn(job_resume),
+        "job_lsn": batch_lsn(job_resume),
         "dest_resume_blob": bool(dest_blob),
     }
     if not dest_lsn or not str(dest_lsn).strip():
         return job_resume, proof
     job_lsn = proof["job_lsn"]
     if dest_blob is not None:
-        blob_lsn = extract_cdc_lsn(dest_blob)
+        blob_lsn = batch_lsn(dest_blob)
         if blob_lsn and compare_lsn(blob_lsn, dest_lsn) == 0:
             if not job_lsn or compare_lsn(job_lsn, dest_lsn) != 0:
                 proof["clamped"] = True
@@ -1309,10 +1315,24 @@ def assert_comparable_lsn(incoming_lsn: str | None, dest_lsn: str | None) -> Non
     """
     inc = str(incoming_lsn or "").strip()
     cur = str(dest_lsn or "").strip()
+    inc_family = lsn_family(inc) if inc else "empty"
+    cur_family = lsn_family(cur) if cur else "empty"
+    if inc_family == "opaque" or cur_family == "opaque":
+        _logger.error(
+            "cdc_eos: refusing unparseable LSN compare incoming=%r (%s) dest=%r (%s)",
+            inc,
+            inc_family,
+            cur,
+            cur_family,
+        )
+        raise ExactlyOnceRouteError(
+            f"exactly_once cannot compare an unparseable position "
+            f"(incoming={inc!r}, dest={cur!r}). Refusing to skip or apply; "
+            "repair the resume position or re-snapshot.",
+            reason=REASON_LSN_FAMILY,
+        )
     if not inc or not cur:
         return
-    inc_family = lsn_family(inc)
-    cur_family = lsn_family(cur)
     if inc_family == cur_family:
         return
     _logger.error(
@@ -1460,9 +1480,14 @@ def decide_from_view(
     incremental_snapshot: bool = False,
     change: Any = None,
 ) -> tuple[str, int]:
+    dest_lsn = dest.committed_lsn
+    if dest_lsn and dest.resume_blob:
+        dest_resume = decode_resume_blob(dest.resume_blob)
+        if extract_cdc_lsn(dest_resume) == dest_lsn:
+            dest_lsn = batch_lsn(dest_resume) or dest_lsn
     return decide_eos_apply(
         incoming_lsn=incoming_lsn,
-        dest_lsn=dest.committed_lsn,
+        dest_lsn=dest_lsn,
         incoming_fence=incoming_fence,
         dest_fence=dest.fence_epoch,
         dest_epoch=dest.epoch,

@@ -4,20 +4,21 @@ from __future__ import annotations
 
 import pytest
 
-from connectors.lsn_guards import lsn_family
+from connectors.lsn_guards import compare_lsn, lsn_family, lsn_sort_key
 from connectors.oracle_logminer import encode_logminer_token
 from connectors.sqlserver_cdc_native import encode_mssql_cdc_token
 from services.cdc_exactly_once import (
+    DestWmView,
     ExactlyOnceRouteError,
+    InMemoryEosStore,
     batch_lsn,
+    clamp_job_resume_to_dest,
     decide_eos_apply,
+    decide_from_view,
+    encode_resume_blob,
 )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="G-CDC M1 red: Oracle EOS watermark ignores RS_ID position within an SCN",
-)
 def test_oracle_eos_applies_later_rs_id_at_same_scn() -> None:
     first = encode_logminer_token(
         100,
@@ -41,10 +42,6 @@ def test_oracle_eos_applies_later_rs_id_at_same_scn() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="G-CDC M1 red: SQL Server EOS watermark ignores seqval within an LSN",
-)
 def test_sqlserver_eos_applies_later_seqval_at_same_lsn() -> None:
     first = encode_mssql_cdc_token(
         "0000002e000001d80030",
@@ -66,10 +63,6 @@ def test_sqlserver_eos_applies_later_seqval_at_same_lsn() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="G-CDC M1 red: digit-only SQL Server LSN is misclassified against hex LSN",
-)
 def test_sqlserver_digit_only_lsn_family_matches_next_hex_lsn() -> None:
     first = encode_mssql_cdc_token("00000025000004500003", table="T")
     later = encode_mssql_cdc_token("0000002a000000100003", table="T")
@@ -92,3 +85,191 @@ def test_sqlserver_digit_only_lsn_family_matches_next_hex_lsn() -> None:
         f"EOS decision={decision or decision_error}"
     )
     assert decision is not None and decision[0] == "apply"
+
+
+def test_composite_position_text_and_ordering() -> None:
+    oracle_legacy = encode_logminer_token(100, table="T", phase="snapshot")
+    oracle_r1 = encode_logminer_token(
+        100, table="T", rs_id=" r1 ", ssn=3
+    )
+    oracle_r2 = encode_logminer_token(
+        100, table="T", rs_id="r2", ssn=3
+    )
+    oracle_complete = encode_logminer_token(100, table="T")
+    assert batch_lsn(oracle_legacy) == "scn:100"
+    assert batch_lsn(oracle_r1) == "scn:100.pr1.0000000003"
+    assert batch_lsn(oracle_complete) == "scn:100.c"
+    assert compare_lsn(batch_lsn(oracle_legacy), batch_lsn(oracle_r1)) < 0
+    assert compare_lsn(batch_lsn(oracle_r1), batch_lsn(oracle_complete)) < 0
+    assert compare_lsn(batch_lsn(oracle_r1), batch_lsn(oracle_r2)) < 0
+    assert compare_lsn("scn:100.c", "scn:101") < 0
+    assert len(lsn_sort_key(batch_lsn(oracle_r1))) == 4
+    assert isinstance(lsn_sort_key(batch_lsn(oracle_r1))[3], str)
+
+    sqlserver_lsn = "0000002E000001D80030"
+    sqlserver_seq1 = "0000002E000001D80002"
+    sqlserver_seq2 = "0000002E000001D80005"
+    sqlserver_partial = encode_mssql_cdc_token(
+        sqlserver_lsn, table="T", seqval=sqlserver_seq1
+    )
+    sqlserver_later = encode_mssql_cdc_token(
+        sqlserver_lsn, table="T", seqval=sqlserver_seq2
+    )
+    sqlserver_complete = encode_mssql_cdc_token(sqlserver_lsn, table="T")
+    assert (
+        batch_lsn(sqlserver_partial)
+        == "0000002e000001d80030.p0000002e000001d80002"
+    )
+    assert batch_lsn(sqlserver_complete) == "0000002e000001d80030.c"
+    assert compare_lsn(sqlserver_lsn.lower(), batch_lsn(sqlserver_partial)) < 0
+    assert compare_lsn(batch_lsn(sqlserver_partial), batch_lsn(sqlserver_complete)) < 0
+    assert compare_lsn(batch_lsn(sqlserver_partial), batch_lsn(sqlserver_later)) < 0
+    assert compare_lsn(
+        "0000002e000001d80030.c",
+        "0000002e000001d80031.p0000002e000001d80002",
+    ) < 0
+    assert len(lsn_sort_key(batch_lsn(sqlserver_partial))) == 4
+    assert isinstance(lsn_sort_key(batch_lsn(sqlserver_partial))[3], str)
+
+
+@pytest.mark.parametrize(
+    ("malformed", "valid"),
+    [
+        ("scn:100.pXYZ", "scn:100.pRSID.0000000001"),
+        ("0000002e000001d80030.q12", "0000002e000001d80030.c"),
+    ],
+)
+def test_malformed_composite_positions_fail_closed(
+    malformed: str, valid: str
+) -> None:
+    assert lsn_family(malformed) == "opaque"
+    with pytest.raises(ExactlyOnceRouteError):
+        decide_eos_apply(incoming_lsn=malformed, dest_lsn=valid)
+
+
+def test_legacy_oracle_watermark_is_refined_from_resume_blob() -> None:
+    first = encode_logminer_token(
+        100, table="T", rs_id="r1", ssn=1
+    )
+    later = encode_logminer_token(
+        100, table="T", rs_id="r2", ssn=1
+    )
+    no_rs_id = encode_logminer_token(100, table="T")
+    dest = DestWmView(
+        committed_lsn="scn:100",
+        resume_blob=encode_resume_blob(first),
+    )
+    assert decide_from_view(incoming_lsn=batch_lsn(later), dest=dest)[0] == "apply"
+    assert (
+        decide_from_view(incoming_lsn=batch_lsn(first), dest=dest)[0]
+        == "already_committed"
+    )
+    assert decide_from_view(incoming_lsn=batch_lsn(no_rs_id), dest=dest)[0] == "apply"
+
+
+def test_legacy_sqlserver_watermark_is_refined_from_resume_blob() -> None:
+    lsn = "0000002e000001d80030"
+    first = encode_mssql_cdc_token(lsn, table="T", seqval="0000002e000001d80002")
+    later = encode_mssql_cdc_token(lsn, table="T", seqval="0000002e000001d80005")
+    no_seqval = encode_mssql_cdc_token(lsn, table="T")
+    dest = DestWmView(
+        committed_lsn=lsn,
+        resume_blob=encode_resume_blob(first),
+    )
+    assert decide_from_view(incoming_lsn=batch_lsn(later), dest=dest)[0] == "apply"
+    assert (
+        decide_from_view(incoming_lsn=batch_lsn(first), dest=dest)[0]
+        == "already_committed"
+    )
+    assert (
+        decide_from_view(incoming_lsn=batch_lsn(no_seqval), dest=dest)[0]
+        == "apply"
+    )
+
+
+def test_legacy_plain_watermarks_apply_same_major_composite_positions() -> None:
+    oracle_token = encode_logminer_token(
+        100, table="T", rs_id="r1", ssn=1
+    )
+    sqlserver_token = encode_mssql_cdc_token(
+        "0000002e000001d80030",
+        table="T",
+        seqval="0000002e000001d80002",
+    )
+    assert (
+        decide_from_view(
+            incoming_lsn=batch_lsn(oracle_token),
+            dest=DestWmView(committed_lsn="scn:100"),
+        )[0]
+        == "apply"
+    )
+    assert (
+        decide_from_view(
+            incoming_lsn=batch_lsn(sqlserver_token),
+            dest=DestWmView(committed_lsn="0000002e000001d80030"),
+        )[0]
+        == "apply"
+    )
+
+
+def test_digit_only_legacy_sqlserver_watermark_fails_closed() -> None:
+    incoming = encode_mssql_cdc_token(
+        "0000002a000000100003",
+        table="T",
+        seqval="0000002a000000100005",
+    )
+    with pytest.raises(ExactlyOnceRouteError):
+        decide_from_view(
+            incoming_lsn=batch_lsn(incoming),
+            dest=DestWmView(committed_lsn="00000025000004500003"),
+        )
+
+
+def test_clamp_prefers_matching_composite_destination_resume_blob() -> None:
+    token = encode_logminer_token(
+        100, table="T", rs_id="r1", ssn=1
+    )
+    dest_lsn = batch_lsn(token)
+    resumed, proof = clamp_job_resume_to_dest(
+        token,
+        dest_lsn,
+        encode_resume_blob(token),
+    )
+    assert proof["reason"] == "dest_resume_blob_authoritative"
+    assert proof["job_lsn"] == dest_lsn
+    assert isinstance(resumed, dict)
+    assert resumed != dest_lsn
+    assert batch_lsn(resumed) == dest_lsn
+
+
+def test_in_memory_eos_applies_split_same_scn_and_skips_redelivery() -> None:
+    store = InMemoryEosStore()
+    stream_key = "oracle|db|T"
+    tokens = [
+        encode_logminer_token(100, table="T", rs_id="r1", ssn=1),
+        encode_logminer_token(100, table="T", rs_id="r2", ssn=1),
+    ]
+    applied: list[str] = []
+
+    def commit(token: str, value: str, batch_id: str):
+        position = batch_lsn(token)
+
+        def apply() -> None:
+            applied.append(value)
+            store.upsert_row("1", {"id": "1", "value": value, "_df_lsn": position})
+
+        return store.commit_atomic(
+            stream_key=stream_key,
+            incoming_lsn=position,
+            batch_id=batch_id,
+            apply_fn=apply,
+        )
+
+    first = commit(tokens[0], "first", "b1")
+    second = commit(tokens[1], "second", "b2")
+    redelivery = commit(tokens[1], "second", "b2")
+    assert first.status == "applied"
+    assert second.status == "applied"
+    assert redelivery.status == "already_committed"
+    assert applied == ["first", "second"]
+    assert store.rows["1"]["value"] == "second"
