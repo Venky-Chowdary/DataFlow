@@ -527,12 +527,15 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_BINARY: "binary",
     },
     # Schemaless / document / KV — wire as string; no SQL DDL contract.
+    # The Redis writer stores each row as one JSON document. JSON carries
+    # integers and booleans natively, so those keep their type; decimal,
+    # temporal, UUID and binary have no JSON type and are stored as exact text.
     "redis": {
         LOGICAL_STRING: "string",
         LOGICAL_TEXT: "string",
-        LOGICAL_INTEGER: "string",
+        LOGICAL_INTEGER: "integer",
         LOGICAL_DECIMAL: "string",
-        LOGICAL_BOOLEAN: "string",
+        LOGICAL_BOOLEAN: "boolean",
         LOGICAL_DATE: "string",
         LOGICAL_DATETIME: "string",
         LOGICAL_TIME: "string",
@@ -6821,6 +6824,9 @@ _BARE_TEMPORAL_DIGITS: dict[str, int] = {
     # TIMESTAMP as FSP 0 graded the column DataFlow itself created on run 1 as
     # a narrowing on run 2 (QA MX3-09).
     "sqlite": 6,
+    # Redis JSON documents hold temporals as ISO text, which keeps every
+    # microsecond, so run 2's sampled TIMESTAMP is the carrier run 1 wrote.
+    "redis": 6,
     **{
         e: 6
         for e in (

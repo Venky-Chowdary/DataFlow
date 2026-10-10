@@ -217,6 +217,11 @@ def _decode(value: Any) -> str:
 _REDIS_COLLECTION_CAP = 10_000
 
 
+#: Fields the reader adds around every key. They describe the key, not the
+#: stored document, so nothing a write maps is ever expected to fill them.
+REDIS_ENVELOPE_COLUMNS: tuple[str, ...] = ("redis_key", "redis_value", "redis_type")
+
+
 def redis_key_for(prefix: str, identity: Any) -> str:
     """Canonical ``prefix:identity`` key layout shared by write and read-back.
 
@@ -386,7 +391,7 @@ def read_keys_batch(
     first_page = not state.keys_seen and not state.cursor and not state.pending_keys
     client = _redis_client(cfg)
     try:
-        identity_headers = ["redis_key", "redis_value", "redis_type"]
+        identity_headers = list(REDIS_ENVELOPE_COLUMNS)
         rows: list[list[str]] = []
 
         while len(rows) < limit and not state.exhausted:

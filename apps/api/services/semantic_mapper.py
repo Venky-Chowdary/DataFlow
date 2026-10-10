@@ -744,6 +744,24 @@ def _sample_consistency_boost(samples: list[str] | None, source_type: str, targe
     return 0.0
 
 
+def _scored_dest_type(src_type: str, tgt_type: str, dest_db: str) -> str:
+    """The destination type a pair is judged against.
+
+    A schemaless profile is a page of values, never a ceiling: run 2's bare
+    DECIMAL sampled from run 1's exact text is the carrier the write widens
+    to (``widen_sampled_dest_carrier``), not a lossy pair below the Map floor.
+    Declared catalogs are returned unchanged.
+    """
+    from services.dest_schema_authority import (
+        destination_schema_is_sampled,
+        widen_sampled_dest_carrier,
+    )
+
+    if not dest_db or not tgt_type or not destination_schema_is_sampled(dest_db):
+        return tgt_type
+    return widen_sampled_dest_carrier(src_type, tgt_type, dest_db) or tgt_type
+
+
 def _score_pair(
     source: str,
     target: str,
@@ -764,6 +782,8 @@ def _score_pair(
     tgt_norm = _normalize(target)
     src_sem = _semantic_form(source)
     tgt_sem_raw = _semantic_form(target)
+
+    target_type = _scored_dest_type(source_type, target_type, dest_db)
 
     # A column this run will CREATE carries the type the kernel invents for this
     # very source, so there is no declared destination type to lose fidelity
@@ -1249,7 +1269,16 @@ def map_columns(
         # the destination object is confirmed missing. Existing/unknown + empty
         # columns = pending schema (shared SQL/warehouse failure mode).
         out: list[dict] = []
-        confirmed_missing = destination_table_exists is False
+        from services.dest_schema_authority import destination_schema_is_sampled
+
+        # A schemaless store (Redis prefix, empty Mongo collection) that exists
+        # but sampled no fields has no schema to wait for: its fields are made
+        # on write, so they are typed from the destination type map exactly as
+        # a missing object's are. Waiting left every column "pending stamp" and
+        # Validate blocked each one as a fidelity collapse.
+        confirmed_missing = destination_table_exists is False or (
+            destination_table_exists is True and destination_schema_is_sampled(dest_db)
+        )
         for src in source_columns:
             new_name = create_new_target_name(src)
             src_type = src_types.get(src, "VARCHAR")
@@ -1358,7 +1387,7 @@ def map_columns(
         score_gap = round(max(winner - runner_up, 0.0), 3)
         requires_review = score_gap < 0.08
         src_type = src_types.get(source, "VARCHAR")
-        tgt_type = tgt_types.get(target, "VARCHAR")
+        tgt_type = _scored_dest_type(src_type, tgt_types.get(target, "VARCHAR"), dest_db)
         try:
             from services.decision_kernel import is_lossy_coercion
 
@@ -1453,7 +1482,9 @@ def map_columns(
         # Never override a hard type/sample demotion (ObjectId → DECIMAL id).
         near_tgt, near_ratio = _near_target_by_form(source, target_columns, used_targets=used_targets)
         if near_tgt:
-            near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
+            near_tgt_type = _scored_dest_type(
+                src_type, tgt_types.get(near_tgt, "VARCHAR"), dest_db
+            )
             near_penalty = _type_compat_penalty(
                 src_type, near_tgt_type, source_name=source, dest_db=dest_db
             )
@@ -1476,7 +1507,9 @@ def map_columns(
                 runner_up = alternatives[1]["confidence"] if len(alternatives) > 1 else 0.0
                 score_gap = round(max(winner - runner_up, 0.0), 3)
                 requires_review = near_ratio < 0.85
-                near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
+                near_tgt_type = _scored_dest_type(
+                    src_type, tgt_types.get(near_tgt, "VARCHAR"), dest_db
+                )
                 try:
                     from services.decision_kernel import is_lossy_coercion
 
@@ -1554,7 +1587,9 @@ def map_columns(
             if near_tgt and near_ratio >= 0.50:
                 greedy_patched = True
                 used_targets.add(near_tgt)
-                near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
+                near_tgt_type = _scored_dest_type(
+                    src_type, tgt_types.get(near_tgt, "VARCHAR"), dest_db
+                )
                 try:
                     from services.decision_kernel import is_lossy_coercion
 
@@ -1639,7 +1674,11 @@ def map_columns(
         score_gap = round(max(winner - runner_up, 0.0), 3)
         requires_review = score_gap < 0.08
         src_type = src_types.get(source, "VARCHAR")
-        tgt_type = tgt_types.get(best_target, "VARCHAR") if best_target else "VARCHAR"
+        tgt_type = (
+            _scored_dest_type(src_type, tgt_types.get(best_target, "VARCHAR"), dest_db)
+            if best_target
+            else "VARCHAR"
+        )
         try:
             from services.decision_kernel import is_lossy_coercion
 

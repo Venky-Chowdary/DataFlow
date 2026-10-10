@@ -1174,6 +1174,12 @@ def _apply_overwrite_emptied_gate(
     ):
         return
     skip = {str(c).casefold() for c in regenerated}
+    if normalize_dest_kind(dest_kind) == "redis":
+        from connectors.redis_reader import REDIS_ENVELOPE_COLUMNS
+
+        # The reader's key/type envelope is not stored data: an overwrite
+        # rebuilds every key under the prefix, so there is no value to lose.
+        skip |= set(REDIS_ENVELOPE_COLUMNS)
     emptied = [
         c for c in overwrite_emptied_columns(live_dest_columns, mappings)
         if c.casefold() not in skip

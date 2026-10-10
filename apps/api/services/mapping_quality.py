@@ -375,10 +375,22 @@ def _is_dialect_sanctioned_carrier(
     """
     if not dest_db or not source_type or not target_type:
         return False
+    from services.dest_schema_authority import destination_schema_is_sampled
     from services.type_system import materialize_dest_ddl
 
     try:
-        expected = str(materialize_dest_ddl(dest_db, source_type) or "").strip()
+        if destination_schema_is_sampled(dest_db):
+            # No DDL here: the write's carrier is the destination type map's
+            # (Redis stores DECIMAL as exact JSON text); the SQL materializer
+            # only echoes the source type back.
+            from services.decision_kernel import InventContext, invent_dest_type
+
+            expected = str(
+                invent_dest_type(source_type, dest_db=dest_db, context=InventContext.CREATE_NEW)
+                or ""
+            ).strip()
+        else:
+            expected = str(materialize_dest_ddl(dest_db, source_type) or "").strip()
     except Exception:
         return False
     if not expected:
