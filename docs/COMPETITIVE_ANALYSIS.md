@@ -97,3 +97,9 @@ Gaps keeping Datawrap below parity:
 - Token chunking has not been tested with real tiktoken.
 
 CDC is at-least-once; exactly-once is not claimed. No retrieval-quality claim is made.
+
+## G-CONN M5: SDK source breadth and transfer evidence
+
+For this connector slice, Datawrap is **6/10** versus **Airbyte/Fivetran at 9/10**. Named evidence is synthetic: `apps/api/tests/test_gconn_sdk_transfer_routing.py` verifies descriptor-driven routing and source-only catalog enrichment; `apps/api/tests/test_gconn_sdk_transfer_e2e.py` exercises GitHub/Jira full-reread PK upsert and Intercom's fresh-destination paginated read. The SDK matrix does not establish live vendor compatibility, quotas, real-volume throughput, or destination-role readiness.
+
+The increment is three SDK sources (GitHub, Jira, Intercom) plus the existing HubSpot SDK source—not parity with the hundreds of connectors available from Airbyte/Fivetran. Catalog enrichment remains `beta` / `source_only`; transfer capabilities are full-refresh-only. Intercom existing-destination epoch remapping and SDK `resume=True` Gate-8 are strict xfails and remain unverified; see `docs/CONNECTOR_CERTIFICATION.md` under **Known engine gaps (G-CONN M5)**.

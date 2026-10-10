@@ -28,7 +28,7 @@ Synthetic certification does **not** prove vendor API compatibility, quota behav
 
 ## M4 source-only SDK connectors
 
-The GitHub, Jira Cloud, and Intercom manifests are registered SDK sources and have been certified as SDK source on synthetic fixtures; not yet wired into the transfer engine. Each remains planned and unexposed in the transfer catalog. M4 did not change catalog, capability, form-schema, or transfer-engine wiring.
+GitHub, Jira Cloud, and Intercom are registered SDK sources, routed through the transfer engine, and certified against synthetic fixtures. They are source-only: catalog enrichment reports `source_ready=true`, `dest_ready=false`, `transfer_ready=false`, `effective_status=beta`, and `certification_tier=source_only`. Transfer capabilities are full-refresh-only (`incremental=false`); descriptors retain manifest-declared sync modes. Synthetic routing and catalog evidence is in `apps/api/tests/test_gconn_sdk_transfer_routing.py`.
 
 - **GitHub** — docs: [GitHub REST API](https://docs.github.com/en/rest). `repositories` is a full-refresh stream; `issues` uses `since` on `updated_at`. The issues endpoint also returns pull requests, which are retained, including the `pull_request` object.
 - **Jira Cloud** — docs: [Jira Cloud REST API v3 issue search](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/) and [project search](https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-projects/). Issue search uses a 60-second-or-greater lookback because JQL timestamps have minute granularity; incremental delivery is at-least-once.
@@ -46,9 +46,17 @@ The connector lifecycle matrix covers the four previously registered SDK connect
 | `jira` | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 | `intercom` | pass | pass | pass | pass | pass | pass | pass | pass | pass |
 
-The two skips above are existing, descriptor-authorized limitations; M4 adds no skips. The optional GitHub live smoke is separate from this synthetic matrix and runs only when `GITHUB_TOKEN` is set and the two-second `api.github.com` probe succeeds. It reads one page through the GitHub manifest and is not live evidence unless actually run against the vendor.
+The two skips above are existing, descriptor-authorized limitations. The optional GitHub live smoke is separate from this synthetic matrix and runs only when `GITHUB_TOKEN` is set and the two-second `api.github.com` probe succeeds. It reads one page through the GitHub manifest and is not live evidence unless actually run against the vendor.
 
-For M5 planning, `sdk_read_as_matrix()` currently stops after the first `RecordBatch`; M4 intentionally leaves that transfer-engine helper unchanged.
+The SDK engine E2E coverage is synthetic. GitHub and Jira prove page-fault recovery by a full reread with primary-key upsert; Intercom's fresh-destination three-page read is covered separately. Live vendor compatibility, quotas, real-volume behavior, and destination-role readiness are not established.
+
+## Known engine gaps (G-CONN M5)
+
+(a) **Existing-destination retry can remap epoch integers to timestamps.** On an Intercom retry, the bridge and stream retain `created_at` as declared `INTEGER` / `BIGINT` with the epoch value `1767225500`, but existing-destination mapping selects `TIMESTAMP` and `datetime`; the transformed UTC `Z` value is rejected by SQLite's NTZ validator. The existing-destination mapping call is in `apps/api/src/transfer/engine.py:2049-2074` and `_auto_map` dispatch in `apps/api/src/transfer/engine.py:4285-4291`; transform inference is in `apps/api/services/mapping_pipeline.py:1218-1225`, application in `apps/api/connectors/writer_common.py:1819`, epoch conversion in `apps/api/services/transform_engine.py:838-839`, and NTZ refusal in `apps/api/connectors/writer_common.py:3415-3419`. Trace: `/home/ubuntu/gconn/logs/m5_intercom_type_trace_second.txt`. This is not SDK-specific: another source with epoch `*_at` integer values rerun against an existing `TEXT`/`BIGINT` destination may hit the same remap class. The defect is not fixed or verified.
+
+(b) **SDK `resume=True` fails strict Gate-8 reconciliation.** A resumed SDK read uses the saved page-two state, but `write_pass_fingerprints` covers only that resumed session while Gate-8 compares the whole destination population. SDK drivers are not in the independent reread set. The resumed-digest behavior is documented at `apps/api/src/transfer/stream.py:2072-2075` and `3819-3823`; the fallback digest is at `apps/api/src/transfer/stream.py:4033-4038`; SDK exclusions are in `apps/api/services/source_reread.py:49-63`. Trace: `/home/ubuntu/gconn/logs/m5_sdk_transfer_e2e_fifth.txt`. This gap is not fixed or verified.
+
+The supported recovery for a page failure is a full reread with primary-key upsert, rather than checkpoint resume; GitHub/Jira synthetic engine tests exercise that path. Intercom's retry may still be blocked by gap (a).
 
 ## Writing a report
 

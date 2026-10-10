@@ -335,15 +335,21 @@ Implement usage metering in `services/usage_metering.py` and expose a pricing ca
 
 **Target:** 131 → 300+ connectors, prioritized by Airbyte/Fivetran gap analysis.
 
-### Status: in progress
+### Status: in progress — G-CONN M5
 
 - ~15 native drivers proven locally.
 - 734 catalog entries; most are stubs or generic SQL.
 - Connector capability registry marks `transfer_ready` truthfully.
+- GitHub, Jira Cloud, and Intercom are descriptor-backed SDK sources routed through the transfer engine. Synthetic catalog enrichment reports `beta` / `source_only`, `source_ready=true`, and destination/transfer readiness false.
+- Transfer capabilities are full-refresh-only; SDK descriptors preserve manifest-declared sync modes. Evidence: `apps/api/tests/test_gconn_sdk_transfer_routing.py`.
+- Synthetic engine evidence: `apps/api/tests/test_gconn_sdk_transfer_e2e.py` covers GitHub/Jira full-reread PK-upsert recovery and Intercom fresh-destination pagination. Intercom retry remapping and SDK `resume=True` Gate-8 remain strict expected failures, not verified fixes; see `docs/CONNECTOR_CERTIFICATION.md`.
+- The added breadth is three sources plus the existing HubSpot SDK connector, still far short of the hundreds of sources offered by Airbyte/Fivetran.
+
+Live vendor compatibility, quota behavior, real-volume performance, destination-role readiness, and both known engine gaps remain unverified. Keep catalog readiness and roadmap claims source-only until that evidence exists.
 
 ### Recommended next step
 
-Ship a generic Singer tap/target bridge and a connector SDK so the community can add sources the same way Airbyte's CDK does.
+Resolve the existing-destination epoch-type remap and add SDK source reread support for strict resumed Gate-8 before expanding the certified surface.
 
 ---
 
@@ -396,4 +402,3 @@ Do not trust stale counts — the authoritative pass/fail/skip artifacts are in 
 - `pytest --collect-only` — 10,533 tests, 0 collection errors
 - `ruff check --select F`, `bandit -r`, `pip-audit --local`, `npm audit` — clean
 - CI: `api-and-web` on PR #28 — re-running on each push
-
