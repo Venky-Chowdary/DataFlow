@@ -707,12 +707,29 @@ def update_connector(  # nosec B107
     schema: str = "",
     ssl: bool | None = None,
     new_name: str = "",
+    host_key: str = "",
 ) -> ToolResult:
     """Stage an in-place connector edit; Confirm applies it via ``PUT /saved-connectors``.
 
     Empty values mean "unchanged". The payload keeps the new secrets on the
     server-side ack ledger; the preview only says that a secret changed.
+    An SFTP host-key pin is not editable here: the PUT body
+    (``ConnectorSaveDTO``) has no trust fields, so a staged pin would be
+    dropped on Confirm while the preview claimed it changed.
     """
+    if (host_key or "").strip():
+        _logger.warning("update_connector refused an SFTP host-key change for %r", connector_id or name)
+        return _tool_result(
+            "update_connector",
+            success=False,
+            output=None,
+            error=(
+                "update_connector cannot change an SFTP host key pin — the saved-connector "
+                "update has no host-key field, so the new pin would not be stored. After "
+                "verifying the new fingerprint with the server admin, save it with "
+                "create_connector(host_key=SHA256:...) as a new connector."
+            ),
+        )
     conn, err = _connector("update_connector", connector_id, name)
     if err:
         return err

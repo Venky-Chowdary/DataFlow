@@ -3516,8 +3516,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     f"Ready to save connector **{prev.get('name') or 'connector'}** "
                     f"({prev.get('type')}) → `{prev.get('host')}:{prev.get('port')}` "
                     f"/ `{prev.get('database') or '—'}`.\n"
-                    f"Connection test: {prev.get('test') or 'ok'}.\n\n"
-                    "Confirm below to save it to **Connectors**."
+                    f"Connection test: {prev.get('test') or 'ok'}.\n"
+                    + (
+                        f"Pins SFTP host key {prev.get('host_key')}, confirm you "
+                        "verified it with the server admin.\n"
+                        if prev.get("host_key")
+                        else ""
+                    )
+                    + "\nConfirm below to save it to **Connectors**."
                 )
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])

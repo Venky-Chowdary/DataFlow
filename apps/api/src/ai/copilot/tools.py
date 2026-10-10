@@ -1580,6 +1580,16 @@ class DataPilotTools:
     ) -> ToolResult:
         from .connector_create import build_connector_draft, draft_is_complete
 
+        if (host_key or "").strip():
+            from connectors.sftp_common import normalize_host_key_pin
+
+            try:
+                host_key = normalize_host_key_pin(host_key)
+            except ValueError as exc:
+                logging.getLogger(__name__).warning(
+                    "create_connector refused a malformed SFTP host_key pin for %r", name
+                )
+                return ToolResult(name="create_connector", success=False, output=None, error=str(exc))
         draft = build_connector_draft(
             message or "",
             {
@@ -1733,6 +1743,9 @@ class DataPilotTools:
             "has_service_account": bool(draft.get("service_account")),
             "test": probe_msg or "skipped",
         }
+        if draft.get("host_key"):
+            # A fingerprint is public; a human must see the pin before Confirm.
+            safe_preview["host_key"] = str(draft["host_key"])
         if readable_objects is not None:
             safe_preview["readable_objects"] = readable_objects
         if readable_warning:
@@ -3086,13 +3099,14 @@ class DataPilotTools:
         schema: str = "",
         ssl: bool | None = None,
         new_name: str = "",
+        host_key: str = "",
     ) -> ToolResult:
         from .lifecycle_tools import update_connector
 
         return update_connector(
             connector_id, name, host=host, port=port, database=database,
             username=username, password=password, connection_string=connection_string,
-            schema=schema, ssl=ssl, new_name=new_name,
+            schema=schema, ssl=ssl, new_name=new_name, host_key=host_key,
         )
 
     def _set_schedule_enabled(
