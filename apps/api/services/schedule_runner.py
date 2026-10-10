@@ -932,10 +932,15 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     sched = get_schedule(schedule_id)
     if not sched:
         return
-    if job_id and sched.last_job_id == job_id and not sched.running:
-        return
     job_doc = _job_doc(job_id)
     status = (job_doc or {}).get("status") or "failed"
+    if (
+        job_id
+        and sched.last_job_id == job_id
+        and not sched.running
+        and _is_success(status) == _is_success(sched.last_status)
+    ):
+        return
     entry = _run_entry(job_id, status, attempt, started_at, job_doc)
 
     from services.execution_engine_contract import committed_rows_of
