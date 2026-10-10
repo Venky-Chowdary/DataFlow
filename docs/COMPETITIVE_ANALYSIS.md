@@ -107,6 +107,7 @@ The increment is three SDK sources (GitHub, Jira, Intercom) plus the existing Hu
 ## G-LAKE: Iceberg / lakehouse (M6)
 
 DataWrap's lakehouse score remains **6/10**. Proposed 7/10 pending runtime exactly-once enablement; not raised.
+REST `s3.*` storage config passes through, and slot release fails closed when retired-store persistence fails.
 
 | System | Iceberg commit/write pattern | DataWrap comparison and test evidence | Sources |
 | --- | --- | --- | --- |

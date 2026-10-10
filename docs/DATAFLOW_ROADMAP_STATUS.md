@@ -316,6 +316,7 @@ Ship undo/rollback (staging swap or Iceberg branch) — do not claim rollback un
 - **Known pre-existing MinIO-auth failures:** These 14 PG-backed live copy tests fail on the M4 parent too: `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_dest_count`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_empty_string_and_null_preserved`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_skip_when_dest_count_matches`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_occupied_mismatch_declines`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_overwrite_replaces_dest`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_source_count_is_not_scan`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_stream_load_method`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_dest_count`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_empty_string_and_null_preserved`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_skip_when_dest_count_matches`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_occupied_mismatch_declines`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_overwrite_replaces_snapshot`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_dest_count_is_not_scan_count`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_stream_load_method`.
 
 Lakehouse score remains **6/10**. Proposed 7/10 pending runtime exactly-once enablement; not raised.
+REST `s3.*` storage config passes through, and slot release fails closed when retired-store persistence fails.
 
 ### Why it matters
 
