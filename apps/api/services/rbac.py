@@ -366,6 +366,21 @@ class RBACMiddleware(BaseHTTPMiddleware):
         if permission in principal_permissions(user, effective):
             return await call_next(request)
 
+        try:
+            from services.audit_coverage import record_authz_denial
+
+            record_authz_denial(
+                request,
+                required_permission=permission,
+                effective_role=effective,
+            )
+        except Exception as exc:
+            # Auditing must not change the authorization decision or response.
+            import logging
+
+            logging.getLogger(__name__).error(
+                "RBAC denial audit failed (%s)", type(exc).__name__, exc_info=exc
+            )
         return JSONResponse(
             status_code=403,
             content={

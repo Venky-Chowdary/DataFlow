@@ -17,6 +17,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
+from services.audit_coverage import AuditAccessMiddleware
 from services.platform_config import (
     apply_railway_defaults,
     cors_origins,
@@ -279,6 +280,7 @@ _cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 if not _cors_origin_regex and is_railway():
     _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
 
+app.add_middleware(AuditAccessMiddleware)
 app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(TenantMiddleware)

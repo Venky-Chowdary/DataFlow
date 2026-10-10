@@ -161,6 +161,7 @@ async def export_events(
 async def get_audit_tip():
     """Return the HMAC chain tip plus the latest external anchor receipt."""
     from services.audit_anchor import latest_anchor, list_anchors
+    from services.audit_coverage import audit_access_failure_count
     from services.audit_log import latest_event_hash
 
     tip = latest_event_hash()
@@ -170,6 +171,7 @@ async def get_audit_tip():
         "anchor": anchor,
         "anchors_recent": list_anchors(limit=5),
         "matched": bool(tip and anchor and anchor.get("tip_hash") == tip),
+        "audit_access_failures": audit_access_failure_count(),
         "honesty": (
             "Tip is HMAC-SHA256 chain head. Anchor is a diligence seal "
             "(stub by default — not auditor WORM / TSA until provider configured)."
