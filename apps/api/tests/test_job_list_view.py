@@ -190,3 +190,27 @@ def test_slim_job_uses_top_level_streams_when_the_summary_list_is_empty():
         }
     )
     assert slim["stream_names"] == ["customers", "orders"]
+
+
+def test_stalled_job_without_destination_summary_does_not_crash_the_list():
+    """A stalled job with no summary raised UnboundLocalError on ``ds``."""
+    job = {
+        "_id": "j-stalled",
+        "status": "running",
+        "updated_at": "2020-01-01T00:00:00+00:00",
+        "rejected_rows": 0,
+    }
+    out = slim_job_for_list(job)
+    assert out["stalled"] is True and out["stall_seconds"] > 0
+
+
+def test_healthy_job_keeps_coerced_null_count_from_summary():
+    job = {
+        "_id": "j-ok",
+        "status": "completed",
+        "destination_summary": {"rejected_rows": 2, "coerced_null_rows": 5},
+    }
+    out = slim_job_for_list(job)
+    assert out["rejected_rows"] == 2
+    assert out["coerced_null_rows"] == 5
+    assert "stalled" not in out

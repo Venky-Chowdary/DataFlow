@@ -40,10 +40,13 @@ def test_create_and_list(temp_store):
     assert len(store.list_schedules()) == 1
 
 
-def test_list_repairs_stale_next_run_for_enabled_schedules(temp_store):
-    """QA D11 — an enabled schedule whose ``next_run_at`` froze in the past
-    (runner outage / dead claim) must not keep advertising a due time that
-    can never arrive. The list read recomputes and persists the repair."""
+def test_list_reports_overdue_without_dropping_the_catch_up(temp_store):
+    """QA D11 — a ``next_run_at`` frozen in the past is reported as overdue.
+
+    The read must not rewrite it: pushing it to the next boundary hid the
+    stuck claim behind it (MX3-24) and silently skipped the catch-up run the
+    beat owes for the missed slot, without counting the miss.
+    """
     sched = store.create_schedule({
         "name": "Stuck beat",
         "source_connector_id": "src-1",
@@ -59,12 +62,11 @@ def test_list_repairs_stale_next_run_for_enabled_schedules(temp_store):
     store._save_all(loaded)
 
     listed = store.list_schedules()
-    due = datetime.fromisoformat(listed[0].next_run_at)
-    assert due > datetime.now(timezone.utc)
-    # The repair persisted — a second read does not see the stale value.
-    assert datetime.fromisoformat(
-        store.get_schedule(sched.id).next_run_at
-    ) > datetime.now(timezone.utc)
+    assert listed[0].next_run_at == past
+    assert store.get_schedule(sched.id).next_run_at == past
+    assert store.schedule_overdue_seconds(listed[0]) >= 2 * 86400 - 5
+    # Still due, so the beat runs the one catch-up and counts the missed window.
+    assert [s.id for s in store.due_schedules()] == [sched.id]
 
 
 def test_list_leaves_disabled_and_running_schedules_alone(temp_store):

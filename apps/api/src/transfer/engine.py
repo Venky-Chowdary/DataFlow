@@ -1474,6 +1474,97 @@ from .job_failure import (  # noqa: E402,F401 — re-export
 
 
 
+#: Terminal-status write attempts after a verified load. The control plane can
+#: be slow under load (QA observed 600s timeouts); the data outcome cannot.
+_TERMINAL_WRITE_ATTEMPTS = 4
+
+
+def _finish_verified_run(
+    mongo: Any,
+    job_id: str,
+    exc: BaseException,
+    *,
+    request: Any,
+    rows_written: int,
+    dest_summary: dict[str, Any] | None,
+    recon: dict[str, Any] | None,
+    total_rows: int | None = None,
+) -> TransferResult:
+    """A step after Gate-8 proved the load raised. The run still succeeded.
+
+    QA MX2-15: 120,000 rows landed with matching checksums and the job read
+    *failed*, because bookkeeping after the proof (status write under a slow
+    control plane, lineage emit, contract finalize, slot release) shared the
+    ``try`` whose handler fails the job — and, for MySQL/Mongo rename-aside
+    overwrite, *restored the previous table* over the verified rows.
+
+    Here the backup is discarded (the new rows are proven), the terminal
+    status is written with bounded retry, and the failing step is recorded as
+    a ``post_commit_warning`` — visible, never a status flip.
+    """
+    import time as _time
+    from datetime import datetime, timezone
+
+    from services.job_status import terminal_status_for
+
+    summary = dict(dest_summary or {})
+    warning = {
+        "step": "post_commit",
+        "error": f"{type(exc).__name__}: {exc}"[:500],
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    summary["post_commit_warnings"] = list(summary.get("post_commit_warnings") or []) + [
+        warning
+    ]
+    logger.error(
+        "Job %s: post-commit step failed after Gate-8 passed; the load stands: %s",
+        job_id,
+        exc,
+        exc_info=exc,
+    )
+    _settle_overwrite_backup(request.destination, restore=False)
+    terminal = terminal_status_for(
+        summary.get("rejected_rows", 0), summary.get("coerced_null_rows", 0)
+    )
+    message = (recon or {}).get(
+        "message", f"Transferred {rows_written:,} rows successfully"
+    )
+    for attempt in range(_TERMINAL_WRITE_ATTEMPTS):
+        try:
+            mongo.update_job_status(
+                job_id,
+                terminal,
+                records_processed=rows_written,
+                progress_pct=100,
+                phase="completed",
+                message=message,
+                rejected_rows=int(summary.get("rejected_rows", 0) or 0),
+                coerced_null_rows=int(summary.get("coerced_null_rows", 0) or 0),
+                destination_summary=summary,
+                reconciliation=recon or {},
+                post_commit_warnings=summary["post_commit_warnings"],
+            )
+            break
+        except Exception as write_exc:  # noqa: BLE001
+            logger.warning(
+                "Job %s terminal status write attempt %s failed: %s",
+                job_id,
+                attempt + 1,
+                write_exc,
+            )
+            if attempt + 1 < _TERMINAL_WRITE_ATTEMPTS:
+                _time.sleep(min(8.0, 0.5 * (2**attempt)))
+    return TransferResult(
+        success=True,
+        job_id=job_id,
+        records_transferred=rows_written,
+        operation=request.operation,
+        source_summary={"rows": total_rows} if total_rows is not None else {},
+        destination_summary=summary,
+        reconciliation=recon or {},
+    )
+
+
 def _note_failed_batch_undo(request: Any, dest_summary: Any, message: str) -> str:
     """Clear a partial SQL batch when this run found the destination empty.
 
@@ -2645,6 +2736,9 @@ class UniversalTransferEngine:
 
         pf = None
         contract_id = ""
+        # Set once Gate-8 passed with no silent loss: from there the run's data
+        # outcome is final and no later exception may fail or roll it back.
+        verified = False
         try:
             mongo.update_job_status(
                 job_id,
@@ -3716,6 +3810,7 @@ class UniversalTransferEngine:
             )
             if lost is not None:
                 return lost
+            verified = True
 
             # Reconciliation passed: the delta is at rest, so the watermark may
             # move. Persisting it earlier would skip these rows after a failed run.
@@ -3921,6 +4016,18 @@ class UniversalTransferEngine:
                 destination_summary=dest_summary,
             )
         except Exception as e:
+            if verified:
+                # QA MX2-15: proven rows must not be failed or rolled back by a
+                # bookkeeping step that raised after Gate-8 passed.
+                return _finish_verified_run(
+                    mongo,
+                    job_id,
+                    e,
+                    request=request,
+                    rows_written=int(rows_written or 0),
+                    dest_summary=dest_summary,
+                    recon=recon,
+                )
             _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
@@ -3950,6 +4057,7 @@ class UniversalTransferEngine:
         pf: dict | None = None
         contract_id = ""
         load_history_report: dict[str, Any] = {}
+        verified = False
         try:
             mongo.update_job_status(
                 job_id,
@@ -4654,6 +4762,7 @@ class UniversalTransferEngine:
             )
             if lost is not None:
                 return lost
+            verified = True
 
 
             if effective_sync == "cdc" and isinstance(dest_summary, dict):
@@ -4934,6 +5043,18 @@ class UniversalTransferEngine:
                 contract_id=contract_id,
             )
         except Exception as e:
+            if verified:
+                # QA MX2-15: proven rows must not be failed or rolled back by a
+                # bookkeeping step that raised after Gate-8 passed.
+                return _finish_verified_run(
+                    mongo,
+                    job_id,
+                    e,
+                    request=request,
+                    rows_written=int(rows_written or 0),
+                    dest_summary=dest_summary,
+                    recon=recon,
+                )
             _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
@@ -4963,6 +5084,7 @@ class UniversalTransferEngine:
         pf: dict | None = None
         contract_id = ""
         load_history_report: dict[str, Any] = {}
+        verified = False
         try:
             filename = request.source_filename or "upload.csv"
             content = prepare_stream_content(
@@ -5509,6 +5631,7 @@ class UniversalTransferEngine:
             )
             if lost is not None:
                 return lost
+            verified = True
             if isinstance(dest_summary, dict) and dest_summary.get("file_digest"):
                 from services.file_load_ledger import record_successful_file_load
 
@@ -5676,6 +5799,18 @@ class UniversalTransferEngine:
                 contract_id=contract_id,
             )
         except Exception as e:
+            if verified:
+                # QA MX2-15: proven rows must not be failed or rolled back by a
+                # bookkeeping step that raised after Gate-8 passed.
+                return _finish_verified_run(
+                    mongo,
+                    job_id,
+                    e,
+                    request=request,
+                    rows_written=int(rows_written or 0),
+                    dest_summary=dest_summary,
+                    recon=recon,
+                )
             _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(

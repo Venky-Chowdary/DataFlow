@@ -269,7 +269,9 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
         "distinct_ratio": round(distinct_ratio, 3),
         "likely_primary_key": is_likely_key,
         "sample_count": len(strings),
-        "non_empty_count": len(present),
+        "non_empty_count": len(non_empty),
+        # Present = not SQL NULL. A stored '' is present but empty (QA T19).
+        "present_count": len(present),
         "empty_string_count": len(present) - len(non_empty),
         "likely_pii": pii,
         "detected_pattern": pattern,

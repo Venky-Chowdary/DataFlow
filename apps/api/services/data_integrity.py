@@ -1045,9 +1045,11 @@ def _check_duplicate_keys(
             )
             probe_authoritative = True
 
+    # Expected but not "ran" is unavailable — including a status nobody set.
+    # Requiring a non-empty status let a probe that never reported pass as
+    # if it had proven uniqueness (QA MX3-22 fail-open).
     probe_unavailable = bool(
         source_duplicate_probe_expected
-        and probe_status
         and probe_status != "ran"
         and not probe_authoritative
     )

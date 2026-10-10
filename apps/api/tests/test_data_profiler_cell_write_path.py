@@ -30,10 +30,11 @@ def test_as_str_matches_transfer_wire():
     assert _as_str(1.5) == "1.5"
 
 
-def test_as_str_nulls_collapse_for_null_rate():
-    assert _as_str(None) == ""
+def test_as_str_null_is_absence_and_empty_string_is_a_value():
+    """QA T19: SQL NULL is absence (None); a stored '' is a present value."""
+    assert _as_str(None) is None
+    assert _as_str(SQL_NULL_SENTINEL) is None
     assert _as_str("") == ""
-    assert _as_str(SQL_NULL_SENTINEL) == ""
     assert _as_str("   ") == ""
 
 
@@ -46,8 +47,11 @@ def test_profile_decimal_scientific_is_one_value():
 
 def test_profile_reader_null_is_absence_not_token():
     prof = profile_column("note", [None, SQL_NULL_SENTINEL, "", "kept"])
-    assert prof["null_rate"] == 0.75
+    # Two NULLs of four cells; '' is stored data, not a null (QA T19).
+    assert prof["null_rate"] == 0.5
     assert prof["non_empty_count"] == 1
+    assert prof["present_count"] == 2
+    assert prof["empty_string_count"] == 1
     assert prof["distinct_count"] == 1
     assert prof["top_values"][0]["value"] == "kept"
     assert not any(v["value"] == SQL_NULL_SENTINEL for v in prof["top_values"])

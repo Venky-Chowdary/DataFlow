@@ -1321,6 +1321,15 @@ def run_file_preflight(
                     "are not a readable source. Grant SELECT to the connector role, "
                     f"then re-validate. ({sample_unavailable_reason})"
                 )
+            elif engine_sample.read_failed:
+                # QA MX3-22: G1 said "Source readable — N columns" beside a
+                # reader that had just raised. Catalog metadata is not a
+                # readable source; the probe failure is the G1 finding.
+                source_error = (
+                    "The source catalog lists this table but Execute's reader "
+                    "could not read rows from it. Fix the source read (connection, "
+                    f"table name, timeout), then re-validate. ({sample_unavailable_reason})"
+                )
     if (
         not sample_rows
         and not source_measured_empty

@@ -316,12 +316,30 @@ class ScheduleSummaryResponse(BaseModel):
     approval_finding: str = ""
     approvable: bool = False
     authorized: bool = False
+    # Due but not started: how late, and exactly what holds the one-writer
+    # claim (schedule + job). "Next run in the past" alone was a dead end.
+    overdue_seconds: int = 0
+    blocked_by: dict[str, Any] = Field(default_factory=dict)
+    blocked_reason: str = ""
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleSummaryResponse:
+        from services.schedule_store import (
+            claim_holder,
+            describe_claim_holder,
+            schedule_overdue_seconds,
+        )
+
         full = ScheduleResponse.from_schedule(s)
         payload = full.model_dump()
         payload.pop("mappings", None)
+        overdue = schedule_overdue_seconds(s)
+        if overdue:
+            holder = claim_holder(s)
+            payload["overdue_seconds"] = overdue
+            if holder:
+                payload["blocked_by"] = holder
+                payload["blocked_reason"] = describe_claim_holder(holder)
         req = dict(s.approval_request or {})
         open_req = str(req.get("status") or "").strip().lower() == STATUS_OPEN
         grant = dict(s.standing_authorization or {})

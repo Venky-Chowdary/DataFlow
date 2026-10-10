@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 import re
+import threading
 from services.brand_env import getenv_brand
 import socket
 from concurrent.futures import ThreadPoolExecutor
@@ -1209,6 +1210,49 @@ def _dispatch_transfer(
     return job_id
 
 
+#: A blocked schedule stays due, and the beat wakes every second for an
+#: already-due schedule. Without backoff the same "already in progress" line
+#: was logged every beat, forever (QA MX3-24 log). Retry 5s → 60s.
+_CLAIM_BACKOFF_MIN_S = 5.0
+_CLAIM_BACKOFF_MAX_S = 60.0
+_claim_backoff: dict[str, tuple[float, float, str]] = {}
+_claim_backoff_lock = threading.Lock()
+
+
+def _note_claim_blocked(schedule_id: str, holder: dict | None, detail: str) -> None:
+    import time as _time
+
+    key = "|".join(
+        str((holder or {}).get(k) or "") for k in ("kind", "schedule_id", "job_id")
+    )
+    now = _time.monotonic()
+    with _claim_backoff_lock:
+        _until, delay, prior_key = _claim_backoff.get(schedule_id, (0.0, 0.0, ""))
+        delay = (
+            min(_CLAIM_BACKOFF_MAX_S, max(_CLAIM_BACKOFF_MIN_S, delay * 2))
+            if prior_key == key
+            else _CLAIM_BACKOFF_MIN_S
+        )
+        _claim_backoff[schedule_id] = (now + delay, delay, key)
+    if prior_key != key:
+        logger.info("Schedule %s skipped — %s", schedule_id, detail)
+    else:
+        logger.debug("Schedule %s still blocked — %s", schedule_id, detail)
+
+
+def _clear_claim_backoff(schedule_id: str) -> None:
+    with _claim_backoff_lock:
+        _claim_backoff.pop(schedule_id, None)
+
+
+def _claim_backed_off(schedule_id: str) -> bool:
+    import time as _time
+
+    with _claim_backoff_lock:
+        entry = _claim_backoff.get(schedule_id)
+    return bool(entry and _time.monotonic() < entry[0])
+
+
 def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
     from services.schedule_store import (
         clear_schedule_running,
@@ -1262,24 +1306,33 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
 
     # Concurrency guard: refuse to start when this schedule, another writer
     # on the same dest object, or the same source→dest pair is already live.
+    from services.schedule_store import (
+        describe_claim_holder,
+        dispatch_in_flight,
+        last_claim_refusal,
+    )
+
     if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
-        logger.info("Schedule %s skipped — a run is already in progress", schedule_id)
+        holder = last_claim_refusal(schedule_id)
+        detail = describe_claim_holder(holder)
+        _note_claim_blocked(schedule_id, holder, detail)
         if manual:
             raise ScheduleStartError(
-                "A run is already in progress for this schedule, the same "
-                "destination table, or the same source→destination pair.",
+                detail,
                 http_status=409,
                 code="already_running",
             )
         return None
+    _clear_claim_backoff(schedule_id)
 
     # A parked retry resumes its own attempt count; the budget is per run, not
     # per beat, or a schedule that fails every time retries forever.
-    job_id = _dispatch_transfer(
-        schedule_id,
-        attempt=sched.retry_attempt if sched.retry_at else 0,
-        allow_paused=manual,
-    )
+    with dispatch_in_flight(schedule_id):
+        job_id = _dispatch_transfer(
+            schedule_id,
+            attempt=sched.retry_attempt if sched.retry_at else 0,
+            allow_paused=manual,
+        )
     if job_id is None:
         # Fail-closed paths (missing connector / contract) already call
         # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.
@@ -1339,13 +1392,28 @@ def _finalize_finished_schedule_claims() -> None:
     The next beat used to skip that schedule forever, and Run now answered
     that a run was still in progress.
     """
-    from services.schedule_store import _load_all, _parse_ts
+    from services.schedule_store import (
+        _is_running_stale,
+        _job_is_live,
+        _load_all,
+        _parse_ts,
+        clear_schedule_running,
+    )
 
     for sched in _load_all():
-        if not sched.running or not str(sched.running_job_id or "").strip():
+        if not sched.running:
             continue
-        from services.schedule_store import _job_is_live
-
+        if not str(sched.running_job_id or "").strip():
+            # Claim taken, job never bound (dispatch died in between). Nothing
+            # is writing; release it once the unbound grace has passed.
+            if _is_running_stale(sched):
+                logger.warning(
+                    "Schedule %s released an unbound claim from %s (no job was created)",
+                    sched.id,
+                    sched.running_started_at,
+                )
+                clear_schedule_running(sched.id)
+            continue
         if _job_is_live(sched.running_job_id) is not False:
             continue
         started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
@@ -1374,11 +1442,21 @@ def _run_due_schedules() -> int:
         release_create_new_dest_exists_false_refuse()
         _release_superseded_queued_claims()
         _finalize_finished_schedule_claims()
+        try:
+            from services.cdc_capture_release import retry_pending_capture_releases
+
+            # A schedule delete that could not drop its source slot (QA S14)
+            # keeps retrying here, so WAL is not retained forever on a client DB.
+            retry_pending_capture_releases()
+        except Exception:  # noqa: BLE001 — cleanup must never stop the beat
+            logger.exception("Pending CDC capture release retry failed")
         from services.schedule_store import unstick_completion_pinned_schedules
 
         unstick_completion_pinned_schedules()
         started = 0
         for sched in due_schedules():
+            if _claim_backed_off(sched.id):
+                continue
             try:
                 if _run_schedule(sched.id):
                     started += 1

@@ -386,6 +386,102 @@ _UNTYPED_NUMERIC_SOURCES = frozenset(
 )
 
 
+# File transports and untyped document formats. Their numeric "types" are
+# inferred by ``file_parser`` / ``object_store_common`` from the first rows
+# (``infer_columns_from_rows`` reads 50), so an observed ``DECIMAL(4,2)`` is
+# a sample of the column, never its domain (QA MX2-10).
+_FILE_TRANSPORT_SOURCES = frozenset(
+    {
+        "file",
+        "local_file",
+        "upload",
+        "json",
+        "jsonl",
+        "ndjson",
+        "s3",
+        "amazon_s3",
+        "gcs",
+        "google_cloud_storage",
+        "azure_blob",
+        "azure_blob_storage",
+        "adls",
+        "adls_gen2",
+        "azure_data_lake",
+        "sftp",
+        "ftp",
+        "ftps",
+        "http",
+        "https",
+        "google_drive",
+        "dropbox",
+        "onedrive",
+        "sharepoint",
+        "box",
+    }
+)
+
+#: Destinations whose bare ``NUMERIC`` is exact and unbounded — no integer
+#: cap, no scale pad, the value is stored as written. Redshift is *not* one:
+#: its bare NUMERIC is NUMERIC(18,0).
+_UNBOUNDED_EXACT_NUMERIC_DIALECTS = frozenset(
+    {
+        "postgresql",
+        "postgres",
+        "cockroachdb",
+        "yugabytedb",
+        "timescaledb",
+        "greenplum",
+        "alloydb",
+        "aurora_postgresql",
+        "supabase",
+        "neon",
+    }
+)
+
+#: Portable exact-decimal ceiling. 38 is the largest precision every
+#: bounded SQL engine accepts without falling back to TEXT (MySQL's 65 is not
+#: portable through ``ddl_type``).
+_OPEN_DOMAIN_PRECISION = 38
+
+
+def sampled_numeric_is_not_a_domain(source_db: str) -> bool:
+    """True when this source's numeric types were *inferred from a sample*.
+
+    Only an explicitly named untyped source qualifies — an unknown (empty)
+    source is not presumed untyped, so relational routes that did not pass
+    their engine keep mirroring the declared type.
+    """
+    key = (source_db or "").strip().lower()
+    if not key:
+        return False
+    if key in _UNTYPED_NUMERIC_SOURCES or key in _FILE_TRANSPORT_SOURCES:
+        return True
+    from services.schema_introspect import sample_page_is_not_a_precision_contract
+
+    return sample_page_is_not_a_precision_contract(key)
+
+
+def open_domain_decimal_carrier(scale: int | None, *, dest_db: str = "") -> str | None:
+    """Create-new carrier for a decimal whose domain no catalog declares.
+
+    The sample is evidence of *scale*, never a bound on the integer part: the
+    integer part takes the destination's full capacity. PostgreSQL-family
+    destinations get exact unbounded ``NUMERIC`` (holds every value as
+    written, no pad). Bounded engines get ``DECIMAL(38, observed_scale)``.
+
+    Returns ``None`` when the scale is unknown and the destination is bounded
+    — inventing scale 0 would quarantine every fractional value, so the caller
+    keeps its platform carrier.
+    """
+    db = (dest_db or "").strip().lower()
+    if db in _UNBOUNDED_EXACT_NUMERIC_DIALECTS:
+        return "NUMERIC"
+    if scale is None:
+        return None
+    s = max(0, min(int(scale), _OPEN_DOMAIN_PRECISION - 1))
+    return f"DECIMAL({_OPEN_DOMAIN_PRECISION},{s})"
+
+
 def source_declares_numeric_domain(source_db: str) -> bool:
     """True when the source engine's cells carry their own numeric domain.
 

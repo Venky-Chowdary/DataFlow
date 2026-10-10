@@ -255,6 +255,29 @@ def infer_redis_conflict_columns(
     return [picked] if picked else []
 
 
+def identity_source_columns(
+    pk_target_columns: Sequence[str] | None,
+    mappings: Iterable[Any] | None,
+) -> list[str]:
+    """Source column for every destination key component, in key order.
+
+    Batch audits read source-keyed cells, while the write key is named by the
+    destination. A component with no mapping keeps its own name (identity map).
+    """
+    target_to_source: dict[str, str] = {}
+    for src, tgt in _mapping_pairs(mappings or []):
+        target_to_source.setdefault(tgt.lower(), src)
+    out: list[str] = []
+    for col in pk_target_columns or []:
+        name = str(col or "").strip()
+        if not name:
+            continue
+        src = target_to_source.get(name.lower(), name)
+        if src not in out:
+            out.append(src)
+    return out
+
+
 def _mapping_pairs(mappings: Iterable[Any]) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
     for m in mappings or []:

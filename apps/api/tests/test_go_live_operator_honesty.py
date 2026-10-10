@@ -10,6 +10,8 @@ from __future__ import annotations
 import importlib
 import time
 
+import pytest
+
 from services.copilot_sql_guard import assert_identifiers_allowed
 from services.preflight_sample import EngineSample
 from services.preflight_service import run_file_preflight
@@ -155,6 +157,84 @@ def test_select_denied_blocks_gate_1_instead_of_a_cast(monkeypatch):
     assert gate["status"] == "block"
     assert "SELECT was denied" in gate["message"]
     assert "Source readable" not in gate["message"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "server closed the connection unexpectedly",
+        'relation "public.orders_v2" does not exist',
+        "canceling statement due to statement timeout",
+    ],
+)
+def test_mx3_22_failed_source_read_blocks_gate_1_not_source_readable(monkeypatch, error):
+    """QA MX3-22: a reader that raised left G1 green ("Source readable") —
+    catalog columns alone were accepted as a readable source."""
+
+    def failed(**kwargs):
+        return EngineSample(
+            unavailable_reason=f"source sample read failed: {error}",
+            attempted=True,
+            read_failed=True,
+        )
+
+    monkeypatch.setattr("services.preflight_sample.engine_sample_rows", failed)
+    cols = ["id", "amount"]
+    result = run_file_preflight(
+        columns=cols,
+        column_types={"id": "INTEGER", "amount": "DECIMAL(10,2)"},
+        row_count=0,
+        mappings=[{"source": c, "target": c, "confidence": 1.0} for c in cols],
+        sample_rows=[],
+        destination_connected=True,
+        source_connected=True,
+        source_kind="database",
+        source_format="postgresql",
+        source_config={"type": "postgresql"},
+        source_table="orders_v2",
+        destination_table_exists=False,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="mysql",
+        destination_table="orders_v2",
+        sync_mode="full_refresh_overwrite",
+    )
+    gate = _gate(result, "g1_source")
+    assert gate["status"] == "block"
+    assert "Source readable" not in gate["message"]
+    assert error in gate["message"]
+    assert result["passed"] is False
+
+
+def test_row_filter_matching_nothing_is_not_a_source_read_failure(monkeypatch):
+    def filtered(**kwargs):
+        return EngineSample(
+            unavailable_reason="none of the first 50 source row(s) match the row filter",
+            attempted=True,
+        )
+
+    monkeypatch.setattr("services.preflight_sample.engine_sample_rows", filtered)
+    cols = ["id"]
+    result = run_file_preflight(
+        columns=cols,
+        column_types={"id": "INTEGER"},
+        row_count=0,
+        mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
+        sample_rows=[],
+        destination_connected=True,
+        source_connected=True,
+        source_kind="database",
+        source_format="postgresql",
+        source_config={"type": "postgresql"},
+        source_table="orders",
+        destination_table_exists=False,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="mysql",
+        destination_table="orders",
+        sync_mode="full_refresh_overwrite",
+    )
+    assert _gate(result, "g1_source")["status"] == "pass"
 
 
 def test_kafka_listing_drops_an_unrecognized_timeout():

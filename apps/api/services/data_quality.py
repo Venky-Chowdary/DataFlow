@@ -349,8 +349,15 @@ def run_integrity_audit(
     dest_kind: str = "",
     sync_mode: str | None = None,
     records: list[dict[str, Any]] | None = None,
+    primary_key_columns: list[str] | None = None,
 ) -> DataQualityReport:
     """Run a sample-based integrity and anomaly audit over raw source rows.
+
+    ``primary_key_columns`` names a composite identity. Duplicates are then
+    the whole tuple repeating — one component repeating across tuples is the
+    normal shape of a composite key (QA ACC-03: ``(region, id)`` blocked every
+    upsert at Execute on ``id`` alone). A tuple with an absent component is not
+    a key (MATCH SIMPLE) and cannot collide.
 
     ``records`` is the file-stream / engine dict form. Cells are read through
     ``matrix_cell_from_record`` (same DF_MISSING / NULL / string rules as the
@@ -455,8 +462,47 @@ def run_integrity_audit(
         report.warnings.append(msg)
         report.checks_warned += 1
 
+    from services.column_case import header_index as _folded_index
+
+    composite_cols = [
+        str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()
+    ]
+    composite_idx = [_folded_index(headers, c) for c in composite_cols]
+    use_composite = len(composite_cols) > 1 and all(i is not None for i in composite_idx)
+
     # 1. Duplicate primary keys — hard only when sync/dest requires unique identity
-    if not pk_source:
+    if use_composite:
+        label = " + ".join(composite_cols)
+        stats["primary_key"] = label
+        stats["primary_key_columns"] = composite_cols
+        tuples: list[tuple[str, ...]] = []
+        for row in rows:
+            cells = tuple(
+                present_cell_text(row[i] if i < len(row) else "")  # type: ignore[operator]
+                for i in composite_idx
+            )
+            if any(c is None for c in cells):
+                continue
+            tuples.append(cells)  # type: ignore[arg-type]
+        dup_tuples = {t: c for t, c in Counter(tuples).items() if c > 1}
+        if dup_tuples:
+            examples = ", ".join("(" + ", ".join(t) + ")" for t in list(dup_tuples)[:3])
+            if require_unique_identity:
+                _hard(
+                    f"Duplicate composite key values in '{label}': "
+                    f"{len(dup_tuples)} key tuple(s) repeat (e.g. {examples})"
+                )
+            else:
+                _warn(
+                    f"Duplicate composite key values in '{label}': "
+                    f"{len(dup_tuples)} key tuple(s) repeat (e.g. {examples}). "
+                    f"Sync mode '{sync_mode or 'append'}' does not require unique "
+                    "identity — all rows will be written."
+                )
+                report.checks_passed += 1
+        else:
+            report.checks_passed += 1
+    elif not pk_source:
         _warn(
             "No identity key resolved for duplicate check "
             "(schemaless needs _id; SQL needs id/_id or a stream-contract primary_key)"

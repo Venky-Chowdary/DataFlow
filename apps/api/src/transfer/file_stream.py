@@ -1550,6 +1550,9 @@ def stream_file_to_database(
             ),
             "",
         )
+        from services.sync_cursor import reconcile_cursor_tiebreak
+
+        cursor_pk_source = reconcile_cursor_tiebreak(scope, cursor_pk_source)
         if scope.cursor_column_changed:
             from services.preflight_cursor_gate import cursor_identity_issue
 
@@ -1668,6 +1671,8 @@ def stream_file_to_database(
                         "job_id": job_id,
                         "sync_mode": effective_sync,
                         "cursor_column": cursor_source_col,
+                        # The column a composite watermark is decodable on (QA ACC-02).
+                        "tiebreak_column": cursor_pk_source,
                     },
                 )
                 dest_summary["watermark"] = wm
@@ -1875,6 +1880,9 @@ def stream_file_to_database(
         if not batch_quality_enabled:
             return local_warnings
         audit_sync = "upsert" if write_mode == "upsert" else effective_sync
+        from services.primary_key import identity_source_columns
+
+        audit_pk = identity_source_columns(pk_target_cols, mappings)
         audit = run_integrity_audit(
             headers=headers,
             rows=rows,
@@ -1884,7 +1892,9 @@ def stream_file_to_database(
             validation_mode=validation_mode,
             dest_kind=dest_type,
             sync_mode=audit_sync,
-            primary_key=pk_target_cols[0] if pk_target_cols else None,
+            # Audit cells are source-header keyed; the key is the mapped source.
+            primary_key=audit_pk[0] if audit_pk else None,
+            primary_key_columns=audit_pk,
         )
         if audit.issues:
             local_warnings.extend(audit.issues[:10])
@@ -2406,6 +2416,8 @@ def stream_file_to_database(
                 # A watermark is a value of one column; record which one so a
                 # later run on a different cursor cannot inherit it.
                 "cursor_column": cursor_source_col,
+                # The column a composite watermark is decodable on (QA ACC-02).
+                "tiebreak_column": cursor_pk_source,
             },
         )
         dest_summary["incremental_watermark"] = running_cursor

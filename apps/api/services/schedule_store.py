@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
@@ -250,6 +252,10 @@ class PipelineSchedule:
     running_job_id: str = ""
     run_history: list[dict] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: _now())
+    #: Store revision this copy was read at. Writes are three-way merged against
+    #: it, so a stale in-memory copy can neither clobber a concurrent change nor
+    #: resurrect a deleted schedule.
+    version: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -371,7 +377,15 @@ class PipelineSchedule:
             running_job_id=(data.get("running_job_id") or "").strip(),
             run_history=list(data.get("run_history") or []),
             created_at=data.get("created_at", _now()),
+            version=_as_version(data.get("version")),
         )
+
+
+def _as_version(raw: Any) -> int:
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _now() -> str:
@@ -495,7 +509,10 @@ def _load_mongo(svc) -> list[PipelineSchedule]:
     # Prefer per-schedule documents (CAS-safe). Fall back to legacy blob.
     docs = list(db["pipeline_schedules"].find({}))
     if docs:
-        return [PipelineSchedule.from_dict({**d, "id": d.get("id") or str(d.get("_id"))}) for d in docs]
+        loaded = [_schedule_from_doc(d) for d in docs]
+        for s in loaded:
+            _remember_base(s)
+        return loaded
     doc = db["schedule_store"].find_one({"_id": "primary"})
     if not doc:
         return []
@@ -507,15 +524,155 @@ def _load_mongo(svc) -> list[PipelineSchedule]:
     return [PipelineSchedule.from_dict(s) for s in doc.get("schedules", [])]
 
 
+def _schedule_from_doc(doc: Mapping[str, Any]) -> PipelineSchedule:
+    return PipelineSchedule.from_dict({**doc, "id": doc.get("id") or str(doc.get("_id"))})
+
+
+# Three-way merge base. Every caller does load → mutate one schedule → save the
+# whole snapshot. Without the revision the copy was read at, a save cannot tell
+# "this caller changed the field" from "this caller holds a stale value", so the
+# snapshot used to overwrite concurrent changes wholesale: a beat's claim, a
+# finished run's release, and — through ``upsert`` — a schedule another request
+# had just deleted (QA MX3-24 stuck ``running``; the delete that "succeeded" but
+# left the schedule live).
+_BASE_CAP = 4096
+_BASE_LOCK = threading.Lock()
+_BASE_DOCS: dict[tuple[str, int], dict[str, str]] = {}
+
+
+def _canon(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, default=json_default)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def _field_fingerprint(payload: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        str(k): _canon(v)
+        for k, v in payload.items()
+        if k not in ("_id", "version")
+    }
+
+
+def _remember_base(sched: PipelineSchedule) -> None:
+    key = (sched.id, int(sched.version or 0))
+    snap = _field_fingerprint(sched.to_dict())
+    with _BASE_LOCK:
+        _BASE_DOCS.pop(key, None)
+        _BASE_DOCS[key] = snap
+        while len(_BASE_DOCS) > _BASE_CAP:
+            _BASE_DOCS.pop(next(iter(_BASE_DOCS)))
+
+
+def _base_for(schedule_id: str, version: int) -> dict[str, str] | None:
+    with _BASE_LOCK:
+        return _BASE_DOCS.get((schedule_id, int(version or 0)))
+
+
+def _changed_fields(
+    payload: Mapping[str, Any], reference: Mapping[str, str]
+) -> dict[str, Any]:
+    return {
+        k: v
+        for k, v in payload.items()
+        if k not in ("_id", "version") and reference.get(k) != _canon(v)
+    }
+
+
 def _same_schedule_doc(existing: Mapping[str, Any], payload: Mapping[str, Any]) -> bool:
     """True when ``payload`` carries exactly what the stored doc already holds."""
     stored = {k: v for k, v in existing.items() if k not in ("_id", "version")}
     try:
         return json.dumps(stored, sort_keys=True, default=json_default) == json.dumps(
-            dict(payload), sort_keys=True, default=json_default
+            {k: v for k, v in dict(payload).items() if k != "version"},
+            sort_keys=True,
+            default=json_default,
         )
     except (TypeError, ValueError):
         return False
+
+
+_SAVE_CAS_ATTEMPTS = 8
+
+
+def _save_one_mongo(coll: Any, sched: PipelineSchedule) -> None:
+    """Write only what this caller changed, conditional on the stored revision.
+
+    The changed fields are this copy versus the revision it was read at. They
+    are applied with ``$set`` under a version CAS, so fields another writer
+    changed meanwhile survive. A copy that was read from the store and whose
+    document is now gone was deleted concurrently: it is dropped, never
+    re-inserted.
+    """
+    from pymongo.errors import DuplicateKeyError
+
+    payload = sched.to_dict()
+    payload.pop("_id", None)
+    payload.pop("version", None)
+    payload["id"] = sched.id
+    loaded_version = int(sched.version or 0)
+    base = _base_for(sched.id, loaded_version)
+    delta: dict[str, Any] = {}
+    for _attempt in range(_SAVE_CAS_ATTEMPTS):
+        existing = coll.find_one({"_id": sched.id})
+        if existing is None:
+            if base is not None:
+                logging.getLogger(__name__).info(
+                    "Schedule %s was deleted concurrently; stale copy not re-inserted",
+                    sched.id,
+                )
+                return
+            try:
+                result = coll.find_one_and_update(
+                    {"_id": sched.id},
+                    {"$set": {**payload, "version": 1}},
+                    upsert=True,
+                    return_document=True,
+                )
+            except DuplicateKeyError:
+                continue
+            if result is not None:
+                _remember_base(_schedule_from_doc(result))
+                return
+            continue
+        current_version = _as_version(existing.get("version"))
+        if current_version == loaded_version:
+            # The stored doc *is* this copy's base: the diff against it is
+            # exactly this caller's change.
+            reference = _field_fingerprint(_schedule_from_doc(existing).to_dict())
+        elif base is not None:
+            reference = base
+        else:
+            # Base revision unknown (evicted, or a copy never read from this
+            # store): fall back to the stored values. Logged — this is the one
+            # path that can still apply a stale value.
+            logging.getLogger(__name__).warning(
+                "Schedule %s saved without its base revision v%s (stored v%s)",
+                sched.id,
+                loaded_version,
+                current_version,
+            )
+            reference = _field_fingerprint(_schedule_from_doc(existing).to_dict())
+        delta = _changed_fields(payload, reference)
+        if not delta:
+            return
+        filt: dict[str, Any] = {"_id": sched.id}
+        filt["version"] = (
+            current_version if "version" in existing else {"$exists": False}
+        )
+        result = coll.find_one_and_update(
+            filt,
+            {"$set": {**delta, "version": current_version + 1}},
+            return_document=True,
+        )
+        if result is not None:
+            _remember_base(_schedule_from_doc(result))
+            return
+    # Contended past every retry: apply only this caller's fields, never the
+    # whole stale snapshot, and never resurrect a deleted document.
+    if delta:
+        coll.update_one({"_id": sched.id}, {"$set": delta, "$inc": {"version": 1}})
 
 
 def _save_mongo(
@@ -524,53 +681,20 @@ def _save_mongo(
     *,
     removed_ids: Sequence[str] = (),
 ) -> None:
-    """Persist schedules as individual docs with version CAS (no whole-blob races).
+    """Persist schedules as individual docs with three-way-merged version CAS.
 
     ``removed_ids`` names the schedules this write deletes; nothing else is
-    ever removed. Docs equal to their stored copy are not re-written, so a
-    whole-snapshot save from one instance cannot clobber another instance's
-    concurrent beat, watermark, or newly created schedule.
+    ever removed. Each schedule writes only the fields this caller changed
+    since it read the doc (:func:`_save_one_mongo`), so a whole-snapshot save
+    cannot clobber another instance's concurrent claim, release or watermark,
+    and cannot resurrect a schedule deleted in between.
     """
-    from pymongo.errors import DuplicateKeyError
-
     db = svc.get_database()
     coll = db["pipeline_schedules"]
     seen = set()
     for s in schedules:
         seen.add(s.id)
-        payload = s.to_dict()
-        # Mongo forbids updating ``_id``. Never put it in $set / $setOnInsert —
-        # the query filter ``{_id: s.id}`` already supplies identity on upsert.
-        payload.pop("_id", None)
-        payload["id"] = s.id
-        for attempt in range(5):
-            existing = coll.find_one({"_id": s.id})
-            if existing is not None and _same_schedule_doc(existing, payload):
-                # Callers save the whole loaded snapshot. A schedule this
-                # write did not touch must not be re-stamped, or a stale copy
-                # would overwrite a concurrent instance's beat/watermark.
-                break
-            version = int((existing or {}).get("version") or 0)
-            filt = {"_id": s.id, "$or": [{"version": version}, {"version": {"$exists": False}}]}
-            if existing is None:
-                filt = {"_id": s.id}
-            try:
-                result = coll.find_one_and_update(
-                    filt,
-                    {"$set": {**payload, "version": version + 1}},
-                    upsert=True,
-                    return_document=True,
-                )
-            except DuplicateKeyError:
-                # CAS lost: another instance bumped the version between our
-                # read and write, so the upsert tried to insert a second doc
-                # under the same ``_id``. Re-read and retry.
-                continue
-            if result is not None:
-                break
-        else:
-            # Last writer wins for this schedule id after CAS retries.
-            coll.replace_one({"_id": s.id}, {"_id": s.id, **payload, "version": 1}, upsert=True)
+        _save_one_mongo(coll, s)
     # Only the ids a caller explicitly deleted are removed. Sweeping every doc
     # absent from this snapshot deleted schedules another instance created
     # between our load and this save.
@@ -605,42 +729,30 @@ def _save_all(schedules: list[PipelineSchedule], *, removed_ids: Sequence[str] =
     )
 
 
-def _repair_stale_next_run(schedules: list[PipelineSchedule]) -> list[PipelineSchedule]:
-    """Recompute ``next_run_at`` for enabled schedules frozen in the past.
+def schedule_overdue_seconds(
+    sched: PipelineSchedule, now: datetime | None = None
+) -> int:
+    """Seconds an enabled, idle schedule is past its due time (0 when not).
 
-    A runner outage or a claim that died mid-run leaves ``next_run_at``
-    behind while the schedule stays enabled — the list then advertises a due
-    time that can never arrive (QA D11). Recompute from *now* and persist the
-    repair once; the runner will claim the recomputed instant when it comes
-    back. Disabled and actively-running schedules are left alone.
+    Read-only. QA D11 saw ``next_run_at`` frozen in the past; the cause was a
+    claim that never released (MX3-24), not the timestamp. Rewriting the
+    timestamp on read hid the stuck claim *and* dropped the one catch-up run
+    the beat owes for that slot without counting it as missed. The list now
+    reports how late the run is and — via :func:`claim_holder` — what holds it.
     """
-    now = datetime.now(timezone.utc)
-    dirty = False
-    for sched in schedules:
-        if not sched.enabled or sched.running:
-            continue
-        due = _parse_ts(sched.next_run_at)
-        if due is not None and due.tzinfo is None:
-            due = due.replace(tzinfo=timezone.utc)
-        if due is None or due < now:
-            sched.next_run_at = next_run_for(sched, now)
-            dirty = True
-    if dirty:
-        try:
-            _save_all(schedules)
-        except Exception:
-            # A read must not fail because the repair could not persist —
-            # the recomputed values are still returned to the caller.
-            logging.getLogger(__name__).debug(
-                "stale next_run_at repair could not persist", exc_info=True
-            )
-    return schedules
+    if not sched.enabled or sched.running:
+        return 0
+    due = _parse_ts(sched.next_run_at)
+    if due is None:
+        return 0
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    return max(0, int((current - due).total_seconds()))
 
 
 def list_schedules() -> list[PipelineSchedule]:
-    return sorted(
-        _repair_stale_next_run(_load_all()), key=lambda s: s.created_at, reverse=True
-    )
+    return sorted(_load_all(), key=lambda s: s.created_at, reverse=True)
 
 
 def get_schedule(schedule_id: str) -> PipelineSchedule | None:
@@ -1217,8 +1329,56 @@ def _job_is_live(job_id: str) -> bool | None:
         )
         seen = _parse_ts(stamp) if stamp else None
         if seen is not None and datetime.now(timezone.utc) - seen > _RUNNING_SILENCE:
-            return False
+            # A silent document is not proof of a dead worker: one long batch
+            # writes no checkpoint. The worker lease is the owner signal the
+            # orphan sweeper uses — one authority for "is anybody running it".
+            return _job_lease_held(job_id)
     return True
+
+
+def _job_lease_held(job_id: str) -> bool:
+    try:
+        from services.worker_leases import get_worker_lease_store
+
+        return bool(get_worker_lease_store().is_held(job_id))
+    except Exception:
+        return False
+
+
+def _unbound_claim_grace() -> timedelta:
+    """How long a claim may exist before its job is bound.
+
+    Dispatch builds the request (connector resolve, drift guard) before the job
+    document exists. Under load that has taken minutes, so the window is
+    configurable rather than the 4h lookup-failure ceiling it used to inherit.
+    """
+    try:
+        seconds = int(os.getenv("DATAFLOW_SCHEDULE_UNBOUND_CLAIM_GRACE_SEC", "900"))
+    except ValueError:
+        seconds = 900
+    return timedelta(seconds=max(60, seconds))
+
+
+# Schedules whose dispatch (claim taken, job not yet bound) is executing in
+# this process right now. An unbound claim with a live local dispatch is held.
+_DISPATCHING: set[str] = set()
+_DISPATCHING_LOCK = threading.Lock()
+
+
+@contextmanager
+def dispatch_in_flight(schedule_id: str):
+    with _DISPATCHING_LOCK:
+        _DISPATCHING.add(schedule_id)
+    try:
+        yield
+    finally:
+        with _DISPATCHING_LOCK:
+            _DISPATCHING.discard(schedule_id)
+
+
+def _dispatching_here(schedule_id: str) -> bool:
+    with _DISPATCHING_LOCK:
+        return schedule_id in _DISPATCHING
 
 
 def _is_running_stale(sched: PipelineSchedule) -> bool:
@@ -1228,8 +1388,13 @@ def _is_running_stale(sched: PipelineSchedule) -> bool:
     hours, and reclaiming it mid-flight starts a second writer against the same
     destination. So the claimed job's own state decides — a job still in flight
     holds the claim for as long as it runs, and a job that ended or vanished
-    releases it after a short grace period rather than hours later. The elapsed
-    ceiling applies only when the job cannot be looked up at all.
+    releases it immediately. The elapsed ceiling applies only when a bound job
+    cannot be looked up at all.
+
+    A claim with *no* bound job is not "unknown": nothing is writing yet. It is
+    held while this process is still dispatching it, and otherwise released
+    after :func:`_unbound_claim_grace`. Treating it as unknown wedged schedules
+    for four hours whenever dispatch died between claim and bind (QA MX3-24).
     """
     if not sched.running:
         return True
@@ -1237,18 +1402,95 @@ def _is_running_stale(sched: PipelineSchedule) -> bool:
     if started is None:
         return True
     age = datetime.now(timezone.utc) - started
-    live = _job_is_live(sched.running_job_id)
+    job_id = str(sched.running_job_id or "").strip()
+    if not job_id:
+        if _dispatching_here(sched.id):
+            return False
+        return age > _unbound_claim_grace()
+    live = _job_is_live(job_id)
     if live is True:
         return False
     if live is False:
-        # The bound job already ended. Holding the claim for the grace window
-        # left next_run_at frozen and made Run now answer "already in progress"
-        # after a successful fire. Grace applies only before a job id exists,
-        # which is the gap between the claim and set_running_job.
-        if str(sched.running_job_id or "").strip():
-            return True
-        return age > CLAIM_GRACE
+        return True
     return age > CLAIM_MAX_RUNTIME
+
+
+def claim_holder(
+    sched: PipelineSchedule,
+    *,
+    snapshot: Sequence[PipelineSchedule] | None = None,
+) -> dict[str, Any] | None:
+    """Who blocks this schedule from claiming a run, or ``None`` when free.
+
+    This *is* the decision :func:`mark_schedule_running` takes — one owner —
+    so the operator-facing reason can never disagree with the refusal.
+    """
+    if sched.running and not _is_running_stale(sched):
+        return _holder_entry("this_schedule", sched)
+    peers = list(snapshot) if snapshot is not None else _load_all()
+    dest = _dest_object_holder(
+        sched.dest_connector_id, sched.dest_table, sched.id, peers
+    )
+    if dest is not None:
+        return _holder_entry("same_destination", dest)
+    pair = _connector_pair_holder(
+        sched.source_connector_id, sched.dest_connector_id, sched.id, peers
+    )
+    if pair is not None:
+        return _holder_entry("same_connector_pair", pair)
+    return None
+
+
+_REFUSALS: dict[str, dict[str, Any]] = {}
+_REFUSALS_LOCK = threading.Lock()
+
+
+def _record_refusal(schedule_id: str, holder: dict[str, Any] | None) -> None:
+    with _REFUSALS_LOCK:
+        if holder is None:
+            _REFUSALS.pop(schedule_id, None)
+        else:
+            _REFUSALS[schedule_id] = {**holder, "observed_at": _now()}
+
+
+def last_claim_refusal(schedule_id: str) -> dict[str, Any] | None:
+    """The holder that refused this schedule's most recent claim attempt."""
+    with _REFUSALS_LOCK:
+        found = _REFUSALS.get(schedule_id)
+        return dict(found) if found else None
+
+
+def _holder_entry(kind: str, holder: PipelineSchedule) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "schedule_id": holder.id,
+        "schedule_name": holder.name,
+        "job_id": str(holder.running_job_id or ""),
+        "running_since": holder.running_started_at,
+        "running_instance": holder.running_instance,
+        "dest_table": holder.dest_table,
+    }
+
+
+def describe_claim_holder(holder: Mapping[str, Any] | None) -> str:
+    """One operator sentence naming exactly what holds the claim."""
+    if not holder:
+        return "A run is already in progress for this schedule."
+    job = str(holder.get("job_id") or "")
+    since = str(holder.get("running_since") or "")
+    tail = (f" (job {job}" if job else " (no job bound yet") + (
+        f", running since {since})" if since else ")"
+    )
+    kind = holder.get("kind")
+    if kind == "this_schedule":
+        return "A run of this schedule is already in progress" + tail + "."
+    name = holder.get("schedule_name") or holder.get("schedule_id")
+    what = (
+        f"destination table {holder.get('dest_table')!s}"
+        if kind == "same_destination"
+        else "the same source→destination connector pair"
+    )
+    return f"Schedule “{name}” is writing {what}" + tail + " — one writer at a time."
 
 
 def _job_dispatch_state(job_id: str) -> str:
@@ -1305,20 +1547,35 @@ def _claim_running_mongo(
     now: str,
     *,
     next_run_at: str | None = None,
+    stale: PipelineSchedule | None = None,
 ) -> PipelineSchedule | None:
-    """CAS the running flag on the per-schedule Mongo document."""
+    """CAS the running flag on the per-schedule Mongo document.
+
+    Free claims match ``running`` false/absent. A *stale* claim is reclaimed
+    only when the document still carries exactly the claim that was judged
+    stale (same start stamp and job id): two beats that both judged it stale
+    cannot both win, and a claim re-taken meanwhile is not stolen.
+    """
     svc = _mongo_backend()
     if not svc:
         return None
     coll = svc.get_database()["pipeline_schedules"]
+    free: list[dict[str, Any]] = [
+        {"running": {"$in": [False, None]}},
+        {"running": {"$exists": False}},
+    ]
+    if stale is not None and stale.running:
+        free.append(
+            {
+                "running": True,
+                "running_started_at": stale.running_started_at,
+                "running_job_id": {"$in": [str(stale.running_job_id or ""), None]}
+                if not str(stale.running_job_id or "")
+                else str(stale.running_job_id),
+            }
+        )
     result = coll.find_one_and_update(
-        {
-            "_id": schedule_id,
-            "$or": [
-                {"running": {"$in": [False, None]}},
-                {"running": {"$exists": False}},
-            ],
-        },
+        {"_id": schedule_id, "$or": free},
         {
             "$set": {
                 "running": True,
@@ -1326,13 +1583,16 @@ def _claim_running_mongo(
                 "running_started_at": now,
                 "running_job_id": "",
                 **({"next_run_at": next_run_at} if next_run_at else {}),
-            }
+            },
+            "$inc": {"version": 1},
         },
         return_document=True,
     )
     if not result:
         return None
-    return PipelineSchedule.from_dict({**result, "id": result.get("id") or str(result.get("_id"))})
+    claimed = _schedule_from_doc(result)
+    _remember_base(claimed)
+    return claimed
 
 
 def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule | None:
@@ -1348,13 +1608,9 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
         for i, s in enumerate(schedules):
             if s.id != schedule_id:
                 continue
-            if s.running and not _is_running_stale(s):
-                return None
-            if dest_object_busy(
-                s.dest_connector_id, s.dest_table, exclude_id=s.id
-            ) or connector_pair_busy(
-                s.source_connector_id, s.dest_connector_id, exclude_id=s.id
-            ):
+            holder = claim_holder(s, snapshot=schedules)
+            _record_refusal(schedule_id, holder)
+            if holder is not None:
                 return None
             # One catch-up for a slot already in the past, then the next
             # cadence boundary. Leaving next_run_at behind made every beat
@@ -1367,8 +1623,19 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                 advanced = compute_next_run(
                     s.interval, current, cron=s.cron, tz=s.timezone
                 )
-            claimed = _claim_running_mongo(schedule_id, instance, now, next_run_at=advanced)
-            if claimed is not None:
+            if _mongo_backend() is not None:
+                # The CAS is the only claim on a shared store. Falling back to a
+                # snapshot write when it lost let two beats both "win" a stale
+                # reclaim and start two writers against one destination.
+                claimed = _claim_running_mongo(
+                    schedule_id, instance, now, next_run_at=advanced, stale=s
+                )
+                if claimed is None:
+                    _record_refusal(
+                        schedule_id,
+                        {"kind": "claim_lost", "schedule_id": schedule_id,
+                         "schedule_name": s.name, "job_id": "", "running_since": None},
+                    )
                 return claimed
             updated = PipelineSchedule.from_dict({
                 **s.to_dict(),
@@ -1613,30 +1880,50 @@ def dest_object_busy(
     table and both append. The destination object (dest connector + table)
     is the write lock — one writer at a time, dest COUNT cannot double.
     """
+    return _dest_object_holder(dest_connector_id, dest_table, exclude_id) is not None
+
+
+def _dest_object_holder(
+    dest_connector_id: str,
+    dest_table: str,
+    exclude_id: str = "",
+    snapshot: Sequence[PipelineSchedule] | None = None,
+) -> PipelineSchedule | None:
     needle = _norm_dest_object(dest_connector_id, dest_table)
     if needle is None:
-        return False
-    for s in _load_all():
+        return None
+    for s in snapshot if snapshot is not None else _load_all():
         if s.id == exclude_id:
             continue
-        other = _norm_dest_object(s.dest_connector_id, s.dest_table)
-        if other != needle:
+        if _norm_dest_object(s.dest_connector_id, s.dest_table) != needle:
             continue
         if s.running and not _is_running_stale(s):
-            return True
-    return False
+            return s
+    return None
 
 
 def connector_pair_busy(source_connector_id: str, dest_connector_id: str, exclude_id: str = "") -> bool:
     """Return True if another non-stale schedule for the same connector pair is running."""
-    for s in _load_all():
+    return (
+        _connector_pair_holder(source_connector_id, dest_connector_id, exclude_id)
+        is not None
+    )
+
+
+def _connector_pair_holder(
+    source_connector_id: str,
+    dest_connector_id: str,
+    exclude_id: str = "",
+    snapshot: Sequence[PipelineSchedule] | None = None,
+) -> PipelineSchedule | None:
+    for s in snapshot if snapshot is not None else _load_all():
         if s.id == exclude_id:
             continue
         if s.source_connector_id != source_connector_id or s.dest_connector_id != dest_connector_id:
             continue
         if s.running and not _is_running_stale(s):
-            return True
-    return False
+            return s
+    return None
 
 
 def has_open_approval(sched: Any) -> bool:

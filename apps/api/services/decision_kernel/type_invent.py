@@ -1262,6 +1262,46 @@ def _unsigned_polarity_only_collapse(src: str, dest: str, db: str) -> bool:
     )
 
 
+def _open_domain_decimal_stamp(
+    src_type: str,
+    dest_db_type: str,
+    *,
+    samples: list | None,
+    source_db: str,
+) -> str:
+    """Create-new stamp for a decimal inferred from an untyped source's sample.
+
+    ``""`` when the rule does not apply (declared source domain, not a decimal,
+    IEEE residue that must stay FLOAT, or unknown scale on a bounded engine).
+    """
+    from services.decimal_observe import (
+        observe_numeric_samples,
+        open_domain_decimal_carrier,
+        sampled_numeric_is_not_a_domain,
+    )
+
+    if normalize_logical_type(src_type) != LOGICAL_DECIMAL:
+        return ""
+    if not sampled_numeric_is_not_a_domain(source_db):
+        return ""
+    scale: int | None = None
+    if samples:
+        obs = observe_numeric_samples(samples)
+        kind = obs.get("kind")
+        if kind == "ieee_float":
+            return ""
+        if kind in {"fixed_decimal", "integer"}:
+            scale = int(obs.get("scale") or 0)
+    if scale is None:
+        _p, declared_scale = parse_numeric_precision_scale(src_type)
+        scale = declared_scale
+    carrier = open_domain_decimal_carrier(scale, dest_db=dest_db_type)
+    if not carrier:
+        return ""
+    db = (dest_db_type or "").strip()
+    return ddl_type(db, carrier) if db else carrier
+
+
 def _create_new_mapping_target_type(
     src_type: str,
     dest_db_type: str = "",
@@ -1280,6 +1320,14 @@ def _create_new_mapping_target_type(
     invent observed ``DECIMAL(p,s)`` or ``FLOAT`` (IEEE residue) — never silent
     platform floor ``DECIMAL(38,15)`` from an empty typmod.
     """
+    # Sample-inferred decimals (files, object stores, document scrolls) are not
+    # a domain: size the integer part to the destination, keep observed scale
+    # (QA MX2-10 — a 50-row DECIMAL(4,2) quarantined 99% of the file).
+    open_stamp = _open_domain_decimal_stamp(
+        src_type, dest_db_type, samples=samples, source_db=source_db
+    )
+    if open_stamp:
+        return open_stamp
     # Bare DECIMAL/NUMERIC invent from samples before specialty / UUID paths.
     # Declared DECIMAL(p,s) wins; empty samples fall through (no fake (38,15)).
     # Declared FLOAT/DOUBLE/REAL must never invent DECIMAL from samples — that

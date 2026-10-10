@@ -370,6 +370,15 @@ def _source_key_values(
     return values
 
 
+def _measured_count(measured: Any, fallback: int) -> int:
+    """The measured count when one exists (including 0), else ``fallback``."""
+    if isinstance(measured, bool):
+        return int(fallback)
+    if isinstance(measured, int) and measured >= 0:
+        return measured
+    return int(fallback)
+
+
 def _as_count(value: Any) -> int:
     try:
         return max(int(value), 0)
@@ -745,8 +754,12 @@ def _maybe_attach_verification_ladder(
         target_rows=target_rows,
         columns=target_cols,
         pk_column=pk_column,
-        source_row_count=int(report.get("source_rows") or len(source_rows)),
-        target_row_count=int(report.get("target_rows") or len(target_rows)),
+        # A measured 0 is a count, not a missing one. ``report["source_rows"] or
+        # len(...)`` replaced a quiet incremental poll's reader count (0) with a
+        # whole-table re-read, so L1 expected every existing row to be new and
+        # failed the steady state of every incremental schedule (QA ACC-02).
+        source_row_count=_measured_count(report.get("source_rows"), len(source_rows)),
+        target_row_count=_measured_count(report.get("target_rows"), len(target_rows)),
         rejected_rows=int(report.get("rejected_rows") or 0),
         coerced_null_rows=int(report.get("coerced_null_rows") or 0),
         rows_skipped=int(report.get("rows_skipped") or 0),

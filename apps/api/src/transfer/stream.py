@@ -1032,6 +1032,22 @@ def _stream_database_transfer_impl(
             )
         except Exception as exc:
             logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
+    if incremental and cursor_source_col and not cursor_pk_source:
+        # One tie-break for every read path of this run (QA ACC-02). The COPY
+        # fast path and the pre-copy watermark scope run before the row path,
+        # so deriving the catalog tie-break only there let run 1 write a
+        # composite watermark that run 2's COPY then decoded single-column.
+        from services.keyset_pagination import catalog_incremental_tiebreak
+
+        _tb_types, _tb_nulls, _tb_keys = _src_rich_catalog
+        cursor_pk_source = catalog_incremental_tiebreak(
+            src_type,
+            cursor_source_col,
+            contract_pk=pk_source_cols,
+            catalog_pk=list(_tb_keys.get("primary_key_columns") or []),
+            unique_keys=list(_tb_keys.get("unique_keys") or []),
+            nullable=_tb_nulls,
+        )
     if requires_upsert(effective_sync) and not pk_target_cols:
         from services.primary_key import mapped_catalog_upsert_key
 
@@ -1079,6 +1095,9 @@ def _stream_database_transfer_impl(
             )
             pre_copy_cursor_key = _scope.cursor_key
             pre_copy_watermark = _scope.watermark
+            from services.sync_cursor import reconcile_cursor_tiebreak
+
+            cursor_pk_source = reconcile_cursor_tiebreak(_scope, cursor_pk_source)
             refuse_unusable_cursor_state(
                 _scope, dest_type, dest_cfg, _dest_obj
             )
@@ -1115,6 +1134,29 @@ def _stream_database_transfer_impl(
             "destination — schema evolution runs on the writer path",
             dest_type,
         )
+    # Write-path referential-integrity guard (QA fk__pg-maria / fk__pg-pg):
+    # child rows whose destination parent does not exist are quarantined, not
+    # committed. Built before the COPY decision: a server-to-server copy never
+    # brings a row into this process, so it cannot hold an orphan back — a
+    # guarded route takes the row path instead of landing orphans unchecked.
+    fk_orphan_guard = None
+    try:
+        from .stream_foreign_keys import build_fk_orphan_guard
+
+        fk_orphan_guard = build_fk_orphan_guard(
+            source,
+            destination,
+            _source_name(source),
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+        )
+    except Exception as exc:
+        logger.debug("FK orphan guard not built for %s: %s", _source_name(source), exc)
+    if fk_orphan_guard is not None:
+        copy_decline.append(
+            "COPY fast path declined: source foreign keys need a per-row "
+            "destination parent check (orphans are quarantined on the row path)"
+        )
     _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
     try:
@@ -1122,7 +1164,10 @@ def _stream_database_transfer_impl(
 
         decline_copy_for_destination_sql(dest_proc_plan)
         fast = None if (
-            pending_shape or writer_owns_evolution or dest_proc_plan is not None
+            pending_shape
+            or writer_owns_evolution
+            or dest_proc_plan is not None
+            or fk_orphan_guard is not None
         ) else _try_copy_fast_path(
             source=source,
             destination=destination,
@@ -1189,6 +1234,8 @@ def _stream_database_transfer_impl(
                         "job_id": job_id,
                         "sync_mode": effective_sync,
                         "cursor_column": cursor_source_col,
+                        # The column a composite watermark is decodable on (QA ACC-02).
+                        "tiebreak_column": cursor_pk_source,
                     },
                 )
                 dest_summary["watermark"] = wm
@@ -1287,6 +1334,9 @@ def _stream_database_transfer_impl(
         cursor_key = scope.cursor_key
         watermark = scope.watermark
         from services.preflight_cursor_gate import refuse_unusable_cursor_state
+        from services.sync_cursor import reconcile_cursor_tiebreak
+
+        cursor_pk_source = reconcile_cursor_tiebreak(scope, cursor_pk_source)
 
         refuse_unusable_cursor_state(
             scope, dest_type, dest_cfg, resolve_dest_table(dest_type, destination, table)
@@ -2611,23 +2661,8 @@ def _stream_database_transfer_impl(
                 kept.append(row)
         return kept, unbounded
 
-    # Write-path referential-integrity guard (QA fk__pg-maria / fk__pg-pg):
-    # child rows whose destination parent does not exist are quarantined, not
-    # committed. Built once per stream — the FK catalog probe is small and
-    # runs before the first page is filtered.
-    fk_orphan_guard = None
-    try:
-        from .stream_foreign_keys import build_fk_orphan_guard
-
-        fk_orphan_guard = build_fk_orphan_guard(
-            source,
-            destination,
-            table,
-            dest_type=dest_type,
-            dest_cfg=dest_cfg,
-        )
-    except Exception as exc:
-        logger.debug("FK orphan guard not built for %s: %s", table, exc)
+    # ``fk_orphan_guard`` was built ahead of the COPY decision (one guard per
+    # stream); the row path below applies it to every page.
 
     def _filter_batch(batch):
         """Source filter, then the approved recipe — once per page.
@@ -2821,6 +2856,11 @@ def _stream_database_transfer_impl(
     if batch and getattr(batch, "headers", None) and pk_source_col:
         lower = {h.lower(): h for h in batch.headers}
         pk_source_col = lower.get(pk_source_col.lower(), pk_source_col)
+    # Full composite identity for the batch audit (QA ACC-03). Auditing the
+    # first component alone hard-blocked every (region, id) upsert at Execute.
+    from services.primary_key import identity_source_columns
+
+    pk_audit_cols = identity_source_columns(pk_target_cols, mappings)
 
     # Phase F6 — default per-transfer parallelism raised from 2 → min(4, CPUs).
     max_workers = int(
@@ -2932,16 +2972,30 @@ def _stream_database_transfer_impl(
                 PHASE_TRANSFORM_WRITE, time.perf_counter() - started, rows=rows
             )
 
+    def _fk_held_out(batch: Any) -> list[dict[str, Any]]:
+        return list(getattr(batch, "fk_orphan_details", None) or [])
+
     def _process_db_chunk_inner(idx: int, batch: Any) -> dict[str, Any]:
         if not batch or not getattr(batch, "rows", None):
             # A page a filter or a recipe emptied still consumed source rows, so
             # the offset, the watermark and the keyset bookmark advance past it.
             # Reporting zero here would re-read that page on resume for ever.
+            # A page the FK orphan guard emptied is *quarantine*, not removal:
+            # its rows must reach the DLQ and the ledger as rejects.
+            orphans = _fk_held_out(batch)
             return {
                 "batch_written": 0,
                 "last_checksum": "",
-                "dest_summary": {},
-                "rejected": 0,
+                "dest_summary": (
+                    {
+                        "rejected_details": orphans,
+                        "rejected_rows": len(orphans),
+                        "orphan_fk_rows": len(orphans),
+                    }
+                    if orphans
+                    else {}
+                ),
+                "rejected": len(orphans),
                 "coerced_null": 0,
                 "warnings": [],
                 "batch_max": _raw_page_cursor(batch) or None,
@@ -2953,7 +3007,8 @@ def _stream_database_transfer_impl(
                     0,
                     _raw_page_rows(batch)
                     - _raw_page_filtered(batch)
-                    - _raw_page_cursor_bounded(batch),
+                    - _raw_page_cursor_bounded(batch)
+                    - len(orphans),
                 ),
                 "reconcile_sample_rows": [],
                 "fingerprints": [],
@@ -2979,6 +3034,7 @@ def _stream_database_transfer_impl(
                 mappings=mappings,
                 required_targets=pk_target_cols or [],
                 primary_key=pk_source_col if pk_source_col in batch.headers else None,
+                primary_key_columns=pk_audit_cols,
                 validation_mode=validation_mode,
                 dest_kind=dest_type,
                 # Validate↔Run parity: Full append must not invent a uniqueness
@@ -3201,7 +3257,10 @@ def _stream_database_transfer_impl(
                 _raw_page_rows(batch)
                 - _raw_page_filtered(batch)
                 - _raw_page_cursor_bounded(batch)
-                - len(batch.rows),
+                - len(batch.rows)
+                # FK orphans are rejects (already in this batch's ledger), not
+                # recipe removals — counting both made a correct run look lossy.
+                - len(_fk_held_out(batch)),
             ),
             "reconcile_sample_rows": sample_rows,
             "fingerprints": inline_fps,
@@ -3373,6 +3432,8 @@ def _stream_database_transfer_impl(
                         # A watermark is a value of one column; record which one
                         # so a later run on a different cursor cannot inherit it.
                         "cursor_column": cursor_source_col,
+                        # The column a composite watermark is decodable on (QA ACC-02).
+                        "tiebreak_column": cursor_pk_source,
                     },
                 )
             except Exception as wm_exc:
@@ -3574,6 +3635,8 @@ def _stream_database_transfer_impl(
                 # A watermark is a value of one column; record which one so a
                 # later run on a different cursor cannot inherit it.
                 "cursor_column": cursor_source_col,
+                # The column a composite watermark is decodable on (QA ACC-02).
+                "tiebreak_column": cursor_pk_source,
             },
         )
 
@@ -3702,6 +3765,13 @@ def _stream_database_transfer_impl(
                     # it removed would fail Gate-8 on a correct run.
                     digest_rows = apply_row_filter_to_matrix(
                         batch.headers, digest_rows, source_filter
+                    )
+                if fk_orphan_guard is not None and digest_rows:
+                    # Orphans were quarantined, not written: the digest covers
+                    # the rows the write pass let through, in the same order of
+                    # owners (filter → FK guard → recipe).
+                    digest_rows, _orphans_now = fk_orphan_guard.partition(
+                        list(digest_headers or []), list(digest_rows)
                     )
                 if reread_shaper is not None:
                     # Shaped for the digest only: pagination and the keyset

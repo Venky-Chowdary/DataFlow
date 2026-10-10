@@ -1389,6 +1389,125 @@ def _stamp_cdc_poll(
     )
 
 
+def cdc_source_type(source: Any) -> str:
+    """CDC source kind — the catalog format, so sqlserver/oracle are not
+    collapsed to generic_sql by driver resolution."""
+    src_driver = resolve_driver_type(getattr(source, "format", "") or "")
+    src_format = (
+        (getattr(source, "format", "") or src_driver or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+    if src_format in {"mssql", "sql_server"}:
+        src_format = "sqlserver"
+    src_type = src_format if src_format in {
+        "mongodb",
+        "mysql",
+        "postgresql",
+        "postgres",
+        "sqlserver",
+        "oracle",
+    } else src_driver
+    return "postgresql" if src_type == "postgres" else src_type
+
+
+def _single_stream_cursor_key(
+    *,
+    src_type: str,
+    src_cfg: dict[str, Any],
+    table_name: str,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    stream_name: str,
+) -> str:
+    return build_cursor_key(
+        source_type=src_type,
+        source_database=src_cfg.get("database", ""),
+        source_object=table_name,
+        dest_type=dest_type,
+        dest_database=dest_cfg.get("database", ""),
+        dest_object=dest_table,
+        stream_name=stream_name or "stream",
+    )
+
+
+def cdc_route_cursor_keys(
+    source: Any,
+    destination: Any,
+    stream_contracts: list[dict] | None,
+) -> list[dict[str, Any]]:
+    """Every cursor key a CDC run of this route can have opened capture under.
+
+    Owner of route → slot identity for anything that must *find* the capture
+    later (schedule delete releasing a PostgreSQL slot, QA S14). It derives the
+    keys exactly as the run paths do, so release never depends on the last
+    job document carrying ``cursor_key`` — a failed last attempt does not.
+
+    Multi-table routes return the shared-reader key *and* each per-table key:
+    the shared reader falls back to N sequential readers, each with its own
+    slot. Each entry is ``{"cursor_key", "tables"}`` (tables = the slot's
+    table scope, a string or list, as the reader names it).
+    """
+    import copy
+
+    selected = resolve_selected_sync_contracts(stream_contracts)
+    dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
+    src_cfg = resolve_connector_config(source)
+    dest_cfg = resolve_connector_config(destination)
+    out: list[dict[str, Any]] = []
+
+    def _single(src: Any, dst: Any, contract: Any) -> None:
+        table_name = getattr(src, "table", None) or getattr(src, "collection", None) or ""
+        out.append({
+            "cursor_key": _single_stream_cursor_key(
+                src_type=cdc_source_type(src),
+                src_cfg=src_cfg,
+                table_name=table_name,
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                dest_table=resolve_dest_table(dest_type, dst, table_name),
+                stream_name=(contract.name if contract else "") or "stream",
+            ),
+            "tables": table_name,
+        })
+
+    if len(selected) <= 1:
+        _single(source, destination, selected[0] if selected else None)
+        return out
+    from services.cdc_multi_table import shared_route_cursor_key
+
+    tables = [(c.name or "").strip() for c in selected if (c.name or "").strip()]
+    out.append({
+        "cursor_key": shared_route_cursor_key(
+            engine=resolve_driver_type(getattr(source, "format", "") or ""),
+            database=str(src_cfg.get("database") or ""),
+            tables=tables,
+            dest_type=dest_type,
+            dest_database=str(dest_cfg.get("database") or ""),
+        ),
+        "tables": tables,
+    })
+    for contract in selected:
+        name = (contract.name or "").strip()
+        if not name:
+            continue
+        src = copy.copy(source)
+        dst = copy.copy(destination)
+        if getattr(src, "format", "") == "mongodb" or getattr(source, "collection", None):
+            src.collection = name
+        else:
+            src.table = name
+        if getattr(destination, "table", None) is not None or getattr(destination, "collection", None) is not None:
+            if getattr(dst, "format", "") == "mongodb" or getattr(destination, "collection", None):
+                dst.collection = name
+            else:
+                dst.table = name
+        _single(src, dst, contract)
+    return out
+
+
 def run_cdc_database_transfer(
     source: Any,
     destination: Any,
@@ -2486,20 +2605,11 @@ def _run_cdc_single_stream(
     # Driver type is used for generic read/write; CDC source kind uses the
     # catalog format so sqlserver/oracle are not collapsed to generic_sql.
     src_driver = resolve_driver_type(source.format)
-    dest_type = resolve_driver_type(destination.format)
     src_format = (source.format or src_driver or "").strip().lower().replace("-", "_")
     if src_format in {"mssql", "sql_server"}:
         src_format = "sqlserver"
-    src_type = src_format if src_format in {
-        "mongodb",
-        "mysql",
-        "postgresql",
-        "postgres",
-        "sqlserver",
-        "oracle",
-    } else src_driver
-    if src_type == "postgres":
-        src_type = "postgresql"
+    src_type = cdc_source_type(source)
+    dest_type = resolve_driver_type(destination.format)
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
     table_name = source.table or source.collection or ""
@@ -2575,13 +2685,13 @@ def _run_cdc_single_stream(
     # Single-column shorthand kept for call sites that still take a string
     # (readers, cursor defaults). Composite deletes/upserts use the list.
     pk_target_col = pk_target_cols[0] if len(pk_target_cols) == 1 else ",".join(pk_target_cols)
-    cursor_key = build_cursor_key(
-        source_type=src_type,
-        source_database=src_cfg.get("database", ""),
-        source_object=table_name,
+    cursor_key = _single_stream_cursor_key(
+        src_type=src_type,
+        src_cfg=src_cfg,
+        table_name=table_name,
         dest_type=dest_type,
-        dest_database=dest_cfg.get("database", ""),
-        dest_object=dest_table,
+        dest_cfg=dest_cfg,
+        dest_table=dest_table,
         stream_name=contract.name if contract else "stream",
     )
     watermark = get_watermark(cursor_key)
