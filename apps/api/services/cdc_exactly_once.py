@@ -1623,17 +1623,8 @@ EOS_NON_TRANSACTIONAL_DESTS: dict[str, str] = {
     "cassandra": "no multi-partition transactions",
 }
 
-_EOS_CANONICAL_SINKS = (
-    "postgresql",
-    "mysql",
-    "mariadb",
-    "sqlserver",
-    "oracle",
-    "snowflake",
-    "duckdb",
-    "sqlite",
-    "generic_sql",
-)
+# Derived from the existing sets so the honesty list cannot drift from the gate.
+_EOS_CANONICAL_SINKS = tuple(sorted(EOS_TRANSACTIONAL_DESTS & EOS_TXN_WIRED_DESTS))
 
 
 def _canonical_sink(dest_type: str) -> str:
@@ -2121,20 +2112,23 @@ def dest_allow_append_only(destination: Any) -> bool:
 
 def dest_require_exactly_once(destination: Any, dest_cfg: dict[str, Any] | None = None) -> bool:
     """``require_exactly_once=true`` on the destination (extra, config, or cfg)."""
-    sources: list[Any] = [
-        getattr(destination, "extra", None),
-        getattr(destination, "config", None),
-        dest_cfg,
-    ]
-    for src in sources:
-        if not isinstance(src, dict):
-            continue
-        for key in ("require_exactly_once", "cdc_require_exactly_once"):
-            val = src.get(key)
-            if val is True or (
-                isinstance(val, str) and val.strip().lower() in {"1", "true", "yes", "on"}
-            ):
-                return True
+    sources = (getattr(destination, "extra", None), getattr(destination, "config", None), dest_cfg)
+    return any(
+        cfg_truthy(src, "require_exactly_once", "cdc_require_exactly_once")
+        for src in sources
+        if isinstance(src, dict)
+    )
+
+
+def cfg_truthy(cfg: dict[str, Any] | None, *keys: str) -> bool:
+    """True when any key is ``True`` or a truthy string ("1", "true", "yes", "on")."""
+    raw = cfg or {}
+    for key in keys:
+        val = raw.get(key)
+        if val is True:
+            return True
+        if isinstance(val, str) and val.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
     return False
 
 

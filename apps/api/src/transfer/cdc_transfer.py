@@ -906,14 +906,9 @@ def _stamp_cdc_lsn(
 
 
 def _truthy_cfg(cfg: dict[str, Any] | None, *keys: str) -> bool:
-    raw = cfg or {}
-    for key in keys:
-        val = raw.get(key)
-        if val is True:
-            return True
-        if isinstance(val, str) and val.strip().lower() in {"1", "true", "yes", "on"}:
-            return True
-    return False
+    from services.cdc_exactly_once import cfg_truthy
+
+    return cfg_truthy(cfg, *keys)
 
 
 def _gate_cdc_sink(
