@@ -144,6 +144,8 @@ _PUBLIC_PATHS = {
     "/api/v1/transfer/platform",
     "/api/v1/transfer/readiness",
     "/api/v1/catalog",
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/api/v1/mcp",
 }
 
 

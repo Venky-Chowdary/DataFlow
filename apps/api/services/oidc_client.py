@@ -346,19 +346,18 @@ def _token_error_reason(exc: PyJWTError) -> str:
     return "malformed"
 
 
-def validate_id_token(
-    id_token: str,
+def _decode_signed_token(
+    token: str,
     *,
     metadata: OidcProviderMetadata,
-    client_id: str,
-    nonce: str,
+    audience: str,
     algorithms: tuple[str, ...],
     leeway: int,
-    sso_type: str = "oidc",
+    sso_type: str,
 ) -> dict[str, Any]:
-    """Validate an ID token against its selected provider key and OIDC claims."""
+    """Decode a signed OIDC token after selecting its provider JWKS key."""
     try:
-        header = jwt.get_unverified_header(id_token)
+        header = jwt.get_unverified_header(token)
     except (PyJWTError, TypeError, ValueError) as exc:
         raise OidcTokenInvalid("malformed") from exc
     algorithm = header.get("alg")
@@ -384,10 +383,10 @@ def validate_id_token(
     try:
         key = jwt.PyJWK(jwk, algorithm=algorithm)
         claims = jwt.decode(
-            id_token,
+            token,
             key,
             algorithms=list(algorithms),
-            audience=client_id,
+            audience=audience,
             issuer=metadata.issuer,
             leeway=leeway,
             options={"require": ["exp", "iat", "iss", "aud", "sub"]},
@@ -396,6 +395,30 @@ def validate_id_token(
         raise OidcTokenInvalid(_token_error_reason(exc)) from exc
     except (TypeError, ValueError) as exc:
         raise OidcTokenInvalid("malformed") from exc
+    if not isinstance(claims.get("sub"), str) or not claims["sub"].strip():
+        raise OidcTokenInvalid("malformed")
+    return claims
+
+
+def validate_id_token(
+    id_token: str,
+    *,
+    metadata: OidcProviderMetadata,
+    client_id: str,
+    nonce: str,
+    algorithms: tuple[str, ...],
+    leeway: int,
+    sso_type: str = "oidc",
+) -> dict[str, Any]:
+    """Validate an ID token against its selected provider key and OIDC claims."""
+    claims = _decode_signed_token(
+        id_token,
+        metadata=metadata,
+        audience=client_id,
+        algorithms=algorithms,
+        leeway=leeway,
+        sso_type=sso_type,
+    )
 
     audience = claims.get("aud")
     if isinstance(audience, list) and len(audience) > 1:
@@ -410,6 +433,26 @@ def validate_id_token(
     ):
         raise OidcTokenInvalid("nonce_mismatch")
     return claims
+
+
+def validate_access_token(
+    token: str,
+    *,
+    metadata: OidcProviderMetadata,
+    audience: str,
+    algorithms: tuple[str, ...],
+    leeway: int,
+    sso_type: str = "oidc",
+) -> dict[str, Any]:
+    """Validate an OAuth access token for the MCP protected resource."""
+    return _decode_signed_token(
+        token,
+        metadata=metadata,
+        audience=audience,
+        algorithms=algorithms,
+        leeway=leeway,
+        sso_type=sso_type,
+    )
 
 
 def clock_skew_leeway() -> int:

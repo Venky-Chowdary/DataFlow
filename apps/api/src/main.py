@@ -44,7 +44,7 @@ from .routers.resource_acl_router import router as resource_acl_router
 from .routers.cdc_mapping_review_router import router as cdc_mapping_review_router
 from .routers.transforms_router import router as transforms_router
 from .routers.copilot_router import router as copilot_router
-from .routers.mcp_router import router as mcp_router
+from .routers.mcp_router import oauth_resource_router, router as mcp_router
 from .routers.ops_router import router as ops_router
 from .routers.preflight_router import router as preflight_router
 from .routers.query_router import router as query_router
@@ -421,6 +421,7 @@ app.include_router(copilot_router, prefix="/api/v1")
 app.include_router(training_agent_router, prefix="/api/v1")
 app.include_router(transfer_router, prefix="/api/v1")
 app.include_router(mcp_router, prefix="/api/v1")
+app.include_router(oauth_resource_router)
 app.include_router(automation_router, prefix="/api/v1")
 app.include_router(catalog_router, prefix="/api/v1")
 app.include_router(schedules_router, prefix="/api/v1")

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -9,6 +11,8 @@ from services.tenant_bind import principal_allowed_for_tenant
 
 from ..services import auth_service as _auth_service
 from ..services.auth_service import lookup_user, verify_token
+
+logger = logging.getLogger(__name__)
 
 _PUBLIC_PREFIXES = (
     "/health",
@@ -25,6 +29,7 @@ _PUBLIC_PREFIXES = (
     # Marketing / docs / landing need catalog stats without a session.
     "/api/v1/catalog",
     "/catalog",
+    "/.well-known/oauth-protected-resource",
 )
 
 if docs_enabled():
@@ -93,7 +98,57 @@ def _attach_user(request: Request, token: str) -> bool:
         request.state.api_key_id = key_info["id"]
         request.state.api_key_auth = True
         return True
-    return False
+
+    if not request.url.path.startswith("/api/v1/mcp"):
+        return False
+    from services import oidc_client
+    from services.mcp_oauth import get_mcp_oauth_config
+    from services.rbac import all_permissions
+    from services.user_store import get_user as get_stored_user
+
+    oauth = get_mcp_oauth_config()
+    if not oauth.enabled:
+        return False
+    try:
+        metadata = oidc_client.discover(oauth.issuer)
+        claims = oidc_client.validate_access_token(
+            token,
+            metadata=metadata,
+            audience=oauth.audience,
+            algorithms=oidc_client.allowed_algorithms("oidc", metadata),
+            leeway=oidc_client.clock_skew_leeway(),
+        )
+        email = oidc_client.email_from_claims(claims, sso_type="oidc")
+    except oidc_client.OidcError as exc:
+        logger.info("MCP OAuth token rejected (reason=%s)", exc.reason)
+        return False
+    stored = get_stored_user(email)
+    if stored and stored.get("status") == "disabled":
+        return False
+    user = lookup_user(email) or {"email": email, "role": "viewer"}
+    user = dict(user)
+    user["email"] = email
+    user["auth_kind"] = "oauth"
+    scope_claim = claims.get("scope")
+    if isinstance(scope_claim, str):
+        raw_scopes = scope_claim.split()
+    elif isinstance(scope_claim, list):
+        raw_scopes = [scope for scope in scope_claim if isinstance(scope, str)]
+    else:
+        raw_scopes = []
+    known_permissions = set(all_permissions())
+    scopes = sorted(
+        {
+            scope.removeprefix("datawrap:")
+            for scope in raw_scopes
+            if scope.removeprefix("datawrap:") in known_permissions
+        }
+    )
+    if scopes:
+        user["scopes"] = scopes
+    request.state.user_email = email
+    request.state.user = user
+    return True
 
 
 def _tenant_bind_forbidden(request: Request) -> JSONResponse | None:
@@ -157,6 +212,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if not token or not _attach_user(request, token):
+            if path == "/api/v1/mcp/tools/call":
+                from services.mcp_oauth import bearer_challenge
+
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Authentication required"},
+                    headers={"WWW-Authenticate": bearer_challenge()},
+                )
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
         forbidden = _tenant_bind_forbidden(request)

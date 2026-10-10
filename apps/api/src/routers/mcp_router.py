@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/mcp", tags=["MCP Server"])
+oauth_resource_router = APIRouter(tags=["MCP OAuth"])
 logger = logging.getLogger(__name__)
 
 
@@ -38,7 +39,7 @@ def _mcp_authenticated(http_request: Request) -> bool:
     return bool(getattr(http_request.state, "user", None) or getattr(http_request.state, "api_key_auth", False))
 
 
-def _require_mcp_tool_auth(http_request: Request) -> None:
+def _require_mcp_tool_auth(http_request: Request, tool_name: str | None = None) -> None:
     """Refuse tool execution unless a Bearer JWT / workspace API key is present.
 
     When platform auth is off (local/dev), tools remain callable without a token
@@ -50,12 +51,15 @@ def _require_mcp_tool_auth(http_request: Request) -> None:
         return
     if _mcp_authenticated(http_request):
         return
+    from services.mcp_oauth import bearer_challenge
+
     raise HTTPException(
         status_code=401,
         detail={
             "error": "Authentication required",
             "hint": "Pass Authorization: Bearer <workspace-api-key-or-jwt>",
         },
+        headers={"WWW-Authenticate": bearer_challenge()},
     )
 
 
@@ -155,6 +159,16 @@ async def mcp_streamable(http_request: Request):
         return Response(status_code=202, headers=headers)
 
     body = results if isinstance(payload, list) else results[0]
+    auth_failed = any(
+        isinstance(result, dict)
+        and isinstance(result.get("error"), dict)
+        and result["error"].get("code") == -32001
+        for result in results
+    )
+    if auth_failed:
+        from services.mcp_oauth import bearer_challenge
+
+        headers["WWW-Authenticate"] = bearer_challenge()
     accept = http_request.headers.get("accept", "")
     if "text/event-stream" in accept and "application/json" not in accept:
         data = json.dumps(body, default=str)
@@ -162,8 +176,34 @@ async def mcp_streamable(http_request: Request):
             iter([f"event: message\ndata: {data}\n\n"]),
             media_type="text/event-stream",
             headers=headers,
+            status_code=401 if auth_failed else 200,
         )
-    return JSONResponse(content=body, headers=headers)
+    return JSONResponse(
+        content=body,
+        headers=headers,
+        status_code=401 if auth_failed else 200,
+    )
+
+
+def _protected_resource_metadata() -> dict[str, object]:
+    from services.mcp_oauth import get_mcp_oauth_config
+    from services.rbac import all_permissions
+
+    config = get_mcp_oauth_config()
+    if not config.enabled:
+        raise HTTPException(status_code=404, detail="MCP OAuth is not configured")
+    return {
+        "resource": config.audience,
+        "authorization_servers": [config.issuer],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": sorted(all_permissions()),
+    }
+
+
+@oauth_resource_router.get("/.well-known/oauth-protected-resource")
+@oauth_resource_router.get("/.well-known/oauth-protected-resource/api/v1/mcp")
+async def mcp_protected_resource_metadata():
+    return _protected_resource_metadata()
 
 
 @router.get("/manifest")
@@ -221,7 +261,7 @@ async def list_mcp_tools():
 @router.post("/tools/call")
 async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     """Execute a Datawrap Pilot tool — same surface external agents use."""
-    _require_mcp_tool_auth(http_request)
+    _require_mcp_tool_auth(http_request, request.name)
     from services.mcp_invocation_log import log_mcp_invocation
     from services.mcp_rate_limit import check_mcp_rate_limit
     from services.secret_config import mask_secrets_in_text
