@@ -796,15 +796,34 @@ def run_transfer_policy_gates(
             }
         )
 
+    from services.validation_mode_contract import (
+        VALIDATION_MODE_ALIASES,
+        normalize_validation_mode,
+    )
+
+    effective_mode = normalize_validation_mode(validation)
+    threshold = confidence_threshold_for_mode(effective_mode)
+    posture = f"Validation posture {effective_mode} uses confidence threshold {threshold:.2f}"
+    if validation != effective_mode:
+        if VALIDATION_MODE_ALIASES.get(validation) == effective_mode:
+            posture += f" (requested {validation!r} runs as {effective_mode})"
+        else:
+            posture += f" (requested {validation!r} is not a validation mode — applied strict)"
+            logger.warning(
+                "Validate: unknown validation_mode %r, applying strict (floor %.2f)",
+                validation,
+                threshold,
+            )
     gates.append(
         {
             "id": "g11_validation_posture",
             "status": GateStatus.PASS.value,
-            "message": f"Validation posture {validation} uses confidence threshold {confidence_threshold_for_mode(validation):.2f}",
+            "message": posture,
             "duration_ms": 0,
             "details": {
-                "validation_mode": validation,
-                "confidence_threshold": confidence_threshold_for_mode(validation),
+                "validation_mode": effective_mode,
+                "requested_validation_mode": validation,
+                "confidence_threshold": threshold,
             },
         }
     )
