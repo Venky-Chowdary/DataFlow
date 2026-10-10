@@ -361,7 +361,7 @@ def evaluate_ddl_compatibility(
                 elif (
                     src_logical in {"string", "text"}
                     and tgt_logical in {"string", "text"}
-                    and string_width_would_narrow(src_type, tgt_type)
+                    and string_width_would_narrow(src_type, tgt_type, dest_db=dest_kind)
                 ):
                     note = " — VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)"
                 issues.append(
@@ -390,7 +390,7 @@ def evaluate_ddl_compatibility(
             elif (
                 normalize_logical_type(src_type) in {"string", "text"}
                 and normalize_logical_type(tgt_type) in {"string", "text"}
-                and string_width_would_narrow(src_type, tgt_type)
+                and string_width_would_narrow(src_type, tgt_type, dest_db=dest_kind)
             ):
                 msg = (
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "

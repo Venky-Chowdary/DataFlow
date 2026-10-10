@@ -1258,7 +1258,7 @@ def _unsigned_polarity_only_collapse(src: str, dest: str, db: str) -> bool:
         or integer_width_would_narrow(src, dest, dest_db=db)
         or decimal_params_would_narrow(src, dest, dest_db=db)
         or float_mantissa_would_narrow(src, dest, dest_db=db)
-        or string_width_would_narrow(src, dest)
+        or string_width_would_narrow(src, dest, dest_db=db)
     )
 
 

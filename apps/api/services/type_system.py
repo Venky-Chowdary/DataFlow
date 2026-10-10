@@ -4739,7 +4739,7 @@ def bounded_string_sink_would_truncate(
         return False
     src_l = normalize_logical_type(source_type)
     if src_l in {LOGICAL_STRING, LOGICAL_TEXT}:
-        return string_width_would_narrow(source_type, target_type)
+        return string_width_would_narrow(source_type, target_type, dest_db=dest_db)
     # Exact UUID 36-char wire is the industry create-new sink — not truncate.
     if normalize_logical_type(source_type) == LOGICAL_UUID and uuid_exact_wire_carrier(
         target_type
@@ -4764,11 +4764,16 @@ def bounded_string_sink_would_truncate(
     return True
 
 
-def string_width_would_narrow(source_type: str, target_type: str) -> bool:
+def string_width_would_narrow(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
     """True when source string capacity exceeds destination VARCHAR(n)/TEXT tier.
 
     Cases: ``VARCHAR(255)→VARCHAR(50)``, ``TEXT→VARCHAR(10)``,
     ``LONGTEXT→TINYTEXT``. Bare ``VARCHAR`` without a width stays unknown.
+    The 64 KiB ``TEXT`` tier is MySQL's: a SQLite/Postgres/DuckDB ``TEXT`` is
+    that engine's unbounded carrier, so the tier only ranks the destination
+    when it is MySQL-family or unnamed (unnamed keeps the fail-closed read).
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
@@ -4778,7 +4783,8 @@ def string_width_would_narrow(source_type: str, target_type: str) -> bool:
         return False
     # MySQL LOB tier narrow (LONGTEXT→MEDIUMTEXT) before unlimited early-out.
     src_rank = mysql_text_tier_rank(source_type)
-    tgt_rank = mysql_text_tier_rank(target_type)
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    tgt_rank = mysql_text_tier_rank(target_type) if db in {"", "mysql"} else None
     if src_rank is not None and tgt_rank is not None and src_rank > tgt_rank:
         return True
     # Unlimited / LOB-ceiling sinks (TEXT, NVARCHAR(MAX), VARCHAR(65535)) never narrow.
@@ -7437,7 +7443,7 @@ def is_precision_collapse_coercion(
         return True
     if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
-    if string_width_would_narrow(source_type, target_type):
+    if string_width_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if bounded_string_sink_would_truncate(
         source_type, target_type, dest_db=dest_db
@@ -7996,7 +8002,7 @@ def is_lossy_coercion(
             return True
         if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
-        if string_width_would_narrow(source_type, target_type):
+        if string_width_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if bounded_string_sink_would_truncate(
             source_type, target_type, dest_db=dest_db
@@ -8197,7 +8203,7 @@ def is_lossy_coercion(
         return True
     if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
-    if string_width_would_narrow(source_type, target_type):
+    if string_width_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if bounded_string_sink_would_truncate(
         source_type, target_type, dest_db=dest_db
