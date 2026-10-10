@@ -1809,6 +1809,48 @@ def _g6_identity_label(columns: list[str]) -> str | None:
     return ", ".join(columns)
 
 
+def _g6_mysql_key_refusal(ctx: PreflightContext, dest_kind: str) -> str | None:
+    """Operator refusal when a create-new MySQL upsert key would land on a LOB.
+
+    The writer refuses the same key before CREATE (A-1170); asking the same
+    shared rule here moves that refusal to Validate, before the job starts.
+    """
+    if dest_kind not in {"mysql", "mariadb"} or ctx.plan.destination.table_exists is not False:
+        return None
+    try:
+        from services.schema_fidelity import mysql_key_compatible_types
+        from services.sync_cursor import requires_upsert
+        from services.type_system import materialize_dest_ddl
+    except ImportError:
+        return None
+    if not requires_upsert(str(ctx.plan.sync_mode or "")):
+        return None
+    _sources, key_targets = _g6_sample_identity(ctx, dest_kind)
+    if not key_targets:
+        return None
+    declared = {c.name: c.inferred_type for c in ctx.plan.source.columns}
+    target_cols: list[str] = []
+    target_types: list[str] = []
+    mappings: list[dict[str, str]] = []
+    for m in ctx.plan.mappings:
+        if not m.target:
+            continue
+        target_cols.append(m.target)
+        target_types.append(
+            m.target_type or materialize_dest_ddl(dest_kind, declared.get(m.source) or "string")
+        )
+        mappings.append({"source": m.source, "target": m.target})
+    _types, refusal = mysql_key_compatible_types(
+        table_name=str(getattr(ctx.plan, "stream_name", "") or ""),
+        conflict_columns=list(key_targets),
+        target_cols=target_cols,
+        target_types=target_types,
+        mappings=mappings,
+        column_types=declared,
+    )
+    return refusal
+
+
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
 
@@ -1976,6 +2018,22 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     "scrubbed_drift_issues": scrubbed,
                 },
                 note="Declared DDL compatibility issues",
+            ),
+        )
+
+    key_refusal = _g6_mysql_key_refusal(ctx, dest_kind)
+    if key_refusal:
+        return _block(
+            GateId.G6_TARGET_DDL,
+            key_refusal,
+            start,
+            _scope(
+                {
+                    "issues": [key_refusal],
+                    "rule_id": "g6_target_ddl.mysql_lob_key",
+                    "remediation_kind": "fix_ddl",
+                },
+                note="MySQL upsert key must be an indexable carrier",
             ),
         )
 

@@ -77,9 +77,9 @@ def test_closed_socket_without_a_code_stays_a_lost_connection():
 
 
 def test_lob_key_column_is_sized_from_the_declared_source_width():
-    from connectors.mysql_writer import _mysql_key_compatible_types
+    from services.schema_fidelity import mysql_key_compatible_types
 
-    types, refusal = _mysql_key_compatible_types(
+    types, refusal = mysql_key_compatible_types(
         table_name="t",
         conflict_columns=["region", "id"],
         target_cols=["region", "id", "note"],
@@ -92,9 +92,9 @@ def test_lob_key_column_is_sized_from_the_declared_source_width():
 
 
 def test_key_wider_than_the_mysql_index_limit_is_refused():
-    from connectors.mysql_writer import _mysql_key_compatible_types
+    from services.schema_fidelity import mysql_key_compatible_types
 
-    _types, refusal = _mysql_key_compatible_types(
+    _types, refusal = mysql_key_compatible_types(
         table_name="t",
         conflict_columns=["a", "b"],
         target_cols=["a", "b"],

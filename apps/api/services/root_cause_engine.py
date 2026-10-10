@@ -1603,16 +1603,37 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         absorbed = sorted(
             {str(b.get("id")) for b in contract_blockers if b.get("id")}
         )
+        # The gate names *which* part of the contract failed (a missing key, an
+        # unknown cursor, a cursor whose meaning cannot capture updates). The
+        # generic "needs an identity key" prose sent operators who had set both
+        # to the wrong control.
+        contract_issues: list[str] = []
+        contract_fixes: list[str] = []
+        for b in contract_blockers:
+            details = b.get("details") or {}
+            for issue in details.get("issues") or []:
+                if str(issue) and str(issue) not in contract_issues:
+                    contract_issues.append(str(issue))
+            for verdict in details.get("cursor_semantics") or []:
+                verdict = verdict if isinstance(verdict, dict) else {}
+                action = str(verdict.get("primary_action") or "").strip()
+                if verdict.get("status") == "block" and action and action not in contract_fixes:
+                    contract_fixes.append(action)
+        contract_summary = (
+            "; ".join(contract_issues[:3]) + " — the run refused before any rows moved."
+            if contract_issues
+            else (
+                "The selected sync mode needs an identity key and/or a "
+                "cursor column that was not provided — the run refused "
+                "before any rows moved."
+            )
+        )
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("sync_contract_incomplete", [], absorbed),
                 kind="sync_contract_incomplete",
                 title="Sync contract incomplete",
-                summary=(
-                    "The selected sync mode needs an identity key and/or a "
-                    "cursor column that was not provided — the run refused "
-                    "before any rows moved."
-                ),
+                summary=contract_summary,
                 business_impact=(
                     "Incremental/upsert routes cannot checkpoint or dedupe "
                     "without the key the contract requires."
@@ -1622,10 +1643,13 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 estimated_total_rows=est_n,
                 risk_level="medium",
                 recommended_fix=(
-                    "Open Sync → identity settings → choose the primary key "
+                    contract_fixes[0]
+                    if contract_fixes
+                    else "Open Sync → identity settings → choose the primary key "
                     "(and cursor column for incremental), then re-Validate."
                 ),
                 alternative_fixes=[
+                    *contract_fixes[1:3],
                     "Switch to full_refresh_append/overwrite — no key required",
                     "Re-run with the same upsert key contract as the prior run",
                 ],
