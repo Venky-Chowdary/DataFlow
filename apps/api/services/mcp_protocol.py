@@ -200,7 +200,9 @@ def handle_jsonrpc(
         return _jsonrpc_result(req_id, {})
 
     if method == "tools/list":
-        return _jsonrpc_result(req_id, {"tools": _tool_descriptors()})
+        from services.mcp_policy import filter_tools
+
+        return _jsonrpc_result(req_id, {"tools": filter_tools(_tool_descriptors())})
 
     if method == "resources/list":
         return _jsonrpc_result(req_id, {"resources": []})
@@ -227,6 +229,23 @@ def handle_jsonrpc(
                 "Authentication required",
                 {"hint": "Pass Authorization: Bearer <token> in MCP headers"},
             )
+        name = params.get("name") if isinstance(params, dict) else None
+        from services.mcp_policy import policy_denial
+
+        denial = policy_denial(name)
+        if denial:
+            from services.mcp_invocation_log import log_mcp_invocation
+
+            log_mcp_invocation(
+                tool=str(name or "unknown"),
+                status="error",
+                error=denial,
+                actor=context.actor,
+                client=context.client,
+                correlation_id=context.correlation_id,
+                error_kind="policy_denied",
+            )
+            return _jsonrpc_error(req_id, -32003, denial)
         from services.mcp_rate_limit import check_mcp_rate_limit
 
         limit = check_mcp_rate_limit(context.actor)
@@ -248,7 +267,6 @@ def handle_jsonrpc(
                 "MCP rate limit exceeded",
                 {"retry_after_sec": limit.get("retry_after_sec")},
             )
-        name = params.get("name") if isinstance(params, dict) else None
         arguments = params.get("arguments") if isinstance(params, dict) else {}
         if not name or not isinstance(name, str):
             return _jsonrpc_error(req_id, -32602, "Invalid params: name required")

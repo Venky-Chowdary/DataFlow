@@ -91,11 +91,12 @@ another mutating tool is allowed; it is governed independently.
 
 ## Administrative policy
 
-Workspace administrators with `workspace.manage` can use `GET` and `PUT
-/api/v1/mcp/policy` to disable MCP or allow-list tool names. A disabled server
-returns policy error `-32003` (or HTTP 403 through the REST bridge). A
-disallowed tool returns the same policy error and the tool name. `tools/list`
-is filtered by the allow-list.
+Administrators with `workspace.manage` can use `GET` and `PUT
+/api/v1/mcp/policy` to disable MCP or allow-list tool names. The policy is
+stored in the integrations store and applies deployment-wide, not to an
+individual workspace. A disabled server returns policy error `-32003` (or HTTP
+403 through the REST bridge). A disallowed tool returns the same policy error
+and the tool name. `tools/list` is filtered by the allow-list.
 
 ## Limits and Origin
 
@@ -117,3 +118,5 @@ DataFlow CORS settings and optional `CORS_ORIGIN_REGEX`.
 * `-32602`: malformed tool arguments.
 * `isError: true` with text beginning `Your role`: add the required role or
   permission scope; this is not a connector failure.
+* Invocation log `error_kind` is one of `ok`, `permission_denied`,
+  `rate_limited`, `auth`, `policy_denied`, or `tool_error`.

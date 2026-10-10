@@ -224,21 +224,20 @@ def test_oidc_callback_requires_code_and_state(client):
 def test_disabled_stored_account_is_denied_and_audited(monkeypatch, tmp_path):
     from fastapi import HTTPException
 
-    from services import audit_log
-    from src.routers import auth_router
+    from services import audit_log, sso_authorization, user_store
 
     monkeypatch.setenv("DATAFLOW_SSO_AUTO_PROVISION", "1")
     monkeypatch.setenv("DATAFLOW_SSO_ALLOWED_DOMAINS", "example.com")
     monkeypatch.setattr(
-        auth_router,
-        "get_stored_user",
+        user_store,
+        "get_user",
         lambda email: {"email": email, "status": "disabled"},
     )
     monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
     monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
 
     with pytest.raises(HTTPException) as error:
-        auth_router._require_sso_authorization("disabled@example.com")
+        sso_authorization.require_sso_authorization("disabled@example.com")
 
     assert error.value.status_code == 403
     assert error.value.detail == "account_disabled"

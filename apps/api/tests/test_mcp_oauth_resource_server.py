@@ -36,7 +36,7 @@ def mcp_oauth_client(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAFLOW_PUBLIC_URL", "https://api.example.test")
     monkeypatch.setenv("DATAFLOW_MCP_RATE_LIMIT", "0")
 
-    from services import integrations_store, oidc_client, user_store
+    from services import integrations_store, oidc_client, sso_authorization, user_store
     from src.middleware import auth_middleware
     from src.main import app
     from src.services import auth_service
@@ -47,8 +47,7 @@ def mcp_oauth_client(monkeypatch, tmp_path):
     monkeypatch.setattr(user_store, "get_user", lambda _email: None)
     fake_user_lookup = lambda email: {"email": email, "role": "editor"}
     monkeypatch.setattr(auth_middleware, "lookup_user", fake_user_lookup)
-    from src.routers import auth_router
-    monkeypatch.setattr(auth_router, "lookup_user", fake_user_lookup)
+    monkeypatch.setattr(sso_authorization, "lookup_user", fake_user_lookup)
     monkeypatch.setattr(
         integrations_store,
         "get_sso_configs",
@@ -249,11 +248,11 @@ def test_oauth_dataflow_scopes_grant_only_the_named_permission(mcp_oauth_client)
 
 def test_oauth_refuses_users_not_authorized_for_sso(mcp_oauth_client, monkeypatch):
     from src.middleware import auth_middleware
-    from src.routers import auth_router
+    from services import sso_authorization
 
     client, make_token, _private_key = mcp_oauth_client
     monkeypatch.setattr(auth_middleware, "lookup_user", lambda _email: None)
-    monkeypatch.setattr(auth_router, "lookup_user", lambda _email: None)
+    monkeypatch.setattr(sso_authorization, "lookup_user", lambda _email: None)
     response = client.post(
         "/api/v1/mcp",
         headers={"Authorization": f"Bearer {make_token(scope='job.read')}"},
@@ -269,6 +268,35 @@ def test_oauth_refuses_users_not_authorized_for_sso(mcp_oauth_client, monkeypatc
     assert response.headers["www-authenticate"] == (
         f'Bearer resource_metadata="{METADATA_URL}"'
     )
+
+
+def test_rejected_access_token_is_not_logged(mcp_oauth_client, monkeypatch, caplog):
+    import logging
+
+    from services import mcp_oauth, oidc_client
+
+    token = "highly-sensitive-access-token"
+    monkeypatch.setattr(
+        mcp_oauth,
+        "get_mcp_oauth_config",
+        lambda: mcp_oauth.McpOAuthConfig(
+            issuer=ISSUER,
+            audience=AUDIENCE,
+            metadata_url=METADATA_URL,
+        ),
+    )
+    monkeypatch.setattr(oidc_client, "discover", lambda _issuer: {})
+    monkeypatch.setattr(oidc_client, "allowed_algorithms", lambda *_args: ["RS256"])
+
+    def reject_token(*_args, **_kwargs):
+        raise oidc_client.OidcTokenInvalid("expired")
+
+    monkeypatch.setattr(oidc_client, "validate_access_token", reject_token)
+    caplog.set_level(logging.INFO, logger="services.mcp_oauth")
+
+    assert mcp_oauth.principal_from_access_token(token) is None
+    assert "reason=expired" in caplog.text
+    assert token not in caplog.text
 
 
 def test_oauth_token_is_not_accepted_outside_mcp(mcp_oauth_client):

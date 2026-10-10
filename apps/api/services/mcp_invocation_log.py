@@ -38,15 +38,8 @@ def log_mcp_invocation(
         else:
             from src.ai.copilot.tool_permissions import is_permission_denial
 
-            text = str(error or "").lower()
             if is_permission_denial(str(error or "")):
                 error_kind = "permission_denied"
-            elif "rate limit" in text:
-                error_kind = "rate_limited"
-            elif "authentication" in text or "unauthorized" in text or "token" in text:
-                error_kind = "auth"
-            elif "policy" in text or "administrator" in text:
-                error_kind = "policy_denied"
             else:
                 error_kind = "tool_error"
     row = {
@@ -126,14 +119,20 @@ class McpInvocationTimer:
     def __exit__(self, exc_type, exc, tb) -> None:
         ms = (time.perf_counter() - self._start) * 1000
         if exc_type is not None:
+            from src.ai.copilot.tool_permissions import is_permission_denial
+
+            error = str(exc)[:500]
             log_mcp_invocation(
                 tool=self.tool,
                 client=self.client,
                 arguments=self.arguments,
                 status="error",
-                error=str(exc)[:500],
+                error=error,
                 duration_ms=ms,
                 correlation_id=self.correlation_id,
+                error_kind=(
+                    "permission_denied" if is_permission_denial(error) else "tool_error"
+                ),
             )
         else:
             log_mcp_invocation(
@@ -143,4 +142,5 @@ class McpInvocationTimer:
                 status="ok",
                 duration_ms=ms,
                 correlation_id=self.correlation_id,
+                error_kind="ok",
             )

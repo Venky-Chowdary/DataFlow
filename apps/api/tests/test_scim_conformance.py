@@ -334,13 +334,13 @@ def test_deprovision_reactivation_and_delete(scim_client, monkeypatch):
     assert client.get(connector_path, headers=_auth(personal["key"])).status_code == 401
     assert client.get(connector_path, headers=_auth(service_account["key"])).status_code != 401
 
-    from src.routers import auth_router
+    from services import sso_authorization
     from fastapi import HTTPException
 
     monkeypatch.setenv("DATAFLOW_SSO_AUTO_PROVISION", "1")
     monkeypatch.setenv("DATAFLOW_SSO_ALLOWED_DOMAINS", "example.test")
     with pytest.raises(HTTPException) as error:
-        auth_router._require_sso_authorization(email)
+        sso_authorization.require_sso_authorization(email)
     assert error.value.status_code == 403
     assert error.value.detail == "account_disabled"
 

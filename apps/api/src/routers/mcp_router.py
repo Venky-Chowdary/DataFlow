@@ -44,18 +44,6 @@ def _mcp_authenticated(http_request: Request) -> bool:
     return bool(getattr(http_request.state, "user", None) or getattr(http_request.state, "api_key_auth", False))
 
 
-def _mcp_policy_denial(tool_name: str | None = None) -> str | None:
-    from services.integrations_store import get_mcp_policy
-
-    policy = get_mcp_policy()
-    if not policy["enabled"]:
-        return "MCP is disabled by an administrator"
-    allowed = policy.get("allowed_tools")
-    if tool_name and allowed is not None and tool_name not in allowed:
-        return f"MCP tool is not allowed by administrator: {tool_name}"
-    return None
-
-
 def _require_mcp_tool_auth(http_request: Request, tool_name: str | None = None) -> None:
     """Refuse tool execution unless a Bearer JWT / workspace API key is present.
 
@@ -152,24 +140,6 @@ async def mcp_streamable(http_request: Request):
                 if not isinstance(message, dict):
                     results.append({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
                     continue
-                if message.get("method") == "tools/call":
-                    params = message.get("params")
-                    tool_name = params.get("name") if isinstance(params, dict) else None
-                    denial = _mcp_policy_denial(tool_name)
-                    if denial:
-                        from services.mcp_invocation_log import log_mcp_invocation
-
-                        log_mcp_invocation(
-                            tool=str(tool_name or "unknown"),
-                            status="error",
-                            error=denial,
-                            actor=context.actor,
-                            client=context.client,
-                            correlation_id=context.correlation_id,
-                            error_kind="policy_denied",
-                        )
-                        results.append(_jsonrpc_error(message.get("id"), -32003, denial))
-                        continue
                 # tools/call runs plan/preflight synchronously. Doing that on
                 # the event loop made ping and tools/list wait out the client
                 # timeout (JSON-RPC -32001 Request timed out). A thread keeps
@@ -183,15 +153,6 @@ async def mcp_streamable(http_request: Request):
                     context=context,
                 )
                 if out is not None:
-                    if message.get("method") == "tools/list":
-                        from services.integrations_store import get_mcp_policy
-
-                        allowed = get_mcp_policy().get("allowed_tools")
-                        if allowed is not None and isinstance(out.get("result"), dict):
-                            out["result"]["tools"] = [
-                                tool for tool in out["result"].get("tools", [])
-                                if tool.get("name") in allowed
-                            ]
                     results.append(out)
     finally:
         reset_mcp_request(request_token)
@@ -282,6 +243,7 @@ async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request)
 async def mcp_manifest(http_request: Request):
     """MCP-compatible manifest for IDE and agent integrations."""
     from ..ai.copilot.tools import TOOL_DEFINITIONS
+    from services.mcp_policy import filter_tools
 
     base = f"{str(http_request.base_url).rstrip('/')}/api/v1/mcp"
     return {
@@ -298,7 +260,7 @@ async def mcp_manifest(http_request: Request):
             "call": f"{base}/tools/call",
             "status": f"{base}/status",
         },
-        "tools": TOOL_DEFINITIONS,
+        "tools": filter_tools(TOOL_DEFINITIONS),
         "integrations": [
             {
                 "id": "cursor",
@@ -327,14 +289,18 @@ async def mcp_manifest(http_request: Request):
 @router.get("/tools")
 async def list_mcp_tools():
     from ..ai.copilot.tools import TOOL_DEFINITIONS
-    return {"tools": TOOL_DEFINITIONS}
+    from services.mcp_policy import filter_tools
+
+    return {"tools": filter_tools(TOOL_DEFINITIONS)}
 
 
 @router.post("/tools/call")
 async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     """Execute a Datawrap Pilot tool — same surface external agents use."""
     _require_mcp_tool_auth(http_request, request.name)
-    denial = _mcp_policy_denial(request.name)
+    from services.mcp_policy import policy_denial
+
+    denial = policy_denial(request.name)
     if denial:
         from services.mcp_invocation_log import log_mcp_invocation
 
@@ -353,6 +319,7 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     from services.mcp_rate_limit import check_mcp_rate_limit
     from services.secret_config import mask_secrets_in_text
     from src.services.auth_service import auth_required as mcp_auth_required
+    from src.ai.copilot.tool_permissions import is_permission_denial
 
     from ..ai.copilot.confirm_ack import reset_mcp_request, set_mcp_request
     from ..ai.copilot.tool_permissions import bind_request_principal
@@ -414,6 +381,9 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
             duration_ms=(time.perf_counter() - start) * 1000,
             correlation_id=correlation_id,
             actor=str(actor or "mcp-agent"),
+            error_kind=(
+                "permission_denied" if is_permission_denial(masked) else "tool_error"
+            ),
         )
         raise HTTPException(
             status_code=500,
@@ -432,6 +402,9 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
             duration_ms=ms,
             correlation_id=correlation_id,
             actor=str(actor or "mcp-agent"),
+            error_kind=(
+                "permission_denied" if is_permission_denial(error) else "tool_error"
+            ),
         )
         raise HTTPException(
             status_code=422,
@@ -446,6 +419,7 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
         duration_ms=ms,
         correlation_id=correlation_id,
         actor=str(actor or "mcp-agent"),
+        error_kind="ok",
     )
     return {
         "tool": result.name,

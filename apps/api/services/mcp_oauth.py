@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -10,6 +11,8 @@ from services.brand_env import getenv_brand
 from services import integrations_store
 from services.platform_config import public_url
 from services.rbac import all_permissions
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -67,19 +70,22 @@ def principal_from_access_token(
             leeway=oidc_client.clock_skew_leeway(),
         )
         email = oidc_client.email_from_claims(claims, sso_type="oidc")
-    except oidc_client.OidcError:
+    except oidc_client.OidcError as exc:
+        logger.info("MCP OAuth token rejected (reason=%s)", exc.reason)
         return None
     from services import user_store
 
     stored = user_store.get_user(email)
     if stored and stored.get("status") == "disabled":
+        logger.info("MCP OAuth token rejected (reason=disabled_user)")
         return None
     from fastapi import HTTPException
-    from src.routers.auth_router import _require_sso_authorization
+    from services.sso_authorization import require_sso_authorization
 
     try:
-        _require_sso_authorization(email)
+        require_sso_authorization(email)
     except HTTPException:
+        logger.info("MCP OAuth token rejected (reason=sso_not_authorized)")
         return None
     if user_lookup is None:
         from src.services import auth_service

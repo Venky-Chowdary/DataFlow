@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from services.user_store import get_user as get_stored_user
 from services.user_store import normalize_email, set_password
+from services.sso_authorization import require_sso_authorization
 from services.workspace_access import actor_email
 
 from ..services.auth_service import (
@@ -26,7 +27,6 @@ from ..services.auth_service import (
     auth_required,
     authenticate,
     create_token,
-    lookup_user,
     public_user,
     revoke_token,
 )
@@ -175,55 +175,6 @@ def _pkce_pair() -> tuple[str, str]:
         .rstrip("=")
     )
     return verifier, challenge
-
-
-def _sso_allowed_domains() -> set[str]:
-    """Domains that may auto-provision via SSO when no explicit user exists."""
-    raw = getenv_brand("SSO_ALLOWED_DOMAINS", "").strip()
-    if not raw:
-        return set()
-    return {d.strip().lower().lstrip("@") for d in raw.split(",") if d.strip()}
-
-
-def _sso_auto_provision() -> bool:
-    return getenv_brand("SSO_AUTO_PROVISION", "0").lower() in ("1", "true", "yes")
-
-
-def _is_sso_email_allowed(email: str) -> bool:
-    """Fail closed: require pre-registered user or allowed domain."""
-    normalized = email.strip().lower()
-    if lookup_user(normalized):
-        return True
-    domain = normalized.split("@")[-1] if "@" in normalized else ""
-    if domain and domain in _sso_allowed_domains():
-        return True
-    return False
-
-
-def _require_sso_authorization(email: str) -> None:
-    """Raise a clear 403 if the IdP user is not authorized for this workspace."""
-    stored = get_stored_user(email)
-    if stored and stored.get("status") == "disabled":
-        _raise_sso_failure(
-            "sso",
-            "account_disabled",
-            403,
-            "account_disabled",
-            resource="/auth/sso/authorization",
-        )
-    if _sso_auto_provision():
-        # Even auto-provision should respect allowed-domain gating when configured.
-        if _sso_allowed_domains() and email.split("@")[-1].lower() not in _sso_allowed_domains():
-            raise HTTPException(
-                status_code=403,
-                detail="SSO email domain is not in DATAFLOW_SSO_ALLOWED_DOMAINS",
-            )
-        return
-    if not _is_sso_email_allowed(email):
-        raise HTTPException(
-            status_code=403,
-            detail="SSO user is not authorized for this workspace",
-        )
 
 
 def _redirect_with_token(email: str, expires_at: int | None = None) -> RedirectResponse:
@@ -597,7 +548,7 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
             sso_type=sso_type,
         )
         email = oidc_client.email_from_claims(claims, sso_type=sso_type)
-        _require_sso_authorization(email)
+        require_sso_authorization(email)
         _audit_sso_success(sso_type, email, resource)
         return _redirect_with_token(email)
     except oidc_client.OidcError as exc:
@@ -785,7 +736,7 @@ async def sso_post_callback(sso_type: str, request: Request):
         )
     email = normalize_email(email)
     try:
-        _require_sso_authorization(email)
+        require_sso_authorization(email)
     except HTTPException:
         _audit_sso_failure(
             "saml",
