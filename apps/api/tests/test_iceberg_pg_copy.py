@@ -29,6 +29,9 @@ REST_URI = os.environ.get("DATAFLOW_ICEBERG_REST_URI", "http://127.0.0.1:8181").
 REST_WAREHOUSE = os.environ.get(
     "DATAFLOW_ICEBERG_REST_WAREHOUSE", "file:///tmp/iceberg-rest-wh"
 )
+S3_ENDPOINT = os.environ.get("DATAFLOW_ICEBERG_S3_ENDPOINT", "http://127.0.0.1:9000")
+MINIO_USER = os.environ.get("MINIO_ROOT_USER", "dataflow")
+MINIO_PASSWORD = os.environ.get("MINIO_ROOT_PASSWORD", "dataflowsecret")
 
 
 def _rest_reachable() -> bool:
@@ -76,7 +79,19 @@ def _iceberg_cfg(table: str) -> dict:
         "warehouse": REST_WAREHOUSE,
         "table": table,
         "schema": "default",
-        "extra": {"catalog_type": "rest", "warehouse": REST_WAREHOUSE},
+        "extra": _iceberg_extra(),
+    }
+
+
+def _iceberg_extra() -> dict:
+    return {
+        "catalog_type": "rest",
+        "warehouse": REST_WAREHOUSE,
+        "s3.endpoint": S3_ENDPOINT,
+        "s3.access-key-id": MINIO_USER,
+        "s3.secret-access-key": MINIO_PASSWORD,
+        "s3.path-style-access": "true",
+        "s3.region": "us-east-1",
     }
 
 
@@ -504,7 +519,7 @@ def test_live_iceberg_pg_stream_load_method(monkeypatch):
                 "warehouse": REST_WAREHOUSE,
                 "table": ice,
                 "schema": "default",
-                "extra": {"catalog_type": "rest", "warehouse": REST_WAREHOUSE},
+                "extra": _iceberg_extra(),
             },
         )
         destination = EndpointConfig.from_dict(
