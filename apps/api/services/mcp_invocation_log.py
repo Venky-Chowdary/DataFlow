@@ -47,6 +47,7 @@ def log_mcp_invocation(
         "time": _now(),
         "tool": tool,
         "client": client,
+        "actor": actor,
         "status": status,
         "error": error,
         "ms": round(duration_ms, 1),

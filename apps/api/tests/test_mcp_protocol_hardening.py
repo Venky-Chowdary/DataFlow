@@ -528,3 +528,82 @@ def test_free_text_and_connector_store_mask_uri_and_query_secrets():
     assert query["access_token"] == ["***"]
     assert query["client_secret"] == ["***"]
     assert _mask_conn_str(raw) == masked
+
+
+@pytest.mark.parametrize("door", ["native", "rest"])
+def test_mcp_invocation_log_persists_actor_for_authenticated_door(
+    mcp_api, monkeypatch, door
+):
+    client, editor_token, _viewer_token = mcp_api
+    monkeypatch.setattr(
+        "src.ai.copilot.tools.get_pilot_tools", lambda: _tools_with_result()
+    )
+    correlation_id = f"actor-attribution-{door}"
+    headers = {
+        "Authorization": f"Bearer {editor_token}",
+        "X-Correlation-ID": correlation_id,
+    }
+
+    if door == "native":
+        response = _rpc(
+            client,
+            "tools/call",
+            token=editor_token,
+            params={"name": "list_connectors", "arguments": {}},
+            headers={"X-Correlation-ID": correlation_id},
+        )
+        assert response.status_code == 200
+        assert response.json()["result"]["isError"] is False
+    else:
+        response = client.post(
+            "/api/v1/mcp/tools/call",
+            headers=headers,
+            json={"name": "list_connectors", "arguments": {}},
+        )
+        assert response.status_code == 200
+        assert response.json()["success"] is True
+
+    logs = client.get(
+        "/api/v1/mcp/logs",
+        headers={"Authorization": f"Bearer {editor_token}"},
+    )
+    assert logs.status_code == 200
+    row = next(
+        row
+        for row in logs.json()["logs"]
+        if row.get("correlation_id") == correlation_id
+    )
+    assert row.get("actor") == "editor@example.test"
+
+
+def test_mcp_invocation_log_has_actor_for_unauthenticated_native_call(
+    mcp_api, monkeypatch
+):
+    client, editor_token, _viewer_token = mcp_api
+    monkeypatch.setattr(
+        "src.ai.copilot.tools.get_pilot_tools", lambda: _tools_with_result()
+    )
+    correlation_id = "actor-attribution-unauthenticated"
+    response = _rpc(
+        client,
+        "tools/call",
+        params={"name": "list_connectors", "arguments": {}},
+        headers={
+            "X-MCP-Client": "anonymous-qa-bot",
+            "X-Correlation-ID": correlation_id,
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == -32001
+    logs = client.get(
+        "/api/v1/mcp/logs",
+        headers={"Authorization": f"Bearer {editor_token}"},
+    )
+    assert logs.status_code == 200
+    row = next(
+        row
+        for row in logs.json()["logs"]
+        if row.get("correlation_id") == correlation_id
+    )
+    assert row.get("actor")
