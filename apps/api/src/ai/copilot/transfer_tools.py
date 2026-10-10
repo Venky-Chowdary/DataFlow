@@ -488,6 +488,13 @@ def _stamp_zone_transform(
     return out
 
 
+# risk_acceptance.on_cast_failure → signed contract quarantine_policy.
+_ON_CAST_FAILURE_POLICIES = {
+    "quarantine": "holdout_rejected_rows",
+    "null": "coerce_null",
+}
+
+
 def _sign_required_risk_contracts(
     mappings: list[dict[str, Any]],
     acceptance: dict[str, Any],
@@ -528,6 +535,20 @@ def _sign_required_risk_contracts(
             "Use QUARANTINE_ROW, CAST_AND_CONTINUE, TRANSFORM_AND_CONTINUE, "
             "SKIP_ROW, or STOP_COLUMN."
         )
+    # QA MX3-14: without this the NULL variant of CAST_AND_CONTINUE was
+    # unreachable and the policy behaved exactly like QUARANTINE_ROW.
+    on_cast_failure = str(acceptance.get("on_cast_failure") or "").strip().lower()
+    if on_cast_failure and on_cast_failure not in _ON_CAST_FAILURE_POLICIES:
+        raise ValueError(
+            f"on_cast_failure {on_cast_failure!r} is not supported. Use "
+            "'quarantine' (hold the row out) or 'null' (write NULL). Nothing was signed."
+        )
+    if on_cast_failure and policy not in {"CAST_AND_CONTINUE", "TRANSFORM_AND_CONTINUE"}:
+        raise ValueError(
+            f"on_cast_failure applies only to CAST_AND_CONTINUE / "
+            f"TRANSFORM_AND_CONTINUE, not {policy}. Nothing was signed."
+        )
+    quarantine_policy = _ON_CAST_FAILURE_POLICIES[on_cast_failure or "quarantine"]
     named = {
         str(c).strip()
         for c in (acceptance.get("columns") or [])
@@ -561,6 +582,8 @@ def _sign_required_risk_contracts(
             table=table,
             fidelity=str(row.get("fidelity") or ""),
             transform=row.get("transform"),
+            quarantine_policy=quarantine_policy,
+            expected_nulls=quarantine_policy == "coerce_null",
         )
         row["risk_contract"] = contract.to_dict()
         signed += 1

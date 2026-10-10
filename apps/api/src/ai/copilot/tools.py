@@ -442,7 +442,11 @@ TOOL_DEFINITIONS: list[dict] = [
                         "and a continue execution_policy (QUARANTINE_ROW, "
                         "CAST_AND_CONTINUE, TRANSFORM_AND_CONTINUE, SKIP_ROW, "
                         "STOP_COLUMN). Omitted means nothing is signed. "
-                        "FAIL_JOB does not clear a gate. Confirm is still required."
+                        "FAIL_JOB does not clear a gate. Confirm is still required. "
+                        "CAST_AND_CONTINUE / TRANSFORM_AND_CONTINUE take optional "
+                        "on_cast_failure: 'quarantine' (default — the row is held "
+                        "out, disposition=cast_failure) or 'null' (the failing cell "
+                        "is written as NULL and counted in coerced_null_rows)."
                     ),
                 },
                 "pii_acknowledgement": {
@@ -1770,9 +1774,13 @@ class DataPilotTools:
                 output=None,
                 error=f"Job '{job_id}' not found. Ask the user for the job ID shown on Jobs / Job Theater.",
             )
+        from services.quarantine_dlq import replay_quarantine_details
+
         quarantine = merge_job_quarantine(job)
-        row_ids = {d.get("row") for d in quarantine if d.get("row") is not None}
-        quarantine_row_count = len(row_ids) if row_ids else len(quarantine)
+        # Skipped and NULL-coerced rows are audit findings, not held-out rows.
+        held_out = replay_quarantine_details(quarantine)
+        row_ids = {d.get("row") for d in held_out if d.get("row") is not None}
+        quarantine_row_count = len(row_ids) if row_ids else len(held_out)
         from services.quarantine_from_preflight import drop_phantom_identity_rows
 
         stored_rejected = int(job.get("rejected_rows") or 0)
@@ -1786,6 +1794,12 @@ class DataPilotTools:
                 "column": d.get("column"),
                 "value": str(d.get("value") or "")[:120],
                 "reason": str(d.get("reason") or "")[:200],
+                # Which signed policy held the row out (cast_failure vs quarantined).
+                **{
+                    k: d[k]
+                    for k in ("execution_policy", "disposition")
+                    if d.get(k)
+                },
             }
             for d in quarantine[:8]
         ]
