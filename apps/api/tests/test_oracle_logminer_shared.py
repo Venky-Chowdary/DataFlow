@@ -4,13 +4,27 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from connectors.oracle_logminer import OracleLogMinerCdc, encode_logminer_token
+from connectors.oracle_logminer import (
+    OracleLogMinerCdc,
+    encode_logminer_token,
+    logminer_contents_sql,
+)
 from services.cdc_multi_table import can_share_log_reader
 
 
 def test_oracle_can_share_log_reader() -> None:
     assert can_share_log_reader("oracle", 2) is True
     assert can_share_log_reader("oracle", 1) is False
+
+
+def test_logminer_contents_selects_documented_xidsqn_column() -> None:
+    sql = logminer_contents_sql(
+        table_predicate="TABLE_NAME IN ('ORDERS','USERS')",
+        include_xid=True,
+    )
+
+    assert ", XIDUSN, XIDSLT, XIDSQN" in sql
+    assert "XIDSEQ" not in sql
 
 
 def test_oracle_shared_reader_init_and_lease() -> None:

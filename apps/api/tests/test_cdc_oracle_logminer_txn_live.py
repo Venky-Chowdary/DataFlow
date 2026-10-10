@@ -120,6 +120,104 @@ def test_oracle_logminer_delivers_long_transaction_after_later_commit() -> None:
                 session_b.commit()
 
 
+@pytest.mark.skipif(
+    not _oracle_logminer_ready(),
+    reason="Oracle LogMiner not reachable — set DATAFLOW_ORACLE_ENABLE=1 on a CDC-ready :1521",
+)
+def test_oracle_shared_logminer_poll_selects_xidsqn_live() -> None:
+    from connectors.generic_sql import get_connection
+
+    cfg = _oracle_cfg()
+    schema = str(cfg["schema"])
+    suffix = uuid.uuid4().hex[:8].upper()
+    tables = [f"GCDC_XID_A_{suffix}", f"GCDC_XID_B_{suffix}"]
+    refs = [f'"{schema}"."{table}"' for table in tables]
+    created: list[str] = []
+    reader = OracleLogMinerCdc(
+        cfg,
+        table=tables,
+        primary_key="ID",
+        primary_keys={table: "ID" for table in tables},
+        schema=schema,
+        batch_size=50,
+        cursor_key=f"gcdc-xid-column:{suffix}",
+    )
+
+    try:
+        with get_connection(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg["username"],
+            password=cfg["password"],
+            connection_string="",
+            ssl=False,
+            db_type="oracle",
+        ) as conn:
+            with conn.cursor() as cur:
+                for ref in refs:
+                    cur.execute(
+                        f"CREATE TABLE {ref} (ID NUMBER PRIMARY KEY, V VARCHAR2(32))"
+                    )
+                    created.append(ref)
+                    cur.execute(
+                        f"ALTER TABLE {ref} ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS"
+                    )
+            conn.commit()
+
+        list(reader.snapshot())
+
+        with get_connection(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg["username"],
+            password=cfg["password"],
+            connection_string="",
+            ssl=False,
+            db_type="oracle",
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"INSERT INTO {refs[0]} (ID, V) VALUES (1, 'a')")
+                cur.execute(f"INSERT INTO {refs[1]} (ID, V) VALUES (2, 'b')")
+            conn.commit()
+
+        seen: dict[str, set[str]] = {table: set() for table in tables}
+        expected = {tables[0]: {"1"}, tables[1]: {"2"}}
+        for _ in range(8):
+            for batch in reader.poll():
+                if batch.table in seen:
+                    seen[batch.table].update(
+                        str(row["ID"]) for row in batch.inserts
+                    )
+            if all(seen[table] == rows for table, rows in expected.items()):
+                break
+            time.sleep(0.25)
+
+        assert seen[tables[0]] == {"1"}
+        assert seen[tables[1]] == {"2"}
+    finally:
+        reader.close()
+        if created:
+            with get_connection(
+                host=cfg["host"],
+                port=cfg["port"],
+                database=cfg["database"],
+                username=cfg["username"],
+                password=cfg["password"],
+                connection_string="",
+                ssl=False,
+                db_type="oracle",
+            ) as conn:
+                with conn.cursor() as cur:
+                    for ref in reversed(created):
+                        try:
+                            cur.execute(f"DROP TABLE {ref} PURGE")
+                        except Exception:
+                            pass
+                conn.commit()
+
+
 @pytest.mark.xfail(
     strict=True,
     reason="G-CDC M1 red: Oracle single-table polling splits committed transactions across batches",
@@ -214,7 +312,7 @@ def test_oracle_single_table_poll_keeps_transactions_whole() -> None:
                 "SEG_OWNER",
             ]
             if "XIDUSN" in sql.upper():
-                columns.extend(["XIDUSN", "XIDSLT", "XIDSEQ"])
+                columns.extend(["XIDUSN", "XIDSLT", "XIDSQN"])
             cur.description = [(name,) for name in columns]
             bind = params or {}
             start = (

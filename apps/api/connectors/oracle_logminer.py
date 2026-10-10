@@ -293,7 +293,7 @@ def logminer_contents_sql(
     order into an inline view and the cap outside is the Debezium-class fix.
     ``(SCN, RS_ID, SSN)`` is LogMiner's true total order.
     """
-    xid_cols = ", XIDUSN, XIDSLT, XIDSEQ" if include_xid else ""
+    xid_cols = ", XIDUSN, XIDSLT, XIDSQN" if include_xid else ""
     return f"""
         SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER{xid_cols}
         FROM (
