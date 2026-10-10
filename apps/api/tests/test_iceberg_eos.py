@@ -549,6 +549,103 @@ def test_blank_resume_never_changes_fence(rest_dest: dict[str, Any]) -> None:
     assert view.fence_epoch == 4
 
 
+def test_retired_slot_ignores_iceberg_lsn_when_catalog_blank_fails(
+    local_sql_dest: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from connectors import cdc_eos_sql, iceberg_eos
+    from services import cdc_slot_resume
+    from services.cdc_slot_resume import retire_after_slot_drop, slot_lsn_retired
+
+    key = "pg:iceberg:retire-a"
+    slot = "df_iceberg_retire_a"
+    _apply(
+        local_sql_dest,
+        stream_key=key,
+        lsn="0/20",
+        inserts=[{"id": "1", "v": "before drop"}],
+    )
+    monkeypatch.setattr(cdc_slot_resume, "STORE_PATH", tmp_path / "retired-a.json")
+    monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: None)
+    monkeypatch.setattr(
+        cdc_eos_sql, "read_route_dest_lsn", lambda *_args, **_kwargs: "0/20"
+    )
+
+    with monkeypatch.context() as failing_catalog:
+        failing_catalog.setattr(
+            iceberg_eos,
+            "load_catalog",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("catalog unavailable")
+            ),
+        )
+        outcome = retire_after_slot_drop(
+            slot_name=slot,
+            cursor_keys=[key],
+            prior_by_key={key: f"lsn=0/20|slot={slot}"},
+            dest_type="iceberg",
+            dest_cfg=local_sql_dest,
+        )
+
+    assert key not in outcome["dest_resume_cleared"]
+    assert slot_lsn_retired("0/20", cursor_key=key, slot_name=slot)
+    opened = cdc_eos_sql.open_eos_session(
+        dest_type="iceberg",
+        dest_cfg=local_sql_dest,
+        stream_key=key,
+        incoming_fence=0,
+        job_resume=f"lsn=0/20|slot={slot}",
+    )
+    assert opened.dest_lsn is None
+    assert opened.resume in {None, ""}
+
+
+def test_retirement_store_failure_leaves_iceberg_lsn_resumable(
+    local_sql_dest: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from connectors import cdc_eos_sql
+    from services import cdc_slot_resume
+    from services.cdc_slot_resume import retire_after_slot_drop
+
+    key = "pg:iceberg:retire-b"
+    slot = "df_iceberg_retire_b"
+    _apply(
+        local_sql_dest,
+        stream_key=key,
+        lsn="0/30",
+        inserts=[{"id": "1", "v": "before drop"}],
+    )
+    monkeypatch.setattr(
+        cdc_slot_resume,
+        "retire_slot_lsn",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("retirement store unavailable")
+        ),
+    )
+    try:
+        retire_after_slot_drop(
+            slot_name=slot,
+            cursor_keys=[key],
+            prior_by_key={key: f"lsn=0/30|slot={slot}"},
+            dest_type="iceberg",
+            dest_cfg=local_sql_dest,
+        )
+    except OSError:
+        pass
+    opened = cdc_eos_sql.open_eos_session(
+        dest_type="iceberg",
+        dest_cfg=local_sql_dest,
+        stream_key=key,
+        incoming_fence=0,
+        job_resume=None,
+    )
+
+    assert opened.dest_lsn == "0/30"
+    assert opened.resume
+
+
 def test_watermark_survives_snapshot_expiration(
     local_sql_dest: dict[str, Any],
 ) -> None:
