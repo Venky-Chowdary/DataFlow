@@ -371,14 +371,17 @@ def _is_dialect_sanctioned_carrier(
     A cross-family pair is normally weak evidence, but ``DECIMAL(12,2) → TEXT``
     on SQLite is the exact-digit carrier :func:`materialize_dest_ddl` itself
     picks — re-running a migration into a table DataFlow created must not score
-    its own DDL as an incompatible-type conflict.
+    its own DDL as an incompatible-type conflict. A carrier never excuses a
+    lossy source-to-target conversion.
     """
     if not dest_db or not source_type or not target_type:
         return False
     from services.dest_schema_authority import destination_schema_is_sampled
-    from services.type_system import materialize_dest_ddl
+    from services.type_system import is_lossy_coercion, materialize_dest_ddl
 
     try:
+        if is_lossy_coercion(source_type, target_type, dest_db=dest_db):
+            return False
         if destination_schema_is_sampled(dest_db):
             # No DDL here: the write's carrier is the destination type map's
             # (Redis stores DECIMAL as exact JSON text); the SQL materializer
