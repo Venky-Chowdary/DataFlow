@@ -2023,6 +2023,7 @@ class DataPilotTools:
             "review_mappings": "Open Map step to review mappings",
             "rerun_preflight": "Re-run Validate",
         }
+        requires_confirm = kind in {"open_bad_data_fix", "quarantine_and_rerun"}
         return ToolResult(
             name="remediate_validation",
             success=True,
@@ -2031,13 +2032,19 @@ class DataPilotTools:
                 "kind": kind,
                 "label": labels[kind],
                 "run_id": cited or None,
-                "risk": "safe",
-                "requires_confirm": False,
-                "ui_only": True,
+                "risk": "mutate" if requires_confirm else "safe",
+                "requires_confirm": requires_confirm,
+                "destructive": kind == "quarantine_and_rerun",
+                "ui_only": not requires_confirm,
                 "note": (
-                    "This opens the studio control. It does not change data "
-                    "until you use that screen. There is no confirm ack because "
-                    "nothing is written here."
+                    "This stages a change for confirmation in Transfer Studio. "
+                    "Nothing is written from this chat."
+                    if requires_confirm
+                    else (
+                        "This opens the studio control. It does not change data "
+                        "until you use that screen. There is no confirm ack because "
+                        "nothing is written here."
+                    )
                 ),
             },
         )

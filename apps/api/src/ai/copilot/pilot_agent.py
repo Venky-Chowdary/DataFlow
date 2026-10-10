@@ -1752,9 +1752,6 @@ class DataPilotAgent:
             return
 
         if tr.name == "remediate_validation":
-            # The tool opens a studio screen. It does not write, so there is
-            # no ack and no Confirm. A caller that still sets requires_confirm
-            # keeps the older staged shape.
             if out.get("ui_only") or out.get("requires_confirm") is False:
                 turn.actions.append({
                     "type": "navigate",
@@ -1772,6 +1769,7 @@ class DataPilotAgent:
                 "label": out.get("label"),
                 "run_id": out.get("run_id"),
                 "risk": "mutate",
+                "destructive": bool(out.get("destructive")),
                 "payload": {"kind": out.get("kind"), "run_id": out.get("run_id")},
             })
             # Ensure Transfer is ready; safe navigate can auto-apply.
