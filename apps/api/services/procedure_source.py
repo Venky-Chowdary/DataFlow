@@ -80,6 +80,21 @@ PROCEDURE_DIALECTS = frozenset({
 
 QUERY_ONLY_DIALECTS = frozenset({"sqlite", "duckdb"})
 
+# Engines where a staging peek of a procedure is rolled back by the server
+# itself: a CALL inside an explicit transaction block cannot COMMIT
+# (InvalidTransactionTermination). Everything else (MySQL implicit/explicit
+# commits, MyISAM, SQL Server / Oracle autonomous work, Snowflake, PG-wire
+# lookalikes not proven here) is refused before confirm unless the operator
+# declares the result schema.
+PEEK_ROLLBACK_DIALECTS = frozenset({
+    "postgresql",
+    "postgres",
+    "pgvector",
+    "timescaledb",
+    "alloydb",
+    "amazon_rds_postgresql",
+})
+
 _IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 _QUALIFIED = rf"(?:{_IDENT}\.){{0,2}}{_IDENT}"
 
@@ -315,6 +330,7 @@ _CALLABLE_CFG_KEYS = (
     "procedure_call",
     "source_query",
     "procedure_params",
+    "procedure_result_schema",
 )
 
 
@@ -394,6 +410,23 @@ def procedure_params_of(source: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         return {}
     return {str(k): v for k, v in raw.items()}
+
+
+def procedure_result_schema_of(source: Any) -> dict[str, str]:
+    """Operator-declared ``{column: type}`` of a procedure result set."""
+    extra: Mapping[str, Any] = {}
+    if hasattr(source, "extra"):
+        extra = getattr(source, "extra", None) or {}
+    elif isinstance(source, Mapping):
+        nested = source.get("extra") if isinstance(source.get("extra"), Mapping) else {}
+        extra = {**dict(nested or {}), **source}
+    raw = extra.get("procedure_result_schema") or {}
+    if not isinstance(raw, Mapping):
+        raise ProcedureSourceError(
+            "procedure_result_schema must map each result column to its type, "
+            'e.g. {"id": "INTEGER", "name": "VARCHAR(100)"}.'
+        )
+    return {str(k).strip(): str(v).strip() for k, v in raw.items() if str(k).strip()}
 
 
 def dialect_of(source: Any) -> str:
@@ -719,7 +752,13 @@ def read_callable_batch(
         params=procedure_params_of(cfg),
     )
     if peek:
-        headers, rows, schema = _execute_live(cfg, spec, limit=min(int(limit or PEEK_ROW_LIMIT), PEEK_ROW_LIMIT))
+        declared = _peek_without_executing(cfg, spec)
+        if declared is not None:
+            headers, rows, schema = list(declared), [], declared
+        else:
+            headers, rows, schema = _execute_live(
+                cfg, spec, limit=min(int(limit or PEEK_ROW_LIMIT), PEEK_ROW_LIMIT)
+            )
         if columns:
             headers, rows = _project(headers, rows, columns)
         return ReadBatch(
@@ -1244,6 +1283,53 @@ def _operator_extract_error(exc: BaseException) -> str:
     return f"The source refused the extract: {sentence}"
 
 
+def _peek_without_executing(cfg: Mapping[str, Any], spec: CallableSpec) -> dict[str, str] | None:
+    """Decide how staging may learn a procedure's shape before confirm.
+
+    Returns the declared schema (nothing executes), ``None`` when executing
+    under a guaranteed rollback is safe, or refuses (fail closed).
+    """
+    if spec.mode != MODE_PROCEDURE:
+        return None
+    declared = procedure_result_schema_of(cfg)
+    dialect = (spec.dialect or str(cfg.get("type") or "")).strip().lower()
+    if declared:
+        logger.info(
+            "procedure %s not executed before confirm: using declared result schema (%d column(s))",
+            spec.identifier, len(declared),
+        )
+        return declared
+    if dialect in PEEK_ROLLBACK_DIALECTS:
+        return None
+    logger.warning(
+        "procedure %s not executed before confirm: %s cannot guarantee a rollback of its side effects",
+        spec.identifier, dialect or "this engine",
+    )
+    raise ProcedureSourceError(
+        f"`{spec.identifier}` was not run during staging: on {dialect or 'this engine'} a "
+        "procedure can COMMIT or write non-transactional tables, so a preview could change "
+        "source data before you confirm. Declare its result columns as "
+        'procedure_result_schema (e.g. {"id": "INTEGER", "name": "VARCHAR(100)"}) and '
+        "stage again; the procedure then runs only after you confirm."
+    )
+
+
+def _rollback_peek(conn: Any, spec: CallableSpec) -> None:
+    """A peek never commits. Roll back explicitly; failing to is fatal."""
+    try:
+        conn.rollback()
+    except Exception as exc:
+        logger.error(
+            "staging peek of %s could not be rolled back", spec.identifier, exc_info=True,
+        )
+        raise ProcedureSourceError(
+            f"Staging could not roll back its preview of `{spec.identifier}`. "
+            "Check the source for changes before confirming."
+        ) from exc
+    if spec.mode == MODE_PROCEDURE:
+        logger.info("staging peek of procedure %s rolled back before confirm", spec.identifier)
+
+
 def _open_callable_result(cfg: Mapping[str, Any], spec: CallableSpec, *, peek: bool):
     from connectors.generic_sql import SQLALCHEMY_AVAILABLE, _engine
     from services.engine_pool import release_engine
@@ -1319,6 +1405,8 @@ def _execute_live(
         raise ProcedureSourceError(_operator_extract_error(exc)) from exc
     finally:
         if conn is not None:
+            if limit is not None:
+                _rollback_peek(conn, spec)
             conn.close()
         if engine is not None:
             release_engine(engine)
