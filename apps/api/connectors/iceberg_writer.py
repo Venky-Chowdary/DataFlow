@@ -1250,6 +1250,11 @@ def _write_mapped_rows_pyiceberg(
             load_catalog,
             parse_iceberg_catalog_config,
         )
+        from connectors.iceberg_schema_evolution import (
+            IcebergSchemaEvolutionError,
+            apply_schema_plan,
+            plan_schema_change,
+        )
         from pyiceberg.exceptions import NoSuchTableError
     except Exception as exc:
         return WriteResult(
@@ -1262,6 +1267,26 @@ def _write_mapped_rows_pyiceberg(
             error=f"Iceberg catalog support unavailable: {exc}",
             driver="iceberg",
         )
+
+    extra = endpoint.get("extra")
+    extra = extra if isinstance(extra, dict) else {}
+    rename_columns = endpoint.get("rename_columns")
+    if rename_columns is None:
+        rename_columns = extra.get("rename_columns")
+    if rename_columns is not None and (
+        not isinstance(rename_columns, dict)
+        or any(
+            not isinstance(source, str) or not isinstance(target, str)
+            for source, target in rename_columns.items()
+        )
+    ):
+        raise ValueError("rename_columns must be a dict of strings to strings")
+    schema_evolution = endpoint.get("schema_evolution")
+    if schema_evolution is None:
+        schema_evolution = extra.get("schema_evolution")
+    strict_schema_evolution = (
+        str(schema_evolution or "").strip().lower() == "strict"
+    )
 
     config = parse_iceberg_catalog_config(endpoint)
     table = config["table_name"]
@@ -1320,6 +1345,22 @@ def _write_mapped_rows_pyiceberg(
         tbl = catalog.load_table(identifier)
         table_existed = True
     except NoSuchTableError:
+        if strict_schema_evolution and rename_columns:
+            evolution_error = IcebergSchemaEvolutionError(
+                "rename source does not exist because the table is not present"
+            )
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"{type(evolution_error).__name__}: {evolution_error}"
+                ),
+                driver="iceberg",
+            )
         if not create_table:
             return WriteResult(
                 ok=False,
@@ -1370,6 +1411,62 @@ def _write_mapped_rows_pyiceberg(
 
     try:
         existing_arrow = tbl.schema().as_arrow()
+        schema_plan = None
+        planned_arrow_schema = None
+        requested_dest_types = dict(dest_types)
+        if table_existed:
+            candidate_fields: list[Any] = []
+            candidate_complete = True
+            rename_sources_by_target = {
+                target: source for source, target in (rename_columns or {}).items()
+            }
+            for column in target_cols:
+                carrier = str(requested_dest_types.get(column) or "").strip()
+                if not carrier:
+                    if studio_err:
+                        candidate_complete = False
+                        break
+                    carrier = "string"
+                existing_field = (
+                    existing_arrow.field(column)
+                    if column in existing_arrow.names
+                    else None
+                )
+                rename_source = rename_sources_by_target.get(column)
+                if existing_field is None and rename_source in existing_arrow.names:
+                    existing_field = existing_arrow.field(rename_source)
+                nullable = existing_field.nullable if existing_field else True
+                candidate_fields.append(
+                    pa.field(
+                        column,
+                        _logical_to_arrow_type(carrier, pa),
+                        nullable=nullable,
+                    )
+                )
+            if candidate_complete:
+                planned_arrow_schema = pa.schema(candidate_fields)
+                schema_plan = plan_schema_change(
+                    tbl.schema(),
+                    planned_arrow_schema,
+                    rename_columns=rename_columns,
+                )
+                if strict_schema_evolution and schema_plan.refused:
+                    evolution_error = IcebergSchemaEvolutionError(
+                        "; ".join(schema_plan.refused)
+                    )
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"{type(evolution_error).__name__}: "
+                            f"{evolution_error}"
+                        ),
+                        driver="iceberg",
+                    )
         # Rematerialize from source when committed Arrow carriers ≠ Map stamps
         # (VARCHAR→int/date/decimal invent cliff — same class as PG/Snowflake).
         if table_existed:
@@ -1417,9 +1514,19 @@ def _write_mapped_rows_pyiceberg(
                         driver="iceberg",
                     )
                 physical = effective
+            rematerialize_physical = dict(physical)
+            if schema_plan is not None and not schema_plan.refused:
+                for change in schema_plan.changes:
+                    if change.kind != "widen":
+                        continue
+                    carrier = str(
+                        requested_dest_types.get(change.column) or ""
+                    ).strip()
+                    if carrier:
+                        rematerialize_physical[change.column] = carrier
             _force_remap = bool(studio_err)
             remat = _iceberg_rematerialize_if_physical_differs(
-                physical=physical,
+                physical=rematerialize_physical,
                 dest_types=dest_types,
                 target_cols=target_cols,
                 headers=headers,
@@ -1450,6 +1557,10 @@ def _write_mapped_rows_pyiceberg(
                     rejected_details=rejected_details,
                     driver="iceberg",
                 )
+            if schema_plan is not None and not schema_plan.refused:
+                for change in schema_plan.changes:
+                    if change.kind == "widen" and change.column in requested_dest_types:
+                        dest_types[change.column] = requested_dest_types[change.column]
 
         if not mapped_rows:
             mapped_rows, transform_errors, rejected_details = _iceberg_map_rows(
@@ -1533,25 +1644,92 @@ def _write_mapped_rows_pyiceberg(
                     )
                 carrier = "string"
             arrow_types.append(_logical_to_arrow_type(carrier, pa))
+        if table_existed and schema_plan is None:
+            fallback_fields: list[Any] = []
+            rename_sources_by_target = {
+                target: source for source, target in (rename_columns or {}).items()
+            }
+            for column, arrow_type in zip(target_cols, arrow_types):
+                existing_field = (
+                    existing_arrow.field(column)
+                    if column in existing_arrow.names
+                    else None
+                )
+                rename_source = rename_sources_by_target.get(column)
+                if existing_field is None and rename_source in existing_arrow.names:
+                    existing_field = existing_arrow.field(rename_source)
+                nullable = existing_field.nullable if existing_field else True
+                fallback_fields.append(
+                    pa.field(column, arrow_type, nullable=nullable)
+                )
+            planned_arrow_schema = pa.schema(fallback_fields)
+            schema_plan = plan_schema_change(
+                tbl.schema(),
+                planned_arrow_schema,
+                rename_columns=rename_columns,
+            )
+            if strict_schema_evolution and schema_plan.refused:
+                evolution_error = IcebergSchemaEvolutionError(
+                    "; ".join(schema_plan.refused)
+                )
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"{type(evolution_error).__name__}: "
+                        f"{evolution_error}"
+                    ),
+                    driver="iceberg",
+                )
         type_locked_warnings: list[str] = []
-        new_fields: list[tuple[str, Any]] = []
-        for c, at in zip(target_cols, arrow_types):
-            if c not in existing_arrow.names:
-                new_fields.append((c, at))
-            else:
-                existing_type = existing_arrow.field(c).type
-                if not existing_type.equals(at):
+        if schema_plan is not None and not schema_plan.refused:
+            if planned_arrow_schema is not None:
+                arrow_types = [
+                    planned_arrow_schema.field(column).type
+                    for column in target_cols
+                ]
+            if schema_plan.changes:
+                with tbl.update_schema() as update:
+                    apply_schema_plan(update, schema_plan)
+                tbl = catalog.load_table(identifier)
+                existing_arrow = tbl.schema().as_arrow()
+        else:
+            new_fields: list[tuple[str, Any]] = []
+            for c, at in zip(target_cols, arrow_types):
+                if c not in existing_arrow.names:
+                    new_fields.append((c, at))
+                else:
+                    existing_type = existing_arrow.field(c).type
+                    if not existing_type.equals(at):
+                        type_locked_warnings.append(
+                            f"type_locked: keep {c}:{existing_type} (incoming {at})"
+                        )
+            if schema_plan is not None:
+                for refusal in schema_plan.refused:
+                    if not refusal.startswith("type_locked: keep "):
+                        continue
+                    column = refusal[len("type_locked: keep ") :].split(":", 1)[0]
+                    if not any(
+                        warning.startswith(f"type_locked: keep {column}:")
+                        for warning in type_locked_warnings
+                    ):
+                        type_locked_warnings.append(refusal)
+                if schema_plan.refused and not type_locked_warnings:
                     type_locked_warnings.append(
-                        f"type_locked: keep {c}:{existing_type} (incoming {at})"
+                        "type_locked: schema evolution refused: "
+                        + "; ".join(schema_plan.refused)
                     )
 
-        if new_fields:
-            new_schema = pa.schema(new_fields)
-            with tbl.update_schema() as update:
-                update.union_by_name(new_schema)
-            # Refresh the table so the final schema includes the new columns.
-            tbl = catalog.load_table(identifier)
-            existing_arrow = tbl.schema().as_arrow()
+            if new_fields:
+                new_schema = pa.schema(new_fields)
+                with tbl.update_schema() as update:
+                    update.union_by_name(new_schema)
+                tbl = catalog.load_table(identifier)
+                existing_arrow = tbl.schema().as_arrow()
 
         final_arrow = existing_arrow
         schema_extra_cols = [n for n in final_arrow.names if n not in set(target_cols)]
