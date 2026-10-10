@@ -102,7 +102,7 @@ CDC is at-least-once; exactly-once is not claimed. No retrieval-quality claim is
 
 For this connector slice, Datawrap is **6/10** versus **Airbyte/Fivetran at 9/10**. Named evidence is synthetic: `apps/api/tests/test_gconn_sdk_transfer_routing.py` verifies descriptor-driven routing and source-only catalog enrichment; `apps/api/tests/test_gconn_sdk_transfer_e2e.py` exercises GitHub/Jira full-reread PK upsert and Intercom's fresh-destination paginated read. The SDK matrix does not establish live vendor compatibility, quotas, real-volume throughput, or destination-role readiness.
 
-The increment is three SDK sources (GitHub, Jira, Intercom) plus the existing HubSpot SDK source—not parity with the hundreds of connectors available from Airbyte/Fivetran. Catalog enrichment remains `beta` / `source_only`; transfer capabilities are full-refresh-only. Intercom existing-destination epoch remapping and SDK `resume=True` Gate-8 are strict xfails and remain unverified; see `docs/CONNECTOR_CERTIFICATION.md` under **Known engine gaps (G-CONN M5)**.
+The increment is three SDK sources (GitHub, Jira, Intercom) plus the existing HubSpot SDK source—not parity with the hundreds of connectors available from Airbyte/Fivetran. Catalog enrichment remains `beta` / `source_only`; transfer capabilities are full-refresh-only. The existing-destination epoch remap is fixed and tested for the SQLite physical-carrier path. SDK `resume=True` is refused before side effects and remains unsupported until whole-population Gate-8 reconciliation is implemented. The named engine E2Es and limits are recorded in `docs/CONNECTOR_CERTIFICATION.md` under **Known engine gaps (G-CONN M5)**.
 
 ## G-LAKE: Iceberg / lakehouse (M6)
 

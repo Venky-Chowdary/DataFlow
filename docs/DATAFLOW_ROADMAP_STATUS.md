@@ -353,14 +353,14 @@ Implement usage metering in `services/usage_metering.py` and expose a pricing ca
 - Connector capability registry marks `transfer_ready` truthfully.
 - GitHub, Jira Cloud, and Intercom are descriptor-backed SDK sources routed through the transfer engine. Synthetic catalog enrichment reports `beta` / `source_only`, `source_ready=true`, and destination/transfer readiness false.
 - Transfer capabilities are full-refresh-only; SDK descriptors preserve manifest-declared sync modes. Evidence: `apps/api/tests/test_gconn_sdk_transfer_routing.py`.
-- Synthetic engine evidence: `apps/api/tests/test_gconn_sdk_transfer_e2e.py` covers GitHub/Jira full-reread PK-upsert recovery and Intercom fresh-destination pagination. Intercom retry remapping and SDK `resume=True` Gate-8 remain strict expected failures, not verified fixes; see `docs/CONNECTOR_CERTIFICATION.md`.
+- Synthetic engine evidence: `apps/api/tests/test_gconn_sdk_transfer_e2e.py` covers GitHub/Jira full-reread PK-upsert recovery, Intercom fresh-destination pagination and fault-then-full-reread retry, and GitHub SDK resume refusal before side effects. The verified SQLite existing-destination epoch remap is fixed; SDK checkpoint resume remains unsupported and is refused, with the strict Gate-8 path unchanged. See `docs/CONNECTOR_CERTIFICATION.md` for tests and details.
 - The added breadth is three sources plus the existing HubSpot SDK connector, still far short of the hundreds of sources offered by Airbyte/Fivetran.
 
-Live vendor compatibility, quota behavior, real-volume performance, destination-role readiness, and both known engine gaps remain unverified. Keep catalog readiness and roadmap claims source-only until that evidence exists.
+Live vendor compatibility, quota behavior, real-volume performance, and destination-role readiness remain unverified. The existing-destination epoch remap fix is proven for the SQLite physical-carrier path; other dialect introspection paths were not changed. SDK `resume=True` is fail-closed and remains unsupported until the engine can reconcile the resumed population at Gate-8. Keep catalog readiness and roadmap claims source-only until that evidence exists.
 
 ### Recommended next step
 
-Resolve the existing-destination epoch-type remap and add SDK source reread support for strict resumed Gate-8 before expanding the certified surface.
+Add SDK source reread / population reconciliation support before enabling checkpoint resume, and expand live-vendor proof before broadening the certified surface.
 
 ---
 
