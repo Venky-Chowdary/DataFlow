@@ -250,6 +250,7 @@ def test_oracle_eos_runner_recovers_from_source_restart(
 ) -> None:
     from connectors.generic_sql import get_connection as oracle_connection
     from connectors import oracle_logminer
+    from connectors import cdc_eos_sql
     from connectors.oracle_logminer import (
         OracleLogMinerCdc,
         decode_logminer_token,
@@ -321,10 +322,48 @@ def test_oracle_eos_runner_recovers_from_source_restart(
     restarted = False
     original_mining_conn = OracleLogMinerCdc._mining_conn
     original_poll_once = OracleLogMinerCdc._poll_once
+    original_init = OracleLogMinerCdc.__init__
+    original_open_eos = cdc_eos_sql.open_eos_session
     original_start_logminer = oracle_logminer.start_logminer_session
     original_decide_eos_apply = cdc_exactly_once.decide_eos_apply
     poll_attempt = 0
+    resume_expected = False
+    resume_from_dest = None
     trace_logger = logging.getLogger(__name__)
+
+    def trace_open_eos(**kwargs):
+        nonlocal resume_from_dest
+        result = original_open_eos(**kwargs)
+        if resume_expected:
+            resume_from_dest = result.resume
+        return result
+
+    def assert_resume_state(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        if resume_expected:
+            assert resume_from_dest is not None
+            state = decode_logminer_token(resume_from_dest)
+            trace_logger.warning(
+                "M23_DIAG reopened-reader scn=%s rs_id=%r ssn=%s "
+                "low_scn=%s phase=%s resume_token=%r dest_resume=%r",
+                self.scn,
+                self.rs_id,
+                self.ssn,
+                self.low_scn,
+                self.phase,
+                self.resume_token,
+                resume_from_dest,
+            )
+            assert self.resume_token == resume_from_dest
+            assert self.scn == state["scn"]
+            assert self.rs_id == state["rs_id"]
+            assert self.ssn == state["ssn"]
+            assert self.low_scn == state["low_scn"]
+            assert self.phase == state["phase"]
+            assert self.phase != "initial"
+            if self.phase == "snapshot":
+                assert self.snapshot_offset or self.snapshot_last_pk
+            assert self.scn > 0
 
     @contextmanager
     def restart_during_stream(self):
@@ -355,6 +394,9 @@ def test_oracle_eos_runner_recovers_from_source_restart(
         nonlocal poll_attempt
         poll_attempt += 1
         attempt = poll_attempt
+        if attempt == 1:
+            assert self.phase == "streaming"
+            assert self.scn > 0
         trace_logger.warning(
             "M23_DIAG poll-start attempt=%d token=%s",
             attempt,
@@ -512,6 +554,8 @@ def test_oracle_eos_runner_recovers_from_source_restart(
             src, dst, mappings=mappings, types=types, stream=stream, job_id=job_id
         )
         with pytest.MonkeyPatch.context() as patcher:
+            patcher.setattr(OracleLogMinerCdc, "__init__", assert_resume_state)
+            patcher.setattr(cdc_eos_sql, "open_eos_session", trace_open_eos)
             patcher.setattr(OracleLogMinerCdc, "_mining_conn", restart_during_stream)
             patcher.setattr(OracleLogMinerCdc, "_poll_once", trace_poll_once)
             patcher.setattr(
@@ -520,6 +564,7 @@ def test_oracle_eos_runner_recovers_from_source_restart(
             patcher.setattr(
                 cdc_exactly_once, "decide_eos_apply", trace_decide_eos_apply
             )
+            resume_expected = True
             with caplog.at_level(logging.WARNING):
                 _run_postgres_eos_transfer(
                     src,

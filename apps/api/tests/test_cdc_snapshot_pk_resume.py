@@ -8,6 +8,7 @@ LSN, SCN, CT version) must survive the seek and must not be recaptured.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 from connectors.mysql_change_stream import MySqlChangeStreamCdc
@@ -37,6 +38,101 @@ from services.cdc_snapshot_resume import (
     last_pk_from_records,
     snapshot_keyset_sql,
 )
+
+
+def test_logminer_decoder_accepts_dict_and_wrapped_tokens_but_rejects_wrong_kind(
+    caplog,
+) -> None:
+    from connectors.oracle_logminer import decode_logminer_token
+
+    token = {
+        "kind": "oracle-logminer",
+        "scn": 1234,
+        "phase": "streaming",
+        "rs_id": " 0xabc ",
+        "ssn": 7,
+        "low_scn": 1200,
+    }
+
+    assert decode_logminer_token(token) == {
+        "scn": 1234,
+        "phase": "streaming",
+        "table": "",
+        "rs_id": " 0xabc ",
+        "ssn": 7,
+        "offset": 0,
+        "last_pk": "",
+        "low_scn": 1200,
+        "poll_scn": 0,
+        "poll_rs_id": "",
+        "poll_ssn": 0,
+        "commit_scn": 0,
+        "commit_rs_id": "",
+        "commit_ssn": 0,
+        "commit_xid": "",
+        "txn_buffer": False,
+    }
+    assert decode_logminer_token(json.dumps(json.dumps(token)))["scn"] == 1234
+    assert decode_logminer_token({"kind": "mssql-cdc", "lsn": "0abc"})["scn"] == 0
+    assert "unexpected kind" in caplog.text
+
+
+def test_mssql_decoder_accepts_dict_and_wrapped_tokens_but_rejects_wrong_kind(
+    caplog,
+) -> None:
+    from connectors.sqlserver_cdc_native import decode_mssql_cdc_token
+
+    token = {
+        "kind": "mssql-cdc",
+        "lsn": "0abc",
+        "phase": "streaming",
+        "table": "orders",
+        "offset": 3,
+        "seqval": "00ff",
+        "capture_instance": "dbo_orders",
+        "last_pk": "7",
+    }
+
+    assert decode_mssql_cdc_token(token) == {
+        "lsn": "0abc",
+        "phase": "streaming",
+        "table": "orders",
+        "offset": 3,
+        "seqval": "00ff",
+        "capture_instance": "dbo_orders",
+        "last_pk": "7",
+    }
+    assert decode_mssql_cdc_token(json.dumps(json.dumps(token)))["lsn"] == "0abc"
+    assert decode_mssql_cdc_token({"kind": "oracle-logminer", "scn": 1234})["lsn"] == ""
+    assert "unexpected kind" in caplog.text
+
+
+def test_mssql_ct_decoder_accepts_dict_and_wrapped_tokens_but_rejects_wrong_kind(
+    caplog,
+) -> None:
+    from connectors.sqlserver_change_stream import decode_sqlserver_resume_token
+
+    token = {
+        "kind": "mssql-ct",
+        "version": 42,
+        "phase": "streaming",
+        "table": "orders",
+        "offset": 3,
+        "last_pk": "7",
+    }
+
+    assert decode_sqlserver_resume_token(token) == {
+        "version": 42,
+        "phase": "streaming",
+        "offset": 3,
+        "table": "orders",
+        "last_pk": "7",
+    }
+    assert decode_sqlserver_resume_token(json.dumps(json.dumps(token)))["version"] == 42
+    assert decode_sqlserver_resume_token({"kind": "mssql-cdc", "lsn": "0abc"})[
+        "version"
+    ] == 0
+    assert "unexpected kind" in caplog.text
 
 
 def test_classify_snapshot_resume_prefers_last_pk() -> None:

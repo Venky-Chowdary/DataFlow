@@ -2762,6 +2762,12 @@ def _run_cdc_single_stream(
         stream=table_name,
         allow_unnamed=not checkpoint_bound_to_stream,
     )
+    if (
+        eos_active
+        and isinstance(opened.resume, dict)
+        and watermark == str(opened.resume)
+    ):
+        watermark = opened.resume
 
     from services.multi_stream_plan import reader_columns_for_stream
 

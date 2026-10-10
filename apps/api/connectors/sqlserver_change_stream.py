@@ -88,10 +88,27 @@ def encode_sqlserver_resume_token(
     return json.dumps(payload, separators=(",", ":"))
 
 
-def decode_sqlserver_resume_token(token: str | None) -> dict[str, Any]:
+def decode_sqlserver_resume_token(token: Any) -> dict[str, Any]:
     if not token:
         return {"version": 0, "phase": "initial", "offset": 0, "table": ""}
-    raw = str(token).strip()
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    data = unwrap_resume_token(token)
+    if isinstance(data, dict):
+        if data.get("kind") != "mssql-ct":
+            logger.warning(
+                "Ignoring resume token with unexpected kind=%r",
+                data.get("kind"),
+            )
+            return {"version": 0, "phase": "initial", "offset": 0, "table": ""}
+        return {
+            "version": int(data.get("version") or 0),
+            "phase": str(data.get("phase") or "streaming"),
+            "offset": int(data.get("offset") or 0),
+            "table": str(data.get("table") or ""),
+            "last_pk": str(data.get("last_pk") or ""),
+        }
+    raw = str(data).strip()
     if raw.startswith("mssql-ct:"):
         # Legacy compact form: mssql-ct:{table}:{version}
         try:
@@ -100,8 +117,14 @@ def decode_sqlserver_resume_token(token: str | None) -> dict[str, Any]:
             version = 0
         return {"version": version, "phase": "streaming", "offset": 0, "table": ""}
     try:
-        data = json.loads(raw)
-        if isinstance(data, dict) and data.get("kind") == "mssql-ct":
+        data = unwrap_resume_token(json.loads(raw))
+        if isinstance(data, dict) and data.get("kind") != "mssql-ct":
+            logger.warning(
+                "Ignoring resume token with unexpected kind=%r",
+                data.get("kind"),
+            )
+            return {"version": 0, "phase": "initial", "offset": 0, "table": ""}
+        if isinstance(data, dict):
             return {
                 "version": int(data.get("version") or 0),
                 "phase": str(data.get("phase") or "streaming"),

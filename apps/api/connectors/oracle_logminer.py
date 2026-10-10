@@ -254,7 +254,7 @@ def encode_logminer_token(
     return json.dumps(payload, separators=(",", ":"))
 
 
-def decode_logminer_token(token: str | None) -> dict[str, Any]:
+def decode_logminer_token(token: Any) -> dict[str, Any]:
     empty = {
         "scn": 0,
         "phase": "initial",
@@ -280,8 +280,13 @@ def decode_logminer_token(token: str | None) -> dict[str, Any]:
 
         data = unwrap_resume_token(token)
         if not isinstance(data, dict):
-            parsed = json.loads(str(token))
-            data = unwrap_resume_token(parsed) if not isinstance(parsed, dict) else parsed
+            parsed = json.loads(str(data))
+            data = unwrap_resume_token(parsed)
+        if isinstance(data, dict) and data.get("kind") != "oracle-logminer":
+            logger.warning(
+                "Ignoring resume token with unexpected kind=%r",
+                data.get("kind"),
+            )
         if isinstance(data, dict) and data.get("kind") == "oracle-logminer":
             scn = int(data.get("scn") or 0)
             return {
@@ -887,7 +892,7 @@ class OracleLogMinerCdc:
         primary_keys: dict[str, str] | None = None,
         schema: str = "",
         batch_size: int = 500,
-        resume_token: str | None = None,
+        resume_token: Any = None,
         cursor_key: str = "",
     ) -> None:
         from services.cdc_multi_table import normalize_table_list, tables_digest

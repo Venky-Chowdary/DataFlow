@@ -203,7 +203,7 @@ def encode_mssql_cdc_token(
     return json.dumps(payload, separators=(",", ":"))
 
 
-def decode_mssql_cdc_token(token: str | None) -> dict[str, Any]:
+def decode_mssql_cdc_token(token: Any) -> dict[str, Any]:
     if not token:
         return {
             "lsn": "",
@@ -215,7 +215,16 @@ def decode_mssql_cdc_token(token: str | None) -> dict[str, Any]:
             "last_pk": "",
         }
     try:
-        data = json.loads(str(token))
+        from services.cdc_resume_tokens import unwrap_resume_token
+
+        data = unwrap_resume_token(token)
+        if not isinstance(data, dict):
+            data = unwrap_resume_token(json.loads(str(data)))
+        if isinstance(data, dict) and data.get("kind") != "mssql-cdc":
+            logger.warning(
+                "Ignoring resume token with unexpected kind=%r",
+                data.get("kind"),
+            )
         if isinstance(data, dict) and data.get("kind") == "mssql-cdc":
             return {
                 "lsn": str(data.get("lsn") or ""),
