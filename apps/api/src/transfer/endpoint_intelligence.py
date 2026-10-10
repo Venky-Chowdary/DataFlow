@@ -1612,7 +1612,9 @@ def _attach_callable_source_sample(
         out["columns"] = out.get("columns") or []
         out["schema"] = out.get("schema") or {}
         out["sample_error"] = str(exc)
-        out["message"] = f"Procedure extract failed: {exc}"
+        from services.procedure_source import _operator_extract_error
+
+        out["message"] = _operator_extract_error(exc)
         logger.warning("callable source peek failed for %s: %s", fmt, exc, exc_info=exc)
 
 

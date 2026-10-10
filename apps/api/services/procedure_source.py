@@ -1228,6 +1228,22 @@ def _project(
     return keep, projected
 
 
+def _operator_extract_error(exc: BaseException) -> str:
+    """The driver's own sentence for a refused extract, without the trace.
+
+    SQLAlchemy wraps the DBAPI error as ``(psycopg2.errors.X) <sentence>
+    LINE 1: … [SQL: …] (Background on this error at: …)``. The operator needs
+    the sentence; the class, SQL echo, caret and link stay in the server log.
+    """
+    orig = getattr(exc, "orig", None)
+    text = str(orig if orig is not None else exc).strip()
+    if orig is None:
+        text = re.sub(r"^\([\w.]+\)\s*", "", text)
+    text = re.split(r"\n\s*(?:LINE \d+:|\[SQL:|\(Background on this error)", text)[0]
+    sentence = " ".join(text.split()) or type(exc).__name__
+    return f"The source refused the extract: {sentence}"
+
+
 def _open_callable_result(cfg: Mapping[str, Any], spec: CallableSpec, *, peek: bool):
     from connectors.generic_sql import SQLALCHEMY_AVAILABLE, _engine
     from services.engine_pool import release_engine
@@ -1292,7 +1308,15 @@ def _execute_live(
     except ProcedureSourceError:
         raise
     except Exception as exc:
-        raise ProcedureSourceError(f"Procedure extract failed: {exc}") from exc
+        logger.warning(
+            "callable extract failed dialect=%s source=%s peek=%s: %s",
+            spec.dialect or cfg.get("type") or "",
+            spec.identifier,
+            limit is not None,
+            exc,
+            exc_info=True,
+        )
+        raise ProcedureSourceError(_operator_extract_error(exc)) from exc
     finally:
         if conn is not None:
             conn.close()
@@ -1354,7 +1378,15 @@ def _execute_to_jsonl(
     except ProcedureSourceError:
         raise
     except Exception as exc:
-        raise ProcedureSourceError(f"Procedure extract failed: {exc}") from exc
+        logger.warning(
+            "callable extract failed dialect=%s source=%s peek=%s: %s",
+            spec.dialect or cfg.get("type") or "",
+            spec.identifier,
+            False,
+            exc,
+            exc_info=True,
+        )
+        raise ProcedureSourceError(_operator_extract_error(exc)) from exc
     finally:
         if conn is not None:
             conn.close()
