@@ -2882,12 +2882,18 @@ def fits_decimal(
     if _schemaless_decimal_capacity_holds(value, dest_db=dest_db):
         return True
     try:
-        text = str(value).strip()
-        if not text:
-            return True
-        from services.transform_engine import decimal_wire_value
+        if isinstance(value, Decimal):
+            # A typed Decimal is already exact. Round-tripping it through
+            # locale text read ``12.345`` as an ambiguous thousands group and
+            # refused every scale-3 value as overflow.
+            d = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return True
+            from services.transform_engine import decimal_wire_value
 
-        d = decimal_wire_value(text)
+            d = decimal_wire_value(text)
         if d is None:
             return False
         if not d.is_finite():
