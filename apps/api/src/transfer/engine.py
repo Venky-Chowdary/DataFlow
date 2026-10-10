@@ -3882,7 +3882,10 @@ class UniversalTransferEngine:
                     "database", request.destination.database or ""
                 ),
                 destination_collection=dest_summary.get("collection")
-                or dest_summary.get("table", ""),
+                or dest_summary.get("table")
+                or request.destination.collection
+                or request.destination.table
+                or "",
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
@@ -4929,7 +4932,10 @@ class UniversalTransferEngine:
                     "database", request.destination.database or ""
                 ),
                 destination_collection=dest_summary.get("collection")
-                or dest_summary.get("table", ""),
+                or dest_summary.get("table")
+                or request.destination.collection
+                or request.destination.table
+                or "",
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
@@ -5718,7 +5724,10 @@ class UniversalTransferEngine:
                     "database", request.destination.database or ""
                 ),
                 destination_collection=dest_summary.get("collection")
-                or dest_summary.get("table", ""),
+                or dest_summary.get("table")
+                or request.destination.collection
+                or request.destination.table
+                or "",
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],

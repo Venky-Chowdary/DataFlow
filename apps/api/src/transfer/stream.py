@@ -3584,6 +3584,9 @@ def _stream_database_transfer_impl(
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
         dest_summary["sync_mode"] = effective_sync
+        # No batch ran, so no writer summary named the table; the job record
+        # read an empty destination and fell back to the database (QA MX3-01).
+        dest_summary.setdefault("table", dest_table)
         stamp_incremental_no_op(dest_summary)
         if resume_key_resolved:
             # Honest delivery label: the read side re-delivers the interrupted
