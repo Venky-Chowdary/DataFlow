@@ -12,13 +12,15 @@ import json
 import logging
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = "2024-11-05"
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
+PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 SERVER_INFO = {
     "name": "dataflow",
     "title": "Datawrap MCP Server",
@@ -39,62 +41,96 @@ def _jsonrpc_error(req_id: Any, code: int, message: str, data: Any = None) -> di
 
 def _tool_descriptors() -> list[dict[str, Any]]:
     from src.ai.copilot.tools import TOOL_DEFINITIONS
+    from src.ai.copilot.tool_permissions import PLAN, READ, tool_requirement
 
     tools: list[dict[str, Any]] = []
     for tool in TOOL_DEFINITIONS:
         schema = tool.get("input_schema") or tool.get("inputSchema") or {"type": "object", "properties": {}}
+        name = tool["name"]
+        effect = tool_requirement(name)[1]
+        read_only = effect in (READ, PLAN) and name != "confirm_action"
         tools.append(
             {
-                "name": tool["name"],
+                "name": name,
                 "description": tool.get("description") or "",
                 "inputSchema": schema,
+                "annotations": {
+                    "readOnlyHint": read_only,
+                    "destructiveHint": not read_only,
+                },
             }
         )
     return tools
 
 
-def _execute_tool(name: str, arguments: dict[str, Any] | None) -> dict[str, Any]:
+@dataclass(frozen=True)
+class McpCallContext:
+    actor: str
+    client: str
+    correlation_id: str | None
+
+
+def _execute_tool(
+    name: str,
+    arguments: dict[str, Any] | None,
+    context: McpCallContext,
+) -> dict[str, Any]:
     from services.mcp_invocation_log import log_mcp_invocation
+    from services.secret_config import mask_secrets_in_text
     from src.ai.copilot.tools import get_pilot_tools
 
     start = time.perf_counter()
     try:
         result = get_pilot_tools().execute(name, arguments or {})
     except Exception as exc:
+        logger.exception("MCP tool %s raised", name)
+        masked = mask_secrets_in_text(str(exc))
         log_mcp_invocation(
             tool=name,
-            client="mcp-streamable",
+            client=context.client,
             arguments=arguments or {},
             status="error",
-            error=str(exc),
+            error=masked,
             duration_ms=(time.perf_counter() - start) * 1000,
+            actor=context.actor,
+            correlation_id=context.correlation_id,
         )
         return {
-            "content": [{"type": "text", "text": f"Tool error: {exc}"}],
+            "content": [
+                {
+                    "type": "text",
+                    "text": f"Tool error: {type(exc).__name__}: {masked}",
+                }
+            ],
             "isError": True,
         }
 
     ms = (time.perf_counter() - start) * 1000
     if not result.success:
+        error = mask_secrets_in_text(str(result.error or "tool failed"))
         log_mcp_invocation(
             tool=name,
-            client="mcp-streamable",
+            client=context.client,
             arguments=arguments or {},
             status="error",
-            error=result.error or "tool failed",
+            error=error,
             duration_ms=ms,
+            actor=context.actor,
+            correlation_id=context.correlation_id,
         )
         return {
-            "content": [{"type": "text", "text": result.error or "tool failed"}],
+            "content": [{"type": "text", "text": error}],
             "isError": True,
         }
 
     log_mcp_invocation(
         tool=name,
-        client="mcp-streamable",
+        client=context.client,
         arguments=arguments or {},
         status="ok",
         duration_ms=ms,
+        actor=context.actor,
+        correlation_id=context.correlation_id,
     )
     text = result.output
     if not isinstance(text, str):
@@ -110,8 +146,14 @@ def handle_jsonrpc(
     *,
     authenticated: bool,
     allow_unauth_tools: bool = False,
+    context: McpCallContext | None = None,
 ) -> dict[str, Any] | None:
     """Handle one JSON-RPC request/notification. Returns None for notifications."""
+    context = context or McpCallContext(
+        actor="mcp-streamable",
+        client="mcp-streamable",
+        correlation_id=None,
+    )
     if not isinstance(message, dict) or message.get("jsonrpc") != "2.0":
         return _jsonrpc_error(message.get("id") if isinstance(message, dict) else None, -32600, "Invalid Request")
 
@@ -121,10 +163,18 @@ def handle_jsonrpc(
     is_notification = "id" not in message
 
     if method == "initialize":
+        requested_version = (
+            params.get("protocolVersion") if isinstance(params, dict) else None
+        )
+        protocol_version = (
+            requested_version
+            if requested_version in SUPPORTED_PROTOCOL_VERSIONS
+            else PROTOCOL_VERSION
+        )
         return _jsonrpc_result(
             req_id,
             {
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": protocol_version,
                 "capabilities": {
                     "tools": {"listChanged": False},
                 },
@@ -162,13 +212,23 @@ def handle_jsonrpc(
                 "Authentication required",
                 {"hint": "Pass Authorization: Bearer <token> in MCP headers"},
             )
+        from services.mcp_rate_limit import check_mcp_rate_limit
+
+        limit = check_mcp_rate_limit(context.actor)
+        if not limit.get("allowed"):
+            return _jsonrpc_error(
+                req_id,
+                -32029,
+                "MCP rate limit exceeded",
+                {"retry_after_sec": limit.get("retry_after_sec")},
+            )
         name = params.get("name") if isinstance(params, dict) else None
         arguments = params.get("arguments") if isinstance(params, dict) else {}
         if not name or not isinstance(name, str):
             return _jsonrpc_error(req_id, -32602, "Invalid params: name required")
         if not isinstance(arguments, dict):
             arguments = {}
-        return _jsonrpc_result(req_id, _execute_tool(name, arguments))
+        return _jsonrpc_result(req_id, _execute_tool(name, arguments, context))
 
     if is_notification:
         return None

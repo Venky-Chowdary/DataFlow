@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from services.platform_config import data_dir
+from services.secret_config import mask_secrets_in_text
 from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
 
 _CONNECTOR_SECRET_KEYS = (
@@ -834,6 +835,4 @@ def mask_connector(c: SavedConnector) -> dict[str, Any]:
 
 
 def _mask_conn_str(s: str) -> str:
-    import re
-
-    return re.sub(r":([^:@/]+)@", ":****@", s)
+    return mask_secrets_in_text(s)

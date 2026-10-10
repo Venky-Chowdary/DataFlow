@@ -15,6 +15,18 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/mcp", tags=["MCP Server"])
+logger = logging.getLogger(__name__)
+
+
+def _mcp_origin_allowed(http_request: Request, origin: str) -> bool:
+    from services.cors_policy import TenantAwareCORSMiddleware
+
+    middleware = http_request.app.middleware_stack
+    while middleware is not None:
+        if isinstance(middleware, TenantAwareCORSMiddleware):
+            return middleware.is_allowed_origin(origin)
+        middleware = getattr(middleware, "app", None)
+    return False
 
 
 class ToolCallRequest(BaseModel):
@@ -51,7 +63,14 @@ def _require_mcp_tool_auth(http_request: Request) -> None:
 @router.api_route("/", methods=["GET", "POST", "DELETE"], include_in_schema=False)
 async def mcp_streamable(http_request: Request):
     """Cursor-native MCP Streamable HTTP endpoint."""
-    from services.mcp_protocol import handle_jsonrpc, new_session_id
+    from services.mcp_protocol import McpCallContext, _jsonrpc_error, handle_jsonrpc, new_session_id
+
+    origin = http_request.headers.get("origin")
+    if origin is not None and not _mcp_origin_allowed(http_request, origin):
+        return JSONResponse(
+            status_code=403,
+            content=_jsonrpc_error(None, -32600, "Origin not allowed"),
+        )
 
     if http_request.method == "DELETE":
         return Response(status_code=204)
@@ -72,10 +91,11 @@ async def mcp_streamable(http_request: Request):
 
     try:
         payload = await http_request.json()
-    except Exception as exc:
+    except Exception:
+        logger.warning("MCP JSON-RPC parse error")
         return JSONResponse(
             status_code=400,
-            content={"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Parse error: {exc}"}},
+            content={"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
         )
 
     from src.ai.copilot.confirm_ack import reset_mcp_request, set_mcp_request
@@ -83,6 +103,17 @@ async def mcp_streamable(http_request: Request):
     from src.services.auth_service import auth_required
 
     authenticated = _mcp_authenticated(http_request)
+    client = http_request.headers.get("X-MCP-Client") or "mcp-streamable"
+    actor = (
+        getattr(http_request.state, "user_email", None)
+        or http_request.headers.get("X-MCP-Client")
+        or "mcp-streamable"
+    )
+    context = McpCallContext(
+        actor=str(actor),
+        client=client,
+        correlation_id=getattr(http_request.state, "correlation_id", None),
+    )
     # When platform auth is off (local/dev), tools are callable without a Bearer token.
     allow_unauth_tools = not auth_required()
     mcp_role = ""
@@ -110,6 +141,7 @@ async def mcp_streamable(http_request: Request):
                     message,
                     authenticated=authenticated,
                     allow_unauth_tools=allow_unauth_tools,
+                    context=context,
                 )
                 if out is not None:
                     results.append(out)
@@ -192,6 +224,7 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     _require_mcp_tool_auth(http_request)
     from services.mcp_invocation_log import log_mcp_invocation
     from services.mcp_rate_limit import check_mcp_rate_limit
+    from services.secret_config import mask_secrets_in_text
     from src.services.auth_service import auth_required as mcp_auth_required
 
     from ..ai.copilot.confirm_ack import reset_mcp_request, set_mcp_request
@@ -239,36 +272,38 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
         finally:
             reset_mcp_request(request_token)
     except Exception as exc:
+        masked = mask_secrets_in_text(str(exc))
         receipt = log_mcp_invocation(
             tool=request.name,
             client=client,
             arguments=request.arguments,
             status="error",
-            error=str(exc),
+            error=masked,
             duration_ms=(time.perf_counter() - start) * 1000,
             correlation_id=correlation_id,
             actor=str(actor or "mcp-agent"),
         )
         raise HTTPException(
             status_code=500,
-            detail={"error": str(exc), "tool": request.name, "receipt_id": receipt.get("id")},
+            detail={"error": masked, "tool": request.name, "receipt_id": receipt.get("id")},
         ) from exc
 
     ms = (time.perf_counter() - start) * 1000
     if not result.success:
+        error = mask_secrets_in_text(str(result.error or "tool failed"))
         receipt = log_mcp_invocation(
             tool=request.name,
             client=client,
             arguments=request.arguments,
             status="error",
-            error=result.error or "tool failed",
+            error=error,
             duration_ms=ms,
             correlation_id=correlation_id,
             actor=str(actor or "mcp-agent"),
         )
         raise HTTPException(
             status_code=422,
-            detail={"error": result.error, "tool": request.name, "receipt_id": receipt.get("id")},
+            detail={"error": error, "tool": request.name, "receipt_id": receipt.get("id")},
         )
 
     receipt = log_mcp_invocation(
