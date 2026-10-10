@@ -30,6 +30,7 @@ class IntercomSource(ManifestConnector):
             "transfer engine. Incremental conversations use at-least-once delivery "
             "with a one-second overlap on epoch-second cursors."
         ),
+        catalog_ids=("intercom",),
     )
 
     def spec(self) -> dict[str, Any]:

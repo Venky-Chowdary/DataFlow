@@ -28,6 +28,7 @@ class JiraCloudSource(ManifestConnector):
             "transfer engine. Incremental reads use at-least-once delivery with a "
             "60-second lookback for Jira's minute-granularity JQL timestamps."
         ),
+        catalog_ids=("jira",),
     )
 
     def __init__(self, config: dict[str, Any]) -> None:

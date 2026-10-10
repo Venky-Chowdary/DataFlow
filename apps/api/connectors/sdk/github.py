@@ -26,6 +26,7 @@ class GitHubSource(ManifestConnector):
             "certified as SDK source on synthetic fixtures; not yet wired into the "
             "transfer engine. Issue records preserve GitHub's pull_request field."
         ),
+        catalog_ids=("github",),
     )
 
     def spec(self) -> dict[str, Any]:

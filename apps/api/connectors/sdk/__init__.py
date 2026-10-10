@@ -63,11 +63,13 @@ class ConnectorDescriptor:
     certification_skips: Mapping[str, str] = field(default_factory=dict)
     docs: str = ""
     description: str = ""
+    catalog_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "roles", frozenset(self.roles))
         object.__setattr__(self, "auth_modes", tuple(self.auth_modes))
         object.__setattr__(self, "sync_modes", tuple(self.sync_modes))
+        object.__setattr__(self, "catalog_ids", tuple(self.catalog_ids))
         object.__setattr__(
             self,
             "form_fields",
@@ -607,28 +609,45 @@ def sdk_read_as_matrix(
     limit: int = 1000,
     state: dict[str, Any] | None = None,
 ) -> tuple[list[str], list[list[str]], dict[str, str], dict[str, Any]]:
-    """Helper for adapters: read one SDK batch into (headers, rows, schema, state)."""
+    """Read SDK batches into a matrix without truncating beyond ``limit``."""
     from services.value_serializer import cell_to_string
 
     cls = get_sdk_connector(connector_name)
     if cls is None:
         raise ValueError(f"Unknown SDK connector: {connector_name}")
     connector = cls(config)
-    headers: list[str] = []
-    rows: list[list[str]] = []
     schema: dict[str, str] = {}
     out_state: dict[str, Any] = dict(state or {})
-    for batch in connector.read(stream, state=state, offset=offset, limit=limit):
+    records: list[dict[str, Any]] = []
+    batches = iter(connector.read(stream, state=state, offset=offset, limit=limit))
+    for batch in batches:
         if batch.schema and batch.schema.properties:
-            schema = dict(batch.schema.properties)
-            headers = list(schema.keys())
-        if batch.state:
-            out_state = dict(batch.state)
+            for name, value in batch.schema.properties.items():
+                schema.setdefault(name, value)
+        out_state = dict(batch.state)
         for rec in batch.records:
-            if not headers:
-                headers = list(rec.keys())
-            rows.append([cell_to_string(rec.get(h, "")) for h in headers])
-        break
+            if limit > 0 and len(records) >= limit:
+                raise ConnectorError(
+                    f"SDK stream {stream!r} returned more than the requested "
+                    f"limit of {limit} records"
+                )
+            for name in rec:
+                schema.setdefault(name, "string")
+            records.append(rec)
+        if limit > 0 and len(records) >= limit:
+            if out_state.get("page_token") not in (None, ""):
+                raise ConnectorError(
+                    f"SDK stream {stream!r} has more data beyond the requested "
+                    f"limit of {limit} records"
+                )
+            if next(batches, None) is not None:
+                raise ConnectorError(
+                    f"SDK stream {stream!r} has more batches beyond the requested "
+                    f"limit of {limit} records"
+                )
+            break
+    headers = list(schema)
+    rows = [[cell_to_string(rec.get(header, "")) for header in headers] for rec in records]
     return headers, rows, schema, out_state
 
 
