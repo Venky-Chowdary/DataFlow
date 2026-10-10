@@ -35,8 +35,25 @@ class ToolCallRequest(BaseModel):
     arguments: dict = Field(default_factory=dict)
 
 
+class McpPolicyRequest(BaseModel):
+    enabled: bool = True
+    allowed_tools: list[str] | None = None
+
+
 def _mcp_authenticated(http_request: Request) -> bool:
     return bool(getattr(http_request.state, "user", None) or getattr(http_request.state, "api_key_auth", False))
+
+
+def _mcp_policy_denial(tool_name: str | None = None) -> str | None:
+    from services.integrations_store import get_mcp_policy
+
+    policy = get_mcp_policy()
+    if not policy["enabled"]:
+        return "MCP is disabled by an administrator"
+    allowed = policy.get("allowed_tools")
+    if tool_name and allowed is not None and tool_name not in allowed:
+        return f"MCP tool is not allowed by administrator: {tool_name}"
+    return None
 
 
 def _require_mcp_tool_auth(http_request: Request, tool_name: str | None = None) -> None:
@@ -135,6 +152,12 @@ async def mcp_streamable(http_request: Request):
                 if not isinstance(message, dict):
                     results.append({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
                     continue
+                if message.get("method") == "tools/call":
+                    params = message.get("params") or {}
+                    denial = _mcp_policy_denial(params.get("name"))
+                    if denial:
+                        results.append(_jsonrpc_error(message.get("id"), -32003, denial))
+                        continue
                 # tools/call runs plan/preflight synchronously. Doing that on
                 # the event loop made ping and tools/list wait out the client
                 # timeout (JSON-RPC -32001 Request timed out). A thread keeps
@@ -148,6 +171,15 @@ async def mcp_streamable(http_request: Request):
                     context=context,
                 )
                 if out is not None:
+                    if message.get("method") == "tools/list":
+                        from services.integrations_store import get_mcp_policy
+
+                        allowed = get_mcp_policy().get("allowed_tools")
+                        if allowed is not None and isinstance(out.get("result"), dict):
+                            out["result"]["tools"] = [
+                                tool for tool in out["result"].get("tools", [])
+                                if tool.get("name") in allowed
+                            ]
                     results.append(out)
     finally:
         reset_mcp_request(request_token)
@@ -206,6 +238,34 @@ async def mcp_protected_resource_metadata():
     return _protected_resource_metadata()
 
 
+@router.get("/policy")
+async def get_mcp_policy_route(http_request: Request):
+    from services.integrations_store import get_mcp_policy
+
+    _require_mcp_tool_auth(http_request)
+    return get_mcp_policy()
+
+
+@router.put("/policy")
+async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request):
+    from services.audit_log import append_audit_event
+    from services.integrations_store import get_mcp_policy, set_mcp_policy
+
+    _require_mcp_tool_auth(http_request)
+    old = get_mcp_policy()
+    try:
+        new = set_mcp_policy(request.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    append_audit_event(
+        action="mcp.policy.updated",
+        resource="/api/v1/mcp/policy",
+        actor=getattr(http_request.state, "user_email", None) or "unknown",
+        details={"old": old, "new": new},
+    )
+    return new
+
+
 @router.get("/manifest")
 async def mcp_manifest(http_request: Request):
     """MCP-compatible manifest for IDE and agent integrations."""
@@ -262,6 +322,9 @@ async def list_mcp_tools():
 async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     """Execute a Datawrap Pilot tool — same surface external agents use."""
     _require_mcp_tool_auth(http_request, request.name)
+    denial = _mcp_policy_denial(request.name)
+    if denial:
+        raise HTTPException(status_code=403, detail=denial)
     from services.mcp_invocation_log import log_mcp_invocation
     from services.mcp_rate_limit import check_mcp_rate_limit
     from services.secret_config import mask_secrets_in_text

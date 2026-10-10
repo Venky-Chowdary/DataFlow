@@ -87,6 +87,7 @@ def _empty_store() -> dict[str, Any]:
         "sso": _default_sso(),
         "ai_providers": _default_ai(),
         "pilot": _default_pilot(),
+        "mcp_policy": {"enabled": True, "allowed_tools": None},
         "api_keys": [],
     }
 
@@ -121,7 +122,19 @@ def _load_raw() -> dict[str, Any]:
     if str(pilot.get("engine", "auto")).strip().lower() not in _PILOT_ENGINES:
         pilot["engine"] = "auto"
 
-    return {"sso": sso, "ai_providers": ai, "pilot": pilot, "api_keys": api_keys}
+    policy = raw.get("mcp_policy")
+    if not isinstance(policy, dict):
+        policy = {"enabled": True, "allowed_tools": None}
+    allowed = policy.get("allowed_tools")
+    if allowed is not None and not isinstance(allowed, list):
+        allowed = None
+    return {
+        "sso": sso,
+        "ai_providers": ai,
+        "pilot": pilot,
+        "mcp_policy": {"enabled": bool(policy.get("enabled", True)), "allowed_tools": allowed},
+        "api_keys": api_keys,
+    }
 
 
 def _save(data: dict[str, Any]) -> None:
@@ -176,6 +189,36 @@ def apply_integrations_to_env() -> None:
 
 
 # ── SSO ──────────────────────────────────────────────────────────────────────
+
+
+def get_mcp_policy() -> dict[str, Any]:
+    """Return the organization-level MCP execution policy."""
+    policy = _load_raw()["mcp_policy"]
+    allowed = policy.get("allowed_tools")
+    return {
+        "enabled": bool(policy.get("enabled", True)),
+        "allowed_tools": sorted(set(allowed)) if isinstance(allowed, list) else None,
+    }
+
+
+def set_mcp_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    """Persist MCP policy, rejecting unknown registered tools."""
+    from src.ai.copilot.tool_permissions import TOOL_PERMISSIONS
+
+    enabled = bool(policy.get("enabled", True))
+    allowed = policy.get("allowed_tools")
+    if allowed is not None:
+        if not isinstance(allowed, list) or any(not isinstance(name, str) for name in allowed):
+            raise ValueError("allowed_tools must be a list of tool names or null")
+        unknown = sorted(set(allowed) - set(TOOL_PERMISSIONS))
+        if unknown:
+            raise ValueError(f"Unknown MCP tools: {', '.join(unknown)}")
+        allowed = sorted(set(allowed))
+    data = _load_raw()
+    data["mcp_policy"] = {"enabled": enabled, "allowed_tools": allowed}
+    data["updated_at"] = _now()
+    _save(data)
+    return get_mcp_policy()
 
 
 def get_sso_configs() -> dict[str, dict[str, Any]]:

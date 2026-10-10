@@ -221,6 +221,7 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # MCP tool execution is an AI surface — same permission as Pilot tools.
     ("POST", "/api/v1/mcp/tools/call", Permission.AI_USE),
     ("GET", "/api/v1/mcp/logs", Permission.AI_USE),
+    ("*", "/api/v1/mcp/policy", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/mcp/", Permission.AI_USE),
     ("GET", "/api/v1/connectors/", Permission.CONNECTOR_READ),
     ("*", "/api/v1/connectors/", Permission.CONNECTOR_WRITE),
