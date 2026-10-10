@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import re
 import shlex
 import subprocess  # nosec: B404 — used only to run operator-configured Singer tap executables with shell=False
 import sys
@@ -22,6 +23,9 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterator
 
+from connectors.sdk.declarative.errors import ConnectorError
+from services.secret_config import redact_config, redact_url
+
 # Runtime registry of SDK-loaded connectors (name -> cls)
 _SDK_REGISTRY: dict[str, type["BaseConnector"]] = {}
 _SDK_DESCRIPTORS: dict[str, "ConnectorDescriptor"] = {}
@@ -29,6 +33,11 @@ _SDK_DESCRIPTORS: dict[str, "ConnectorDescriptor"] = {}
 from services.value_serializer import json_loads_exact
 
 logger = logging.getLogger(__name__)
+
+
+class SingerTapError(ConnectorError):
+    """Singer subprocess exited unsuccessfully."""
+
 
 # Declarative manifest auth modes are separate from engine-level auth modes.
 SDK_AUTH_MODES = frozenset(
@@ -258,6 +267,31 @@ class SingerTapBridge(BaseConnector):
             tmp.close()
         return tmp.name
 
+    def _safe_tap_stderr(self, stderr: str | None) -> str:
+        text = str(stderr or "")
+        secret_values: set[str] = set()
+        pending: list[Any] = [self.config]
+        while pending:
+            value = pending.pop()
+            if isinstance(value, Mapping):
+                for key, item in value.items():
+                    if isinstance(item, (Mapping, list, tuple)):
+                        pending.append(item)
+                    elif item not in (None, ""):
+                        normalized_key = str(key).lower()
+                        if redact_config({normalized_key: item})[normalized_key] == "***":
+                            secret_values.add(str(item))
+            elif isinstance(value, (list, tuple)):
+                pending.extend(value)
+        for secret in sorted(secret_values, key=len, reverse=True):
+            text = text.replace(secret, "[REDACTED]")
+        text = re.sub(
+            r"""https?://[^\s'"<>]+""",
+            lambda match: redact_url(match.group(0)),
+            text,
+        )
+        return text[:500]
+
     @staticmethod
     def _parse_streams(output: str | None) -> list[StreamSchema]:
         streams: list[StreamSchema] = []
@@ -343,20 +377,22 @@ class SingerTapBridge(BaseConnector):
                         f"Singer tap --discover OK ({len(streams)} streams); "
                         "tap has no --check"
                     )
-                stderr = (discover_proc.stderr or "")[:300]
+                stderr = self._safe_tap_stderr(discover_proc.stderr)
                 return False, (
                     "unverified: tap has no --check and --discover produced no streams "
                     f"(exit {discover_proc.returncode}): {stderr}"
                 )
-            return False, (proc.stderr or proc.stdout or "tap --check failed")[:500]
+            return False, self._safe_tap_stderr(
+                proc.stderr or proc.stdout or "tap --check failed"
+            )
         except FileNotFoundError:
             return False, "Singer tap binary not found"
         except subprocess.TimeoutExpired:
             return False, "Singer tap --check timed out"
         except OSError as exc:
-            return False, f"Singer tap execution failed: {exc}"
+            return False, self._safe_tap_stderr(f"Singer tap execution failed: {exc}")
         except Exception as exc:
-            return False, str(exc)
+            return False, self._safe_tap_stderr(str(exc))
         finally:
             if cfg_path:
                 Path(cfg_path).unlink(missing_ok=True)
@@ -390,6 +426,7 @@ class SingerTapBridge(BaseConnector):
     ) -> Iterator[RecordBatch]:
         cfg_path = None
         state_path = None
+        stderr_file = None
         proc = None
         try:
             cfg_path = self._config_file()
@@ -404,10 +441,11 @@ class SingerTapBridge(BaseConnector):
                 st.close()
                 argv.extend(["--state", state_path])
 
+            stderr_file = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
             proc = subprocess.Popen(
                 argv,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=stderr_file,
                 text=True,
             )  # nosec: B603 — argv is shell-safe and shell=False
             if proc.stdout is None:
@@ -416,6 +454,7 @@ class SingerTapBridge(BaseConnector):
             schema: StreamSchema | None = None
             skipped = 0
             emitted = 0
+            limit_reached = False
             out_state: dict[str, Any] = dict(state or {})
             for line in proc.stdout:
                 line = line.strip()
@@ -455,6 +494,7 @@ class SingerTapBridge(BaseConnector):
                         emitted += len(batch)
                         batch = []
                         if limit and emitted >= limit:
+                            limit_reached = True
                             break
             if batch:
                 yield RecordBatch(
@@ -463,6 +503,20 @@ class SingerTapBridge(BaseConnector):
                     schema=schema,
                     state=dict(out_state),
                 )
+            if limit_reached:
+                proc.kill()
+                proc.wait(timeout=5)
+            else:
+                proc.stdout.close()
+                return_code = proc.wait(timeout=5)
+                stderr_file.flush()
+                stderr_file.seek(0)
+                stderr = stderr_file.read()
+                if return_code != 0:
+                    raise SingerTapError(
+                        "Singer tap exited with status "
+                        f"{return_code}: {self._safe_tap_stderr(stderr)}"
+                    )
         except subprocess.TimeoutExpired as exc:
             raise TimeoutError("Singer tap read timed out") from exc
         except OSError as exc:
@@ -482,6 +536,8 @@ class SingerTapBridge(BaseConnector):
                 Path(cfg_path).unlink(missing_ok=True)
             if state_path:
                 Path(state_path).unlink(missing_ok=True)
+            if stderr_file is not None:
+                stderr_file.close()
 
 
 register_connector(SingerTapBridge)

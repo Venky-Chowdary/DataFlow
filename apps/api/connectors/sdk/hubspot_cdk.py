@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from connectors.saas_common import base_url, humanize_http_error, request, token
 from connectors.sdk import (
@@ -14,6 +14,8 @@ from connectors.sdk import (
     StreamSchema,
     register_connector,
 )
+from connectors.sdk.declarative.errors import ConnectorAuthError
+from connectors.sdk.declarative.requester import _github_rate_limited
 from services.value_serializer import load_http_json
 
 DEFAULT_HOST = "api.hubapi.com"
@@ -36,6 +38,10 @@ class HubSpotCursorStalled(HubSpotCursorError):
 
 class HubSpotPaginationError(RuntimeError):
     """HubSpot returned a pagination sequence that cannot be resumed safely."""
+
+
+class HubSpotAuthError(ConnectorAuthError):
+    """HubSpot rejected the configured authentication credentials."""
 
 
 def _parse_cursor_datetime(value: Any, *, stream: str, cursor_field: str) -> datetime:
@@ -148,6 +154,49 @@ class HubSpotCDKConnector(BaseConnector):
         evidence="synthetic-fixture",
     )
 
+    def __init__(
+        self,
+        config: dict[str, Any],
+        *,
+        sleep: Callable[[float], None] | None = None,
+    ) -> None:
+        super().__init__(config)
+        self._sleep = sleep
+
+    def _request_hubspot(
+        self,
+        *,
+        method: str,
+        url: str,
+        token: str,
+        params: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        timeout: float,
+    ) -> Any:
+        try:
+            response = request(
+                method=method,
+                url=url,
+                token=token,
+                params=params,
+                data=data,
+                timeout=timeout,
+                sleep=self._sleep,
+            )
+            response.raise_for_status()
+            return response
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            if status == 401 or (
+                status == 403 and not _github_rate_limited(response)
+            ):
+                raise HubSpotAuthError(
+                    f"HubSpot authentication failed (HTTP {status})",
+                    status=status,
+                ) from None
+            raise
+
     def _token(self) -> str:
         return token(
             self.config.get("api_key", ""),
@@ -185,7 +234,7 @@ class HubSpotCDKConnector(BaseConnector):
             return False, "HubSpot private app token is required"
         url = f"{self._base()}/crm/v3/objects/contacts"
         try:
-            r = request(
+            r = self._request_hubspot(
                 method="GET",
                 url=url,
                 token=access,
@@ -336,7 +385,7 @@ class HubSpotCDKConnector(BaseConnector):
                         "limit": page_limit,
                         "after": int(after),
                     }
-                    response = request(
+                    response = self._request_hubspot(
                         method="POST",
                         url=f"{url}/search",
                         token=access,
@@ -350,7 +399,7 @@ class HubSpotCDKConnector(BaseConnector):
                     }
                     if after is not None:
                         params["after"] = str(after)
-                    response = request(
+                    response = self._request_hubspot(
                         method="GET",
                         url=url,
                         token=access,

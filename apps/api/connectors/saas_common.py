@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, NoReturn
+from typing import Any, Callable, NoReturn
 
 import requests
 from services.error_handling import RetryBudget, with_retry
@@ -256,6 +256,7 @@ def request(
     data: dict[str, Any] | None = None,
     timeout: float = 30.0,
     retry_budget: RetryBudget | None = None,
+    sleep: Callable[[float], None] | None = None,
     auth_header: str = "Authorization",
     auth_scheme: str = "Bearer",
 ) -> requests.Response:
@@ -289,7 +290,14 @@ def request(
         resp.raise_for_status()
         return resp
 
-    return with_retry(_call, budget=retry_budget or RetryBudget())
+    retry_options: dict[str, Any] = {}
+    if sleep is not None:
+        retry_options["sleep"] = sleep
+    return with_retry(
+        _call,
+        budget=retry_budget or RetryBudget(),
+        **retry_options,
+    )
 
 
 def is_auth_error(exc: Exception) -> bool:
