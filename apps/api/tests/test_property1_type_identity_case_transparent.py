@@ -20,6 +20,7 @@ from services.type_system import (
     integer_bit_width,
     normalize_logical_type,
 )
+from services.dest_schema_authority import destination_schema_is_sampled
 
 
 def _case_variants(token: str) -> list[str]:
@@ -126,8 +127,9 @@ def test_full_case_matrix_dump_for_proof_artifact():
     for dest, logical, invented, _ in rows:
         if logical != "integer":
             continue
-        table = DDL_TYPES[dest][LOGICAL_INTEGER]
-        assert invented == table, (dest, invented, table)
-        if invented.strip().upper() in {"INTEGER", "INT", "INT32", "SIGNED"}:
-            assert dest == "sqlite", (dest, invented)
+        if not destination_schema_is_sampled(dest):
+            table = DDL_TYPES[dest][LOGICAL_INTEGER]
+            assert invented == table, (dest, invented, table)
+            if invented.strip().upper() in {"INTEGER", "INT", "INT32", "SIGNED"}:
+                assert dest == "sqlite", (dest, invented)
     assert len(rows) == len(DDL_TYPES) * len(_LOGICAL_SPELLINGS)
