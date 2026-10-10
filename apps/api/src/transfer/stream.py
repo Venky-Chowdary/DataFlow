@@ -894,6 +894,7 @@ def stream_database_transfer(
     shape_runner: ShapeRunner | None = None,
     shape_steps: list[dict] | None = None,
     mappings_inherited: bool = False,
+    initial_batch: Any = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -935,6 +936,7 @@ def stream_database_transfer(
             shape_runner=shape_runner,
             shape_steps=shape_steps,
             mappings_inherited=mappings_inherited,
+            initial_batch=initial_batch,
         )
         ok = True
         return result
@@ -997,6 +999,7 @@ def _stream_database_transfer_impl(
     shape_runner: ShapeRunner | None = None,
     shape_steps: list[dict] | None = None,
     mappings_inherited: bool = False,
+    initial_batch: Any = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -1009,6 +1012,17 @@ def _stream_database_transfer_impl(
     from .connector_capabilities import resolve_bind_dialect, resolve_driver_type
     src_type = resolve_driver_type(source.format)
     dest_type = resolve_driver_type(destination.format)
+    from connectors.sdk import get_descriptor
+
+    sdk_descriptor = get_descriptor(src_type)
+    sdk_source = bool(
+        sdk_descriptor
+        and "source" in sdk_descriptor.roles
+        and sdk_descriptor.catalog_ids
+    )
+    initial_sdk_state = (
+        getattr(checkpoint, "cursor_value", None) if sdk_source else None
+    )
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
     # Gate-8 fingerprints must name the dialect the writer binds against, not
@@ -1668,7 +1682,7 @@ def _stream_database_transfer_impl(
     # Snowflake snapshot scan opens one warehouse session on the first write
     # page. A separate OFFSET sizing login resumes the warehouse twice — that
     # is how a 150k TPC-H extract spent minutes before the first real page.
-    skip_sf_sizing_probe = src_type == "snowflake" and not incremental
+    skip_sf_sizing_probe = (src_type == "snowflake" and not incremental) or sdk_source
     if skip_sf_sizing_probe:
         sample_probe = type("SizingSkip", (), {"rows": [], "headers": [], "total_rows": None})()
         sample_rows = []
@@ -1797,13 +1811,21 @@ def _stream_database_transfer_impl(
         _probe_cursor_kw: dict[str, Any] = {}
     else:
         _probe_cursor_kw = _cursor_read_args(watermark)
-    probe, ddb_cursor = _unwrap_read(
-        _read_batch(
-            src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
-            **_probe_cursor_kw,
-            **_scan_kw,
+    if sdk_source and initial_batch is not None:
+        probe, ddb_cursor = initial_batch, None
+    else:
+        probe, ddb_cursor = _unwrap_read(
+            _read_batch(
+                src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
+                **_probe_cursor_kw,
+                **_scan_kw,
+                **(
+                    {"sdk_state": initial_sdk_state}
+                    if sdk_source and initial_sdk_state
+                    else {}
+                ),
+            )
         )
-    )
     # This page is not thrown away — it becomes the first written batch.
     phase_profile.add(
         PHASE_READ, time.perf_counter() - _probe_started, rows=len(probe.rows or [])
@@ -2223,7 +2245,7 @@ def _stream_database_transfer_impl(
             c for c in keyset_order_cols if c != cursor_source_col
         ]
     keyset_tiebreak = next((c for c in keyset_order_cols if c != keyset_col), "")
-    keyset_after = checkpoint.cursor_value
+    keyset_after = None if sdk_source else checkpoint.cursor_value
     if keyset_after in (None, "") and incremental and keyset_col == cursor_source_col:
         keyset_after = watermark
     decision = decide_keyset_pagination(
@@ -2442,8 +2464,37 @@ def _stream_database_transfer_impl(
                 return None
         if limit > 0 and fetch_offset >= limit:
             return None
-        if total_rows is not None and fetch_offset >= total_rows and src_type != "dynamodb":
+        if (
+            total_rows is not None
+            and fetch_offset >= total_rows
+            and src_type != "dynamodb"
+            and not sdk_source
+        ):
             return None
+        if sdk_source:
+            last_meta = (
+                last_batch.meta
+                if last_batch is not None and isinstance(last_batch.meta, dict)
+                else {}
+            )
+            if last_batch is not None and last_meta.get("sdk_done"):
+                return None
+            sdk_state_for_read = (
+                last_meta.get("sdk_state") if last_batch is not None else initial_sdk_state
+            )
+            batch, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    fetch_offset,
+                    _batch_limit(fetch_offset),
+                    database=src_db,
+                    sdk_state=sdk_state_for_read or None,
+                )
+            )
+            return batch
         # A zero-row page is drained. Short *non-empty* pages may be driver
         # vectors (DuckDB 2048) and must continue — that is ``page_may_be_partial``
         # below. An empty fetchmany after ``close_table_scan`` used to fall
@@ -2674,7 +2725,7 @@ def _stream_database_transfer_impl(
                 )
             )
             return batch
-        elif total_rows is not None and fetch_offset >= total_rows:
+        elif total_rows is not None and fetch_offset >= total_rows and not sdk_source:
             return None
         elif _filtered_scan_reason:
             # One held scan bound to the *run* watermark; the page max never
@@ -3076,6 +3127,9 @@ def _stream_database_transfer_impl(
         return list(getattr(batch, "fk_orphan_details", None) or [])
 
     def _process_db_chunk_inner(idx: int, batch: Any) -> dict[str, Any]:
+        batch_sdk_state = None
+        if sdk_source and isinstance(getattr(batch, "meta", None), dict):
+            batch_sdk_state = batch.meta.get("sdk_state", "")
         if not batch or not getattr(batch, "rows", None):
             # A page a filter or a recipe emptied still consumed source rows, so
             # the offset, the watermark and the keyset bookmark advance past it.
@@ -3112,6 +3166,7 @@ def _stream_database_transfer_impl(
                 ),
                 "reconcile_sample_rows": [],
                 "fingerprints": [],
+                "sdk_state_after": batch_sdk_state,
             }
         # Absorb sparse schemaless attributes discovered on this page.
         _absorb_schemaless_discovered_attrs(batch)
@@ -3371,6 +3426,7 @@ def _stream_database_transfer_impl(
                 if overwrite_keys_acc is not None
                 else None
             ),
+            "sdk_state_after": batch_sdk_state,
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
@@ -3408,6 +3464,8 @@ def _stream_database_transfer_impl(
         # the furthest safe keyset bookmark.
         if result.get("batch_keyset"):
             committed_keyset = result["batch_keyset"]
+        if sdk_source and "sdk_state_after" in result:
+            running_cursor = result["sdk_state_after"]
         # Absolute source-row offset for this batch (0-based start before commit).
         batch_start = int(committed_offset or 0)
         committed_offset += result["batch_rows"]
@@ -3504,7 +3562,9 @@ def _stream_database_transfer_impl(
         checkpoint.rows_removed_on_read = removed_on_read_total
         checkpoint.rows_source_filtered = filtered_on_read_total
         checkpoint.rows_cursor_bounded = cursor_bounded_total
-        checkpoint.cursor_value = running_cursor or committed_keyset or ""
+        checkpoint.cursor_value = (
+            running_cursor if sdk_source else running_cursor or committed_keyset or ""
+        )
         checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
         checkpoint.es_search_after = es_search_after
         checkpoint.redis_scan_state = redis_scan_state
@@ -4220,8 +4280,17 @@ def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> b
     if source.kind != "database" or destination.kind != "database":
         return False
     from .connector_capabilities import resolve_driver_type, source_read_driver
+    from connectors.sdk import get_descriptor
+
+    source_driver = source_read_driver(resolve_driver_type(source.format))
+    descriptor = get_descriptor(source_driver)
+    sdk_source = bool(
+        descriptor
+        and "source" in descriptor.roles
+        and descriptor.catalog_ids
+    )
     return (
-        source_read_driver(resolve_driver_type(source.format)) in _STREAMING_SOURCES
+        (source_driver in _STREAMING_SOURCES or sdk_source)
         and resolve_driver_type(destination.format) in _STREAMING_DESTINATIONS
     )
 

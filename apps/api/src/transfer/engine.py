@@ -4182,10 +4182,29 @@ class UniversalTransferEngine:
             # SELECT when it has one. Peeking the table would map columns the
             # writer never reads.
             from services.execute_shape_route import peek_declared_source
+            from connectors.sdk import get_descriptor
+            from .connector_capabilities import resolve_driver_type
 
-            columns, schema, total_rows, sample_rows = peek_declared_source(
-                request.source, request.stream_contracts
+            sdk_descriptor = get_descriptor(resolve_driver_type(src_fmt))
+            sdk_source = bool(
+                sdk_descriptor
+                and "source" in sdk_descriptor.roles
+                and sdk_descriptor.catalog_ids
             )
+            sdk_state = (
+                getattr(checkpoint, "cursor_value", None) if sdk_source else None
+            )
+            peeked = peek_declared_source(
+                request.source,
+                request.stream_contracts,
+                sdk_state=sdk_state,
+                include_batch=sdk_source,
+            )
+            if sdk_source:
+                columns, schema, total_rows, sample_rows, initial_batch = peeked
+            else:
+                columns, schema, total_rows, sample_rows = peeked
+                initial_batch = None
             if request.limit > 0:
                 total_rows = min(total_rows, request.limit)
             if total_rows == 0 and not columns:
@@ -4804,6 +4823,7 @@ class UniversalTransferEngine:
                     limit=request.limit,
                     skip_preflight=request.skip_preflight,
                     shape_runner=shape_runner,
+                    initial_batch=initial_batch,
                 )
 
             with _reconcile_phase_heartbeat(

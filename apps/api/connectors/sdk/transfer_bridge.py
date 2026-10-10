@@ -106,6 +106,7 @@ def read_object(
             "sdk_done": not has_more,
             "sdk_state": _encode_cursor_state(state) if state else "",
             "sdk_stream": object,
+            "native_types": dict(page.schema.properties) if page.schema else {},
         },
         raw_page_rows=len(rows),
     )
