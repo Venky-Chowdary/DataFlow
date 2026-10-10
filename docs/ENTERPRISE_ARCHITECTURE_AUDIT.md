@@ -70,6 +70,83 @@ row. One green route is not enterprise readiness.
 | Observability | **Partial** | Prometheus-compatible `/metrics`, `/ops/freshness`, optional OpenTelemetry spans across the pool boundary (`services/tracing.py`). No SLO/alert pack shipped |
 | Security | **Partial** | RBAC middleware with viewer/editor/admin, audit log, SSO state, secret redaction in spans. **No SOC 2 claim**, no encryption-at-rest module, and the dev role maps to `editor` — a production deployment must gate on the real claim |
 
+### RBAC: deny-by-default
+
+RBAC denies an authenticated request with HTTP 403 when its method/path has no
+explicit permission rule and is not in the reviewed public-route set. Unknown
+and nonexistent paths are also `no_rule` denials; they do not inherit a broad
+prefix rule or the old method fallback. Denials are recorded as `authz.denied`
+through the bounded M5 audit dedupe.
+
+`DATAFLOW_RBAC_UNRULED_ROUTES` defaults to `deny`. The temporary
+`allow_and_log` value restores the legacy fallback (`GET` → `job.read`;
+`POST`/`PUT`/`PATCH`/`DELETE` → `connector.write`) while warning on each hit
+and emitting a startup warning and `authz.config.unruled_routes_allowed`
+audit event. Invalid values log an error and fail closed to `deny`. When
+authentication is disabled, RBAC remains skipped.
+
+The reviewed public-route allow-list is explicit and tested against the live
+route table. It covers health, login/logout/bootstrap, SSO start/callback/
+providers, OAuth protected-resource metadata, docs/OpenAPI/Redoc, and the
+currently public connector catalog. SCIM retains its bearer-token gate;
+MCP retains its own authentication/tool gates, including the special
+`tools/call` gate. The allow-list must equal the route set that RBAC treats as
+public. AuthMiddleware and RBAC have intentionally distinct public policies;
+the three RBAC-only and five AuthMiddleware-only route mismatches are pinned
+in `apps/api/tests/test_rbac_route_inventory.py` and are not silently changed.
+
+The following permission changes are **proposed tightenings pending
+product-owner review**. They are intentionally not applied in M2 Phase B; the
+current permissions remain in force to preserve existing behavior.
+
+| Method/path | Current | Proposed | Reason |
+|---|---|---|---|
+| `POST /api/v1/audit/verify-pack` | `connector.write` | `audit.read` | Verifies an audit proof pack; a read/verification operation, not connector write. |
+| `POST /api/v1/cdc/signals/ensure-table` | `connector.write` | `job.run` | Performs source-side DDL to ensure the CDC signal table. |
+| `POST /api/v1/cdc/signals/execute-snapshot` | `connector.write` | `job.run` | Enqueues an incremental snapshot through the signal API. |
+| `POST /api/v1/cdc/snapshots` | `connector.write` | `job.run` | Requests/enqueues an incremental snapshot. |
+| `POST /api/v1/cdc/snapshots/{signal_id}/cancel` | `connector.write` | `job.manage` | Cancels an incremental snapshot signal. |
+| `POST /api/v1/contracts/test` | `connector.write` | `job.read` | Evaluates a contract against supplied schema data without persisting changes. |
+| `GET /api/v1/ops/cdc-cursors` | `job.read` | `workspace.manage` | Reads a global persisted CDC watermark. |
+| `POST /api/v1/ops/cdc-cursors/clear` | `connector.write` | `workspace.manage` | Clears a global CDC watermark. |
+| `GET /api/v1/ops/cdc-cursors/keys` | `job.read` | `workspace.manage` | Lists global cursor keys. |
+| `GET /api/v1/ops/cdc-leases` | `job.read` | `workspace.manage` | Reads a global CDC lease by cursor key. |
+| `POST /api/v1/ops/cdc-leases/force-release` | `connector.write` | `workspace.manage` | Breaks a live CDC lease. |
+| `GET /api/v1/ops/cdc-leases/list` | `job.read` | `workspace.manage` | Lists global CDC leases and holder/job metadata. |
+| `POST /api/v1/ops/cdc-retention/probe` | `connector.write` | `job.run` | Performs a live external CDC-retention probe; aligns with operation/run capability. |
+| `GET /api/v1/ops/metrics/json` | `job.read` | `workspace.manage` | Returns global in-process metrics. |
+| `POST /api/v1/ops/source-ha/probe` | `connector.write` | `job.run` | Performs a live external source role probe; aligns with operation/run capability. |
+| `POST /api/v1/preflight/explain` | `connector.write` | `job.read` | Pure explanation of caller-supplied preflight data; read-only POST. |
+| `POST /api/v1/preflight/preview-cells` | `connector.write` | `job.read` | Returns a quarantine-cell preview without applying a mutation; read-only POST. |
+| `POST /api/v1/preflight/run` | `connector.write` | `job.plan` | Preflight performs live validation/probes but does not execute the transfer; use the plan/validate capability. |
+| `POST /api/v1/preflight/schema-drift` | `connector.write` | `job.read` | Pure schema-drift classification; read-only POST. |
+| `POST /api/v1/repair/proposals/{proposal_id}/decide` | `connector.write` | `job.manage` | Decision can apply repair actions when mappings are supplied. |
+| `POST /api/v1/repair/propose/preflight` | `connector.write` | `job.plan` | Creates a repair proposal for review; it does not apply the repair. |
+| `POST /api/v1/repair/propose/quarantine` | `connector.write` | `job.plan` | Creates a repair proposal for review; it does not apply the repair. |
+| `POST /api/v1/training-agent/run` | `connector.write` | `workspace.manage` | Starts a workspace-wide Pilot training job. |
+| `POST /api/v1/training-agent/run/sync` | `connector.write` | `workspace.manage` | Runs workspace-wide Pilot training synchronously. |
+| `POST /api/v1/transfer/analyze` | `connector.write` | `job.plan` | Compatibility analysis is planning, not connector configuration mutation. |
+| `POST /api/v1/transfer/analyze-file` | `connector.write` | `job.plan` | File analysis produces a transfer plan, not a connector mutation. |
+| `POST /api/v1/transfer/certificate/verify` | `connector.write` | `job.read` | Verifies a supplied certificate without executing or mutating a transfer. |
+| `POST /api/v1/transfer/execute` | `connector.write` | `job.run` | Executes a transfer; connector.write is the wrong capability and excludes operator role. |
+| `POST /api/v1/transfer/introspect` | `connector.write` | `job.plan` | Live schema introspection is a transfer-planning operation. |
+| `POST /api/v1/transfer/map` | `connector.write` | `job.plan` | Mapping authoring is transfer planning. |
+| `POST /api/v1/transfer/plans` | `connector.write` | `job.plan` | Creates a transfer plan; the existing `/plans/` rule misses this slashless collection route. |
+| `POST /api/v1/transfer/proof-pack/verify` | `connector.write` | `job.read` | Verifies a supplied proof artifact without executing or mutating a transfer. |
+| `POST /api/v1/transfer/route` | `connector.write` | `job.plan` | Route recommendation is planning, not connector configuration mutation. |
+| `POST /api/v1/transfer/{job_id}/cdc/snapshots` | `connector.write` | `job.run` | Enqueues an incremental snapshot operation for an existing job. |
+| `POST /api/v1/transfer/{job_id}/cdc/snapshots/{signal_id}/cancel` | `connector.write` | `job.manage` | Cancels a running/pending snapshot signal. |
+| `POST /api/v1/transfer/{job_id}/rollback/execute` | `connector.write` | `job.manage` | Executes job rollback control; should be separated from connector configuration writes. |
+| `POST /api/v1/transforms/plan` | `connector.write` | `job.read` | Builds a dry-run SQL plan without touching a warehouse or persisting a project. |
+| `POST /api/v1/transforms/{project_id}/run` | `connector.write` | `job.run` | Runs the transform project against its destination. |
+| `GET /metrics` | `job.read` | `workspace.manage` | Global Prometheus endpoint exposes process/platform telemetry, not a workspace-local job view. |
+
+Open M2 follow-ups, not changed in this phase: the fidelity-check path can
+load a blank-workspace legacy schedule and resolve connectors by ID without a
+workspace filter; GitOps planning discards the resolved workspace and performs
+global schedule/contract lookups. These are static scope findings, not runtime-
+confirmed exploits.
+
 ---
 
 ## 2. Head-to-head, by capability (not by brand)

@@ -55,6 +55,7 @@ Optional:
 | `DATAFLOW_AUTO_INSTALL_DRIVERS` | `0` | Drivers baked in Docker image |
 | `DATAFLOW_ENABLE_DOCS` | `0` | Hide `/docs` |
 | `DATAFLOW_SEED_DEMO` | `0` | No demo connectors |
+| `DATAFLOW_RBAC_UNRULED_ROUTES` | `deny` | `deny` rejects authenticated requests without a reviewed public exception or explicit permission rule; `allow_and_log` temporarily restores method-based fallback permissions and warns/audits. Invalid values fail closed. |
 
 ### Multi-replica / enterprise coordination
 
