@@ -1044,6 +1044,25 @@ def delete_by_primary_keys(
             incoming_lsn=incoming_lsn,
             lsn_column=lsn_column,
         )
+    if dt in {"pgvector", "qdrant"}:
+        # Vector stores have no _df_lsn; deletes remain honest at-least-once.
+        if incoming_lsn:
+            logger.debug("Ignoring incoming_lsn for vector destination %s", dt)
+        from services.row_conservation import parse_delete_keys
+        from services.vector_sync import (
+            pgvector_delete_doc_keys,
+            qdrant_delete_doc_keys,
+            vector_doc_key,
+        )
+
+        doc_keys = [
+            vector_doc_key(values)
+            for values in parse_delete_keys(list(keys), len(pk_cols))
+        ]
+        if dt == "pgvector":
+            return pgvector_delete_doc_keys(cfg, table_name, schema, doc_keys)
+        return qdrant_delete_doc_keys(cfg, table_name, doc_keys)
+
     work_keys = list(keys)
     if incoming_lsn:
         try:
@@ -1084,12 +1103,6 @@ def delete_by_primary_keys(
 
         return _elasticsearch_delete_keys(
             cfg, index=table_name, cols=pk_cols, keys=work_keys
-        )
-    if dt == "qdrant":
-        from services.dest_precount import _qdrant_delete_keys
-
-        return _qdrant_delete_keys(
-            cfg, collection=table_name, cols=pk_cols, keys=work_keys
         )
     if dt == "dynamodb":
         from services.dest_precount import _dynamodb_delete_keys

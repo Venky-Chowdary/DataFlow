@@ -4199,42 +4199,17 @@ def _qdrant_delete_keys(
     cols: list[str],
     keys: Sequence[str],
 ) -> int:
-    """Delete leftover points by the same unsigned-int / UUID5 id the writer uses."""
-    import json
-
-    from connectors.qdrant_writer import qdrant_point_id, qdrant_rest
+    """Compatibility wrapper for the canonical Qdrant document-key delete."""
     from services.row_conservation import parse_delete_keys
-    from services.value_serializer import json_default, present_cell_text
+    from services.vector_sync import qdrant_delete_doc_keys, vector_doc_key
 
     leftover = parse_delete_keys(list(keys), len(cols))
     name = str(collection or "").strip()
     if not leftover or not name:
         return 0
-    ids: list[Any] = []
-    for tup in leftover:
-        parts = [present_cell_text(part) or "" for part in tup]
-        raw = "|".join(parts) if len(parts) > 1 else (parts[0] if parts else "")
-        if raw:
-            ids.append(qdrant_point_id(raw))
-    if not ids:
-        return 0
-    session, base_url, headers = qdrant_rest(dict(cfg))
-    exists = session.get(
-        f"{base_url}/collections/{name}", headers=headers, timeout=10
+    return qdrant_delete_doc_keys(
+        cfg, name, [vector_doc_key(values) for values in leftover]
     )
-    if exists.status_code == 404:
-        return 0
-    resp = session.post(
-        f"{base_url}/collections/{name}/points/delete",
-        data=json.dumps({"points": ids, "wait": True}, default=json_default),
-        headers=headers,
-        timeout=30,
-    )
-    if resp.status_code not in {200, 201}:
-        raise RuntimeError(
-            f"Qdrant leftover DELETE failed: {resp.status_code} {resp.text[:300]}"
-        )
-    return len(ids)
 
 
 def _dynamodb_key_list(

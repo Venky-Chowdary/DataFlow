@@ -1077,6 +1077,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "Rides PostgreSQL driver; extension must be installed on the target.",
         ],
         "recommended_batch_size": 500,
+        "supports_lsn_guard": False,
     },
     "qdrant": {
         "transfer_ready": True,

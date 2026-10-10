@@ -592,13 +592,15 @@ def vectorize_records(
         # text produced the same vector id and the ON CONFLICT batch failed
         # "cannot affect row a second time" (QA MX2-17). Composite keys join
         # with a unit separator so ("ab","c") never equals ("a","bc").
-        source_id = ""
-        for identity_col in (identity_columns or []):
-            candidate = rec.get(identity_col)
-            if candidate is not None and str(candidate).strip():
-                source_id = (
-                    f"{source_id}\x1f{candidate}" if source_id else str(candidate)
-                )
+        identity_values = [
+            rec[identity_col]
+            for identity_col in (identity_columns or [])
+            if rec.get(identity_col) is not None
+            and str(rec[identity_col]).strip()
+        ]
+        from services.vector_sync import vector_doc_key
+
+        source_id = vector_doc_key(identity_values)
         if not source_id:
             source_id = str(
                 rec.get("id", rec.get("_id", rec.get("source_id", "")))

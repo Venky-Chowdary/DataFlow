@@ -1335,6 +1335,8 @@ def _apply_change_batch(
                 "azure_synapse_serverless",
                 "iceberg",
                 "apache_iceberg",
+                "pgvector",
+                "qdrant",
             }
             if not supported:
                 raise UnsupportedCdcDeleteError(

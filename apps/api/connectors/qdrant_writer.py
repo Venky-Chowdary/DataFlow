@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -23,6 +24,8 @@ from services.value_serializer import (
 from services.vectorization import vectorize_records
 
 from connectors.writer_common import WriteResult as _WriteResult
+
+logger = logging.getLogger(__name__)
 
 
 def _requests_session() -> Any:
@@ -657,6 +660,25 @@ def write_mapped_rows(
         ),
     )
     if map_abort:
+        from services.vector_sync import _rejected_doc_keys
+
+        skipped_docs = max(
+            len(_rejected_doc_keys(headers, data_rows, pk_cols, mappings, map_rejected)),
+            len(
+                {
+                    str(detail.get("row"))
+                    for detail in map_rejected
+                    if str(detail.get("row") or "").strip()
+                }
+            ),
+        )
+        if skipped_docs:
+            logger.warning(
+                "Qdrant stale cleanup skipped %d document(s) for collection %s "
+                "because row mapping was rejected",
+                skipped_docs,
+                table_name or "dataflow_vectors",
+            )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -667,6 +689,10 @@ def write_mapped_rows(
             error=map_abort,
             rejected_details=map_rejected,
             rejected_rows=len(map_rejected),
+            meta={
+                "stale_chunks_deleted": 0,
+                "vector_stale_cleanup_skipped_docs": skipped_docs,
+            },
         )
     from services.vectorization import vector_identity_columns
 
@@ -697,11 +723,33 @@ def write_mapped_rows(
             rejected_rows=len(map_rejected),
         )
 
+    from services.vector_sync import _rejected_doc_keys
+
+    rejected_source_ids = _rejected_doc_keys(
+        headers, data_rows, pk_cols, mappings, map_rejected
+    )
     if not vector_rows:
         from connectors.writer_common import refuse_empty_vectorization
 
         empty_err = refuse_empty_vectorization(records=records, data_rows=data_rows)
         if empty_err:
+            skipped_docs = max(
+                len(rejected_source_ids),
+                len(
+                    {
+                        str(detail.get("row"))
+                        for detail in map_rejected
+                        if str(detail.get("row") or "").strip()
+                    }
+                ),
+            )
+            if skipped_docs:
+                logger.warning(
+                    "Qdrant stale cleanup skipped %d document(s) for collection %s "
+                    "because row mapping was rejected",
+                    skipped_docs,
+                    table_name or "dataflow_vectors",
+                )
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -712,6 +760,27 @@ def write_mapped_rows(
                 error=empty_err,
                 rejected_details=list(map_rejected),
                 rejected_rows=len(map_rejected),
+                meta={
+                    "stale_chunks_deleted": 0,
+                    "vector_stale_cleanup_skipped_docs": skipped_docs,
+                },
+            )
+        skipped_docs = max(
+            len(rejected_source_ids),
+            len(
+                {
+                    str(detail.get("row"))
+                    for detail in map_rejected
+                    if str(detail.get("row") or "").strip()
+                }
+            ),
+        )
+        if skipped_docs:
+            logger.warning(
+                "Qdrant stale cleanup skipped %d document(s) for collection %s "
+                "because row mapping was rejected",
+                skipped_docs,
+                table_name or "dataflow_vectors",
             )
         return WriteResult(
             ok=True,
@@ -723,12 +792,32 @@ def write_mapped_rows(
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
             warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
+            meta={
+                "stale_chunks_deleted": 0,
+                "vector_stale_cleanup_skipped_docs": skipped_docs,
+            },
         )
 
-    from services.vector_embedding import resolve_embedding_dimension
+    from services.vector_embedding import coerce_embedding, resolve_embedding_dimension
 
     dimension, dim_err = resolve_embedding_dimension(vector_rows, default=None)
     if dimension is None:
+        rejected_source_ids.update(
+            str(row.get("source_id") or "")
+            for row in vector_rows
+            if row.get("source_id")
+            and coerce_embedding(row.get("embedding"))[1]
+        )
+        skipped_docs = len(rejected_source_ids) + int(
+            any(not str(row.get("source_id") or "") for row in vector_rows)
+        )
+        if skipped_docs:
+            logger.warning(
+                "Qdrant stale cleanup skipped %d document(s) for collection %s "
+                "because embeddings were rejected",
+                skipped_docs,
+                table_name or "dataflow_vectors",
+            )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -749,11 +838,42 @@ def write_mapped_rows(
                 }
             ],
             rejected_rows=len(map_rejected) + 1,
+            meta={
+                "stale_chunks_deleted": 0,
+                "vector_stale_cleanup_skipped_docs": skipped_docs,
+            },
         )
 
     points, embed_rejected = build_qdrant_points(vector_rows, dimension=dimension)
     rejected = list(map_rejected) + list(embed_rejected)
+    point_ids = {str(point.get("id")) for point in points}
+    for row in vector_rows:
+        source_id = str(row.get("source_id") or "")
+        if not source_id:
+            continue
+        raw_id = str(row.get("id") or "")
+        if not raw_id or str(qdrant_point_id(raw_id)) not in point_ids:
+            rejected_source_ids.add(source_id)
+    skipped_docs = len(rejected_source_ids) + int(
+        any(not str(row.get("source_id") or "") for row in vector_rows)
+    )
     if not points and rejected:
+        skipped_docs = max(
+            len(rejected_source_ids),
+            len(
+                {
+                    str(detail.get("row"))
+                    for detail in rejected
+                    if str(detail.get("row") or "").strip()
+                }
+            ),
+        )
+        logger.warning(
+            "Qdrant stale cleanup skipped %d document(s) for collection %s "
+            "because all chunks were rejected",
+            skipped_docs,
+            collection,
+        )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -765,11 +885,22 @@ def write_mapped_rows(
             or "all embeddings rejected",
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={
+                "stale_chunks_deleted": 0,
+                "vector_stale_cleanup_skipped_docs": skipped_docs,
+            },
         )
     from connectors.writer_common import reject_on_strict_policy
 
     strict_error = reject_on_strict_policy(error_policy, rejected, "Qdrant")
     if strict_error:
+        if skipped_docs:
+            logger.warning(
+                "Qdrant stale cleanup skipped %d document(s) for collection %s "
+                "because a chunk was rejected",
+                skipped_docs,
+                collection,
+            )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -780,11 +911,18 @@ def write_mapped_rows(
             error=strict_error,
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={
+                "stale_chunks_deleted": 0,
+                "vector_stale_cleanup_skipped_docs": skipped_docs,
+            },
         )
 
     collection = table_name or "dataflow_vectors"
     # api_key / base_url already resolved for schema probe above.
     inserted = 0
+    stale_chunks_deleted = 0
+    skipped_docs = 0
+    session = None
     try:
         session = _requests_session()
         hdrs = _headers(api_key)
@@ -851,6 +989,9 @@ def write_mapped_rows(
         else:
             _ensure_collection(session, base_url, collection, dimension, hdrs)
 
+        from services.vector_sync import _ensure_qdrant_source_id_index
+
+        _ensure_qdrant_source_id_index(session, base_url, hdrs, collection)
         batch_size = 100
         total = len(points)
         for i in range(0, total, batch_size):
@@ -867,6 +1008,14 @@ def write_mapped_rows(
             if on_checkpoint:
                 on_checkpoint((i // batch_size) + 1, (total + batch_size - 1) // batch_size, inserted)
     except Exception as exc:
+        if session is not None:
+            try:
+                session.close()
+            except Exception as close_exc:
+                logger.warning(
+                    "Failed to close Qdrant session after an upsert error: %s",
+                    close_exc,
+                )
         return WriteResult(
             ok=False,
             rows_written=inserted,
@@ -878,6 +1027,58 @@ def write_mapped_rows(
             rejected_details=rejected,
             rejected_rows=len(rejected),
         )
+
+    cleanup_keep: dict[str, set[Any]] = {}
+    for point in points:
+        payload = point.get("payload") if isinstance(point.get("payload"), dict) else {}
+        source_id = str(payload.get("source_id") or "")
+        if source_id and source_id not in rejected_source_ids:
+            cleanup_keep.setdefault(source_id, set()).add(point["id"])
+    skipped_docs = len(rejected_source_ids) + int(
+        any(
+            not str((point.get("payload") or {}).get("source_id") or "")
+            for point in points
+        )
+    )
+    if skipped_docs:
+        logger.warning(
+            "Qdrant stale cleanup skipped %d document(s) for collection %s "
+            "because source identity was absent or a chunk was rejected",
+            skipped_docs,
+            collection,
+        )
+    try:
+        from services.vector_sync import qdrant_delete_stale_chunks
+
+        stale_chunks_deleted = qdrant_delete_stale_chunks(
+            session, base_url, hdrs, collection, cleanup_keep
+        )
+    except Exception as exc:
+        logger.error(
+            "Qdrant upsert landed for %s but stale cleanup failed; rerun to converge: %s",
+            collection,
+            exc,
+        )
+        return WriteResult(
+            ok=False,
+            rows_written=inserted,
+            table_name=collection,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=(inserted + 99) // 100,
+            error=(
+                f"Qdrant upsert landed, but stale cleanup failed; "
+                f"a rerun converges: {exc}"
+            ),
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
+            meta={
+                "stale_chunks_deleted": stale_chunks_deleted,
+                "vector_stale_cleanup_skipped_docs": skipped_docs,
+            },
+        )
+    finally:
+        session.close()
 
     _final_abort = reject_on_strict_policy(error_policy, rejected, "Qdrant")
     if _final_abort:
@@ -894,6 +1095,9 @@ def write_mapped_rows(
             warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
         )
 
+    meta = _qdrant_gate8_meta(points)
+    meta["stale_chunks_deleted"] = stale_chunks_deleted
+    meta["vector_stale_cleanup_skipped_docs"] = skipped_docs
     return WriteResult(
         ok=True,
         rows_written=inserted,
@@ -904,7 +1108,7 @@ def write_mapped_rows(
         rejected_details=rejected,
         rejected_rows=len(rejected),
         warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
-        meta=_qdrant_gate8_meta(points),
+        meta=meta,
     )
 
 

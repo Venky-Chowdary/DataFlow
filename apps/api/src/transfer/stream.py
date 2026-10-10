@@ -665,6 +665,9 @@ def _write_batch(
             kwargs["job_id"] = job_id or ""
             kwargs.update(source_handoff)
         if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
+            kwargs["conflict_columns"] = conflict_columns
+            kwargs["write_mode"] = write_mode
+            kwargs["sync_mode"] = sync_mode
             extra = getattr(dest, "extra", {}) or {}
             kwargs["content_column"] = extra.get("content_column")
             kwargs["embedding_column"] = extra.get("embedding_column")
