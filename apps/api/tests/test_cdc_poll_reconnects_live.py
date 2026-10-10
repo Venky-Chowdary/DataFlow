@@ -239,10 +239,6 @@ def test_sqlserver_eos_runner_recovers_from_source_restart(
 
 
 @pytest.mark.parametrize("txn_buffer", [False, True], ids=["buffer-off", "buffer-on"])
-@pytest.mark.xfail(
-    strict=True,
-    reason="G-CDC M2 residual: non-empty redelivery at committed composite position after Oracle restart; under diagnosis",
-)
 def test_oracle_eos_runner_recovers_from_source_restart(
     txn_buffer: bool,
     monkeypatch: pytest.MonkeyPatch,

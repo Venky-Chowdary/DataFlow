@@ -28,6 +28,7 @@ from services.cdc_exactly_once import (
     EosOpenResult,
     ExactlyOnceRouteError,
     assert_bundle_members_reached,
+    assert_unambiguous_eos_row_columns,
     batch_apply_checksum,
     combine_change_batch,
     committed_apply_checksum,
@@ -393,6 +394,11 @@ def _sqlite_apply_member(
         mappings, column_types, pk_target_cols
     )
     change = combine_change_batch(change, pk_cols=pk_target_cols)
+    assert_unambiguous_eos_row_columns(
+        incoming_rows=list(change.inserts or []) + list(change.updates or []),
+        mappings=mappings,
+        target_cols=target_cols,
+    )
     incoming_phase = extract_cdc_phase(change.resume_token)
     incoming_checksum = batch_apply_checksum(
         change, incoming_lsn=incoming_lsn, pk_cols=pk_target_cols
@@ -514,10 +520,7 @@ def _sqlite_apply_member(
             values: list[Any] = []
             for tgt in target_cols:
                 src = tgt_to_src.get(tgt, tgt)
-                if tgt in stamped:
-                    values.append(stamped.get(tgt))
-                else:
-                    values.append(stamped.get(src))
+                values.append(stamped.get(src) if src in stamped else stamped.get(tgt))
             tuples.append(tuple(values))
         written, _skipped = _sqlite_upsert_batch(
             cur,

@@ -958,6 +958,138 @@ def test_sqlalchemy_eos_partial_update_keeps_dest_column() -> None:
         assert extra == "keep"
 
 
+@pytest.mark.parametrize("dest_type", ["sqlite", "generic_sql"])
+def test_eos_mixed_case_partial_update_keeps_unmentioned_target(
+    dest_type: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_mixed_partial.db")
+        dest_cfg = (
+            {"database": path}
+            if dest_type == "sqlite"
+            else {"type": "sqlite", "database": path}
+        )
+        mappings = [
+            {"source": "ID", "target": "id", "confidence": 1.0},
+            {"source": "AMOUNT", "target": "amount", "confidence": 1.0},
+            {"source": "note", "target": "note", "confidence": 1.0},
+        ]
+        types = {"ID": "string", "AMOUNT": "string", "note": "string"}
+        stream_key = f"{dest_type}|eos|mixed-partial"
+        apply_change_batch_exactly_once(
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=_batch(
+                "0/10",
+                inserts=[{"ID": "1", "AMOUNT": "10.00", "note": "first"}],
+            ),
+            mappings=mappings,
+            column_types=types,
+            headers=["ID", "AMOUNT", "note"],
+            pk_target_cols=["id"],
+            cursor_key=stream_key,
+        )
+        rows, _ck, _summary, _deleted = apply_change_batch_exactly_once(
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=_batch("0/20", updates=[{"ID": "1", "note": "second"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["ID", "AMOUNT", "note"],
+            pk_target_cols=["id"],
+            cursor_key=stream_key,
+        )
+
+        with sqlite3.connect(path) as conn:
+            amount, note = conn.execute(
+                "SELECT amount, note FROM orders WHERE id = ?", ("1",)
+            ).fetchone()
+
+        assert rows == 1
+        assert amount == "10.00"
+        assert note == "second"
+
+
+@pytest.mark.parametrize("dest_type", ["sqlite", "generic_sql"])
+def test_eos_same_source_and_target_column_still_updates(dest_type: str) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_same_case.db")
+        dest_cfg = (
+            {"database": path}
+            if dest_type == "sqlite"
+            else {"type": "sqlite", "database": path}
+        )
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "amount", "target": "amount", "confidence": 1.0},
+        ]
+        types = {"id": "string", "amount": "string"}
+        stream_key = f"{dest_type}|eos|same-case"
+        for lsn, amount, operation in (
+            ("0/10", "10.00", "inserts"),
+            ("0/20", "99.00", "updates"),
+        ):
+            apply_change_batch_exactly_once(
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                dest_table="orders",
+                change=_batch(
+                    lsn,
+                    **{operation: [{"id": "1", "amount": amount}]},
+                ),
+                mappings=mappings,
+                column_types=types,
+                headers=["id", "amount"],
+                pk_target_cols=["id"],
+                cursor_key=stream_key,
+            )
+
+        with sqlite3.connect(path) as conn:
+            amount = conn.execute(
+                "SELECT amount FROM orders WHERE id = ?", ("1",)
+            ).fetchone()[0]
+
+        assert amount == "99.00"
+
+
+@pytest.mark.parametrize("dest_type", ["sqlite", "generic_sql"])
+def test_eos_case_variant_keys_for_one_target_fail_closed(
+    dest_type: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_ambiguous_case.db")
+        dest_cfg = (
+            {"database": path}
+            if dest_type == "sqlite"
+            else {"type": "sqlite", "database": path}
+        )
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "AMOUNT", "target": "amount", "confidence": 1.0},
+        ]
+        with pytest.raises(ExactlyOnceRouteError) as exc_info:
+            apply_change_batch_exactly_once(
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                dest_table="orders",
+                change=_batch(
+                    "0/10",
+                    inserts=[{"id": "1", "AMOUNT": "99.00", "amount": "10.00"}],
+                ),
+                mappings=mappings,
+                column_types={"id": "string", "AMOUNT": "string"},
+                headers=["id", "AMOUNT"],
+                pk_target_cols=["id"],
+                cursor_key=f"{dest_type}|eos|ambiguous-case",
+            )
+
+        assert "AMOUNT" in str(exc_info.value)
+        assert "amount" in str(exc_info.value)
+        assert exc_info.value.reason == "exactly_once_ambiguous_column_mapping"
+
+
 def test_sqlite_eos_crash_before_watermark_then_retry() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = str(Path(tmp) / "eos.db")

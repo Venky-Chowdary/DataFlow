@@ -96,10 +96,6 @@ def test_run_cdc_database_transfer_requires_pk_and_cursor():
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M2 H5: EOS writer prefers the stale destination spelling over the mapped source update",
-)
 def test_eos_uppercase_oracle_update_overwrites_lowercase_destination(tmp_path):
     import sqlite3
 

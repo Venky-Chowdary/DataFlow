@@ -358,10 +358,6 @@ def test_live_bundle_crash_rolls_back_every_stream(engine: str) -> None:
     assert (_count(engine, t1), _count(engine, t2)) == (2, 2)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="M2 H5: EOS writer prefers the stale destination spelling over the mapped source update",
-)
 def test_live_postgresql_eos_mixed_case_update_overwrites_stale_value() -> None:
     cfg = _require("postgresql")
     table = "h5_case_" + uuid.uuid4().hex[:12]

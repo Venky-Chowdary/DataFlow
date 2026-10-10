@@ -619,6 +619,46 @@ def incoming_pk_keys(rows: list[dict[str, Any]], pk_cols: list[str]) -> list[str
     return keys
 
 
+def assert_unambiguous_eos_row_columns(
+    *,
+    incoming_rows: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    target_cols: list[str],
+) -> None:
+    from services.column_case import header_index
+
+    source_to_target = {
+        str(mapping.get("source") or ""): str(
+            mapping.get("target") or mapping.get("source") or ""
+        )
+        for mapping in mappings
+        if mapping.get("source")
+    }
+    for row in incoming_rows:
+        by_target: dict[str, str] = {}
+        for raw_key in row:
+            key = str(raw_key)
+            target = source_to_target.get(key)
+            if target is None:
+                target_index = header_index(target_cols, key)
+                if target_index is None:
+                    continue
+                target = target_cols[target_index]
+            prior = by_target.get(target)
+            if (
+                prior is not None
+                and prior != key
+                and header_index([prior], key) is not None
+            ):
+                raise ExactlyOnceRouteError(
+                    "exactly_once ambiguous source columns "
+                    f"{prior!r} and {key!r} both resolve to destination "
+                    f"column {target!r}.",
+                    reason="exactly_once_ambiguous_column_mapping",
+                )
+            by_target[target] = key
+
+
 def load_reduce_into_dest(
     *,
     incoming_rows: list[dict[str, Any]],
