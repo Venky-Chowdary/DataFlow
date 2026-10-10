@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from connectors.sql_identifiers import quote_table_ref
+from connectors.write_resilience import is_connection_lost
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.cdc_engine import ChangeBatch
 
@@ -31,6 +32,55 @@ from services.cdc_engine import ChangeBatch
 __all_gap__ = ("CdcLsnGapError",)
 
 logger = logging.getLogger(__name__)
+
+
+def _sqlserver_error_number(exc: BaseException) -> int | None:
+    pending = list(getattr(exc, "args", ()))
+    while pending:
+        value = pending.pop(0)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        if isinstance(value, (tuple, list)):
+            pending[0:0] = list(value)
+    return None
+
+
+class SqlServerCdcReadError(RuntimeError):
+    error_number: int | None
+    capture_instance: str
+    cursor_key: str
+    transient: bool
+    table: str
+
+    def __init__(
+        self,
+        exc: BaseException,
+        *,
+        capture_instance: str = "",
+        table: str = "",
+        cursor_key: str = "",
+    ) -> None:
+        self.error_number = _sqlserver_error_number(exc)
+        self.capture_instance = str(capture_instance or "")
+        self.table = str(table or "")
+        self.cursor_key = str(cursor_key or "")
+        self.transient = is_connection_lost(exc)
+
+        location = (
+            f"capture instance {self.capture_instance!r} for table {self.table!r}"
+            if self.capture_instance
+            else f"table {self.table!r}"
+        )
+        error_number = (
+            f"SQL Server error {self.error_number}"
+            if self.error_number is not None
+            else "SQL Server error number unavailable"
+        )
+        super().__init__(
+            f"SQL Server CDC/Change Tracking read failed for {location} "
+            f"({error_number}). Check the CDC capture job, "
+            "sp_cdc_help_change_data_capture, and permissions."
+        )
 
 
 def _qualified_ref(schema: str, table: str) -> str:
@@ -1308,8 +1358,14 @@ class SqlServerNativeCdc:
         except CdcLsnGapError:
             raise
         except Exception as exc:
-            logger.warning("SQL Server native CDC poll failed: %s", exc)
-            return
+            read_error = SqlServerCdcReadError(
+                exc,
+                capture_instance=self.capture_instance,
+                table=f"{self.schema}.{self.table}",
+                cursor_key=self.cursor_key,
+            )
+            logger.error("%s", read_error)
+            raise read_error from exc
 
         token = self._token(
             lsn=self.start_lsn, phase="streaming", seqval=self.start_seqval
@@ -1338,6 +1394,8 @@ class SqlServerNativeCdc:
 
         tagged: list[tuple[str, str, str, dict[str, Any]]] = []
         max_lsn = ""
+        failed_table = self.table
+        failed_capture_instance = ""
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
@@ -1371,9 +1429,11 @@ class SqlServerNativeCdc:
                     to_lsn = _hex_to_lsn(max_lsn)
                     filter_arg = self._row_filter_sql_arg()
                     for table_name in self.tables:
+                        failed_table = table_name
                         cap = self._captures.get(table_name) or ""
                         if not cap:
                             continue
+                        failed_capture_instance = cap
                         fn = self._changes_tvf_for(cap)
                         sql = (
                             f"""
@@ -1403,8 +1463,14 @@ class SqlServerNativeCdc:
         except CdcLsnGapError:
             raise
         except Exception as exc:
-            logger.warning("SQL Server shared CDC poll failed: %s", exc)
-            return
+            read_error = SqlServerCdcReadError(
+                exc,
+                capture_instance=failed_capture_instance,
+                table=f"{self.schema}.{failed_table}",
+                cursor_key=self.cursor_key,
+            )
+            logger.error("%s", read_error)
+            raise read_error from exc
 
         if not tagged:
             self.start_lsn = max_lsn or self.start_lsn

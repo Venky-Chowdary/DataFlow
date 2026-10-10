@@ -9,6 +9,7 @@ import pytest
 
 from connectors.sqlserver_cdc_native import SqlServerNativeCdc
 from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
+from connectors.write_resilience import is_connection_lost
 
 
 CFG = {
@@ -103,36 +104,37 @@ def _native_poll(
         return list(reader.poll())
 
 
-def _assert_new_read_error(poll, expected_error: type[Exception]) -> None:
+def _assert_new_read_error(poll, expected_error: type[Exception]) -> Exception:
     from services.cdc_cursor_gap import CdcLsnGapError
 
     try:
         batches = list(poll())
     except CdcLsnGapError as exc:
         pytest.fail(f"poll raised CdcLsnGapError instead of a read error: {exc}")
-    except expected_error:
-        return
+    except expected_error as exc:
+        return exc
     pytest.fail(f"poll swallowed the read error and returned {batches!r}")
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="G-CDC M1 red: SQL Server native CDC poll swallows TVF read errors",
-)
 def test_native_poll_surfaces_cdc_tvf_error_313() -> None:
-    try:
-        from connectors.sqlserver_cdc_native import SqlServerCdcReadError
-    except ImportError:
-        class SqlServerCdcReadError(Exception):
-            pass
+    from connectors.sqlserver_cdc_native import SqlServerCdcReadError
 
     cur = MagicMock()
     cur.execute.side_effect = _operational_error_313()
     reader = _native_reader()
-    _assert_new_read_error(
+    error = _assert_new_read_error(
         lambda: _native_poll(reader, cur),
         SqlServerCdcReadError,
     )
+    assert error.error_number == 313
+    assert error.capture_instance == "dbo_orders"
+    assert error.cursor_key == "mssql-cdc:dataflow:dbo.orders"
+    assert error.__cause__ is not None
+    assert error.transient is is_connection_lost(error.__cause__)
+    assert "CDC capture job" in str(error)
+    assert "sp_cdc_help_change_data_capture" in str(error)
+    assert "permissions" in str(error)
+    assert CFG["password"] not in str(error)
 
 
 def test_native_poll_emits_heartbeat_for_empty_tvf() -> None:
@@ -151,36 +153,23 @@ def test_native_poll_emits_heartbeat_for_empty_tvf() -> None:
     assert batches[0].resume_token
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="G-CDC M1 red: shared SQL Server poll swallows TVF read errors",
-)
 def test_shared_poll_surfaces_cdc_tvf_error_313() -> None:
-    try:
-        from connectors.sqlserver_cdc_native import SqlServerCdcReadError
-    except ImportError:
-        class SqlServerCdcReadError(Exception):
-            pass
+    from connectors.sqlserver_cdc_native import SqlServerCdcReadError
 
     cur = MagicMock()
     cur.execute.side_effect = _operational_error_313()
     reader = _native_reader(shared=True)
-    _assert_new_read_error(
+    error = _assert_new_read_error(
         lambda: _native_poll(reader, cur, shared=True),
         SqlServerCdcReadError,
     )
+    assert error.error_number == 313
+    assert error.capture_instance == "dbo_orders"
+    assert error.cursor_key == reader.cursor_key
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="G-CDC M1 red: SQL Server Change Tracking poll swallows query errors",
-)
 def test_change_tracking_poll_surfaces_query_error_313() -> None:
-    try:
-        from connectors.sqlserver_cdc_native import SqlServerCdcReadError
-    except ImportError:
-        class SqlServerCdcReadError(Exception):
-            pass
+    from connectors.sqlserver_cdc_native import SqlServerCdcReadError
 
     reader = SqlServerChangeTrackingCdc(
         CFG,
@@ -198,4 +187,8 @@ def test_change_tracking_poll_surfaces_query_error_313() -> None:
     with patch.object(reader, "_conn", return_value=conn), patch.object(
         reader, "_acquire_cdc_lease"
     ), patch.object(reader, "_assert_version_within_retention"):
-        _assert_new_read_error(lambda: reader.poll(), SqlServerCdcReadError)
+        error = _assert_new_read_error(lambda: reader.poll(), SqlServerCdcReadError)
+    assert error.error_number == 313
+    assert error.capture_instance == ""
+    assert error.cursor_key == "mssql-ct:dataflow:dbo.orders"
+    assert "table 'dbo.orders'" in str(error)

@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+from connectors.sqlserver_cdc_native import SqlServerCdcReadError
 from services.cdc_cursor_gap import CdcCtGapError, CdcCursorGapError
 from services.cdc_engine import ChangeBatch
 
@@ -471,8 +472,13 @@ class SqlServerChangeTrackingCdc:
         except RuntimeError:
             raise
         except Exception as exc:
-            logger.warning("SQL Server CT poll failed for %s: %s", qualified, exc)
-            return
+            read_error = SqlServerCdcReadError(
+                exc,
+                table=f"{self.schema}.{self.table}",
+                cursor_key=self.cursor_key,
+            )
+            logger.error("%s", read_error)
+            raise read_error from exc
 
         self.version = next_version
         self.phase = "streaming"
