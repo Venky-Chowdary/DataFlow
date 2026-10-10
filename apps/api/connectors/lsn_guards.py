@@ -42,6 +42,11 @@ def _parse_oracle_rs_id(rs_id: str) -> tuple[int, int, int] | None:
         return None
 
 
+def parse_oracle_rs_id(rs_id: str) -> tuple[int, int, int] | None:
+    """Parse an Oracle LogMiner RS_ID into its numeric components."""
+    return _parse_oracle_rs_id(rs_id)
+
+
 def lsn_family(lsn: Any) -> str:
     """Return CDC stamp family for LSN-guard compares (Debezium-class).
 

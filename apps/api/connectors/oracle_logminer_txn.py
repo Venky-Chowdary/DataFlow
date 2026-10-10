@@ -21,11 +21,11 @@ and never drops an event.
 from __future__ import annotations
 
 import json
-import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from connectors.lsn_guards import parse_oracle_rs_id
 from services.brand_env import getenv_brand
 from services.cdc_transaction_buffer import CdcTxnBufferOverflow
 
@@ -87,12 +87,9 @@ def rs_id_sort_key(rs_id: str) -> tuple:
     raw = str(rs_id or "").strip()
     if not raw:
         return (0, 0, 0, 0, "")
-    parts = [part.strip() for part in raw.split(".")]
-    if len(parts) == 3:
-        if parts[0].lower().startswith("0x"):
-            parts[0] = parts[0][2:]
-        if all(re.fullmatch(r"[0-9a-f]+", part, flags=re.IGNORECASE) for part in parts):
-            return (1, int(parts[0], 16), int(parts[1], 16), int(parts[2], 16), "")
+    parsed = parse_oracle_rs_id(raw)
+    if parsed is not None:
+        return (1, *parsed, "")
     raise ValueError(f"Invalid Oracle LogMiner RS_ID {rs_id!r}; refusing opaque ordering")
 
 

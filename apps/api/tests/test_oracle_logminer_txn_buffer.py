@@ -11,9 +11,10 @@ from connectors.oracle_logminer_txn import (
     OracleTxnBuffer,
     mining_position,
     oracle_txn_buffer_enabled,
+    rs_id_sort_key,
 )
 from connectors.oracle_logminer import logminer_txn_contents_sql
-from connectors.lsn_guards import compare_lsn
+from connectors.lsn_guards import compare_lsn, parse_oracle_rs_id
 from services.cdc_exactly_once import batch_lsn
 from services.cdc_transaction_buffer import CdcTxnBufferOverflow
 
@@ -87,6 +88,19 @@ def test_invalid_rs_id_cannot_enter_commit_position_order() -> None:
     )
     with pytest.raises(ValueError, match="refusing opaque ordering"):
         mining_position(100, "scn:100.pXYZ", 0)
+
+
+def test_rs_id_sort_key_reuses_shared_parser_contract() -> None:
+    rs_id = " 0x000017.0000b4a2.0010 "
+    assert parse_oracle_rs_id(rs_id) == (0x17, 0xB4A2, 0x10)
+    assert parse_oracle_rs_id("not-an-rs-id") is None
+    assert rs_id_sort_key("") == (0, 0, 0, 0, "")
+    assert rs_id_sort_key(rs_id) == (1, 0x17, 0xB4A2, 0x10, "")
+    with pytest.raises(ValueError) as exc:
+        rs_id_sort_key("bad")
+    assert str(exc.value) == (
+        "Invalid Oracle LogMiner RS_ID 'bad'; refusing opaque ordering"
+    )
 
 
 def test_full_rollback_discards_transaction() -> None:
