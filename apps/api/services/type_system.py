@@ -6816,6 +6816,11 @@ _BARE_TEMPORAL_DIGITS: dict[str, int] = {
     **{e: 0 for e in ("mysql", "mariadb", "maria", "singlestore", "tidb", "vitess")},
     **{e: 7 for e in _MSSQL_TEMPORAL_ENGINES},
     "snowflake": 9,
+    # SQLite has no temporal storage class: the writer binds ``isoformat`` text,
+    # which keeps every microsecond a Python datetime carries. Reading its bare
+    # TIMESTAMP as FSP 0 graded the column DataFlow itself created on run 1 as
+    # a narrowing on run 2 (QA MX3-09).
+    "sqlite": 6,
     **{
         e: 6
         for e in (
