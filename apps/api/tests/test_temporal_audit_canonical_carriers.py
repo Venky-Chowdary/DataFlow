@@ -2,6 +2,9 @@
 
 Each property is stated once against the shared layer and swept across the
 engines it applies to, so a connector cannot pass by special-casing a value.
+These cases are deterministic and need only ``requirements.txt``; the
+``check_*`` helpers are reused by the hypothesis sweep in
+``test_temporal_audit_canonical_carriers_property.py``.
 """
 
 from __future__ import annotations
@@ -12,8 +15,6 @@ from decimal import Decimal
 import pytest
 
 sa = pytest.importorskip("sqlalchemy")
-from hypothesis import given, settings  # noqa: E402
-from hypothesis import strategies as st  # noqa: E402
 from sqlalchemy.dialects import mssql  # noqa: E402
 
 from connectors.elasticsearch_writer import _to_es_value  # noqa: E402
@@ -42,11 +43,6 @@ ENGINES = [
     ("duckdb", "duckdb"),
 ]
 
-_STAMPS = st.datetimes(
-    min_value=datetime(1900, 1, 1), max_value=datetime(2200, 12, 31)
-).map(lambda d: d.replace(microsecond=0))
-
-
 def _inferred(values: list[str]) -> str:
     return str(infer_column(values, field_name="created")["logical_type"]).upper()
 
@@ -54,21 +50,36 @@ def _inferred(values: list[str]) -> str:
 # --- 1. date vs datetime ----------------------------------------------------
 
 
-@settings(max_examples=60, deadline=None)
-@given(
-    midnights=st.lists(st.dates(min_value=date(1900, 1, 1)), min_size=1, max_size=6),
-    stamp=_STAMPS.filter(lambda d: d.time() != datetime.min.time()),
-)
-def test_one_real_time_of_day_makes_the_column_a_timestamp(midnights, stamp):
+def check_one_real_time_of_day_makes_a_timestamp(midnights: list[date], stamp: datetime) -> None:
     values = [f"{d.isoformat()}T00:00:00" for d in midnights] + [stamp.isoformat()]
     assert _inferred(values) == "TIMESTAMP"
+    assert _inferred([d.isoformat() for d in midnights] + [stamp.isoformat(sep=" ")]) == "TIMESTAMP"
 
 
-@settings(max_examples=30, deadline=None)
-@given(days=st.lists(st.dates(min_value=date(1900, 1, 1)), min_size=1, max_size=6))
-def test_a_date_only_column_stays_a_date(days):
+def check_date_only_column_stays_a_date(days: list[date]) -> None:
     assert _inferred([d.isoformat() for d in days]) == "DATE"
     assert _inferred([f"{d.isoformat()}T00:00:00" for d in days]) == "DATE"
+
+
+@pytest.mark.parametrize(
+    ("midnights", "stamp"),
+    [
+        ([date(2024, 1, 15), date(2024, 3, 1)], datetime(2024, 2, 28, 14, 30)),
+        ([date(1900, 1, 1)], datetime(2200, 12, 31, 23, 59, 59)),
+        ([date(2024, 1, 15)] * 5, datetime(2024, 1, 15, 0, 0, 1)),
+        ([date(1999, 12, 31), date(2000, 2, 29)], datetime(2000, 1, 1, 12, 0)),
+    ],
+)
+def test_one_real_time_of_day_makes_the_column_a_timestamp(midnights, stamp):
+    check_one_real_time_of_day_makes_a_timestamp(midnights, stamp)
+
+
+@pytest.mark.parametrize(
+    "days",
+    [[date(2024, 1, 15), date(2024, 3, 1)], [date(1900, 1, 1)], [date(2000, 2, 29)] * 4],
+)
+def test_a_date_only_column_stays_a_date(days):
+    check_date_only_column_stays_a_date(days)
 
 
 @pytest.mark.parametrize(("dialect", "db_type"), ENGINES)
@@ -121,18 +132,21 @@ def test_sqlserver_bare_datetime2_is_the_seven_digit_family():
     assert _logical_type_from_sa(sa_t) == _logical_type_from_sa(mssql.DATETIME2(precision=7))
 
 
-@settings(max_examples=60, deadline=None)
-@given(
-    stamp=_STAMPS,
-    minutes=st.integers(min_value=-14 * 60, max_value=14 * 60),
-)
-def test_sqlserver_aware_bind_is_the_same_instant(stamp, minutes):
-    tz = timezone(timedelta(minutes=minutes))
-    aware = stamp.replace(tzinfo=tz)
+def check_sqlserver_aware_bind_is_the_same_instant(stamp: datetime, minutes: int) -> None:
+    aware = stamp.replace(tzinfo=timezone(timedelta(minutes=minutes)))
     sa_t = _sa_type_for_logical("TIMESTAMPTZ", "mssql", "sqlserver")
     out = _to_sa_value(aware.isoformat(), "TIMESTAMPTZ", sa_t, dialect_name="mssql", db_type="sqlserver")
     assert out.tzinfo is not None
     assert out == aware
+
+
+@pytest.mark.parametrize("minutes", [-14 * 60, -330, 0, 330, 345, 14 * 60])
+@pytest.mark.parametrize(
+    "stamp",
+    [datetime(1900, 1, 1), datetime(2024, 2, 28, 14, 30), datetime(2200, 12, 31, 23, 59, 59)],
+)
+def test_sqlserver_aware_bind_is_the_same_instant(stamp, minutes):
+    check_sqlserver_aware_bind_is_the_same_instant(stamp, minutes)
 
 
 # --- 3. NaN is SQL NULL at the NULL-polarity boundary -----------------------
@@ -166,18 +180,21 @@ def test_oracle_empty_string_stays_distinct_from_sql_null():
 # --- 4. Elasticsearch Decimal keeps fixed-point text and scale --------------
 
 
-@settings(max_examples=200, deadline=None)
-@given(
-    unscaled=st.integers(min_value=-(10**17), max_value=10**17),
-    scale=st.integers(min_value=0, max_value=10),
-)
-def test_es_decimal_binds_fixed_point_text_with_scale(unscaled, scale):
-    value = Decimal(unscaled).scaleb(-scale)
+def check_es_decimal_binds_fixed_point_text(value: Decimal) -> None:
+    scale = max(0, -value.as_tuple().exponent)
     out = _to_es_value(value, f"DECIMAL(38,{scale})")
     assert isinstance(out, str)
     assert out == format(value, "f")
     assert Decimal(out) == value
     assert Decimal(out).as_tuple().exponent == value.as_tuple().exponent
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["10.5000", "0", "0.00", "-0.001", "1000", "0.0000000001", "-99999999999999999.9", "12345678901234567.1234567890"],
+)
+def test_es_decimal_binds_fixed_point_text_with_scale(text):
+    check_es_decimal_binds_fixed_point_text(Decimal(text))
 
 
 # --- 5. Declared nanoseconds narrow on every microsecond destination --------
@@ -214,19 +231,22 @@ def test_bare_snowflake_ceiling_is_not_declared_evidence(dest):
     assert not temporal_precision_would_narrow("TIMESTAMP_NTZ", _DEST_TIMESTAMP[dest], dest_db=dest)
 
 
-@settings(max_examples=200, deadline=None)
-@given(
-    unscaled=st.integers(min_value=-(10**9), max_value=10**9),
-    scale=st.integers(min_value=0, max_value=6),
-)
-def test_typed_decimal_fit_is_exact_never_a_locale_reparse(unscaled, scale):
+def check_typed_decimal_fit_is_exact(value: Decimal) -> None:
     from connectors.sql_bind import coerce_decimal_wire
     from connectors.writer_common import fits_decimal
 
-    value = Decimal(unscaled).scaleb(-scale)
     assert fits_decimal(value, 16, 6)
     assert coerce_decimal_wire(value, ddl_type="DECIMAL(16,6)") == value
+    scale = max(0, -value.as_tuple().exponent)
     if scale:
         narrower = scale - 1
         significant = value != value.quantize(Decimal(1).scaleb(-narrower))
         assert fits_decimal(value, 16, narrower) is (not significant)
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["12.345", "1.000", "0.123", "1234.567", "-999999999.999999", "0.000001", "100", "2.50"],
+)
+def test_typed_decimal_fit_is_exact_never_a_locale_reparse(text):
+    check_typed_decimal_fit_is_exact(Decimal(text))
