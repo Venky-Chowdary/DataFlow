@@ -202,6 +202,15 @@ def _sql_props(connection_string: str, warehouse: str, extra: dict[str, Any]) ->
     return f"sqlite:///{db_path.resolve()}", props
 
 
+def _forward_storage_properties(
+    props: dict[str, Any], extra: dict[str, Any], *, overwrite: bool
+) -> None:
+    for key, value in extra.items():
+        if key.startswith("s3.") or key.startswith("client."):
+            if overwrite or key not in props:
+                props[key] = value
+
+
 def _rest_props(connection_string: str, warehouse: str, endpoint: Any, extra: dict[str, Any]) -> dict[str, Any]:
     """Build REST catalog properties from connection string + endpoint fields."""
     cs = (connection_string or "").strip()
@@ -242,6 +251,10 @@ def _rest_props(connection_string: str, warehouse: str, endpoint: Any, extra: di
     for key, value in extra.items():
         if key.startswith("rest.") and key not in props:
             props[key] = value
+    _forward_storage_properties(props, extra, overwrite=False)
+    region = _get_value(endpoint, "region") or extra.get("region") or ""
+    if region:
+        props.setdefault("client.region", region)
 
     return props
 
@@ -267,10 +280,7 @@ def _glue_props(warehouse: str, endpoint: Any, extra: dict[str, Any]) -> dict[st
     ):
         if key in extra:
             props[key] = extra[key]
-    # Allow s3.* properties to flow through for the file IO.
-    for key, value in extra.items():
-        if key.startswith("s3.") or key.startswith("client."):
-            props[key] = value
+    _forward_storage_properties(props, extra, overwrite=True)
     return props
 
 
@@ -287,6 +297,14 @@ def parse_iceberg_catalog_config(endpoint: Any) -> dict[str, Any]:
         connection_string: str
     """
     extra = _ensure_dict(_get_value(endpoint, "extra"))
+    if isinstance(endpoint, dict):
+        flattened_storage = {
+            key: value
+            for key, value in endpoint.items()
+            if isinstance(key, str)
+            and (key.startswith("s3.") or key.startswith("client."))
+        }
+        extra = {**flattened_storage, **extra}
     connection_string = _get_value(endpoint, "connection_string")
     # The "database" field is commonly used as the warehouse/catalog path when no
     # explicit warehouse/connection_string is provided (legacy filesystem CoW tests
