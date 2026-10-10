@@ -257,6 +257,10 @@ _WIRE_NUMBER_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _NUMBER_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
     "number_locale", default=""
 )
+# Strict validation with no declared locale: a decimal comma is a locale guess.
+_STRICT_NUMBER_VAR: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "strict_number_reading", default=False
+)
 
 
 def _active_number_locale(explicit: str = "") -> str:
@@ -290,6 +294,42 @@ def set_active_number_locale(locale: str) -> contextvars.Token[str]:
 def reset_active_number_locale(token: contextvars.Token[str]) -> None:
     """Restore the previous number locale."""
     _NUMBER_LOCALE_VAR.reset(token)
+
+
+def set_strict_number_reading(strict: bool) -> contextvars.Token[bool]:
+    """Refuse decimal-comma guesses (``4,0``) for this run.
+
+    Set for ``validation_mode=strict`` when the operator declared no number
+    locale: ``4,0`` is 4.0 only under EU and not a US number at all, so strict
+    quarantines it instead of picking EU silently (QA MX3-11).
+    """
+    return _STRICT_NUMBER_VAR.set(bool(strict))
+
+
+def reset_strict_number_reading(token: contextvars.Token[bool]) -> None:
+    """Restore the previous strict-number setting."""
+    _STRICT_NUMBER_VAR.reset(token)
+
+
+def strict_decimal_comma_reason(value: Any) -> str:
+    """Why strict refused ``value``, when the only reason is its decimal comma."""
+    text = str(value or "").strip()
+    if not text or "," not in text or not _STRICT_NUMBER_VAR.get():
+        return ""
+    if _parse_decimal(text) is not None:
+        return ""
+    token = _STRICT_NUMBER_VAR.set(False)
+    try:
+        auto = _parse_decimal(text)
+    finally:
+        _STRICT_NUMBER_VAR.reset(token)
+    if auto is None:
+        return ""
+    return (
+        f"'{text}' is a number only if ',' is the decimal separator (EU reads "
+        f"{auto}). Strict validation never guesses a number locale — set number "
+        "locale EU in Destination → Advanced, or fix the source value."
+    )
 
 
 def _implied_number_locale_from_currency(raw: str) -> str:
@@ -360,6 +400,9 @@ def number_locale_ambiguity_reason(value: Any) -> str:
     for any other reason, so a genuinely unparseable cell keeps its own error.
     """
     text = str(value or "").strip()
+    strict_reason = strict_decimal_comma_reason(text)
+    if strict_reason:
+        return strict_reason
     if not text or not _looks_like_grouped_number(text):
         return ""
     if _parse_decimal(text) is not None:
@@ -919,6 +962,7 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
         if _WIRE_NUMBER_RE.match(text):
             return text
         locale = ""
+    refuse_comma_decimal = not locale and _STRICT_NUMBER_VAR.get()
     # Remove ASCII spaces used as thousands separators (e.g. "1 000 000").
     text = text.replace(" ", "").replace("\t", "")
 
@@ -929,6 +973,8 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
             candidate = text.replace(",", "")
             if candidate.count(".") <= 1:
                 return candidate
+            return None
+        if refuse_comma_decimal:
             return None
         text = text.replace(".", "")
         last_comma = text.rfind(",")
@@ -962,6 +1008,8 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
             and all(len(part) == 3 for part in parts[1:])
         ):
             return "".join(parts)
+        if refuse_comma_decimal:
+            return None
         if (
             len(parts) >= 2
             and all(len(part) == 3 for part in parts[1:-1])
@@ -2001,7 +2049,7 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
             return Decimal(bool_as_number), None
         parsed = _parse_decimal(text)
         if parsed is None:
-            return None, f"Invalid decimal: {text!r}"
+            return None, strict_decimal_comma_reason(text) or f"Invalid decimal: {text!r}"
         # Return Decimal so bind does not re-apply locale to the canonical
         # spelling (EU ``1,234`` → ``1.234`` must not become thousands 1234).
         # Extreme scientific stays a short string (never expand 1e1000000).

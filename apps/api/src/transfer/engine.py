@@ -2413,6 +2413,16 @@ class UniversalTransferEngine:
         number_token = set_active_number_locale(
             _run_number_locale(request)
         )
+        from services.transform_engine import (
+            reset_strict_number_reading,
+            set_strict_number_reading,
+        )
+
+        strict_number_token = set_strict_number_reading(
+            str(getattr(request, "validation_mode", "") or "strict").strip().lower()
+            == "strict"
+            and not str(getattr(request, "number_locale", "") or "").strip()
+        )
         try:
             from services.tracing import (
                 current_trace_id,
@@ -2559,6 +2569,7 @@ class UniversalTransferEngine:
                 self._notify_job_status(request, result)
                 return result
         finally:
+            reset_strict_number_reading(strict_number_token)
             reset_active_number_locale(number_token)
             reset_active_date_locale(locale_token)
             # The run is over however it ended, so the slot must be freed here.

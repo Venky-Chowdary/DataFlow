@@ -78,9 +78,20 @@ def _with_date_locale(fn):
     def wrapper(*args, **kwargs):
         date_token = set_active_date_locale(kwargs.get("date_locale", ""))
         number_token = set_active_number_locale(kwargs.get("number_locale", ""))
+        from services.transform_engine import (
+            reset_strict_number_reading,
+            set_strict_number_reading,
+        )
+
+        # Same rule as Execute (engine): strict + no declared locale.
+        strict_token = set_strict_number_reading(
+            str(kwargs.get("validation_mode") or "strict").strip().lower() == "strict"
+            and not str(kwargs.get("number_locale") or "").strip()
+        )
         try:
             return fn(*args, **kwargs)
         finally:
+            reset_strict_number_reading(strict_token)
             reset_active_number_locale(number_token)
             reset_active_date_locale(date_token)
 
