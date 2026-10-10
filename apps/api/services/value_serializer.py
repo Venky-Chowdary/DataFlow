@@ -108,7 +108,7 @@ def present_cell_text(value: Any) -> str | None:
     SQL NULL / Missing / blank are not a unique key, FK, or collision token.
     Typed cells use ``cell_to_string`` so ``True`` and dest ``"true"`` match.
     """
-    if is_null_evidence(value):
+    if is_null_evidence(value) or is_frame_missing(value):
         return None
     if isinstance(value, str):
         text = value.strip()
@@ -179,6 +179,23 @@ def _is_na(value: Any) -> bool:
         return bool(value != value)
     except (TypeError, ValueError):
         return False
+
+
+def is_frame_missing(value: Any) -> bool:
+    """pandas/numpy missing marker (``np.nan``, ``pd.NA``, ``pd.NaT``).
+
+    A DataFrame spells SQL NULL this way, so at a NULL-polarity boundary
+    (quarantine wire, present-token checks) it is NULL, not the text ``nan``.
+    Text, bytes, bool and :class:`~decimal.Decimal` are never frame markers:
+    ``Decimal('NaN')`` is a stored numeric value.
+    """
+    if value is None or isinstance(value, (str, bytes, bytearray, bool, Decimal)):
+        return False
+    # ``pd.NA != pd.NA`` is ``pd.NA`` and its truth value raises, so the
+    # self-inequality probe alone misses it.
+    if type(value).__name__ in {"NAType", "NaTType"}:
+        return True
+    return _is_na(value)
 
 
 def nonfinite_wire_token(value: Any) -> str | None:

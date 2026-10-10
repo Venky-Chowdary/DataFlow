@@ -94,16 +94,19 @@ def quarantine_cell_wire(value: Any) -> str:
         DF_MISSING_SENTINEL,
         SQL_NULL_SENTINEL,
         cell_to_string,
+        is_frame_missing,
         is_missing_sentinel,
     )
 
-    if value is None:
+    if value is None or is_frame_missing(value):
+        # Frame NaN / NA / NaT first: cell_to_string spells float NaN ``"NaN"``
+        # and ``pd.NA`` cannot be compared, so replay would write text (or
+        # raise) where the row had NULL.
         return SQL_NULL_SENTINEL
     if is_missing_sentinel(value):
         return DF_MISSING_SENTINEL
     if isinstance(value, str) and value.strip() == SQL_NULL_SENTINEL:
         return SQL_NULL_SENTINEL
-    # cell_to_string(preserve_sql_null=True) maps NA/NaN → SQL_NULL_SENTINEL.
     return cell_to_string(value, preserve_sql_null=True)
 
 
