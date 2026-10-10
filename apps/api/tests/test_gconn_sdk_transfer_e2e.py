@@ -171,6 +171,19 @@ def _table_rows(path: Path, table: str) -> list[tuple]:
         return conn.execute(f'SELECT id FROM "{table}" ORDER BY id').fetchall()
 
 
+def _table_exists(path: Path, table: str) -> bool:
+    if not path.exists():
+        return False
+    with sqlite3.connect(path) as conn:
+        return (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                (table,),
+            ).fetchone()
+            is not None
+        )
+
+
 def _sample_row(path: Path, table: str, row_id: int | str) -> str:
     with sqlite3.connect(path) as conn:
         row = conn.execute(
@@ -333,10 +346,6 @@ def test_intercom_fresh_destination_reads_three_pages_with_epoch_values(
         assert _SECRET not in caplog.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="engine retry re-maps epoch INTEGER to TIMESTAMP; see CONNECTOR_CERTIFICATION.md known gap (a)",
-)
 def test_intercom_fault_then_full_reread_retry_uses_pk_upsert(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -389,11 +398,7 @@ def test_intercom_fault_then_full_reread_retry_uses_pk_upsert(
         assert _SECRET not in caplog.text
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="SDK resume fails strict Gate-8 on a session-only write digest; see CONNECTOR_CERTIFICATION.md known gap (b)",
-)
-def test_github_resume_uses_saved_page_two_state_and_reconciles_population(
+def test_github_resume_is_refused_before_http_or_destination_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -452,8 +457,41 @@ def test_github_resume_uses_saved_page_two_state_and_reconciles_population(
             request, job_id, resume=True
         )
         resume_requests = fixture.request_log[request_start:]
-        assert resume_requests and "page=2" in resume_requests[0].target
-        assert resumed.success, resumed.error
-        rows = _table_rows(destination_path, "issues")
-        assert len(rows) == 250
-        assert len(set(rows)) == 250
+        refusal = (
+            "Resume is not supported for GitHub yet; rerun the job — "
+            "rows are upserted by primary key."
+        )
+        assert not resumed.success
+        assert resumed.error == refusal
+        assert fake.jobs[job_id]["status"] == "failed"
+        assert fake.jobs[job_id]["error"] == refusal
+        assert len(_table_rows(destination_path, "issues")) == 100
+        assert not resume_requests
+
+        fresh_destination = tmp_path / "github-resume-fresh.sqlite"
+        fresh_job_id = f"gconn-github-resume-fresh-{uuid.uuid4().hex[:12]}"
+        fresh_request = TransferRequest(
+            source=request.source,
+            destination=_destination(fresh_destination, "issues"),
+            sync_mode="upsert",
+            skip_preflight=True,
+            validation_mode="strict",
+            stream_contracts=[
+                {
+                    "name": "issues",
+                    "primary_key": ["id"],
+                    "sync_mode": "upsert",
+                    "selected": True,
+                }
+            ],
+        )
+        fresh_request_start = len(fixture.request_log)
+        fresh_result = UniversalTransferEngine().execute_tracked(
+            fresh_request, fresh_job_id, resume=True
+        )
+        assert not fresh_result.success
+        assert fresh_result.error == refusal
+        assert fake.jobs[fresh_job_id]["status"] == "failed"
+        assert fake.jobs[fresh_job_id]["error"] == refusal
+        assert not _table_exists(fresh_destination, "issues")
+        assert len(fixture.request_log) == fresh_request_start

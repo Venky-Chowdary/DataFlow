@@ -2223,6 +2223,24 @@ def _job_destination_name(dest_summary: dict[str, Any], destination: Any) -> str
     )
 
 
+class SdkResumeNotSupportedError(ValueError):
+    """SDK source resume is not supported by the engine contract."""
+
+
+def _sdk_source_descriptor_for_format(source_format: str) -> Any | None:
+    from connectors.sdk import get_descriptor
+    from .connector_capabilities import resolve_driver_type
+
+    descriptor = get_descriptor(resolve_driver_type(source_format))
+    if (
+        descriptor is None
+        or "source" not in descriptor.roles
+        or not descriptor.catalog_ids
+    ):
+        return None
+    return descriptor
+
+
 class UniversalTransferEngine:
     """
     Orchestrates universal data movement:
@@ -2376,6 +2394,15 @@ class UniversalTransferEngine:
         from services.procedure_source import is_callable_source
 
         try:
+            if resume:
+                descriptor = _sdk_source_descriptor_for_format(
+                    request.source.format or ""
+                )
+                if descriptor is not None:
+                    raise SdkResumeNotSupportedError(
+                        f"Resume is not supported for {descriptor.display_name} yet; "
+                        "rerun the job — rows are upserted by primary key."
+                    )
             requested_delivery = getattr(request, "delivery_guarantee", None) or "auto"
             request.delivery_pinned = operator_pinned_delivery(requested_delivery)
             request.delivery_guarantee = select_route_delivery(
@@ -4182,15 +4209,8 @@ class UniversalTransferEngine:
             # SELECT when it has one. Peeking the table would map columns the
             # writer never reads.
             from services.execute_shape_route import peek_declared_source
-            from connectors.sdk import get_descriptor
-            from .connector_capabilities import resolve_driver_type
-
-            sdk_descriptor = get_descriptor(resolve_driver_type(src_fmt))
-            sdk_source = bool(
-                sdk_descriptor
-                and "source" in sdk_descriptor.roles
-                and sdk_descriptor.catalog_ids
-            )
+            sdk_descriptor = _sdk_source_descriptor_for_format(src_fmt)
+            sdk_source = sdk_descriptor is not None
             sdk_state = (
                 getattr(checkpoint, "cursor_value", None) if sdk_source else None
             )
