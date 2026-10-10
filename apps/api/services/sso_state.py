@@ -1,4 +1,8 @@
-"""SSO transient state uses Mongo across hosts and a flocked file on one host."""
+"""Mongo is the multi-host backend.
+
+The flocked file backend is safe across workers on one host only and is not shared
+across hosts.
+"""
 
 from __future__ import annotations
 
