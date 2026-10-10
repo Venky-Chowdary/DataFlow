@@ -445,6 +445,15 @@ TOOL_DEFINITIONS: list[dict] = [
                         "FAIL_JOB does not clear a gate. Confirm is still required."
                     ),
                 },
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "(the finding names the columns and rule). Requires "
+                        "approved_by and reason; recorded on the job as "
+                        "compliance_acknowledged + acknowledgment_actor/reason."
+                    ),
+                },
             },
             "required": [],
         },
@@ -527,6 +536,15 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Same operator signature as plan_transfer. Applied only "
                         "to mappings that already require a continue-policy "
                         "Migration Risk Contract. Never signed when omitted."
+                    ),
+                },
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "(the finding names the columns and rule). Requires "
+                        "approved_by and reason; recorded on the job as "
+                        "compliance_acknowledged + acknowledgment_actor/reason."
                     ),
                 },
             },
@@ -3231,6 +3249,7 @@ class DataPilotTools:
         all_tables: bool = False,
         limit: int = 0,
         risk_acceptance: dict | None = None,
+        pii_acknowledgement: dict | None = None,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -3262,6 +3281,7 @@ class DataPilotTools:
             cadence=cadence,
             all_tables=all_tables,
             risk_acceptance=risk_acceptance,
+            pii_acknowledgement=pii_acknowledgement,
         )
 
     def _start_transfer(
@@ -3294,6 +3314,7 @@ class DataPilotTools:
         cadence: str = "",
         all_tables: bool = False,
         risk_acceptance: dict | None = None,
+        pii_acknowledgement: dict | None = None,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -3326,6 +3347,7 @@ class DataPilotTools:
             cadence=cadence,
             all_tables=all_tables,
             risk_acceptance=risk_acceptance,
+            pii_acknowledgement=pii_acknowledgement,
         )
 
     def _start_dataset_transfer(

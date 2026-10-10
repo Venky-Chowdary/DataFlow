@@ -64,5 +64,10 @@ def transfer_request_from_ack(payload: dict[str, Any]) -> TransferRequest:
         source_object_uri=str(payload.get("source_object_uri") or ""),
         skip_preflight=False,
         triggered_by="data-pilot",
+        # The operator's PII acknowledgement from staging: Execute re-runs
+        # Validate with it, and the job keeps the approver + reason for audit.
+        compliance_acknowledged=bool(payload.get("compliance_acknowledged")),
+        acknowledgment_actor=str(payload.get("acknowledgment_actor") or "").strip(),
+        acknowledgment_reason=str(payload.get("acknowledgment_reason") or "").strip(),
     )
     return request

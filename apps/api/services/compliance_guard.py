@@ -19,6 +19,8 @@ SSN_RE = re.compile(r"^\d{3}-\d{2}-\d{4}$")
 # invented a HIPAA hold on ``event_date`` / ``created_at``.
 ACCOUNT_RE = re.compile(r"^(?:\d{8,19}|[A-Z]{2}\d{12,30})$")
 
+_ACCOUNT_SURROGATE_NAME_RE = re.compile(r"account_?id\b")
+
 _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
     "email": ((r"email", r"e_mail", r"\bmail\b"), 0.22),
     "phone": ((r"phone", r"mobile", r"\btel\b", r"contact_?(?:phone|number|no)"), 0.22),
@@ -109,15 +111,37 @@ def detect_pii_fields(
     field_risk: dict[str, list[str]] = {}
     high_risk_fields: list[str] = []
 
+    field_evidence: dict[str, list[dict[str, str]]] = {}
+
     for col in columns:
         name_hits = _field_hits(col)
         sample_values = [str(row.get(col, "")).strip() for row in sample_rows if col in row]
         value_hits = _value_hits(sample_values)
+        non_empty = [v for v in sample_values if v]
+        if (
+            "account" in name_hits
+            and "account" not in value_hits
+            and non_empty
+            and _ACCOUNT_SURROGATE_NAME_RE.search(col.lower())
+            and not any(ACCOUNT_RE.match(v) for v in non_empty)
+        ):
+            # ``account_id`` is usually a surrogate key. Sampled values that do
+            # not look like a bank/card number keep it a regulated identifier
+            # (PCI tag, visible) instead of a high-risk account number that
+            # forces review on a synthetic numeric table.
+            name_hits = ["identifier" if h == "account" else h for h in name_hits]
         categories = list(dict.fromkeys(name_hits + value_hits))
         if not categories:
             continue
         sensitive_fields.append(col)
         field_risk[col] = categories
+        field_evidence[col] = [
+            {"category": cat, "rule": "column_name"} for cat in dict.fromkeys(name_hits)
+        ] + [
+            {"category": cat, "rule": "sample_value"}
+            for cat in value_hits
+            if cat not in name_hits
+        ]
         if any(cat in {"ssn", "dob", "account"} for cat in categories):
             high_risk_fields.append(col)
 
@@ -133,6 +157,7 @@ def detect_pii_fields(
         "high_risk_fields": sorted(high_risk_fields),
         "risk_level": risk_level,
         "sensitive_count": len(sensitive_fields),
+        "field_evidence": field_evidence,
     }
 
 
@@ -191,6 +216,16 @@ def score_compliance_risk(
         compliance_tags.append("PII")
 
     requires_review = risk_score >= 0.45 or bool(pii_report["high_risk_fields"])
+    evidence = pii_report.get("field_evidence") or {}
+    findings = [
+        {
+            "column": col,
+            "categories": list(field_risk.get(col, [])),
+            "high_risk": col in pii_report["high_risk_fields"],
+            "evidence": list(evidence.get(col, [])),
+        }
+        for col in sensitive_fields
+    ]
 
     return {
         "risk_score": risk_score,
@@ -199,5 +234,6 @@ def score_compliance_risk(
         "sensitive_fields": sensitive_fields,
         "high_risk_fields": pii_report["high_risk_fields"],
         "field_risk": field_risk,
+        "findings": findings,
         "compliance_tags": sorted(set(compliance_tags)),
     }

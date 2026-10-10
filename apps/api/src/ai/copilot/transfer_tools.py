@@ -279,6 +279,23 @@ def _transfer_decision(preflight: dict[str, Any]) -> str:
     ).strip().lower()
 
 
+def _pii_acknowledgement(raw: dict[str, Any] | None) -> dict[str, str] | None:
+    """Validate the operator's PII/compliance acknowledgement (or None)."""
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("pii_acknowledgement must be an object with approved_by and reason.")
+    approved_by = str(raw.get("approved_by") or "").strip()
+    reason = str(raw.get("reason") or "").strip()
+    if not approved_by or not reason:
+        raise ValueError(
+            "pii_acknowledgement needs approved_by and reason — an unsigned "
+            "acknowledgement cannot clear a PII/compliance review."
+        )
+    _LOG.info("PII/compliance review acknowledged by %s: %s", approved_by, reason)
+    return {"approved_by": approved_by, "reason": reason}
+
+
 def _is_execute_cleared(preflight: dict[str, Any]) -> bool:
     """Same bar as Studio Execute — passed + approve; never local / review-grade."""
     run_id = str(preflight.get("run_id") or "")
@@ -608,6 +625,7 @@ def plan_transfer(
     cadence: str = "",
     all_tables: bool = False,
     risk_acceptance: dict[str, Any] | None = None,
+    pii_acknowledgement: dict[str, Any] | None = None,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -831,6 +849,11 @@ def plan_transfer(
     if contracts and contracts[0].get("cursor_inferred"):
         row_rules["cursor_inferred"] = True
 
+    try:
+        pii_ack = _pii_acknowledgement(pii_acknowledgement)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
+
     if risk_acceptance:
         try:
             mappings = _sign_required_risk_contracts(
@@ -868,6 +891,7 @@ def plan_transfer(
         source_read_mode=str((callable_plan or {}).get("mode") or ""),
         source_filter=row_rules["source_filter"] or None,
         stream_contracts=row_rules["stream_contracts"] or None,
+        pii_ack=pii_ack,
     )
 
     conversions = _type_conversions(mappings)
@@ -1317,6 +1341,7 @@ def _run_preflight(
     stream_contracts: list[dict[str, Any]] | None = None,
     source_kind: str = "database",
     known_row_count: int | None = None,
+    pii_ack: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.preflight_run_store import save_preflight_run
@@ -1460,6 +1485,9 @@ def _run_preflight(
             contract_primary_key=source_primary_key or None,
             source_filter=source_filter or None,
             stream_contracts=list(stream_contracts or []),
+            compliance_acknowledged=bool(pii_ack),
+            acknowledgment_actor=(pii_ack or {}).get("approved_by", ""),
+            acknowledgment_reason=(pii_ack or {}).get("reason", ""),
         )
         result = apply_policy_gates(
             result,
@@ -1759,6 +1787,7 @@ def start_transfer(
     cadence: str = "",
     all_tables: bool = False,
     risk_acceptance: dict[str, Any] | None = None,
+    pii_acknowledgement: dict[str, Any] | None = None,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -1788,6 +1817,7 @@ def start_transfer(
         cadence=cadence,
         all_tables=all_tables,
         risk_acceptance=risk_acceptance,
+        pii_acknowledgement=pii_acknowledgement,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)
@@ -1824,10 +1854,15 @@ def start_transfer(
                 "re-run Validate against the API until decision is approve."
             )
         else:
+            reason = str(
+                ((preflight.get("proof_bundle") or {}).get("transfer_decision") or {}).get("reason")
+                or ""
+            ).strip()
             err = (
                 f"Preflight is {decision}-grade, not approve — Confirm is blocked "
                 "until Studio Execute would unlock "
                 + (f"(run {preflight.get('run_id')})." if preflight.get("run_id") else ".")
+                + (f" Reason: {reason}" if reason else "")
             )
         return _tool_result(
             tool,
@@ -1880,6 +1915,12 @@ def start_transfer(
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
     }
+    pii_ack = _pii_acknowledgement(pii_acknowledgement)
+    if pii_ack:
+        # Execute re-runs Validate: the same ack and its trail ride on the job.
+        payload["compliance_acknowledged"] = True
+        payload["acknowledgment_actor"] = pii_ack["approved_by"]
+        payload["acknowledgment_reason"] = pii_ack["reason"]
     try:
         bound = _stage_bound_contract(contract_id, require_signed_contract)
     except ValueError as exc:
@@ -1903,6 +1944,8 @@ def start_transfer(
         "validation_mode": plan.get("validation_mode"),
         "schema_policy": plan.get("schema_policy"),
     }
+    if pii_ack:
+        preview["pii_acknowledgement"] = dict(pii_ack)
     rules_preview = plan.get("data_rules") or {}
     if rules_preview.get("row_filter"):
         preview["row_filter"] = rules_preview["row_filter"]
