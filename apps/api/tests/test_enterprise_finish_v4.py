@@ -312,7 +312,7 @@ def test_concurrent_fleet_loop_opens_the_pool_before_the_first_claim(monkeypatch
     stop = threading.Event()
     seen: dict = {}
 
-    def claim(_store):
+    def claim(_store, ttl_seconds=60):
         seen["cap"] = wf._fleet_pool_cap
         seen["workers"] = None if wf._fleet_pool is None else wf._fleet_pool._max_workers
         stop.set()
@@ -339,7 +339,7 @@ def test_serial_fleet_loop_does_not_open_a_pool(monkeypatch):
 
     stop = threading.Event()
 
-    def claim(_store):
+    def claim(_store, ttl_seconds=60):
         stop.set()
         return None
 
