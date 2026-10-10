@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -40,6 +41,8 @@ _UNBOUNDED_TEXT_TYPES = re.compile(
     r"string|bytes|json|jsonb|xml|super|variant)\b",
     re.I,
 )
+_logger = logging.getLogger(__name__)
+
 _DECIMAL_PRECISION = re.compile(r"(?:decimal|numeric|number)\s*\(\s*(\d+)\s*(?:,\s*(\d+)\s*)?\)", re.I)
 _NUMBERISH = re.compile(r"^(?:decimal|numeric|number|float|double|real|int|bigint|smallint)", re.I)
 
@@ -103,10 +106,6 @@ def _decimal_overflow_issue(samples: list[str], tgt: str, tgt_type: str) -> str 
         return None
     precision, scale = capacity
     max_int_digits = max(0, precision - scale)
-    try:
-        from decimal import Decimal, InvalidOperation
-    except ImportError:
-        return None
     for raw in samples[:50]:
         from services.transform_engine import decimal_wire_value
 
@@ -127,7 +126,8 @@ def _decimal_overflow_issue(samples: list[str], tgt: str, tgt_type: str) -> str 
         if int_digits > max_int_digits or scale_digits > scale:
             return (
                 f"Decimal capacity overflow: {tgt} ({tgt_type}) cannot hold sample value "
-                f"'{raw[:40]}' (needs ~{int_digits},{scale_digits} vs {precision},{scale})"
+                f"'{raw[:40]}' (needs ~{int_digits + scale_digits},{scale_digits} "
+                f"vs {precision},{scale})"
             )
     return None
 
@@ -405,17 +405,34 @@ def evaluate_ddl_compatibility(
             samples = _sample_values(sample_rows, src)
             if samples:
                 width = _parse_varchar_width(tgt_type)
+                value_overflows: list[str] = []
                 if width is not None:
                     max_len = _max_string_len(samples)
                     if max_len > width:
-                        issues.append(
+                        value_overflows.append(
                             f"Value width overflow: {src} sample max {max_len} chars "
                             f"exceeds {tgt} ({tgt_type})"
                         )
 
                 overflow = _decimal_overflow_issue(samples, tgt, tgt_type)
                 if overflow:
-                    issues.append(overflow)
+                    value_overflows.append(overflow)
+                if value_overflows and risk_cleared:
+                    # A verified continue-policy Risk Contract is the operator's
+                    # signed instruction for exactly these rows: the writer holds
+                    # each non-fitting value out per its execution_policy
+                    # (quarantine / skip / cast). Blocking here made every
+                    # continue policy unreachable for capacity overflow.
+                    _logger.info(
+                        "G6 value overflow on %s→%s (%s) cleared by Risk Contract; "
+                        "writer enforces per row: %s",
+                        src,
+                        tgt,
+                        tgt_type,
+                        "; ".join(value_overflows),
+                    )
+                else:
+                    issues.extend(value_overflows)
 
                 src_logical = normalize_logical_type(src_type)
                 tgt_logical = normalize_logical_type(tgt_type)

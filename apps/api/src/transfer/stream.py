@@ -1157,6 +1157,27 @@ def _stream_database_transfer_impl(
             "COPY fast path declined: source foreign keys need a per-row "
             "destination parent check (orphans are quarantined on the row path)"
         )
+    # Signed Risk Contracts (QUARANTINE_ROW / SKIP_ROW / CAST_AND_CONTINUE)
+    # are per-row dispositions. A server-to-server copy never sees a row, so a
+    # value the narrower destination cannot hold aborted the whole COPY instead
+    # of being held out as the contract instructs — those routes stream rows.
+    risk_contract_columns = [
+        str(m.get("source") or m.get("target") or "")
+        for m in (mappings or [])
+        if isinstance(m, dict) and m.get("risk_contract")
+    ]
+    if risk_contract_columns:
+        logger.info(
+            "COPY fast path declined for %s: Risk Contract on %s needs per-row "
+            "disposition on the writer path",
+            _source_name(source),
+            ", ".join(risk_contract_columns),
+        )
+        copy_decline.append(
+            "COPY fast path declined: signed Risk Contract columns ("
+            + ", ".join(risk_contract_columns)
+            + ") need per-row quarantine/skip on the row path"
+        )
     _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
     try:
@@ -1168,6 +1189,7 @@ def _stream_database_transfer_impl(
             or writer_owns_evolution
             or dest_proc_plan is not None
             or fk_orphan_guard is not None
+            or bool(risk_contract_columns)
         ) else _try_copy_fast_path(
             source=source,
             destination=destination,

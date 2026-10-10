@@ -567,8 +567,9 @@ def resolve_schema_evolution(
         elif unmapped:
             action = "review"
             reasons.append("type_locked_new_columns_need_approval")
-        else:
-            # Other additive changes under type_locked: review, don't auto-propagate
+        elif additive or soft:
+            # Other additive changes under type_locked: review, don't auto-propagate.
+            # An identical schema is not a change and must not demand review.
             action = "review"
             reasons.append("type_locked_review_required")
     elif policy in PROPAGATE_POLICIES and (additive or soft or unmapped):
