@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 
 def _is_local(host: str, port: int) -> bool:
@@ -28,6 +31,8 @@ def _emulator_endpoint(cfg: dict[str, Any]) -> bool:
     if "azurite" in host or "azurite" in blob:
         return True
     if "devstoreaccount1" in blob or "usedevelopmentstorage=true" in blob:
+        return True
+    if _account_name(cfg).lower() == "devstoreaccount1":
         return True
     if cfg.get("emulator") or cfg.get("azurite"):
         return True
@@ -70,6 +75,14 @@ def _account_url(cfg: dict[str, Any]) -> str:
     port = int(cfg.get("port") or 0)
     if _is_local(host, port):
         return f"http://{host}:{port}/{account}"
+    public = host.lower() in ("", account.lower()) or host.lower().endswith(".core.windows.net")
+    if not public and (port or _emulator_endpoint(cfg)):
+        # A tunneled / private Blob endpoint is path-style; the shared-key
+        # signature covers /<account>/..., so public Azure must not be dialed.
+        scheme = "https" if cfg.get("ssl") else "http"
+        url = f"{scheme}://{host}:{port or 10000}/{account}"
+        _logger.info("ADLS field form uses path-style custom endpoint %s", url)
+        return url
     return f"https://{account}.blob.core.windows.net"
 
 
@@ -147,4 +160,7 @@ def blob_service_client(cfg: dict[str, Any]):
 
     key = _account_key(cfg)
     url = _account_url(cfg)
-    return BlobServiceClient(account_url=url, credential=key or None, **client_kwargs)
+    # Name the account explicitly: a path-style endpoint's hostname is not
+    # <account>.blob..., so the SDK cannot derive it for the shared-key signature.
+    credential = {"account_name": _account_name(cfg), "account_key": key} if key else None
+    return BlobServiceClient(account_url=url, credential=credential, **client_kwargs)
