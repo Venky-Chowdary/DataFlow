@@ -6574,11 +6574,14 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 re.I,
             ):
                 ds_name = st
-            if not ds_name:
+            explicit_source_connector = str(
+                transfer_intent.get("source_connector_name") or ""
+            ).strip()
+            if not ds_name and not explicit_source_connector:
                 try:
                     for cand in (
                         st,
-                        str(transfer_intent.get("source_connector_name") or ""),
+                        explicit_source_connector,
                     ):
                         if not cand or cand.lower() in _BARE_OBJECT_WORDS:
                             continue
