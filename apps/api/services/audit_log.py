@@ -306,13 +306,16 @@ def list_audit_events(
     tenant_id: str | None = None,
     since: str | None = None,
     until: str | None = None,
+    after_seq: int | None = None,
 ) -> list[dict[str, Any]]:
-    """Return the most recent audit events, newest first.
+    """Return recent events, or an ascending chain-sequence cursor page.
 
     ``workspace_id`` / ``tenant_id`` are exact matches. Unscoped historical
     events (empty workspace) are excluded from a scoped query so one tenant
     cannot export another tenant's rows — or the global leftovers.
     """
+    if after_seq is not None and after_seq < 0:
+        raise ValueError("after_seq must be nonnegative")
     ws = (workspace_id or "").strip() or None
     tid = (tenant_id or "").strip() or None
     since = (since or "").strip() or None
@@ -335,9 +338,14 @@ def list_audit_events(
                     query["time"]["$gte"] = since
                 if until:
                     query["time"]["$lte"] = until
+            if after_seq is not None:
+                query["chain_seq"] = {"$gt": after_seq}
+                sort_order = [("chain_seq", 1)]
+            else:
+                sort_order = [(key, -direction) for key, direction in CHAIN_ORDER]
             cursor = (
                 coll.find(query)
-                .sort([(key, -direction) for key, direction in CHAIN_ORDER])
+                .sort(sort_order)
                 .limit(limit)
             )
             return [{k: v for k, v in doc.items() if k != "_id"} for doc in cursor]
@@ -348,7 +356,8 @@ def list_audit_events(
         return []
     lines = STORE_PATH.read_text(encoding="utf-8").strip().splitlines()
     events: list[dict[str, Any]] = []
-    for line in reversed(lines):
+    ordered_lines = lines if after_seq is not None else reversed(lines)
+    for line in ordered_lines:
         if not line.strip():
             continue
         try:
@@ -359,12 +368,16 @@ def list_audit_events(
             continue
         if actor and ev.get("actor") != actor:
             continue
+        if after_seq is not None and chain_seq_of(ev) <= after_seq:
+            continue
         if not _event_in_scope(ev, workspace_id=ws, tenant_id=tid, since=since, until=until):
             continue
         events.append(ev)
-        if len(events) >= limit:
+        if after_seq is None and len(events) >= limit:
             break
-    return events
+    if after_seq is not None:
+        events.sort(key=chain_seq_of)
+    return events[:limit]
 
 
 def _event_hash_of_line(line: str) -> str | None:

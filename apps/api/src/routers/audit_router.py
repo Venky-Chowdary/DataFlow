@@ -5,9 +5,11 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 router = APIRouter(prefix="/audit", tags=["Audit"])
 
@@ -43,11 +45,75 @@ def _scope(request: Request) -> tuple[str, str]:
     return workspace_id, tenant_id
 
 
+def _next_after_seq(
+    events: list[dict[str, object]], after_seq: int | None
+) -> tuple[int | None, dict[str, str]]:
+    if after_seq is None:
+        return None, {}
+    next_seq = int(events[-1].get("chain_seq") or after_seq) if events else after_seq
+    return next_seq, {"X-Next-After-Seq": str(next_seq)}
+
+
+def _cef_header_escape(value: object) -> str:
+    return str(value).replace("\\", "\\\\").replace("|", "\\|")
+
+
+def _cef_extension_escape(value: object) -> str:
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("=", "\\=")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "\\n")
+    )
+
+
+def _cef_time_ms(value: object) -> int:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp() * 1000)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _cef_line(event: dict[str, object]) -> str:
+    """CEF intentionally omits details; the NDJSON export includes them."""
+    action = str(event.get("action") or "")
+    severity = {"info": 3, "success": 1, "warn": 6, "error": 8}.get(
+        str(event.get("level") or "info"), 3
+    )
+    header_action = _cef_header_escape(action)
+    extension = [
+        f"rt={_cef_time_ms(event.get('time'))}",
+        f"suser={_cef_extension_escape(event.get('actor') or '')}",
+        f"act={_cef_extension_escape(action)}",
+        f"request={_cef_extension_escape(event.get('resource') or '')}",
+        "cs1Label=workspace_id",
+        f"cs1={_cef_extension_escape(event.get('workspace_id') or '')}",
+        "cs2Label=event_hash",
+        f"cs2={_cef_extension_escape(event.get('event_hash') or '')}",
+        "cs3Label=prev_hash",
+        f"cs3={_cef_extension_escape(event.get('prev_hash') or '')}",
+        "cn1Label=chain_seq",
+        f"cn1={event.get('chain_seq') or 0}",
+        f"externalId={_cef_extension_escape(event.get('id') or '')}",
+    ]
+    device_version = os.getenv("DATAFLOW_VERSION", "1")
+    return (
+        f"CEF:0|Datawrap|Datawrap|{_cef_header_escape(device_version)}|"
+        f"{header_action}|{header_action}|{severity}|{' '.join(extension)}"
+    )
+
+
 @router.get("/events")
 async def list_events(
     request: Request,
     limit: int = Query(50, ge=1, le=500),
     level: str | None = Query(None, description="info | success | warn | error | all"),
+    after_seq: int | None = Query(None, ge=0),
 ):
     from services.audit_log import list_audit_events
 
@@ -59,28 +125,36 @@ async def list_events(
         limit=limit,
         level=level,
         workspace_id=workspace_id or None,
+        after_seq=after_seq,
     )
-    return {
-        "events": events,
-        "count": len(events),
-        "workspace_id": workspace_id or None,
-        "tenant_id": tenant_id or None,
-    }
+    next_seq, cursor_headers = _next_after_seq(events, after_seq)
+    return JSONResponse(
+        {
+            "events": events,
+            "count": len(events),
+            "workspace_id": workspace_id or None,
+            "tenant_id": tenant_id or None,
+            "next_after_seq": next_seq,
+        },
+        headers=cursor_headers,
+    )
 
 
 @router.get("/export")
 async def export_events(
     request: Request,
-    format: str = Query("csv", description="csv | json"),
+    format: str = Query("csv", description="csv | json | ndjson | cef"),
     limit: int = Query(5000, ge=1, le=20000),
     level: str | None = Query(None),
     since: str | None = Query(None, description="ISO-8601 inclusive lower bound"),
     until: str | None = Query(None, description="ISO-8601 inclusive upper bound"),
+    after_seq: int | None = Query(None, ge=0),
 ):
     """Workspace-scoped audit download for an auditor sample.
 
     Requires ``X-Workspace-Id``. Only events stamped with that workspace
-    are included. This is evidence, not a SOC 2 / HIPAA letter.
+    are included. This is evidence, not a SOC 2 / HIPAA letter. CEF omits
+    event details intentionally; use NDJSON when those details are needed.
     """
     from services.audit_log import latest_event_hash, list_audit_events
 
@@ -97,7 +171,9 @@ async def export_events(
         workspace_id=workspace_id,
         since=since,
         until=until,
+        after_seq=after_seq,
     )
+    next_seq, cursor_headers = _next_after_seq(events, after_seq)
     tip = latest_event_hash()
     honesty = audit_export_honesty()
     attestation = {
@@ -106,8 +182,8 @@ async def export_events(
         "note": honesty["note"],
     }
     fmt = (format or "csv").strip().lower()
-    if fmt not in ("csv", "json"):
-        raise HTTPException(status_code=400, detail="format must be csv or json")
+    if fmt not in ("csv", "json", "ndjson", "cef"):
+        raise HTTPException(status_code=400, detail="format must be csv, json, ndjson, or cef")
     if fmt == "json":
         return JSONResponse(
             {
@@ -119,11 +195,40 @@ async def export_events(
                 "hash_alg": "HMAC-SHA256",
                 "honesty": honesty,
                 "attestation": attestation,
+                "next_after_seq": next_seq,
             },
             headers={
                 "Content-Disposition": (
                     f'attachment; filename="datawrap-audit-{workspace_id}.json"'
                 ),
+                **cursor_headers,
+            },
+        )
+    if fmt == "ndjson":
+        body = "".join(
+            json.dumps(event, ensure_ascii=False, default=str) + "\n"
+            for event in events
+        )
+        return Response(
+            body,
+            media_type="application/x-ndjson",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="datawrap-audit-{workspace_id}.ndjson"'
+                ),
+                **cursor_headers,
+            },
+        )
+    if fmt == "cef":
+        body = "".join(_cef_line(event) + "\n" for event in events)
+        return PlainTextResponse(
+            body,
+            media_type="text/plain",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="datawrap-audit-{workspace_id}.cef"'
+                ),
+                **cursor_headers,
             },
         )
 
@@ -153,6 +258,7 @@ async def export_events(
             "Content-Disposition": (
                 f'attachment; filename="{filename}"; workspace-id={workspace_id}'
             ),
+            **cursor_headers,
         },
     )
 
