@@ -461,6 +461,53 @@ def test_crash_hooks_leave_table_unchanged(
 
 
 @requires_rest
+@pytest.mark.parametrize(
+    "lsn_filtered",
+    [False, True],
+    ids=["unmatched-key", "all-deletes-lsn-filtered"],
+)
+def test_delete_only_empty_batch_commits_watermark_snapshot(
+    rest_dest: dict[str, Any], lsn_filtered: bool
+) -> None:
+    stream_key = (
+        "empty-delete-lsn-filtered"
+        if lsn_filtered
+        else "empty-delete-unmatched"
+    )
+    if lsn_filtered:
+        _apply(rest_dest, lsn="0/10", inserts=[{"id": "1", "v": "newer"}])
+        incoming_lsn = "0/9"
+        delete_keys = ["1"]
+    else:
+        incoming_lsn = "0/10"
+        delete_keys = ["missing"]
+
+    before = len(_load_table(rest_dest).metadata.snapshots)
+    result = _apply(
+        rest_dest,
+        stream_key=stream_key,
+        lsn=incoming_lsn,
+        deletes=delete_keys,
+    )
+
+    table = _load_table(rest_dest)
+    prefix = _prefix(stream_key)
+    assert result.status == "empty"
+    assert result.committed_lsn == incoming_lsn
+    assert len(table.metadata.snapshots) == before + 1
+    assert table.metadata.properties[prefix + "committed_lsn"] == incoming_lsn
+    snapshot_summary = _summary(table.metadata.snapshots[-1])
+    assert snapshot_summary[prefix + "committed_lsn"] == incoming_lsn
+    rows = table.scan().to_arrow().to_pylist()
+    if lsn_filtered:
+        assert [(row["id"], row["v"], row["_df_lsn"]) for row in rows] == [
+            ("1", "newer", "0/10")
+        ]
+    else:
+        assert rows == []
+
+
+@requires_rest
 def test_lsn_guarded_delete_keeps_newer_row(rest_dest: dict[str, Any]) -> None:
     _apply(rest_dest, lsn="0/10", inserts=[{"id": "1", "v": "newer"}])
     result = _apply(
