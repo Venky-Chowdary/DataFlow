@@ -271,6 +271,8 @@ _DRIVERNAME_MAP: dict[str, str] = {
     "sqlite": "sqlite",
     # PostgreSQL-wire compatible engines
     "greenplum": "postgresql+psycopg2",
+    # pgvector is the PostgreSQL wire protocol plus the vector type.
+    "pgvector": "postgresql+psycopg2",
     "cratedb": "postgresql+psycopg2",
     "yugabytedb": "postgresql+psycopg2",
     "cockroachdb": "postgresql+psycopg2",

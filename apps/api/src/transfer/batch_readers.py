@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .connector_capabilities import resolve_driver_type
+from .connector_capabilities import resolve_driver_type, source_read_driver
 
 # Sources whose pages are addressed by an opaque continuation token instead of a
 # row offset. The token a page returns must be handed to the next read: these
@@ -54,6 +54,8 @@ def _read_batch_impl(
     scan_filter: tuple[str, str | None] | None = None,
 ):
     from connectors.generic_sql import connection_options
+
+    src_type = source_read_driver(src_type)
     from connectors.sql_snapshot_scan import FILTERED_SCAN_SOURCES
     from services.procedure_source import is_callable_source, read_callable_batch
 

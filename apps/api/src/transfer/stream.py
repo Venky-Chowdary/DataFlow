@@ -4107,9 +4107,9 @@ class _NoOpCheckpointService:
 def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> bool:
     if source.kind != "database" or destination.kind != "database":
         return False
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import resolve_driver_type, source_read_driver
     return (
-        resolve_driver_type(source.format) in _STREAMING_SOURCES
+        source_read_driver(resolve_driver_type(source.format)) in _STREAMING_SOURCES
         and resolve_driver_type(destination.format) in _STREAMING_DESTINATIONS
     )
 

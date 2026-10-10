@@ -218,8 +218,8 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
     ),
     "pgvector": ConnectorModules(
         probe=("connectors.postgresql", "test_postgresql"),
-        reader=None,
-        reader_fn="",
+        reader="connectors.postgresql_reader",
+        reader_fn="read_table_batch",
         writer="connectors.pgvector_writer",
     ),
     "qdrant": ConnectorModules(

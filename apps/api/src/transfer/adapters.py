@@ -746,11 +746,11 @@ def read_source_database(
     cursor_column: str = "",
     cursor_after: Any = None,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import resolve_driver_type, source_read_driver
 
     cfg = resolve_connector_config(endpoint)
     # Prefer the saved connector's driver type over any inline format string.
-    db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
+    db_type = source_read_driver(resolve_driver_type(cfg.get("type") or endpoint.format or ""))
 
     from services.procedure_source import is_callable_source, read_callable_batch
 

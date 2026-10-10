@@ -234,9 +234,13 @@ def test_vector_destinations_stream_and_neo4j_is_source_only():
     neo = EndpointConfig(kind="database", format="neo4j")
     assert supports_streaming(neo, pg) is True
     assert supports_streaming(pg, neo) is False
-    for dest in ("pgvector", "pinecone", "milvus"):
+    for dest in ("pinecone", "milvus"):
         assert supports_streaming(pg, EndpointConfig(kind="database", format=dest)) is True
         assert supports_streaming(EndpointConfig(kind="database", format=dest), pg) is False
+    # pgvector reads through the PostgreSQL reader (MX2-12), so it streams both ways.
+    pgv = EndpointConfig(kind="database", format="pgvector")
+    assert supports_streaming(pg, pgv) is True
+    assert supports_streaming(pgv, pg) is True
 
 
 def test_buffered_kafka_read_uses_the_topic_reader(monkeypatch):

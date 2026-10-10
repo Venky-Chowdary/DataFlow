@@ -63,7 +63,7 @@ REREAD_SCAN_SOURCES: Final[frozenset[str]] = frozenset(
 )
 
 _PG_FAMILY: Final[frozenset[str]] = frozenset(
-    {"postgresql", "postgres", "pg", "timescaledb", "alloydb", "supabase", "redshift"}
+    {"postgresql", "postgres", "pg", "timescaledb", "alloydb", "supabase", "redshift", "pgvector"}
 )
 _MYSQL_FAMILY: Final[frozenset[str]] = frozenset({"mysql", "mariadb", "tidb"})
 _MSSQL_FAMILY: Final[frozenset[str]] = frozenset({"sqlserver", "mssql", "azure_sql"})

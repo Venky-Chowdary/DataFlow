@@ -25,7 +25,9 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
         "test": True, "read": True, "write": True, "introspect": True, "preflight": True,
         "certified": False,
     },
-    "pgvector": {"test": True, "read": False, "write": True, "introspect": True, "preflight": True, "dest_only": True},
+    # pgvector is PostgreSQL plus the ``vector`` type: it reads through the
+    # PostgreSQL reader (``source_read_driver``) and writes vectors natively.
+    "pgvector": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "qdrant": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "weaviate": {"test": True, "read": False, "write": True, "introspect": True, "preflight": True, "dest_only": True},
     "pinecone": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
@@ -536,6 +538,18 @@ def resolve_driver_type(catalog_id: str) -> str:
     if base in _DRIVER_CAPS or base in _FILE_CAPS or base == "generic_sql":
         return base
     return base
+
+
+# Drivers whose *reads* are another driver's wire protocol. Writes keep the
+# native driver (pgvector upserts embeddings); reads dispatch to the reader that
+# already owns the protocol instead of a second, weaker copy (QA MX2-12).
+_SOURCE_READ_DRIVER: dict[str, str] = {"pgvector": "postgresql"}
+
+
+def source_read_driver(driver_type: str) -> str:
+    """Driver whose reader serves a *source* endpoint of ``driver_type``."""
+    key = (driver_type or "").strip().lower()
+    return _SOURCE_READ_DRIVER.get(key, key)
 
 
 def resolve_bind_dialect(catalog_id: str, *, config_type: str = "") -> str:
