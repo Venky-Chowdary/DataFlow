@@ -131,7 +131,7 @@ def test_append_does_not_raise_when_opportunistic_purge_fails(
     def fail_purge(**_kwargs):
         raise OSError("retention store unavailable")
 
-    monkeypatch.setattr(audit, "_LAST_RETENTION_PURGE", 0.0)
+    monkeypatch.setattr(audit, "_LAST_RETENTION_PURGE", float("-inf"))
     monkeypatch.setattr(audit, "purge_expired_audit_events", fail_purge)
     event = audit.append_audit_event(
         action="append.with.purge.failure",
