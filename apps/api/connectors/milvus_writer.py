@@ -1126,6 +1126,19 @@ def write_mapped_rows(
         collection_existed = _has_collection(
             session, base_url, hdrs, collection, db_name=db_name
         )
+        if not collection_existed and not create_table:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Milvus collection '{collection}' is missing and "
+                    "create_table is disabled"
+                ),
+            )
         if collection_existed:
             schema_types, cached_live_dim = _milvus_describe_collection(
                 session, base_url, hdrs, collection, db_name=db_name
@@ -1437,11 +1450,6 @@ def write_mapped_rows(
         session = _requests_session()
         hdrs = _headers(token)
         if not collection_existed:
-            if not create_table:
-                raise RuntimeError(
-                    f"Milvus collection '{collection}' is missing and "
-                    "create_table is disabled"
-                )
             _ensure_collection(
                 session, base_url, hdrs, collection, dimension, db_name=db_name
             )
