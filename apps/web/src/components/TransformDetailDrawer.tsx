@@ -13,8 +13,8 @@ interface TransformDetailDrawerProps {
   running?: boolean;
   lastRun?: TransformRunResult | null;
   onClose: () => void;
-  onDryRun: () => void;
-  onRun: () => void;
+  onDryRun?: () => void;
+  onRun?: () => void;
   onExportDbt: () => void;
   onEdit: () => void;
   onDelete: () => void;
@@ -63,24 +63,28 @@ export function TransformDetailDrawer({
       }
       footer={
         <div className="df2-drawer-actions">
-          <Button
-            size="sm"
-            variant="ghost"
-            loading={running}
-            onClick={onDryRun}
-            leadingIcon={<DtIcon name="activity" size={14} />}
-          >
-            Dry run
-          </Button>
-          <Button
-            size="sm"
-            variant="primary"
-            loading={running}
-            onClick={onRun}
-            leadingIcon={<DtIcon name="play" size={14} />}
-          >
-            Run now
-          </Button>
+          {onDryRun ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={running}
+              onClick={onDryRun}
+              leadingIcon={<DtIcon name="activity" size={14} />}
+            >
+              Dry run
+            </Button>
+          ) : null}
+          {onRun ? (
+            <Button
+              size="sm"
+              variant="primary"
+              loading={running}
+              onClick={onRun}
+              leadingIcon={<DtIcon name="play" size={14} />}
+            >
+              Run now
+            </Button>
+          ) : null}
           <Button
             size="sm"
             variant="ghost"

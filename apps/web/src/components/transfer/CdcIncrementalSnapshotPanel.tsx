@@ -8,6 +8,7 @@ import {
   type CdcSnapshotSignal,
 } from "../../lib/api";
 import { useToast } from "../Toast";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 
 export interface CdcIncrementalSnapshotPanelProps {
   jobId: string;
@@ -32,6 +33,8 @@ export function CdcIncrementalSnapshotPanel({
   pollMs = 4000,
 }: CdcIncrementalSnapshotPanelProps) {
   const { toast } = useToast();
+  const runGate = useWriteGate(PERMISSIONS.jobRun);
+  const manageGate = useWriteGate(PERMISSIONS.jobManage);
   const [signals, setSignals] = useState<CdcSnapshotSignal[]>([]);
   const [table, setTable] = useState(defaultTable);
   const [primaryKey, setPrimaryKey] = useState(defaultPrimaryKey || "id");
@@ -209,7 +212,7 @@ export function CdcIncrementalSnapshotPanel({
             disabled={busy}
           />
         </div>
-        <div className="df2-field" style={{ alignSelf: "flex-end" }}>
+        {runGate.allowed && <div className="df2-field" style={{ alignSelf: "flex-end" }}>
           <Button
             variant="primary"
             size="sm"
@@ -221,7 +224,7 @@ export function CdcIncrementalSnapshotPanel({
           >
             Request snapshot
           </Button>
-        </div>
+        </div>}
       </div>
 
       {signals.length === 0 ? (
@@ -240,7 +243,7 @@ export function CdcIncrementalSnapshotPanel({
                 {s.error ? <span className="df2-label-hint" role="alert">{s.error}</span> : null}
                 <code className="df2-mono df2-label-hint">{s.id}</code>
               </div>
-              {(s.status === "pending" || s.status === "running") && (
+              {(s.status === "pending" || s.status === "running") && manageGate.allowed && (
                 <Button variant="secondary" size="sm" onClick={() => void cancel(s.id)} disabled={busy}>
                   Cancel
                 </Button>

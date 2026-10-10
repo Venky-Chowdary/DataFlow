@@ -15,6 +15,7 @@ import {
   type RepairMapping,
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
@@ -511,6 +512,7 @@ export function JobTheaterView({
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
   const [resettingBreaker, setResettingBreaker] = useState(false);
   const [rollbackBusy, setRollbackBusy] = useState(false);
+  const rollbackGate = useWriteGate(PERMISSIONS.jobManage);
   const [resolvedProof, setResolvedProof] = useState<MappingProof | null>(() => asMappingProof(job.mapping_proof));
 
   useEffect(() => {
@@ -1743,7 +1745,7 @@ export function JobTheaterView({
         />
       )}
 
-      {canDiscardStaging && (
+      {canDiscardStaging && rollbackGate.allowed && (
         <section className="df2-theater-rollback" aria-label="Staging rollback">
           <div>
             <strong>Discard staging table</strong>
