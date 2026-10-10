@@ -23,6 +23,7 @@ Execute, schedules, and signed contracts must call :func:`resolve_schema_evoluti
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -35,6 +36,8 @@ from services.decision_kernel import (
 )
 
 # Policies that auto-apply additive field evolution (Airbyte propagate_*).
+_logger = logging.getLogger(__name__)
+
 PROPAGATE_POLICIES = frozenset({"propagate_columns", "propagate_all"})
 
 #: Operator caption — same meaning as Studio ``schemaPolicyHonestyLine``.
@@ -1043,6 +1046,37 @@ def detect_schema_drift(
         evolution_unmapped = list(unmapped_sources)
     else:
         evolution_unmapped = []
+
+    # QA MX3-17: a live destination column the source no longer feeds is a
+    # drop, not a soft note — the policy decides (review / pause; propagate
+    # keeps destination history).
+    if live_ddl_contract and orphan_targets:
+        if not isinstance(classification, dict):
+            classification = {
+                "additive": [],
+                "breaking": [],
+                "severity": "none",
+                "renamed": [],
+            }
+        breaking = list(classification.get("breaking") or [])
+        named = {str(b.get("column") or "").lower() for b in breaking}
+        target_types = {str(k).lower(): v for k, v in (target_schema or {}).items()}
+        for col in orphan_targets:
+            if col.lower() in named:
+                continue
+            breaking.append({
+                "kind": "drop",
+                "column": col,
+                "old_type": str(target_types.get(col.lower()) or "VARCHAR"),
+                "reason": "destination_column_not_in_source",
+            })
+        classification["breaking"] = breaking
+        classification["severity"] = "breaking"
+        _logger.info(
+            "schema drift: destination column(s) %s not in source — drop under policy %s",
+            orphan_targets,
+            schema_policy,
+        )
 
     # A mapped target that is not on the live table is an ADD, not a pass.
     # Preflight used to see no unmapped source and no type mismatch, then

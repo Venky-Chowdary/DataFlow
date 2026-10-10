@@ -167,7 +167,9 @@ def test_warns_on_unmapped_destination_columns():
         table_exists=True,
     )
     assert report["orphan_targets"] == ["legacy_flag"]
-    assert report["severity"] == "warning"
+    # QA MX3-17: the column stops being fed — a drop that needs review.
+    assert report["schema_evolution"]["action"] == "review"
+    assert any(s.get("kind") == "drop" for s in report["schema_evolution"]["soft_net_additive"])
 
 
 def test_ignores_case_only_target_name_differences():
