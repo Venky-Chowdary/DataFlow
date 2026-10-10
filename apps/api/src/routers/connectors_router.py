@@ -1452,6 +1452,15 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     transfer_req = transfer_request_from_dict(payload)
     mappings = list(transfer_req.mappings or [])
     if body.transform_overrides:
+        from services.transform_engine import transform_override_refusal
+
+        refusal = transform_override_refusal(
+            dict(body.transform_overrides),
+            [str(m.get("source") or m.get("source_column") or "") for m in mappings] or columns,
+        )
+        if refusal:
+            logger.warning("Quarantine replay of job %s refused: %s", job_id, refusal)
+            raise HTTPException(status_code=400, detail=refusal)
         for m in mappings:
             src = m.get("source") or m.get("source_column") or ""
             if src in body.transform_overrides:

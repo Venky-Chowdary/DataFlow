@@ -372,6 +372,16 @@ def normalize_quarantine_replay_edits(
     return overrides, edited, ""
 
 
+def _job_mapped_sources(job: dict[str, Any]) -> list[str]:
+    """Source columns the job's saved mapping reads (empty when unknown)."""
+    req = job.get("transfer_request") or {}
+    return [
+        str(m.get("source") or m.get("source_column") or "")
+        for m in (req.get("mappings") or [] if isinstance(req, dict) else [])
+        if isinstance(m, dict)
+    ]
+
+
 def _job_tool(
     tool: str,
     job_id: str,
@@ -449,6 +459,14 @@ def _job_tool(
         overrides, edited, edit_error = normalize_quarantine_replay_edits(
             transform_overrides, rows
         )
+        if not edit_error and overrides:
+            from services.transform_engine import transform_override_refusal
+
+            edit_error = transform_override_refusal(
+                overrides, _job_mapped_sources(job)
+            )
+            if edit_error:
+                _logger.warning("replay_quarantine %s: override refused: %s", short, edit_error)
         if edit_error:
             return _tool_result(tool, success=False, output=None, error=edit_error)
         payload = {"job_id": jid}

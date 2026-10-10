@@ -1560,6 +1560,41 @@ KNOWN_TRANSFORMS = frozenset({
     "strip_controls", "normalize_unicode",
 })
 
+def transform_override_refusal(
+    overrides: dict[str, str],
+    mapped_sources: list[str] | None = None,
+) -> str:
+    """Why a replay ``transform_overrides`` map is refused; ``""`` when it is valid.
+
+    An override the engine does not know (``"null"``), or one naming a column
+    the job never mapped, was staged and then silently ignored — the replay
+    re-ran the original cast (QA MX3-15). UI aliases are resolved first.
+    """
+    from services.transform_resolver import UI_TO_ENGINE
+
+    mapped = {str(c).strip().lower() for c in mapped_sources or [] if str(c).strip()}
+    for column, transform in (overrides or {}).items():
+        name = str(transform or "").strip()
+        engine = str(UI_TO_ENGINE.get(name, UI_TO_ENGINE.get(name.lower(), name))).lower()
+        if engine not in KNOWN_TRANSFORMS:
+            hint = (
+                " To write NULL, send the edited row with that cell set to null."
+                if name.lower() in {"null", "none_null", "set_null", "nullify"}
+                else ""
+            )
+            return (
+                f"transform_overrides[{column!r}] = {name!r} is not a transform the "
+                f"engine applies. Use one of: {', '.join(sorted(KNOWN_TRANSFORMS))}.{hint}"
+            )
+        if mapped and str(column).strip().lower() not in mapped:
+            return (
+                f"transform_overrides names column {column!r}, which this job does not "
+                f"map (mapped source columns: {', '.join(sorted(mapped))}). The override "
+                "would be ignored."
+            )
+    return ""
+
+
 #: Rename-only transforms — must not mutate wire (no strip). Trim is opt-in.
 _IDENTITY_TRANSFORMS = frozenset({
     "none", "identity", "passthrough", "string", "varchar", "text",
