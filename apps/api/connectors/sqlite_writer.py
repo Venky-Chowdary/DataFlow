@@ -182,21 +182,18 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
         except ValueError:
             # Fail-closed at row bind — never invent NULL from empty temporal.
             raise
-        # A TZ carrier stores canonical UTC wall-clock digits: the declared
-        # column is the zone contract, and an offset-suffixed cell
-        # ("...+00:00") is un-re-readable — sqlite_copy_naive_datetime_value
-        # and the NTZ bind both refuse it. The instant is unchanged.
+        # A TZ carrier stores RFC 3339 UTC with an explicit "+00:00". The
+        # declared TIMESTAMPTZ token is not read back by any reader, so a bare
+        # UTC clock re-read as naive and our own table failed to load into a
+        # PostgreSQL TIMESTAMPTZ (MXD07). SQLite's date functions accept the
+        # offset; the naive COPY reader declines it to the row path.
         if (
             tz_carrier
             and isinstance(coerced, datetime)
             and coerced.tzinfo is not None
             and coerced.utcoffset() is not None
         ):
-            return (
-                coerced.astimezone(timezone.utc)
-                .replace(tzinfo=None)
-                .isoformat(sep=" ")
-            )
+            return coerced.astimezone(timezone.utc).isoformat()
         if wire is not None:
             return wire
         if coerced is None:
