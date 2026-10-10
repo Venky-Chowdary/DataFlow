@@ -135,6 +135,11 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "ssl": {"type": "boolean"},
                 "schema": {"type": "string"},
+                "host_key": {
+                    "type": "string",
+                    "description": "SFTP only: operator-approved server key fingerprint "
+                    "(SHA256:...) shown by a failed test; pins this connector.",
+                },
                 "message": {
                     "type": "string",
                     "description": "Original user message (for credential extraction)",
@@ -1571,6 +1576,7 @@ class DataPilotTools:
         schema: str = "",
         message: str = "",
         test_first: bool = True,
+        host_key: str = "",
     ) -> ToolResult:
         from .connector_create import build_connector_draft, draft_is_complete
 
@@ -1587,6 +1593,7 @@ class DataPilotTools:
                 "connection_string": connection_string,
                 "service_account": service_account,
                 "ssl": ssl,
+                "host_key": host_key,
                 "schema": schema,
             },
         )
@@ -1639,6 +1646,7 @@ class DataPilotTools:
                         "warehouse": draft.get("warehouse") or "",
                         "account": draft.get("account") or "",
                         "service_account": draft.get("service_account") or "",
+                        "host_key": draft.get("host_key") or "",
                     },
                 )
                 if not probe_ok:

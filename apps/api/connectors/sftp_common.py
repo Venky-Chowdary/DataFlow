@@ -274,8 +274,11 @@ def verify_host_key(cfg: SFTPConfig, transport: Any) -> None:
 
     raise RuntimeError(
         f"SFTP host key for {cfg.host}:{cfg.port} is not trusted "
-        f"({server_key.get_name()} {host_key_fingerprint(server_key)}). Pin it "
-        "with DATAFLOW_SFTP_HOST_KEY, add it to a known_hosts file "
+        f"({server_key.get_name()} {host_key_fingerprint(server_key)}). After "
+        "confirming this fingerprint with the server's administrator, approve "
+        f"it for this connector by saving host_key={host_key_fingerprint(server_key)} "
+        "(pins this connector only). Alternatively pin it process-wide with "
+        "DATAFLOW_SFTP_HOST_KEY, add it to a known_hosts file "
         "(DATAFLOW_SFTP_KNOWN_HOSTS), or set "
         "DATAFLOW_SFTP_HOST_KEY_POLICY=insecure_ignore to accept an "
         "unverified transport."
