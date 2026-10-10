@@ -1337,6 +1337,8 @@ def _apply_change_batch(
                 "apache_iceberg",
                 "pgvector",
                 "qdrant",
+                "weaviate",
+                "pinecone",
             }
             if not supported:
                 raise UnsupportedCdcDeleteError(

@@ -88,6 +88,18 @@ def vector_record_key(
     )
 
 
+def vector_chunk_identity(source_id: Any, chunk_index: Any) -> str:
+    """Return a stable, engine-neutral id for one document chunk."""
+    try:
+        index = int(chunk_index)
+    except (TypeError, ValueError):
+        raise ValueError("vector chunk index must be an integer") from None
+    source = str(source_id or "")
+    if not source:
+        return ""
+    return hashlib.sha256(f"{source}\x1f{index}".encode("utf-8")).hexdigest()
+
+
 def vector_document_hash(text: str, fingerprint_digest: str) -> str:
     return hashlib.sha256(
         f"{text}\x1f{fingerprint_digest}".encode("utf-8")
@@ -659,3 +671,652 @@ def qdrant_delete_stale_chunks(
             )
         deleted += max(before - remaining, 0)
     return deleted
+
+
+def _m6_engine_rows(
+    engine: str,
+    cfg: Mapping[str, Any],
+    target: str,
+    source_ids: Sequence[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Read identity and contract metadata from an M6 vector target."""
+    rows: list[dict[str, Any]] = []
+    if engine == "weaviate":
+        import json
+
+        from connectors.weaviate_writer import (
+            _base_url,
+            _headers,
+            _requests_session,
+            iter_weaviate_objects_after,
+        )
+
+        session = _requests_session()
+        base_url = _base_url(
+            str(cfg.get("host") or ""),
+            int(cfg.get("port") or 8080),
+            bool(cfg.get("ssl")),
+            str(cfg.get("connection_string") or ""),
+        )
+        headers = _headers(str(cfg.get("api_key") or ""))
+        try:
+            probe = session.get(
+                f"{base_url}/v1/schema/{target}", headers=headers, timeout=15
+            )
+            if probe.status_code == 404:
+                return rows
+            if probe.status_code != 200:
+                raise RuntimeError(
+                    f"Weaviate class probe failed: {probe.status_code}"
+                )
+            if source_ids:
+                schema = probe.json() if probe.content else {}
+                available_fields = {
+                    str(prop.get("name") or "")
+                    for prop in schema.get("properties") or []
+                    if isinstance(prop, Mapping)
+                }
+                selected_fields = [
+                    name
+                    for name in (
+                        "source_id",
+                        "chunk_index",
+                        "_df_doc_hash",
+                        "_df_chunk_count",
+                        "_df_metadata_hash",
+                    )
+                    if name in available_fields
+                ]
+                if "source_id" not in selected_fields:
+                    return rows
+                property_selection = " ".join(selected_fields)
+                for offset in range(0, len(source_ids), 100):
+                    batch = [str(value) for value in source_ids[offset : offset + 100]]
+                    clauses = [
+                        "{ path: [\"source_id\"], operator: Equal, valueText: "
+                        f"{json.dumps(source_id)} }}"
+                        for source_id in batch
+                    ]
+                    where = clauses[0] if len(clauses) == 1 else (
+                        "{ operator: Or, operands: [" + ", ".join(clauses) + "] }"
+                    )
+                    query = (
+                        f"{{ Get {{ {target}(where: {where}) "
+                        f"{{ {property_selection} _additional {{ id }} }} }} }}"
+                    )
+                    response = session.post(
+                        f"{base_url}/v1/graphql",
+                        json={"query": query},
+                        headers=headers,
+                        timeout=30,
+                    )
+                    if response.status_code != 200:
+                        raise RuntimeError(
+                            f"Weaviate document-state query failed: {response.status_code}"
+                        )
+                    body = response.json() if response.content else {}
+                    if body.get("errors"):
+                        raise RuntimeError("Weaviate document-state query was rejected")
+                    data = ((body.get("data") or {}).get("Get") or {}).get(target) or []
+                    for obj in data:
+                        additional = obj.get("_additional") or {}
+                        metadata = {
+                            key: obj.get(key)
+                            for key in selected_fields
+                        }
+                        rows.append(
+                            {
+                                "id": str(additional.get("id") or ""),
+                                "source_id": obj.get("source_id"),
+                                "chunk_index": obj.get("chunk_index"),
+                                "metadata": metadata,
+                            }
+                        )
+                return rows
+            for page in iter_weaviate_objects_after(
+                session=session,
+                base_url=base_url,
+                headers=headers,
+                class_name=target,
+                include="",
+            ):
+                for obj in page:
+                    props = obj.get("properties")
+                    if isinstance(props, Mapping):
+                        rows.append(
+                            {
+                                "id": str(obj.get("id") or ""),
+                                "source_id": props.get("source_id"),
+                                "chunk_index": props.get("chunk_index"),
+                                "metadata": dict(props),
+                            }
+                        )
+        finally:
+            session.close()
+        return rows
+    if engine == "pinecone":
+        import json
+
+        from connectors.pinecone_writer import (
+            _headers,
+            _index_url,
+            _pinecone_vector_id,
+            _requests_session,
+        )
+
+        session = _requests_session()
+        base_url = _index_url(
+            str(cfg.get("host") or ""), str(cfg.get("connection_string") or "")
+        )
+        headers = _headers(
+            str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+        )
+        namespace = str(target or cfg.get("schema") or "").strip()
+        ids: list[str] = []
+        token = ""
+        try:
+            while True:
+                params: dict[str, Any] = {"limit": 99}
+                if namespace:
+                    params["namespace"] = namespace
+                if token:
+                    params["paginationToken"] = token
+                listed = session.get(
+                    f"{base_url}/vectors/list",
+                    headers=headers,
+                    params=params,
+                    timeout=30,
+                )
+                if listed.status_code == 404:
+                    return rows
+                if listed.status_code != 200:
+                    raise RuntimeError(
+                        f"Pinecone vector list failed: {listed.status_code}"
+                    )
+                body = listed.json() if listed.content else {}
+                for entry in body.get("vectors") or []:
+                    vector_id = _pinecone_vector_id(entry)
+                    if vector_id:
+                        ids.append(vector_id)
+                pagination = body.get("pagination")
+                token = str(
+                    pagination.get("next") or ""
+                    if isinstance(pagination, Mapping)
+                    else ""
+                )
+                if not token:
+                    break
+            for offset in range(0, len(ids), 100):
+                batch = ids[offset : offset + 100]
+                fetch_params = [("ids", vector_id) for vector_id in batch]
+                if namespace:
+                    fetch_params.append(("namespace", namespace))
+                fetched = session.get(
+                    f"{base_url}/vectors/fetch",
+                    params=fetch_params,
+                    headers=headers,
+                    timeout=60,
+                )
+                if fetched.status_code != 200:
+                    raise RuntimeError(
+                        f"Pinecone vector fetch failed: {fetched.status_code}"
+                    )
+                vector_map = fetched.json().get("vectors") or {}
+                for vector_id, vector in vector_map.items():
+                    metadata = vector.get("metadata") or {}
+                    rows.append(
+                        {
+                            "id": str(vector_id),
+                            "source_id": metadata.get("source_id"),
+                            "chunk_index": metadata.get("chunk_index"),
+                            "metadata": metadata,
+                        }
+                    )
+        finally:
+            session.close()
+        return rows
+    if engine == "milvus":
+        import json
+
+        from connectors.milvus_writer import (
+            _auth_token,
+            _base_url,
+            _milvus_describe_data,
+            _requests_session,
+            _headers,
+            iter_milvus_query_pages,
+            milvus_pk_info_from_describe_data,
+        )
+
+        session = _requests_session()
+        base_url = _base_url(
+            str(cfg.get("host") or ""),
+            int(cfg.get("port") or 19530),
+            bool(cfg.get("ssl")),
+            str(cfg.get("connection_string") or ""),
+        )
+        headers = _headers(
+            _auth_token(
+                api_key=str(cfg.get("api_key") or ""),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+            )
+        )
+        db_name = str(cfg.get("database") or "")
+        try:
+            described = _milvus_describe_data(
+                session, base_url, headers, target, db_name
+            )
+            if not described:
+                return rows
+            pk_name, pk_type = milvus_pk_info_from_describe_data(described)
+            fields = {
+                str(field.get("fieldName") or field.get("name") or "")
+                for field in described.get("fields") or []
+                if isinstance(field, Mapping)
+            }
+            output_fields = [
+                name
+                for name in ("id", "source_id", "chunk_index", "metadata")
+                if name in fields
+            ]
+            if source_ids and "source_id" not in fields:
+                return rows
+            if "id" not in output_fields:
+                output_fields.insert(0, pk_name)
+            from connectors.milvus_writer import milvus_quote_pk_expr
+
+            source_batches = (
+                [source_ids[offset : offset + 100] for offset in range(0, len(source_ids), 100)]
+                if source_ids
+                else [None]
+            )
+            for source_batch in source_batches:
+                filter_expr = None
+                if source_batch:
+                    filter_expr = "source_id in [" + ",".join(
+                        milvus_quote_pk_expr(str(value), integer=False)
+                        for value in source_batch
+                    ) + "]"
+                for page in iter_milvus_query_pages(
+                    session=session,
+                    base_url=base_url,
+                    headers=headers,
+                    collection=target,
+                    db_name=db_name,
+                    pk_name=pk_name,
+                    pk_type=pk_type,
+                    output_fields=output_fields,
+                    filter_expr=filter_expr,
+                ):
+                    for entity in page:
+                        metadata = entity.get("metadata")
+                        if isinstance(metadata, str):
+                            try:
+                                metadata = json.loads(metadata)
+                            except (TypeError, ValueError):
+                                metadata = {}
+                        if not isinstance(metadata, Mapping):
+                            metadata = {}
+                        rows.append(
+                            {
+                                "id": str(entity.get(pk_name, entity.get("id", ""))),
+                                "source_id": entity.get("source_id"),
+                                "chunk_index": entity.get("chunk_index"),
+                                "metadata": dict(metadata),
+                            }
+                        )
+        finally:
+            session.close()
+        return rows
+    raise ValueError(f"unsupported vector sync engine {engine!r}")
+
+
+def vector_engine_read_document_states(
+    engine: str,
+    cfg: Mapping[str, Any],
+    target: str,
+    source_ids: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    wanted = {str(value) for value in source_ids if str(value)}
+    if not wanted:
+        return {}
+    rows = _m6_engine_rows(engine, cfg, target, sorted(wanted))
+    return summarize_vector_document_rows(rows)
+
+
+def _m6_delete_ids(
+    engine: str, cfg: Mapping[str, Any], target: str, ids: Sequence[str]
+) -> int:
+    values = list(dict.fromkeys(str(value) for value in ids if str(value)))
+    if not values:
+        return 0
+    if engine == "weaviate":
+        from connectors.weaviate_writer import _base_url, _headers, _requests_session
+
+        session = _requests_session()
+        base_url = _base_url(
+            str(cfg.get("host") or ""),
+            int(cfg.get("port") or 8080),
+            bool(cfg.get("ssl")),
+            str(cfg.get("connection_string") or ""),
+        )
+        headers = _headers(str(cfg.get("api_key") or ""))
+        deleted = 0
+        try:
+            for object_id in values:
+                response = session.delete(
+                    f"{base_url}/v1/objects/{target}/{object_id}",
+                    headers=headers,
+                    timeout=30,
+                )
+                if response.status_code not in {200, 204, 404}:
+                    raise RuntimeError(
+                        f"Weaviate object delete failed: {response.status_code}"
+                    )
+                deleted += int(response.status_code != 404)
+        finally:
+            session.close()
+        return deleted
+    if engine == "pinecone":
+        import json
+
+        from connectors.pinecone_writer import _headers, _index_url, _requests_session
+
+        session = _requests_session()
+        base_url = _index_url(
+            str(cfg.get("host") or ""), str(cfg.get("connection_string") or "")
+        )
+        headers = _headers(
+            str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+        )
+        namespace = str(target or cfg.get("schema") or "").strip()
+        try:
+            for offset in range(0, len(values), 1000):
+                payload: dict[str, Any] = {"ids": values[offset : offset + 1000]}
+                if namespace:
+                    payload["namespace"] = namespace
+                response = session.post(
+                    f"{base_url}/vectors/delete",
+                    data=json.dumps(payload),
+                    headers=headers,
+                    timeout=60,
+                )
+                if response.status_code not in {200, 202}:
+                    raise RuntimeError(
+                        f"Pinecone vector delete failed: {response.status_code}"
+                    )
+        finally:
+            session.close()
+        return len(values)
+    if engine == "milvus":
+        from connectors.milvus_writer import (
+            _auth_token,
+            _base_url,
+            _headers,
+            _milvus_with_db,
+            _ok_response,
+            _requests_session,
+            milvus_quote_pk_expr,
+        )
+
+        session = _requests_session()
+        base_url = _base_url(
+            str(cfg.get("host") or ""),
+            int(cfg.get("port") or 19530),
+            bool(cfg.get("ssl")),
+            str(cfg.get("connection_string") or ""),
+        )
+        headers = _headers(
+            _auth_token(
+                api_key=str(cfg.get("api_key") or ""),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+            )
+        )
+        filter_expr = "id in [" + ",".join(
+            milvus_quote_pk_expr(value, integer=False) for value in values
+        ) + "]"
+        payload = _milvus_with_db(
+            {"collectionName": target, "filter": filter_expr},
+            str(cfg.get("database") or ""),
+        )
+        try:
+            response = session.post(
+                f"{base_url}/v2/vectordb/entities/delete",
+                json=payload,
+                headers=headers,
+                timeout=60,
+            )
+            body = response.json() if response.content else {}
+            if not _ok_response(body, response.status_code):
+                raise RuntimeError(
+                    f"Milvus entity delete failed: {response.status_code}"
+                )
+        finally:
+            session.close()
+        return len(values)
+    raise ValueError(f"unsupported vector sync engine {engine!r}")
+
+
+def vector_engine_delete_doc_keys(
+    engine: str,
+    cfg: Mapping[str, Any],
+    target: str,
+    doc_keys: Sequence[str],
+) -> int:
+    keys = list(dict.fromkeys(str(value) for value in doc_keys if str(value)))
+    if not keys:
+        return 0
+    try:
+        states = vector_engine_read_document_states(engine, cfg, target, keys)
+        ids = sorted(
+            {
+                str(vector_id)
+                for state in states.values()
+                for vector_id in state.get("chunk_ids", set())
+            }
+        )
+        deleted = _m6_delete_ids(engine, cfg, target, ids)
+        remaining = vector_engine_read_document_states(engine, cfg, target, keys)
+        count = sum(int(state.get("actual_chunk_count") or 0) for state in remaining.values())
+        if count:
+            raise VectorDeleteUnverifiedError(target, count)
+        return deleted
+    except DestinationDeleteError:
+        raise
+    except Exception as exc:
+        raise DestinationDeleteError(target, exc) from exc
+
+
+def vector_engine_delete_stale_chunks(
+    engine: str,
+    cfg: Mapping[str, Any],
+    target: str,
+    keep: Mapping[str, set[str]],
+) -> int:
+    if not keep:
+        return 0
+    keys = list(keep)
+    try:
+        before = vector_engine_read_document_states(engine, cfg, target, keys)
+        stale_ids = sorted(
+            {
+                str(vector_id)
+                for source_id, state in before.items()
+                for vector_id in state.get("chunk_ids", set()) - set(keep.get(source_id, set()))
+            }
+        )
+        deleted = _m6_delete_ids(engine, cfg, target, stale_ids)
+        after = vector_engine_read_document_states(engine, cfg, target, keys)
+        for source_id in keys:
+            actual = set((after.get(source_id) or {}).get("chunk_ids") or set())
+            expected = set(keep.get(source_id) or set())
+            if actual != expected:
+                raise VectorDeleteUnverifiedError(
+                    target,
+                    len(actual),
+                    expected=len(expected),
+                )
+        return deleted
+    except VectorDeleteUnverifiedError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"{engine} stale chunk cleanup failed ({type(exc).__name__})"
+        ) from exc
+
+
+def prepare_vector_sync_write(
+    engine: str,
+    cfg: Mapping[str, Any],
+    target: str,
+    records: Sequence[Mapping[str, Any]],
+    *,
+    identity_columns: Sequence[str] | None,
+    model: str | None,
+    content_column: str | None,
+    embedding_column: str | None,
+    metadata_columns: Sequence[str] | None,
+    exclude_pii_columns: Sequence[str] | None,
+    chunk_size: int,
+    chunk_overlap: int,
+    skip_chunking: bool,
+    durable_embedding_cache: bool | None,
+    options: Mapping[str, Any],
+    usage: Any = None,
+    vectorizer: Any = None,
+) -> dict[str, Any]:
+    """Read document state, skip unchanged inputs, and embed through M1–M5 APIs."""
+    from services.embedding_providers import create_embedding_usage, provider_extra_from_options
+    from services.vectorization import vectorize_records
+
+    embedding_extra = provider_extra_from_options(dict(options))
+    usage = usage or create_embedding_usage(model, embedding_extra, embedding_column)
+    enabled = str(options.get("vector_skip_unchanged", True)).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    dimension = vector_dimension_hint(
+        model, embedding_extra, records=records, embedding_column=embedding_column
+    )
+    fingerprint = None
+    states: dict[str, dict[str, Any]] = {}
+    source_ids = sorted(
+        {
+            vector_record_key(record, identity_columns)
+            for record in records
+            if vector_record_key(record, identity_columns)
+        }
+    )
+    if dimension:
+        from services.vector_fingerprint import fingerprint_for_write
+
+        fingerprint = fingerprint_for_write(
+            model=model,
+            dimension=int(dimension),
+            distance=str(options.get("distance") or "cosine"),
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            skip_chunking=skip_chunking,
+            embedding_column=embedding_column,
+            chunk_strategy=str(options.get("chunk_strategy") or "recursive"),
+            chunk_unit=str(options.get("chunk_unit") or "chars"),
+            chunk_tokenizer=(
+                options.get("chunk_tokenizer")
+                if isinstance(options.get("chunk_tokenizer"), str)
+                else None
+            ),
+            text_template=(
+                options.get("text_template")
+                if isinstance(options.get("text_template"), str)
+                else None
+            ),
+        )
+    if enabled and source_ids:
+        states = vector_engine_read_document_states(engine, cfg, target, source_ids)
+    vector_rows = (vectorizer or vectorize_records)(
+        records,
+        content_column=content_column,
+        embedding_column=embedding_column,
+        metadata_columns=list(metadata_columns or []),
+        exclude_pii_columns=list(exclude_pii_columns or []),
+        model=model,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        skip_chunking=skip_chunking,
+        chunk_strategy=str(options.get("chunk_strategy") or "recursive"),
+        chunk_unit=str(options.get("chunk_unit") or "chars"),
+        chunk_tokenizer=options.get("chunk_tokenizer"),
+        text_template=options.get("text_template"),
+        durable_embedding_cache=durable_embedding_cache,
+        identity_columns=list(identity_columns or ()),
+        usage=usage,
+        embedding_extra=embedding_extra,
+        existing_vector_docs=states,
+        doc_fingerprint_digest=(fingerprint.digest if fingerprint else None),
+        skip_unchanged=enabled and fingerprint is not None,
+    )
+    if fingerprint is None:
+        inferred_dimension = next(
+            (
+                len(vector)
+                for row in vector_rows
+                if isinstance((vector := row.get("embedding")), (list, tuple))
+                and vector
+            ),
+            None,
+        )
+        if inferred_dimension:
+            from services.vector_fingerprint import fingerprint_for_write
+
+            fingerprint = fingerprint_for_write(
+                model=model,
+                dimension=inferred_dimension,
+                distance=str(options.get("distance") or "cosine"),
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                skip_chunking=skip_chunking,
+                embedding_column=embedding_column,
+                chunk_strategy=str(options.get("chunk_strategy") or "recursive"),
+                chunk_unit=str(options.get("chunk_unit") or "chars"),
+                chunk_tokenizer=(
+                    options.get("chunk_tokenizer")
+                    if isinstance(options.get("chunk_tokenizer"), str)
+                    else None
+                ),
+                text_template=(
+                    options.get("text_template")
+                    if isinstance(options.get("text_template"), str)
+                    else None
+                ),
+            )
+            dimension = inferred_dimension
+    if fingerprint is not None:
+        stamp_vector_document_metadata(vector_rows, fingerprint.digest)
+    skipped_ids = {
+        str(row.get("source_id") or "")
+        for row in vector_rows
+        if row.get("_df_unchanged_skipped") and row.get("source_id")
+    }
+    output_rows = [
+        row for row in vector_rows if not row.get("_df_unchanged_skipped")
+    ]
+    return {
+        "rows": output_rows,
+        "usage": usage,
+        "fingerprint": fingerprint,
+        "dimension_hint": dimension,
+        "unchanged_skipped": len(skipped_ids),
+        "unchanged_source_ids": skipped_ids,
+        "embedded_docs": len(
+            {
+                str(row.get("source_id") or "")
+                for row in output_rows
+                if row.get("source_id")
+            }
+        ),
+        "enabled": enabled,
+    }

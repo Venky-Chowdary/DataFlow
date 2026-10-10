@@ -1081,7 +1081,7 @@ def delete_by_primary_keys(
             incoming_lsn=incoming_lsn,
             lsn_column=lsn_column,
         )
-    if dt in {"pgvector", "qdrant"}:
+    if dt in {"pgvector", "qdrant", "weaviate", "pinecone"}:
         # Vector stores have no _df_lsn; deletes remain honest at-least-once.
         if incoming_lsn:
             logger.debug("Ignoring incoming_lsn for vector destination %s", dt)
@@ -1090,6 +1090,7 @@ def delete_by_primary_keys(
             pgvector_delete_doc_keys,
             qdrant_delete_doc_keys,
             vector_doc_key,
+            vector_engine_delete_doc_keys,
         )
 
         doc_keys = [
@@ -1098,7 +1099,9 @@ def delete_by_primary_keys(
         ]
         if dt == "pgvector":
             return pgvector_delete_doc_keys(cfg, table_name, schema, doc_keys)
-        return qdrant_delete_doc_keys(cfg, table_name, doc_keys)
+        if dt == "qdrant":
+            return qdrant_delete_doc_keys(cfg, table_name, doc_keys)
+        return vector_engine_delete_doc_keys(dt, cfg, table_name, doc_keys)
 
     work_keys = list(keys)
     if incoming_lsn:

@@ -666,6 +666,363 @@ def _enforce_qdrant(
     return status
 
 
+def _enforce_weaviate(
+    cfg: Mapping[str, Any], target: str, incoming: EmbeddingFingerprint
+) -> str:
+    import uuid
+
+    from connectors.weaviate_writer import _base_url, _headers, _requests_session
+    from services.vector_sync import _m6_engine_rows
+
+    sidecar = "DfVectorCollections"
+    if target == sidecar:
+        raise ValueError(f"{sidecar!r} is reserved for vector fingerprints")
+    session = _requests_session()
+    base_url = _base_url(
+        str(cfg.get("host") or ""),
+        int(cfg.get("port") or 8080),
+        bool(cfg.get("ssl")),
+        str(cfg.get("connection_string") or ""),
+    )
+    headers = _headers(str(cfg.get("api_key") or ""))
+    object_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"dataflow-vector:{target}"))
+    try:
+        probe = session.get(f"{base_url}/v1/schema/{sidecar}", headers=headers, timeout=15)
+        if probe.status_code == 404:
+            created = session.post(
+                f"{base_url}/v1/schema",
+                headers=headers,
+                json={
+                    "class": sidecar,
+                    "vectorizer": "none",
+                    "properties": [
+                        {"name": "target", "dataType": ["text"]},
+                        {"name": "fingerprint", "dataType": ["text"]},
+                        {"name": "digest", "dataType": ["text"]},
+                        {"name": "status", "dataType": ["text"]},
+                    ],
+                },
+                timeout=30,
+            )
+            if created.status_code not in {200, 201}:
+                verify = session.get(
+                    f"{base_url}/v1/schema/{sidecar}", headers=headers, timeout=15
+                )
+                if verify.status_code != 200:
+                    raise RuntimeError(
+                        f"Weaviate fingerprint class creation failed: {created.status_code}"
+                    )
+        elif probe.status_code != 200:
+            raise RuntimeError(f"Weaviate fingerprint class probe failed: {probe.status_code}")
+
+        object_url = f"{base_url}/v1/objects/{sidecar}/{object_id}"
+        stored_resp = session.get(object_url, headers=headers, timeout=15)
+        stored = None
+        if stored_resp.status_code == 200:
+            stored = (stored_resp.json().get("properties") or {})
+        elif stored_resp.status_code != 404:
+            raise RuntimeError(
+                f"Weaviate fingerprint read failed: {stored_resp.status_code}"
+            )
+        if isinstance(stored, Mapping):
+            values = json.loads(str(stored.get("fingerprint") or "{}"))
+            _check_existing_fingerprint(
+                values, str(stored.get("digest") or ""), incoming
+            )
+            return "verified"
+        existing = [
+            row
+            for row in _m6_engine_rows("weaviate", cfg, target)
+            if row.get("source_id")
+        ]
+        status = "created"
+        if existing:
+            backends = {
+                str((row.get("metadata") or {}).get("_df_embedding_backend") or "")
+                for row in existing
+                if isinstance(row.get("metadata"), Mapping)
+            }
+            conflict = next(
+                (backend for backend in sorted(backends) if backend and backend != incoming.provider),
+                None,
+            )
+            if conflict:
+                raise _legacy_backend_mismatch(conflict, incoming)
+            status = "adopted_unverified"
+        props = {
+            "target": target,
+            "fingerprint": _canonical_json(incoming.to_dict()),
+            "digest": incoming.digest,
+            "status": status,
+        }
+        written = session.post(
+            f"{base_url}/v1/objects",
+            headers=headers,
+            json={"class": sidecar, "id": object_id, "properties": props},
+            timeout=30,
+        )
+        if written.status_code not in {200, 201}:
+            reread = session.get(object_url, headers=headers, timeout=15)
+            if reread.status_code == 200:
+                props = reread.json().get("properties") or {}
+                _check_existing_fingerprint(
+                    json.loads(str(props.get("fingerprint") or "{}")),
+                    str(props.get("digest") or ""),
+                    incoming,
+                )
+                return "verified"
+            raise RuntimeError(f"Weaviate fingerprint write failed: {written.status_code}")
+        reread = session.get(object_url, headers=headers, timeout=15)
+        if reread.status_code != 200:
+            raise RuntimeError("Weaviate fingerprint write could not be read back")
+        props = reread.json().get("properties") or {}
+        _check_existing_fingerprint(
+            json.loads(str(props.get("fingerprint") or "{}")),
+            str(props.get("digest") or ""),
+            incoming,
+        )
+        return status
+    finally:
+        session.close()
+
+
+def _enforce_pinecone(
+    cfg: Mapping[str, Any], target: str, incoming: EmbeddingFingerprint
+) -> str:
+    import hashlib
+    import json
+
+    from connectors.pinecone_writer import _headers, _index_url, _requests_session
+    from services.vector_sync import _m6_engine_rows
+
+    namespace = "_df_fingerprints"
+    if target == namespace:
+        raise ValueError(f"{namespace!r} is reserved for vector fingerprints")
+    session = _requests_session()
+    base_url = _index_url(
+        str(cfg.get("host") or ""), str(cfg.get("connection_string") or "")
+    )
+    headers = _headers(
+        str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+    )
+    vector_id = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
+    try:
+        stats = session.get(
+            f"{base_url}/describe_index_stats", headers=headers, timeout=15
+        )
+        if stats.status_code != 200:
+            raise RuntimeError(f"Pinecone index stats failed: {stats.status_code}")
+        dimension = int((stats.json() or {}).get("dimension") or 0)
+        if dimension != incoming.dimension or dimension <= 0:
+            raise ValueError(
+                f"Pinecone index dimension {dimension} does not match embedding dimension {incoming.dimension}"
+            )
+        fetch_params = [("ids", vector_id), ("namespace", namespace)]
+        fetched = session.get(
+            f"{base_url}/vectors/fetch",
+            headers=headers,
+            params=fetch_params,
+            timeout=30,
+        )
+        if fetched.status_code not in {200, 404}:
+            raise RuntimeError(f"Pinecone fingerprint read failed: {fetched.status_code}")
+        vectors = (fetched.json() or {}).get("vectors") or {}
+        stored = vectors.get(vector_id)
+        if isinstance(stored, Mapping):
+            metadata = stored.get("metadata") or {}
+            _check_existing_fingerprint(
+                json.loads(str(metadata.get("fingerprint") or "{}")),
+                str(metadata.get("digest") or ""),
+                incoming,
+            )
+            return "verified"
+        existing = [
+            row
+            for row in _m6_engine_rows("pinecone", cfg, target)
+            if row.get("source_id")
+        ]
+        status = "created"
+        if existing:
+            backends = {
+                str((row.get("metadata") or {}).get("_df_embedding_backend") or "")
+                for row in existing
+                if isinstance(row.get("metadata"), Mapping)
+            }
+            conflict = next(
+                (backend for backend in sorted(backends) if backend and backend != incoming.provider),
+                None,
+            )
+            if conflict:
+                raise _legacy_backend_mismatch(conflict, incoming)
+            status = "adopted_unverified"
+        upserted = session.post(
+            f"{base_url}/vectors/upsert",
+            headers=headers,
+            json={
+                "namespace": namespace,
+                "vectors": [
+                    {
+                        "id": vector_id,
+                        "values": [0.0] * dimension,
+                        "metadata": {
+                            "target": str(target),
+                            "fingerprint": _canonical_json(incoming.to_dict()),
+                            "digest": incoming.digest,
+                            "status": status,
+                        },
+                    }
+                ],
+            },
+            timeout=30,
+        )
+        if upserted.status_code not in {200, 201}:
+            raise RuntimeError(f"Pinecone fingerprint write failed: {upserted.status_code}")
+        reread = session.get(
+            f"{base_url}/vectors/fetch",
+            headers=headers,
+            params=fetch_params,
+            timeout=30,
+        )
+        if reread.status_code != 200:
+            raise RuntimeError("Pinecone fingerprint write could not be read back")
+        props = ((reread.json() or {}).get("vectors") or {}).get(vector_id, {}).get("metadata") or {}
+        _check_existing_fingerprint(
+            json.loads(str(props.get("fingerprint") or "{}")),
+            str(props.get("digest") or ""),
+            incoming,
+        )
+        return status
+    finally:
+        session.close()
+
+
+def _enforce_milvus(
+    cfg: Mapping[str, Any], target: str, incoming: EmbeddingFingerprint
+) -> str:
+    import hashlib
+
+    from connectors.milvus_writer import (
+        _auth_token,
+        _base_url,
+        _ensure_collection,
+        _headers,
+        _milvus_with_db,
+        _ok_response,
+        _requests_session,
+    )
+    from services.vector_sync import _m6_engine_rows
+    from services.value_serializer import json_dumps_exact_numbers
+
+    sidecar = "_df_vector_collections"
+    if target == sidecar:
+        raise ValueError(f"{sidecar!r} is reserved for vector fingerprints")
+    session = _requests_session()
+    base_url = _base_url(
+        str(cfg.get("host") or ""),
+        int(cfg.get("port") or 19530),
+        bool(cfg.get("ssl")),
+        str(cfg.get("connection_string") or ""),
+    )
+    headers = _headers(
+        _auth_token(
+            api_key=str(cfg.get("api_key") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+        )
+    )
+    db_name = str(cfg.get("database") or "")
+    vector_id = hashlib.sha256(str(target).encode("utf-8")).hexdigest()
+    try:
+        _ensure_collection(
+            session, base_url, headers, sidecar, dimension=1, db_name=db_name
+        )
+        rows = _m6_engine_rows("milvus", cfg, sidecar)
+        stored_row = next(
+            (
+                row
+                for row in rows
+                if str(row.get("source_id") or "") == str(target)
+            ),
+            None,
+        )
+        if stored_row:
+            metadata = stored_row.get("metadata") or {}
+            _check_existing_fingerprint(
+                json.loads(str(metadata.get("fingerprint") or "{}")),
+                str(metadata.get("digest") or ""),
+                incoming,
+            )
+            return "verified"
+        existing = [
+            row
+            for row in _m6_engine_rows("milvus", cfg, target)
+            if row.get("source_id")
+        ]
+        status = "created"
+        if existing:
+            backends = {
+                str((row.get("metadata") or {}).get("_df_embedding_backend") or "")
+                for row in existing
+                if isinstance(row.get("metadata"), Mapping)
+            }
+            conflict = next(
+                (backend for backend in sorted(backends) if backend and backend != incoming.provider),
+                None,
+            )
+            if conflict:
+                raise _legacy_backend_mismatch(conflict, incoming)
+            status = "adopted_unverified"
+        entity = {
+            "id": vector_id,
+            "vector": [0.0],
+            "content": "",
+            "source_id": str(target)[:256],
+            "chunk_index": 0,
+            "filename": "",
+            "page": "",
+            "heading": "",
+            "element_type": "",
+            "metadata": {
+                "target": str(target),
+                "fingerprint": _canonical_json(incoming.to_dict()),
+                "digest": incoming.digest,
+                "status": status,
+            },
+        }
+        payload = _milvus_with_db(
+            {"collectionName": sidecar, "data": [entity]}, db_name
+        )
+        written = session.post(
+            f"{base_url}/v2/vectordb/entities/upsert",
+            data=json_dumps_exact_numbers(payload),
+            headers=headers,
+            timeout=30,
+        )
+        body = written.json() if written.content else {}
+        if not _ok_response(body if isinstance(body, dict) else {}, written.status_code):
+            raise RuntimeError(f"Milvus fingerprint write failed: {written.status_code}")
+        reread = _m6_engine_rows("milvus", cfg, sidecar)
+        stored_row = next(
+            (
+                row
+                for row in reread
+                if str(row.get("source_id") or "") == str(target)
+            ),
+            None,
+        )
+        if not stored_row:
+            raise RuntimeError("Milvus fingerprint write could not be read back")
+        metadata = stored_row.get("metadata") or {}
+        _check_existing_fingerprint(
+            json.loads(str(metadata.get("fingerprint") or "{}")),
+            str(metadata.get("digest") or ""),
+            incoming,
+        )
+        return status
+    finally:
+        session.close()
+
+
 def enforce_fingerprint(
     engine: str,
     cfg: Mapping[str, Any],
@@ -702,6 +1059,12 @@ def enforce_fingerprint(
             finally:
                 if owned_session:
                     session.close()
+        elif normalized_engine == "weaviate":
+            status = _enforce_weaviate(cfg, target, incoming)
+        elif normalized_engine == "pinecone":
+            status = _enforce_pinecone(cfg, target, incoming)
+        elif normalized_engine == "milvus":
+            status = _enforce_milvus(cfg, target, incoming)
         else:
             raise ValueError(f"unsupported vector fingerprint engine {engine!r}")
     except VectorFingerprintMismatchError:
