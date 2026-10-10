@@ -56,6 +56,11 @@ def _is_public_mcp_path(path: str, method: str) -> bool:
 def _attach_user(request: Request, token: str) -> bool:
     email = verify_token(token)
     if email:
+        from services.user_store import get_user as get_stored_user
+
+        stored = get_stored_user(email)
+        if stored and stored.get("status") == "disabled":
+            return False
         request.state.user_email = email
         user = lookup_user(email)
         if user:

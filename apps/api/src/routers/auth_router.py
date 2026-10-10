@@ -202,6 +202,15 @@ def _is_sso_email_allowed(email: str) -> bool:
 
 def _require_sso_authorization(email: str) -> None:
     """Raise a clear 403 if the IdP user is not authorized for this workspace."""
+    stored = get_stored_user(email)
+    if stored and stored.get("status") == "disabled":
+        _raise_sso_failure(
+            "sso",
+            "account_disabled",
+            403,
+            "account_disabled",
+            resource="/auth/sso/authorization",
+        )
     if _sso_auto_provision():
         # Even auto-provision should respect allowed-domain gating when configured.
         if _sso_allowed_domains() and email.split("@")[-1].lower() not in _sso_allowed_domains():
