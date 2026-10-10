@@ -197,7 +197,7 @@ class FileTransformProjectStore(TransformProjectStore):
             raw = self._read()
         projects = [TransformProject.from_dict(v) for v in raw.values()]
         if workspace_id:
-            projects = [p for p in projects if p.workspace_id in ("", workspace_id)]
+            projects = [p for p in projects if p.workspace_id == workspace_id]
         return sorted(projects, key=lambda p: p.updated_at, reverse=True)
 
     def get(
@@ -209,8 +209,12 @@ class FileTransformProjectStore(TransformProjectStore):
         if not entry:
             return None
         project = TransformProject.from_dict(entry)
-        if workspace_id is not None and project.workspace_id not in ("", workspace_id):
-            return None
+        if workspace_id is not None:
+            if workspace_id == "":
+                if project.workspace_id != "":
+                    return None
+            elif project.workspace_id != workspace_id:
+                return None
         return project
 
     def save(self, project: TransformProject) -> TransformProject:
@@ -274,7 +278,7 @@ class MongoTransformProjectStore(TransformProjectStore):
         db = self._db()
         if db is not None:
             try:
-                query = {"workspace_id": {"$in": ["", workspace_id]}} if workspace_id else {}
+                query = {"workspace_id": workspace_id} if workspace_id else {}
                 for doc in db[self.COLLECTION].find(query):
                     doc.pop("_id", None)
                     project = TransformProject.from_dict(doc)
@@ -297,7 +301,11 @@ class MongoTransformProjectStore(TransformProjectStore):
             try:
                 query = {"id": project_id}
                 if workspace_id is not None:
-                    query["workspace_id"] = {"$in": ["", None, workspace_id]}
+                    query["workspace_id"] = (
+                        {"$in": ["", None]}
+                        if workspace_id == ""
+                        else workspace_id
+                    )
                 doc = db[self.COLLECTION].find_one(query)
                 if doc:
                     doc.pop("_id", None)

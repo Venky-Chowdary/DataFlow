@@ -148,7 +148,7 @@ def get_project(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> dict[str, Any]:
     ws = resolve_read_workspace(request, workspace_id)
-    project = get_transform_store().get(project_id, workspace_id=ws or None)
+    project = get_transform_store().get(project_id, workspace_id=ws)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
     assert_resource_workspace(request, project.workspace_id or "")
@@ -189,7 +189,7 @@ def update_project(
 ) -> dict[str, Any]:
     ws = resolve_write_workspace(request, workspace_id)
     store = get_transform_store()
-    project = store.get(project_id, workspace_id=ws or None)
+    project = store.get(project_id, workspace_id=ws)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
     assert_resource_workspace(request, project.workspace_id or "")
@@ -235,7 +235,7 @@ def delete_project(
 ) -> Response:
     ws = resolve_write_workspace(request, workspace_id)
     store = get_transform_store()
-    project = store.get(project_id, workspace_id=ws or None)
+    project = store.get(project_id, workspace_id=ws)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
     assert_resource_workspace(request, project.workspace_id or "")
@@ -323,7 +323,7 @@ def export_dbt_pack(
 ) -> dict[str, Any]:
     """Export models as a dbt sources/models starter pack (complement hook only)."""
     ws = resolve_read_workspace(request, workspace_id)
-    project = get_transform_store().get(project_id, workspace_id=ws or None)
+    project = get_transform_store().get(project_id, workspace_id=ws)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
     assert_resource_workspace(request, project.workspace_id or "")
@@ -340,7 +340,7 @@ def run_project(
 ) -> dict[str, Any]:
     """Run a project on demand against its destination."""
     ws = resolve_write_workspace(request, workspace_id)
-    project = get_transform_store().get(project_id, workspace_id=ws or None)
+    project = get_transform_store().get(project_id, workspace_id=ws)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
     assert_resource_workspace(request, project.workspace_id or "")
