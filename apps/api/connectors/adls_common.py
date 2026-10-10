@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from itertools import islice
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -122,8 +123,12 @@ def list_service_containers(client: Any, *, maxresults: int = 1) -> Any:
     answers ``400 Bad Request`` before any container exists. ``include=None``
     omits the parameter. Metadata, deleted, and system flags are not requested.
     """
-    service = client._client.service
-    return service.list_containers_segment(include=None, maxresults=maxresults)
+    limit = max(0, int(maxresults))
+    internal = getattr(client, "_client", None)
+    if internal is None:
+        return list(islice(client.list_containers(), limit))
+    service = internal.service
+    return service.list_containers_segment(include=None, maxresults=limit)
 
 
 def blob_service_client(cfg: dict[str, Any]):
