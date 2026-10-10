@@ -481,12 +481,13 @@ def _resume_section() -> GeneratedSection | None:
 
     text = "\n".join(
         [
-            "An incremental or CDC transfer that fails part-way resumes from "
-            "the committed cursor. A full refresh overwrite or full refresh "
-            "append restarts from the beginning: overwrite replaces the "
-            "destination, and append reads the source again. Each successfully "
-            "committed incremental chunk is checkpointed with the cursor the "
-            "next chunk must read from.",
+            "An incremental or CDC re-run after a failure resumes from the "
+            "last committed chunk's checkpointed cursor and reads the next "
+            "chunk. A full refresh overwrite or full refresh append re-run "
+            "starts at the beginning: overwrite replaces the destination, "
+            "and append reads the source again. Each successfully committed "
+            "incremental chunk is checkpointed with the cursor the next chunk "
+            "must read from.",
             "The checkpoint is the unit of resume: progress is durable per "
             "committed chunk, not per row. Under at-least-once delivery that "
             "means a crash can re-read the chunk in flight, which is why the "
