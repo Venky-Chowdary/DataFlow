@@ -14,6 +14,7 @@ from connectors.sdk.declarative.connector import DeclarativeSource
 from connectors.sdk.github import GitHubSource
 from connectors.sdk.http_declarative import DeclarativeHttpConnector
 from connectors.sdk.hubspot_cdk import HubSpotCDKConnector
+from connectors.sdk.intercom import IntercomSource
 from connectors.sdk.jira import JiraCloudSource
 from tests.connector_certification.fixture_server import FixtureResponse, FixtureServer
 from tests.connector_certification.harness import CertificationCase
@@ -774,6 +775,170 @@ def build_certification_cases(tmp_path: Path) -> dict[str, CertificationCase]:
         assert_incremental_cursor=assert_jira_cursor,
     )
 
+    intercom_fixture_dir = Path(__file__).parent / "fixtures" / "intercom"
+    intercom_conversation_pages = [
+        json.loads((intercom_fixture_dir / filename).read_text(encoding="utf-8"))
+        for filename in ("conversations_page_1.json", "conversations_page_2.json")
+    ]
+    intercom_records = tuple(
+        dict(record)
+        for page in intercom_conversation_pages
+        for record in page["conversations"]
+    )
+    intercom_contacts_path = "/contacts"
+    intercom_conversations_path = "/conversations/search"
+
+    def intercom_routes(
+        fixture: FixtureServer,
+        phase: str,
+        fixture_records: Sequence[Mapping[str, Any]],
+    ) -> None:
+        rows = [deepcopy(dict(row)) for row in fixture_records]
+        contacts_page_one = json.loads(
+            (intercom_fixture_dir / "contacts_page_1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        contacts_page_two = json.loads(
+            (intercom_fixture_dir / "contacts_page_2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        if phase == "auth":
+            fixture.add_route(
+                intercom_contacts_path,
+                FixtureResponse(status=401, body={"type": "error"}),
+            )
+            fixture.add_route(
+                intercom_conversations_path,
+                FixtureResponse(status=401, body={"type": "error"}),
+                method="POST",
+            )
+            return
+        if phase == "check":
+            fixture.add_route(
+                intercom_contacts_path,
+                responses=[
+                    FixtureResponse(body=contacts_page_one),
+                    FixtureResponse(body=contacts_page_two),
+                ],
+            )
+            return
+
+        if phase == "incremental":
+            responses = [FixtureResponse(body={"conversations": rows[1:]})]
+        elif phase == "fault":
+            responses = [
+                FixtureResponse(
+                    body={
+                        "conversations": rows[:2],
+                        "pages": {
+                            "next": {
+                                "starting_after": "synthetic-conversation-page-two"
+                            }
+                        },
+                    }
+                ),
+                *[
+                    FixtureResponse(status=500, body={"type": "synthetic_error"})
+                    for _ in range(4)
+                ],
+            ]
+        elif phase == "resume":
+            responses = [FixtureResponse(body={"conversations": rows[2:]})]
+        elif phase == "rate_limit":
+            responses = [
+                FixtureResponse(
+                    status=429,
+                    body={"type": "rate_limit"},
+                    headers={"Retry-After": "2"},
+                ),
+                FixtureResponse(
+                    body={
+                        "conversations": rows[:2],
+                        "pages": {
+                            "next": {
+                                "starting_after": "synthetic-conversation-page-two"
+                            }
+                        },
+                    }
+                ),
+                FixtureResponse(body={"conversations": rows[2:]}),
+            ]
+        else:
+            responses = [
+                FixtureResponse(
+                    body={
+                        "conversations": rows[:2],
+                        "pages": {
+                            "next": {
+                                "starting_after": "synthetic-conversation-page-two"
+                            }
+                        },
+                    }
+                ),
+                FixtureResponse(body={"conversations": rows[2:]}),
+            ]
+        fixture.add_route(
+            intercom_conversations_path,
+            responses=responses,
+            method="POST",
+        )
+
+    def intercom_factory(
+        base_url: str,
+        _phase: str,
+        _fixture_records: Sequence[Mapping[str, Any]],
+        _sleep: Any = None,
+    ) -> IntercomSource:
+        config: dict[str, Any] = {"access_token": _SECRET}
+        if base_url:
+            config["base_url"] = base_url
+        return IntercomSource(config)
+
+    def mutate_intercom(
+        original: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+        changed = deepcopy([dict(row) for row in original])
+        changed[1]["updated_at"] = 1767312000
+        changed[2]["updated_at"] = 1767398400
+        added = deepcopy(changed[-1])
+        added["id"] = "3005"
+        added["updated_at"] = 1767484800
+        changed.append(added)
+        return changed, {"3002", "3003", "3005"}, {"3004"}
+
+    def assert_intercom_cursor(
+        fixture: FixtureServer,
+        state: Mapping[str, Any],
+    ) -> None:
+        cursor = state.get("cursor")
+        if not isinstance(cursor, int):
+            raise AssertionError("Intercom incremental read has no saved epoch cursor")
+        body = json.loads(fixture.request_log[0].body)
+        expected = cursor - 1
+        if body.get("query", {}).get("value") != expected:
+            raise AssertionError(
+                f"Intercom request omitted the one-second cursor overlap {expected!r}"
+            )
+        if body.get("pagination", {}).get("per_page") != 150:
+            raise AssertionError(
+                "Intercom conversation search did not request 150 records"
+            )
+
+    intercom_case = CertificationCase(
+        connector_id="intercom",
+        connector_factory=intercom_factory,
+        fixture_routes=intercom_routes,
+        stream="conversations",
+        mutate_fixture=mutate_intercom,
+        fixture_records=intercom_records,
+        primary_key=("id",),
+        cursor_field="updated_at",
+        secret=_SECRET,
+        assert_incremental_cursor=assert_intercom_cursor,
+    )
+
     tap_script = _tap_source(tmp_path)
 
     def singer_factory(
@@ -823,5 +988,6 @@ def build_certification_cases(tmp_path: Path) -> dict[str, CertificationCase]:
             shim_case,
             github_case,
             jira_case,
+            intercom_case,
         )
     }
