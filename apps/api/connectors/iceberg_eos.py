@@ -75,6 +75,29 @@ class IcebergEosWatermarkError(RuntimeError):
     """A table carries an incomplete, malformed, or colliding EOS watermark."""
 
 
+def iceberg_eos_catalog_ready(dest_cfg: dict[str, Any] | None) -> bool:
+    """Return whether the supplied endpoint describes a catalog Iceberg write path."""
+    if not isinstance(dest_cfg, dict):
+        logger.debug(
+            "Iceberg EOS catalog readiness refused reason=%s",
+            type(dest_cfg).__name__,
+        )
+        return False
+    try:
+        from connectors.iceberg_writer import resolve_iceberg_write_path
+
+        ready = resolve_iceberg_write_path(dest_cfg) == "catalog"
+        if not ready:
+            logger.debug("Iceberg EOS catalog readiness refused reason=filesystem")
+        return ready
+    except Exception as exc:
+        logger.debug(
+            "Iceberg EOS catalog readiness refused reason=%s",
+            type(exc).__name__,
+        )
+        return False
+
+
 class _IcebergNoCommit(Exception):
     def __init__(self, result: Any) -> None:
         super().__init__("Iceberg EOS action requires no catalog commit")

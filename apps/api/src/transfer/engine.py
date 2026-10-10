@@ -2392,6 +2392,7 @@ class UniversalTransferEngine:
         from services.execution_engine_contract import DeliveryGuaranteeError
         from services.mapping_pipeline import assert_mappings_executable
         from services.procedure_source import is_callable_source
+        from .models import endpoint_to_dict
 
         try:
             if resume:
@@ -2418,6 +2419,7 @@ class UniversalTransferEngine:
                 ),
                 allow_append_only=dest_allow_append_only(request.destination),
                 callable_source=is_callable_source(request.source),
+                dest_cfg=endpoint_to_dict(request.destination),
             )
             from services.procedure_source import assert_callable_sync_allowed
 

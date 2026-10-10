@@ -113,6 +113,14 @@ DELIVERY_SEMANTICS_ALO = "at_least_once_idempotent_apply"
 # Operator did not pin a guarantee. Eligible CDC resolves to dest-owned EOS.
 DELIVERY_AUTO = "auto"
 _AUTO_TOKENS = frozenset({"", "auto", "default"})
+_ICEBERG_EOS_SINKS = frozenset(
+    {"iceberg", "apache_iceberg", "iceberg_rest", "nessie"}
+)
+_ICEBERG_CATALOG_REQUIRED_NOTE = (
+    "Iceberg exactly-once requires a catalog-backed destination "
+    "(REST/Glue/SQL/Hive/Nessie); filesystem/warehouse-path Iceberg remains "
+    "at-least-once."
+)
 
 # Destinations that can host a transactional watermark table in principle.
 # Aliases stay listed so classify never invents a miss on catalog ids.
@@ -1553,6 +1561,7 @@ def classify_exactly_once_route(
     has_lsn_column: bool | None = True,
     callable_source: bool = False,
     source_type: str = "",
+    dest_cfg: dict[str, Any] | None = None,
 ) -> EosEligibility:
     """Fail-closed eligibility. ``auto`` calls this; an explicit at-least-once pin does not."""
     dest = (dest_type or "").strip().lower().replace("-", "_")
@@ -1568,6 +1577,8 @@ def classify_exactly_once_route(
         "oracle_autonomous_warehouse": "oracle",
     }
     sink_dest = _SINK_ALIASES.get(dest, dest)
+    if dest in _ICEBERG_EOS_SINKS:
+        sink_dest = "iceberg"
     mode = (sync_mode or "").strip().lower().replace("-", "_")
     notes: list[str] = [
         "Algorithm: dest-owned watermark in the same dest transaction as apply.",
@@ -1606,7 +1617,22 @@ def classify_exactly_once_route(
         return EosEligibility(
             False, REASON_NO_PK, dest, None, False, tuple(notes)
         )
-    if dest not in EOS_TRANSACTIONAL_DESTS:
+    iceberg_ready = False
+    if dest in _ICEBERG_EOS_SINKS:
+        from connectors.iceberg_eos import iceberg_eos_catalog_ready
+
+        iceberg_ready = iceberg_eos_catalog_ready(dest_cfg)
+        if not iceberg_ready:
+            return EosEligibility(
+                False,
+                REASON_DEST_NOT_WIRED,
+                dest,
+                ALGORITHM,
+                False,
+                (_ICEBERG_CATALOG_REQUIRED_NOTE, *notes),
+            )
+
+    if dest not in EOS_TRANSACTIONAL_DESTS and not iceberg_ready:
         return EosEligibility(
             False, REASON_DEST_NOT_TXN, dest, None, False, tuple(notes)
         )
@@ -1626,7 +1652,7 @@ def classify_exactly_once_route(
         return EosEligibility(
             False, REASON_APPEND, dest, None, False, tuple(notes)
         )
-    wired = dest in EOS_TXN_WIRED_DESTS
+    wired = dest in EOS_TXN_WIRED_DESTS or iceberg_ready
     if not wired:
         return EosEligibility(
             False,
@@ -1695,6 +1721,7 @@ def classify_sink_exactly_once(
     allow_append_only: bool = False,
     has_lsn_column: bool | None = True,
     sync_mode: str = "cdc",
+    dest_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Per-sink delivery class. ``exactly_once`` only for transactional offset sinks.
 
@@ -1708,6 +1735,7 @@ def classify_sink_exactly_once(
         write_mode=write_mode,
         allow_append_only=allow_append_only,
         has_lsn_column=has_lsn_column,
+        dest_cfg=dest_cfg,
     )
     dest = _canonical_sink(dest_type)
     if eligibility.eligible:
@@ -1750,6 +1778,8 @@ def classify_sink_exactly_once(
 
 
 def _refusal_detail(dest: str, reason: str) -> str:
+    if dest in _ICEBERG_EOS_SINKS and reason == REASON_DEST_NOT_WIRED:
+        return _ICEBERG_CATALOG_REQUIRED_NOTE
     if dest in EOS_NON_TRANSACTIONAL_DESTS:
         return EOS_NON_TRANSACTIONAL_DESTS[dest]
     return {
@@ -1771,6 +1801,7 @@ def require_exactly_once_sink(
     allow_append_only: bool = False,
     has_lsn_column: bool | None = True,
     sync_mode: str = "cdc",
+    dest_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """``require_exactly_once=true`` gate: return the EO posture or fail closed."""
     posture = classify_sink_exactly_once(
@@ -1780,6 +1811,7 @@ def require_exactly_once_sink(
         allow_append_only=allow_append_only,
         has_lsn_column=True if has_lsn_column is None else has_lsn_column,
         sync_mode=sync_mode,
+        dest_cfg=dest_cfg,
     )
     if posture.get("delivery_class") == DELIVERY_CLASS_EXACTLY_ONCE:
         return posture
@@ -1820,6 +1852,7 @@ def assert_requested_cdc_delivery(
     allow_append_only: bool = False,
     callable_source: bool = False,
     has_lsn_column: bool | None = True,
+    dest_cfg: dict[str, Any] | None = None,
 ) -> str:
     """Normalize delivery. Exactly-once is opt-in and fail-closed on the route."""
     from services.execution_engine_contract import DeliveryGuaranteeError
@@ -1846,6 +1879,7 @@ def assert_requested_cdc_delivery(
         has_lsn_column=has_lsn_column,
         callable_source=callable_source,
         source_type=source_type,
+        dest_cfg=dest_cfg,
     )
     if not eligibility.eligible:
         raise ExactlyOnceRouteError(
@@ -1869,6 +1903,7 @@ def select_route_delivery(
     allow_append_only: bool = False,
     callable_source: bool = False,
     has_lsn_column: bool | None = True,
+    dest_cfg: dict[str, Any] | None = None,
 ) -> str:
     """Resolve delivery for one route.
 
@@ -1890,6 +1925,7 @@ def select_route_delivery(
             has_lsn_column=has_lsn_column,
             callable_source=callable_source,
             source_type=source_type,
+            dest_cfg=dest_cfg,
         )
         if eligibility.eligible:
             return DELIVERY_CLASS_EXACTLY_ONCE
@@ -1904,6 +1940,7 @@ def select_route_delivery(
         allow_append_only=allow_append_only,
         callable_source=callable_source,
         has_lsn_column=has_lsn_column,
+        dest_cfg=dest_cfg,
     )
 
 
@@ -2218,6 +2255,7 @@ def preflight_delivery_gate(
     callable_source: bool = False,
     source_type: str = "",
     has_lsn_column: bool | None = True,
+    dest_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Validate-time EOS gate. Absent when the route is not CDC and did not opt in."""
     raw = (delivery_guarantee or "").strip().lower().replace("-", "_")
@@ -2234,6 +2272,7 @@ def preflight_delivery_gate(
             callable_source=callable_source,
             source_type=source_type,
             has_lsn_column=has_lsn_column,
+            dest_cfg=dest_cfg,
         )
         if eligibility.eligible:
             details = eligibility.to_dict()
@@ -2295,6 +2334,7 @@ def preflight_delivery_gate(
         callable_source=callable_source,
         source_type=source_type,
         has_lsn_column=has_lsn_column,
+        dest_cfg=dest_cfg,
     )
     details = eligibility.to_dict()
     details["delivery_guarantee"] = DELIVERY_CLASS_EXACTLY_ONCE

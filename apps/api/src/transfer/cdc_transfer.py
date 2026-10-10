@@ -937,6 +937,7 @@ def _gate_cdc_sink(
         require_effectively_once=_truthy_cfg(
             dest_cfg, "require_effectively_once", "cdc_require_effectively_once"
         ),
+        dest_cfg=dest_cfg,
     )
 
 
@@ -2670,6 +2671,7 @@ def _run_cdc_single_stream(
         assert_requested_cdc_delivery,
         dest_allow_append_only,
         dest_require_exactly_once,
+        select_route_delivery,
     )
     from services.procedure_source import is_callable_source
 
@@ -2678,6 +2680,20 @@ def _run_cdc_single_stream(
         required=dest_require_exactly_once(destination, dest_cfg),
         pinned=delivery_pinned,
     )
+    if str(delivery_guarantee or "").strip().lower() in {"", "auto", "default"}:
+        delivery_guarantee = select_route_delivery(
+            delivery_guarantee,
+            sync_mode=sync_mode or "cdc",
+            dest_type=dest_type,
+            source_type=src_type,
+            has_primary_key=True,
+            write_mode="upsert",
+            allow_append_only=dest_allow_append_only(destination)
+            or _truthy_cfg(dest_cfg, "allow_append_only", "cdc_allow_append_only"),
+            callable_source=is_callable_source(source),
+            has_lsn_column=True,
+            dest_cfg=dest_cfg,
+        )
     eos_guarantee = assert_requested_cdc_delivery(
         delivery_guarantee,
         sync_mode=sync_mode or "cdc",
@@ -2688,6 +2704,7 @@ def _run_cdc_single_stream(
         allow_append_only=dest_allow_append_only(destination)
         or _truthy_cfg(dest_cfg, "allow_append_only", "cdc_allow_append_only"),
         callable_source=is_callable_source(source),
+        dest_cfg=dest_cfg,
     )
     eos_active = eos_guarantee == "exactly_once"
     if src_type in {"mongodb", "mysql", "postgresql", "sqlserver", "oracle"}:

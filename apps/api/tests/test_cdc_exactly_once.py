@@ -37,6 +37,7 @@ from services.cdc_exactly_once import (  # noqa: E402
     REASON_BUNDLE_LSN,
     REASON_CHECKSUM,
     REASON_DEST_NOT_TXN,
+    REASON_DEST_NOT_WIRED,
     REASON_NO_LSN,
     REASON_NOT_CDC,
     REASON_OK,
@@ -1871,7 +1872,7 @@ def test_named_matrix_artifact_matches_measured() -> None:
             "sync_mode": "cdc",
             "has_pk": True,
             "expect_eligible": False,
-            "expect_reason": REASON_DEST_NOT_TXN,
+            "expect_reason": REASON_DEST_NOT_WIRED,
         },
         {
             "id": "kafka_not_txn",

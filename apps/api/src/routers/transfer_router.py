@@ -815,7 +815,7 @@ async def execute_transfer_json(
     from services.procedure_source import is_callable_source
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
-    from ..transfer.models import EndpointConfig, TransferRequest
+    from ..transfer.models import EndpointConfig, TransferRequest, endpoint_to_dict
 
     src_preview = EndpointConfig.from_dict(
         body.source.kind, body.source.model_dump(by_alias=True)
@@ -836,6 +836,7 @@ async def execute_transfer_json(
             has_lsn_column=route_declares_log_position(body.stream_contracts),
             allow_append_only=dest_allow_append_only(dst_preview),
             callable_source=is_callable_source(src_preview),
+            dest_cfg=endpoint_to_dict(dst_preview),
         )
     except (DeliveryGuaranteeError, ExactlyOnceRouteError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

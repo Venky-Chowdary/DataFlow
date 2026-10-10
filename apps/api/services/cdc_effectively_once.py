@@ -360,6 +360,7 @@ def gate_cdc_destination(
     has_lsn_column: bool | None = None,
     require_exactly_once: bool = False,
     sync_mode: str = "cdc",
+    dest_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fail-fast when CDC would write append-only without an explicit allow.
 
@@ -382,6 +383,7 @@ def gate_cdc_destination(
             allow_append_only=allow_append_only,
             has_lsn_column=has_lsn_column,
             sync_mode=sync_mode,
+            dest_cfg=dest_cfg,
         )
     posture = classify_sink_delivery(
         dest_type=dest_type,
