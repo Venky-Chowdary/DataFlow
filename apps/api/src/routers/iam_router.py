@@ -19,6 +19,7 @@ from services.rbac import (
     principal_permissions,
 )
 from services.workspace_access import actor_email
+from src.services import auth_service as _auth_service
 
 router = APIRouter(prefix="/iam", tags=["IAM"])
 
@@ -80,13 +81,16 @@ def _caller_permissions(request: Request) -> set[str]:
     return principal_permissions(user, role)
 
 
-def _check_grant(
+def enforce_grant_bounds(
     request: Request,
     *,
     route: str,
     target_role: str,
     target_scopes: list[str] | None,
 ) -> None:
+    if not _auth_service.auth_required():
+        return
+
     granted = principal_permissions(
         {"scopes": target_scopes} if target_scopes is not None else {},
         target_role,
@@ -121,7 +125,7 @@ def _check_grant(
 def create_service_account(body: ServiceAccountCreate, request: Request):
     if not body.name.strip():
         raise HTTPException(status_code=400, detail="name must not be blank")
-    _check_grant(
+    enforce_grant_bounds(
         request,
         route="POST /api/v1/iam/service-accounts",
         target_role=body.role,
@@ -166,7 +170,7 @@ def rotate_api_key(key_id: str, body: ApiKeyRotation, request: Request):
         None,
     )
     if existing is not None:
-        _check_grant(
+        enforce_grant_bounds(
             request,
             route=f"POST /api/v1/iam/api-keys/{key_id}/rotate",
             target_role=existing.get("role") or "viewer",
@@ -230,7 +234,7 @@ def revoke_service_account(key_id: str, request: Request):
 
 @router.post("/scim-token")
 def create_scim_token(request: Request, body: ScimTokenCreate | None = None):
-    _check_grant(
+    enforce_grant_bounds(
         request,
         route="POST /api/v1/iam/scim-token",
         target_role="admin",
@@ -277,7 +281,7 @@ def put_scim_group_mappings(body: ScimGroupMappingsUpdate, request: Request):
             raise HTTPException(status_code=400, detail="role is not a supported workspace role")
         if team_store.get_workspace(mapping.workspace_id) is None:
             raise HTTPException(status_code=400, detail="workspace_id does not exist")
-        _check_grant(
+        enforce_grant_bounds(
             request,
             route="PUT /api/v1/iam/scim/group-mappings",
             target_role=membership_role_to_gate_role(mapping.role),

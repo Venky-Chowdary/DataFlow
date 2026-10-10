@@ -238,3 +238,36 @@ def test_grant_bound_helpers_report_sorted_missing_permissions():
     with pytest.raises(PrivilegeEscalation) as exc_info:
         assert_grant_within({"job.read"}, {"job.run", "connector.write"})
     assert exc_info.value.missing == ("connector.write", "job.run")
+
+
+def test_auth_disabled_allows_admin_key_creation(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAFLOW_ENV", "development")
+    monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "0")
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATAFLOW_TEAM_STORE", str(tmp_path / "teams.json"))
+
+    from services import audit_log, integrations_store
+    from src.services import auth_service
+
+    monkeypatch.setattr(auth_service, "auth_required", lambda: False)
+    monkeypatch.setattr(integrations_store, "STORE_PATH", tmp_path / "integrations.json")
+    monkeypatch.setattr(integrations_store, "_keys_collection", lambda: None)
+    monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+
+    from src.main import app
+
+    with TestClient(app) as client:
+        workspace_key = client.post(
+            "/api/v1/workspace/api-keys",
+            json={"name": "Operator admin", "role": "admin"},
+        )
+        service_account = client.post(
+            "/api/v1/iam/service-accounts",
+            json={"name": "Service admin", "role": "admin", "scopes": ["job.run"]},
+        )
+
+    assert [workspace_key.status_code, service_account.status_code] == [200, 200], (
+        workspace_key.text,
+        service_account.text,
+    )
