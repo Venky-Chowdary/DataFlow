@@ -1255,6 +1255,12 @@ def _write_mapped_rows_pyiceberg(
             apply_schema_plan,
             plan_schema_change,
         )
+        from connectors.iceberg_partitioning import (
+            IcebergPartitionSpecError,
+            parse_partition_spec,
+            partition_spec_for_schema,
+            partition_spec_matches,
+        )
         from pyiceberg.exceptions import NoSuchTableError
     except Exception as exc:
         return WriteResult(
@@ -1287,6 +1293,35 @@ def _write_mapped_rows_pyiceberg(
     strict_schema_evolution = (
         str(schema_evolution or "").strip().lower() == "strict"
     )
+    unset = object()
+    partition_spec_value = endpoint.get("partition_spec", unset)
+    if partition_spec_value is unset:
+        partition_spec_value = extra.get("partition_spec", unset)
+    partition_spec_declared = partition_spec_value is not unset
+    partition_spec = (
+        parse_partition_spec(partition_spec_value)
+        if partition_spec_declared
+        else ()
+    )
+    allow_partition_evolution_value = endpoint.get(
+        "allow_partition_evolution", unset
+    )
+    if allow_partition_evolution_value is unset:
+        allow_partition_evolution_value = extra.get(
+            "allow_partition_evolution", False
+        )
+    if allow_partition_evolution_value is None:
+        allow_partition_evolution = False
+    elif isinstance(allow_partition_evolution_value, bool):
+        allow_partition_evolution = allow_partition_evolution_value
+    elif isinstance(allow_partition_evolution_value, str) and (
+        allow_partition_evolution_value.strip().lower() in {"true", "false"}
+    ):
+        allow_partition_evolution = (
+            allow_partition_evolution_value.strip().lower() == "true"
+        )
+    else:
+        raise ValueError("allow_partition_evolution must be a boolean")
 
     config = parse_iceberg_catalog_config(endpoint)
     table = config["table_name"]
@@ -1295,6 +1330,31 @@ def _write_mapped_rows_pyiceberg(
     # so a schema that already carries the table name resolves to ``ns.tbl.tbl``.
     target_schema = ".".join(namespace)
     table_identifier = ".".join(namespace + (table,))
+
+    def partition_core_available() -> bool:
+        try:
+            __import__("pyiceberg_core")
+        except ImportError:
+            return False
+        return True
+
+    def missing_partition_core_result() -> WriteResult:
+        partition_error = IcebergPartitionSpecError(
+            "partitioned Iceberg writes require the missing pyiceberg-core "
+            "package (import pyiceberg_core)"
+        )
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=target_schema,
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"{type(partition_error).__name__}: {partition_error}"
+            ),
+            driver="iceberg",
+        )
 
     target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if conflict_columns:
@@ -1345,6 +1405,19 @@ def _write_mapped_rows_pyiceberg(
         tbl = catalog.load_table(identifier)
         table_existed = True
     except NoSuchTableError:
+        if partition_spec_declared:
+            missing_partition_columns = [
+                column
+                for column, _ in partition_spec
+                if column not in target_cols
+            ]
+            if missing_partition_columns:
+                raise ValueError(
+                    "partition_spec column does not exist: "
+                    + ", ".join(repr(column) for column in missing_partition_columns)
+                )
+            if not partition_core_available():
+                return missing_partition_core_result()
         if strict_schema_evolution and rename_columns:
             evolution_error = IcebergSchemaEvolutionError(
                 "rename source does not exist because the table is not present"
@@ -1390,7 +1463,22 @@ def _write_mapped_rows_pyiceberg(
         ensure_namespace(catalog, namespace)
         arrow_types = [_logical_to_arrow_type(dest_types.get(c, "string"), pa) for c in target_cols]
         arrow_schema = pa.schema([(c, t) for c, t in zip(target_cols, arrow_types)])
-        tbl = catalog.create_table(identifier, schema=arrow_schema)
+        create_options: dict[str, Any] = {}
+        create_schema: Any = arrow_schema
+        if partition_spec_declared:
+            from pyiceberg.catalog import Catalog
+            from pyiceberg.schema import assign_fresh_schema_ids
+
+            iceberg_schema = assign_fresh_schema_ids(
+                Catalog._convert_schema_if_needed(arrow_schema)
+            )
+            create_schema = iceberg_schema
+            create_options["partition_spec"] = partition_spec_for_schema(
+                iceberg_schema, partition_spec
+            )
+        tbl = catalog.create_table(
+            identifier, schema=create_schema, **create_options
+        )
         table_existed = False
     except Exception as exc:
         return WriteResult(
@@ -1403,6 +1491,39 @@ def _write_mapped_rows_pyiceberg(
             error=f"Unable to load or create Iceberg table: {exc}",
             driver="iceberg",
         )
+
+    if table_existed and partition_spec_declared:
+        partition_spec_for_schema(
+            tbl.schema(), partition_spec, rename_columns=rename_columns
+        )
+    if table_existed and (
+        partition_spec_declared or not tbl.spec().is_unpartitioned()
+    ):
+        if not partition_core_available():
+            return missing_partition_core_result()
+    if table_existed and partition_spec_declared:
+        if not partition_spec_matches(
+            tbl.schema(),
+            tbl.spec(),
+            partition_spec,
+            rename_columns=rename_columns,
+        ) and not allow_partition_evolution:
+            partition_error = IcebergPartitionSpecError(
+                "declared partition_spec differs from the existing table; "
+                "set allow_partition_evolution=true to apply it"
+            )
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"{type(partition_error).__name__}: {partition_error}"
+                ),
+                driver="iceberg",
+            )
 
     mode = _iceberg_effective_write_mode(
         write_mode, sync_mode=sync_mode, file_batch_idx=file_batch_idx
@@ -1730,6 +1851,81 @@ def _write_mapped_rows_pyiceberg(
                     update.union_by_name(new_schema)
                 tbl = catalog.load_table(identifier)
                 existing_arrow = tbl.schema().as_arrow()
+
+        if (
+            table_existed
+            and partition_spec_declared
+            and allow_partition_evolution
+        ):
+            fresh_tbl = catalog.load_table(identifier)
+            partition_spec_for_schema(
+                fresh_tbl.schema(),
+                partition_spec,
+                rename_columns=rename_columns,
+            )
+            if not partition_spec_matches(
+                fresh_tbl.schema(),
+                fresh_tbl.spec(),
+                partition_spec,
+                rename_columns=rename_columns,
+            ):
+                desired_fields = {
+                    (column, repr(transform))
+                    for column, transform in partition_spec
+                }
+                current_fields: set[tuple[str, str]] = set()
+                for field in fresh_tbl.spec().fields:
+                    column = fresh_tbl.schema().find_column_name(
+                        field.source_id
+                    )
+                    if column is None:
+                        continue
+                    current_fields.add(
+                        (
+                            (rename_columns or {}).get(column, column),
+                            repr(field.transform),
+                        )
+                    )
+                with fresh_tbl.update_spec() as update:
+                    for field in fresh_tbl.spec().fields:
+                        column = fresh_tbl.schema().find_column_name(
+                            field.source_id
+                        )
+                        signature = (
+                            (rename_columns or {}).get(column, column)
+                            if column is not None
+                            else None,
+                            repr(field.transform),
+                        )
+                        if signature not in desired_fields:
+                            update.remove_field(field.name)
+                    for column, transform in partition_spec:
+                        if (column, repr(transform)) not in current_fields:
+                            source_column = column
+                            try:
+                                fresh_tbl.schema().find_field(source_column)
+                            except ValueError:
+                                source_column = next(
+                                    (
+                                        source
+                                        for source, target in (
+                                            rename_columns or {}
+                                        ).items()
+                                        if target == column
+                                    ),
+                                    column,
+                                )
+                            update.add_field(source_column, transform)
+                tbl = catalog.load_table(identifier)
+                if not partition_spec_matches(
+                    tbl.schema(),
+                    tbl.spec(),
+                    partition_spec,
+                    rename_columns=rename_columns,
+                ):
+                    raise IcebergPartitionSpecError(
+                        "partition spec did not match after evolution"
+                    )
 
         final_arrow = existing_arrow
         schema_extra_cols = [n for n in final_arrow.names if n not in set(target_cols)]
@@ -3371,18 +3567,30 @@ def _delete_pyiceberg(
     def stage(fresh_tbl: Any, txn: Any, props: dict[str, str]) -> int:
         work_keys = {str(k) for k in key_set}
         if incoming_lsn:
-            # CDC LSN guard projects pk (+ lsn) only. Overwrite leftover MERGE
-            # has no LSN and must not materialize scan().to_arrow() of the table.
+            # CDC LSN guard reads only the keys this delete can affect.
             select_cols = list(dict.fromkeys([*pk_cols, lsn_column]))
-            scanned = fresh_tbl.scan().select(*select_cols).to_arrow()
             rows: list[dict[str, Any]] = []
-            for i in range(scanned.num_rows):
-                rows.append(
-                    {
-                        name: scanned.column(name)[i].as_py()
-                        for name in scanned.column_names
-                    }
+            ordered_work_keys = sorted(work_keys)
+            for start in range(0, len(ordered_work_keys), _PK_SCAN_SLICE):
+                chunk = set(
+                    ordered_work_keys[start : start + _PK_SCAN_SLICE]
                 )
+                scanned = (
+                    fresh_tbl.scan(
+                        row_filter=_iceberg_delete_predicate(
+                            fresh_tbl, pk_cols, chunk
+                        )
+                    )
+                    .select(*select_cols)
+                    .to_arrow()
+                )
+                for i in range(scanned.num_rows):
+                    rows.append(
+                        {
+                            name: scanned.column(name)[i].as_py()
+                            for name in scanned.column_names
+                        }
+                    )
             work_keys = _filter_delete_keys_by_lsn(
                 rows,
                 pk_cols,

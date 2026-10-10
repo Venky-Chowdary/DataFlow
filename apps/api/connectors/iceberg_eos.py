@@ -12,6 +12,7 @@ from connectors.iceberg_catalog import (
     parse_iceberg_catalog_config,
 )
 from connectors.iceberg_writer import (
+    _PK_SCAN_SLICE,
     _filter_delete_keys_by_lsn,
     _iceberg_present_fields,
     _iceberg_delete_predicate,
@@ -239,14 +240,18 @@ def _scan_dest_rows(
     if not keys:
         return []
     projection = list(dict.fromkeys([*pk_cols, DF_LSN_COL]))
-    predicate = _iceberg_delete_predicate(tbl, pk_cols, keys)
-    scanned = tbl.scan(row_filter=predicate).select(*projection).to_arrow()
     rows: list[dict[str, Any]] = []
-    columns = {
-        name: scanned.column(name).to_pylist() for name in scanned.column_names
-    }
-    for index in range(scanned.num_rows):
-        rows.append({name: values[index] for name, values in columns.items()})
+    ordered_keys = sorted(keys)
+    for start in range(0, len(ordered_keys), _PK_SCAN_SLICE):
+        chunk = set(ordered_keys[start : start + _PK_SCAN_SLICE])
+        predicate = _iceberg_delete_predicate(tbl, pk_cols, chunk)
+        scanned = tbl.scan(row_filter=predicate).select(*projection).to_arrow()
+        columns = {
+            name: scanned.column(name).to_pylist()
+            for name in scanned.column_names
+        }
+        for index in range(scanned.num_rows):
+            rows.append({name: values[index] for name, values in columns.items()})
     return rows
 
 
