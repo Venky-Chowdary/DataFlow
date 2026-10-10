@@ -1738,6 +1738,15 @@ class MySqlChangeStreamCdc:
                             pos["pos"] = stream.log_pos
                         self._record_schema_change(ddl=query.strip()[:2000], offset=pos)
                         self._last_event_at = datetime.now(timezone.utc)
+                    # DDL commits implicitly and logs no XID. Without this, a
+                    # trailing DDL on any table (our own signal table) kept the
+                    # poll "behind" its head forever (MX3-20).
+                    if buf.open_xid is None and stream.log_pos:
+                        last_position = {
+                            "file": getattr(stream, "log_file", ""),
+                            "pos": stream.log_pos,
+                            "tables": list(self.tables),
+                        }
                     continue
                 if isinstance(binlog_event, XidEvent):
                     if stream.log_pos:
