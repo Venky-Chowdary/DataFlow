@@ -25,20 +25,71 @@ def test_streaming_transport_selected(monkeypatch):
     assert selected_pg_cdc_transport() == "streaming"
 
 
-def test_streaming_buffer_drop_upto_lsn():
+def test_streaming_buffer_ack_keeps_interleaved_txn():
+    """A txn that began before an earlier commit has smaller BEGIN/change LSNs.
+
+    Dropping by ``lsn <= ack`` discarded it (silent loss). Ack drops through the
+    acked COMMIT only.
+    """
     from connectors.postgresql_cdc_transport import PeekedChange, StreamingBuffer
 
     buf = StreamingBuffer()
     buf.extend(
         [
-            PeekedChange(lsn="0/16B8", payload=b"a"),
-            PeekedChange(lsn="0/16C0", payload=b"b"),
-            PeekedChange(lsn="0/16D0", payload=b"c"),
+            PeekedChange(lsn="0/1C71D88", payload=b"B"),
+            PeekedChange(lsn="0/1C71D88", payload=b"I"),
+            PeekedChange(lsn="0/1C71E38", payload=b"C", is_commit=True),
+            PeekedChange(lsn="0/1C71CA8", payload=b"B"),
+            PeekedChange(lsn="0/1C71CA8", payload=b"I"),
+            PeekedChange(lsn="0/1C71E38", payload=b"I"),
+            PeekedChange(lsn="0/1C71EE8", payload=b"C", is_commit=True),
         ]
     )
-    dropped = buf.drop_upto_lsn("0/16C0")
-    assert dropped == 2
-    assert [x.lsn for x in buf.items] == ["0/16D0"]
+    assert buf.drop_through_commit("0/1C71E38") == 3
+    assert [x.lsn for x in buf.items] == ["0/1C71CA8", "0/1C71CA8", "0/1C71E38", "0/1C71EE8"]
+
+
+def test_streaming_buffer_poll_redelivers_until_ack_and_never_splits_txn():
+    from connectors.postgresql_cdc_transport import PeekedChange, StreamingBuffer
+
+    buf = StreamingBuffer()
+    buf.extend(
+        [
+            PeekedChange(lsn="0/10", payload=b"B"),
+            PeekedChange(lsn="0/10", payload=b"I"),
+            PeekedChange(lsn="0/10", payload=b"I"),
+            PeekedChange(lsn="0/20", payload=b"C", is_commit=True),
+            PeekedChange(lsn="0/30", payload=b"B"),
+        ]
+    )
+    first = buf.committed(limit=2)
+    assert [x.payload for x in first] == [b"B", b"I", b"I", b"C"]
+    assert buf.committed(limit=2) == first  # no ack -> redelivered
+    buf.drop_through_commit("0/20")
+    assert buf.committed() == []  # open txn is never returned
+
+
+def test_streaming_buffer_ack_before_redelivery_skips_on_arrival():
+    """After a reconnect the acked txn may be resent later; drop it on arrival."""
+    from connectors.postgresql_cdc_transport import PeekedChange, StreamingBuffer
+
+    buf = StreamingBuffer()
+    buf.drop_through_commit("0/20")
+    buf.extend(
+        [
+            PeekedChange(lsn="0/10", payload=b"B"),
+            PeekedChange(lsn="0/20", payload=b"C", is_commit=True),
+            PeekedChange(lsn="0/30", payload=b"B"),
+            PeekedChange(lsn="0/40", payload=b"C", is_commit=True),
+        ]
+    )
+    assert [x.lsn for x in buf.committed()] == ["0/30", "0/40"]
+
+
+def test_lsn_round_trip():
+    from connectors.postgresql_cdc_transport import int_to_lsn, lsn_to_int
+
+    assert int_to_lsn(lsn_to_int("1C/71EE8")) == "1C/71EE8"
 
 
 def test_open_streaming_returns_none_when_peek_mode(monkeypatch):
