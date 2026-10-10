@@ -1,8 +1,9 @@
 """AUDIT-INTEGRITY — duplicate identity matrix across sync modes and key shapes.
 
-Source duplicate identity blocks on every key-addressed or overwrite mode; append
-without a covering destination key warns. Genuinely unique scalar and composite
-keys never block, and SCD2 checks the business key, not the history columns.
+Duplicate *declared* identity blocks on every key-addressed or overwrite mode; an
+inferred key on an overwrite heap and append without a covering destination key
+warn. Genuinely unique scalar and composite keys never block, and SCD2 checks the
+business key, not the history columns.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ def test_unique_composite_key_with_repeating_components_never_blocks(sync_mode: 
 @pytest.mark.parametrize("sync_mode", BLOCKING_MODES)
 def test_duplicate_scalar_key_blocks_keyed_and_overwrite_modes(sync_mode: str) -> None:
     rows = [{"id": 1}, {"id": 1}, {"id": 2}]
-    result = _check(rows, ["id"], sync_mode=sync_mode)
+    result = _check(rows, ["id"], sync_mode=sync_mode, identity_declared=True)
     assert result["blocks_transfer"] is True, result
     assert result["passed"] is False
 
@@ -64,9 +65,31 @@ def test_duplicate_scalar_key_blocks_keyed_and_overwrite_modes(sync_mode: str) -
 @pytest.mark.parametrize("sync_mode", BLOCKING_MODES)
 def test_duplicate_composite_tuple_blocks_keyed_and_overwrite_modes(sync_mode: str) -> None:
     rows = [{"region": "eu", "id": 1}, {"region": "eu", "id": 1}, {"region": "us", "id": 1}]
-    result = _check(rows, ["region", "id"], sync_mode=sync_mode)
+    result = _check(rows, ["region", "id"], sync_mode=sync_mode, identity_declared=True)
     assert result["blocks_transfer"] is True, result
     assert any("duplicate" in str(i).lower() for i in result["issues"])
+
+
+@pytest.mark.parametrize("sync_mode", ["overwrite", "replace", "full_refresh_overwrite"])
+def test_inferred_only_duplicate_on_overwrite_heap_warns_with_sample_key(
+    sync_mode: str,
+) -> None:
+    result = _check(
+        [{"id": 41}, {"id": 41}, {"id": 2}], ["id"], sync_mode=sync_mode,
+        identity_declared=False,
+    )
+    assert result["blocks_transfer"] is False, result
+    blob = " ".join(str(w) for w in result.get("warnings") or [])
+    assert "duplicate" in blob.lower() and "41" in blob, result
+
+
+@pytest.mark.parametrize("sync_mode", ["overwrite", "replace", "full_refresh_overwrite"])
+def test_destination_key_the_recreate_enforces_counts_as_declared(sync_mode: str) -> None:
+    result = _check(
+        [{"id": 1}, {"id": 1}], ["id"], sync_mode=sync_mode,
+        destination_pk_columns=["id"], identity_declared=False,
+    )
+    assert result["blocks_transfer"] is True, result
 
 
 @pytest.mark.parametrize("sync_mode", APPEND_MODES)
@@ -93,8 +116,19 @@ def test_overwrite_probe_duplicates_block_and_unique_probe_passes(sync_mode: str
         source_duplicate_findings=[{"value": 7, "count": 2}],
         source_duplicate_probe_status="ran",
         source_duplicate_probe_expected=True,
+        identity_declared=True,
     )
     assert dup["blocks_transfer"] is True, dup
+    inferred = _check(
+        rows,
+        ["id"],
+        sync_mode=sync_mode,
+        source_duplicate_findings=[{"value": 7, "count": 2}],
+        source_duplicate_probe_status="ran",
+        source_duplicate_probe_expected=True,
+        identity_declared=False,
+    )
+    assert inferred["blocks_transfer"] is False, inferred
     clean = _check(
         rows,
         ["id"],
@@ -116,6 +150,7 @@ def test_overwrite_probe_unavailable_fails_closed(sync_mode: str) -> None:
         source_duplicate_probe_status="error",
         source_duplicate_probe_message="simulated",
         source_duplicate_probe_expected=True,
+        identity_declared=True,
     )
     assert result["blocks_transfer"] is True, result
 
@@ -149,19 +184,43 @@ def test_scd2_history_key_checks_business_key_only() -> None:
     assert dup["blocks_transfer"] is True, dup
 
 
-@pytest.mark.parametrize("sync_mode", ["overwrite", "replace", "full_refresh_overwrite"])
-def test_audit_report_blocks_inferred_duplicate_pk_on_overwrite(sync_mode: str) -> None:
+def _audit(sync_mode: str, rows: list[dict[str, Any]], **kw: Any) -> dict[str, Any]:
     report = run_integrity_audit(
         source_columns=["order_id"],
         mappings=[{"source": "order_id", "target": "order_id", "confidence": 1.0}],
-        sample_rows=[{"order_id": "1"}, {"order_id": "1"}],
+        sample_rows=rows,
         destination_db_type="postgresql",
         validation_mode="strict",
         sync_mode=sync_mode,
+        **kw,
     )
-    dup = next(c for c in report["checks"] if c["check"] == "duplicate_keys")
-    assert dup["blocks_transfer"] is True
-    assert report["passed"] is False
+    return next(c for c in report["checks"] if c["check"] == "duplicate_keys")
+
+
+OVERWRITE_MODES = ["overwrite", "replace", "full_refresh_overwrite"]
+
+
+@pytest.mark.parametrize("sync_mode", OVERWRITE_MODES)
+def test_audit_report_inferred_duplicate_pk_on_overwrite_heap_warns(sync_mode: str) -> None:
+    dup = _audit(sync_mode, [{"order_id": "1"}, {"order_id": "1"}])
+    assert dup["blocks_transfer"] is False, dup
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        {"contract_primary_key": "order_id"},
+        {"destination_pk_columns": ["order_id"]},
+        {"stream_contracts": [{"name": "orders", "primary_key": ["order_id"]}]},
+    ],
+    ids=["operator_pk", "destination_pk", "stream_contract_pk"],
+)
+@pytest.mark.parametrize("sync_mode", OVERWRITE_MODES)
+def test_audit_report_declared_duplicate_pk_on_overwrite_blocks(
+    sync_mode: str, declared: dict[str, Any]
+) -> None:
+    dup = _audit(sync_mode, [{"order_id": "1"}, {"order_id": "1"}], **declared)
+    assert dup["blocks_transfer"] is True, dup
 
 
 @pytest.mark.parametrize("sync_mode", ["overwrite", "upsert"])

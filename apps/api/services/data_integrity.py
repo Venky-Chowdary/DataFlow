@@ -890,6 +890,37 @@ def _check_destination_unique_constraints(
     return issues
 
 
+def _inferred_identity_dup_warnings(
+    rows: list[dict[str, Any]], identity_cols: list[str], pk_label: str
+) -> list[str]:
+    """Non-blocking note for duplicates of a heuristically inferred identity."""
+    counts: dict[tuple[str, ...], int] = {}
+    for row in rows:
+        tup = tuple(cell_to_string(row.get(c)) for c in identity_cols)
+        if all(v == "" for v in tup):
+            continue
+        counts[tup] = counts.get(tup, 0) + 1
+    dupes = [(",".join(t), n) for t, n in counts.items() if n > 1]
+    if not dupes:
+        return []
+    sample = ", ".join(f"{v}×{n}" for v, n in dupes[:3])
+    return [
+        f"{pk_label}: duplicate values of an inferred identity ({sample}) — the "
+        "overwrite recreates a table without a declared key, so rows load as-is. "
+        "Declare a primary key to enforce uniqueness."
+    ]
+
+
+def _stream_contracts_declare_identity(stream_contracts: list[dict] | None) -> bool:
+    for contract in stream_contracts or []:
+        if not isinstance(contract, dict):
+            continue
+        for field in ("primary_key", "primary_keys", "upsert_key", "cursor_primary_key"):
+            if contract.get(field):
+                return True
+    return False
+
+
 def _business_identity_columns(identity_cols: list[str], sync: str) -> list[str]:
     """Drop SCD2 engine-owned history columns from a source identity key.
 
@@ -923,13 +954,16 @@ def _check_duplicate_keys(
     source_duplicate_probe_status: str = "",
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
+    identity_declared: bool | None = None,
 ) -> dict[str, Any]:
     """Duplicate check on the resolved identity key (sample + source-side probe).
 
     - Schemaless destinations (Mongo/Redis/Dynamo) and sync modes that require a
       unique identity (upsert/CDC/mirror/SCD2) always enforce duplicates.
-    - Overwrite modes enforce duplicates on any resolved identity key: source
-      duplicate identity blocks before the recreate, whatever the old table held.
+    - Overwrite modes block on duplicates of a *declared* identity (operator /
+      contract / composite key, or a destination key the recreate enforces). A
+      heuristically inferred key only warns — a heap may legally repeat it.
+      ``identity_declared=None`` means only a destination key counts as declared.
     - SCD2 dedupes on the business key; engine-owned history columns
       (valid_from/valid_to/is_current/row_hash) are never part of source identity.
     - Append-like modes only enforce duplicates when the destination primary key or
@@ -962,8 +996,6 @@ def _check_duplicate_keys(
     destination_pk_columns = _business_identity_columns(
         [str(c) for c in (destination_pk_columns or []) if c], sync
     )
-    if primary_key and identity_cols and primary_key not in identity_cols:
-        primary_key = identity_cols[0]
     composite_identity = len(identity_cols) > 1
     pk_label = " + ".join(identity_cols) if identity_cols else (primary_key or "")
     target_cols = [
@@ -979,12 +1011,19 @@ def _check_duplicate_keys(
         target_types=target_types,
     )
 
-    # Duplicate identity is a fact about the source, not about the table the
-    # overwrite recreates: a declared or resolved identity key that repeats in
-    # the source cannot become the recreated table's key, so overwrite modes
-    # block whenever an identity was resolved. A route with no identity key at
-    # all has nothing to dedupe and is not blocked here.
-    overwrite_enforces_uniqueness = _is_overwrite_like(sync) and bool(identity_cols)
+    dest_has_enforced_key = bool(destination_pk_columns) or any(
+        _unique_constraint_enforced(uk, dest_kind=dest_kind)
+        for uk in (destination_unique_keys or [])
+    )
+    if identity_declared is None:
+        identity_declared = dest_has_enforced_key
+    # A declared identity that repeats in the source cannot become the recreated
+    # table's key, so overwrite blocks. An inferred key on a heap only warns.
+    overwrite_enforces_uniqueness = (
+        _is_overwrite_like(sync)
+        and bool(identity_cols)
+        and bool(identity_declared or dest_has_enforced_key)
+    )
     # Single-column identity enforcement (upsert/CDC/PK/single UNIQUE).
     enforce_identity = bool(identity_cols) and (
         schemaless
@@ -1079,6 +1118,10 @@ def _check_duplicate_keys(
     )
 
     if not enforce_identity and not issues and not probe_unavailable:
+        if _is_overwrite_like(sync) and identity_cols:
+            advisory_warnings = advisory_warnings + _inferred_identity_dup_warnings(
+                rows, identity_cols, pk_label
+            )
         return {
             "check": "duplicate_keys",
             "passed": True,
@@ -1624,6 +1667,12 @@ def run_integrity_audit(
         pk_uniqueness = pk_columns_uniqueness[0]
     if len(pk_columns_uniqueness) <= 1:
         pk_columns_uniqueness = [pk_uniqueness] if pk_uniqueness else []
+    identity_declared = bool(
+        str(contract_primary_key or "").strip()
+        or len(pk_columns_uniqueness) > 1
+        or destination_pk_columns
+        or _stream_contracts_declare_identity(stream_contracts)
+    )
 
     checks: list[dict[str, Any]] = []
 
@@ -1691,6 +1740,7 @@ def run_integrity_audit(
                 dest_kind=dest_kind,
                 primary_key=pk_uniqueness,
                 primary_key_columns=pk_columns_uniqueness,
+            identity_declared=identity_declared,
                 source_duplicate_findings=source_duplicate_findings,
                 sync_mode=sync_mode,
                 destination_pk_columns=destination_pk_columns,
