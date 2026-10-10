@@ -147,8 +147,8 @@ def get_project(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> dict[str, Any]:
-    resolve_read_workspace(request, workspace_id)
-    project = get_transform_store().get(project_id)
+    ws = resolve_read_workspace(request, workspace_id)
+    project = get_transform_store().get(project_id, workspace_id=ws or None)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
     assert_resource_workspace(request, project.workspace_id or "")
@@ -187,9 +187,9 @@ def update_project(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> dict[str, Any]:
-    resolve_write_workspace(request, workspace_id)
+    ws = resolve_write_workspace(request, workspace_id)
     store = get_transform_store()
-    project = store.get(project_id)
+    project = store.get(project_id, workspace_id=ws or None)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
     assert_resource_workspace(request, project.workspace_id or "")
@@ -233,11 +233,12 @@ def delete_project(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> Response:
-    resolve_write_workspace(request, workspace_id)
+    ws = resolve_write_workspace(request, workspace_id)
     store = get_transform_store()
-    project = store.get(project_id)
-    if project:
-        assert_resource_workspace(request, project.workspace_id or "")
+    project = store.get(project_id, workspace_id=ws or None)
+    if not project:
+        raise HTTPException(status_code=404, detail="Transformation project not found")
+    assert_resource_workspace(request, project.workspace_id or "")
     if not store.delete(project_id):
         raise HTTPException(status_code=404, detail="Transformation project not found")
     return Response(status_code=204)
@@ -321,8 +322,8 @@ def export_dbt_pack(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> dict[str, Any]:
     """Export models as a dbt sources/models starter pack (complement hook only)."""
-    resolve_read_workspace(request, workspace_id)
-    project = get_transform_store().get(project_id)
+    ws = resolve_read_workspace(request, workspace_id)
+    project = get_transform_store().get(project_id, workspace_id=ws or None)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
     assert_resource_workspace(request, project.workspace_id or "")
@@ -339,7 +340,7 @@ def run_project(
 ) -> dict[str, Any]:
     """Run a project on demand against its destination."""
     ws = resolve_write_workspace(request, workspace_id)
-    project = get_transform_store().get(project_id)
+    project = get_transform_store().get(project_id, workspace_id=ws or None)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
     assert_resource_workspace(request, project.workspace_id or "")
