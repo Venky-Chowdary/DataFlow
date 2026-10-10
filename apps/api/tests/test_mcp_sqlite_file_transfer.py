@@ -410,13 +410,13 @@ def test_mcp_loads_tsv_json_and_jsonl_then_pauses_and_deletes_the_schedule(mcp_c
     # lands in BLOB. Anonymous TEXT for either column is a fidelity collapse.
     assert "TIMESTAMPTZ" in declared["created_at"].upper()
     assert declared["payload_b64"].upper() == "BLOB"
-    # SQLite stores the UTC clock under the TIMESTAMPTZ token. The operator
-    # declared UTC, so the wall-clock digits are that instant. The Z on the
-    # middle row is the same instant and is not shifted.
+    # SQLite stores RFC 3339 UTC with an explicit offset (MXD07). The
+    # operator declared UTC, so the wall-clock digits are that instant. The Z
+    # on the middle row is the same instant and is not shifted.
     assert stamps == [
-        "2024-06-01 12:00:00",
-        "2024-06-02 15:30:00",
-        "2024-06-03 08:00:00",
+        "2024-06-01T12:00:00+00:00",
+        "2024-06-02T15:30:00+00:00",
+        "2024-06-03T08:00:00+00:00",
     ]
 
     warehouse = db_path.with_name("hr_warehouse.db")
