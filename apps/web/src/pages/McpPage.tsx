@@ -67,6 +67,7 @@ type McpLog = {
   ts: number;
   tool: string;
   client: string;
+  actor: string | null;
   status: "ok" | "error";
   errorKind: string | null;
   error: string | null;
@@ -99,6 +100,7 @@ export function McpPage() {
               ts: new Date(r.time).getTime(),
               tool: r.tool,
               client: r.client,
+              actor: r.actor ?? null,
               status: r.status === "ok" ? "ok" : "error",
               errorKind: r.error_kind ?? null,
               error: r.error ?? null,
@@ -245,7 +247,7 @@ export function McpPage() {
                       <tr>
                         <th>Time</th>
                         <th>Tool</th>
-                        <th>Client</th>
+                        <th>Client / caller</th>
                         <th>Status</th>
                         <th>Latency</th>
                       </tr>
@@ -277,7 +279,14 @@ export function McpPage() {
                             <td>
                               <code>{log.tool}</code>
                             </td>
-                            <td>{log.client}</td>
+                            <td>
+                              {log.client}
+                              {log.actor ? (
+                                <span className="df2-mcp-log-actor" title={log.actor}>
+                                  {log.actor}
+                                </span>
+                              ) : null}
+                            </td>
                             <td>
                               <span
                                 className={`df2-mcp-log-status df2-mcp-log-status--${mcpLogTone(

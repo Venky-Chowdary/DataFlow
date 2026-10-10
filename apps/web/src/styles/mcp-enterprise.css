@@ -247,3 +247,13 @@
     grid-template-columns: 1fr;
   }
 }
+
+.df2-mcp-log-actor {
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--df-text-muted, #6b7280);
+}

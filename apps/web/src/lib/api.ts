@@ -3118,6 +3118,7 @@ export async function fetchMcpLogs(limit = 50): Promise<Array<{
   time: string;
   tool: string;
   client: string;
+  actor?: string | null;
   status: string;
   ms: number;
   error?: string | null;
