@@ -13,6 +13,8 @@ is not blocked, but production must still gate based on the actual role claim.
 
 from __future__ import annotations
 
+from typing import Any
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -45,6 +47,8 @@ class Permission:
     MEMBER_INVITE = "member.invite"
     AI_USE = "ai.use"
     QUERY_USE = "query.use"
+    IAM_MANAGE = "iam.manage"
+    SCIM_PROVISION = "scim.provision"
     # Acting on your *own* credential (rotating a one-time password). Every role
     # holds it: without it an admin-issued temporary password could never be
     # retired by the person who received it.
@@ -69,6 +73,8 @@ _ALL_PERMISSIONS = {
     Permission.AI_USE,
     Permission.QUERY_USE,
     Permission.ACCOUNT_SELF,
+    Permission.IAM_MANAGE,
+    Permission.SCIM_PROVISION,
 }
 
 
@@ -144,6 +150,8 @@ _PUBLIC_PATHS = {
 # Ordered list of (method, path_prefix, permission) rules.  The first match wins.
 # Method "*" matches any method.
 _PATH_RULES: list[tuple[str, str, str]] = [
+    ("*", "/api/v1/iam/", Permission.IAM_MANAGE),
+    ("*", "/api/v1/scim/v2", Permission.SCIM_PROVISION),
     ("*", "/api/v1/admin/", Permission.WORKSPACE_MANAGE),
     # Rotating your own password is not workspace administration.
     ("POST", "/api/v1/auth/change-password", Permission.ACCOUNT_SELF),
@@ -238,6 +246,14 @@ def role_permissions(role: str) -> set[str]:
     return _ROLE_PERMISSIONS.get(normalize_role(role), _ROLE_PERMISSIONS["viewer"])
 
 
+def principal_permissions(user: dict[str, Any] | None, role: str) -> set[str]:
+    permissions = role_permissions(role)
+    scopes = user.get("scopes") if user else None
+    if isinstance(scopes, list):
+        return permissions & {scope for scope in scopes if isinstance(scope, str)}
+    return permissions
+
+
 def role_names() -> tuple[str, ...]:
     """The closed role set, least to most authority.
 
@@ -253,11 +269,11 @@ def all_permissions() -> tuple[str, ...]:
     return tuple(sorted(_ALL_PERMISSIONS))
 
 
-def has_permission(user: dict[str, str] | None, permission: str) -> bool:
+def has_permission(user: dict[str, Any] | None, permission: str) -> bool:
     if not user:
         return False
     role = normalize_role(user.get("role"))
-    return permission in role_permissions(role)
+    return permission in principal_permissions(user, role)
 
 
 def _is_public_mcp_path(path: str) -> bool:
@@ -327,7 +343,7 @@ class RBACMiddleware(BaseHTTPMiddleware):
         workspace_id = workspace_id_from_request_headers(request.headers)
         effective = resolve_effective_role(user, workspace_id)
         request.state.effective_role = effective
-        if permission in role_permissions(effective):
+        if permission in principal_permissions(user, effective):
             return await call_next(request)
 
         return JSONResponse(

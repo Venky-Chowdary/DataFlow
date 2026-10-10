@@ -33,6 +33,7 @@ from .middleware.tenant_middleware import TenantMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
 from .routers.auth_router import router as auth_router
+from .routers.iam_router import router as iam_router
 from .routers.automation_router import router as automation_router
 from .routers.catalog_router import router as catalog_router
 from .routers.connectors_router import router as connectors_router
@@ -426,6 +427,7 @@ app.include_router(auth_router, prefix="/api/v1")
 # Compatibility mount when VITE_API_BASE omits /api/v1 (hits /auth/login).
 app.include_router(auth_router)
 app.include_router(audit_router, prefix="/api/v1")
+app.include_router(iam_router, prefix="/api/v1")
 app.include_router(cdc_mapping_review_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
 app.include_router(team_router, prefix="/api/v1")
