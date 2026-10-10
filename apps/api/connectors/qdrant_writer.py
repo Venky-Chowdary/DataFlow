@@ -100,6 +100,24 @@ def _qdrant_live_vector_size(collection_info: dict[str, Any]) -> int | None:
     return None
 
 
+def _qdrant_live_vector_distance(collection_info: dict[str, Any]) -> str | None:
+    """Extract the configured distance from GET /collections/{name} JSON."""
+    result = collection_info.get("result") if isinstance(collection_info, dict) else None
+    if not isinstance(result, dict):
+        result = collection_info if isinstance(collection_info, dict) else {}
+    config = result.get("config") if isinstance(result, dict) else None
+    params = (config or {}).get("params") if isinstance(config, dict) else None
+    vectors = (params or {}).get("vectors") if isinstance(params, dict) else None
+    if not isinstance(vectors, dict):
+        return None
+    if vectors.get("distance"):
+        return str(vectors["distance"])
+    for spec in vectors.values():
+        if isinstance(spec, dict) and spec.get("distance"):
+            return str(spec["distance"])
+    return None
+
+
 def _qdrant_payload_data_type_to_carrier(data_type: Any) -> str:
     """Map Qdrant payload_schema ``data_type`` to a Datawrap logical carrier."""
     raw = str(data_type or "").strip().lower()
@@ -530,6 +548,7 @@ def write_mapped_rows(
 
     collection_existed = False
     cached_live_dim: int | None = None
+    cached_live_distance: str | None = None
     try:
         session = _requests_session()
         hdrs = _headers(api_key)
@@ -557,6 +576,9 @@ def write_mapped_rows(
             except Exception:
                 info = {}
             cached_live_dim = _qdrant_live_vector_size(
+                info if isinstance(info, dict) else {}
+            )
+            cached_live_distance = _qdrant_live_vector_distance(
                 info if isinstance(info, dict) else {}
             )
             schema_types = _qdrant_live_payload_types(
@@ -888,21 +910,25 @@ def write_mapped_rows(
     inserted = 0
     stale_chunks_deleted = 0
     skipped_docs = 0
+    fingerprint_meta: dict[str, str] = {}
     session = None
     try:
         session = _requests_session()
         hdrs = _headers(api_key)
+        qdrant_distance = "Cosine"
         if collection_existed:
             live_dim = cached_live_dim
-            if live_dim is None:
+            live_distance = cached_live_distance
+            if live_dim is None or live_distance is None:
                 exists = session.get(
                     f"{base_url}/collections/{collection}", headers=hdrs, timeout=10
                 )
                 if exists.status_code == 200:
-                    try:
-                        live_dim = _qdrant_live_vector_size(exists.json())
-                    except Exception:
-                        live_dim = None
+                    live_info = exists.json()
+                    if live_dim is None:
+                        live_dim = _qdrant_live_vector_size(live_info)
+                    if live_distance is None:
+                        live_distance = _qdrant_live_vector_distance(live_info)
             if live_dim is None:
                 return WriteResult(
                     ok=False,
@@ -947,6 +973,23 @@ def write_mapped_rows(
                     ],
                     rejected_rows=len(rejected) + 1,
                 )
+            if live_distance is None:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection,
+                    target_schema=schema or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Qdrant collection {collection!r} exists but live vector "
+                        "distance was unavailable — refuse to fingerprint an "
+                        "assumed distance. Re-check collection config and retry."
+                    ),
+                    rejected_details=list(rejected),
+                    rejected_rows=len(rejected),
+                )
+            qdrant_distance = live_distance
         elif not create_table:
             raise RuntimeError(
                 f"Qdrant collection '{collection}' is missing and "
@@ -954,6 +997,59 @@ def write_mapped_rows(
             )
         else:
             _ensure_collection(session, base_url, collection, dimension, hdrs)
+
+        from services.vector_fingerprint import (
+            VectorFingerprintMismatchError,
+            enforce_fingerprint,
+            fingerprint_for_write,
+        )
+
+        incoming_fingerprint = fingerprint_for_write(
+            model=embedding_model,
+            dimension=dimension,
+            distance=qdrant_distance,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            skip_chunking=skip_chunking,
+            embedding_column=embedding_column,
+        )
+        try:
+            fingerprint_status = enforce_fingerprint(
+                "qdrant",
+                {},
+                collection,
+                incoming_fingerprint,
+                session=session,
+                base_url=base_url,
+                headers=hdrs,
+            )
+        except VectorFingerprintMismatchError as exc:
+            try:
+                session.close()
+            except Exception as close_exc:
+                logger.warning(
+                    "Failed to close Qdrant session after fingerprint mismatch: %s",
+                    close_exc,
+                )
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                rejected_details=rejected,
+                rejected_rows=len(rejected),
+                meta={
+                    "vector_fingerprint_status": "mismatch",
+                    "vector_fingerprint_digest": incoming_fingerprint.digest,
+                },
+            )
+        fingerprint_meta = {
+            "vector_fingerprint_status": fingerprint_status,
+            "vector_fingerprint_digest": incoming_fingerprint.digest,
+        }
 
         from services.vector_sync import _ensure_qdrant_source_id_index
 
@@ -992,6 +1088,7 @@ def write_mapped_rows(
             error=str(exc),
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta=fingerprint_meta,
         )
 
     cleanup_keep: dict[str, set[Any]] = {}
@@ -1040,7 +1137,10 @@ def write_mapped_rows(
             ),
             rejected_details=rejected,
             rejected_rows=len(rejected),
-            meta=stale_cleanup_meta(stale_chunks_deleted, skipped_docs),
+            meta={
+                **stale_cleanup_meta(stale_chunks_deleted, skipped_docs),
+                **fingerprint_meta,
+            },
         )
     finally:
         session.close()
@@ -1058,10 +1158,12 @@ def write_mapped_rows(
             rejected_details=rejected,
             rejected_rows=len(rejected),
             warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
+            meta=fingerprint_meta,
         )
 
     meta = _qdrant_gate8_meta(points)
     meta.update(stale_cleanup_meta(stale_chunks_deleted, skipped_docs))
+    meta.update(fingerprint_meta)
     return WriteResult(
         ok=True,
         rows_written=inserted,

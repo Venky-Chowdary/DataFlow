@@ -598,6 +598,7 @@ def write_mapped_rows(
     inserted = 0
     committed = False
     rejected_details: list[dict[str, Any]] = list(map_rejected)
+    fingerprint_meta: dict[str, str] = {}
     from services.vector_sync import pgvector_delete_stale_chunks
     stale_chunks_deleted = 0
     skipped_docs = 0
@@ -771,6 +772,50 @@ def write_mapped_rows(
                     rejected_rows=len(rejected_details),
                     meta=stale_cleanup_meta(0, skipped_docs),
                 )
+            from services.vector_fingerprint import (
+                VectorFingerprintMismatchError,
+                enforce_fingerprint,
+                fingerprint_for_write,
+            )
+
+            incoming_fingerprint = fingerprint_for_write(
+                model=embedding_model,
+                dimension=dimension,
+                distance="cosine",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                skip_chunking=skip_chunking,
+                embedding_column=embedding_column,
+            )
+            try:
+                fingerprint_status = enforce_fingerprint(
+                    "pgvector",
+                    {},
+                    table_name,
+                    incoming_fingerprint,
+                    schema=schema or "public",
+                    cursor=cur,
+                )
+            except VectorFingerprintMismatchError as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=str(exc),
+                    rejected_details=rejected_details,
+                    rejected_rows=len(rejected_details),
+                    meta={
+                        "vector_fingerprint_status": "mismatch",
+                        "vector_fingerprint_digest": incoming_fingerprint.digest,
+                    },
+                )
+            fingerprint_meta = {
+                "vector_fingerprint_status": fingerprint_status,
+                "vector_fingerprint_digest": incoming_fingerprint.digest,
+            }
             total = len(valid_rows)
             for i in range(0, total, batch_size):
                 batch = valid_rows[i : i + batch_size]
@@ -923,11 +968,17 @@ def write_mapped_rows(
             ),
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
-            meta=stale_cleanup_meta(stale_chunks_deleted, skipped_docs),
+            meta={
+                **stale_cleanup_meta(stale_chunks_deleted, skipped_docs),
+                **fingerprint_meta,
+            },
         )
     finally:
         conn.close()
 
+    meta = _pgvector_gate8_meta(written_rows)
+    meta.update(stale_cleanup_meta(stale_chunks_deleted, skipped_docs))
+    meta.update(fingerprint_meta)
     from connectors.writer_common import reject_on_strict_policy as _reject_final
 
     _final_abort = _reject_final(error_policy, rejected_details, "pgvector")
@@ -943,10 +994,9 @@ def write_mapped_rows(
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
             warnings=[r.get("reason") or "" for r in rejected_details[:10] if r.get("reason")],
+            meta=meta,
         )
 
-    meta = _pgvector_gate8_meta(written_rows)
-    meta.update(stale_cleanup_meta(stale_chunks_deleted, skipped_docs))
     return WriteResult(
         ok=True,
         rows_written=inserted,

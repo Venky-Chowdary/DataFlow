@@ -936,12 +936,16 @@ def _drop_qdrant(cfg: dict[str, Any], table_name: str) -> bool:
     """Delete the destination collection so overwrite cannot append points."""
     from connectors.qdrant_writer import qdrant_rest
 
+    session = None
     try:
         session, base_url, headers = qdrant_rest(cfg)
         resp = session.delete(
             f"{base_url}/collections/{table_name}", headers=headers, timeout=10
         )
         if resp.status_code in {200, 201, 404}:
+            from services.vector_fingerprint import delete_qdrant_fingerprint
+
+            delete_qdrant_fingerprint(session, base_url, headers, table_name)
             return True
         raise RuntimeError(
             f"Qdrant drop failed: {resp.status_code} {resp.text[:300]}"
@@ -950,6 +954,12 @@ def _drop_qdrant(cfg: dict[str, Any], table_name: str) -> bool:
         raise
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception as exc:
+                logger.warning("Failed to close Qdrant drop session: %s", exc)
 
 
 def delete_by_primary_keys(
