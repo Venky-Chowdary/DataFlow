@@ -127,9 +127,10 @@ def test_full_case_matrix_dump_for_proof_artifact():
     for dest, logical, invented, _ in rows:
         if logical != "integer":
             continue
-        if not destination_schema_is_sampled(dest):
-            table = DDL_TYPES[dest][LOGICAL_INTEGER]
-            assert invented == table, (dest, invented, table)
-            if invented.strip().upper() in {"INTEGER", "INT", "INT32", "SIGNED"}:
-                assert dest == "sqlite", (dest, invented)
+        table = DDL_TYPES[dest][LOGICAL_INTEGER]
+        assert invented == table, (dest, invented, table)
+        if destination_schema_is_sampled(dest):
+            continue
+        if invented.strip().upper() in {"INTEGER", "INT", "INT32", "SIGNED"}:
+            assert dest == "sqlite", (dest, invented)
     assert len(rows) == len(DDL_TYPES) * len(_LOGICAL_SPELLINGS)
