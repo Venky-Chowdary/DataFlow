@@ -9,6 +9,7 @@ field mapping.
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import logging
 import re
 from dataclasses import dataclass
@@ -47,8 +48,6 @@ def _pgvector_live_embedding_dim(
     Uses ``format_type`` so we never guess atttypmod encoding across pgvector
     versions. Missing table/column → ``None`` (caller fail-closed).
     """
-    import re
-
     from psycopg2 import sql
 
     cur.execute(
@@ -71,7 +70,7 @@ def _pgvector_live_embedding_dim(
     if not row or not row[0]:
         return None
     formatted = str(row[0]).lower().replace(" ", "")
-    match = re.search(r"vector\((\d+)\)", formatted)
+    match = re.fullmatch(r"(?:vector|halfvec)\((\d+)\)", formatted)
     if not match:
         # Unbounded vector / non-vector type — refuse invent.
         return None
@@ -80,6 +79,155 @@ def _pgvector_live_embedding_dim(
     except (TypeError, ValueError):
         return None
     return dim if dim > 0 else None
+
+
+def _pgvector_live_embedding_storage(
+    cur: Any,
+    schema: str,
+    table_name: str,
+    *,
+    column: str = "embedding",
+) -> str | None:
+    from psycopg2 import sql
+
+    cur.execute(
+        sql.SQL(
+            """
+            SELECT format_type(a.atttypid, a.atttypmod)
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND a.attname = %s
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            """
+        ),
+        (schema, table_name, column),
+    )
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return None
+    match = re.fullmatch(r"(vector|halfvec)\(\d+\)", str(row[0]).lower().replace(" ", ""))
+    return match.group(1) if match else None
+
+
+def _pgvector_extension_version(cur: Any) -> tuple[int, int, int] | None:
+    cur.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return None
+    match = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", str(row[0]).strip())
+    return (
+        (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+        if match
+        else None
+    )
+
+
+def _pgvector_storage_version_error(cur: Any, storage: str) -> str | None:
+    if storage != "halfvec":
+        return None
+    version = _pgvector_extension_version(cur)
+    if version is None:
+        return "Could not determine the installed pgvector extension version."
+    if version < (0, 7, 0):
+        return (
+            f"halfvec storage requires pgvector 0.7.0 or newer; found "
+            f"{'.'.join(map(str, version))}. Upgrade pgvector or use vector storage."
+        )
+    return None
+
+
+def _pgvector_integer_option(
+    value: Any,
+    *,
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if value is None:
+        parsed = default
+    elif isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+    elif isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        parsed = int(value.strip())
+    else:
+        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+    return parsed
+
+
+def _pgvector_index_name(schema: str, table_name: str, kind: str) -> str:
+    digest = hashlib.sha256(f"{schema}\x1f{table_name}\x1f{kind}".encode()).hexdigest()[:10]
+    prefix = re.sub(r"[^A-Za-z0-9_]", "_", f"dfv_{kind}_{table_name}")[:50]
+    return f"{prefix}_{digest}"
+
+
+def _pgvector_ensure_source_index(cur: Any, schema: str, table_name: str) -> None:
+    from psycopg2 import sql
+
+    schema_id = sql.Identifier(schema)
+    table_id = sql.Identifier(table_name)
+    cur.execute(
+        sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS source_id TEXT").format(
+            schema_id, table_id
+        )
+    )
+    cur.execute(
+        sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}.{} USING btree (source_id)").format(
+            sql.Identifier(_pgvector_index_name(schema, table_name, "source")),
+            schema_id,
+            table_id,
+        )
+    )
+
+
+def _pgvector_ensure_hnsw_index(
+    cur: Any,
+    schema: str,
+    table_name: str,
+    *,
+    storage: str,
+    m: int,
+    ef_construction: int,
+) -> str | None:
+    from psycopg2 import sql
+
+    version = _pgvector_extension_version(cur)
+    if version is None or version < (0, 5, 0):
+        found = ".".join(map(str, version)) if version else "unknown"
+        return (
+            f"HNSW indexing requires pgvector 0.5.0 or newer; found {found}. "
+            "Upgrade pgvector or set vector_index to none."
+        )
+    live_storage = _pgvector_live_embedding_storage(cur, schema, table_name)
+    if live_storage != storage:
+        return (
+            f"pgvector embedding column uses {live_storage or 'an unsupported type'}, "
+            f"but vector_storage is {storage}. Use a new table or restore the "
+            "stored vector_storage setting."
+        )
+    operator_class = "halfvec_cosine_ops" if storage == "halfvec" else "vector_cosine_ops"
+    cur.execute(
+        sql.SQL(
+            "CREATE INDEX IF NOT EXISTS {} ON {}.{} USING hnsw "
+            "(embedding {}) WITH (m = {}, ef_construction = {})"
+        ).format(
+            sql.Identifier(_pgvector_index_name(schema, table_name, "hnsw")),
+            sql.Identifier(schema),
+            sql.Identifier(table_name),
+            sql.SQL(operator_class),
+            sql.Literal(m),
+            sql.Literal(ef_construction),
+        )
+    )
+    return None
 
 
 def pgvector_extension_unavailable_reason(exc: BaseException) -> str | None:
@@ -201,6 +349,8 @@ def _exec_schema_table(
     table_name: str,
     dimension: int,
     extras: list[tuple[str, str]] | None = None,
+    *,
+    vector_storage: str = "vector",
 ) -> None:
     from psycopg2 import sql
 
@@ -213,6 +363,11 @@ def _exec_schema_table(
         if named:
             raise RuntimeError(named) from exc
         raise
+    if vector_storage not in {"vector", "halfvec"}:
+        raise ValueError("vector_storage must be 'vector' or 'halfvec'")
+    storage_error = _pgvector_storage_version_error(cur, vector_storage)
+    if storage_error:
+        raise RuntimeError(storage_error)
     cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema_id))
     # Literal double braces in SQL so psycopg2.sql does not treat '{}' as a format placeholder.
     cur.execute(
@@ -221,14 +376,14 @@ def _exec_schema_table(
             CREATE TABLE IF NOT EXISTS {}.{} (
                 id TEXT PRIMARY KEY,
                 content TEXT,
-                embedding vector(%s),
+                embedding {}(%s),
                 metadata JSONB DEFAULT '{{}}',
                 source_id TEXT,
                 chunk_index INT DEFAULT 0,
                 created_at TIMESTAMP DEFAULT now()
             )
             """
-        ).format(schema_id, table_id),
+        ).format(schema_id, table_id, sql.SQL(vector_storage)),
         (dimension,),
     )
     for name, ddl in extras or []:
@@ -401,6 +556,56 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     """Write text rows as embedded chunks into a PostgreSQL pgvector table."""
+    vector_storage = str(_kwargs.get("vector_storage") or "vector").strip().lower()
+    vector_index = str(_kwargs.get("vector_index") or "none").strip().lower()
+    if vector_storage not in {"vector", "halfvec"}:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error="vector_storage must be 'vector' or 'halfvec'.",
+        )
+    if vector_index not in {"none", "hnsw"}:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error="vector_index must be 'none' or 'hnsw'.",
+        )
+    hnsw_m = 16
+    hnsw_ef_construction = 64
+    if vector_index == "hnsw":
+        try:
+            hnsw_m = _pgvector_integer_option(
+                _kwargs.get("vector_hnsw_m"),
+                name="vector_hnsw_m",
+                default=16,
+                minimum=2,
+                maximum=100,
+            )
+            hnsw_ef_construction = _pgvector_integer_option(
+                _kwargs.get("vector_hnsw_ef_construction"),
+                name="vector_hnsw_ef_construction",
+                default=64,
+                minimum=4,
+                maximum=1000,
+            )
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "public",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+            )
     logger.info(
         "Vector write target=%s.%s strategy=%s size=%s overlap=%s unit=%s template=%s",
         schema or "public",
@@ -628,6 +833,7 @@ def write_mapped_rows(
                         chunk_tokenizer if isinstance(chunk_tokenizer, str) else None
                     ),
                     text_template=text_template,
+                    vector_storage=vector_storage,
                 )
         except Exception as exc:
             return WriteResult(
@@ -725,6 +931,35 @@ def write_mapped_rows(
         ),
     }
     if not vector_rows and skipped_source_ids:
+        index_conn = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
+        try:
+            with index_conn.cursor() as index_cur:
+                _pgvector_ensure_source_index(
+                    index_cur, schema or "public", table_name
+                )
+            index_conn.commit()
+        except Exception as exc:
+            index_conn.rollback()
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "public",
+                checksum="",
+                chunks_completed=0,
+                error=f"pgvector source-id index setup failed: {exc}",
+                meta={**vector_skip_meta, "embedding_usage": usage.to_dict()},
+            )
+        finally:
+            index_conn.close()
         if skip_fingerprint is not None:
             from services.vector_fingerprint import (
                 VectorFingerprintMismatchError,
@@ -750,6 +985,48 @@ def write_mapped_rows(
                         schema=schema or "public",
                         cursor=verify_cur,
                     )
+                    if vector_index == "hnsw":
+                        storage_error = _pgvector_storage_version_error(
+                            verify_cur, vector_storage
+                        )
+                        if storage_error:
+                            verify_conn.rollback()
+                            return WriteResult(
+                                ok=False,
+                                rows_written=0,
+                                table_name=table_name,
+                                target_schema=schema or "public",
+                                checksum="",
+                                chunks_completed=0,
+                                error=storage_error,
+                                meta={
+                                    **vector_skip_meta,
+                                    "embedding_usage": usage.to_dict(),
+                                },
+                            )
+                        index_error = _pgvector_ensure_hnsw_index(
+                            verify_cur,
+                            schema or "public",
+                            table_name,
+                            storage=vector_storage,
+                            m=hnsw_m,
+                            ef_construction=hnsw_ef_construction,
+                        )
+                        if index_error:
+                            verify_conn.rollback()
+                            return WriteResult(
+                                ok=False,
+                                rows_written=0,
+                                table_name=table_name,
+                                target_schema=schema or "public",
+                                checksum="",
+                                chunks_completed=0,
+                                error=index_error,
+                                meta={
+                                    **vector_skip_meta,
+                                    "embedding_usage": usage.to_dict(),
+                                },
+                            )
                 verify_conn.commit()
             except VectorFingerprintMismatchError as exc:
                 verify_conn.rollback()
@@ -863,6 +1140,21 @@ def write_mapped_rows(
             },
         )
 
+    if vector_storage == "halfvec" and dimension > 4000:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"halfvec supports at most 4000 dimensions; this embedding has "
+                f"{dimension}. Use vector storage or a lower-dimensional model."
+            ),
+            meta={"embedding_usage": usage.to_dict()},
+        )
+
     inserted = 0
     committed = False
     rejected_details: list[dict[str, Any]] = list(map_rejected)
@@ -894,6 +1186,7 @@ def write_mapped_rows(
                     table_name,
                     dimension,
                     typed_extras,
+                    vector_storage=vector_storage,
                 )
             else:
                 # Respect create_table=False — never contradict preflight deny-create.
@@ -918,6 +1211,22 @@ def write_mapped_rows(
                         rejected_details=list(map_rejected),
                         rejected_rows=len(map_rejected),
                     )
+
+            storage_error = _pgvector_storage_version_error(cur, vector_storage)
+            if storage_error:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=storage_error,
+                    rejected_details=list(map_rejected),
+                    rejected_rows=len(map_rejected),
+                    meta={"embedding_usage": usage.to_dict()},
+                )
+            _pgvector_ensure_source_index(cur, schema or "public", table_name)
 
             # CREATE TABLE IF NOT EXISTS does not alter an existing vector(n) —
             # always probe live typmod and refuse dim invent / silent truncate.
@@ -1060,6 +1369,7 @@ def write_mapped_rows(
                     chunk_tokenizer if isinstance(chunk_tokenizer, str) else None
                 ),
                 text_template=text_template,
+                vector_storage=vector_storage,
             )
             try:
                 fingerprint_status = enforce_fingerprint(
@@ -1088,6 +1398,56 @@ def write_mapped_rows(
                         },
                 )
             from services.vector_sync import stamp_vector_document_metadata
+
+            live_storage = _pgvector_live_embedding_storage(
+                cur, schema or "public", table_name
+            )
+            if live_storage != vector_storage:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"pgvector embedding column uses "
+                        f"{live_storage or 'an unsupported type'}, but vector_storage "
+                        f"is {vector_storage}. Use a new table or restore the stored "
+                        "vector_storage setting."
+                    ),
+                    rejected_details=rejected_details,
+                    rejected_rows=len(rejected_details),
+                    meta={
+                        **fingerprint_meta,
+                        "vector_fingerprint_status": fingerprint_status,
+                    },
+                )
+            if vector_index == "hnsw":
+                index_error = _pgvector_ensure_hnsw_index(
+                    cur,
+                    schema or "public",
+                    table_name,
+                    storage=vector_storage,
+                    m=hnsw_m,
+                    ef_construction=hnsw_ef_construction,
+                )
+                if index_error:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema or "public",
+                        checksum="",
+                        chunks_completed=0,
+                        error=index_error,
+                        rejected_details=rejected_details,
+                        rejected_rows=len(rejected_details),
+                        meta={
+                            **fingerprint_meta,
+                            "vector_fingerprint_status": fingerprint_status,
+                        },
+                    )
 
             stamp_vector_document_metadata(valid_rows, incoming_fingerprint.digest)
             fingerprint_meta.update({
@@ -1138,9 +1498,11 @@ def write_mapped_rows(
 
                 if not values:
                     continue
-                placeholders = "(%s, %s, %s::vector, %s::jsonb, %s, %s" + (
-                    "".join(", %s" for _ in typed_extras)
-                ) + ")"
+                placeholders = (
+                    f"(%s, %s, %s::{vector_storage}, %s::jsonb, %s, %s"
+                    + "".join(", %s" for _ in typed_extras)
+                    + ")"
+                )
                 args_str = ",".join(
                     cur.mogrify(
                         placeholders,

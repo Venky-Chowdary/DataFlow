@@ -48,6 +48,28 @@ def test_default_chunker_fingerprint_is_byte_compatible_with_m2():
     }
 
 
+def test_vector_storage_changes_fingerprint_only_when_non_default():
+    from services.vector_fingerprint import fingerprint_for_write
+
+    options = {
+        "model": "hash/32",
+        "dimension": 32,
+        "distance": "cosine",
+        "chunk_size": 512,
+        "chunk_overlap": 50,
+        "skip_chunking": False,
+        "embedding_column": None,
+    }
+    default = fingerprint_for_write(**options)
+    explicit_default = fingerprint_for_write(**options, vector_storage="vector")
+    halfvec = fingerprint_for_write(**options, vector_storage="halfvec")
+
+    assert explicit_default.to_dict() == default.to_dict()
+    assert "vector_storage" not in default.chunker
+    assert halfvec.chunker["vector_storage"] == "halfvec"
+    assert halfvec.digest != default.digest
+
+
 def test_non_default_chunking_and_template_are_fingerprinted():
     from services.chunkers import ChunkerConfig
     from services.vector_fingerprint import fingerprint_for_write

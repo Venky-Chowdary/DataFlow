@@ -74,3 +74,26 @@ Move schemas and data across heterogeneous engines **with fail-closed type fidel
 | Catalog honesty | `enrich_catalog_entry` / `catalog_summary.unique_drivers` |
 | Buyer pack | `docs/BUYER_EVIDENCE_PACK.md` |
 | Scope | `docs/PRODUCT_SCOPE.md` |
+
+## G-VEC: Vector / AI-ready
+
+**Parity score:** Datawrap **5/10** vs Airbyte/Fivetran **6/10**.
+
+| Capability | Status | Evidence test file | Verified-live engine |
+| --- | --- | --- | --- |
+| pgvector source-id btree / optional HNSW indexes and vector / halfvec storage | M7 live coverage; default remains `vector` with no HNSW index | `apps/api/tests/test_pgvector_m7_live.py` | pgvector extension 0.8.7 at `:5434` |
+| Stable vector writes, unchanged-document skip, fingerprints, usage, verified delete and stale cleanup | Live writer contracts cover only the named engines; Milvus was not available | `apps/api/tests/test_vector_m6_live.py`, `apps/api/tests/test_vector_document_skip.py`, `apps/api/tests/test_vector_fingerprint_live.py` | Weaviate 1.26.6; Pinecone Local `v1.0.0.rc0`; pgvector and Qdrant have separate live suites |
+| CDC document-key delete, cleanup and redelivery | End-to-end proof is at-least-once and currently limited to pgvector and Qdrant | `apps/api/tests/test_cdc_postgres_vector_live.py` | pgvector `:5434`; Qdrant `:6335` |
+| Embedding provider routing and usage accounting | Paid-provider tests use fake responses; deterministic hash embeddings are used for live writer tests | `apps/api/tests/test_embedding_providers.py` | pgvector, Qdrant, Weaviate, Pinecone Local (hash model only) |
+| Chunking strategies and safe record templates | Unit coverage uses injected tokenizers; real tiktoken has not been tested | `apps/api/tests/test_document_chunking.py`, `apps/api/tests/test_vector_template.py` | No live embedding provider |
+| Run-detail embedding usage estimate | Component-rendered summary with a test for tokens, calls and estimated cost | `apps/web/src/components/transfer/EmbeddingUsageSummary.test.tsx` | No engine required; not an engine-live capability |
+
+Gaps keeping Datawrap below parity:
+- Paid providers are tested only against fake responses.
+- Milvus has not run live; Pinecone evidence is Pinecone Local only.
+- CDC for Weaviate, Pinecone, and Milvus has not run end to end.
+- No managed rerank or hybrid search.
+- The rate limiter is process-local.
+- Token chunking has not been tested with real tiktoken.
+
+CDC is at-least-once; exactly-once is not claimed. No retrieval-quality claim is made.

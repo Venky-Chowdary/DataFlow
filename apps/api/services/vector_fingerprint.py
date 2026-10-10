@@ -125,6 +125,7 @@ def fingerprint_for_write(
     chunk_unit: str = "chars",
     chunk_tokenizer: str | None = None,
     text_template: str | None = None,
+    vector_storage: str = "vector",
 ) -> EmbeddingFingerprint:
     """Build a credential-free identity for one vector write configuration."""
     from services import vectorization
@@ -207,6 +208,10 @@ def fingerprint_for_write(
         chunker["template_sha256"] = hashlib.sha256(
             text_template.encode("utf-8")
         ).hexdigest()
+    if vector_storage not in {"vector", "halfvec"}:
+        raise ValueError("vector_storage must be 'vector' or 'halfvec'")
+    if vector_storage != "vector":
+        chunker["vector_storage"] = vector_storage
     return EmbeddingFingerprint(
         provider=provider,
         model=canonical_model,

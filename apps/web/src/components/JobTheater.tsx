@@ -45,6 +45,7 @@ import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
 import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
+import { EmbeddingUsageSummary } from "./transfer/EmbeddingUsageSummary";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -952,6 +953,7 @@ export function JobTheaterView({
             job={job}
             onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
           />
+          <EmbeddingUsageSummary destinationSummary={destinationSummary} />
           <JobTrustScoreCard
             job={job}
             onOpenQuarantine={rejectedRows > 0 ? () => {

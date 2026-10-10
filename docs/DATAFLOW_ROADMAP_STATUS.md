@@ -139,28 +139,28 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 
 **Target:** Move data into vector DBs so it is AI-ready.
 
-### Status: shipped (five vector dests + Studio wiring + OCR + durable cache)
+### G-VEC status: partially verified
 
+| Capability | Status | Evidence test file | Verified-live engine |
+| --- | --- | --- | --- |
+| pgvector source-id btree / optional HNSW indexes and vector / halfvec storage | M7 live coverage; default remains `vector` with no HNSW index | `apps/api/tests/test_pgvector_m7_live.py` | pgvector extension 0.8.7 at `:5434` |
+| Stable vector writes, unchanged-document skip, fingerprints, usage, verified delete and stale cleanup | Live writer contracts cover only the named engines; Milvus was not available | `apps/api/tests/test_vector_m6_live.py`, `apps/api/tests/test_vector_document_skip.py`, `apps/api/tests/test_vector_fingerprint_live.py` | Weaviate 1.26.6; Pinecone Local `v1.0.0.rc0`; pgvector and Qdrant have separate live suites |
+| CDC document-key delete, cleanup and redelivery | End-to-end proof is at-least-once and currently limited to pgvector and Qdrant | `apps/api/tests/test_cdc_postgres_vector_live.py` | pgvector `:5434`; Qdrant `:6335` |
+| Embedding provider routing and usage accounting | Paid-provider tests use fake responses; deterministic hash embeddings are used for live writer tests | `apps/api/tests/test_embedding_providers.py` | pgvector, Qdrant, Weaviate, Pinecone Local (hash model only) |
+| Chunking strategies and safe record templates | Unit coverage uses injected tokenizers; real tiktoken has not been tested | `apps/api/tests/test_document_chunking.py`, `apps/api/tests/test_vector_template.py` | No live embedding provider |
+| Run-detail embedding usage estimate | Component-rendered summary with a test for tokens, calls and estimated cost | `apps/web/src/components/transfer/EmbeddingUsageSummary.test.tsx` | No engine required; not an engine-live capability |
 
-| What exists today                                          | Where                                         |
-| ---------------------------------------------------------- | --------------------------------------------- |
-| Internal ChromaDB RAG store for mapping suggestions        | `packages/ml` / `services`                    |
-| Sentence-transformers / OpenAI embed + L1/L2 cache         | `services/vectorization.py` + `embedding_cache.py` |
-| pgvector + Qdrant + Weaviate + Pinecone + Milvus writers   | `connectors/*_writer.py` (REST; no fake SDKs) |
-| Studio catalog + Advanced vector fields → `endpoint.extra` | Transfer Studio / Destination Advanced        |
-| Opt-in OCR for scanned PDFs                                | `services/pdf_ocr.py` + Studio upload toggle  |
-| Semantic vector field routing                              | `services/semantic_vector_routing.py` + Studio Apply |
-| Durable embedding cache (SQLite)                           | `services/embedding_cache.py` + Studio Advanced |
+**Parity score:** Datawrap **5/10** vs Airbyte/Fivetran **6/10**.
 
+Gaps keeping Datawrap below parity:
+- Paid providers are tested only against fake responses.
+- Milvus has not run live; Pinecone evidence is Pinecone Local only.
+- CDC for Weaviate, Pinecone, and Milvus has not run end to end.
+- No managed rerank or hybrid search.
+- The rate limiter is process-local.
+- Token chunking has not been tested with real tiktoken.
 
-### What is missing
-
-- Dual-node AG / Data Guard failover IT against a real secondary (probe + gap class are shipped; topology failover reconnect not claimed).
-- Cross-node shared embedding cache (Redis/shared volume) — not claimed; SQLite is per volume.
-
-### Why it matters
-
-Airbyte ships five vector destinations and an official RAG pipeline guide. Datawrap now matches that destination set with Studio-wired writers and can beat them on semantic mapping + integrity.
+CDC is at-least-once; exactly-once is not claimed. No retrieval-quality claim is made.
 
 ### Recommended next step
 
@@ -355,7 +355,7 @@ Ship a generic Singer tap/target bridge and a connector SDK so the community can
 | Batch reliability           | 8/10           | 9/10             | small                                                            |
 | Connector depth             | 5/10           | 9/10             | large (3 transfer-ready SaaS writers added; still far behind)    |
 | CDC / real-time             | **7.2/10**     | 8/10             | large (incremental snapshot UI + row_filter evidence; AG dual-node gated) |
-| Vector / AI-ready           | 2/10           | 6/10             | large                                                            |
+| Vector / AI-ready           | **5/10**       | **6/10**         | large                                                            |
 | Data contracts / governance | 6/10           | 5/10             | small lead                                                       |
 | GitOps / as-code            | **7/10**       | 5/10             | lead (CLI+HTTP+UI+CI+signed CD gate)                             |
 | Lakehouse / Iceberg         | **6/10**       | 5/10             | small lead (pyiceberg REST/Glue/Nessie/SQL + filesystem CoW)     |
