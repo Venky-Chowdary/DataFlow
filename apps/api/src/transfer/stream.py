@@ -737,7 +737,12 @@ def _write_batch(
         result = mod.write_mapped_rows(**kwargs)
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
-        summary = {"type": dest_type, "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
+        # Name what was written like the batch writers do: job records and
+        # reconcile read ``table``. An object-store writer's name is this
+        # chunk's part key, not the logical object, so it stays ``key``.
+        name_field = "key" if dest_type in ("s3", "gcs", "adls") else "table"
+        summary = {"type": dest_type, name_field: result.table_name, "checksum": result.checksum,
+                   "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
     if resolve_driver_type(dest_type) == "generic_sql":

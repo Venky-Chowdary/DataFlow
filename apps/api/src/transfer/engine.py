@@ -2206,6 +2206,23 @@ class DuplicateTransferSubmission(Exception):
         )
 
 
+def _job_destination_name(dest_summary: dict[str, Any], destination: Any) -> str:
+    """The object a run wrote, as the job record names it.
+
+    A file export has no table: the writer names the file it produced, and
+    without it ``get_job`` / ``list_jobs`` showed the format (``csv``) and
+    ``dest_table=null``.
+    """
+    return str(
+        dest_summary.get("collection")
+        or dest_summary.get("table")
+        or getattr(destination, "collection", "")
+        or getattr(destination, "table", "")
+        or dest_summary.get("filename")
+        or ""
+    )
+
+
 class UniversalTransferEngine:
     """
     Orchestrates universal data movement:
@@ -3949,11 +3966,9 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
-                destination_collection=dest_summary.get("collection")
-                or dest_summary.get("table")
-                or request.destination.collection
-                or request.destination.table
-                or "",
+                destination_collection=_job_destination_name(
+                    dest_summary, request.destination
+                ),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
@@ -5000,11 +5015,9 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
-                destination_collection=dest_summary.get("collection")
-                or dest_summary.get("table")
-                or request.destination.collection
-                or request.destination.table
-                or "",
+                destination_collection=_job_destination_name(
+                    dest_summary, request.destination
+                ),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
@@ -5793,11 +5806,9 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
-                destination_collection=dest_summary.get("collection")
-                or dest_summary.get("table")
-                or request.destination.collection
-                or request.destination.table
-                or "",
+                destination_collection=_job_destination_name(
+                    dest_summary, request.destination
+                ),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
