@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -29,6 +30,11 @@ from typing import Any, Callable, Sequence
 
 from services.value_serializer import json_default, json_loads_exact
 
+from connectors.iceberg_commit import (
+    CommitRetryPolicy,
+    IcebergCommitStateUnknownError,
+    commit_with_retry,
+)
 from connectors.writer_common import (
     WriteResult,
     _rejected_row_count,
@@ -39,6 +45,13 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy,
 )
+
+logger = logging.getLogger(__name__)
+
+
+class _IcebergNoCommit(Exception):
+    """Signal an empty delete plan without invoking transaction commit."""
+
 
 try:
     import pyarrow as pa
@@ -1873,15 +1886,41 @@ def _write_mapped_rows_pyiceberg(
 
         if mode in upsert_modes:
             pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
-            upsert_result = tbl.upsert(pa_table, join_cols=pk_cols)
-            rows_written = upsert_result.rows_updated + upsert_result.rows_inserted
+
+            def stage(_fresh_tbl: Any, txn: Any, props: dict[str, str]) -> int:
+                upsert_result = txn.upsert(
+                    pa_table,
+                    join_cols=pk_cols,
+                    snapshot_properties=props,
+                )
+                return upsert_result.rows_updated + upsert_result.rows_inserted
+
         elif mode in {"overwrite", "replace"}:
-            tbl.overwrite(pa_table)
-            rows_written = len(pa_table)
+
+            def stage(_fresh_tbl: Any, txn: Any, props: dict[str, str]) -> int:
+                txn.overwrite(pa_table, snapshot_properties=props)
+                return len(pa_table)
+
         else:
-            tbl.append(pa_table)
-            rows_written = len(pa_table)
-    except Exception as exc:
+
+            def stage(_fresh_tbl: Any, txn: Any, props: dict[str, str]) -> int:
+                txn.append(pa_table, snapshot_properties=props)
+                return len(pa_table)
+
+        outcome = commit_with_retry(
+            lambda: catalog.load_table(identifier),
+            stage,
+            operation=mode,
+            policy=CommitRetryPolicy.from_endpoint(endpoint),
+        )
+        rows_written = outcome.value
+    except IcebergCommitStateUnknownError as exc:
+        logger.error(
+            "Iceberg %s commit outcome unknown table=%s commit_id=%s",
+            mode,
+            table_identifier,
+            exc.commit_id,
+        )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -1889,7 +1928,27 @@ def _write_mapped_rows_pyiceberg(
             target_schema=target_schema,
             checksum="",
             chunks_completed=0,
-            error=f"Iceberg {mode} failed: {exc}",
+            error=(
+                f"Iceberg {mode} commit outcome unknown "
+                f"(commit-id {exc.commit_id}): {exc}"
+            ),
+            driver="iceberg",
+        )
+    except Exception as exc:
+        logger.error(
+            "Iceberg %s failed table=%s error=%s",
+            mode,
+            table_identifier,
+            type(exc).__name__,
+        )
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=target_schema,
+            checksum="",
+            chunks_completed=0,
+            error=f"Iceberg {mode} failed: {type(exc).__name__}: {exc}",
             driver="iceberg",
         )
 
@@ -3116,52 +3175,85 @@ def _delete_pyiceberg(
     lsn_column: str,
 ) -> int:
     from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
+    from pyiceberg.exceptions import (
+        CommitFailedException,
+        CommitStateUnknownException,
+        ValidationException,
+    )
 
     config = parse_iceberg_catalog_config(endpoint)
     catalog = load_catalog(endpoint)
     identifier = config["namespace"] + (config["table_name"],)
-    tbl = catalog.load_table(identifier)
-    work_keys = {str(k) for k in key_set}
-    if incoming_lsn:
-        # CDC LSN guard projects pk (+ lsn) only. Overwrite leftover MERGE
-        # has no LSN and must not materialize scan().to_arrow() of the table.
-        select_cols = list(dict.fromkeys([*pk_cols, lsn_column]))
-        scanned = tbl.scan().select(*select_cols).to_arrow()
-        rows: list[dict[str, Any]] = []
-        for i in range(scanned.num_rows):
-            rows.append(
-                {
-                    name: scanned.column(name)[i].as_py()
-                    for name in scanned.column_names
-                }
-            )
-        work_keys = _filter_delete_keys_by_lsn(
-            rows,
-            pk_cols,
-            work_keys,
-            incoming_lsn=incoming_lsn,
-            lsn_column=lsn_column,
-        )
-        work_keys = {
-            pk
-            for row in rows
-            if (pk := _iceberg_row_pk(row, pk_cols)) is not None and pk in work_keys
-        }
-    if not work_keys:
-        return 0
-    try:
-        tbl.delete(delete_filter=_iceberg_delete_predicate(tbl, pk_cols, work_keys))
-    except Exception:
-        if len(pk_cols) != 1:
-            raise
-        from pyiceberg.types import StringType
 
-        field = tbl.schema().find_field(pk_cols[0], case_sensitive=False)
-        ftype = getattr(field, "field_type", None)
-        # Quoted-string IN is only valid for string PKs. A numeric In()
-        # failure falling through to strings would no-op leftover MERGE.
-        if not isinstance(ftype, StringType):
+    def stage(fresh_tbl: Any, txn: Any, props: dict[str, str]) -> int:
+        work_keys = {str(k) for k in key_set}
+        if incoming_lsn:
+            # CDC LSN guard projects pk (+ lsn) only. Overwrite leftover MERGE
+            # has no LSN and must not materialize scan().to_arrow() of the table.
+            select_cols = list(dict.fromkeys([*pk_cols, lsn_column]))
+            scanned = fresh_tbl.scan().select(*select_cols).to_arrow()
+            rows: list[dict[str, Any]] = []
+            for i in range(scanned.num_rows):
+                rows.append(
+                    {
+                        name: scanned.column(name)[i].as_py()
+                        for name in scanned.column_names
+                    }
+                )
+            work_keys = _filter_delete_keys_by_lsn(
+                rows,
+                pk_cols,
+                work_keys,
+                incoming_lsn=incoming_lsn,
+                lsn_column=lsn_column,
+            )
+            work_keys = {
+                pk
+                for row in rows
+                if (pk := _iceberg_row_pk(row, pk_cols)) is not None and pk in work_keys
+            }
+        if not work_keys:
+            raise _IcebergNoCommit
+        try:
+            txn.delete(
+                delete_filter=_iceberg_delete_predicate(
+                    fresh_tbl, pk_cols, work_keys
+                ),
+                snapshot_properties=props,
+            )
+        except (
+            CommitFailedException,
+            CommitStateUnknownException,
+            ValidationException,
+        ):
             raise
-        quoted = ", ".join("'" + str(k).replace("'", "''") + "'" for k in work_keys)
-        tbl.delete(delete_filter=f"{pk_cols[0]} IN ({quoted})")
-    return len(work_keys)
+        except Exception:
+            if len(pk_cols) != 1:
+                raise
+            from pyiceberg.types import StringType
+
+            field = fresh_tbl.schema().find_field(pk_cols[0], case_sensitive=False)
+            ftype = getattr(field, "field_type", None)
+            # Quoted-string IN is only valid for string PKs. A numeric In()
+            # failure falling through to strings would no-op leftover MERGE.
+            if not isinstance(ftype, StringType):
+                raise
+            quoted = ", ".join(
+                "'" + str(k).replace("'", "''") + "'" for k in work_keys
+            )
+            txn.delete(
+                delete_filter=f"{pk_cols[0]} IN ({quoted})",
+                snapshot_properties=props,
+            )
+        return len(work_keys)
+
+    try:
+        outcome = commit_with_retry(
+            lambda: catalog.load_table(identifier),
+            stage,
+            operation="delete",
+            policy=CommitRetryPolicy.from_endpoint(endpoint),
+        )
+    except _IcebergNoCommit:
+        return 0
+    return outcome.value
