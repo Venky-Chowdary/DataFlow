@@ -111,25 +111,47 @@ def kafka_client_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
         "bootstrap_servers": bootstrap,
         "request_timeout_ms": 30000,
     }
+    kwargs.update(kafka_sasl_kwargs(cfg))
+    return kwargs
+
+
+# The saved connector form keeps the mechanism in ``database``. Only a real
+# SASL mechanism name is read from there — a database/cluster label is not.
+_SASL_MECHANISMS = frozenset(
+    {"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512", "GSSAPI", "OAUTHBEARER"}
+)
+
+
+def kafka_sasl_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
+    """kafka-python SASL kwargs from a connector config — the one mapping.
+
+    Consumer, producer and privilege probe all authenticate through this, so a
+    broker that accepts the reader cannot reject the writer or the probe. Empty
+    when there is no username+password (plaintext / mTLS-less dev brokers).
+    """
     extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
     security = str(
         cfg.get("security_protocol") or extra.get("security_protocol") or cfg.get("schema") or ""
     ).upper()
     username = str(cfg.get("username") or extra.get("username") or "")
     password = str(cfg.get("password") or cfg.get("api_key") or extra.get("password") or "")
+    if not (username and password):
+        return {}
+    database = str(cfg.get("database") or "").strip().upper()
     mechanism = str(
-        extra.get("sasl_mechanism") or cfg.get("sasl_mechanism") or ""
+        extra.get("sasl_mechanism")
+        or cfg.get("sasl_mechanism")
+        or (database if database in _SASL_MECHANISMS else "")
     ).strip()
-    if username and password:
-        kwargs["security_protocol"] = (
-            security if security in {"SASL_SSL", "SASL_PLAINTEXT"} else "SASL_SSL"
-        )
-        kwargs["sasl_mechanism"] = mechanism or "PLAIN"
-        kwargs["sasl_plain_username"] = username
-        kwargs["sasl_plain_password"] = password
-        if kwargs["security_protocol"] == "SASL_SSL":
-            kwargs["ssl_context"] = ssl.create_default_context()
-    return kwargs
+    out: dict[str, Any] = {
+        "security_protocol": security if security in {"SASL_SSL", "SASL_PLAINTEXT"} else "SASL_SSL",
+        "sasl_mechanism": mechanism or "PLAIN",
+        "sasl_plain_username": username,
+        "sasl_plain_password": password,
+    }
+    if out["security_protocol"] == "SASL_SSL":
+        out["ssl_context"] = ssl.create_default_context()
+    return out
 
 
 def kafka_dest_count(cfg: dict[str, Any], topic: str) -> int:
