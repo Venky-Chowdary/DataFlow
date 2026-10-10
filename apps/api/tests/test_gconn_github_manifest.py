@@ -1,12 +1,7 @@
 from __future__ import annotations
 
 import json
-import os
-import socket
 from pathlib import Path
-from urllib.parse import urljoin
-
-import pytest
 
 from connectors.sdk import get_descriptor
 from connectors.sdk.github import GitHubSource
@@ -106,29 +101,3 @@ def test_github_repository_link_pagination_and_pull_request_records_are_preserve
 
         pull_request_issue = next(record for record in issues if "pull_request" in record)
         assert pull_request_issue["pull_request"] == issue_page_one[0]["pull_request"]
-
-
-def test_github_live_smoke_reads_one_page_or_skips_with_a_reason() -> None:
-    token = os.environ.get("GITHUB_TOKEN", "").strip()
-    if not token:
-        pytest.skip("GITHUB_TOKEN is not set")
-
-    try:
-        with socket.create_connection(("api.github.com", 443), timeout=2):
-            pass
-    except OSError as exc:
-        pytest.skip(f"api.github.com two-second probe failed ({type(exc).__name__})")
-
-    source = GitHubSource({"access_token": token})
-    repositories = source.manifest.streams[0]
-    headers = dict(source.auth.headers)
-    headers.update(repositories.request_headers)
-    result = source.requester.request_json(
-        repositories.method,
-        urljoin(source.manifest.base_url, repositories.path),
-        headers=headers,
-        params={"per_page": 1},
-        stream=repositories.name,
-    )
-    assert isinstance(result.payload, list)
-    assert len(result.payload) <= 1

@@ -38,6 +38,7 @@ def pytest_configure(config):
         "markers",
         "fake_mongo: leftover MERGE uses an in-memory collection (no live Mongo)",
     )
+    config.addinivalue_line("markers", "live: optional live vendor smoke test")
 
 # fakesnow keeps the emulated warehouse in a DuckDB file, and DuckDB allows a
 # single writer per file. Under `pytest -n` every worker would open the same
