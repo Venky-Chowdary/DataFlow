@@ -507,7 +507,7 @@ def test_auth_on_streamable_door_keeps_tools_public_and_enforces_tool_roles(mcp_
         "tools/call",
         params={"name": "list_connectors", "arguments": {}},
     )
-    assert unauthenticated_call.status_code == 200
+    assert unauthenticated_call.status_code == 401
     assert unauthenticated_call.json()["error"]["code"] == -32001
 
 

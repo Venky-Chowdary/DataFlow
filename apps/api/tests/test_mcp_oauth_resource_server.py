@@ -45,11 +45,10 @@ def mcp_oauth_client(monkeypatch, tmp_path):
     monkeypatch.setattr(integrations_store, "STORE_PATH", tmp_path / "integrations.json")
     monkeypatch.setattr(integrations_store, "_keys_collection", lambda: None)
     monkeypatch.setattr(user_store, "get_user", lambda _email: None)
-    monkeypatch.setattr(
-        auth_middleware,
-        "lookup_user",
-        lambda email: {"email": email, "role": "editor"},
-    )
+    fake_user_lookup = lambda email: {"email": email, "role": "editor"}
+    monkeypatch.setattr(auth_middleware, "lookup_user", fake_user_lookup)
+    from src.routers import auth_router
+    monkeypatch.setattr(auth_router, "lookup_user", fake_user_lookup)
     monkeypatch.setattr(
         integrations_store,
         "get_sso_configs",
@@ -197,6 +196,79 @@ def test_oauth_scopes_restrict_tool_permissions(mcp_oauth_client):
     result = response.json()["result"]
     assert result["isError"] is True
     assert result["content"][0]["text"].startswith("Your role")
+
+
+def test_oauth_without_dataflow_permission_scopes_has_no_tool_permissions(mcp_oauth_client):
+    client, make_token, _private_key = mcp_oauth_client
+    response = client.post(
+        "/api/v1/mcp",
+        headers={"Authorization": f"Bearer {make_token(scope='openid email')}"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "list_connectors", "arguments": {}},
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["isError"] is True
+    assert response.json()["result"]["content"][0]["text"].startswith("Your role")
+
+
+def test_oauth_dataflow_scopes_grant_only_the_named_permission(mcp_oauth_client):
+    client, make_token, _private_key = mcp_oauth_client
+    headers = {"Authorization": f"Bearer {make_token(scope='datawrap:job.read')}"}
+    read = client.post(
+        "/api/v1/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "list_jobs", "arguments": {}},
+        },
+    )
+    mutate = client.post(
+        "/api/v1/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "start_transfer", "arguments": {}},
+        },
+    )
+
+    assert read.status_code == 200
+    assert read.json()["result"]["isError"] is False
+    assert mutate.status_code == 200
+    assert mutate.json()["result"]["isError"] is True
+    assert mutate.json()["result"]["content"][0]["text"].startswith("Your role")
+
+
+def test_oauth_refuses_users_not_authorized_for_sso(mcp_oauth_client, monkeypatch):
+    from src.middleware import auth_middleware
+    from src.routers import auth_router
+
+    client, make_token, _private_key = mcp_oauth_client
+    monkeypatch.setattr(auth_middleware, "lookup_user", lambda _email: None)
+    monkeypatch.setattr(auth_router, "lookup_user", lambda _email: None)
+    response = client.post(
+        "/api/v1/mcp",
+        headers={"Authorization": f"Bearer {make_token(scope='job.read')}"},
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "list_jobs", "arguments": {}},
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == (
+        f'Bearer resource_metadata="{METADATA_URL}"'
+    )
 
 
 def test_oauth_token_is_not_accepted_outside_mcp(mcp_oauth_client):

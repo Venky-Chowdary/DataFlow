@@ -77,6 +77,7 @@ def _execute_tool(
 ) -> dict[str, Any]:
     from services.mcp_invocation_log import log_mcp_invocation
     from services.secret_config import mask_secrets_in_text
+    from src.ai.copilot.tool_permissions import is_permission_denial
     from src.ai.copilot.tools import get_pilot_tools
 
     start = time.perf_counter()
@@ -94,6 +95,7 @@ def _execute_tool(
             duration_ms=(time.perf_counter() - start) * 1000,
             actor=context.actor,
             correlation_id=context.correlation_id,
+            error_kind="tool_error",
         )
         return {
             "content": [
@@ -117,6 +119,7 @@ def _execute_tool(
             duration_ms=ms,
             actor=context.actor,
             correlation_id=context.correlation_id,
+            error_kind="permission_denied" if is_permission_denial(error) else "tool_error",
         )
         return {
             "content": [{"type": "text", "text": error}],
@@ -131,6 +134,7 @@ def _execute_tool(
         duration_ms=ms,
         actor=context.actor,
         correlation_id=context.correlation_id,
+        error_kind="ok",
     )
     text = result.output
     if not isinstance(text, str):
@@ -206,6 +210,17 @@ def handle_jsonrpc(
 
     if method == "tools/call":
         if not authenticated and not allow_unauth_tools:
+            from services.mcp_invocation_log import log_mcp_invocation
+
+            log_mcp_invocation(
+                tool=str((params or {}).get("name") or "unknown"),
+                status="error",
+                error="Authentication required",
+                actor=context.actor,
+                client=context.client,
+                correlation_id=context.correlation_id,
+                error_kind="auth",
+            )
             return _jsonrpc_error(
                 req_id,
                 -32001,
@@ -216,6 +231,17 @@ def handle_jsonrpc(
 
         limit = check_mcp_rate_limit(context.actor)
         if not limit.get("allowed"):
+            from services.mcp_invocation_log import log_mcp_invocation
+
+            log_mcp_invocation(
+                tool=str((params or {}).get("name") or "unknown"),
+                status="error",
+                error="MCP rate limit exceeded",
+                actor=context.actor,
+                client=context.client,
+                correlation_id=context.correlation_id,
+                error_kind="rate_limited",
+            )
             return _jsonrpc_error(
                 req_id,
                 -32029,

@@ -30,7 +30,25 @@ def log_mcp_invocation(
     duration_ms: float = 0.0,
     correlation_id: str | None = None,
     actor: str = "mcp-agent",
+    error_kind: str | None = None,
 ) -> dict[str, Any]:
+    if error_kind is None:
+        if status == "ok":
+            error_kind = "ok"
+        else:
+            from src.ai.copilot.tool_permissions import is_permission_denial
+
+            text = str(error or "").lower()
+            if is_permission_denial(str(error or "")):
+                error_kind = "permission_denied"
+            elif "rate limit" in text:
+                error_kind = "rate_limited"
+            elif "authentication" in text or "unauthorized" in text or "token" in text:
+                error_kind = "auth"
+            elif "policy" in text or "administrator" in text:
+                error_kind = "policy_denied"
+            else:
+                error_kind = "tool_error"
     row = {
         "id": str(uuid.uuid4()),
         "time": _now(),
@@ -41,6 +59,7 @@ def log_mcp_invocation(
         "ms": round(duration_ms, 1),
         "arguments": _redact(arguments or {}),
         "correlation_id": correlation_id,
+        "error_kind": error_kind,
     }
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with STORE_PATH.open("a", encoding="utf-8") as fh:

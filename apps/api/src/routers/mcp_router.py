@@ -153,9 +153,21 @@ async def mcp_streamable(http_request: Request):
                     results.append({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
                     continue
                 if message.get("method") == "tools/call":
-                    params = message.get("params") or {}
-                    denial = _mcp_policy_denial(params.get("name"))
+                    params = message.get("params")
+                    tool_name = params.get("name") if isinstance(params, dict) else None
+                    denial = _mcp_policy_denial(tool_name)
                     if denial:
+                        from services.mcp_invocation_log import log_mcp_invocation
+
+                        log_mcp_invocation(
+                            tool=str(tool_name or "unknown"),
+                            status="error",
+                            error=denial,
+                            actor=context.actor,
+                            client=context.client,
+                            correlation_id=context.correlation_id,
+                            error_kind="policy_denied",
+                        )
                         results.append(_jsonrpc_error(message.get("id"), -32003, denial))
                         continue
                 # tools/call runs plan/preflight synchronously. Doing that on
@@ -324,6 +336,18 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     _require_mcp_tool_auth(http_request, request.name)
     denial = _mcp_policy_denial(request.name)
     if denial:
+        from services.mcp_invocation_log import log_mcp_invocation
+
+        log_mcp_invocation(
+            tool=request.name,
+            client=http_request.headers.get("X-MCP-Client") or "mcp-rest",
+            arguments=request.arguments,
+            status="error",
+            error=denial,
+            actor=getattr(http_request.state, "user_email", None) or "mcp-rest",
+            correlation_id=getattr(http_request.state, "correlation_id", None),
+            error_kind="policy_denied",
+        )
         raise HTTPException(status_code=403, detail=denial)
     from services.mcp_invocation_log import log_mcp_invocation
     from services.mcp_rate_limit import check_mcp_rate_limit
@@ -347,6 +371,19 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     correlation_id = getattr(http_request.state, "correlation_id", None)
     limit = check_mcp_rate_limit(str(actor or client))
     if not limit.get("allowed"):
+        from services.mcp_invocation_log import log_mcp_invocation
+
+        log_mcp_invocation(
+            tool=request.name,
+            client=client,
+            arguments=request.arguments,
+            status="error",
+            error="MCP rate limit exceeded",
+            duration_ms=0,
+            correlation_id=correlation_id,
+            actor=str(actor or "mcp-agent"),
+            error_kind="rate_limited",
+        )
         raise HTTPException(
             status_code=429,
             detail={

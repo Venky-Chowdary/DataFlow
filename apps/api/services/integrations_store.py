@@ -197,7 +197,11 @@ def get_mcp_policy() -> dict[str, Any]:
     allowed = policy.get("allowed_tools")
     return {
         "enabled": bool(policy.get("enabled", True)),
-        "allowed_tools": sorted(set(allowed)) if isinstance(allowed, list) else None,
+        "allowed_tools": (
+            sorted({name for name in allowed if isinstance(name, str)})
+            if isinstance(allowed, list)
+            else None
+        ),
     }
 
 
