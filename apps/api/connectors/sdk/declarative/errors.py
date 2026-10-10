@@ -1,6 +1,47 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
+
+
+_REQUEST_ID_HEADERS = (
+    "x-request-id",
+    "x-correlation-id",
+    "request-id",
+    "x-amzn-requestid",
+)
+
+
+def safe_exception_context(exc: BaseException) -> str:
+    details = [type(exc).__name__]
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    if not isinstance(status, int) or isinstance(status, bool):
+        status = getattr(exc, "status", None)
+    if isinstance(status, int) and not isinstance(status, bool):
+        details.append(f"HTTP {status}")
+
+    request_id = ""
+    headers = getattr(response, "headers", None)
+    if isinstance(headers, Mapping):
+        for name in _REQUEST_ID_HEADERS:
+            value = next(
+                (
+                    item
+                    for key, item in headers.items()
+                    if str(key).lower() == name and item not in (None, "")
+                ),
+                "",
+            )
+            if value:
+                request_id = str(value)
+                break
+    if not request_id:
+        request_id = str(getattr(exc, "request_id", "") or "")
+    request_id = "".join(char for char in request_id if char.isprintable())[:128]
+    if request_id:
+        details.append(f"request_id={request_id}")
+    return f" (cause: {'; '.join(details)})"
 
 
 class ConnectorError(Exception):

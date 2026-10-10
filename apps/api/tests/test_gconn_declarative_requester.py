@@ -4,6 +4,7 @@ import logging
 import time
 
 import pytest
+import requests
 
 from connectors.sdk.declarative.errors import (
     ConnectorAuthError,
@@ -216,6 +217,36 @@ def test_auth_error_refreshes_once_and_second_failure_is_typed() -> None:
         assert len(refreshes) == 1
         assert raised.value.stream == "accounts"
         assert raised.value.status == 401
+
+
+def test_auth_refresh_error_exposes_safe_cause_without_leaking_secret(caplog) -> None:
+    secret = "planted-refresh-response-secret"
+    refresh_response = requests.Response()
+    refresh_response.status_code = 503
+    refresh_response.headers["X-Correlation-ID"] = "refresh-failure-17"
+    refresh_error = requests.HTTPError(secret, response=refresh_response)
+
+    def refresh() -> dict[str, str]:
+        raise refresh_error
+
+    with FixtureServer() as fixture:
+        fixture.add_route("/auth", FixtureResponse(status=401, body={"error": "expired"}))
+        requester = _requester(attempts=1)
+        with caplog.at_level(logging.DEBUG):
+            with pytest.raises(ConnectorAuthError) as raised:
+                requester.request_json(
+                    "GET",
+                    f"{fixture.base_url}/auth?access_token={secret}",
+                    refresh_auth=refresh,
+                    stream="accounts",
+                )
+
+    message = str(raised.value)
+    assert "HTTPError" in message
+    assert "503" in message
+    assert "refresh-failure-17" in message
+    assert secret not in message
+    assert secret not in caplog.text
 
 
 def test_connection_failure_exhaustion_is_typed_with_request_id() -> None:

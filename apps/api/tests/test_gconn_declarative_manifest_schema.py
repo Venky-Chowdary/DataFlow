@@ -87,6 +87,16 @@ def test_manifest_errors_name_the_bad_path(mutate, path: str) -> None:
         parse_manifest(raw)
 
 
+def test_declared_cursor_requires_a_request_param() -> None:
+    raw = _manifest()
+    del raw["streams"][0]["cursor"]["request_param"]
+
+    with pytest.raises(ManifestError) as error:
+        parse_manifest(raw)
+
+    assert error.value.path == "streams[0].cursor.request_param"
+
+
 def test_schema_inference_preserves_null_only_and_nullable_types() -> None:
     schema = infer_json_schema(
         [

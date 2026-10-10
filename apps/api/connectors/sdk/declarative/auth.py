@@ -5,7 +5,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from connectors.sdk.declarative.errors import ConnectorAuthError
+from connectors.sdk.declarative.errors import (
+    ConnectorAuthError,
+    safe_exception_context,
+)
 from connectors.sdk.declarative.manifest import AuthSpec
 from connectors.sdk.oauth import (
     OAuth2Spec,
@@ -77,15 +80,21 @@ def build_auth(spec: AuthSpec, config: Mapping[str, Any] | None = None) -> AuthB
                 credential_config,
                 build_spec=lambda _config: oauth_spec,
             )
-        except Exception:
-            raise ConnectorAuthError("OAuth2 refresh authentication failed") from None
+        except Exception as exc:
+            raise ConnectorAuthError(
+                "OAuth2 refresh authentication failed"
+                f"{safe_exception_context(exc)}"
+            ) from None
         token_cache["access_token"] = token
 
         def refresh_auth() -> Mapping[str, str]:
             try:
                 updated = refresh_oauth2_token(oauth_spec)
-            except Exception:
-                raise ConnectorAuthError("OAuth2 refresh authentication failed") from None
+            except Exception as exc:
+                raise ConnectorAuthError(
+                    "OAuth2 refresh authentication failed"
+                    f"{safe_exception_context(exc)}"
+                ) from None
             oauth_spec.refresh_token = updated.refresh_token
             token_cache["access_token"] = updated.access_token
             return {"Authorization": f"Bearer {updated.access_token}"}
@@ -102,8 +111,11 @@ def build_auth(spec: AuthSpec, config: Mapping[str, Any] | None = None) -> AuthB
             token = str(token_data.get("access_token") or "")
             if not token:
                 raise ValueError("missing access token")
-        except Exception:
-            raise ConnectorAuthError("OAuth2 client-credentials authentication failed") from None
+        except Exception as exc:
+            raise ConnectorAuthError(
+                "OAuth2 client-credentials authentication failed"
+                f"{safe_exception_context(exc)}"
+            ) from None
 
         def refresh_client_credentials() -> Mapping[str, str]:
             try:
@@ -111,9 +123,10 @@ def build_auth(spec: AuthSpec, config: Mapping[str, Any] | None = None) -> AuthB
                 access_token = str(refreshed.get("access_token") or "")
                 if not access_token:
                     raise ValueError("missing access token")
-            except Exception:
+            except Exception as exc:
                 raise ConnectorAuthError(
                     "OAuth2 client-credentials authentication failed"
+                    f"{safe_exception_context(exc)}"
                 ) from None
             return {"Authorization": f"Bearer {access_token}"}
 

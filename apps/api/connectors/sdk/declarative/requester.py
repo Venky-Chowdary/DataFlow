@@ -16,6 +16,7 @@ from connectors.sdk.declarative.errors import (
     RateLimitExhausted,
     ResponseShapeError,
     TransientExhausted,
+    safe_exception_context,
 )
 from services.error_handling import RetryBudget, with_retry
 from services.mcp_rate_limit import TokenBucketStore
@@ -245,9 +246,10 @@ class HttpRequester:
                     refreshed = True
                     try:
                         current_headers = self._merge_headers(current_headers, refresh_auth())
-                    except Exception:
+                    except Exception as exc:
                         raise ConnectorAuthError(
-                            f"Authentication refresh failed for {safe_url}",
+                            "Authentication refresh failed for "
+                            f"{safe_url}{safe_exception_context(exc)}",
                             request_id=request_id_for_error,
                             stream=stream,
                             status=status,
@@ -263,7 +265,9 @@ class HttpRequester:
                     "url": safe_url,
                 }
                 if status == 401 or status == 403 and not _github_rate_limited(response):
-                    raise ConnectorAuthError(message, **common) from None
+                    raise ConnectorAuthError(
+                        f"{message}{safe_exception_context(exc)}", **common
+                    ) from None
                 if status == 429 or status == 403 and _github_rate_limited(response):
                     raise RateLimitExhausted(message, **common) from None
                 if status == 408 or status is not None and 500 <= status <= 599:

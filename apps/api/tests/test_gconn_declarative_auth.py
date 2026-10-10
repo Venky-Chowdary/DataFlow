@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import base64
+import logging
+from unittest.mock import Mock
 
+import pytest
+import requests
+
+import connectors.sdk.declarative.auth as auth_module
 from connectors.sdk.declarative.auth import build_auth
+from connectors.sdk.declarative.errors import ConnectorAuthError
 from connectors.sdk.declarative.manifest import AuthSpec
 from tests.connector_certification.fixture_server import FixtureResponse, FixtureServer
 
@@ -80,3 +87,32 @@ def test_oauth_refresh_and_client_credentials_refresh_tokens_on_demand() -> None
             "Authorization": "Bearer client-2"
         }
 
+
+def test_oauth_auth_error_includes_safe_cause_without_leaking_secret(
+    monkeypatch, caplog
+) -> None:
+    secret = "planted-oauth-response-secret"
+    response = requests.Response()
+    response.status_code = 502
+    response.headers["X-Request-ID"] = "oauth-failure-42"
+    failure = requests.HTTPError(secret, response=response)
+    monkeypatch.setattr(auth_module, "ensure_access_token", Mock(side_effect=failure))
+
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(ConnectorAuthError) as raised:
+            build_auth(
+                AuthSpec(
+                    type="oauth2_refresh",
+                    token_url="https://auth.example.test/token",
+                    client_id="client",
+                    client_secret="client-secret",
+                    refresh_token="refresh-token",
+                )
+            )
+
+    message = str(raised.value)
+    assert "HTTPError" in message
+    assert "502" in message
+    assert "oauth-failure-42" in message
+    assert secret not in message
+    assert secret not in caplog.text
