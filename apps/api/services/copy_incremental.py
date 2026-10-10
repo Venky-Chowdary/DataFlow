@@ -34,6 +34,7 @@ the same high-water write. CDC / SCD2 / mirror stay on the row path.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from services.copy_fast_path import (
@@ -232,6 +233,9 @@ def _sqlite_quoted_literal(value: Any) -> str:
     return "'" + str(value).replace("'", "''") + "'"
 
 
+_SQLITE_DATETIME_HEAD = re.compile(r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}")
+
+
 def sqlite_normalize_cursor_watermark(value: str) -> str:
     """Naive ISO watermarks use space so they match SQLite TEXT DATETIME cells.
 
@@ -244,6 +248,38 @@ def sqlite_normalize_cursor_watermark(value: str) -> str:
     if len(text) >= 19 and text[10] == "T" and text[4] == "-" and text[7] == "-":
         return text[:10] + " " + text[11:]
     return text
+
+
+def sqlite_cursor_sort_expr(cursor_ident: str) -> str:
+    """Cursor operand that orders SQLite TEXT timestamps by time, not by separator.
+
+    SQLite stores temporals as TEXT, and one column can hold both ISO forms
+    (``2025-01-01T01:40:00`` from ``isoformat`` and ``2025-01-01 03:21:00``
+    from ``datetime()`` / the sqlite3 adapter). Compared raw, space < ``T``, so
+    later rows sort below the watermark and are skipped (QA MX3-04). Only cells
+    shaped ``YYYY-MM-DDT…`` are rewritten to the space form; integers, reals
+    and other text keep their own ordering.
+    """
+    return (
+        f"(CASE WHEN {cursor_ident} GLOB "
+        "'[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T*' "
+        f"THEN substr({cursor_ident}, 1, 10) || ' ' || substr({cursor_ident}, 12) "
+        f"ELSE {cursor_ident} END)"
+    )
+
+
+def sqlite_cursor_operand(cursor_ident: str, watermark_value: str) -> str:
+    """The cursor side of ``cursor > watermark`` on SQLite.
+
+    A date-time watermark compares against :func:`sqlite_cursor_sort_expr`.
+    Any other watermark keeps the bare column: the expression has no column
+    affinity, so an INTEGER cursor against a quoted ``'9'`` would compare as
+    integer < text and read nothing.
+    """
+    text = (watermark_value or "").strip()
+    if len(text) >= 19 and text[10] in "T " and _SQLITE_DATETIME_HEAD.match(text):
+        return sqlite_cursor_sort_expr(cursor_ident)
+    return cursor_ident
 
 
 def sqlite_cursor_predicate_sql(
@@ -268,12 +304,14 @@ def sqlite_cursor_predicate_sql(
     if pk and pk != cursor_column:
         cur_val, pk_val = split_cursor_bookmark(bookmark, has_tiebreak=True)
         pk_ident = sqlite_ident(pk)
+        cursor_ident = sqlite_cursor_operand(cursor_ident, str(cur_val))
         cur_val = sqlite_normalize_cursor_watermark(str(cur_val))
         return (
             f"({cursor_ident}, {pk_ident}) > "
             f"({_sqlite_quoted_literal(cur_val)}, {_sqlite_quoted_literal(pk_val)})"
         )
     cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
+    cursor_ident = sqlite_cursor_operand(cursor_ident, str(cur_val))
     cur_val = sqlite_normalize_cursor_watermark(str(cur_val))
     return f"{cursor_ident} > {_sqlite_quoted_literal(cur_val)}"
 
@@ -300,13 +338,17 @@ def read_high_water_row(
     quote,
     *,
     mysql: bool = False,
+    sqlite: bool = False,
 ) -> tuple[Any, ...] | None:
     """MAX(cursor[, pk]) of the copied population. NULLs do not advance the mark."""
     if not columns:
         return None
     idents = [quote(c) for c in columns]
+    sort_keys = list(idents)
+    if sqlite:
+        sort_keys[0] = sqlite_cursor_sort_expr(idents[0])
     order = ", ".join(
-        f"{ident} DESC" if mysql else f"{ident} DESC NULLS LAST" for ident in idents
+        f"{key} DESC" if mysql else f"{key} DESC NULLS LAST" for key in sort_keys
     )
     cur.execute(
         f"SELECT {', '.join(idents)} FROM {table_sql} "  # nosec B608
@@ -703,7 +745,9 @@ def _apply_staging_to_sqlite(
 
     wm_cols = [dest_cursor] + ([dest_pk_col] if dest_pk_col else [])
     high = encode_high_water(
-        read_high_water_row(dst_cur, staging_q, wm_cols, sqlite_ident, mysql=False)
+        read_high_water_row(
+            dst_cur, staging_q, wm_cols, sqlite_ident, mysql=False, sqlite=True
+        )
     )
     staging_count = int(result.source_rows)
     if staging_count == 0:
