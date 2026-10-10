@@ -1163,6 +1163,7 @@ TOOL_FAMILIES: list[dict] = [
             "replay_quarantine",
             "test_connector",
             "delete_connector",
+            "update_connector",
             "set_schedule_enabled",
             "delete_schedule",
             "update_schedule",
@@ -1353,6 +1354,7 @@ class DataPilotTools:
             "prepare_cdc_source": self._prepare_cdc_source,
             "test_connector": self._test_connector,
             "delete_connector": self._delete_connector,
+            "update_connector": self._update_connector,
             "set_schedule_enabled": self._set_schedule_enabled,
             "delete_schedule": self._delete_schedule,
             "update_schedule": self._update_schedule,
@@ -3058,6 +3060,28 @@ class DataPilotTools:
         from .lifecycle_tools import delete_connector
 
         return delete_connector(connector_id, name)
+
+    def _update_connector(  # nosec B107
+        self,
+        connector_id: str = "",
+        name: str = "",
+        host: str = "",
+        port: int = 0,
+        database: str = "",
+        username: str = "",
+        password: str = "",
+        connection_string: str = "",
+        schema: str = "",
+        ssl: bool | None = None,
+        new_name: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import update_connector
+
+        return update_connector(
+            connector_id, name, host=host, port=port, database=database,
+            username=username, password=password, connection_string=connection_string,
+            schema=schema, ssl=ssl, new_name=new_name,
+        )
 
     def _set_schedule_enabled(
         self, schedule_id: str = "", name: str = "", enabled: bool = True

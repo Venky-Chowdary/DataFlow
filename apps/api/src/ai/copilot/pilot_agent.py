@@ -944,6 +944,13 @@ def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
             f"**{p.get('name')}** ({p.get('type') or 'connector'}) will be removed from saved connectors. "
             f"Data at the source is untouched.{warn}\n\nConfirm to proceed: **{label}**."
         )
+    if name == "update_connector":
+        changed = ", ".join(f"{k} → {v}" for k, v in (p.get("changes") or {}).items())
+        return (
+            f"**{p.get('name')}** ({p.get('type') or 'connector'}) changes: {changed}. "
+            "Its id and bound pipelines stay the same; test it after saving."
+            f"\n\nConfirm to proceed: **{label}**."
+        )
     if name == "set_schedule_enabled":
         after = "resume on its cadence" if p.get("enabled_after") else "stop firing until resumed"
         return f"Pipeline **{p.get('name')}** will {after}.\n\nConfirm to proceed: **{label}**."

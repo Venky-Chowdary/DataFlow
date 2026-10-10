@@ -259,6 +259,31 @@ async def _run_lifecycle_confirm(
         cid = str(payload.get("connector_id") or "").strip()
         out = saved_connectors_router.remove_saved_connector(cid, http_request, workspace_id)
         return {**dict(out), "connector_id": cid, "name": payload.get("name") or ""}
+    if kind == "update_connector":
+        cid = str(payload.get("connector_id") or "").strip()
+        existing = saved_connectors_router.get_connector(cid, workspace_id=workspace_id or None)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Connector not found")
+        dto_cls = saved_connectors_router.ConnectorSaveDTO
+        data: dict = {}
+        for field_name, field in dto_cls.model_fields.items():
+            if field_name == "last_test_ok":
+                continue
+            key = field.alias or field_name
+            value = getattr(existing, key, getattr(existing, field_name, None))
+            if value is not None:
+                data[key] = value
+        data.update(dict(payload.get("changes") or {}))
+        out = saved_connectors_router.update_saved_connector(
+            cid, dto_cls(**data), http_request, workspace_id
+        )
+        return {
+            **dict(out),
+            "connector_id": cid,
+            "name": data.get("name") or payload.get("name") or "",
+            "changed_fields": sorted(dict(payload.get("changes") or {})),
+            "next": "Run test_connector to prove the new settings connect.",
+        }
     if kind == "set_schedule_enabled":
         sid = str(payload.get("schedule_id") or "").strip()
         body = schedules_router.ScheduleUpdate(enabled=bool(payload.get("enabled")))

@@ -16,10 +16,14 @@ picked by the shared fuzzy matcher and any tie becomes a question.
 
 from __future__ import annotations
 
+import logging
+
 import re
 from typing import TYPE_CHECKING, Any
 
 from .schema_tools import AmbiguousConnectorError, _connector_dict, _tool_result
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .tools import ToolResult
@@ -142,6 +146,32 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "update_connector",
+        "description": (
+            "Stage a change to one saved connector's connection fields (host, port, "
+            "database, username, password, connection_string, schema, ssl) or its "
+            "name. Pending action until Confirm; the connector id, and every "
+            "pipeline bound to it, stay the same. Secrets are never echoed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string"},
+                "host": {"type": "string"},
+                "port": {"type": "integer"},
+                "database": {"type": "string"},
+                "username": {"type": "string"},
+                "password": {"type": "string"},
+                "connection_string": {"type": "string"},
+                "schema": {"type": "string"},
+                "ssl": {"type": "boolean"},
+                "new_name": {"type": "string"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "set_schedule_enabled",
         "description": (
             "Stage pausing (enabled=false) or resuming (enabled=true) a pipeline "
@@ -236,6 +266,7 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "resume_job": "resume_job",
     "replay_quarantine": "replay_quarantine",
     "delete_connector": "delete_connector",
+    "update_connector": "update_connector",
     "set_schedule_enabled": "set_schedule_enabled",
     "delete_schedule": "delete_schedule",
     "update_schedule": "update_schedule",
@@ -639,6 +670,85 @@ def delete_connector(connector_id: str = "", name: str = "") -> ToolResult:
         preview=preview,
         label=f"Delete connector “{brief['name']}”",
         destructive=True,
+    )
+
+
+_CONNECTOR_SECRET_FIELDS = frozenset({"password", "connection_string"})
+
+
+def update_connector(  # nosec B107
+    connector_id: str = "",
+    name: str = "",
+    *,
+    host: str = "",
+    port: int = 0,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    schema: str = "",
+    ssl: bool | None = None,
+    new_name: str = "",
+) -> ToolResult:
+    """Stage an in-place connector edit; Confirm applies it via ``PUT /saved-connectors``.
+
+    Empty values mean "unchanged". The payload keeps the new secrets on the
+    server-side ack ledger; the preview only says that a secret changed.
+    """
+    conn, err = _connector("update_connector", connector_id, name)
+    if err:
+        return err
+    assert conn is not None
+    brief = _connector_brief(conn)
+    requested: dict[str, Any] = {
+        "host": (host or "").strip(),
+        "port": int(port or 0),
+        "database": (database or "").strip(),
+        "username": (username or "").strip(),
+        "password": password or "",
+        "connection_string": (connection_string or "").strip(),
+        "schema": (schema or "").strip(),
+        "name": (new_name or "").strip(),
+    }
+    changes = {k: v for k, v in requested.items() if v and v != conn.get(k)}
+    if ssl is not None and bool(ssl) != bool(conn.get("ssl")):
+        changes["ssl"] = bool(ssl)
+    if not changes:
+        return _tool_result(
+            "update_connector",
+            success=False,
+            output=None,
+            error=(
+                f"What should change on “{brief['name']}”? Give a host, port, database, "
+                "username, password, connection string, schema, ssl or a new name."
+            ),
+        )
+    if "name" in changes:
+        try:
+            clash = _connector_dict("", changes["name"])
+        except AmbiguousConnectorError:
+            clash = {"id": "<several>"}
+        if clash and str(clash.get("id") or "") != brief["connector_id"]:
+            return _tool_result(
+                "update_connector",
+                success=False,
+                output=None,
+                error=f"A connector named “{changes['name']}” already exists. Pick another name.",
+            )
+    shown = {
+        k: ("(changed — hidden)" if k in _CONNECTOR_SECRET_FIELDS else v)
+        for k, v in changes.items()
+    }
+    _logger.info(
+        "update_connector staged for %s (%s): fields=%s",
+        brief["connector_id"], brief["type"], sorted(changes),
+    )
+    return _stage(
+        "update_connector",
+        payload={"connector_id": brief["connector_id"], "name": brief["name"], "changes": changes},
+        preview={**brief, "changes": shown, "bound_schedules": _schedules_bound_to(brief["connector_id"])},
+        label=f"Update connector “{brief['name']}”",
+        destructive=False,
     )
 
 
