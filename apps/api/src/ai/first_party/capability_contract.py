@@ -803,6 +803,23 @@ def rest_api_card() -> CapabilityCard:
     )
 
 
+def scim_provisioning_card() -> CapabilityCard:
+    return CapabilityCard(
+        title="Do you support SCIM",
+        text=(
+            "Datawrap supports a SCIM 2.0 subset for Users and Groups at "
+            "/api/v1/scim/v2. Create a provisioning token with "
+            "POST /api/v1/iam/scim-token. SCIM groups can map to workspace "
+            "roles, and deactivating a user revokes their sessions and personal "
+            "API keys. Filters support eq, sw, and co joined by and. Bulk "
+            "operations, sorting, ETags, and password changes are not supported; "
+            "userName is immutable."
+        ),
+        source_module="docs/SCIM.md · services/scim_service.py",
+        category="identity",
+    )
+
+
 def github_actions_card() -> CapabilityCard:
     return CapabilityCard(
         title="Can I call Datawrap from GitHub Actions",
@@ -6717,6 +6734,7 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         transfer_undo_card,
         viewer_secrets_card,
         rest_api_card,
+        scim_provisioning_card,
         github_actions_card,
         openlineage_card,
         mirror_versus_upsert_card,
