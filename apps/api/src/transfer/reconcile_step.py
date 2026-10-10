@@ -57,6 +57,51 @@ from .adapters import records_to_matrix, resolve_connector_config
 from .adapters_introspect import _introspect_table_schema_rich
 from .models import EndpointConfig
 
+_logger = logging.getLogger(__name__)
+
+
+class _SampleReadExhausted(TargetSampleUnavailable):
+    """A Gate-8 destination read that still failed after bounded retries."""
+
+    def __init__(self, cause: TargetSampleUnavailable, *, attempts: int, transient: bool) -> None:
+        self.attempts = attempts
+        self.transient = transient
+        super().__init__(f"{cause} (after {attempts} attempt(s))")
+
+
+def _read_target_sample_retrying(purpose: str, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    """``read_target_sample`` with backoff for transient faults (QA MX2-15).
+
+    Post-write verification runs after rows are committed; one dropped
+    connection must not decide the job. Deterministic failures (grants,
+    missing objects) are not retried. Exhausted reads raise
+    :class:`_SampleReadExhausted` so callers still fail closed.
+    """
+    from services.error_handling import RetryBudget, classify_error, with_retry
+
+    budget = RetryBudget()
+
+    def _on_transient(exc: Exception, delay: float) -> None:
+        _logger.warning(
+            "Gate-8 %s read failed transiently (attempt %d/%d); retrying in %.1fs: %s",
+            purpose, budget.attempts_made, budget.max_attempts, delay, exc,
+        )
+
+    try:
+        return with_retry(
+            lambda: read_target_sample(*args, **kwargs),
+            budget=budget,
+            on_transient=_on_transient,
+        )
+    except TargetSampleUnavailable as exc:
+        transient = bool(classify_error(exc).get("retriable"))
+        attempts = max(1, budget.attempts_made)
+        _logger.error(
+            "Gate-8 %s read unavailable after %d attempt(s) (transient=%s, table=%s): %s",
+            purpose, attempts, transient, kwargs.get("table_name"), exc,
+        )
+        raise _SampleReadExhausted(exc, attempts=attempts, transient=transient) from exc
+
 
 def _finalize_reconcile(
     payload: dict[str, Any],
@@ -2317,7 +2362,8 @@ def run_reconciliation(
         # 21+ as NULL (Mongo→MySQL users with 24 fields: Gate-8 failed on
         # referral_invite_modal_dismissed with source 0 vs invented NULL).
         try:
-            target_sample = read_target_sample(
+            target_sample = _read_target_sample_retrying(
+                "sample compare",
                 db_type,
                 cfg,
                 schema=schema,
@@ -2331,11 +2377,19 @@ def run_reconciliation(
             # A failed read is not "no rows to compare". Skipping Gate-8 here
             # used to report a clean reconcile while the destination was
             # unreachable — the exact silent-pass the proof bar forbids.
+            unavailable = bool(getattr(exc, "transient", False))
             return _finalize({
                 "passed": False,
+                "verification_unavailable": unavailable,
                 "message": (
                     "Gate-8 sample compare unavailable: could not read destination "
                     f"sample ({exc}). Refusing to treat a failed read as fidelity proof."
+                    + (
+                        " The committed rows were kept; re-run verification once the "
+                        "destination is reachable."
+                        if unavailable
+                        else ""
+                    )
                 ),
                 "source_rows": source_rows,
                 "target_rows": target_rows,
@@ -2367,7 +2421,8 @@ def run_reconciliation(
         sort_key = _sort_key_for_columns(target_cols, mapping_dicts)
         if sort_key:
             try:
-                still_present = read_target_sample(
+                still_present = _read_target_sample_retrying(
+                    "delete proof",
                     db_type,
                     cfg,
                     schema=schema,
@@ -2380,6 +2435,7 @@ def run_reconciliation(
             except TargetSampleUnavailable as exc:
                 return _finalize({
                     "passed": False,
+                    "verification_unavailable": bool(getattr(exc, "transient", False)),
                     "message": (
                         "Gate-8 delete proof unavailable: could not read destination "
                         f"keys ({exc}). Refusing to treat a failed read as proof that "

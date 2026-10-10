@@ -119,6 +119,8 @@ RETRIABLE_EXCEPTIONS: set[str] = {
     "lost connection",
     "server has gone away",
     "terminating connection",
+    # pymssql/FreeTDS: the TDS session dropped (tunnel rotation, failover).
+    "dbprocess is dead",
 }
 
 # Non-retriable errors indicate a data or contract problem that will not fix itself.

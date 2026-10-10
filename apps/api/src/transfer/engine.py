@@ -1565,16 +1565,39 @@ def _finish_verified_run(
     )
 
 
-def _note_failed_batch_undo(request: Any, dest_summary: Any, message: str) -> str:
+def _note_failed_batch_undo(
+    request: Any,
+    dest_summary: Any,
+    message: str,
+    *,
+    recon: dict[str, Any] | None = None,
+) -> str:
     """Clear a partial SQL batch when this run found the destination empty.
 
     A MySQL overwrite renamed the previous table aside. Restoring that
     backup is the rollback. Deleting the replacement after the rename
     leaves the live name empty and the pre-run rows only in the backup
     — or gone, if a second start already dropped the backup.
+
+    When verification could not *read* the destination (transient fault
+    after retries), nothing was proven wrong with the committed rows, so
+    they are kept rather than undone (QA MX2-15).
     """
     if not isinstance(dest_summary, dict):
         return message or "Reconciliation failed"
+    if isinstance(recon, dict) and recon.get("verification_unavailable"):
+        note = (
+            "The committed rows were kept: verification could not read the "
+            "destination, which is not evidence the batch is wrong."
+        )
+        logger.warning(
+            "Skipping failed-batch undo for table=%s: verification unavailable",
+            dest_summary.get("table"),
+        )
+        dest_summary["partial_batch_undo"] = "retained"
+        dest_summary["partial_batch_undo_note"] = note
+        base = message or "Reconciliation failed"
+        return base if note in base else f"{base} {note}"
     destination = getattr(request, "destination", None)
     extra = dict(getattr(destination, "extra", None) or {})
     backup_engine = str(extra.get("overwrite_backup_engine") or "")
@@ -3775,7 +3798,10 @@ class UniversalTransferEngine:
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
                 fail_message = _note_failed_batch_undo(
-                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                    request,
+                    dest_summary,
+                    recon.get("message", "Reconciliation failed"),
+                    recon=recon,
                 )
                 mongo.update_job_status(
                     job_id,
@@ -4727,7 +4753,10 @@ class UniversalTransferEngine:
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
                 fail_message = _note_failed_batch_undo(
-                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                    request,
+                    dest_summary,
+                    recon.get("message", "Reconciliation failed"),
+                    recon=recon,
                 )
                 mongo.update_job_status(
                     job_id,
@@ -5596,7 +5625,10 @@ class UniversalTransferEngine:
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
                 fail_message = _note_failed_batch_undo(
-                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                    request,
+                    dest_summary,
+                    recon.get("message", "Reconciliation failed"),
+                    recon=recon,
                 )
                 mongo.update_job_status(
                     job_id,
