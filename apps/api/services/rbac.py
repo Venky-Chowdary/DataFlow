@@ -299,6 +299,8 @@ def _is_public_path(path: str) -> bool:
 
 
 def _required_permission(method: str, path: str) -> str | None:
+    if method == "POST" and path == "/api/v1/mcp/tools/call":
+        return None
     if _is_public_path(path):
         return None
     for rule_method, prefix, permission in _PATH_RULES:

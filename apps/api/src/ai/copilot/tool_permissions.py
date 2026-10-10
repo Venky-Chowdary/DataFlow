@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any, TypeVar
 
 from services.rbac import Permission, normalize_role, role_permissions
@@ -163,6 +163,9 @@ _UNKNOWN_TOOL = (Permission.WORKSPACE_MANAGE, MUTATE)
 _caller_role: contextvars.ContextVar[str] = contextvars.ContextVar(
     "pilot_caller_role", default=""
 )
+_caller_permissions: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
+    "pilot_caller_permissions", default=None
+)
 
 T = TypeVar("T")
 
@@ -185,14 +188,28 @@ def current_caller_role() -> str:
     return _caller_role.get()
 
 
+def current_caller_permissions() -> frozenset[str] | None:
+    return _caller_permissions.get()
+
+
+def _granted(role: str) -> set[str]:
+    permissions = role_permissions(role)
+    bound = _caller_permissions.get()
+    return permissions & bound if bound is not None else permissions
+
+
 @contextlib.contextmanager
-def caller_role(role: str) -> Iterator[None]:
-    """Bind ``role`` for the duration of one request, then restore it."""
-    token = set_caller_role(role)
+def caller_role(role: str, permissions: Iterable[str] | None = None) -> Iterator[None]:
+    """Bind the caller role and optional permission scope for one request."""
+    role_token = set_caller_role(role)
+    permissions_token = _caller_permissions.set(
+        frozenset(permissions) if permissions is not None else None
+    )
     try:
         yield
     finally:
-        reset_caller_role(token)
+        _caller_permissions.reset(permissions_token)
+        reset_caller_role(role_token)
 
 
 def bind_current_context(fn: Callable[..., T]) -> Callable[..., T]:
@@ -221,14 +238,14 @@ def is_tool_allowed(role: str, name: str) -> bool:
     if not role:
         return True
     permission, _effect = tool_requirement(name)
-    return permission in role_permissions(role)
+    return permission in _granted(role)
 
 
 def allowed_tools(role: str) -> set[str]:
     """Every tool ``role`` may run — used to filter a plan before it executes."""
     if not role:
         return set(TOOL_PERMISSIONS)
-    granted = role_permissions(role)
+    granted = _granted(role)
     return {
         name
         for name, (permission, _effect) in TOOL_PERMISSIONS.items()
@@ -243,7 +260,7 @@ def denial_message(role: str, name: str) -> str:
     role_l = normalize_role(role)
     can = sorted(
         _PERMISSION_WORDS[p]
-        for p in role_permissions(role_l)
+        for p in _granted(role_l)
         if p in _PERMISSION_WORDS
     )
     allowed_words = ", ".join(can[:4]) or "nothing in this workspace"
@@ -269,7 +286,7 @@ def can_confirm_kind(role: str, kind: str) -> bool:
         # An unmapped kind is refused rather than allowed: Confirm is the last
         # gate before a write, so an unknown mutation must never pass it.
         return False
-    return permission in role_permissions(role)
+    return permission in _granted(role)
 
 
 def confirm_denial_message(role: str, kind: str) -> str:

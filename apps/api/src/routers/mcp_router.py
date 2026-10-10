@@ -82,6 +82,8 @@ async def mcp_streamable(http_request: Request):
     from src.ai.copilot.tool_permissions import caller_role
     from src.services.auth_service import auth_required
 
+    from services.rbac import principal_permissions
+
     authenticated = _mcp_authenticated(http_request)
     # When platform auth is off (local/dev), tools are callable without a Bearer token.
     allow_unauth_tools = not auth_required()
@@ -95,7 +97,14 @@ async def mcp_streamable(http_request: Request):
     results: list[dict] = []
     request_token = set_mcp_request(http_request)
     try:
-        with caller_role(mcp_role):
+        with caller_role(
+            mcp_role,
+            permissions=(
+                principal_permissions(getattr(http_request.state, "user", None), mcp_role)
+                if mcp_role
+                else None
+            ),
+        ):
             for message in messages:
                 if not isinstance(message, dict):
                     results.append({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
@@ -197,6 +206,7 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     from ..ai.copilot.confirm_ack import reset_mcp_request, set_mcp_request
     from ..ai.copilot.tool_permissions import caller_role
     from ..ai.copilot.tools import get_pilot_tools
+    from services.rbac import principal_permissions
 
     client = http_request.headers.get("X-MCP-Client", "unknown")
     # MCP is a second door into the same tools, so it carries the same role gate:
@@ -224,7 +234,14 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     try:
         request_token = set_mcp_request(http_request)
         try:
-            with caller_role(mcp_role):
+            with caller_role(
+                mcp_role,
+                permissions=(
+                    principal_permissions(getattr(http_request.state, "user", None), mcp_role)
+                    if mcp_role
+                    else None
+                ),
+            ):
                 result = await asyncio.to_thread(
                     get_pilot_tools().execute, request.name, request.arguments
                 )
