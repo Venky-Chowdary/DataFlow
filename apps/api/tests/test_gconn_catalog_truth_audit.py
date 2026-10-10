@@ -118,9 +118,7 @@ def test_planted_form_auth_mode_is_reported(monkeypatch: pytest.MonkeyPatch) -> 
     }
 
 
-def test_planted_write_mode_claim_without_writer_is_reported(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _plant_fake_write_claim(monkeypatch: pytest.MonkeyPatch):
     from services import connector_capability_registry
     from src.transfer import connector_capabilities
 
@@ -146,6 +144,58 @@ def test_planted_write_mode_claim_without_writer_is_reported(
         ),
     )
     truth_audit.driver_role_reality.cache_clear()
+    return connector_capability_registry
+
+
+def test_planted_write_mode_claim_is_a_visible_downgrade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connector_capability_registry = _plant_fake_write_claim(monkeypatch)
+    capability = connector_capability_registry.get_connector_capability(
+        "truth_audit_fake_writer"
+    )
+    write_fields = (
+        "supports_upsert",
+        "supports_append",
+        "supports_overwrite",
+        "supports_merge",
+    )
+    assert not any(capability.get(field) for field in write_fields)
+    assert any(
+        downgrade.get("reason", "").strip()
+        for downgrade in capability.get("capability_downgrades", [])
+    )
+
+    violations = truth_audit.audit_catalog_truth()
+
+    assert ("write_modes", "truth_audit_fake_writer") not in {
+        (v.rule, v.connector_id) for v in violations
+    }
+
+
+def test_planted_write_mode_claim_with_missed_downgrade_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connector_capability_registry = _plant_fake_write_claim(monkeypatch)
+    original_get_capability = connector_capability_registry.get_connector_capability
+    original_reason = truth_audit.write_mode_downgrade_reason
+
+    def keep_write_claim(connector_id: str) -> dict:
+        capability = original_get_capability(connector_id)
+        if connector_id == "truth_audit_fake_writer":
+            capability["supports_upsert"] = True
+            capability.pop("capability_downgrades", None)
+        return capability
+
+    def simulated_reason(connector_id: str, driver: str, caps: dict) -> str | None:
+        if connector_id == "truth_audit_fake_writer":
+            return "simulated missed downgrade"
+        return original_reason(connector_id, driver, caps)
+
+    monkeypatch.setattr(
+        connector_capability_registry, "get_connector_capability", keep_write_claim
+    )
+    monkeypatch.setattr(truth_audit, "write_mode_downgrade_reason", simulated_reason)
 
     violations = truth_audit.audit_catalog_truth()
 

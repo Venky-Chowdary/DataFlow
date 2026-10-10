@@ -182,6 +182,7 @@ def audit_catalog_truth() -> list[TruthViolation]:
     from services import connector_auth, connector_form_schema
     from services.connector_capability_registry import (
         CAPABILITY_REGISTRY,
+        DEFAULT_CAPABILITY,
         get_connector_capability,
     )
     from src.transfer.connector_capabilities import (
@@ -225,17 +226,35 @@ def audit_catalog_truth() -> list[TruthViolation]:
                 claim="dest_ready",
                 evidence=f"{writer['kind']}: {writer['detail']}",
             ))
-        if any(capability.get(field) for field in _WRITE_MODE_FIELDS):
+        raw_capability = CAPABILITY_REGISTRY.get(connector_id, DEFAULT_CAPABILITY)
+        raw_write_claims = [
+            field for field in _WRITE_MODE_FIELDS if raw_capability.get(field)
+        ]
+        has_static_downgrade = bool(raw_capability.get("capability_downgrades"))
+        source_dest_only_zeroing = bool(driver_caps.get("source_only")) or bool(
+            driver_caps.get("dest_only") and not driver_caps.get("write")
+        )
+        if (raw_write_claims or has_static_downgrade) and not source_dest_only_zeroing:
             reason = write_mode_downgrade_reason(connector_id, driver, driver_caps)
             if reason:
-                violations.append(TruthViolation(
-                    rule="write_modes",
-                    connector_id=connector_id,
-                    claim=", ".join(
-                        field for field in _WRITE_MODE_FIELDS if capability.get(field)
-                    ),
-                    evidence=reason,
-                ))
+                downgrade_entries = capability.get("capability_downgrades") or ()
+                has_visible_reason = any(
+                    isinstance(downgrade, dict)
+                    and isinstance(downgrade.get("reason"), str)
+                    and downgrade["reason"].strip()
+                    for downgrade in downgrade_entries
+                )
+                visibly_downgraded = (
+                    not any(capability.get(field) for field in _WRITE_MODE_FIELDS)
+                    and has_visible_reason
+                )
+                if not visibly_downgraded:
+                    violations.append(TruthViolation(
+                        rule="write_modes",
+                        connector_id=connector_id,
+                        claim=", ".join(raw_write_claims) or "capability_downgrades",
+                        evidence=reason,
+                    ))
 
     forms = connector_form_schema._load()
     for form_type, form in forms.items():
