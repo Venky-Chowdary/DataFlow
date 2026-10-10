@@ -83,7 +83,7 @@ Backend batch reliability is **beta / early production** for batch transfers on 
 - **SQL Server / Oracle shared multi-table CDC** readers + Pipelines contract breaker UX.
 - **CDC lease force-release** (`POST /ops/cdc-leases/force-release`) + Theater/Jobs Next-step CTAs (fencing-aware).
 - **Freshness SLO alerts** (`GET /ops/freshness` → `alerts` / `slo_status`) + Overview Open pipeline/job CTAs.
-- **Incremental snapshot operator UI** — job-scoped `GET/POST /transfer/{job_id}/cdc/snapshots` (+ cancel) resolves `source_key` from the job fingerprint; Theater + Jobs `CdcIncrementalSnapshotPanel` request/cancel/monitor. Still at-least-once upsert; not destination undo.
+- **Incremental snapshot operator UI** — job-scoped `GET/POST /transfer/{job_id}/cdc/snapshots` (+ cancel) resolves `source_key` from the job fingerprint; Theater + Jobs `CdcIncrementalSnapshotPanel` request/cancel/monitor. Still at-least-once upsert; not destination undo. **Filtered incremental snapshots** (Debezium `additional-conditions` equivalent): signals carry a structured `row_filter` (never raw SQL; `services/cdc_snapshot_filter.py`) compiled to bound predicates for PostgreSQL, MySQL, SQL Server, Oracle and a `$match` for MongoDB; invalid/`regex` filters are a 400 at request time. The filter bounds only the snapshot read — stream events for all rows keep flowing, and rows outside the filter are not deleted. Live proof: `tests/test_cdc_postgres_filtered_incremental_snapshot_live.py` (PG); other engines are unit-proven only (`tests/test_cdc_snapshot_filter.py`).
 
 ### Why it matters
 

@@ -36,6 +36,7 @@ export function CdcIncrementalSnapshotPanel({
   const [table, setTable] = useState(defaultTable);
   const [primaryKey, setPrimaryKey] = useState(defaultPrimaryKey || "id");
   const [chunkSize, setChunkSize] = useState(1000);
+  const [filterText, setFilterText] = useState("");
   const [honesty, setHonesty] = useState("");
   const [sourceKey, setSourceKey] = useState("");
   const [loading, setLoading] = useState(false);
@@ -88,12 +89,26 @@ export function CdcIncrementalSnapshotPanel({
   if (!enabled || !jobId) return null;
 
   const request = async () => {
+    let rowFilter: Record<string, unknown> | unknown[] | undefined;
+    if (filterText.trim()) {
+      try {
+        rowFilter = JSON.parse(filterText);
+      } catch {
+        toast({
+          title: "Invalid row filter",
+          message: 'Use JSON, e.g. {"column": "region", "op": "eq", "value": "EU"}',
+          tone: "error",
+        });
+        return;
+      }
+    }
     setBusy(true);
     try {
       const sig = await requestJobCdcSnapshot(jobId, {
         table: table || undefined,
         primary_key: primaryKey || undefined,
         chunk_size: chunkSize,
+        row_filter: rowFilter,
       });
       toast({
         title: "Incremental snapshot requested",
@@ -180,6 +195,18 @@ export function CdcIncrementalSnapshotPanel({
             max={50000}
             value={chunkSize}
             onChange={(e) => setChunkSize(Math.max(1, Number(e.target.value) || 1000))}
+          />
+        </div>
+        <div className="df2-field" style={{ flex: "1 1 16rem" }}>
+          <label className="df2-label" htmlFor={`cdc-snap-filter-${jobId}`}>Row filter (optional)</label>
+          <textarea
+            id={`cdc-snap-filter-${jobId}`}
+            className="df2-input"
+            rows={2}
+            value={filterText}
+            placeholder='{"column": "region", "op": "eq", "value": "EU"}'
+            onChange={(e) => setFilterText(e.target.value)}
+            disabled={busy}
           />
         </div>
         <div className="df2-field" style={{ alignSelf: "flex-end" }}>

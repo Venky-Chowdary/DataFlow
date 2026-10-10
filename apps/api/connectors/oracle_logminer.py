@@ -985,6 +985,7 @@ class OracleLogMinerCdc:
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk for signal-driven incremental snapshots."""
+        from services.cdc_snapshot_filter import signal_filter_sql
         from services.cdc_snapshot_resume import (
             last_pk_from_records,
             quoted_pk_columns,
@@ -1005,23 +1006,19 @@ class OracleLogMinerCdc:
         qualified = self._qualified()
         with self._conn() as conn:
             with conn.cursor() as cur:
-                if last_pk:
-                    sql, params = snapshot_keyset_sql(
-                        table_ref=qualified,
-                        quoted_pk_columns=quoted,
-                        last_pk=last_pk,
-                        limit=limit,
-                        dialect="oracle",
-                    )
-                    cur.execute(sql, params)
-                else:
-                    order_sql = ", ".join(quoted)
-                    cur.execute(
-                        f"SELECT * FROM ("  # nosec B608
-                        f"SELECT * FROM {qualified} ORDER BY {order_sql}"
-                        f") WHERE ROWNUM <= :lim",
-                        {"lim": limit},
-                    )
+                # Optional operator filter (Debezium additional-conditions);
+                # binds only, compiled from the structured spec on the signal.
+                filter_sql, filter_params = signal_filter_sql(sig, dialect="oracle", upper_columns=True)
+                sql, params = snapshot_keyset_sql(
+                    table_ref=qualified,
+                    quoted_pk_columns=quoted,
+                    last_pk=last_pk,
+                    limit=limit,
+                    dialect="oracle",
+                    filter_sql=filter_sql,
+                    filter_params=filter_params,
+                )
+                cur.execute(sql, params)
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall() or []
         records = self._rows_to_records(cols, rows)

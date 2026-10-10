@@ -4620,6 +4620,7 @@ export interface CdcSnapshotSignal {
   chunk_size?: number;
   last_pk?: string;
   rows_snapshotted?: number;
+  row_filter?: Record<string, unknown> | null;
   created_at?: number;
   updated_at?: number;
   error?: string;
@@ -4652,7 +4653,12 @@ export async function listJobCdcSnapshots(
 
 export async function requestJobCdcSnapshot(
   jobId: string,
-  body?: { table?: string; primary_key?: string; chunk_size?: number },
+  body?: {
+    table?: string;
+    primary_key?: string;
+    chunk_size?: number;
+    row_filter?: Record<string, unknown> | unknown[] | null;
+  },
 ): Promise<CdcSnapshotSignal> {
   const res = await apiFetch(
     `${API_BASE}/transfer/${encodeURIComponent(jobId)}/cdc/snapshots`,

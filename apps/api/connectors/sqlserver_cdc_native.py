@@ -23,7 +23,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
-from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+from connectors.sql_identifiers import quote_table_ref
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.cdc_engine import ChangeBatch
 
@@ -1003,6 +1003,7 @@ class SqlServerNativeCdc:
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk for signal-driven incremental snapshots."""
+        from services.cdc_snapshot_filter import signal_filter_sql
         from connectors.sql_identifiers import require_safe_identifier
 
         from services.cdc_snapshot_resume import (
@@ -1015,29 +1016,29 @@ class SqlServerNativeCdc:
         pk_name = require_safe_identifier(sig.primary_key or self.primary_key, preserve_case=True)
         pk_cols = _pk_columns(sig.primary_key or self.primary_key or pk_name)
         quoted = quoted_pk_columns(pk_cols, "[")
-        qualified = _qualified_ref(self.schema, self.table)
+        # Shared readers bind self.table to tables[0]; read the signal's table.
+        sig_table = (getattr(sig, "table", "") or "").strip() or self.table
+        qualified = _qualified_ref(self.schema, sig_table)
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
         with self._conn() as conn:
             with conn.cursor() as cur:
-                if last_pk:
-                    sql, params = snapshot_keyset_sql(
-                        table_ref=qualified,
-                        quoted_pk_columns=quoted,
-                        last_pk=last_pk,
-                        limit=limit,
-                        dialect="sqlserver",
-                    )
+                # Optional operator filter (Debezium additional-conditions);
+                # binds only, compiled from the structured spec on the signal.
+                filter_sql, filter_params = signal_filter_sql(sig, dialect="sqlserver", quote_char="[")
+                sql, params = snapshot_keyset_sql(
+                    table_ref=qualified,
+                    quoted_pk_columns=quoted,
+                    last_pk=last_pk,
+                    limit=limit,
+                    dialect="sqlserver",
+                    filter_sql=filter_sql,
+                    filter_params=filter_params,
+                )
+                if params:
                     cur.execute(sql, params)
                 else:
-                    order_sql = ", ".join(quoted)
-                    cur.execute(
-                        f"""
-                        SELECT TOP ({limit}) *
-                        FROM {qualified}
-                        ORDER BY {order_sql}
-                        """  # nosec B608
-                    )
+                    cur.execute(sql)
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall() or []
         records = [

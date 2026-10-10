@@ -61,7 +61,7 @@ def _sql(sql: str, params: tuple = (), fetch: bool = False):
     conn = get_connection(**CFG, connection_string="", ssl=False)
     try:
         with conn.cursor() as cur:
-            cur.execute(sql, params)
+            cur.execute(sql, params or None)
             rows = cur.fetchall() if fetch else None
         conn.commit()
         return rows

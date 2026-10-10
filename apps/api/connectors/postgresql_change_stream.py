@@ -1681,6 +1681,8 @@ class PostgreSqlChangeStreamCdc:
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk reader for Debezium-style incremental snapshots."""
+        from services.cdc_snapshot_filter import signal_filter_sql
+        from services.cdc_snapshot_resume import snapshot_keyset_sql
         from connectors.sql_identifiers import (
             quote_sql_identifier,
             require_safe_identifier,
@@ -1690,7 +1692,6 @@ class PostgreSqlChangeStreamCdc:
         from services.cdc_snapshot_window import (
             _pk_columns,
             _pk_value,
-            keyset_successor_predicate,
         )
 
         pk_cols = _pk_columns(sig.primary_key or self.primary_key)
@@ -1698,7 +1699,6 @@ class PostgreSqlChangeStreamCdc:
             quote_sql_identifier(require_safe_identifier(c, preserve_case=True))
             for c in pk_cols
         ]
-        order_sql = ", ".join(pk_quoted)
         # Snapshot chunks must read the table the signal names, not whichever
         # table this reader happens to be bound to. In shared multi-table mode
         # `self.table` is pinned to tables[0], so honouring it here meant a
@@ -1716,18 +1716,19 @@ class PostgreSqlChangeStreamCdc:
                 # predated the read, so an event *older* than the chunk could
                 # overwrite the fresher snapshot value.
                 lsn_low = self._current_wal_lsn(cur)
-                if last_pk:
-                    where, params = keyset_successor_predicate(pk_quoted, last_pk)
-                    cur.execute(
-                        f"SELECT * FROM {qualified} WHERE {where} "  # nosec B608
-                        f"ORDER BY {order_sql} LIMIT %s",
-                        (*params, limit),
-                    )
-                else:
-                    cur.execute(
-                        f"SELECT * FROM {qualified} ORDER BY {order_sql} LIMIT %s",  # nosec B608
-                        (limit,),
-                    )
+                # Optional operator filter (Debezium additional-conditions);
+                # binds only, compiled from the structured spec on the signal.
+                filter_sql, filter_params = signal_filter_sql(sig, dialect="postgresql")
+                sql, params = snapshot_keyset_sql(
+                    table_ref=qualified,
+                    quoted_pk_columns=pk_quoted,
+                    last_pk=last_pk,
+                    limit=limit,
+                    dialect="postgresql",
+                    filter_sql=filter_sql,
+                    filter_params=filter_params,
+                )
+                cur.execute(sql, params)
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall() or []
                 lsn_high = self._current_wal_lsn(cur)

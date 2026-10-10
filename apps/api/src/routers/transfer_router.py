@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from services.brand_env import getenv_brand
 from services.mapping_proof import mappings_from_request
 from services.shape_preflight import ShapePreflightRefused
@@ -1802,6 +1801,8 @@ class JobCdcSnapshotBody(BaseModel):
     table: str = ""
     primary_key: str = ""
     chunk_size: int = 1000
+    # Structured filter spec (services/cdc_snapshot_filter.py), never raw SQL.
+    row_filter: dict | list | None = None
 
 
 @router.get("/{job_id}/cdc/snapshots")
@@ -1860,6 +1861,7 @@ async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, reques
             table=body.table,
             primary_key=body.primary_key,
             chunk_size=body.chunk_size,
+            row_filter=body.row_filter,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
