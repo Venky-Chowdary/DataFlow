@@ -621,6 +621,49 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     }
   }
 
+  if (resolved === "github") {
+    authModes.push(
+      auth(
+        "pat",
+        "GitHub personal access token",
+        [
+          text("owner", "Repository owner"),
+          text("repo", "Repository"),
+          password("access_token", "Personal access token"),
+        ],
+        (values) =>
+          required(values, "owner", "Repository owner")
+          || required(values, "repo", "Repository")
+          || required(values, "access_token", "Personal access token"),
+      ),
+    );
+  } else if (resolved === "jira") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Jira Cloud API token",
+        [
+          text("site", "Jira site URL", { placeholder: "https://your-domain.atlassian.net" }),
+          text("email", "Atlassian account email"),
+          password("api_token", "API token"),
+        ],
+        (values) =>
+          required(values, "site", "Jira site URL")
+          || required(values, "email", "Atlassian account email")
+          || required(values, "api_token", "API token"),
+      ),
+    );
+  } else if (resolved === "intercom") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Intercom access token",
+        [password("access_token", "Access token")],
+        (values) => required(values, "access_token", "Access token"),
+      ),
+    );
+  }
+
   // Build auth modes for each connector
   if (userPassFields.length) {
     authModes.push(
@@ -806,6 +849,8 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
 function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
+  if (resolved === "github") return "pat";
+  if (["jira", "intercom"].includes(resolved)) return "api_key";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";

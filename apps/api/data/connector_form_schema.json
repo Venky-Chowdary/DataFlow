@@ -1057,6 +1057,42 @@
     "common_fields": [],
     "setup_steps": []
   },
+  "github": {
+    "label": "GitHub",
+    "default_auth_mode": "pat",
+    "auth_modes": [
+      {
+        "value": "pat",
+        "label": "GitHub personal access token",
+        "description": "Programmatic access token. Snowflake sends it as password=.",
+        "fields": [
+          {
+            "key": "owner",
+            "label": "Repository owner",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "repo",
+            "label": "Repository",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "access_token",
+            "label": "Personal access token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
   "html": {
     "label": "HTML",
     "default_auth_mode": "file_path",
@@ -1194,6 +1230,65 @@
             "optional": true,
             "sensitive": false,
             "placeholder": "analytics"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "intercom": {
+    "label": "Intercom",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Intercom access token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "access_token",
+            "label": "Access token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "jira": {
+    "label": "Jira Cloud",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Jira Cloud API token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "site",
+            "label": "Jira site URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "https://your-domain.atlassian.net"
+          },
+          {
+            "key": "email",
+            "label": "Atlassian account email",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "api_token",
+            "label": "API token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
           }
         ]
       }
