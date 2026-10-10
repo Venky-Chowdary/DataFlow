@@ -309,9 +309,16 @@ def _introspect_schema(
     auth_role: str = "",
     private_key: str = "",
     strict_namespace: bool = False,
+    reader_cfg: dict[str, Any] | None = None,
     **options: Any,
 ) -> dict[str, Any]:
     """Load tables/columns for ``table`` in the requested database/schema.
+
+    ``reader_cfg`` asks a document store for the shape its Execute reader will
+    emit (the connector config the reader is built from). Without it MongoDB
+    reports raw top-level keys, which is right for ``$group`` pipelines but not
+    for a transfer plan: the reader expands nested objects into ``parent_child``
+    columns, and a plan built from the raw keys never maps them.
 
     ``options`` carries the connection-affecting extras from the connector
     config (``connectors.generic_sql.connection_options``): TLS material,
@@ -452,6 +459,7 @@ def _introspect_schema(
             connection_string=connection_string,
             auth_source=auth_source,
             table=table,
+            reader_cfg=reader_cfg,
         )
     if db_type == "dynamodb":
         return _introspect_dynamodb(
@@ -3731,6 +3739,24 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         # Sample BSON types BEFORE stringifying _id — otherwise ObjectId is
         # erased to TEXT and create-new never stamps VARCHAR(24).
         docs = list(db[target].find().limit(100)) if target else []
+        reader_cfg = kwargs.get("reader_cfg")
+        if reader_cfg is not None and docs:
+            # Same expansion as connectors.mongodb_reader._page_docs_to_batch, on
+            # the BSON values (ObjectId / Decimal128 carriers survive it).
+            from services.json_intelligence import expand_mongo_documents
+
+            raw_keys = {k for doc in docs for k in doc}
+            docs = expand_mongo_documents(docs, cfg=reader_cfg)
+            expanded = sorted({k for doc in docs for k in doc} - raw_keys)
+            if expanded:
+                logger.info(
+                    "mongodb introspect %s.%s: %d nested column(s) from the reader's "
+                    "expansion: %s",
+                    db_name,
+                    target,
+                    len(expanded),
+                    ", ".join(expanded[:12]),
+                )
         resolved, mix_notes = _mongodb_types_with_notes(docs)
         for doc in docs:
             for key, val in list(doc.items()):

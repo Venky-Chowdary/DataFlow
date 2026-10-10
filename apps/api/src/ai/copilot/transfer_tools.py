@@ -734,7 +734,7 @@ def plan_transfer(
         sample_rows = list(src_info.get("sample_rows") or [])
     else:
         try:
-            src_info = _introspect(src_conn, src_table, purpose="source")
+            src_info = _introspect(src_conn, src_table, purpose="source", execute_shape=True)
         except Exception as exc:
             _LOG.warning("plan_transfer source introspect failed: %s", exc, exc_info=True)
             return _tool_result(tool, success=False, error=f"Could not read the source: {exc}")

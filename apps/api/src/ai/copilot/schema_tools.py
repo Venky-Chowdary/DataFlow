@@ -374,6 +374,7 @@ def introspect_connector_table(
     table: str = "",
     *,
     purpose: str = "",
+    execute_shape: bool = False,
 ) -> dict[str, Any]:
     """Canonical live schema read for a saved connector.
 
@@ -387,6 +388,11 @@ def introspect_connector_table(
     ``purpose`` is passed to the introspector as ``introspect_purpose`` so
     destination reads can distinguish "table absent" from "cannot connect" —
     the difference between create-new and a hard failure.
+
+    ``execute_shape=True`` (transfer planning) returns the columns the Execute
+    reader will emit — for MongoDB that includes nested ``parent_child``
+    leaves, so the plan maps or omits every column G13 will count at runtime.
+    Query/aggregation callers keep the raw document keys their pipelines use.
     """
     from services.dialect_profiles import normalize_schema
     from services.schema_introspect import introspect_schema
@@ -413,6 +419,7 @@ def introspect_connector_table(
         table=table,
         catalog_type=str(cfg.get("type") or ""),
         auth_source=str(cfg.get("auth_source") or ""),
+        reader_cfg=cfg if execute_shape else None,
     )
     ok = bool(info.get("ok"))
     columns = _normalize_columns(info) if ok else []
