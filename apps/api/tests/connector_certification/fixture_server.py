@@ -23,6 +23,7 @@ class RequestRecord:
     path: str
     headers: Mapping[str, str]
     body: bytes
+    target: str = ""
 
 
 class FixtureServer:
@@ -48,6 +49,7 @@ class FixtureServer:
                     path=path,
                     headers=dict(self.headers.items()),
                     body=body,
+                    target=self.path,
                 )
                 response = owner._record_and_get_response(record)
                 if response.drop_connection:
