@@ -42,8 +42,10 @@ def test_sdk_descriptors_match_discovered_sync_modes(tmp_path: Path) -> None:
     script.write_text(
         "import json\n"
         "print(json.dumps({'type':'SCHEMA','stream':'items',"
-        "'schema':{'type':'object','properties':{'id':{'type':'string'}}},"
-        "'key_properties':['id']}))\n",
+        "'schema':{'type':'object','properties':{'id':{'type':'string'},"
+        "'updated_at':{'type':'string'}}},'key_properties':['id'],"
+        "'metadata':[{'breadcrumb':[],'metadata':{'replication-method':"
+        "'INCREMENTAL','replication-key':'updated_at'}}]}))\n",
         encoding="utf-8",
     )
     manifest = {
@@ -147,6 +149,20 @@ def test_sdk_registry_drift_matches_transfer_handoffs() -> None:
     assert (singer_modules.writer_fn != "write_not_supported") is (
         "destination" in singer.roles
     )
+    for connector_id in sdk_ids & set(_DRIVER_CAPS):
+        descriptor = get_descriptor(connector_id)
+        assert descriptor is not None
+        capabilities = _DRIVER_CAPS[connector_id]
+        assert bool(capabilities["read"]) is ("source" in descriptor.roles)
+        assert bool(capabilities["write"]) is ("destination" in descriptor.roles)
+    for connector_id in sdk_ids & set(CONNECTOR_MODULES):
+        descriptor = get_descriptor(connector_id)
+        assert descriptor is not None
+        modules = CONNECTOR_MODULES[connector_id]
+        assert bool(modules.reader) is ("source" in descriptor.roles)
+        assert (modules.writer_fn != "write_not_supported") is (
+            "destination" in descriptor.roles
+        )
 
 
 def test_connector_descriptor_is_frozen_and_rejects_empty_skip_reasons() -> None:

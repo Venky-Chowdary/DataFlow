@@ -55,7 +55,7 @@ SDK_AUTH_MODES = frozenset(
 class ConnectorDescriptor:
     id: str
     display_name: str
-    roles: tuple[str, ...]
+    roles: frozenset[str]
     auth_modes: tuple[str, ...]
     sync_modes: tuple[str, ...]
     form_fields: tuple[Mapping[str, Any], ...]
@@ -63,7 +63,7 @@ class ConnectorDescriptor:
     certification_skips: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "roles", tuple(self.roles))
+        object.__setattr__(self, "roles", frozenset(self.roles))
         object.__setattr__(self, "auth_modes", tuple(self.auth_modes))
         object.__setattr__(self, "sync_modes", tuple(self.sync_modes))
         object.__setattr__(
@@ -222,9 +222,9 @@ class SingerTapBridge(BaseConnector):
     descriptor = ConnectorDescriptor(
         id="singer_tap",
         display_name="Singer tap",
-        roles=("source",),
+        roles=frozenset({"source"}),
         auth_modes=(),
-        sync_modes=("full_refresh",),
+        sync_modes=("full_refresh", "incremental"),
         form_fields=(
             {"name": "tap_command", "sensitive": False},
             {"name": "tap_config", "sensitive": True},
@@ -293,6 +293,49 @@ class SingerTapBridge(BaseConnector):
         return text[:500]
 
     @staticmethod
+    def _schema_from_message(
+        message: Mapping[str, Any],
+        fallback_stream: str = "stream",
+    ) -> StreamSchema:
+        schema = message.get("schema") or {}
+        properties = schema.get("properties") or {}
+        metadata: Mapping[str, Any] = {}
+        raw_metadata = message.get("metadata")
+        if isinstance(raw_metadata, Mapping):
+            metadata = raw_metadata
+        elif isinstance(raw_metadata, list):
+            for item in raw_metadata:
+                if (
+                    isinstance(item, Mapping)
+                    and not item.get("breadcrumb")
+                    and isinstance(item.get("metadata"), Mapping)
+                ):
+                    metadata = item["metadata"]
+                    break
+        cursor_field = str(
+            metadata.get("replication-key")
+            or metadata.get("replication_key")
+            or message.get("cursor_field")
+            or ""
+        )
+        modes = ["full_refresh", "incremental"] if cursor_field else ["full_refresh"]
+        return StreamSchema(
+            name=str(
+                message.get("stream")
+                or message.get("tap_stream_id")
+                or fallback_stream
+            ),
+            properties={
+                key: str((value or {}).get("type", "string"))
+                for key, value in properties.items()
+            },
+            primary_key=list(message.get("key_properties") or []),
+            cursor_field=cursor_field,
+            json_schema=dict(schema),
+            supported_sync_modes=modes,
+        )
+
+    @staticmethod
     def _parse_streams(output: str | None) -> list[StreamSchema]:
         streams: list[StreamSchema] = []
         for line in (output or "").splitlines():
@@ -303,34 +346,10 @@ class SingerTapBridge(BaseConnector):
             if msg is None:
                 continue
             if msg.get("type") == "SCHEMA":
-                schema = msg.get("schema") or {}
-                props = {
-                    k: str((v or {}).get("type", "string"))
-                    for k, v in schema.get("properties", {}).items()
-                }
-                streams.append(
-                    StreamSchema(
-                        name=msg.get("stream") or "stream",
-                        properties=props,
-                        primary_key=list(msg.get("key_properties") or []),
-                        json_schema=dict(schema),
-                    )
-                )
+                streams.append(SingerTapBridge._schema_from_message(msg))
             elif msg.get("streams"):
                 for stream in msg["streams"]:
-                    schema = stream.get("schema") or {}
-                    props = {
-                        k: str((v or {}).get("type", "string"))
-                        for k, v in (schema.get("properties") or {}).items()
-                    }
-                    streams.append(
-                        StreamSchema(
-                            name=stream.get("stream") or stream.get("tap_stream_id") or "stream",
-                            properties=props,
-                            primary_key=list(stream.get("key_properties") or []),
-                            json_schema=schema,
-                        )
-                    )
+                    streams.append(SingerTapBridge._schema_from_message(stream))
         return streams
 
     def test_connection(self) -> bool:
@@ -465,16 +484,7 @@ class SingerTapBridge(BaseConnector):
                     continue
                 mtype = msg.get("type")
                 if mtype == "SCHEMA" and (not stream or msg.get("stream") == stream):
-                    props = {
-                        k: str((v or {}).get("type", "string"))
-                        for k, v in (msg.get("schema") or {}).get("properties", {}).items()
-                    }
-                    schema = StreamSchema(
-                        name=msg.get("stream") or stream,
-                        properties=props,
-                        primary_key=list(msg.get("key_properties") or []),
-                        json_schema=dict(msg.get("schema") or {}),
-                    )
+                    schema = self._schema_from_message(msg, stream or "stream")
                 elif mtype == "STATE":
                     value = msg.get("value") or msg.get("state") or {}
                     if isinstance(value, dict):
