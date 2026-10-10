@@ -14,6 +14,7 @@ from connectors.writer_common import (
 from services.dest_precount import (
     OVERWRITE_SOURCE_KEYS_KEY,
     PRECOUNT_KEY,
+    destination_row_count,
     VECTOR_IDENTITY_ENGINES,
     records_to_key_tuples,
     stamp_artifact_census,
@@ -1035,6 +1036,47 @@ def _writer_supplied_engine_digests(
         return None
     rows = summary.get("rows_written")
     return source, target, int(rows or 0)
+
+
+def _with_reread_dest_count(
+    paired: tuple[str, str, int],
+    *,
+    db_type: str,
+    cfg: dict[str, Any],
+    schema: str,
+    table_name: str,
+    rows_before: int | None,
+) -> tuple[str, str, int]:
+    """Writer digest pair with the destination COUNT(*) re-read, not the batch.
+
+    The pair's row count is the writer's ``rows_written`` — the batch. Into an
+    occupied destination (incremental run 2+, append) that is not the
+    population: L1 graded ``batch - target_rows_before == batch`` and failed
+    every correct second run, and a quiet poll (batch 0) missed the no-op proof
+    (QA RT-02). When the count cannot be re-read and the destination already
+    held rows, the population is reported unmeasured (-1, the
+    ``verify_target`` convention) so Gate-8 fails closed.
+    """
+    source, target, batch = paired
+    measured = destination_row_count(
+        db_type, cfg, schema=schema, table_name=table_name
+    )
+    if measured is not None:
+        if rows_before and int(measured) != int(batch):
+            _logger.info(
+                "gate8: writer digest pair for %s — batch %d, destination COUNT(*) "
+                "%d (held %d before)",
+                table_name, int(batch), int(measured), int(rows_before),
+            )
+        return source, target, int(measured)
+    if rows_before:
+        _logger.warning(
+            "gate8: destination COUNT(*) re-read unavailable for %s (%s) after a "
+            "write into %d existing row(s); population left unmeasured",
+            table_name, db_type, int(rows_before),
+        )
+        return source, target, -1
+    return paired
 
 
 _COUNT_PROOF_TOKEN = re.compile(r"^(?:dest_count|pk_join_count):(\d+)$")
@@ -2192,7 +2234,14 @@ def run_reconciliation(
     # here would compare two different algorithms and always disagree.
     paired = _writer_supplied_engine_digests(dest_summary)
     if paired is not None and not source_checksum_scope_note:
-        engine_digests = paired
+        engine_digests = _with_reread_dest_count(
+            paired,
+            db_type=db_type,
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            rows_before=rows_before,
+        )
     elif (_engine_digest_enabled() or _cdc_source_image_gate(dest_summary)) and not source_checksum_scope_note:
         engine_digests = _engine_population_digests(
             source_endpoint=source_endpoint,
