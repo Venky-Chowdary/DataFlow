@@ -917,7 +917,13 @@ def plan_transfer(
         pii_ack=pii_ack,
     )
 
-    contract_refusal = _plan_contract_refusal(contract_id, require_signed_contract)
+    contract_refusal = _plan_contract_refusal(
+        contract_id,
+        require_signed_contract,
+        source_format=str(src_info.get("db_type") or ""),
+        destination_format=str(dst_info.get("db_type") or ""),
+        column_types={r["name"]: r["inferred_type"] for r in src_rows},
+    )
     if contract_refusal:
         preflight = _block_plan_on_contract(preflight, contract_refusal)
 
@@ -1766,18 +1772,34 @@ def _preview_bound_contract(
     return preview
 
 
-def _plan_contract_refusal(contract_id: str = "", require_signed_contract: Any = None) -> str:
+def _plan_contract_refusal(
+    contract_id: str = "",
+    require_signed_contract: Any = None,
+    *,
+    source_format: str = "",
+    destination_format: str = "",
+    column_types: dict[str, str] | None = None,
+) -> str:
     """Why Confirm would refuse this contract bind; ``""`` when it would not.
 
-    Same check as staging, so plan_transfer cannot approve a bind that
-    start_transfer then refuses (QA MX3-02).
+    Same bind check as staging (QA MX3-02) plus the contract's route/schema
+    compatibility the engine enforces after Confirm (QA MX3-18).
     """
     try:
         _stage_bound_contract(contract_id, require_signed_contract)
     except ValueError as exc:
         _LOG.warning("plan_transfer: contract bind %r refused: %s", contract_id, exc)
         return str(exc)
-    return ""
+    if not str(contract_id or "").strip():
+        return ""
+    from src.transfer.contract_engine import contract_route_refusal
+
+    return contract_route_refusal(
+        contract_id,
+        source_format=source_format,
+        destination_format=destination_format,
+        column_types=column_types,
+    )
 
 
 def _block_plan_on_contract(preflight: dict[str, Any], refusal: str) -> dict[str, Any]:
@@ -1796,7 +1818,10 @@ def _block_plan_on_contract(preflight: dict[str, Any], refusal: str) -> dict[str
             "id": "contract_bind",
             "severity": "block",
             "message": refusal,
-            "fix": "Bind an existing SIGNED contract, or turn off require_signed_contract.",
+            "fix": (
+                "Bind a SIGNED contract that matches this route, re-sign the "
+                "contract, or turn off require_signed_contract."
+            ),
         },
     ]
     return out
@@ -1882,6 +1907,9 @@ def start_transfer(
         all_tables=all_tables,
         risk_acceptance=risk_acceptance,
         pii_acknowledgement=pii_acknowledgement,
+        # The plan evaluates the bound contract against this route (QA MX3-18).
+        contract_id=contract_id,
+        require_signed_contract=require_signed_contract,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)

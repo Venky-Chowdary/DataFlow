@@ -7,6 +7,7 @@ versioned, reusable agreement that can break the pipeline if violated.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 try:
@@ -25,6 +26,8 @@ except ImportError:  # pragma: no cover - compatibility for tests
         ContractViolation,
         build_contract_from_preflight,
     )
+
+_logger = logging.getLogger(__name__)
 
 
 def resolve_bound_contract(
@@ -116,6 +119,39 @@ def enforce_bound_contract(
     if not cid or not getattr(request, "enforce_contract", True):
         return cid
     return enforce_or_create_contract(request, schema, mappings, preflight=None)
+
+
+def contract_route_refusal(
+    contract_id: str,
+    *,
+    source_format: str,
+    destination_format: str,
+    column_types: dict[str, str] | None = None,
+) -> str:
+    """Why the bound contract would be violated by this route; ``""`` if not.
+
+    The same ``ContractEnforcer`` the engine runs after Confirm, evaluated at
+    plan/staging time so a contract for another route is refused before an
+    ack is issued (QA MX3-18).
+    """
+    from types import SimpleNamespace
+
+    cid = str(contract_id or "").strip()
+    if not cid:
+        return ""
+    contract = get_contract_store().get_contract(cid)
+    if contract is None:
+        return f"Contract {cid} not found"
+    request = SimpleNamespace(
+        source=SimpleNamespace(format=str(source_format or "")),
+        destination=SimpleNamespace(format=str(destination_format or "")),
+    )
+    try:
+        ContractEnforcer(contract).enforce(request, sample_schema=column_types or {})
+    except ContractViolation as cv:
+        _logger.warning("Contract %s refused route at staging: %s", cid, cv)
+        return str(cv)
+    return ""
 
 
 def enforce_or_create_contract(
