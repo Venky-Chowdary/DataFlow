@@ -1467,6 +1467,11 @@ def _run_preflight(
             row_count=row_count,
             mappings=mappings,
             destination_connected=bool(dest_probe.get("connected")),
+            # The probe's own reason (e.g. a TLS handshake against a plaintext
+            # Redis) is the operator's fix; "not reachable" alone is not.
+            destination_error=None
+            if dest_probe.get("connected")
+            else (dest_probe.get("error") or dest_probe.get("message") or None),
             sample_rows=sample_rows,
             sync_mode=mode,
             schema_policy=schema_policy,
