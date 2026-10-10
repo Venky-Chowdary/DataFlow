@@ -1681,9 +1681,20 @@ class DataPilotTools:
                     else:
                         from .connector_create import probe_failure_advice
 
+                        host = str(draft.get("host") or "")
+                        port = str(draft.get("port") or "")
+                        attempted = f"{host}:{port}" if host and port else host
+                        target = f" to {attempted}" if attempted else ""
+                        advice = probe_failure_advice(
+                            str(draft.get("type") or ""),
+                            host=host,
+                            connection_string=str(
+                                draft.get("connection_string") or ""
+                            ),
+                        )
                         error = (
-                            f"Could not connect with those credentials: {probe_msg}. "
-                            f"{probe_failure_advice(str(draft.get('type') or ''), host=str(draft.get('host') or ''), connection_string=str(draft.get('connection_string') or ''))}"
+                            f"Could not connect{target} with those credentials: "
+                            f"{probe_msg}. {advice}"
                         )
                     return ToolResult(
                         name="create_connector",
@@ -6319,7 +6330,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     ):
         # "show last 3 transfers" named a count — returning the default 10
         # (or 20 rows rendered) silently widened it (QA C08).
-        _n_m = re.search(r"\b(?:last|recent|top|first)\s+(\d{1,3})\b", lower)
+        _n_m = re.search(
+            r"\b(?:last|recent|top|first)\s+(\d{1,3})\b"
+            r"(?!\s*(?:minutes?|mins?|min|m|hours?|hrs?|hr|h|days?|d|weeks?|wks?|wk|w)\b)",
+            lower,
+        )
         _n = max(1, min(int(_n_m.group(1)), 100)) if _n_m else 10
         planned.append(("list_jobs", {"limit": _n}))
         planned = [
@@ -7108,6 +7123,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             and "columns" not in lower
             and "describe" not in lower
             and "list_connector_objects" not in [p[0] for p in planned]
+            and "list_jobs" not in [p[0] for p in planned]
             and not any(w in lower for w in (" to ", " into ", "->"))
             and not re.search(r"\b(?:move|transfer|migrate|sync|copy|replicate)\b.+\b(?:from|to)\b", lower)
         ):

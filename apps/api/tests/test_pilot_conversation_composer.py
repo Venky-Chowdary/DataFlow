@@ -2104,6 +2104,15 @@ def test_what_broke_recently_reads_the_ledger():
     ):
         assert asks_what_failed_recently(ask), ask
         assert infer_tools_from_message(ask) == [("list_jobs", {"limit": 10})], ask
+    assert infer_tools_from_message("show the last 5 jobs") == [
+        ("list_jobs", {"limit": 5})
+    ]
+    for ask in (
+        "show jobs in the last 24 hours",
+        "show jobs in 24h",
+        "show jobs in the past 3 days",
+    ):
+        assert infer_tools_from_message(ask) == [("list_jobs", {"limit": 10})], ask
     # A documentation question that contains a failure word stays documentation.
     for doc in (
         "what happens if a transfer fails",

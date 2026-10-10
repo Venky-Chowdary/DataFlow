@@ -529,8 +529,32 @@ def test_sql_probe_failure_still_names_host_and_port(monkeypatch):
         test_first=True,
     )
     assert res.success is False
-    assert "Railway" in (res.error or "")
+    assert "Railway" not in (res.error or "")
+    assert "db.internal:5432" in (res.error or "")
     assert "host/port/user/password" in (res.error or "")
+
+
+def test_railway_sql_probe_failure_keeps_railway_advice(monkeypatch):
+    monkeypatch.setattr(
+        "services.connector_store.connector_name_taken",
+        lambda *a, **k: False,
+    )
+    monkeypatch.setattr(
+        "src.transfer.connector_registry.run_probe",
+        lambda *_a, **_k: (False, "connection refused"),
+    )
+    res = DataPilotTools()._create_connector(
+        name="pg-railway-qa",
+        type="postgresql",
+        host="tokaido.proxy.rlwy.net",
+        port=5432,
+        database="app",
+        username="app",
+        password="secret",
+        test_first=True,
+    )
+    assert res.success is False
+    assert "Railway" in (res.error or "")
 
 
 def test_service_account_camel_case_binds():
