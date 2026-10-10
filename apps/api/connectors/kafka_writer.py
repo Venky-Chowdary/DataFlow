@@ -23,7 +23,6 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     mapped_row_to_json_record,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )

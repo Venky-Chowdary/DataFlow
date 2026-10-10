@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from services.value_serializer import cell_to_string, json_default, json_loads_exact
+from services.value_serializer import json_default, json_loads_exact
 
 from connectors.base import ReadBatch
 

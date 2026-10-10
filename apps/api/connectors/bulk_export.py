@@ -15,7 +15,6 @@ without recording ``bulk_export_fallback`` in the transfer summary.
 
 from __future__ import annotations
 
-import csv
 import io
 import logging
 import tempfile

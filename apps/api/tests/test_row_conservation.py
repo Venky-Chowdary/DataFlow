@@ -7480,7 +7480,7 @@ def test_redshift_dest_count_is_engine_count_not_svv_table_info(
     assert all("to_regclass" not in sql.lower() for sql in missing.sql)
     assert all("SVV_TABLE_INFO" not in sql.upper() for sql in missing.sql)
 
-    engine = _patch_warehouse(monkeypatch, _ScriptedWarehouseEngine(count=3, rows=[(1,), (2,), (99,)]))
+    _patch_warehouse(monkeypatch, _ScriptedWarehouseEngine(count=3, rows=[(1,), (2,), (99,)]))
     cfg = {"host": "h", "schema": "public"}
     assert destination_row_count("amazon_redshift", cfg, schema="public", table_name="orders") == 3
     listed = destination_key_list(

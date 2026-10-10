@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import InvalidOperation
@@ -618,9 +617,7 @@ def write_mapped_rows(
 
         from datetime import date as _date
         from datetime import datetime as _datetime
-        from datetime import time as _time
 
-        from bson.binary import Binary
         from bson.decimal128 import Decimal128
 
         transform_by_col = {

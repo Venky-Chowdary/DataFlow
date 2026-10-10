@@ -217,7 +217,7 @@ def evaluate_cursor_semantics(
             "the insert order, so a row inserted with an earlier date stays "
             f"behind the watermark and is never read"
             + (
-                f", and an update that leaves it untouched is never re-read either"
+                ", and an update that leaves it untouched is never re-read either"
                 if promises_updates
                 else ""
             )

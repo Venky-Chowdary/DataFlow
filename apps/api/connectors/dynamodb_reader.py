@@ -18,7 +18,7 @@ import logging
 import sys
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 from connectors.aws_common import boto3_client
 from connectors.base import ReadBatch

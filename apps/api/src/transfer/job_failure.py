@@ -453,7 +453,7 @@ def _fail_runtime_job(
     job_id: str,
     exc: Exception,
     *,
-    lineage: Any = None,
+    lineage: Any = None,  # noqa: F811  # preserve public parameter name
     request: Any = None,
     already_persisted: list[int] | None = None,
 ) -> tuple[str, dict[str, Any]]:
@@ -645,7 +645,7 @@ def _fail_job_preflight(
     job_id: str,
     pf: dict,
     *,
-    lineage,
+    lineage,  # noqa: F811  # preserve public parameter name
     rows_read: int | None = None,
     sync_mode: str = "",
 ) -> tuple[str, dict]:

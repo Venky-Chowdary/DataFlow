@@ -542,7 +542,6 @@ def _map_identity_names_to_source(
 ) -> list[str]:
     """Map dest/contract identity names onto source columns when possible."""
     pairs = _mapping_pairs(mappings)
-    tgt_by_src = {s: t for s, t in pairs}
     src_by_tgt = {t: s for s, t in pairs}
     srcs = [s for s, _ in pairs]
     if source_columns:

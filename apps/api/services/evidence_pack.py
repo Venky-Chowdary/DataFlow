@@ -398,7 +398,6 @@ def measure_hungarian_vs_greedy() -> dict[str, Any]:
     from services.semantic_mapper import map_columns
 
     data = json.loads(ENTERPRISE.read_text(encoding="utf-8"))
-    all_cases = [c for d in data["domains"] for c in d["cases"]]
     # Domain-batched (same protocol as enterprise proof) so bipartite stays fair.
     hung_correct = 0
     greed_correct = 0

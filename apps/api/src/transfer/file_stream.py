@@ -518,7 +518,7 @@ def peek_file_source(
         prefix = detect_ijson_records_prefix(head)
         if prefix:
             try:
-                import ijson
+                import ijson  # noqa: F401  # optional dependency availability check
             except ImportError:
                 prefix = None
         if prefix:

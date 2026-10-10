@@ -29,11 +29,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .query_tools import _MAX_QUERY_ROWS, _quote_ident, _store_result, _tool_result
+from .query_tools import _quote_ident, _store_result, _tool_result
 from .schema_tools import (
     AmbiguousConnectorError,
-    _endpoint_from_connector,
-    _normalize_columns,
     _safe_connector,
 )
 

@@ -66,7 +66,6 @@ def _replace_remote(sftp: Any, temp_path: str, final_path: str) -> None:
     do this" is identified by errno *and* message, and an unrecognised error
     with no errno stays fatal rather than being read as permission to fall back.
     """
-    import errno
 
     try:
         sftp.posix_rename(temp_path, final_path)

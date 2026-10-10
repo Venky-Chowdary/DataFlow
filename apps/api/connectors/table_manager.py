@@ -874,7 +874,6 @@ def retire_mongodb_overwrite(cfg: dict[str, Any], table_name: str) -> str | None
             db[backup].rename(table_name)
             names.add(table_name)
         options = _collection_create_options(db, table_name)
-        indexes_from = db[table_name]
         db[table_name].rename(backup)
         db.create_collection(table_name, **options)
         _copy_collection_indexes(db[backup], db[table_name])
@@ -989,8 +988,6 @@ def delete_by_primary_keys(
     from services.cdc_snapshot_window import _pk_columns
 
     pk_cols = _pk_columns(primary_key_column)
-    # Single-column shorthand keeps the existing IN (...) fast path.
-    pk_col = pk_cols[0] if len(pk_cols) == 1 else pk_cols
     dt = (db_type or "").lower().strip()
     from services.dest_precount import _object_store_kind
 
@@ -1143,7 +1140,7 @@ def _fetch_pk_lsn_map(
     Composite keys are addressed with the same unit-separator join the CDC
     readers emit, so the LSN guard and the delete path share one key space.
     """
-    from services.cdc_snapshot_window import _pk_columns, _pk_value
+    from services.cdc_snapshot_window import _pk_columns
 
     pk_cols = _pk_columns(primary_key_column)
     existing: dict[str, Any] = {str(k): None for k in keys}

@@ -15,8 +15,6 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from .example_phrases import example_connector_name as _example_connector
-from .example_phrases import example_table_name as _example_table
 from .schema_tools import AmbiguousConnectorError, _safe_connector, list_connector_objects
 
 _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$")

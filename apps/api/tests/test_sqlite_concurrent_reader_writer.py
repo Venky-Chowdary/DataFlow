@@ -79,7 +79,7 @@ def test_lsn_lookup_is_chunked_below_sqlite_expression_depth(tmp_path):
     conn = sqlite3.connect(tmp_path / "lsn.db")
     conn.execute(f'CREATE TABLE t (id INTEGER, v TEXT, "{DF_LSN_COL}" TEXT)')
     conn.executemany(
-        f'INSERT INTO t VALUES (?, ?, ?)',
+        'INSERT INTO t VALUES (?, ?, ?)',
         [(i, "old", "0/00000010") for i in range(2000)],
     )
     conn.commit()

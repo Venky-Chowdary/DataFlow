@@ -13,7 +13,6 @@ from services.value_serializer import (
     NULL_WIRE_SENTINELS,
     SQL_NULL_SENTINEL,
     cell_to_string,
-    is_null_evidence,
     is_reader_null_cell,
 )
 

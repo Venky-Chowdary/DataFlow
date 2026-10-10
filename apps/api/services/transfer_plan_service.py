@@ -244,7 +244,6 @@ def run_plan_preflight(
     )
     if not live_target_schema and table_exists is True:
         live_target_schema = {}
-    live_target_columns = list(live_target_schema.keys()) if live_target_schema else plan.target_columns
 
     ack = acknowledgments or Acknowledgments()
     if ack.any_claimed:

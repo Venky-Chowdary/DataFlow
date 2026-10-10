@@ -70,7 +70,7 @@ def test_list_reports_overdue_without_dropping_the_catch_up(temp_store):
 
 
 def test_list_leaves_disabled_and_running_schedules_alone(temp_store):
-    sched = store.create_schedule({
+    store.create_schedule({
         "name": "Paused",
         "source_connector_id": "src-1",
         "source_table": "orders",

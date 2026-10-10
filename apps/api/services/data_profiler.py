@@ -18,7 +18,7 @@ from services.transform_engine import (
     pin_settled_number_locale,
     reset_active_number_locale,
 )
-from services.value_serializer import cell_to_string, is_null_evidence
+from services.value_serializer import cell_to_string
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(

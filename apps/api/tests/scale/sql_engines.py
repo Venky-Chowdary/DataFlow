@@ -17,7 +17,6 @@ test.
 from __future__ import annotations
 
 import json
-import os
 import socket
 from dataclasses import dataclass
 import struct
@@ -30,7 +29,6 @@ from services.brand_env import getenv_brand_str
 from src.transfer.models import EndpointConfig
 
 from tests.scale.fixture import (
-    COLUMNS_BY_NAME,
     Checksum,
     ddl_for,
     invented_ddl_for,
