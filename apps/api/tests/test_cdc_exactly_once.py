@@ -532,6 +532,58 @@ def test_decide_idle_heartbeat_at_committed_lsn_is_not_a_conflict() -> None:
     assert action == "already_committed"
 
 
+def test_equal_position_empty_batch_is_already_committed_and_logs_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("DEBUG", logger="services.cdc_exactly_once"):
+        action, _fence = decide_eos_apply(
+            incoming_lsn="0/10",
+            dest_lsn="0/10",
+            incoming_checksum="empty-poll",
+            dest_checksum="committed-update",
+            change=ChangeBatch(),
+        )
+
+    assert action == "already_committed"
+    assert any("empty heartbeat" in record.message for record in caplog.records)
+
+
+def test_equal_position_nonempty_rejected_batch_still_checks_checksum() -> None:
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        decide_eos_apply(
+            incoming_lsn="0/10",
+            dest_lsn="0/10",
+            incoming_checksum="rejected-payload",
+            dest_checksum="committed-payload",
+            change=ChangeBatch(rejected=[{"id": "1", "reason": "invalid"}]),
+        )
+
+    assert exc.value.reason == REASON_CHECKSUM
+
+
+def test_equal_position_nonempty_batch_still_checks_checksum() -> None:
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        decide_eos_apply(
+            incoming_lsn="0/10",
+            dest_lsn="0/10",
+            incoming_checksum="updated-payload",
+            dest_checksum="committed-payload",
+            change=ChangeBatch(updates=[{"id": "1", "value": "changed"}]),
+        )
+
+    assert exc.value.reason == REASON_CHECKSUM
+
+
+def test_newer_position_empty_batch_still_applies() -> None:
+    action, _fence = decide_eos_apply(
+        incoming_lsn="0/20",
+        dest_lsn="0/10",
+        change=ChangeBatch(),
+    )
+
+    assert action == "apply"
+
+
 def test_decide_same_lsn_payload_mismatch_refuses() -> None:
     with pytest.raises(ExactlyOnceRouteError) as exc:
         decide_eos_apply(

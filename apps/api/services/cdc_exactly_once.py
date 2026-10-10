@@ -1455,14 +1455,16 @@ def decide_eos_apply(
             and (dest_phase or "") == "snapshot"
         ):
             return "handoff_phase", fence
-        # The dest checksum describes the batch dest committed *at* its
-        # watermark, so it is only comparable to a redelivery of that same LSN
-        # that still carries rows. A strictly older LSN is an at-least-once
-        # replay of an earlier batch. An idle poll repeats this LSN with no
-        # rows; its empty digest is not a second version of the event.
-        if compare_lsn(incoming_lsn, dest_lsn or "") == 0 and not is_position_heartbeat(
-            change
-        ):
+        if compare_lsn(incoming_lsn, dest_lsn or "") == 0:
+            if change is not None and all(
+                not list(getattr(change, attr, None) or [])
+                for attr in ("inserts", "updates", "deletes", "rejected")
+            ):
+                _logger.debug(
+                    "cdc_eos: empty heartbeat already committed at position lsn=%s",
+                    incoming_lsn,
+                )
+                return "already_committed", fence
             assert_redelivery_checksum(
                 incoming_checksum,
                 dest_checksum or None,
