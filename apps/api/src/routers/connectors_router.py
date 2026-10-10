@@ -840,11 +840,9 @@ async def cancel_transfer_job(job_id: str, request: Request):
                     "cancel_requested": True,
                     "queue_release": queue_release,
                 }
-        # The worker drops the slot after it closes the replication connection.
-        # While that worker still holds the CDC lease, peek mode leaves the
-        # slot inactive between polls — this call then refuses to drop it.
-        # A worker that has already exited has no live lease, and this call
-        # drops the idle slot.
+        # A cancelled one-shot keeps its slot so the next run resumes from the
+        # log (release_finished_cdc_slot, E3-006); the response names it so the
+        # operator can drop an abandoned route's slot by hand.
         slot_release: dict[str, Any] = {"released": False, "reason": "not_attempted"}
         try:
             from services.cdc_catchup import release_finished_cdc_slot
