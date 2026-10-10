@@ -191,3 +191,43 @@ def test_rerun_redis_text_carrier_is_the_sanctioned_carrier_not_a_conflict(sampl
         destination_db_type="redis",
     )
     assert cls["confidence_class"] != "weak_or_conflicted", cls
+
+
+@pytest.mark.skipif(not _redis_up(), reason="Redis not reachable on localhost:6379")
+def test_redis_confirm_preview_names_columns_stored_as_exact_text(tmp_path):
+    """Redis has no decimal/date type: the Confirm preview must say which typed
+    columns land as exact JSON text, not pass them silently as "preserve"."""
+    from services import connector_store
+    from src.ai.copilot.tools import DataPilotTools
+
+    db = tmp_path / "src.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT, "
+            "price DECIMAL(10,2), ok BOOLEAN)"
+        )
+        conn.executemany(
+            "INSERT INTO items VALUES (?, ?, ?, ?)",
+            [(i, f"n{i}", f"{i}.25", i % 2) for i in range(1, 11)],
+        )
+    tag = uuid.uuid4().hex[:8]
+    src = connector_store.create_connector(
+        {"name": f"rd-src-{tag}", "type": "sqlite", "role": "both", "database": str(db)}
+    )
+    dst = connector_store.create_connector(
+        {"name": f"rd-dst-{tag}", "type": "redis", "role": "both", "host": "localhost",
+         "port": 6379, "database": "0", "ssl": False}
+    )
+    try:
+        res = DataPilotTools().execute("start_transfer", {
+            "source_connector_id": src.id, "source_table": "items",
+            "dest_connector_id": dst.id, "dest_table": f"rdtx_{tag}",
+            "sync_mode": "full_refresh_overwrite",
+        })
+        assert res.success, res.error
+        stored = (res.output or {}).get("preview", {}).get("stored_as_text") or []
+        assert [s["column"] for s in stored] == ["price"], stored
+        assert "exact" in stored[0]["note"].lower(), stored
+    finally:
+        connector_store.delete_connector(src.id)
+        connector_store.delete_connector(dst.id)

@@ -336,6 +336,41 @@ def _risky_conversions(conversions: list[dict[str, Any]]) -> list[dict[str, Any]
     ]
 
 
+def _stored_as_text(mappings: list[dict[str, Any]], dest_db: str) -> list[dict[str, Any]]:
+    """Typed columns a schemaless destination can only hold as exact text.
+
+    Redis keeps each row as one JSON document: DECIMAL / DATE / TIMESTAMP have
+    no JSON type, so the destination type map stores them as exact text. The
+    value round-trips, but readers get a string — Confirm names it instead of
+    passing it silently as "preserve".
+    """
+    from services.decision_kernel import InventContext, invent_dest_type, normalize_logical_type
+    from services.dest_schema_authority import destination_schema_is_sampled
+
+    if not dest_db or not destination_schema_is_sampled(dest_db):
+        return []
+    text = {"string", "text", "unknown", ""}
+    out: list[dict[str, Any]] = []
+    for m in mappings:
+        src_type = str(m.get("source_type") or m.get("inferred_type") or "")
+        logical = normalize_logical_type(src_type) if src_type else ""
+        if logical in text:
+            continue
+        carrier = invent_dest_type(src_type, dest_db=dest_db, context=InventContext.CREATE_NEW)
+        if normalize_logical_type(str(carrier or "")) not in text:
+            continue
+        column = str(m.get("target") or m.get("target_column") or m.get("source") or "")
+        out.append({
+            "column": column,
+            "source_type": src_type,
+            "note": (
+                f"{dest_db} has no {logical} type: {column} is stored as exact "
+                "JSON text, so readers get a string, not a typed value."
+            ),
+        })
+    return out
+
+
 def _dest_table_exists_tri_state(dst_info: dict[str, Any]) -> bool | None:
     """True / False / None — never invent create-new from failed introspect.
 
@@ -2041,6 +2076,12 @@ def start_transfer(
         "validation_mode": plan.get("validation_mode"),
         "schema_policy": plan.get("schema_policy"),
     }
+    stored_as_text = _stored_as_text(
+        list(plan.get("engine_mappings") or plan.get("mappings") or []),
+        str(destination.get("type") or ""),
+    )
+    if stored_as_text:
+        preview["stored_as_text"] = stored_as_text
     if pii_ack:
         preview["pii_acknowledgement"] = dict(pii_ack)
     rules_preview = plan.get("data_rules") or {}
