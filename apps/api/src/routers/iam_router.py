@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from services import audit_log, integrations_store
+from services import audit_log, integrations_store, scim_service, team_store
 from services.workspace_access import actor_email
 
 router = APIRouter(prefix="/iam", tags=["IAM"])
@@ -26,6 +26,24 @@ class ServiceAccountCreate(BaseModel):
 
 class ApiKeyRotation(BaseModel):
     overlap_seconds: int = Field(default=86400, ge=0, le=604800)
+
+
+class ScimTokenCreate(BaseModel):
+    name: str = Field(default="SCIM provisioning token", min_length=1, max_length=64)
+    expires_in: str = Field(
+        default=integrations_store.DEFAULT_API_KEY_LIFETIME,
+        min_length=1,
+        max_length=16,
+    )
+
+
+class ScimGroupMapping(BaseModel):
+    workspace_id: str = Field(min_length=1, max_length=128)
+    role: str = Field(min_length=1, max_length=32)
+
+
+class ScimGroupMappingsUpdate(BaseModel):
+    mappings: dict[str, ScimGroupMapping]
 
 
 def _audit_key_details(key: dict[str, Any]) -> dict[str, Any]:
@@ -133,3 +151,65 @@ def revoke_service_account(key_id: str, request: Request):
         details=_audit_key_details(key),
     )
     return {"id": key_id, "revoked": True}
+
+
+@router.post("/scim-token")
+def create_scim_token(request: Request, body: ScimTokenCreate | None = None):
+    actor = actor_email(request)
+    try:
+        key = integrations_store.create_api_key(
+            (body.name if body else "SCIM provisioning token"),
+            actor,
+            role="admin",
+            expires_in=(body.expires_in if body else integrations_store.DEFAULT_API_KEY_LIFETIME),
+            scopes=["scim.provision"],
+            kind="scim",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    audit_log.append_audit_event(
+        action="iam.scim.token.create",
+        resource=f"scim_token:{key['id']}",
+        actor=actor,
+        level="info",
+        details=_audit_key_details(key),
+    )
+    return key
+
+
+@router.get("/scim/group-mappings")
+def get_scim_group_mappings():
+    try:
+        return {"mappings": scim_service.get_group_mappings()}
+    except scim_service.ScimError as exc:
+        raise HTTPException(status_code=503, detail="SCIM storage is unavailable") from exc
+
+
+@router.put("/scim/group-mappings")
+def put_scim_group_mappings(body: ScimGroupMappingsUpdate, request: Request):
+    mappings: dict[str, dict[str, str]] = {}
+    for display_name, mapping in body.mappings.items():
+        key = display_name.strip().lower()
+        if not key:
+            raise HTTPException(status_code=400, detail="Group displayName is required")
+        if mapping.role not in team_store.ROLES:
+            raise HTTPException(status_code=400, detail="role is not a supported workspace role")
+        if team_store.get_workspace(mapping.workspace_id) is None:
+            raise HTTPException(status_code=400, detail="workspace_id does not exist")
+        mappings[key] = {
+            "workspace_id": mapping.workspace_id,
+            "role": mapping.role,
+        }
+    actor = actor_email(request)
+    try:
+        scim_service.set_group_mappings(mappings)
+    except scim_service.ScimError as exc:
+        raise HTTPException(status_code=500, detail="SCIM storage is unavailable") from exc
+    audit_log.append_audit_event(
+        action="iam.scim.group_mappings.update",
+        resource="scim_group_mappings",
+        actor=actor,
+        level="info",
+        details={"mappings": mappings},
+    )
+    return {"mappings": mappings}
