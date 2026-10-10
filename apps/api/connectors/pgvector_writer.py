@@ -501,7 +501,22 @@ def write_mapped_rows(
     from services.vectorization import vector_identity_columns
 
     identity_columns = vector_identity_columns(pk_cols, mappings, records)
+    from services.embedding_providers import (
+        EmbeddingProviderError,
+        EmbeddingUsage,
+        create_embedding_usage,
+        provider_extra_from_options,
+    )
+
+    embedding_extra = provider_extra_from_options(_kwargs)
+    usage = EmbeddingUsage(
+        provider=(embedding_model or "unknown").split("/", 1)[0],
+        model=embedding_model or "unknown",
+    )
     try:
+        usage = create_embedding_usage(
+            embedding_model, embedding_extra, embedding_column
+        )
         vector_rows = vectorize_records(
             records,
             content_column=content_column,
@@ -514,6 +529,24 @@ def write_mapped_rows(
             skip_chunking=skip_chunking,
             durable_embedding_cache=durable_embedding_cache,
             identity_columns=identity_columns or None,
+            usage=usage,
+            embedding_extra=embedding_extra,
+        )
+    except EmbeddingProviderError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"Embedding provider {usage.provider} model {usage.model} "
+                f"failed ({type(exc).__name__}): {exc}"
+            ),
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     except Exception as exc:
         return WriteResult(
@@ -523,9 +556,10 @@ def write_mapped_rows(
             target_schema=schema or "public",
             checksum="",
             chunks_completed=0,
-            error=f"Vectorization failed: {exc}",
+            error=f"Vectorization failed ({type(exc).__name__})",
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     from services.vector_sync import _rejected_doc_keys
@@ -554,7 +588,10 @@ def write_mapped_rows(
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
             warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
-            meta=stale_cleanup_meta(0, skipped_docs),
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
 
     # Determine dimension from valid embeddings only — never invent 384.
@@ -592,13 +629,16 @@ def write_mapped_rows(
             error=dim_err or "embedding dimension unknown — refuse fabricated defaults",
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
-            meta=stale_cleanup_meta(0, skipped_docs),
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
 
     inserted = 0
     committed = False
     rejected_details: list[dict[str, Any]] = list(map_rejected)
-    fingerprint_meta: dict[str, str] = {}
+    fingerprint_meta: dict[str, Any] = {"embedding_usage": usage.to_dict()}
     from services.vector_sync import pgvector_delete_stale_chunks
     stale_chunks_deleted = 0
     skipped_docs = 0
@@ -807,15 +847,16 @@ def write_mapped_rows(
                     error=str(exc),
                     rejected_details=rejected_details,
                     rejected_rows=len(rejected_details),
-                    meta={
-                        "vector_fingerprint_status": "mismatch",
-                        "vector_fingerprint_digest": incoming_fingerprint.digest,
-                    },
+                        meta={
+                            "vector_fingerprint_status": "mismatch",
+                            "vector_fingerprint_digest": incoming_fingerprint.digest,
+                            "embedding_usage": usage.to_dict(),
+                        },
                 )
-            fingerprint_meta = {
+            fingerprint_meta.update({
                 "vector_fingerprint_status": fingerprint_status,
                 "vector_fingerprint_digest": incoming_fingerprint.digest,
-            }
+            })
             total = len(valid_rows)
             for i in range(0, total, batch_size):
                 batch = valid_rows[i : i + batch_size]

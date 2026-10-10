@@ -714,7 +714,22 @@ def write_mapped_rows(
         )
     from services.vectorization import vector_identity_columns
 
+    from services.embedding_providers import (
+        EmbeddingProviderError,
+        EmbeddingUsage,
+        create_embedding_usage,
+        provider_extra_from_options,
+    )
+
+    embedding_extra = provider_extra_from_options(_kwargs)
+    usage = EmbeddingUsage(
+        provider=(embedding_model or "unknown").split("/", 1)[0],
+        model=embedding_model or "unknown",
+    )
     try:
+        usage = create_embedding_usage(
+            embedding_model, embedding_extra, embedding_column
+        )
         vector_rows = vectorize_records(
             records,
             content_column=content_column,
@@ -727,6 +742,24 @@ def write_mapped_rows(
             skip_chunking=skip_chunking,
             durable_embedding_cache=durable_embedding_cache,
             identity_columns=vector_identity_columns(pk_cols, mappings, records),
+            usage=usage,
+            embedding_extra=embedding_extra,
+        )
+    except EmbeddingProviderError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"Embedding provider {usage.provider} model {usage.model} "
+                f"failed ({type(exc).__name__}): {exc}"
+            ),
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     except Exception as exc:
         return WriteResult(
@@ -736,9 +769,10 @@ def write_mapped_rows(
             target_schema=schema or "",
             checksum="",
             chunks_completed=0,
-            error=f"Vectorization failed: {exc}",
+            error=f"Vectorization failed ({type(exc).__name__})",
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     from services.vector_sync import _rejected_doc_keys
@@ -771,7 +805,10 @@ def write_mapped_rows(
                 error=empty_err,
                 rejected_details=list(map_rejected),
                 rejected_rows=len(map_rejected),
-                meta=stale_cleanup_meta(0, skipped_docs),
+                meta={
+                    **stale_cleanup_meta(0, skipped_docs),
+                    "embedding_usage": usage.to_dict(),
+                },
             )
         skipped_docs = stale_cleanup_skipped_docs(
             rejected_source_ids, map_rejected
@@ -793,7 +830,10 @@ def write_mapped_rows(
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
             warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
-            meta=stale_cleanup_meta(0, skipped_docs),
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
 
     from services.vector_embedding import coerce_embedding, resolve_embedding_dimension
@@ -840,7 +880,10 @@ def write_mapped_rows(
                 }
             ],
             rejected_rows=len(map_rejected) + 1,
-            meta=stale_cleanup_meta(0, skipped_docs),
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
 
     points, embed_rejected = build_qdrant_points(vector_rows, dimension=dimension)
@@ -879,7 +922,10 @@ def write_mapped_rows(
             or "all embeddings rejected",
             rejected_details=rejected,
             rejected_rows=len(rejected),
-            meta=stale_cleanup_meta(0, skipped_docs),
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
     from connectors.writer_common import reject_on_strict_policy
 
@@ -902,7 +948,10 @@ def write_mapped_rows(
             error=strict_error,
             rejected_details=rejected,
             rejected_rows=len(rejected),
-            meta=stale_cleanup_meta(0, skipped_docs),
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
 
     collection = table_name or "dataflow_vectors"
@@ -910,7 +959,7 @@ def write_mapped_rows(
     inserted = 0
     stale_chunks_deleted = 0
     skipped_docs = 0
-    fingerprint_meta: dict[str, str] = {}
+    fingerprint_meta: dict[str, Any] = {"embedding_usage": usage.to_dict()}
     session = None
     try:
         session = _requests_session()
@@ -1044,12 +1093,13 @@ def write_mapped_rows(
                 meta={
                     "vector_fingerprint_status": "mismatch",
                     "vector_fingerprint_digest": incoming_fingerprint.digest,
+                    "embedding_usage": usage.to_dict(),
                 },
             )
-        fingerprint_meta = {
+        fingerprint_meta.update({
             "vector_fingerprint_status": fingerprint_status,
             "vector_fingerprint_digest": incoming_fingerprint.digest,
-        }
+        })
 
         from services.vector_sync import _ensure_qdrant_source_id_index
 

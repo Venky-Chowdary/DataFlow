@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from services.brand_env import getenv_brand
 from functools import lru_cache
 from typing import Any, Callable, Protocol
@@ -70,6 +71,8 @@ class _SentenceTransformerEmbedder:
 class _OpenAIEmbedder:
     """Managed OpenAI embedding backend (text-embedding-3-small by default)."""
 
+    backend = "openai"
+
     def __init__(self, model_name: str = "text-embedding-3-small", api_key: str = ""):
         self.model_name = model_name
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
@@ -85,22 +88,13 @@ class _OpenAIEmbedder:
         }.get(self.model_name, 1536)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        if not self.api_key:
-            raise RuntimeError("OpenAI API key is not configured")
-        try:
-            import openai
-        except ImportError as exc:
-            raise RuntimeError("OpenAI package not installed") from exc
+        from services.embedding_providers import EmbeddingRunner, usage_for_provider
+        from services.embedding_providers.config import resolve_provider
 
-        client = openai.OpenAI(api_key=self.api_key)
-        # OpenAI batch limit is 2048; cap locally to avoid large payloads.
-        all_embeddings: list[list[float]] = []
-        batch_size = 128
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            response = client.embeddings.create(input=batch, model=self.model_name)
-            all_embeddings.extend([list(e.embedding) for e in response.data])
-        return all_embeddings
+        extra = {"embedding_api_key": self.api_key} if self.api_key else {}
+        provider = resolve_provider(f"openai/{self.model_name}", extra)
+        usage = usage_for_provider(provider)
+        return EmbeddingRunner(provider, usage=usage).embed(texts)
 
 
 class _HashEmbedder:
@@ -192,9 +186,42 @@ def _get_embedder(name: str | None = None) -> Embedder:
         return _HashEmbedder(dimension=dim)
     if model_name.startswith("sentence-transformers/"):
         return _sentence_transformer_or_fallback(model_name)
+    if model_name.startswith(
+        ("azure/", "openai-compatible/", "cohere/", "bedrock/")
+    ):
+        provider = {
+            "azure/": "azure_openai",
+            "openai-compatible/": "openai_compatible",
+            "cohere/": "cohere",
+            "bedrock/": "bedrock",
+        }
+        prefix = next(key for key in provider if model_name.startswith(key))
+        return _ConfiguredProviderEmbedder(model_name, provider[prefix])
     if model_name in {"text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"}:
         return _OpenAIEmbedder(model_name=model_name)
     return _sentence_transformer_or_fallback(model_name)
+
+
+class _ConfiguredProviderEmbedder:
+    def __init__(self, model: str, backend: str) -> None:
+        self.model = model
+        self.backend = backend
+        self._dimension = 0
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        from services.embedding_providers import EmbeddingRunner, usage_for_provider
+        from services.embedding_providers.config import resolve_provider
+
+        provider = resolve_provider(self.model, {})
+        usage = usage_for_provider(provider)
+        vectors = EmbeddingRunner(provider, usage=usage).embed(texts)
+        if vectors:
+            self._dimension = len(vectors[0])
+        return vectors
 
 
 def chunk_text(
@@ -265,6 +292,8 @@ def chunk_text(
 
 # In-process L1 cache for repeated identical content within a process.
 _EMBEDDING_CACHE: dict[str, list[float]] = {}
+_EMBEDDING_DIMENSIONS: dict[tuple[str, str], int] = {}
+_EMBEDDING_DIMENSIONS_LOCK = threading.Lock()
 
 # Set when this task embedded with a fallback instead of the configured model.
 # ``_writer_diagnostics`` copies it onto the job warning list and clears it,
@@ -344,6 +373,8 @@ def embed(
     use_cache: bool = True,
     *,
     durable: bool | None = None,
+    usage: Any = None,
+    embedding_extra: dict[str, Any] | None = None,
 ) -> list[list[float]]:
     """Return embeddings for a list of texts, using the configured model.
 
@@ -361,18 +392,37 @@ def embed(
     )
 
     use_durable = durable_cache_enabled_by_default() if durable is None else bool(durable)
-    embedder = _get_embedder(model)
+    from services.embedding_providers import EmbeddingRunner, usage_for_provider
+    from services.embedding_providers.config import resolve_provider
+    from services.embedding_providers.runtime import provider_rate_limit_kwargs
+
+    resolved_model = model or getenv_brand(
+        "EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+    )
+    provider = resolve_provider(resolved_model, embedding_extra or {})
+    rate_limit_options = provider_rate_limit_kwargs(embedding_extra or {})
+    if usage is None:
+        usage = usage_for_provider(provider)
+    embedder = _get_embedder(resolved_model)
     _note_cached_fallback(embedder, model)
     if not use_cache:
-        return embedder.embed(texts)
+        usage.cache_misses += len(texts)
+        vectors = EmbeddingRunner(
+            provider, usage=usage, **rate_limit_options
+        ).embed(texts)
+        _validate_provider_dimension(provider, vectors)
+        return vectors
 
     results: list[list[float] | None] = [None] * len(texts)
     missing_l1: list[tuple[int, str, str]] = []  # idx, text, key
     for i, text in enumerate(texts):
-        embedder_backend = str(getattr(embedder, "backend", "") or "")
-        key = _cache_key(text, model, embedder_backend)
+        embedder_backend = str(
+            getattr(embedder, "backend", "") or provider.provider_name
+        )
+        key = _cache_key(text, model or resolved_model, embedder_backend)
         if key in _EMBEDDING_CACHE:
             results[i] = list(_EMBEDDING_CACHE[key])
+            usage.cache_hits += 1
         else:
             missing_l1.append((i, text, key))
 
@@ -384,12 +434,19 @@ def embed(
                 vector = list(durable_hits[key])
                 _EMBEDDING_CACHE[key] = vector
                 results[i] = vector
+                usage.cache_hits += 1
             else:
                 still_missing.append((i, text, key))
         missing_l1 = still_missing
 
     if missing_l1:
-        embedded = embedder.embed([text for _, text, _ in missing_l1])
+        usage.cache_misses += len(missing_l1)
+        embedded = EmbeddingRunner(
+            provider, usage=usage, **rate_limit_options
+        ).embed(
+            [text for _, text, _ in missing_l1]
+        )
+        _validate_provider_dimension(provider, embedded)
         to_persist: list[tuple[str, str, list[float]]] = []
         for (i, text, key), vector in zip(missing_l1, embedded):
             _EMBEDDING_CACHE[key] = vector
@@ -405,6 +462,19 @@ def embed(
             raise RuntimeError("embedding cache produced incomplete results")
         out.append(v)
     return out
+
+
+def _validate_provider_dimension(provider: Any, vectors: list[list[float]]) -> None:
+    if not vectors:
+        return
+    key = (str(provider.provider_name), str(provider.model))
+    dimension = len(vectors[0])
+    with _EMBEDDING_DIMENSIONS_LOCK:
+        prior = _EMBEDDING_DIMENSIONS.setdefault(key, dimension)
+    if prior != dimension:
+        from services.embedding_providers.base import EmbeddingResponseError
+
+        raise EmbeddingResponseError("Embedding response dimension drift detected")
 
 
 CONTENT_STORE_LIMIT = 4000
@@ -509,6 +579,8 @@ def vectorize_records(
     skip_chunking: bool = False,
     durable_embedding_cache: bool | None = None,
     identity_columns: list[str] | None = None,
+    usage: Any = None,
+    embedding_extra: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Expand records into vector rows: id, content, embedding, metadata, source_id, chunk_index.
 
@@ -669,7 +741,10 @@ def vectorize_records(
                 "chunk_index": existing_chunk_index,
             })
         elif content and prechunked:
-            vectors = embed([content], model=model, durable=durable_embedding_cache)
+            vectors = embed(
+                [content], model=model, durable=durable_embedding_cache,
+                usage=usage, embedding_extra=embedding_extra,
+            )
             vector = vectors[0] if vectors else None
             bounded, meta = _bounded_vector_content(content, metadata)
             _annotate_embed_backend(meta, model)
@@ -688,7 +763,10 @@ def vectorize_records(
             if not chunks:
                 chunks = [content]
             multi = len(chunks) > 1
-            embeddings = embed(chunks, model=model, durable=durable_embedding_cache)
+            embeddings = embed(
+                chunks, model=model, durable=durable_embedding_cache,
+                usage=usage, embedding_extra=embedding_extra,
+            )
             for idx, (chunk, vector) in enumerate(zip(chunks, embeddings)):
                 bounded, meta = _bounded_vector_content(chunk, metadata)
                 _annotate_embed_backend(meta, model)

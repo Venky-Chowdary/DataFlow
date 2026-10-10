@@ -152,7 +152,40 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     meta = getattr(result, "meta", None) or {}
     if isinstance(meta, dict) and meta.get("schema_fidelity"):
         out["schema_fidelity"] = meta["schema_fidelity"]
+    if isinstance(meta, dict) and isinstance(meta.get("embedding_usage"), dict):
+        out["embedding_usage"] = dict(meta["embedding_usage"])
     return out
+
+
+def _merge_embedding_usage(previous: Any, incoming: Any) -> dict[str, Any] | None:
+    if not isinstance(incoming, dict):
+        return None
+    if not isinstance(previous, dict) or not previous:
+        return dict(incoming)
+    return {
+        "provider": incoming.get("provider") or previous.get("provider"),
+        "model": incoming.get("model") or previous.get("model"),
+        "calls": int(previous.get("calls") or 0) + int(incoming.get("calls") or 0),
+        "retries": int(previous.get("retries") or 0)
+        + int(incoming.get("retries") or 0),
+        "input_tokens": int(previous.get("input_tokens") or 0)
+        + int(incoming.get("input_tokens") or 0),
+        "token_count_estimated": bool(
+            previous.get("token_count_estimated")
+            or incoming.get("token_count_estimated")
+        ),
+        "cache_hits": int(previous.get("cache_hits") or 0)
+        + int(incoming.get("cache_hits") or 0),
+        "cache_misses": int(previous.get("cache_misses") or 0)
+        + int(incoming.get("cache_misses") or 0),
+        "estimated_cost_usd": (
+            None
+            if previous.get("estimated_cost_usd") is None
+            or incoming.get("estimated_cost_usd") is None
+            else float(previous.get("estimated_cost_usd") or 0)
+            + float(incoming.get("estimated_cost_usd") or 0)
+        ),
+    }
 
 
 _STREAMING_TYPES = frozenset({
@@ -677,6 +710,19 @@ def _write_batch(
             kwargs["chunk_size"] = int(extra.get("chunk_size", 512)) if extra.get("chunk_size") else 512
             kwargs["chunk_overlap"] = int(extra.get("chunk_overlap", 50)) if extra.get("chunk_overlap") else 50
             kwargs["skip_chunking"] = bool(extra.get("skip_chunking"))
+            for option in (
+                "embedding_api_key",
+                "embedding_base_url",
+                "embedding_endpoint",
+                "embedding_api_version",
+                "embedding_base_model",
+                "embedding_region",
+                "embedding_dimensions",
+                "embedding_requests_per_minute",
+                "embedding_tokens_per_minute",
+            ):
+                if option in extra:
+                    kwargs[option] = extra[option]
         result = mod.write_mapped_rows(**kwargs)
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -3359,6 +3405,9 @@ def _stream_database_transfer_impl(
             append_procedure_warnings(ddl_log, incoming)
             # Merge quarantine findings across batches — never replace with last batch only.
             prev = dest_summary if isinstance(dest_summary, dict) else {}
+            merged_usage = _merge_embedding_usage(
+                prev.get("embedding_usage"), incoming.get("embedding_usage")
+            )
             prev_details = list(prev.get("rejected_details") or [])
             new_details: list[dict[str, Any]] = []
             for raw in incoming.get("rejected_details") or []:
@@ -3392,6 +3441,8 @@ def _stream_database_transfer_impl(
                 "rejected_rows": rejected_total,
                 "coerced_null_rows": coerced_null_total,
             }
+            if merged_usage is not None:
+                dest_summary["embedding_usage"] = merged_usage
             # Property 6 — keep first-batch fidelity certificate across chunks.
             fid = incoming.get("schema_fidelity") or prev.get("schema_fidelity")
             if fid:

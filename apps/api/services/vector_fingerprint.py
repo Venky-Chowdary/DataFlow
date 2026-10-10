@@ -137,6 +137,21 @@ def fingerprint_for_write(
         provider = "source_embedding"
         canonical_model = f"column:{embedding_column}"
     else:
+        remote_providers = {
+            "azure/": "azure_openai",
+            "openai-compatible/": "openai_compatible",
+            "cohere/": "cohere",
+            "bedrock/": "bedrock",
+        }
+        remote_prefix = next(
+            (prefix for prefix in remote_providers if resolved_model.startswith(prefix)),
+            None,
+        )
+        if remote_prefix:
+            provider = remote_providers[remote_prefix]
+            canonical_model = resolved_model.split("/", 1)[1]
+        else:
+            canonical_model = resolved_model
         if not backend:
             if resolved_model.startswith(("hash/", "deterministic/")):
                 backend = "hash"
@@ -146,18 +161,22 @@ def fingerprint_for_write(
                 backend = "openai"
             elif type(embedder).__name__ == "_SentenceTransformerEmbedder":
                 backend = "sentence_transformers"
-        provider = backend
+        if not remote_prefix:
+            provider = backend
         if provider not in {
             "openai",
             "hash",
             "sentence_transformers",
             "tfidf_fallback",
+            "azure_openai",
+            "openai_compatible",
+            "cohere",
+            "bedrock",
         }:
             raise ValueError(
                 f"unsupported embedding backend {provider!r}; refusing to "
                 "persist an ambiguous vector fingerprint"
             )
-        canonical_model = resolved_model
         if canonical_model.startswith("deterministic/"):
             canonical_model = "hash/" + canonical_model.split("/", 1)[1]
         elif canonical_model.startswith("text-embedding-"):

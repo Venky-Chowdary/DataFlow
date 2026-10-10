@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 
 def _fingerprint(*, model: str = "hash/32", chunk_size: int = 512):
     from services.vector_fingerprint import fingerprint_for_write
@@ -93,6 +95,28 @@ def test_fingerprint_does_not_include_api_credentials(monkeypatch):
     assert fingerprint.model == "openai/text-embedding-3-small"
     assert "must-not-be-persisted" not in serialized
     assert "OPENAI_API_KEY" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("model", "provider", "canonical"),
+    [
+        ("text-embedding-3-small", "openai", "openai/text-embedding-3-small"),
+        ("azure/prod-deployment", "azure_openai", "prod-deployment"),
+        ("openai-compatible/vendor-model", "openai_compatible", "vendor-model"),
+        ("cohere/embed-english-v3.0", "cohere", "embed-english-v3.0"),
+        (
+            "bedrock/amazon.titan-embed-text-v2:0",
+            "bedrock",
+            "amazon.titan-embed-text-v2:0",
+        ),
+    ],
+)
+def test_fingerprint_uses_credential_free_provider_identity(
+    model, provider, canonical
+):
+    fingerprint = _fingerprint(model=model)
+    assert fingerprint.provider == provider
+    assert fingerprint.model == canonical
 
 
 def test_supplied_embedding_column_uses_source_embedding_provider():

@@ -122,6 +122,7 @@ def _write(
     chunk_overlap: int = 50,
     skip_chunking: bool = True,
     embedding_column: str | None = None,
+    **embedding_options: Any,
 ):
     from connectors.pgvector_writer import write_mapped_rows as write_pgvector
     from connectors.qdrant_writer import write_mapped_rows as write_qdrant
@@ -151,6 +152,7 @@ def _write(
         "write_mode": "upsert",
         "sync_mode": "cdc",
     }
+    options.update(embedding_options)
     writer = write_pgvector if resource["engine"] == "pgvector" else write_qdrant
     return writer(**options)
 
@@ -169,14 +171,17 @@ def _source_count(resource: Mapping[str, Any], source_id: str) -> int:
             password=cfg["password"],
         )
         try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    sql.SQL("SELECT count(*) FROM {}.{} WHERE source_id = %s").format(
-                        sql.Identifier("public"), sql.Identifier(resource["name"])
-                    ),
-                    (source_id,),
-                )
-                return int(cur.fetchone()[0])
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql.SQL("SELECT count(*) FROM {}.{} WHERE source_id = %s").format(
+                            sql.Identifier("public"), sql.Identifier(resource["name"])
+                        ),
+                        (source_id,),
+                    )
+                    return int(cur.fetchone()[0])
+            except psycopg2.errors.UndefinedTable:
+                return 0
         finally:
             conn.close()
     import requests
@@ -191,6 +196,8 @@ def _source_count(resource: Mapping[str, Any], source_id: str) -> int:
         },
         timeout=10,
     )
+    if response.status_code == 404:
+        return 0
     assert response.status_code == 200, response.text
     return int(response.json()["result"]["count"])
 
@@ -556,6 +563,88 @@ def test_pgvector_drop_clears_fingerprint_before_rewrite(fingerprint_destination
     assert rewritten.ok, rewritten.error
     meta = dict(getattr(rewritten, "meta", {}) or {})
     assert meta.get("vector_fingerprint_status") == "created"
+
+
+def test_fake_openai_usage_and_auth_failure_are_visible(fingerprint_destination):
+    class Response:
+        def __init__(self, status, body=None):
+            self.status_code = status
+            self.headers = {}
+            self.body = body or {}
+            self.text = "safe error"
+
+        def json(self):
+            return self.body
+
+    class Session:
+        def __init__(self, status):
+            self.status = status
+            self.calls = 0
+
+        def post(self, _url, **_kwargs):
+            self.calls += 1
+            if self.status == 401:
+                return Response(401)
+            return Response(
+                200,
+                {
+                    "data": [{"index": 0, "embedding": [0.25] * 32}],
+                    "usage": {"prompt_tokens": 100},
+                },
+            )
+
+    resource = fingerprint_destination
+    auth_text = f"safe auth failure {resource['engine']}"
+    failed = _write(
+        resource,
+        [{"doc_id": "provider-auth-fail", "content": auth_text}],
+        model="openai/text-embedding-3-small",
+        _embedding_session=Session(401),
+        embedding_api_key="APIKEY_SENTINEL",
+        embedding_dimensions=32,
+        durable_embedding_cache=False,
+    )
+    assert failed.ok is False
+    assert "EmbeddingAuthError" in (failed.error or "")
+    assert _source_count(resource, "provider-auth-fail") == 0
+
+    fake = Session(200)
+    written = _write(
+        resource,
+        [
+            {
+                "doc_id": "provider-usage-success",
+                "content": f"safe provider success {resource['engine']}",
+            }
+        ],
+        model="openai/text-embedding-3-small",
+        _embedding_session=fake,
+        embedding_api_key="APIKEY_SENTINEL",
+        embedding_dimensions=32,
+        durable_embedding_cache=False,
+    )
+    assert written.ok, written.error
+    usage = written.meta["embedding_usage"]
+    assert usage["provider"] == "openai"
+    assert usage["calls"] == 1
+    assert usage["input_tokens"] == 100
+    assert usage["estimated_cost_usd"] == pytest.approx(0.02 * 100 / 1_000_000)
+    assert _source_count(resource, "provider-usage-success") == 1
+    assert fake.calls == 1
+
+    from connectors.table_manager import drop_table
+
+    assert drop_table(
+        resource["engine"], resource["cfg"], resource["name"]
+    ) is True
+    hashed = _write(
+        resource,
+        [{"doc_id": "provider-hash-cost", "content": "safe content"}],
+        model="hash/32",
+        durable_embedding_cache=False,
+    )
+    assert hashed.ok, hashed.error
+    assert hashed.meta["embedding_usage"]["estimated_cost_usd"] == 0.0
 
 
 def test_embedding_column_fingerprint_and_dimension_gate(fingerprint_destination):
