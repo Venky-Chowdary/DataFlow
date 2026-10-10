@@ -537,6 +537,8 @@ def _python_carrier(value: Any) -> str:
     if isinstance(value, float):
         return "DOUBLE"
     if isinstance(value, _dt.datetime):
+        if value.tzinfo is not None and value.utcoffset() is not None:
+            return "TIMESTAMPTZ"
         return "TIMESTAMP"
     if isinstance(value, _dt.date):
         return "DATE"
@@ -547,35 +549,87 @@ def _python_carrier(value: Any) -> str:
     return "VARCHAR"
 
 
+def python_carriers_of_rows(
+    headers: list[str],
+    rows: Any,
+) -> dict[str, str]:
+    """One driver-materialised carrier per column, from raw DBAPI rows.
+
+    Read before the cells are stringified for the wire: afterwards every
+    value is a ``str`` and the carrier says nothing. A column whose non-null
+    values disagree (``sql_variant``, a UNION of types) gets no carrier.
+    """
+    seen: dict[str, set[str]] = {}
+    for row in rows or []:
+        for i, h in enumerate(headers):
+            if isinstance(row, Mapping):
+                val = row.get(h)
+            elif i < len(row):
+                val = row[i]
+            else:
+                continue
+            if is_null_evidence(val):
+                continue
+            seen.setdefault(h, set()).add(_python_carrier(val))
+    return {h: next(iter(kinds)) for h, kinds in seen.items() if len(kinds) == 1}
+
+
+# Sample-fit types a driver carrier is allowed to keep. Anything else is
+# replaced by the carrier itself: the driver read the column's declared type.
+_CARRIER_KEEPS_SAMPLE: dict[str, tuple[str, ...]] = {
+    "VARCHAR": ("VARCHAR", "TEXT", "JSON", "UNKNOWN"),
+    "INTEGER": ("INTEGER", "BIGINT", "SMALLINT"),
+    "DECIMAL": ("DECIMAL", "NUMERIC"),
+    "DOUBLE": ("DOUBLE", "FLOAT"),
+    "BOOLEAN": ("BOOLEAN",),
+    "TIMESTAMPTZ": ("TIMESTAMPTZ",),
+    "TIMESTAMP": ("TIMESTAMP",),
+    "DATE": ("DATE",),
+    "BYTEA": ("BYTEA", "BINARY"),
+}
+
+
 def peek_callable_schema(
     headers: list[str],
     rows: list[list[Any]] | list[dict[str, Any]],
+    carriers: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
-    """Infer result-set types from peeked rows — same choke point as playground."""
+    """Infer result-set types from peeked rows — same choke point as playground.
+
+    ``carriers`` are the driver's Python types read from the raw rows (see
+    ``python_carriers_of_rows``). Pass them when ``rows`` are already wire
+    strings; without them the carriers are read from ``rows`` themselves.
+    """
     from services.schema_inference import infer_schema_map
 
     samples: dict[str, list[str]] = {h: [] for h in headers}
-    py_carriers: dict[str, str] = {}
     for row in rows:
         if isinstance(row, Mapping):
             for h in headers:
                 val = row.get(h)
                 if not is_null_evidence(val):
                     samples[h].append(_cell(val))
-                    py_carriers.setdefault(h, _python_carrier(val))
         else:
             for i, h in enumerate(headers):
                 if i < len(row) and not is_null_evidence(row[i]):
                     samples[h].append(_cell(row[i]))
-                    py_carriers.setdefault(h, _python_carrier(row[i]))
+    py_carriers = (
+        dict(carriers) if carriers is not None else python_carriers_of_rows(headers, rows)
+    )
     schema, intel = infer_schema_map(samples)
     for h in headers:
         schema.setdefault(h, "VARCHAR")
         carrier = py_carriers.get(h)
-        if carrier == "VARCHAR" and schema[h] not in {"VARCHAR", "TEXT", "JSON", "unknown"}:
-            # str values mean a text column — never let sample-fit retype
-            # digits-in-text into NUMERIC (QA T16 fidelity block).
-            schema[h] = "VARCHAR"
+        keeps = _CARRIER_KEEPS_SAMPLE.get(carrier or "")
+        if keeps is None:
+            continue
+        if not str(schema[h]).upper().startswith(keeps):
+            # The driver's own Python type is declared evidence: a ``str``
+            # is a text column (QA T16 digits-in-text), a ``float`` an
+            # approximate column, an aware ``datetime`` an instant. Sample
+            # fit must not retype it (QA MX2-07: pymssql NUMBER/BINARY name
+            # no carrier, so this is the only declared evidence there is).
+            schema[h] = carrier
     return schema, intel
 
 
@@ -1224,6 +1278,7 @@ def _execute_live(
         description = _copy_cursor_description(result)
         cap = int(limit) if limit is not None else None
         fetched = result.fetchmany(cap) if cap is not None else result.fetchall()
+        carriers = python_carriers_of_rows(headers, fetched)
         rows = [[_cell(v) for v in row] for row in fetched]
         # The type lookup is a second statement. Close the extract first, or
         # PostgreSQL rejects it while that cursor is still open.
@@ -1244,7 +1299,7 @@ def _execute_live(
         if engine is not None:
             release_engine(engine)
 
-    schema, _intel = peek_callable_schema(headers, rows)
+    schema, _intel = peek_callable_schema(headers, rows, carriers)
     schema = _overlay_declared_numerics(
         headers, description, schema,
         dialect=spec.dialect or str(cfg.get("type") or ""),
@@ -1263,6 +1318,7 @@ def _execute_to_jsonl(
     engine = None
     conn = None
     sample: list[list[str]] = []
+    raw_sample: list[Any] = []
     total = 0
     description = None
     try:
@@ -1277,6 +1333,7 @@ def _execute_to_jsonl(
                     cells = [_cell(v) for v in row]
                     if len(sample) < PEEK_ROW_LIMIT:
                         sample.append(cells)
+                        raw_sample.append(tuple(row))
                     fh.write(
                         json.dumps(
                             cells,
@@ -1304,7 +1361,9 @@ def _execute_to_jsonl(
         if engine is not None:
             release_engine(engine)
 
-    schema, _intel = peek_callable_schema(headers, sample)
+    schema, _intel = peek_callable_schema(
+        headers, sample, python_carriers_of_rows(headers, raw_sample)
+    )
     schema = _overlay_declared_numerics(
         headers, description, schema,
         dialect=spec.dialect or str(cfg.get("type") or ""),

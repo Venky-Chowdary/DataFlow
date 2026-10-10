@@ -826,11 +826,16 @@ _TEXT_TYPE_CODES = frozenset(
 )
 
 
-def _cursor_type_code_is_text(type_code: Any) -> bool:
+def _cursor_type_code_is_text(type_code: Any, dialect: str = "") -> bool:
     """True for a driver type that is character data, not a DECIMAL."""
     if isinstance(type_code, bool) or type_code is None:
         return False
     if isinstance(type_code, int):
+        family = _cursor_code_family(dialect)
+        if family == _CODE_FAMILY_SQLSERVER:
+            return _PYMSSQL_TYPE_CODES.get(type_code) == "VARCHAR"
+        if family == _CODE_FAMILY_UNTRUSTED:
+            return False
         return type_code in _TEXT_TYPE_CODES
     name = str(getattr(type_code, "__name__", "") or type_code).lower()
     return any(
@@ -842,6 +847,7 @@ def _cursor_type_code_is_text(type_code: Any) -> bool:
 def cursor_declared_numeric_types(
     headers: list[str],
     description: Any,
+    dialect: str = "",
 ) -> dict[str, str]:
     """``DECIMAL(p,s)`` from a DBAPI ``cursor.description``, by result position.
 
@@ -861,12 +867,12 @@ def cursor_declared_numeric_types(
         if not col or len(col) < 6:
             continue
         type_code = col[1] if len(col) > 1 else None
-        if _cursor_type_code_is_text(type_code):
+        if _cursor_type_code_is_text(type_code, dialect):
             continue
         # DATE / DATETIME / TINYINT carry a display width in the precision
         # slot. Reading it as DECIMAL(10,0) made every MariaDB query column
         # look numeric (DEF-B-019).
-        carrier = _carrier_for_cursor_column(col)
+        carrier = _carrier_for_cursor_column(col, dialect)
         if carrier and carrier not in {"DECIMAL", "NUMERIC"}:
             continue
         try:
@@ -964,6 +970,21 @@ _CURSOR_ARRAY_CODES: dict[int, str] = {
     2951: "UUID[]",
     3807: "JSON[]",
 }
+# pymssql (FreeTDS) reports the five PEP 249 type objects as small ints, not
+# engine types: FLOAT, INT and BIT all arrive as NUMBER, and DATETIMEOFFSET,
+# DATETIME2, DATE, TIME and VARBINARY all arrive as BINARY. Those two codes
+# name no carrier, so the sample decides. They are also 1–5, which the MySQL
+# FIELD_TYPE table reads as TINYINT/SMALLINT/INT/FLOAT/DOUBLE: a SQL Server
+# VARCHAR, FLOAT and DATETIMEOFFSET were all stamped INTEGER (QA MX2-07).
+_PYMSSQL_TYPE_CODES: dict[int, str] = {
+    1: "VARCHAR",  # STRING
+    4: "DATETIME",  # DATETIME / SMALLDATETIME
+    5: "DECIMAL",  # DECIMAL / NUMERIC / MONEY
+}
+_CODE_FAMILY_MYSQL_PG = "mysql_pg"
+_CODE_FAMILY_SQLSERVER = "sqlserver"
+_CODE_FAMILY_UNTRUSTED = "untrusted"
+_SQLALCHEMY_MYSQL_PG_BACKENDS = frozenset({"mysql", "mariadb", "postgresql", "postgres"})
 _PG_CATALOG_DIALECTS = frozenset({
     "postgresql",
     "postgres",
@@ -1002,6 +1023,33 @@ _PG_ELEMENT_CARRIERS = {
 }
 
 
+def _cursor_code_family(dialect: str) -> str:
+    """Which driver's integer type-code table applies to this dialect.
+
+    Integer type codes are driver-private. The MySQL FIELD_TYPE and PostgreSQL
+    OID tables below do not overlap, so they serve the empty/``generic_sql``
+    dialect too. Any other engine that reports integers (pymssql, Snowflake)
+    must not be read through them.
+    """
+    d = (dialect or "").strip().lower()
+    if not d or d == "generic_sql" or d in _PG_CATALOG_DIALECTS:
+        return _CODE_FAMILY_MYSQL_PG
+    try:
+        from connectors.generic_sql import _drivername
+    except ImportError:
+        logger.warning(
+            "cursor type codes for dialect %r not trusted: generic_sql driver map unavailable",
+            d,
+        )
+        return _CODE_FAMILY_UNTRUSTED
+    backend = _drivername(d).split("+", 1)[0].strip().lower()
+    if backend in _SQLALCHEMY_MYSQL_PG_BACKENDS:
+        return _CODE_FAMILY_MYSQL_PG
+    if backend == "mssql":
+        return _CODE_FAMILY_SQLSERVER
+    return _CODE_FAMILY_UNTRUSTED
+
+
 def _carrier_for_cursor_column(col: Any, dialect: str = "") -> str:
     """Logical carrier a cursor column declared, or ``""`` when it did not.
 
@@ -1022,6 +1070,16 @@ def _carrier_for_cursor_column(col: Any, dialect: str = "") -> str:
     ):
         return explicit.strip()
     if isinstance(type_code, int) and not isinstance(type_code, bool):
+        family = _cursor_code_family(dialect)
+        if family == _CODE_FAMILY_SQLSERVER:
+            return _PYMSSQL_TYPE_CODES.get(type_code, "")
+        if family == _CODE_FAMILY_UNTRUSTED:
+            logger.debug(
+                "cursor type code %r on dialect %r has no known table; sample decides",
+                type_code,
+                dialect,
+            )
+            return ""
         # Code 16 is PostgreSQL's bool OID *and* MySQL FIELD_TYPE_BIT — only
         # the dialect disambiguates. An all-NULL ``NULL::boolean`` column has
         # no sample to arbitrate, so leaving it to inference rewrote the
@@ -1229,7 +1287,7 @@ def cursor_declared_carriers(
 
     Sample inference runs first at the call site. This map replaces it.
     """
-    numeric = cursor_declared_numeric_types(headers, description)
+    numeric = cursor_declared_numeric_types(headers, description, dialect)
     if not headers or not description:
         return numeric
     out = dict(numeric)
