@@ -1359,19 +1359,13 @@ def sa_blank_eos_resume(
                 {"k": key, "lsn": target},
             )
             cleared = int(result.rowcount or 0) > 0
-            try:
-                with conn.begin_nested():
-                    conn.execute(
-                        text(
-                            f"UPDATE {_wm_ref(dialect)} SET resume_blob = '' "  # nosec B608
-                            f"WHERE stream_key = :k AND committed_lsn = ''"
-                        ),
-                        {"k": key},
-                    )
-            except SQLAlchemyError as exc:
-                _logger.warning(
-                    "cdc_eos: could not blank resume_blob stream_key=%s: %s", key, exc
-                )
+            conn.execute(
+                text(
+                    f"UPDATE {_wm_ref(dialect)} SET resume_blob = '' "  # nosec B608
+                    f"WHERE stream_key = :k AND committed_lsn = ''"
+                ),
+                {"k": key},
+            )
             return cleared
     finally:
         release_engine(engine)

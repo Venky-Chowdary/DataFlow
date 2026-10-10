@@ -169,6 +169,55 @@ def test_retired_lsn_is_scoped_to_the_cursor(retired_store) -> None:
     assert gate["details"]["resume_retired"] is True
 
 
+def test_pre_retire_slot_resume_persists_and_reads_back_all_tokens(
+    retired_store, monkeypatch
+) -> None:
+    from services import cdc_slot_resume
+
+    monkeypatch.setattr(
+        "services.sync_cursor.get_watermark", lambda _key: "lsn=0/11744550"
+    )
+    monkeypatch.setattr(
+        "connectors.cdc_eos_sql.read_route_dest_lsn",
+        lambda *_args, **_kwargs: "0/11744560",
+    )
+    pre_retire = getattr(cdc_slot_resume, "pre_retire_slot_resume", None)
+    assert callable(pre_retire)
+
+    tokens = pre_retire(
+        slot_name="df_orders",
+        cursor_keys=["pg:qa:orders"],
+        job_tokens=["lsn=0/11744550|slot=df_orders", "0/11744570"],
+        dest_type="generic_sql",
+        dest_cfg={"type": "sqlite", "database": "unused.db"},
+    )
+
+    assert tokens == ["0/11744550", "0/11744570", "0/11744560"]
+    assert all(
+        slot_lsn_retired(token, cursor_key="pg:qa:orders", slot_name="df_orders")
+        for token in tokens
+    )
+
+
+def test_pre_retire_slot_resume_refuses_failed_readback(retired_store, monkeypatch) -> None:
+    from services import cdc_slot_resume
+
+    monkeypatch.setattr(
+        "services.sync_cursor.get_watermark", lambda _key: "0/11744550"
+    )
+    monkeypatch.setattr(cdc_slot_resume, "slot_lsn_retired", lambda *_a, **_k: False)
+    pre_retire = getattr(cdc_slot_resume, "pre_retire_slot_resume", None)
+    assert callable(pre_retire)
+    error_type = getattr(cdc_slot_resume, "CdcSlotRetirementError", RuntimeError)
+
+    with pytest.raises(error_type, match="df_orders"):
+        pre_retire(
+            slot_name="df_orders",
+            cursor_keys=["pg:qa:orders"],
+            job_tokens=[],
+        )
+
+
 def test_open_ignores_a_retired_dest_lsn_and_keeps_the_fence(retired_store) -> None:
     retire_slot_lsn("0/11744550", cursor_key="pg:qa:orders", slot_name="df_orders")
     view = DestWmView(
@@ -228,6 +277,157 @@ def test_slot_drop_retires_the_prior_lsn(retired_store, monkeypatch) -> None:
     assert out["released"] is True
     assert out["retired_lsns"] == ["0/11744550"]
     assert slot_lsn_retired("0/11744550", cursor_key="pg:qa:orders") is True
+
+
+def test_mongo_retirement_write_failure_refuses_slot_drop(
+    retired_store, monkeypatch
+) -> None:
+    from services import cdc_slot_resume
+
+    class _Mongo:
+        def find(self, *_args, **_kwargs):
+            return []
+
+        def delete_many(self, *_args, **_kwargs):
+            return None
+
+        def insert_many(self, *_args, **_kwargs):
+            raise OSError("store credentials must not appear in the error")
+
+    dropped: list[str] = []
+    monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: _Mongo())
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: dropped.append("df_orders") or {"slot": "dropped"},
+    )
+    error_type = getattr(cdc_slot_resume, "CdcSlotRetirementError", RuntimeError)
+
+    with pytest.raises(error_type, match="df_orders") as raised:
+        release_finished_cdc_slot(
+            {"cdc_slot_name": "df_orders", "cursor_key": "pg:qa:orders",
+             "cursor_value": "lsn=0/11744550|slot=df_orders"},
+            reason="failed",
+            source_cfg={"type": "postgresql"},
+            job_id="job-mongo-retire",
+            worker_closed=True,
+        )
+
+    assert dropped == []
+    assert "store credentials must not appear" not in str(raised.value)
+
+
+def test_destination_lsn_read_failure_refuses_slot_drop(
+    retired_store, monkeypatch
+) -> None:
+    from services import cdc_slot_resume
+
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: dropped.append("df_orders") or {"slot": "dropped"},
+    )
+    monkeypatch.setattr(
+        "connectors.cdc_eos_sql.read_route_dest_lsn",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("secret=do-not-log")),
+    )
+    error_type = getattr(cdc_slot_resume, "CdcSlotRetirementError", RuntimeError)
+
+    with pytest.raises(error_type, match="df_orders") as raised:
+        release_finished_cdc_slot(
+            {"cdc_slot_name": "df_orders", "cursor_key": "pg:qa:orders"},
+            reason="failed",
+            source_cfg={"type": "postgresql"},
+            job_id="job-dest-read",
+            worker_closed=True,
+            dest_type="generic_sql",
+            dest_cfg={"type": "sqlite", "database": "unused.db"},
+        )
+
+    assert dropped == []
+    assert "do-not-log" not in str(raised.value)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="needs strict cursor_keys_for_job; pending lead approval",
+)
+def test_cursor_key_enumeration_failure_refuses_slot_drop(
+    retired_store, monkeypatch
+) -> None:
+    from services import cdc_slot_resume
+
+    class _Mongo:
+        def find(self, *_args, **_kwargs):
+            raise OSError("cursor store unavailable")
+
+    dropped: list[str] = []
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "services.sync_cursor._mongo_cursors", lambda: _Mongo()
+    )
+    monkeypatch.setattr(
+        "services.sync_cursor._load", lambda: {"cursors": []}
+    )
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: dropped.append("df_orders") or {"slot": "dropped"},
+    )
+    error_type = getattr(cdc_slot_resume, "CdcSlotRetirementError", RuntimeError)
+
+    with pytest.raises(error_type, match="df_orders"):
+        release_finished_cdc_slot(
+            {"cdc_slot_name": "df_orders"},
+            reason="failed",
+            source_cfg={"type": "postgresql"},
+            job_id="job-keys",
+            worker_closed=True,
+        )
+
+    assert dropped == []
+
+
+def test_post_drop_retirement_failure_is_reported(retired_store, monkeypatch, caplog) -> None:
+    from services import cdc_slot_resume
+
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: {"slot": "dropped", "slot_name": "df_orders"},
+    )
+    monkeypatch.setattr(
+        "services.sync_cursor.clear_watermark", lambda _key: {"cleared": True}
+    )
+    monkeypatch.setattr(
+        cdc_slot_resume,
+        "retire_after_slot_drop",
+        lambda **_kwargs: (_ for _ in ()).throw(OSError("post-drop write failed")),
+        raising=False,
+    )
+
+    with caplog.at_level("ERROR"):
+        result = release_finished_cdc_slot(
+            {"cdc_slot_name": "df_orders", "cursor_key": "pg:qa:orders"},
+            reason="failed",
+            source_cfg={"type": "postgresql"},
+            job_id="job-post-drop",
+            worker_closed=True,
+        )
+
+    assert result["released"] is True
+    assert result["dest_resume_blank_failed"] is True
+    assert result["dest_resume_blank_error"] == "OSError"
+    assert "df_orders" in caplog.text
+    assert "retired_lsns" not in result
 
 
 def test_incomplete_value_scan_is_not_a_row_count_pass(monkeypatch) -> None:

@@ -1189,6 +1189,115 @@ def test_sqlalchemy_sqlite_eos_apply_and_redelivery() -> None:
         assert sa_dest_engine_count(dest_cfg, "lines", "generic_sql") == 1
 
 
+def test_sa_blank_resume_blob_failure_rolls_back_committed_lsn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import event
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from connectors.cdc_eos_sa import sa_blank_eos_resume, sa_dest_watermark_lsn
+    from connectors.generic_sql import _engine
+
+    dest_cfg = {"type": "sqlite", "database": str(tmp_path / "blank_failure.db")}
+    cursor_key = "sa|eos|blank-failure"
+    apply_change_batch_exactly_once(
+        dest_type="generic_sql",
+        dest_cfg=dest_cfg,
+        dest_table="lines",
+        change=_batch("0/360", inserts=[{"id": "1", "v": "before"}]),
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "v", "target": "v"},
+        ],
+        column_types={"id": "string", "v": "string"},
+        headers=["id", "v"],
+        pk_target_cols=["id"],
+        cursor_key=cursor_key,
+    )
+    engine = _engine(dest_cfg)
+
+    def fail_blob_update(_conn, _cursor, statement, _parameters, _context, _many):
+        if "SET resume_blob = ''" in statement:
+            raise SQLAlchemyError("forced resume_blob update failure")
+
+    event.listen(engine, "before_cursor_execute", fail_blob_update)
+    try:
+        with pytest.raises(SQLAlchemyError, match="resume_blob"):
+            sa_blank_eos_resume(
+                dest_cfg, cursor_key, "generic_sql", lsn="0/360"
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_blob_update)
+
+    assert sa_dest_watermark_lsn(dest_cfg, cursor_key, "generic_sql") == "0/360"
+
+
+def test_retired_sa_lsn_stays_unresumable_when_post_drop_blank_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from connectors.cdc_eos_sa import sa_dest_watermark_lsn
+    from connectors.cdc_eos_sql import open_eos_session
+    from services import cdc_slot_resume
+    from services.cdc_catchup import release_finished_cdc_slot
+
+    dest_cfg = {"type": "sqlite", "database": str(tmp_path / "retired_sa.db")}
+    cursor_key = "sa|eos|retired"
+    slot = "df_sa_retired"
+    apply_change_batch_exactly_once(
+        dest_type="generic_sql",
+        dest_cfg=dest_cfg,
+        dest_table="lines",
+        change=_batch("0/370", inserts=[{"id": "1", "v": "before"}]),
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "v", "target": "v"},
+        ],
+        column_types={"id": "string", "v": "string"},
+        headers=["id", "v"],
+        pk_target_cols=["id"],
+        cursor_key=cursor_key,
+    )
+    monkeypatch.setattr(cdc_slot_resume, "STORE_PATH", tmp_path / "retired.json")
+    monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: None)
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: {"slot": "dropped", "slot_name": slot},
+    )
+    monkeypatch.setattr(
+        "connectors.cdc_eos_sa.sa_blank_eos_resume",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("blank failed")),
+    )
+
+    result = release_finished_cdc_slot(
+        {
+            "cdc_slot_name": slot,
+            "cursor_key": cursor_key,
+            "cursor_value": f"lsn=0/370|slot={slot}",
+        },
+        reason="failed",
+        source_cfg={"type": "postgresql"},
+        job_id="job-retired-sa",
+        worker_closed=True,
+        dest_type="generic_sql",
+        dest_cfg=dest_cfg,
+    )
+
+    assert result["released"] is True
+    assert sa_dest_watermark_lsn(dest_cfg, cursor_key, "generic_sql") == "0/370"
+    opened = open_eos_session(
+        dest_type="generic_sql",
+        dest_cfg=dest_cfg,
+        stream_key=cursor_key,
+        incoming_fence=0,
+        job_resume=f"lsn=0/370|slot={slot}",
+    )
+    assert opened.dest_lsn is None
+    assert opened.resume in {None, ""}
+
+
 def test_sqlalchemy_eos_crash_before_watermark_then_retry() -> None:
     """SA dest txn must roll back apply when watermark is not committed."""
     from connectors.cdc_eos_sa import sa_dest_engine_count, sa_dest_watermark_lsn

@@ -243,15 +243,10 @@ def _cursor_keys_to_clear(job: dict[str, Any], job_id: str) -> list[str]:
     if isinstance(nested, dict):
         _add(nested.get("cursor_key"))
     if job_id:
-        try:
-            from services.sync_cursor import cursor_keys_for_job
+        from services.sync_cursor import cursor_keys_for_job
 
-            for key in cursor_keys_for_job(job_id):
-                _add(key)
-        except Exception as exc:  # noqa: BLE001
-            _logger.warning(
-                "CDC watermark lookup by job %s failed: %s", job_id, exc
-            )
+        for key in cursor_keys_for_job(job_id):
+            _add(key)
     return keys
 
 
@@ -291,9 +286,9 @@ def release_finished_cdc_slot(
     schedule, including a paused one, keeps it. An operator release of
     the schedule still drops the slot.
 
-    Never raises. A failed release is logged so the operator can drop the
-    slot by hand. Does not clear the watermark unless the slot was
-    actually dropped. A dropped slot also retires the destination
+    A failed release is logged so the operator can drop the slot by hand.
+    Does not clear the watermark unless the slot was actually dropped. A
+    dropped slot also retires the destination
     exactly-once LSN for those cursor keys. The writer fence is not
     changed. Historical slots are not enumerated here. A kept slot is
     the resume point: the next run streams from it and does not snapshot
@@ -391,6 +386,26 @@ def release_finished_cdc_slot(
             "job_id": jid,
             "slot_name": slot_name,
         }
+    from services.cdc_slot_resume import (
+        CdcSlotRetirementError,
+        pre_retire_slot_resume,
+    )
+
+    try:
+        keys = _cursor_keys_to_clear(job, jid)
+    except Exception as exc:  # noqa: BLE001
+        raise CdcSlotRetirementError(slot_name, exc) from exc
+    extra = list(extra_lsns or [])
+    for field in ("cursor_value", "eos_committed_lsn", "cdc_confirmed_flush_lsn"):
+        if job.get(field):
+            extra.append(job.get(field))
+    pre_retire_slot_resume(
+        slot_name=slot_name,
+        cursor_keys=keys,
+        job_tokens=extra,
+        dest_type=dest_type,
+        dest_cfg=dest_cfg,
+    )
     publication = str(job.get("cdc_publication_name") or "")
     from connectors.postgresql_change_stream import release_pg_capture
 
@@ -416,7 +431,6 @@ def release_finished_cdc_slot(
     if detail.get("slot") != "dropped":
         return {"released": False, "reason": str(detail.get("slot") or "kept"), "job_id": jid, **detail}
 
-    keys = _cursor_keys_to_clear(job, jid)
     cleared_keys: list[str] = []
     prior_by_key: dict[str, Any] = {}
     if not keys:
@@ -444,10 +458,6 @@ def release_finished_cdc_slot(
                 cleared_keys.append(cursor_key)
             if cleared.get("prior_watermark") is not None:
                 prior_by_key[cursor_key] = cleared.get("prior_watermark")
-    extra = list(extra_lsns or [])
-    for field in ("cursor_value", "eos_committed_lsn", "cdc_confirmed_flush_lsn"):
-        if job.get(field):
-            extra.append(job.get(field))
     try:
         from services.cdc_slot_resume import retire_after_slot_drop
 
@@ -460,12 +470,15 @@ def release_finished_cdc_slot(
             dest_cfg=dest_cfg,
         )
     except Exception as exc:  # noqa: BLE001
-        _logger.warning(
-            "Dropped slot %s but could not retire its resume LSN: %s",
+        _logger.error(
+            "Dropped slot %s but could not retire its resume LSN (%s)",
             slot_name,
-            exc,
+            type(exc).__name__,
         )
-        retired = {"retired_lsns": [], "dest_resume_cleared": []}
+        retired = {
+            "dest_resume_blank_failed": True,
+            "dest_resume_blank_error": type(exc).__name__,
+        }
     return {
         "released": True,
         "reason": reason,

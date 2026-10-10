@@ -601,13 +601,12 @@ def test_retired_slot_ignores_iceberg_lsn_when_catalog_blank_fails(
     assert opened.resume in {None, ""}
 
 
-def test_retirement_store_failure_leaves_iceberg_lsn_resumable(
+def test_retirement_store_failure_refuses_slot_release(
     local_sql_dest: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from connectors import cdc_eos_sql
     from services import cdc_slot_resume
-    from services.cdc_slot_resume import retire_after_slot_drop
+    from services.cdc_catchup import release_finished_cdc_slot
 
     key = "pg:iceberg:retire-b"
     slot = "df_iceberg_retire_b"
@@ -617,6 +616,7 @@ def test_retirement_store_failure_leaves_iceberg_lsn_resumable(
         lsn="0/30",
         inserts=[{"id": "1", "v": "before drop"}],
     )
+    dropped: list[str] = []
     monkeypatch.setattr(
         cdc_slot_resume,
         "retire_slot_lsn",
@@ -624,26 +624,29 @@ def test_retirement_store_failure_leaves_iceberg_lsn_resumable(
             OSError("retirement store unavailable")
         ),
     )
-    try:
-        retire_after_slot_drop(
-            slot_name=slot,
-            cursor_keys=[key],
-            prior_by_key={key: f"lsn=0/30|slot={slot}"},
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: dropped.append(slot) or {"slot": "dropped"},
+    )
+    error_type = getattr(cdc_slot_resume, "CdcSlotRetirementError", RuntimeError)
+
+    with pytest.raises(error_type, match=slot):
+        release_finished_cdc_slot(
+            {"cdc_slot_name": slot, "cursor_key": key},
+            reason="failed",
+            source_cfg={"type": "postgresql"},
+            job_id="job-retirement-store-failure",
+            worker_closed=True,
             dest_type="iceberg",
             dest_cfg=local_sql_dest,
         )
-    except OSError:
-        pass
-    opened = cdc_eos_sql.open_eos_session(
-        dest_type="iceberg",
-        dest_cfg=local_sql_dest,
-        stream_key=key,
-        incoming_fence=0,
-        job_resume=None,
-    )
 
-    assert opened.dest_lsn == "0/30"
-    assert opened.resume
+    assert dropped == []
+    view = _adapter().iceberg_dest_watermark_view(local_sql_dest, key)
+    assert view.committed_lsn == "0/30"
 
 
 def test_watermark_survives_snapshot_expiration(

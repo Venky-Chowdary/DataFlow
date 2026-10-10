@@ -95,17 +95,36 @@ def _load() -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
+class CdcSlotRetirementError(RuntimeError):
+    def __init__(self, slot_name: str, cause: Exception) -> None:
+        self.slot_name = str(slot_name or "").strip()
+        self.cause = cause
+        super().__init__(
+            "Refusing to drop CDC slot "
+            f"{self.slot_name}: could not durably record its resume LSN(s) "
+            "in the retired-slot store "
+            f"({type(cause).__name__}). The slot is kept so the old position "
+            "stays valid; fix the store and retry the release."
+        )
+
+
 def _save(rows: list[dict[str, Any]]) -> None:
     kept = rows[-_MAX_RECORDS:]
     coll = _mongo_retired()
+    mongo_error: Exception | None = None
     if coll is not None:
         try:
             coll.delete_many({})
             if kept:
                 coll.insert_many(kept)
         except Exception as exc:  # noqa: BLE001
-            _logger.debug("retired-slot mongo write failed: %s", exc)
+            _logger.warning(
+                "retired-slot mongo write failed (%s)", type(exc).__name__
+            )
+            mongo_error = exc
     write_json_atomic(STORE_PATH, {"resumes": kept}, indent=2, default=json_default)
+    if mongo_error is not None:
+        raise mongo_error
 
 
 def retire_slot_lsn(
@@ -168,6 +187,57 @@ def slot_lsn_retired(
         if slot and row_slot == slot:
             return True
     return False
+
+
+def pre_retire_slot_resume(
+    *,
+    slot_name: str,
+    cursor_keys: list[str],
+    job_tokens: list[Any],
+    dest_type: str = "",
+    dest_cfg: dict[str, Any] | None = None,
+) -> list[str]:
+    slot = str(slot_name or "").strip()
+    keys = [str(key).strip() for key in cursor_keys if str(key).strip()]
+    tokens_by_key: dict[str, list[Any]] = {}
+    for key in keys or [""]:
+        tokens_by_key[key] = list(job_tokens or [])
+
+    try:
+        from services.sync_cursor import get_watermark
+
+        for key in keys:
+            tokens_by_key[key].append(get_watermark(key))
+        if dest_cfg is not None and keys:
+            from connectors.cdc_eos_sql import read_route_dest_lsn
+
+            for key in keys:
+                tokens_by_key[key].append(
+                    read_route_dest_lsn(dest_type, dest_cfg, key)
+                )
+    except Exception as exc:  # noqa: BLE001
+        raise CdcSlotRetirementError(slot, exc) from exc
+
+    retired: list[str] = []
+    for key, raw_tokens in tokens_by_key.items():
+        for raw in raw_tokens:
+            token = _lsn_of(raw)
+            if not token:
+                continue
+            try:
+                if not retire_slot_lsn(
+                    token, cursor_key=key, slot_name=slot
+                ):
+                    raise RuntimeError("retirement write returned false")
+                if not slot_lsn_retired(
+                    token, cursor_key=key, slot_name=slot
+                ):
+                    raise RuntimeError("retirement read-back failed")
+            except Exception as exc:  # noqa: BLE001
+                raise CdcSlotRetirementError(slot, exc) from exc
+            if token not in retired:
+                retired.append(token)
+    return retired
 
 
 def resume_token_retired(resume: Any, *, cursor_key: str = "") -> bool:
