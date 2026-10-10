@@ -232,6 +232,11 @@
   color: var(--df-success);
 }
 
+.df2-mcp-log-status--warn {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
 .df2-mcp-log-status--err {
   background: var(--df-danger-bg);
   color: var(--df-danger);
