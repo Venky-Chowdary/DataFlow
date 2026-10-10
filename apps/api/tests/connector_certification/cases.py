@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import sys
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -13,6 +14,7 @@ from connectors.sdk.declarative.connector import DeclarativeSource
 from connectors.sdk.github import GitHubSource
 from connectors.sdk.http_declarative import DeclarativeHttpConnector
 from connectors.sdk.hubspot_cdk import HubSpotCDKConnector
+from connectors.sdk.jira import JiraCloudSource
 from tests.connector_certification.fixture_server import FixtureResponse, FixtureServer
 from tests.connector_certification.harness import CertificationCase
 
@@ -629,6 +631,149 @@ def build_certification_cases(tmp_path: Path) -> dict[str, CertificationCase]:
         assert_incremental_cursor=assert_github_cursor,
     )
 
+    jira_fixture_dir = Path(__file__).parent / "fixtures" / "jira"
+    jira_issue_pages = [
+        json.loads((jira_fixture_dir / filename).read_text(encoding="utf-8"))
+        for filename in ("issues_page_1.json", "issues_page_2.json")
+    ]
+    jira_records = tuple(
+        dict(record) for page in jira_issue_pages for record in page["issues"]
+    )
+    jira_issues_path = "/rest/api/3/search/jql"
+
+    def jira_routes(
+        fixture: FixtureServer,
+        phase: str,
+        fixture_records: Sequence[Mapping[str, Any]],
+    ) -> None:
+        rows = [deepcopy(dict(row)) for row in fixture_records]
+        if phase == "auth":
+            fixture.add_route(
+                jira_issues_path,
+                FixtureResponse(status=401, body={"errorMessages": ["unauthorized"]}),
+            )
+        elif phase == "check":
+            fixture.add_route(
+                jira_issues_path,
+                FixtureResponse(body={"issues": rows[:2]}),
+            )
+        elif phase == "incremental":
+            fixture.add_route(
+                jira_issues_path,
+                FixtureResponse(body={"issues": rows[1:]}),
+            )
+        elif phase == "fault":
+            fixture.add_route(
+                jira_issues_path,
+                responses=[
+                    FixtureResponse(
+                        body={
+                            "issues": rows[:2],
+                            "nextPageToken": "synthetic-page-two",
+                        }
+                    ),
+                    *[
+                        FixtureResponse(
+                            status=500,
+                            body={"errorMessages": ["synthetic fault"]},
+                        )
+                        for _ in range(4)
+                    ],
+                ],
+            )
+        elif phase == "resume":
+            fixture.add_route(
+                jira_issues_path,
+                FixtureResponse(body={"issues": rows[2:]}),
+            )
+        elif phase == "rate_limit":
+            fixture.add_route(
+                jira_issues_path,
+                responses=[
+                    FixtureResponse(
+                        status=429,
+                        body={"errorMessages": ["rate limited"]},
+                        headers={"Retry-After": "2"},
+                    ),
+                    FixtureResponse(
+                        body={
+                            "issues": rows[:2],
+                            "nextPageToken": "synthetic-page-two",
+                        }
+                    ),
+                    FixtureResponse(body={"issues": rows[2:]}),
+                ],
+            )
+        else:
+            fixture.add_route(
+                jira_issues_path,
+                responses=[
+                    FixtureResponse(
+                        body={
+                            "issues": rows[:2],
+                            "nextPageToken": "synthetic-page-two",
+                        }
+                    ),
+                    FixtureResponse(body={"issues": rows[2:]}),
+                ],
+            )
+
+    def jira_factory(
+        base_url: str,
+        _phase: str,
+        _fixture_records: Sequence[Mapping[str, Any]],
+        _sleep: Any = None,
+    ) -> JiraCloudSource:
+        config: dict[str, Any] = {
+            "site": "fixture-site",
+            "email": "fixture@example.test",
+            "api_token": _SECRET,
+        }
+        if base_url:
+            config["base_url"] = base_url
+        return JiraCloudSource(config)
+
+    def mutate_jira(
+        original: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+        changed = deepcopy([dict(row) for row in original])
+        changed[1]["fields"]["updated"] = "2026-01-05T00:00:00.000+0000"
+        changed[2]["fields"]["updated"] = "2026-01-06T00:00:00.000+0000"
+        added = deepcopy(changed[-1])
+        added.update({"id": "1005", "key": "FIX-5"})
+        added["fields"]["updated"] = "2026-01-07T00:00:00.000+0000"
+        changed.append(added)
+        return changed, {"1002", "1003", "1005"}, {"1004"}
+
+    def assert_jira_cursor(
+        fixture: FixtureServer,
+        state: Mapping[str, Any],
+    ) -> None:
+        cursor = state.get("cursor")
+        if cursor is None:
+            raise AssertionError("Jira incremental read has no saved updated cursor")
+        parsed = datetime.fromisoformat(str(cursor).replace("Z", "+00:00"))
+        lower_bound = (
+            parsed.astimezone(timezone.utc) - timedelta(seconds=60)
+        ).strftime("%Y/%m/%d %H:%M")
+        query = parse_qs(urlsplit(fixture.request_log[0].target).query)
+        expected = f'updated >= "{lower_bound}" ORDER BY updated ASC'
+        if query.get("jql") != [expected]:
+            raise AssertionError(f"Jira request omitted the lookback JQL cursor {expected!r}")
+
+    jira_case = CertificationCase(
+        connector_id="jira",
+        connector_factory=jira_factory,
+        fixture_routes=jira_routes,
+        stream="issues",
+        mutate_fixture=mutate_jira,
+        fixture_records=jira_records,
+        primary_key=("id",),
+        cursor_field="fields.updated",
+        secret=_SECRET,
+        assert_incremental_cursor=assert_jira_cursor,
+    )
+
     tap_script = _tap_source(tmp_path)
 
     def singer_factory(
@@ -677,5 +822,6 @@ def build_certification_cases(tmp_path: Path) -> dict[str, CertificationCase]:
             declarative_case,
             shim_case,
             github_case,
+            jira_case,
         )
     }
