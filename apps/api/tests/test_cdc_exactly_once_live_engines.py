@@ -356,3 +356,61 @@ def test_live_bundle_crash_rolls_back_every_stream(engine: str) -> None:
         bundle_key=key,
     )
     assert (_count(engine, t1), _count(engine, t2)) == (2, 2)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="M2 H5: EOS writer prefers the stale destination spelling over the mapped source update",
+)
+def test_live_postgresql_eos_mixed_case_update_overwrites_stale_value() -> None:
+    cfg = _require("postgresql")
+    table = "h5_case_" + uuid.uuid4().hex[:12]
+    mappings = [
+        {"source": "ID", "target": "id", "confidence": 1.0},
+        {"source": "AMOUNT", "target": "amount", "confidence": 1.0},
+    ]
+    types = {"ID": "string", "AMOUNT": "string"}
+    key = "h5-case|" + uuid.uuid4().hex
+    _drop("postgresql", [table])
+    try:
+        apply_change_batch_exactly_once(
+            dest_type="postgresql",
+            dest_cfg=cfg,
+            dest_table=table,
+            change=_batch("0/10", inserts=[{"ID": "1", "AMOUNT": "10.00"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["ID", "AMOUNT"],
+            pk_target_cols=["id"],
+            cursor_key=key,
+        )
+        apply_change_batch_exactly_once(
+            dest_type="postgresql",
+            dest_cfg=cfg,
+            dest_table=table,
+            change=_batch("0/20", updates=[{"ID": "1", "AMOUNT": "99"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["ID", "AMOUNT"],
+            pk_target_cols=["id"],
+            cursor_key=key,
+        )
+
+        from connectors.generic_sql import _engine
+        from services.engine_pool import release_engine
+        from sqlalchemy import text
+
+        engine = _engine(cfg)
+        try:
+            with engine.connect() as conn:
+                amount, lsn = conn.execute(
+                    text(f'SELECT "amount", "_df_lsn" FROM "{table}" WHERE "id" = :id'),
+                    {"id": "1"},
+                ).one()
+        finally:
+            release_engine(engine)
+
+        assert amount == "99"
+        assert lsn == "0/20"
+    finally:
+        _drop("postgresql", [table])

@@ -96,6 +96,73 @@ def test_run_cdc_database_transfer_requires_pk_and_cursor():
         )
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="M2 H5: EOS writer prefers the stale destination spelling over the mapped source update",
+)
+def test_eos_uppercase_oracle_update_overwrites_lowercase_destination(tmp_path):
+    import sqlite3
+
+    from services.cdc_engine import ChangeBatch
+    from src.transfer.cdc_transfer import _apply_change_batch
+
+    db_path = tmp_path / "cdc_case_mismatch.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            'CREATE TABLE orders (id TEXT PRIMARY KEY, amount TEXT, "_df_lsn" TEXT)'
+        )
+        conn.execute(
+            'INSERT INTO orders (id, amount, "_df_lsn") VALUES (?, ?, ?)',
+            ("1", "10.00", "0/10"),
+        )
+
+    rows, _, _, _ = _apply_change_batch(
+        dest_type="sqlite",
+        destination=None,
+        dest_cfg={"database": str(db_path)},
+        dest_table="orders",
+        change=ChangeBatch(
+            updates=[{"ID": "1", "AMOUNT": "99"}],
+            resume_token={"lsn": "0/20"},
+        ),
+        mappings=[
+            {"source": "ID", "target": "id"},
+            {"source": "AMOUNT", "target": "amount"},
+        ],
+        column_types={"ID": "string", "AMOUNT": "string"},
+        headers=["ID", "AMOUNT"],
+        pk_target_col=["id"],
+        chunk_idx=0,
+        total_chunks=1,
+        delivery_guarantee="exactly_once",
+        delivery_pinned=True,
+        cursor_key="cdc-case-mismatch",
+        stream_name="orders",
+    )
+
+    with sqlite3.connect(db_path) as conn:
+        amount, lsn = conn.execute(
+            'SELECT amount, "_df_lsn" FROM orders WHERE id = ?', ("1",)
+        ).fetchone()
+
+    assert rows == 1
+    assert amount == "99"
+    assert lsn == "0/20"
+
+
+def test_sqlserver_cdc_classifier_preserves_uppercase_source_columns():
+    from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
+
+    inserts, updates, deletes = classify_mssql_cdc_rows(
+        [{"__$operation": 4, "ID": "1", "AMOUNT": "99"}],
+        primary_key="ID",
+    )
+
+    assert not inserts
+    assert updates == [{"ID": "1", "AMOUNT": "99"}]
+    assert not deletes
+
+
 def test_run_cdc_database_transfer_performs_initial_snapshot(tmp_path, monkeypatch):
     # A previous run of this test left watermark "2" in the workspace cursor
     # file. Resume then seeks past 2, the mock still returns those rows, and
@@ -685,5 +752,3 @@ def test_single_table_does_not_seek_a_shared_route_token(tmp_path, monkeypatch):
     assert seen
     assert all(row["cursor_after"] is None for row in seen)
     assert all(token not in str(row["cursor_after"]) for row in seen)
-
-
