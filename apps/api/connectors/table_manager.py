@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from connectors.mongodb_common import (
@@ -115,6 +116,8 @@ def drop_table(
     dt = (db_type or "").lower().strip()
     if dt in ("postgresql", "redshift"):
         return _drop_postgresql(cfg, table_name, schema)
+    if dt == "pgvector":
+        return _drop_pgvector(cfg, table_name, schema)
     if dt == "mysql":
         return _drop_mysql(cfg, table_name, schema)
     if dt == "sqlite":
@@ -440,7 +443,13 @@ def postgres_columns_to_keep(
         conn.close()
 
 
-def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
+def _drop_postgresql(
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None,
+    *,
+    after_drop: Callable[[Any], None] | None = None,
+) -> bool:
     from psycopg2 import sql
 
     from connectors.postgresql_conn import get_connection
@@ -462,10 +471,28 @@ def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -
             cur.execute(
                 sql.SQL("DROP TABLE IF EXISTS {}.{} CASCADE").format(schema_id, table_id)
             )
+            if after_drop is not None:
+                after_drop(cur)
         conn.close()
         return True
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc
+
+
+def _drop_pgvector(
+    cfg: dict[str, Any], table_name: str, schema: str | None
+) -> bool:
+    from services.vector_fingerprint import delete_pgvector_fingerprint
+
+    schema_name = schema or str(cfg.get("schema") or "public")
+    return _drop_postgresql(
+        cfg,
+        table_name,
+        schema_name,
+        after_drop=lambda cursor: delete_pgvector_fingerprint(
+            cursor, schema_name, table_name
+        ),
+    )
 
 
 def _drop_bigquery(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:

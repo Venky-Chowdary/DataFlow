@@ -298,6 +298,14 @@ def _pgvector_delete_fingerprint(cursor: Any, schema: str, target: str) -> None:
     )
 
 
+def delete_pgvector_fingerprint(cursor: Any, schema: str, target: str) -> None:
+    try:
+        _pgvector_delete_fingerprint(cursor, schema, target)
+    except Exception as exc:
+        if getattr(exc, "pgcode", None) != "42P01":
+            raise
+
+
 def _pgvector_legacy_backends(
     cursor: Any, schema: str, target: str
 ) -> set[str]:

@@ -533,6 +533,31 @@ def test_qdrant_drop_clears_fingerprint_before_rewrite(fingerprint_destination, 
     assert meta.get("vector_fingerprint_status") == "created"
 
 
+def test_pgvector_drop_clears_fingerprint_before_rewrite(fingerprint_destination, monkeypatch):
+    resource = fingerprint_destination
+    if resource["engine"] != "pgvector":
+        pytest.skip("pgvector table-drop integration")
+
+    from connectors.table_manager import drop_table
+
+    row = {"doc_id": "fingerprint-pg-drop", "content": "rewrite after pgvector drop"}
+    assert _write(resource, [row]).ok
+    assert _read_fingerprint(resource) is not None
+    assert drop_table("pgvector", resource["cfg"], resource["name"]) is True
+    assert _read_fingerprint(resource) is None
+
+    _use_sentence_transformer_model(monkeypatch)
+    rewritten = _write(
+        resource,
+        [row],
+        model="sentence-transformers/all-MiniLM-L6-v2",
+    )
+
+    assert rewritten.ok, rewritten.error
+    meta = dict(getattr(rewritten, "meta", {}) or {})
+    assert meta.get("vector_fingerprint_status") == "created"
+
+
 def test_embedding_column_fingerprint_and_dimension_gate(fingerprint_destination):
     resource = fingerprint_destination
     row = {
