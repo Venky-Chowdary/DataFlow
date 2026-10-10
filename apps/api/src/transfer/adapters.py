@@ -767,6 +767,28 @@ def read_source_database(
             records, batch.headers, schema, batch=batch, stamp_total=stamp_total
         )
 
+    from connectors.sdk import get_descriptor, sdk_read_as_matrix
+
+    sdk_descriptor = get_descriptor(db_type)
+    if (
+        sdk_descriptor
+        and "source" in sdk_descriptor.roles
+        and sdk_descriptor.catalog_ids
+    ):
+        stream = endpoint.table or endpoint.collection
+        if not stream:
+            raise ValueError(f"Source {db_type} stream name required")
+        headers, rows, schema, _ = sdk_read_as_matrix(
+            db_type,
+            cfg,
+            stream,
+            limit=limit,
+        )
+        records = [dict(zip(headers, row)) for row in rows]
+        return _pack_source_read(
+            records, headers, schema, stamp_total=stamp_total
+        )
+
     if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_reader import read_table_batch
 

@@ -35,8 +35,14 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
     if isinstance(extra, Mapping):
         config.update(extra)
     if driver == "jira":
-        config.setdefault("email", config.get("username", ""))
-        config.setdefault("api_token", config.get("password") or config.get("api_key") or "")
+        if not config.get("email"):
+            config["email"] = config.get("username", "")
+        if not config.get("api_token"):
+            config["api_token"] = config.get("password") or config.get("api_key") or ""
+        if not config.get("username"):
+            config["username"] = config.get("email", "")
+        if not config.get("password"):
+            config["password"] = config.get("api_token", "")
     elif driver in {"github", "intercom"}:
         config.setdefault(
             "access_token",
