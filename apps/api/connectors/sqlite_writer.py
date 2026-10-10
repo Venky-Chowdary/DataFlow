@@ -7,7 +7,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -170,6 +170,7 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
                 f"SQLite {upper} refuses timezone-aware wire (would strip offset). "
                 "Map to TIMESTAMPTZ or provide a naive wall-clock value."
             )
+        tz_carrier = upper in {"TIMESTAMP_TZ", "TIMESTAMPTZ", "TIMESTAMP_LTZ"}
 
         try:
             coerced = coerce_sql_temporal(
@@ -181,6 +182,21 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
         except ValueError:
             # Fail-closed at row bind — never invent NULL from empty temporal.
             raise
+        # A TZ carrier stores canonical UTC wall-clock digits: the declared
+        # column is the zone contract, and an offset-suffixed cell
+        # ("...+00:00") is un-re-readable — sqlite_copy_naive_datetime_value
+        # and the NTZ bind both refuse it. The instant is unchanged.
+        if (
+            tz_carrier
+            and isinstance(coerced, datetime)
+            and coerced.tzinfo is not None
+            and coerced.utcoffset() is not None
+        ):
+            return (
+                coerced.astimezone(timezone.utc)
+                .replace(tzinfo=None)
+                .isoformat(sep=" ")
+            )
         if wire is not None:
             return wire
         if coerced is None:

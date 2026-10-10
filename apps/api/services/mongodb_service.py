@@ -794,7 +794,11 @@ class MongoDBService:
 
     @classmethod
     def _local_claim(
-        cls, key: str, job_id: str, expires_at: datetime
+        cls,
+        key: str,
+        job_id: str,
+        expires_at: datetime,
+        status_lookup: Any = None,
     ) -> tuple[bool, str]:
         now = datetime.now(timezone.utc)
         with cls._LOCAL_CLAIMS_LOCK:
@@ -802,25 +806,30 @@ class MongoDBService:
                 if _as_utc(exp) <= now:
                     cls._LOCAL_CLAIMS.pop(k, None)
             holder, exp = cls._LOCAL_CLAIMS.get(key, ("", expires_at))
-            # A claim whose job already finished is a normal re-run.
-            if holder:
+            # A claim whose job already finished is a normal re-run. The
+            # caller supplies the status lookup — constructing a service here
+            # would pay a connect timeout inside the lock.
+            if holder and callable(status_lookup):
                 try:
-                    holder_status = cls()._job_status(holder)
+                    holder_status = status_lookup(holder)
                 except Exception:
                     holder_status = ""
                 if holder_status in TERMINAL_JOB_STATUSES:
                     holder = ""
-            if holder and holder != job_id:
+            # Any live holder blocks a new claim — same as the Mongo insert:
+            # claimants all arrive under the shared _PENDING_CLAIM_ID, so an
+            # id-equality pass would admit every second submitter.
+            if holder:
                 return False, holder
             cls._LOCAL_CLAIMS[key] = (job_id, expires_at)
             return True, ""
 
     @classmethod
-    def _local_bind(cls, key: str, job_id: str) -> None:
+    def _local_bind(cls, key: str, from_job_id: str, to_job_id: str) -> None:
         with cls._LOCAL_CLAIMS_LOCK:
             entry = cls._LOCAL_CLAIMS.get(key)
-            if entry:
-                cls._LOCAL_CLAIMS[key] = (job_id, entry[1])
+            if entry and entry[0] == from_job_id:
+                cls._LOCAL_CLAIMS[key] = (to_job_id, entry[1])
 
     @classmethod
     def _local_release(cls, key: str, job_id: str) -> None:
@@ -860,7 +869,9 @@ class MongoDBService:
             # Without a shared store the same-process registry is the only
             # coordination: a scheduled beat and a manual run in this process
             # still must not both write (QA DS08).
-            acquired, holder = self._local_claim(key, job_id, expires_at)
+            acquired, holder = self._local_claim(
+                key, job_id, expires_at, self._job_status
+            )
             if not acquired:
                 return False, holder, self._job_status(holder)
             return True, "", ""
@@ -885,7 +896,9 @@ class MongoDBService:
                 # A claim store problem must not block data movement; the
                 # same-process registry still dedupes within this worker.
                 logger.warning("idempotency claim failed for %s: %s", key, exc)
-                acquired, holder = self._local_claim(key, job_id, expires_at)
+                acquired, holder = self._local_claim(
+                    key, job_id, expires_at, self._job_status
+                )
                 if not acquired:
                     return False, holder, self._job_status(holder)
                 return True, "", ""
@@ -927,7 +940,7 @@ class MongoDBService:
         """
         if not key or not from_job_id or not to_job_id:
             return False
-        self._local_bind(key, to_job_id)
+        self._local_bind(key, from_job_id, to_job_id)
         try:
             db = self.get_database()
         except ConnectionError:
