@@ -74,6 +74,7 @@ def _write(
     rows: list[list[Any]],
     live_types: dict[str, str] | None = None,
     conflict_columns: list[str] | None = None,
+    error_policy: str | None = None,
 ):
     return write_mapped_rows(
         host="",
@@ -92,6 +93,7 @@ def _write(
         create_table=False,
         conflict_columns=conflict_columns,
         destination_column_types=live_types,
+        error_policy=error_policy,
     )
 
 
@@ -486,7 +488,236 @@ def test_binary_key_scalar_round_trips(value, expected):
     )
 
 
-def _dynamo_preflight(mappings):
+@pytest.mark.parametrize(
+    ("raw_type", "expected"),
+    [
+        (
+            "VARCHAR(10)",
+            {"S": "compatible", "N": "compatible", "B": "compatible"},
+        ),
+        ("string", {"S": "compatible", "N": "compatible", "B": "compatible"}),
+        ("text", {"S": "compatible", "N": "compatible", "B": "compatible"}),
+        (
+            "FOO_CUSTOM",
+            {
+                "S": "runtime_validated",
+                "N": "runtime_validated",
+                "B": "runtime_validated",
+            },
+        ),
+        ("NUMBER(10,2)", {"S": "compatible", "N": "compatible", "B": "incompatible"}),
+        ("DOUBLE", {"S": "compatible", "N": "compatible", "B": "incompatible"}),
+        ("int64", {"S": "compatible", "N": "compatible", "B": "incompatible"}),
+        ("money", {"S": "compatible", "N": "compatible", "B": "incompatible"}),
+        ("TIMESTAMPTZ", {"S": "compatible", "N": "incompatible", "B": "incompatible"}),
+        ("BYTEA", {"S": "incompatible", "N": "incompatible", "B": "compatible"}),
+        ("JSON", {"S": "incompatible", "N": "incompatible", "B": "incompatible"}),
+        ("uuid", {"S": "compatible", "N": "incompatible", "B": "incompatible"}),
+    ],
+)
+def test_key_carrier_verdict_uses_canonical_type_helpers(raw_type, expected):
+    from connectors.dynamodb_schema import key_carrier_verdict
+
+    assert {
+        scalar: key_carrier_verdict(scalar, raw_type) for scalar in ("S", "N", "B")
+    } == expected
+
+
+@pytest.mark.parametrize(
+    ("scalar", "raw_type", "expected"),
+    [
+        ("S", "S", "compatible"),
+        ("N", "S", "incompatible"),
+        ("S", "BOOL", "incompatible"),
+        ("S", "", "runtime_validated"),
+        ("BOOL", "INTEGER", "incompatible"),
+    ],
+)
+def test_key_carrier_verdict_handles_dynamodb_scalar_tokens(scalar, raw_type, expected):
+    from connectors.dynamodb_schema import key_carrier_verdict
+
+    assert key_carrier_verdict(scalar, raw_type) == expected
+
+
+@pytest.mark.parametrize(
+    ("error_kind", "error_class"),
+    [("client_error", "ClientError"), ("runtime_error", "RuntimeError")],
+)
+def test_writer_refuses_when_canonical_key_schema_cannot_be_read(
+    caplog, error_kind, error_class
+):
+    import logging
+    from unittest.mock import MagicMock, patch
+
+    from botocore.exceptions import ClientError
+
+    client = MagicMock()
+    if error_kind == "client_error":
+        client.describe_table.side_effect = ClientError(
+            {"Error": {"Code": "AccessDeniedException", "Message": "denied"}},
+            "DescribeTable",
+        )
+    else:
+        client.describe_table.side_effect = RuntimeError("unavailable")
+
+    with patch("connectors.dynamodb_writer.boto3_client", return_value=client):
+        with caplog.at_level(logging.WARNING, logger="connectors.dynamodb_writer"):
+            result = write_mapped_rows(
+                host="",
+                port=0,
+                database="",
+                username="",
+                password="",
+                schema="",
+                connection_string="",
+                ssl=False,
+                table_name="unreadable",
+                headers=["id"],
+                data_rows=[["1"]],
+                mappings=[{"source": "id", "target": "id"}],
+                column_types={"id": "INTEGER"},
+                create_table=False,
+            )
+
+    assert result.ok is False
+    assert result.rows_written == 0
+    assert "unreadable" in (result.error or "")
+    assert error_class in (result.error or "")
+    assert "refuse PutItem" in (result.error or "")
+    client.batch_write_item.assert_not_called()
+    client.put_item.assert_not_called()
+    assert any(
+        "table=unreadable" in record.getMessage()
+        and f"error_class={error_class}" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("error_policy", ["fail", "quarantine"])
+def test_unknown_source_type_for_n_key_is_checked_per_row(error_policy):
+    from unittest.mock import patch
+
+    with moto.mock_aws():
+        client = _client()
+        _create_table(client, "unknown_n_key", [("id", "HASH", "N")])
+        with (
+            patch(
+                "connectors.dynamodb_writer.build_mapped_rows_with_details",
+                return_value=([["abc"]], [], []),
+            ),
+            patch(
+                "connectors.writer_common.apply_write_quarantine_matrix",
+                side_effect=lambda rows, *args, **kwargs: rows,
+            ),
+        ):
+            result = _write(
+                "unknown_n_key",
+                mappings=[{"source": "id", "target": "id", "target_type": "VARCHAR"}],
+                column_types={"id": "FOO_CUSTOM"},
+                headers=["id"],
+                rows=[["abc"]],
+                error_policy=error_policy,
+            )
+
+        assert client.scan(TableName="unknown_n_key")["Count"] == 0
+        if error_policy == "fail":
+            assert result.ok is False
+            assert "abc" in (result.error or "")
+        else:
+            assert result.rejected_details
+            assert result.rejected_details[0]["column"] == "id"
+            assert result.rejected_details[0]["policy"] == "write_quarantine"
+
+
+def test_numeric_values_share_identity_in_s_key_moto_table():
+    with moto.mock_aws():
+        client = _client()
+        _create_table(client, "numeric_s_key", [("id", "HASH", "S")])
+        for value in (1, 1.0):
+            result = _write(
+                "numeric_s_key",
+                mappings=[{"source": "id", "target": "id"}],
+                column_types={"id": "DECIMAL"},
+                headers=["id"],
+                rows=[[value]],
+            )
+            assert result.ok, result.error
+
+        items = client.scan(TableName="numeric_s_key")["Items"]
+        assert len(items) == 1
+        assert items[0]["id"] == {"S": "1"}
+
+
+def test_key_refusal_logs_redact_binary_and_truncate_string_values(caplog):
+    import logging
+
+    from connectors.dynamodb_schema import log_key_refusal
+
+    binary_value = b"secret-binary"
+    long_value = "x" * 100
+    with caplog.at_level(logging.WARNING, logger="connectors.dynamodb_schema"):
+        log_key_refusal(
+            phase="execute",
+            table="binary_table",
+            column="pk",
+            key_role="HASH",
+            expected_scalar="B",
+            reason="invalid_binary_key",
+            value=binary_value,
+        )
+        log_key_refusal(
+            phase="execute",
+            table="string_table",
+            column="pk",
+            key_role="HASH",
+            expected_scalar="S",
+            reason="invalid_string_key",
+            value=long_value,
+        )
+
+    records = [
+        record for record in caplog.records
+        if getattr(record, "event", None) == "dynamodb_key_refusal"
+    ]
+    assert len(records) == 2
+    binary_record = next(record for record in records if record.table == "binary_table")
+    assert binary_record.value == "<redacted:binary>"
+    assert binary_value.decode() not in binary_record.getMessage()
+    string_record = next(record for record in records if record.table == "string_table")
+    assert string_record.value == repr(long_value)[:63] + "…"
+    assert len(string_record.value) == 64
+
+
+def test_writer_logs_once_per_key_contract_violation(caplog):
+    import logging
+
+    with moto.mock_aws():
+        client = _client()
+        _create_table(
+            client,
+            "missing_composite_key",
+            [("pk", "HASH", "S"), ("sk", "RANGE", "N")],
+        )
+        with caplog.at_level(logging.WARNING, logger="connectors.dynamodb_schema"):
+            result = _write(
+                "missing_composite_key",
+                mappings=[{"source": "amount", "target": "amount"}],
+                column_types={"amount": "DECIMAL"},
+                headers=["amount"],
+                rows=[["12.5"]],
+            )
+
+    assert result.ok is False
+    records = [
+        record for record in caplog.records
+        if getattr(record, "event", None) == "dynamodb_key_refusal"
+    ]
+    assert len(records) == 2
+    assert {record.key_role for record in records} == {"HASH", "RANGE"}
+    assert {record.phase for record in records} == {"execute"}
+
+
+def _dynamo_preflight(mappings, *, destination_table=""):
     from services.preflight_service import run_file_preflight
 
     return run_file_preflight(
@@ -496,6 +727,7 @@ def _dynamo_preflight(mappings):
         mappings=mappings,
         destination_connected=True,
         destination_table_exists=True,
+        destination_table=destination_table,
         destination_can_create=True,
         destination_db_type="dynamodb",
         destination_column_types={"id": "DECIMAL"},
@@ -519,6 +751,23 @@ def test_validate_blocks_existing_dynamodb_table_when_hash_key_is_not_mapped():
 
     assert gate["status"] == "block"
     assert gate["details"]["rule_id"] == "g6_target_ddl.dynamo_key_contract"
+
+
+def test_validate_logs_structured_dynamodb_key_refusal(caplog):
+    result = _dynamo_preflight(
+        [{"source": "amount", "target": "amount"}],
+        destination_table="dynamo_contract_table",
+    )
+    gate = _g6(result)
+
+    assert gate["status"] == "block"
+    records = [
+        record for record in caplog.records
+        if getattr(record, "event", None) == "dynamodb_key_refusal"
+    ]
+    assert len(records) == 1
+    assert records[0].phase == "validate"
+    assert records[0].table == "dynamo_contract_table"
 
 
 def test_validate_accepts_nonkey_attribute_when_table_keys_are_mapped():
