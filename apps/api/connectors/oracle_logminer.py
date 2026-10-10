@@ -495,6 +495,119 @@ def fetch_oldest_available_scn(cur: Any) -> int | None:
     return min(candidates)
 
 
+def fetch_redo_inventory(cur: Any) -> list[tuple[int, int, int, int, str]] | None:
+    """Return deduplicated per-thread online and archived redo ranges."""
+    inventory: dict[tuple[int, int], tuple[int, int, int, int, str]] = {}
+    try:
+        cur.execute(
+            """
+            SELECT THREAD#, SEQUENCE#, FIRST_CHANGE#, NEXT_CHANGE#
+            FROM V$ARCHIVED_LOG
+            WHERE DELETED = 'NO'
+              AND STANDBY_DEST = 'NO'
+            """
+        )
+        for row in cur.fetchall() or []:
+            thread, sequence, first_change, next_change = row
+            key = (int(thread), int(sequence))
+            inventory.setdefault(
+                key,
+                (key[0], key[1], int(first_change), int(next_change), "archived"),
+            )
+        cur.execute(
+            """
+            SELECT THREAD#, SEQUENCE#, FIRST_CHANGE#, NEXT_CHANGE#
+            FROM V$LOG
+            """
+        )
+        for row in cur.fetchall() or []:
+            thread, sequence, first_change, next_change = row
+            key = (int(thread), int(sequence))
+            inventory[key] = (
+                key[0],
+                key[1],
+                int(first_change),
+                int(next_change),
+                "online",
+            )
+    except Exception as exc:
+        logger.warning("Oracle per-thread redo inventory is unavailable: %s", exc)
+        return None
+    return sorted(inventory.values(), key=lambda item: (item[0], item[1]))
+
+
+def assert_redo_continuity(
+    resume_scn: int,
+    inventory: list[tuple[int, int, int, int, str]] | None,
+    *,
+    cursor_key: str = "",
+) -> None:
+    """Raise :class:`CdcScnGapError` when retained redo has a thread sequence hole."""
+    resume = int(resume_scn or 0)
+    if resume <= 0:
+        return
+    if not inventory:
+        logger.warning(
+            "Oracle redo inventory is empty or undetermined; continuity is unverified "
+            "for cursor %s",
+            cursor_key or "<unknown>",
+        )
+        return
+
+    by_thread: dict[int, dict[int, tuple[int, int, int, int, str]]] = {}
+    try:
+        for row in inventory:
+            thread, sequence, first_change, next_change, source = row
+            thread, sequence = int(thread), int(sequence)
+            first_change, next_change = int(first_change), int(next_change)
+            if thread <= 0 or sequence <= 0 or next_change <= first_change:
+                raise ValueError("invalid redo range")
+            entries = by_thread.setdefault(thread, {})
+            candidate = (thread, sequence, first_change, next_change, str(source))
+            current = entries.get(sequence)
+            if current is None or candidate[4] == "online":
+                entries[sequence] = candidate
+    except (TypeError, ValueError, IndexError):
+        logger.warning(
+            "Oracle redo inventory is incomplete; continuity is unverified for "
+            "cursor %s",
+            cursor_key or "<unknown>",
+        )
+        return
+
+    def raise_gap(thread: int, first_missing: int, last_missing: int) -> None:
+        raise CdcScnGapError(
+            "Oracle redo continuity gap on thread "
+            f"{thread}: missing sequence range {first_missing}-{last_missing} "
+            f"for resume SCN {resume}. Restore the archived logs with "
+            "RMAN RESTORE ARCHIVELOG or re-snapshot.",
+            resume_scn=resume,
+            oldest_scn=0,
+            cursor_key=cursor_key,
+        )
+
+    for thread, sequence_map in sorted(by_thread.items()):
+        logs = [sequence_map[seq] for seq in sorted(sequence_map)]
+        earliest = logs[0]
+        if earliest[2] > resume and earliest[1] > 1:
+            raise_gap(thread, 1, earliest[1] - 1)
+
+        containing = [log for log in logs if log[2] <= resume < log[3]]
+        if containing:
+            resume_sequence = max(log[1] for log in containing)
+        else:
+            before_resume = [log for log in logs if log[2] <= resume]
+            if not before_resume:
+                continue
+            resume_sequence = max(log[1] for log in before_resume)
+        later_sequences = [log[1] for log in logs if log[1] > resume_sequence]
+        previous = resume_sequence
+        for sequence in later_sequences:
+            if sequence > previous + 1:
+                raise_gap(thread, previous + 1, sequence - 1)
+            previous = sequence
+
+
 _SET_RE = re.compile(r'"?(\w+)"?\s*=\s*(?:\'([^\']*)\'|([^\s,]+))')
 
 
@@ -1320,6 +1433,11 @@ class OracleLogMinerCdc:
                         fetch_oldest_available_scn(cur),
                         cursor_key=self.cursor_key,
                     )
+                    assert_redo_continuity(
+                        self.scn,
+                        fetch_redo_inventory(cur),
+                        cursor_key=self.cursor_key,
+                    )
                     cur.execute("SELECT current_scn FROM v$database")
                     head = cur.fetchone()
                     end_scn = int(head[0] or self.scn) if head else self.scn
@@ -1463,6 +1581,11 @@ class OracleLogMinerCdc:
                     assert_resume_scn_in_redo(
                         mine_from_scn,
                         fetch_oldest_available_scn(cur),
+                        cursor_key=self.cursor_key,
+                    )
+                    assert_redo_continuity(
+                        mine_from_scn,
+                        fetch_redo_inventory(cur),
                         cursor_key=self.cursor_key,
                     )
                     cur.execute("SELECT current_scn FROM v$database")
@@ -1733,6 +1856,11 @@ class OracleLogMinerCdc:
                     assert_resume_scn_in_redo(
                         self.scn,
                         fetch_oldest_available_scn(cur),
+                        cursor_key=self.cursor_key,
+                    )
+                    assert_redo_continuity(
+                        self.scn,
+                        fetch_redo_inventory(cur),
                         cursor_key=self.cursor_key,
                     )
                     cur.execute("SELECT current_scn FROM v$database")

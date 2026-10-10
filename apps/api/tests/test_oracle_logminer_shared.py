@@ -73,6 +73,8 @@ def test_oracle_shared_poll_demuxes_two_tables() -> None:
     # current_scn, then logminer rows
     cur.fetchone.side_effect = [(200,)]
     cur.fetchall.side_effect = [
+        [],  # archived redo inventory
+        [],  # online redo inventory
         # V$LOGFILE members, then V$ARCHIVED_LOG names: the session now
         # ADD_LOGFILEs an explicit redo set instead of using CONTINUOUS_MINE.
         [("/redo/redo01.log",)],

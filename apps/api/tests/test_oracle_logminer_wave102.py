@@ -183,6 +183,8 @@ def test_poll_truncated_window_does_not_skip_past_last_row():
         (99,),  # current_scn = end_scn
     ]
     cur.fetchall.side_effect = [
+        [],  # archived redo inventory
+        [],  # online redo inventory
         [("/redo/online1.log",)],  # register logs
         [],
         mined[:2],  # ROWNUM-capped result the real DB would return
