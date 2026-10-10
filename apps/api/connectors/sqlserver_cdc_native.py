@@ -20,12 +20,17 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from itertools import groupby
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from connectors.sql_identifiers import quote_table_ref
-from connectors.write_resilience import is_connection_lost
+from connectors.write_resilience import (
+    is_connection_lost,
+    reconnect_backoff_seconds,
+    should_retry_connection_lost,
+)
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.cdc_engine import ChangeBatch
 
@@ -82,6 +87,76 @@ class SqlServerCdcReadError(RuntimeError):
             f"({error_number}). Check the CDC capture job, "
             "sp_cdc_help_change_data_capture, and permissions."
         )
+
+
+def _sqlserver_connection_lost(exc: BaseException) -> bool:
+    pending = [exc]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if getattr(current, "transient", False) or is_connection_lost(current):
+            return True
+        for inner in (
+            current.__cause__,
+            None if current.__suppress_context__ else current.__context__,
+            getattr(current, "orig", None),
+        ):
+            if isinstance(inner, BaseException):
+                pending.append(inner)
+    return False
+
+
+def _retry_sqlserver_poll(
+    operation: Callable[[], Iterator[ChangeBatch]],
+    *,
+    component: str,
+    cursor_key: str,
+    table: str,
+    capture_instance: str = "",
+) -> Iterator[ChangeBatch]:
+    started_at = time.monotonic()
+    attempt = 0
+    while True:
+        yielded = False
+        try:
+            for batch in operation():
+                yielded = True
+                yield batch
+            return
+        except Exception as exc:
+            if not _sqlserver_connection_lost(exc):
+                raise
+            read_error = (
+                exc
+                if isinstance(exc, SqlServerCdcReadError)
+                else SqlServerCdcReadError(
+                    exc,
+                    capture_instance=capture_instance,
+                    table=table,
+                    cursor_key=cursor_key,
+                )
+            )
+            if yielded:
+                if read_error is exc:
+                    raise
+                raise read_error from exc
+            attempt += 1
+            if not should_retry_connection_lost(
+                attempt=attempt,
+                started_at=started_at,
+            ):
+                if read_error is exc:
+                    raise
+                raise read_error from exc
+            logger.warning(
+                "%s poll connection lost; reconnecting (attempt=%d)",
+                component,
+                attempt,
+            )
+            time.sleep(reconnect_backoff_seconds(attempt))
 
 
 def _qualified_ref(schema: str, table: str) -> str:
@@ -1327,6 +1402,31 @@ class SqlServerNativeCdc:
         )
 
     def poll(self) -> Iterator[ChangeBatch]:
+        if self.phase != "streaming" or not self.start_lsn:
+            yield from self._poll_once()
+            return
+        try:
+            yield from _retry_sqlserver_poll(
+                lambda: self._poll_once(),
+                component="SQL Server CDC",
+                cursor_key=self.cursor_key,
+                table=f"{self.schema}.{self.table}",
+                capture_instance=self.capture_instance,
+            )
+        except SqlServerCdcReadError:
+            raise
+        except Exception as exc:
+            if is_connection_lost(exc):
+                read_error = SqlServerCdcReadError(
+                    exc,
+                    capture_instance=self.capture_instance,
+                    table=f"{self.schema}.{self.table}",
+                    cursor_key=self.cursor_key,
+                )
+                raise read_error from exc
+            raise
+
+    def _poll_once(self) -> Iterator[ChangeBatch]:
         self._acquire_cdc_lease()
         if self.phase != "streaming" or not self.start_lsn:
             yield from self.snapshot()

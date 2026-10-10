@@ -230,6 +230,7 @@ def test_restart_remines_open_transaction_but_dedupes_emitted_commit(
         commit_scn=150,
         commit_rs_id="0x000001.0001.0004",
         commit_ssn=4,
+        commit_xid="already-emitted",
         txn_buffer=True,
     )
     from connectors.oracle_logminer import decode_logminer_token
@@ -252,11 +253,7 @@ def test_restart_remines_open_transaction_but_dedupes_emitted_commit(
     buf = OracleTxnBuffer(
         max_txns=2,
         max_bytes=10_000,
-        emitted_position=(
-            mining_position(
-                state["commit_scn"], state["commit_rs_id"], state["commit_ssn"]
-            )
-        ),
+        emitted_commit=(state["commit_scn"], state["commit_xid"]),
     )
     _dml(buf, "already-emitted", 120, "0x000001.0001.0001", 1, "old")
     replayed = buf.feed(
@@ -280,6 +277,25 @@ def test_restart_remines_open_transaction_but_dedupes_emitted_commit(
     assert [txn.xid for txn in resumed] == ["still-open"]
 
 
+def test_late_distinct_commit_before_emitted_cursor_is_not_deduped() -> None:
+    buf = OracleTxnBuffer(
+        max_txns=2,
+        max_bytes=10_000,
+        emitted_commit=(150, "already-emitted"),
+    )
+    _dml(buf, "late-xid", 110, "0x000001.0001.0001", 1, "late")
+
+    late = buf.feed(
+        xid="late-xid",
+        scn=140,
+        rs_id="0x000001.0001.0007",
+        ssn=7,
+        operation="COMMIT",
+    )
+
+    assert [txn.xid for txn in late] == ["late-xid"]
+
+
 def _make_mining_conn(rows: list[tuple], head_scn: int = 200):
     conn = MagicMock()
     cur = MagicMock()
@@ -291,6 +307,52 @@ def _make_mining_conn(rows: list[tuple], head_scn: int = 200):
     conn.cursor.return_value.__enter__.return_value = cur
     conn.cursor.return_value.__exit__.return_value = False
     return conn
+
+
+def test_buffered_short_window_keeps_last_mined_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    txn_id = (1, 0, 21)
+    rows = [
+        (101, "0x000001.0001.0001", 0, "START", None, None, None, *txn_id, 0),
+        (
+            102,
+            "0x000001.0001.0002",
+            1,
+            "INSERT",
+            'INSERT INTO "T"("ID","V") VALUES(\'1\',\'v1\')',
+            "T",
+            "APP",
+            *txn_id,
+            0,
+        ),
+        (110, "0x000001.0001.0003", 0, "COMMIT", "commit", None, None, *txn_id, 0),
+    ]
+    reader = OracleLogMinerCdc(
+        {"host": "localhost", "database": "ORCL", "username": "APP"},
+        table="T",
+        primary_key="ID",
+        schema="APP",
+        resume_token=encode_logminer_token(100, table="T", phase="streaming"),
+    )
+    reader.phase = "streaming"
+    conn = _make_mining_conn(rows, head_scn=200)
+
+    with (
+        patch.object(reader, "_mining_conn", return_value=conn),
+        patch.object(reader, "_acquire_cdc_lease"),
+        patch("connectors.oracle_logminer.fetch_oldest_available_scn", return_value=None),
+        patch("connectors.oracle_logminer.fetch_redo_inventory", return_value=[]),
+        patch("connectors.oracle_logminer.assert_resume_scn_in_redo"),
+        patch("connectors.oracle_logminer.assert_redo_continuity"),
+        patch("connectors.oracle_logminer.start_logminer_session"),
+    ):
+        batches = list(reader.poll())
+
+    assert reader._poll_scn == 110
+    assert reader.scn == 110
+    assert [row["ID"] for batch in batches for row in batch.inserts] == ["1"]
 
 
 def test_oversized_transaction_chunks_have_increasing_same_commit_positions(

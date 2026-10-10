@@ -162,7 +162,7 @@ class OracleTxnBuffer:
         max_bytes: int | None = None,
         max_age_scn: int | None = None,
         max_age_seconds: int | None = None,
-        emitted_position: tuple | None = None,
+        emitted_commit: tuple[int, str] | None = None,
     ) -> None:
         self.max_txns = int(max_txns) if max_txns else oracle_txn_max_open()
         self.max_bytes = int(max_bytes) if max_bytes else oracle_txn_max_bytes()
@@ -174,7 +174,11 @@ class OracleTxnBuffer:
             if max_age_seconds is not None
             else oracle_txn_max_age_seconds()
         )
-        self.emitted_position = emitted_position
+        self.emitted_commit = (
+            (int(emitted_commit[0]), str(emitted_commit[1]))
+            if emitted_commit is not None
+            else None
+        )
         self._open: dict[str, _OpenTxn] = {}
         self._bytes = 0
 
@@ -267,8 +271,8 @@ class OracleTxnBuffer:
                 commit_ssn=int(ssn or 0),
                 rows=list(committed.rows),
             )
-            if self.emitted_position is not None and txn.position <= self.emitted_position:
-                # Already emitted before the restart — re-mining must not duplicate.
+            if self.emitted_commit == (txn.commit_scn, txn.xid):
+                # Only the exact commit is a replay; distinct late commits survive.
                 return []
             return [txn]
 

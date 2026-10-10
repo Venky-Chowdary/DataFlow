@@ -27,7 +27,11 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
-from connectors.sqlserver_cdc_native import SqlServerCdcReadError
+from connectors.sqlserver_cdc_native import (
+    SqlServerCdcReadError,
+    _retry_sqlserver_poll,
+)
+from connectors.write_resilience import is_connection_lost
 from services.cdc_cursor_gap import CdcCtGapError, CdcCursorGapError
 from services.cdc_engine import ChangeBatch
 
@@ -413,6 +417,29 @@ class SqlServerChangeTrackingCdc:
         )
 
     def poll(self) -> Iterator[ChangeBatch]:
+        if self.phase == "snapshot" or (self.version <= 0 and self.phase != "streaming"):
+            yield from self._poll_once()
+            return
+        try:
+            yield from _retry_sqlserver_poll(
+                lambda: self._poll_once(),
+                component="SQL Server Change Tracking",
+                cursor_key=self.cursor_key,
+                table=f"{self.schema}.{self.table}",
+            )
+        except SqlServerCdcReadError:
+            raise
+        except Exception as exc:
+            if is_connection_lost(exc):
+                read_error = SqlServerCdcReadError(
+                    exc,
+                    table=f"{self.schema}.{self.table}",
+                    cursor_key=self.cursor_key,
+                )
+                raise read_error from exc
+            raise
+
+    def _poll_once(self) -> Iterator[ChangeBatch]:
         self._acquire_cdc_lease()
         # Resume incomplete snapshot before streaming.
         if self.phase == "snapshot" or (self.version <= 0 and self.phase != "streaming"):
