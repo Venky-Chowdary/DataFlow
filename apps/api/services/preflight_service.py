@@ -590,6 +590,44 @@ def apply_readiness_honesty_caps(out: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def _block_decision_on_hard_gate(out: dict[str, Any]) -> dict[str, Any]:
+    """A block-status gate can never sit beside ``decision=approve``.
+
+    The proof bundle is stamped before the hosted gates (g3f population fit,
+    additive stamp) run; without this a g3f block left "No blocking issues
+    detected" on the verdict that Execute and Pilot read (QA MX3-22).
+    """
+    pb = out.get("proof_bundle")
+    td = (pb or {}).get("transfer_decision") if isinstance(pb, dict) else None
+    if out.get("passed") is not False or not isinstance(td, dict):
+        return out
+    if str(td.get("decision") or "").lower() != "approve":
+        return out
+    blocking = [
+        g for g in out.get("gates") or []
+        if isinstance(g, dict) and g.get("status") == "block"
+    ]
+    if not blocking:
+        return out
+    messages = [str(g.get("message") or g.get("id") or "") for g in blocking]
+    logger.warning(
+        "preflight verdict demoted approve->block: gate(s) %s blocked after the "
+        "proof bundle was stamped",
+        [g.get("id") for g in blocking],
+    )
+    out["proof_bundle"] = {
+        **pb,
+        "passed": False,
+        "transfer_decision": {
+            **td,
+            "decision": "block",
+            "blockers": list(dict.fromkeys([*(td.get("blockers") or []), *messages])),
+            "reason": "Blocking issues detected: " + "; ".join(messages[:3]),
+        },
+    }
+    return out
+
+
 def confidence_threshold_for_mode(validation_mode: str | None) -> float:
     try:
         from services.validation_mode_contract import confidence_floor_for_mode
@@ -2177,6 +2215,7 @@ def run_file_preflight(
     # caller actually holds — the whole batch at Execute preflight, the preview in
     # Studio — and report the evidence for what it is.
     fit_gate: dict[str, Any] | None = None
+    population_walk_error = ""
     fit_report_payload: dict[str, Any] = {}
     fit_blocked = False
     try:
@@ -2275,9 +2314,11 @@ def run_file_preflight(
                 )
             except Exception as walk_exc:
                 logger.warning(
-                    "table population walk failed; Validate will use the preview: %s",
+                    "table population walk failed for %s; g3f fails closed: %s",
+                    source_table,
                     walk_exc,
                 )
+                population_walk_error = str(walk_exc)[:400]
                 table_rows = None
             if table_rows is not None:
                 try:
@@ -2290,9 +2331,11 @@ def run_file_preflight(
                     # Cursor-unreadable / down source must keep the preview,
                     # never claim an empty population as exact.
                     logger.warning(
-                        "table population walk failed; Validate will use the preview: %s",
+                        "table population walk failed for %s; g3f fails closed: %s",
+                        source_table,
                         walk_exc,
                     )
+                    population_walk_error = str(walk_exc)[:400]
                 else:
 
                     def _chained():
@@ -2447,6 +2490,38 @@ def run_file_preflight(
           # "no bounded carrier can be exceeded" is evidence, and a silently
           # absent gate reads as an unasked question.
           fit_gate = build_population_fit_gate(fit_report)
+          if (
+              population_walk_error
+              and fit_report.targets
+              and fit_gate.get("status") != "block"
+          ):
+              # QA MX3-22: a walk that raised left only the preview checked, and
+              # "no unfit value in N scanned row(s)" let Execute approve blind.
+              logger.error(
+                  "g3f population probe failed for %s (%d bounded column(s), "
+                  "%d preview row(s) checked): %s",
+                  source_table,
+                  len(fit_report.targets),
+                  fit_report.rows_scanned,
+                  population_walk_error,
+              )
+              fit_gate = {
+                  "id": _FIT_GATE_ID,
+                  "status": "block",
+                  "message": (
+                      "Population probe failed — the source table walk raised "
+                      f"({population_walk_error}), so only {fit_report.rows_scanned} "
+                      f"preview row(s) were checked against {len(fit_report.targets)} "
+                      "bounded destination column(s). Restore source access and "
+                      "re-run Validate."
+                  ),
+                  "duration_ms": int(fit_report.duration_ms or 0),
+                  "details": {
+                      **fit_report_payload,
+                      "probe_failed": True,
+                      "probe_error": population_walk_error,
+                  },
+              }
         if fit_gate.get("status") == "block":
             fit_blocked = True
             blockers.append(
@@ -3454,7 +3529,9 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
-    return apply_root_causes_to_preflight(apply_readiness_honesty_caps(out))
+    return apply_root_causes_to_preflight(
+        _block_decision_on_hard_gate(apply_readiness_honesty_caps(out))
+    )
 
 
 # --------------------------------------------------------------------------- #
