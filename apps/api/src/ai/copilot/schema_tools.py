@@ -750,9 +750,11 @@ def diff_schemas(
         c["name"]: bool(c.get("nullable", True))
         for c in (dst.output or {}).get("columns") or []
     }
+    # The destination is what exists; the source is what a load brings. A
+    # source-only column is an add, a destination-only column a drop (QA MX3-08).
     classification = classify_schema_change(
-        {"columns": src_map, "nullable": src_null},
         {"columns": dst_map, "nullable": dst_null},
+        {"columns": src_map, "nullable": src_null},
     )
     only_src = sorted(set(src_map) - set(dst_map))
     only_dst = sorted(set(dst_map) - set(src_map))
