@@ -2172,6 +2172,7 @@ def _stream_database_transfer_impl(
         cursor_after=keyset_after,
         snapshot_scan=bool(src_scan),
         cursor_is_unique=_cursor_is_unique,
+        callable_source=bool(is_callable_source(source) or is_callable_source(src_cfg)),
     )
     use_keyset = decision.use_keyset
     if _filtered_scan_reason and use_keyset:

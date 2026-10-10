@@ -20,7 +20,7 @@ import pytest
 from services.source_reread import reread_pagination_plan
 from src.transfer.models import EndpointConfig, TransferRequest
 
-_ROWS = 20_000
+_ROWS = 50_000  # >2 pages of 20k: page one alone hid both defects
 
 
 @pytest.mark.parametrize("src", ["sqlite", "postgresql", "mysql", "snowflake"])
@@ -28,6 +28,27 @@ def test_callable_source_rereads_by_offset(src):
     plan = reread_pagination_plan(src_type=src, incremental=False, callable_source=True)
     assert plan["use_offset"] is True
     assert plan["scan_state"] is None
+
+
+def test_callable_source_never_keyset_seeks():
+    """A spool pages by offset; adding a page-max cursor on top skipped a page."""
+    from services.keyset_pagination import decide_keyset_pagination
+
+    common = dict(
+        src_type="sqlite",
+        keyset_order_cols=["id"],
+        keyset_col="id",
+        keyset_tiebreak="",
+        incremental=False,
+        offset=20_000,
+        chunk_index=1,
+        cursor_after="19999",
+        snapshot_scan=False,
+    )
+    assert decide_keyset_pagination(**common).use_keyset is True
+    decision = decide_keyset_pagination(callable_source=True, **common)
+    assert decision.use_keyset is False
+    assert decision.pagination_mode == "offset"
 
 
 def test_table_source_keeps_held_scan():
