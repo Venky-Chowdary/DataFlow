@@ -219,3 +219,32 @@ def test_oidc_callback_requires_code_and_state(client):
     response = client.get("/api/v1/auth/sso/oidc/callback?code=&state=")
     # Missing state pops false; returns invalid SSO state before code check.
     assert response.status_code == 400
+
+
+def test_disabled_stored_account_is_denied_and_audited(monkeypatch, tmp_path):
+    from fastapi import HTTPException
+
+    from services import audit_log
+    from src.routers import auth_router
+
+    monkeypatch.setenv("DATAFLOW_SSO_AUTO_PROVISION", "1")
+    monkeypatch.setenv("DATAFLOW_SSO_ALLOWED_DOMAINS", "example.com")
+    monkeypatch.setattr(
+        auth_router,
+        "get_stored_user",
+        lambda email: {"email": email, "status": "disabled"},
+    )
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+    monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
+
+    with pytest.raises(HTTPException) as error:
+        auth_router._require_sso_authorization("disabled@example.com")
+
+    assert error.value.status_code == 403
+    assert error.value.detail == "account_disabled"
+    events = audit_log.list_audit_events(limit=20)
+    assert any(
+        event.get("action") == "auth.sso.failure"
+        and event.get("details", {}).get("reason") == "account_disabled"
+        for event in events
+    )
