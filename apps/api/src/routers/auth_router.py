@@ -692,9 +692,10 @@ async def sso_post_callback(sso_type: str, request: Request):
     auth = OneLogin_Saml2_Auth(req, saml_settings)
     try:
         auth.process_response(request_id=request_id)
-    except Exception:
+    except Exception as exc:
         logger.warning(
-            "SAML response processing failed (sso_type=saml reason=response_invalid)"
+            "SAML response processing failed (sso_type=saml reason=response_invalid error_type=%s)",
+            type(exc).__name__,
         )
         _audit_sso_failure(
             "saml",

@@ -1,4 +1,6 @@
-"""Mongo is the multi-host backend.
+"""SSO state store: transient OAuth/SAML state and one-time replay claims.
+
+Mongo is the multi-host backend.
 
 The flocked file backend is safe across workers on one host only and is not shared
 across hosts.

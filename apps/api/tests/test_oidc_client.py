@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
 from datetime import datetime, timezone
 
 import httpx
@@ -184,6 +186,15 @@ def test_unknown_kid_refetches_once_then_succeeds(monkeypatch):
         return httpx.Response(200, json={"keys": keys})
 
     _set_transport(monkeypatch, handler)
+    clock = [100.0]
+    monkeypatch.setattr(oidc_client.time, "monotonic", lambda: clock[0])
+    oidc_client._find_jwk(
+        JWKS_URI,
+        "rsa-key",
+        issuer=ISSUER,
+        sso_type="oidc",
+    )
+    clock[0] += 61
     token = _token(new_key, kid="rotated-key")
     claims = oidc_client.validate_id_token(
         token,
@@ -222,7 +233,153 @@ def test_second_unknown_kid_within_cooldown_does_not_refetch(monkeypatch):
             )
         assert exc.value.reason == "unknown_kid"
 
-    assert len(requests) == 2
+    assert len(requests) == 1
+
+
+def test_cold_jwks_fetch_does_not_refetch_immediately_for_unknown_kid(monkeypatch):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    requests = []
+    _set_transport(
+        monkeypatch,
+        lambda request: (
+            requests.append(request.url.path)
+            or httpx.Response(200, json={"keys": [_rsa_jwk(key)]})
+        ),
+    )
+
+    assert oidc_client._find_jwk(
+        JWKS_URI,
+        "rsa-key",
+        issuer=ISSUER,
+        sso_type="oidc",
+    )["kid"] == "rsa-key"
+    with pytest.raises(oidc_client.OidcTokenInvalid) as exc:
+        oidc_client._find_jwk(
+            JWKS_URI,
+            "missing-key",
+            issuer=ISSUER,
+            sso_type="oidc",
+        )
+
+    assert exc.value.reason == "unknown_kid"
+    assert requests == ["/jwks"]
+
+
+def test_cold_jwks_fetch_is_single_flight_for_same_uri(monkeypatch):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    request_count = 0
+    request_lock = threading.Lock()
+    barrier = threading.Barrier(5)
+
+    def handler(_request):
+        nonlocal request_count
+        with request_lock:
+            request_count += 1
+        return httpx.Response(200, json={"keys": [_rsa_jwk(key)]})
+
+    _set_transport(monkeypatch, handler)
+    results = []
+    errors = []
+
+    def lookup():
+        try:
+            barrier.wait(timeout=2)
+            results.append(
+                oidc_client._find_jwk(
+                    JWKS_URI,
+                    "missing-key",
+                    issuer=ISSUER,
+                    sso_type="oidc",
+                )
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=lookup) for _ in range(5)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(errors) == 5
+    assert all(
+        isinstance(error, oidc_client.OidcTokenInvalid)
+        and error.reason == "unknown_kid"
+        for error in errors
+    )
+    assert not results
+    assert request_count == 1
+
+
+def test_cached_jwks_lookup_for_other_uri_is_not_blocked_by_fetch(monkeypatch):
+    key_a = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key_b = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    uri_a = "https://issuer-a.example/jwks"
+    uri_b = "https://issuer-b.example/jwks"
+    fetch_started = threading.Event()
+    release_fetch = threading.Event()
+    lookup_finished = threading.Event()
+    errors = []
+    b_results = []
+
+    def handler(request):
+        if str(request.url) == uri_a:
+            fetch_started.set()
+            if not release_fetch.wait(timeout=3):
+                raise AssertionError("test did not release blocked JWKS fetch")
+            return httpx.Response(200, json={"keys": [_rsa_jwk(key_a, "key-a")]})
+        return httpx.Response(200, json={"keys": [_rsa_jwk(key_b, "key-b")]})
+
+    _set_transport(monkeypatch, handler)
+    assert oidc_client._find_jwk(
+        uri_b,
+        "key-b",
+        issuer="https://issuer-b.example",
+        sso_type="oidc",
+    )["kid"] == "key-b"
+
+    def fetch_a():
+        try:
+            oidc_client._find_jwk(
+                uri_a,
+                "key-a",
+                issuer="https://issuer-a.example",
+                sso_type="oidc",
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    def lookup_b():
+        try:
+            b_results.append(
+                oidc_client._find_jwk(
+                    uri_b,
+                    "key-b",
+                    issuer="https://issuer-b.example",
+                    sso_type="oidc",
+                )
+            )
+        except Exception as exc:
+            errors.append(exc)
+        finally:
+            lookup_finished.set()
+
+    fetch_thread = threading.Thread(target=fetch_a)
+    fetch_thread.start()
+    assert fetch_started.wait(timeout=2)
+    lookup_thread = threading.Thread(target=lookup_b)
+    lookup_thread.start()
+    completed_without_waiting = lookup_finished.wait(timeout=0.5)
+    release_fetch.set()
+    fetch_thread.join(timeout=3)
+    lookup_thread.join(timeout=3)
+
+    assert completed_without_waiting
+    assert not fetch_thread.is_alive()
+    assert not lookup_thread.is_alive()
+    assert not errors
+    assert b_results == [_rsa_jwk(key_b, "key-b")]
 
 
 def test_jwks_unavailable_fails_closed(monkeypatch):
@@ -412,6 +569,19 @@ def test_azure_uses_preferred_username_when_email_is_missing():
         {"preferred_username": "Alice@Example.com", "sub": "not-an-email"},
         sso_type="azure_ad",
     ) == "alice@example.com"
+
+
+def test_azure_email_claim_logs_name_without_email_value(caplog):
+    email = "Alice@Example.com"
+    caplog.set_level(logging.INFO, logger=oidc_client.__name__)
+
+    assert oidc_client.email_from_claims(
+        {"preferred_username": email},
+        sso_type="azure_ad",
+    ) == "alice@example.com"
+
+    assert "preferred_username" in caplog.text
+    assert email not in caplog.text
 
 
 def test_oidc_algorithms_are_constrained_by_provider_metadata(monkeypatch):

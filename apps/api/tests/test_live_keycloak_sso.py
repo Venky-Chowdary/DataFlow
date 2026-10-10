@@ -415,6 +415,8 @@ def test_live_keycloak_oidc_rotation_refetches_jwks_once(
         return fetch_jwks(*args, **kwargs)
 
     monkeypatch.setattr(oidc_client, "_fetch_jwks", counted_fetch)
+    metadata = oidc_client.discover(f"{KEYCLOAK_URL}/realms/{REALM}")
+    oidc_client._JWKS_REFRESHED.pop(metadata.jwks_uri, None)
     start = live_client.get("/api/v1/auth/sso/oidc/start", follow_redirects=False)
     code, state = _oidc_code_state(start.headers["location"])
     callback = live_client.get(

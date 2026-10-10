@@ -41,7 +41,8 @@ _ALLOWED_ALGORITHMS = frozenset(
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _CACHE_LOCK = threading.Lock()
 _METADATA_CACHE: dict[str, tuple[float, "OidcProviderMetadata"]] = {}
-_JWKS_LOCK = threading.Lock()
+_JWKS_LOCKS_REGISTRY_LOCK = threading.Lock()
+_JWKS_URI_LOCKS: dict[str, threading.Lock] = {}
 _JWKS_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 _JWKS_REFRESHED: dict[str, float] = {}
 
@@ -193,6 +194,15 @@ def _jwks_refresh_cooldown() -> int:
     return _cache_ttl("OIDC_JWKS_REFRESH_COOLDOWN_SEC", 60)
 
 
+def _jwks_lock(jwks_uri: str) -> threading.Lock:
+    with _JWKS_LOCKS_REGISTRY_LOCK:
+        lock = _JWKS_URI_LOCKS.get(jwks_uri)
+        if lock is None:
+            lock = threading.Lock()
+            _JWKS_URI_LOCKS[jwks_uri] = lock
+        return lock
+
+
 def _fetch_jwks(jwks_uri: str, issuer: str, sso_type: str) -> list[dict[str, Any]]:
     try:
         with _http_client() as client:
@@ -236,17 +246,19 @@ def _find_jwk(
     issuer: str,
     sso_type: str,
 ) -> dict[str, Any]:
-    now = time.monotonic()
-    with _JWKS_LOCK:
+    with _jwks_lock(jwks_uri):
+        now = time.monotonic()
         cached = _JWKS_CACHE.get(jwks_uri)
         if cached and cached[0] > now:
             keys = cached[1]
         else:
             keys = _fetch_jwks(jwks_uri, issuer, sso_type)
+            refreshed_at = time.monotonic()
             _JWKS_CACHE[jwks_uri] = (
-                time.monotonic() + _jwks_ttl(),
+                refreshed_at + _jwks_ttl(),
                 keys,
             )
+            _JWKS_REFRESHED[jwks_uri] = refreshed_at
         match = next((key for key in keys if key.get("kid") == kid), None)
         if match:
             return match
@@ -284,9 +296,16 @@ def reset_caches() -> None:
     """Clear discovery, JWKS, and rotation-refresh caches."""
     with _CACHE_LOCK:
         _METADATA_CACHE.clear()
-    with _JWKS_LOCK:
+    with _JWKS_LOCKS_REGISTRY_LOCK:
+        locks = tuple(_JWKS_URI_LOCKS.values())
+    for lock in locks:
+        lock.acquire()
+    try:
         _JWKS_CACHE.clear()
         _JWKS_REFRESHED.clear()
+    finally:
+        for lock in reversed(locks):
+            lock.release()
 
 
 def allowed_algorithms(
@@ -407,7 +426,7 @@ def clock_skew_leeway() -> int:
 
 def email_from_claims(claims: dict[str, Any], *, sso_type: str) -> str:
     """Extract a verified provider email, normalized for account matching."""
-    candidates: tuple[Any, ...]
+    candidates: tuple[tuple[str, Any], ...]
     if sso_type == "oidc":
         email = claims.get("email")
         if not isinstance(email, str) or "@" not in email:
@@ -416,16 +435,21 @@ def email_from_claims(claims: dict[str, Any], *, sso_type: str) -> str:
         require_verified = (getenv_brand("OIDC_REQUIRE_EMAIL_VERIFIED", "1") or "1") != "0"
         if verified is False or (require_verified and verified is not True):
             raise OidcTokenInvalid("no_verified_email")
-        candidates = (email,)
+        candidates = (("email", email),)
     elif sso_type == "azure_ad":
         candidates = (
-            claims.get("email"),
-            claims.get("preferred_username"),
-            claims.get("upn"),
+            ("email", claims.get("email")),
+            ("preferred_username", claims.get("preferred_username")),
+            ("upn", claims.get("upn")),
         )
     else:
         raise OidcConfigError("unsupported_sso_type")
-    for candidate in candidates:
+    for claim_name, candidate in candidates:
         if isinstance(candidate, str) and "@" in candidate:
+            if sso_type == "azure_ad":
+                logger.info(
+                    "Entra email claim selected (sso_type=azure_ad claim=%s)",
+                    claim_name,
+                )
             return candidate.strip().lower()
     raise OidcTokenInvalid("no_verified_email")
