@@ -411,6 +411,18 @@ def build_dest_ri_validate_gate(*, has_relationships: bool) -> dict[str, Any]:
     }
 
 
+_ANOMALY_ORIGIN_NOTE = {
+    "source": (
+        " Source anomaly: the source rows already reference parents the source"
+        " does not hold — the copy is faithful, the data is not."
+    ),
+    "destination": (
+        " Destination anomaly: the source holds every referenced parent, so the"
+        " destination parent table is incomplete."
+    ),
+}
+
+
 def build_dest_ri_gate(
     evidence: Mapping[str, Any] | None,
     *,
@@ -427,6 +439,8 @@ def build_dest_ri_gate(
             r for r in list(evidence.get("relations") or []) if isinstance(r, dict)
         ]
     asked = bool(has_relationships) or bool(relations)
+    if isinstance(evidence, Mapping):
+        asked = asked or bool(evidence.get("asked") or evidence.get("probe_error"))
     if not asked:
         return {
             "id": GATE_ID,
@@ -459,6 +473,24 @@ def build_dest_ri_gate(
                 "rule_id": f"{GATE_ID}.unproven",
             },
         }
+    if evidence.get("probe_error"):
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": (
+                "Destination referential integrity probe failed ("
+                + str(evidence.get("reason") or "error")
+                + ") — orphan rows cannot be ruled out, so the run is not certified."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "reason": str(evidence.get("reason") or ""),
+                "relations": relations,
+                "rule_id": f"{GATE_ID}.probe_error",
+            },
+        }
     if referential_integrity_proven(evidence):
         n = len(relations)
         return {
@@ -481,12 +513,14 @@ def build_dest_ri_gate(
     unavailable = list(evidence.get("unavailable_relations") or [])
     if orphan_rows > 0 or orphan_rels:
         named = ", ".join(str(r) for r in orphan_rels[:4]) or "relationship"
+        origin = str(evidence.get("anomaly_origin") or "undetermined")
         return {
             "id": GATE_ID,
             "status": "block",
             "message": (
                 f"Destination referential integrity failed: {orphan_rows} orphan "
                 f"row(s) on {named}. A matching row count does not prove parents exist."
+                + _ANOMALY_ORIGIN_NOTE.get(origin, "")
             ),
             "duration_ms": 0,
             "details": {
@@ -495,6 +529,8 @@ def build_dest_ri_gate(
                 "orphan_rows": orphan_rows,
                 "orphan_relations": orphan_rels,
                 "relations": relations,
+                "anomaly_origin": origin,
+                "source_orphan_rows": evidence.get("source_orphan_rows"),
                 "rule_id": f"{GATE_ID}.orphans",
             },
         }
@@ -538,6 +574,7 @@ def apply_dest_ri_to_reconcile(
     )
     out = dict(stamped)
     out["g22_dest_referential_integrity"] = gate
+    out["passed_before_dest_ri"] = bool(stamped.get("passed"))
     status = str(gate.get("status") or "")
     if status in {"block", "warn"}:
         if status == "block":

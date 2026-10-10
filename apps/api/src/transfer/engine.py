@@ -1613,6 +1613,16 @@ def _finish_verified_run(
     )
 
 
+def _ri_is_the_only_failure(recon: dict[str, Any] | None) -> bool:
+    """G22 measured orphans and every Gate-8 check before it had passed."""
+    if not isinstance(recon, dict) or recon.get("passed_before_dest_ri") is not True:
+        return False
+    gate = recon.get("g22_dest_referential_integrity")
+    if not isinstance(gate, dict) or gate.get("status") != "block":
+        return False
+    return str((gate.get("details") or {}).get("rule_id") or "").endswith(".orphans")
+
+
 def _note_failed_batch_undo(
     request: Any,
     dest_summary: Any,
@@ -1641,6 +1651,15 @@ def _note_failed_batch_undo(
         logger.warning(
             "Skipping failed-batch undo for table=%s: verification unavailable",
             dest_summary.get("table"),
+        )
+        dest_summary["partial_batch_undo"] = "retained"
+        dest_summary["partial_batch_undo_note"] = note
+        base = message or "Reconciliation failed"
+        return base if note in base else f"{base} {note}"
+    if _ri_is_the_only_failure(recon):
+        note = (
+            "The committed rows were kept: every other Gate-8 check passed, and "
+            "the orphan rows are the evidence of the referential-integrity finding."
         )
         dest_summary["partial_batch_undo"] = "retained"
         dest_summary["partial_batch_undo_note"] = note

@@ -873,6 +873,10 @@ from .stream_catalog import (  # noqa: E402
 )
 
 
+def _fk_orphans_quarantine(validation_mode: str) -> bool:
+    return str(validation_mode or "").strip().lower() not in {"strict", "maximum"}
+
+
 def stream_database_transfer(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -1230,17 +1234,21 @@ def _stream_database_transfer_impl(
     # committed. Built before the COPY decision: a server-to-server copy never
     # brings a row into this process, so it cannot hold an orphan back — a
     # guarded route takes the row path instead of landing orphans unchecked.
+    # Strict/maximum do not quarantine: holding an orphan back lets the row
+    # checksum match the survivors and green a referential-integrity defect.
+    # The row lands and Gate-8 G22 measures the orphan and fails the run.
     fk_orphan_guard = None
     try:
         from .stream_foreign_keys import build_fk_orphan_guard
 
-        fk_orphan_guard = build_fk_orphan_guard(
-            source,
-            destination,
-            _source_name(source),
-            dest_type=dest_type,
-            dest_cfg=dest_cfg,
-        )
+        if _fk_orphans_quarantine(validation_mode):
+            fk_orphan_guard = build_fk_orphan_guard(
+                source,
+                destination,
+                _source_name(source),
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+            )
     except Exception as exc:
         logger.debug("FK orphan guard not built for %s: %s", _source_name(source), exc)
     if fk_orphan_guard is not None:

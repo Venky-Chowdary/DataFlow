@@ -980,6 +980,45 @@ def _referential_integrity_evidence(
     return evidence
 
 
+def _classify_ri_anomaly_origin(
+    evidence: dict[str, Any],
+    source_endpoint: EndpointConfig,
+    schema_state: dict[str, Any],
+) -> None:
+    """Say whether destination orphans were already orphans in the source.
+
+    ``source``: the source child rows reference parents the source lacks — the
+    copy is faithful and the data is wrong. ``destination``: the source holds
+    every parent, so the destination parent set is incomplete. A source scan
+    that did not complete is ``undetermined``, never either answer.
+    """
+    evidence["anomaly_origin"] = "undetermined"
+    try:
+        from services.population_orphan_probe import probe_population_fk_orphans
+
+        src_cfg = resolve_connector_config(source_endpoint)
+        src_table = str(source_endpoint.table or src_cfg.get("table") or "")
+        foreign_keys, _unparsed = _source_foreign_keys(schema_state)
+        scan = probe_population_fk_orphans(
+            child_table=src_table,
+            mappings=[],
+            foreign_keys=foreign_keys,
+            source_config=src_cfg,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "source orphan classification failed: %s", exc, exc_info=exc
+        )
+        evidence["anomaly_origin_reason"] = f"source orphan scan failed: {exc}"
+        return
+    if not scan.get("ran") or not scan.get("complete"):
+        evidence["anomaly_origin_reason"] = str(scan.get("note") or "source scan incomplete")
+        return
+    source_orphans = int(scan.get("orphan_count") or 0)
+    evidence["source_orphan_rows"] = source_orphans
+    evidence["anomaly_origin"] = "source" if source_orphans > 0 else "destination"
+
+
 def _apply_n5_gate8_extensions(
     stamped: dict[str, Any],
     n5_ctx: dict[str, Any],
@@ -2024,18 +2063,25 @@ def run_reconciliation(
             schema_state=schema_state,
             source_schema=ri_source_schema,
         )
+        if int(ri_state.get("orphan_rows") or 0) > 0 and source_endpoint is not None:
+            _classify_ri_anomaly_origin(ri_state, source_endpoint, schema_state)
         physical_state["referential_integrity"] = ri_state
         n5_ctx["source_has_fks"] = bool(
             ri_state.get("asked") or ri_state.get("relations")
         )
     except Exception as exc:
         logging.getLogger(__name__).warning(
-            "destination referential integrity probe skipped: %s", exc, exc_info=exc
+            "destination referential integrity probe failed: %s", exc, exc_info=exc
         )
+        # A probe that raised proves nothing either way; G22 must not read it
+        # as "no foreign keys declared".
         physical_state["referential_integrity"] = {
             "verified": False,
+            "asked": True,
+            "probe_error": True,
             "reason": f"probe failed: {exc}",
         }
+        n5_ctx["source_has_fks"] = True
 
     # The writer digest of a resumed pass covers the tail it wrote, not the
     # population. Recompute from the full source when the caller re-supplied it;
