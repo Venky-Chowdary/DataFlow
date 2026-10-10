@@ -522,8 +522,18 @@ def destination_row_count(
         if db_type == "sqlite":
             import sqlite3
 
-            database = str(cfg.get("database") or "")
-            if not database:
+            from connectors.sqlite_common import sqlite_file_path
+
+            # Connectors saved from the UI carry only ``connection_string``
+            # (``sqlite:///path``); reading ``database`` alone left every such
+            # destination uncountable, so a quiet incremental poll could never
+            # prove the no-op (QA RT-02).
+            database = sqlite_file_path(
+                str(cfg.get("database") or ""),
+                str(cfg.get("connection_string") or ""),
+                str(cfg.get("host") or ""),
+            )
+            if not database or database == ":memory:":
                 return None
             with closing(sqlite3.connect(database)) as conn:
                 exists = conn.execute(

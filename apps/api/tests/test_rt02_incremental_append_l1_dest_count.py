@@ -177,3 +177,83 @@ def test_pg_pg_incremental_append_run2_and_quiet_run3_pass_l1(isolated, composit
         with conn.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS "{src}", "{dst}"')
         conn.close()
+
+
+def test_sqlite_destination_count_reads_a_connection_string(tmp_path):
+    """A UI-saved SQLite connector carries ``connection_string`` only.
+
+    ``destination_row_count`` read ``database`` alone and returned ``None``, so
+    PG→SQLite quiet polls failed "pre-write destination count was not measured".
+    """
+    import sqlite3
+
+    from services.dest_precount import destination_row_count, precount_table
+
+    db = tmp_path / "dst.sqlite"
+    with sqlite3.connect(db) as conn:
+        conn.execute('CREATE TABLE "QA_T_d" (id INTEGER PRIMARY KEY)')
+        conn.executemany('INSERT INTO "QA_T_d" VALUES (?)', [(i,) for i in range(5)])
+    cfg = {"connection_string": f"sqlite:///{db}", "database": ""}
+    assert destination_row_count("sqlite", cfg, schema="", table_name="QA_T_d") == 5
+    assert precount_table("sqlite", cfg, "QA_T_d") == 5
+    assert destination_row_count("sqlite", cfg, schema="", table_name="absent") == 0
+    memory = {"connection_string": "sqlite://:memory:"}
+    assert destination_row_count("sqlite", memory, schema="", table_name="QA_T_d") is None
+
+
+def test_pg_sqlite_incremental_upsert_quiet_run3_is_a_proven_no_op(isolated, tmp_path):
+    suffix = uuid.uuid4().hex[:8]
+    src, dst = f"rt02_q_{suffix}", f"rt02_q_{suffix}_d"
+    db = tmp_path / "dst.sqlite"
+    dest = EndpointConfig(
+        kind="database", format="sqlite", connection_string=f"sqlite:///{db}", table=dst
+    )
+    conn = _pg()
+
+    def run():
+        job_id = "rt02q" + uuid.uuid4().hex[:16]
+        isolated.update_job_status(job_id, "pending", transfer_request={})
+        request = TransferRequest(
+            source=_endpoint(src),
+            destination=dest,
+            sync_mode="incremental_upsert",
+            stream_contracts=[{
+                "name": src, "cursor_field": "updated_at", "primary_key": ["id"],
+                "sync_mode": "incremental_upsert", "selected": True,
+            }],
+            skip_preflight=True,
+            validation_mode="strict",
+        )
+        return UniversalTransferEngine().execute_tracked(request, job_id)
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f'CREATE TABLE "{src}" (id int PRIMARY KEY, amount numeric(10,2), '
+                "updated_at timestamp NOT NULL)"
+            )
+            cur.execute(
+                f'INSERT INTO "{src}" SELECT i, i * 1.5, '
+                "timestamp '2026-01-01' + i * interval '1 minute' "
+                "FROM generate_series(1, 30) i"
+            )
+        first = run()
+        assert first.success, first.error
+        with conn.cursor() as cur:
+            cur.execute(
+                f'INSERT INTO "{src}" SELECT i, i * 1.5, '
+                "timestamp '2026-02-01' + i * interval '1 minute' "
+                "FROM generate_series(31, 34) i"
+            )
+        second = run()
+        assert second.success, second.error
+        third = run()  # quiet poll
+        assert third.success, third.error  # RT-02: "count was not measured"
+        import sqlite3
+
+        with sqlite3.connect(db) as sq:
+            assert sq.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0] == 34
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{src}"')
+        conn.close()
