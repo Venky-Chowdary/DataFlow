@@ -10,12 +10,12 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 
-def test_default_transport_is_peek(monkeypatch):
+def test_default_transport_is_auto(monkeypatch):
     monkeypatch.delenv("DATAFLOW_CDC_PG_TRANSPORT", raising=False)
     monkeypatch.delenv("DATAWRAP_CDC_PG_TRANSPORT", raising=False)
     from connectors.postgresql_cdc_transport import selected_pg_cdc_transport
 
-    assert selected_pg_cdc_transport() == "peek"
+    assert selected_pg_cdc_transport() == "auto"
 
 
 def test_streaming_transport_selected(monkeypatch):
@@ -115,14 +115,14 @@ def test_change_stream_wires_transport_helpers():
     assert "postgresql_cdc_transport" in src
 
 
-def test_pg_capability_marks_streaming_planned_opt_in():
-    """F4 honesty: default peek; streaming must not look certified via supports_streaming."""
+def test_pg_capability_marks_streaming_default_with_peek_fallback():
+    """F4: streaming is the default only because the live streaming ITs prove it."""
     from services.connector_capability_registry import get_connector_capability
 
     cap = get_connector_capability("postgresql")
-    assert cap.get("cdc_transport_default") == "peek"
-    assert cap.get("cdc_streaming_status") == "planned_opt_in"
-    assert cap.get("supports_streaming") is False
+    assert cap.get("cdc_transport_default") == "auto"
+    assert cap.get("cdc_streaming_status") == "default_with_peek_fallback"
+    assert cap.get("supports_streaming") is True
     assert cap.get("bulk_export_status") == "implemented_pg_copy"
 
 

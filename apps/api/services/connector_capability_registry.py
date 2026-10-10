@@ -55,11 +55,11 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "tier": TIER_HIGHEST,
         "pattern": "batch",
         "supports_cdc": True,
-        # F4: supports_streaming=False until START_REPLICATION is default + lag-proven.
-        # Opt-in transport: DATAFLOW_CDC_PG_TRANSPORT=streaming (falls back to peek).
-        "supports_streaming": False,
-        "cdc_transport_default": "peek",
-        "cdc_streaming_status": "planned_opt_in",
+        # F4: START_REPLICATION is the default (auto) with peek fallback; proven by
+        # tests/test_cdc_postgres_streaming_transport_live.py. DATAFLOW_CDC_PG_TRANSPORT=peek opts out.
+        "supports_streaming": True,
+        "cdc_transport_default": "auto",
+        "cdc_streaming_status": "default_with_peek_fallback",
         "bulk_export_status": "implemented_pg_copy",
         "supports_upsert": True,
         "supports_append": True,

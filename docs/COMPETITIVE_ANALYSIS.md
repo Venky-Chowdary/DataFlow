@@ -45,7 +45,7 @@ Move schemas and data across heterogeneous engines **with fail-closed type fidel
 
 ### Debezium / Estuary / Qlik Replicate / GoldenGate
 - **Strengths:** Streaming CDC transport maturity (replication connections, lag curves).
-- **Gaps vs us:** Not migration-assurance UI + type invent + Map/Validate Decision Artifact. Our CDC is **correct at-least-once semantics** today; transport is still peek-poll (Phase F streaming). Do not claim Debezium parity until F4 exits.
+- **Gaps vs us:** Not migration-assurance UI + type invent + Map/Validate Decision Artifact. Our CDC is **correct at-least-once semantics** today; PostgreSQL transport is `START_REPLICATION` streaming by default with peek fallback (F4, live-proven on PG; see `KEYSET_AND_BULK_IO.md`). Still do not claim Debezium parity: AG/DG dual-node failover and Oracle/SQL Server live matrices remain open.
 
 ### Airbyte / Fivetran (secondary)
 - **Hired for:** Land many SaaS APIs into a warehouse with minimal engineering.

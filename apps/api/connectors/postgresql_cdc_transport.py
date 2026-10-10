@@ -8,9 +8,9 @@ Two transports share the same at-least-once contract (read → apply → ack):
   decoded once by the server. Confirmed-flush feedback is sent **only** for LSNs
   passed to :meth:`StreamingReplicationTransport.ack` after destination apply.
 
-Select with ``DATAFLOW_CDC_PG_TRANSPORT``: ``peek`` (default), ``streaming`` or
-``auto`` (streaming, falling back to peek when a replication connection cannot be
-opened — e.g. the role lacks REPLICATION).
+Select with ``DATAFLOW_CDC_PG_TRANSPORT``: ``auto`` (default — streaming, falling
+back to peek when a replication connection cannot be opened, e.g. the role lacks
+REPLICATION or pg_hba has no replication entry), ``streaming`` or ``peek``.
 
 Streaming keeps peek semantics so the change stream does not care which one runs:
 
@@ -49,12 +49,14 @@ class CdcStreamingTransportError(RuntimeError):
 
 
 def selected_pg_cdc_transport() -> str:
-    raw = (getenv_brand("CDC_PG_TRANSPORT", TRANSPORT_PEEK) or TRANSPORT_PEEK).strip().lower()
+    raw = (getenv_brand("CDC_PG_TRANSPORT", TRANSPORT_AUTO) or TRANSPORT_AUTO).strip().lower()
     if raw in ("stream", "streaming", "replication", "start_replication"):
         return TRANSPORT_STREAMING
-    if raw == TRANSPORT_AUTO:
-        return TRANSPORT_AUTO
-    return TRANSPORT_PEEK
+    if raw in ("peek", "poll", "sql"):
+        return TRANSPORT_PEEK
+    if raw != TRANSPORT_AUTO:
+        _logger.warning("Unknown DATAFLOW_CDC_PG_TRANSPORT=%r; using auto", raw)
+    return TRANSPORT_AUTO
 
 
 def lsn_to_int(lsn: str | int | None) -> int:
