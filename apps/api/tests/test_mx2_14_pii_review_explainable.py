@@ -148,3 +148,69 @@ def test_live_real_pii_explains_and_acknowledges(pg_route):
     raw = json.dumps(get_mongodb_service().get_job(job_id) or {}, default=str)
     assert '"compliance_acknowledged": true' in raw
     assert "synthetic test data" in raw
+
+
+# --- MX2-01 QA file (relayed by session C): birth_date + epoch-ms on an upload ---
+
+import tests.test_mcp_sqlite_file_transfer as _mcp_harness  # noqa: E402
+
+mcp_client = _mcp_harness.mcp_client
+
+
+def test_mx2_01_fixture_flags_birth_date_by_name_not_epoch_digits():
+    import csv
+    from pathlib import Path
+
+    from services.compliance_guard import score_compliance_risk
+
+    path = Path(__file__).parent / "fixtures" / "sample_schema_types.csv"
+    with path.open(newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    out = score_compliance_risk(list(rows[0]), rows)
+    by_col = {f["column"]: f for f in out["findings"]}
+    # updated_epoch_ms / txn_yyyymmdd were "phone"; birth_date was dob + phone.
+    assert set(by_col) == {"birth_date", "customer_email"}, by_col
+    assert by_col["birth_date"]["evidence"] == [{"category": "dob", "rule": "column_name"}]
+    assert out["requires_review"] is True  # a real DOB column stays fail-closed
+
+
+def test_bare_digits_without_a_temporal_name_still_read_as_phone():
+    from services.compliance_guard import detect_pii_fields
+
+    rows = [{"contact": f"555123{4000 + i}"} for i in range(5)]
+    assert detect_pii_fields(["contact"], rows)["field_risk"]["contact"] == ["phone"]
+    rows = [{"created_at": str(1705312200000 + i)} for i in range(5)]
+    assert "created_at" not in detect_pii_fields(["created_at"], rows)["field_risk"]
+
+
+def test_mcp_dataset_transfer_names_birth_date_and_acknowledges(mcp_client, tmp_path):
+    import sqlite3
+
+    from services.mongodb_service import get_mongodb_service
+    from tests.test_mcp_sqlite_file_transfer import _call, _mcp, _wait_job
+    from tests.test_mx2_01_declared_zone_reaches_g9 import _stage as _stage_upload
+
+    client, db_path = mcp_client
+    args, expected = _stage_upload(client, db_path, tmp_path)
+    args["source_timezone"] = "UTC"
+    failed, refused = _call(client, "start_dataset_transfer", dict(args))
+    text = str(refused)
+    assert failed and "birth_date (dob by column name" in text, text
+    assert "updated_epoch_ms" not in text and "pii_acknowledgement" in text, text
+
+    staged = _mcp(client, "start_dataset_transfer", {
+        **args,
+        "pii_acknowledgement": {"approved_by": "qa-lead", "reason": "synthetic QA fixture"},
+    })
+    assert staged.get("requires_confirm") is True, staged
+    assert staged["preview"]["pii_acknowledgement"]["approved_by"] == "qa-lead"
+    confirmed = _mcp(client, "confirm_action", {"ack_id": staged["ack_id"], "reason": "qe"})
+    job = _wait_job(confirmed["job_id"])
+    assert job.get("status") == "completed", job.get("error")
+    with sqlite3.connect(db_path) as conn:
+        landed = conn.execute('SELECT COUNT(*) FROM "QA_E2E_RT_schema_types"').fetchone()[0]
+    assert landed == expected
+    req = (get_mongodb_service().get_job(confirmed["job_id"]) or {}).get("transfer_request") or {}
+    assert req.get("compliance_acknowledged") is True, req
+    assert req.get("acknowledgment_actor") == "qa-lead"
+    assert req.get("acknowledgment_reason") == "synthetic QA fixture"

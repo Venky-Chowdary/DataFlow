@@ -138,8 +138,13 @@ The proof-bundle confidence floor is `max(0.55, threshold - 0.3)`. Mappings belo
 
 ### 6.4 "PII/compliance review required"
 
-- **What it means:** The sample contains fields that look like PII.
-- **Fix:** Mask, tokenize, or drop the PII fields, or approve the transfer after confirming your data governance policy allows it.
+- **What it means:** A high-risk field (SSN, date of birth, bank/card account number) or enough lower-risk PII was found. The reason names each column, its category and the rule that flagged it, e.g. `birth_date (dob by column name)`; `compliance.findings` carries the same per column.
+- **Not flagged:** A column whose every sampled value is a date/timestamp (ISO dates, `yyyymmdd` / epoch digits under a temporal name) is not value-matched as a phone/account number. A surrogate `account_id` whose sampled values are not account-number shaped is an identifier, not a high-risk account number.
+- **Fix:** Mask, tokenize, or drop the PII fields, or acknowledge the review after confirming your data governance policy allows it. An acknowledgement needs an approver and a reason, and both are recorded on the job (`compliance_acknowledged`, `acknowledgment_actor`, `acknowledgment_reason`):
+  - **Studio:** tick the compliance acknowledgement on Validate and enter the approver and reason.
+  - **REST:** send `compliance_acknowledged: true` with `acknowledgment_actor` and `acknowledgment_reason` on preflight / transfer.
+  - **Pilot / MCP:** pass `pii_acknowledgement: {approved_by, reason}` to `plan_transfer`, `start_transfer` or `start_dataset_transfer`.
+- Without an acknowledgement a genuine PII review stays fail-closed.
 
 ### 6.5 "Source schema changed" / "Destination schema changed"
 

@@ -233,6 +233,7 @@ def stage_dataset_transfer(
     contract_id: str = "",
     require_signed_contract: Any = None,
     source_timezone: str = "",
+    pii_acknowledgement: dict[str, Any] | None = None,
 ) -> Any:
     """Stage a file→connector transfer. Returns a tool result. Does not write."""
     tool = "start_dataset_transfer"
@@ -242,6 +243,12 @@ def stage_dataset_transfer(
     zone, zone_error = _declared_zone(source_timezone)
     if zone_error:
         return _tool_result(tool, success=False, error=zone_error)
+    from .transfer_tools import _pii_acknowledgement
+
+    try:
+        pii_ack = _pii_acknowledgement(pii_acknowledgement)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
 
     from .data_analyst import get_data_analyst
 
@@ -376,14 +383,22 @@ def stage_dataset_transfer(
         dest_exists=dest_exists,
         source_kind="file",
         known_row_count=int(getattr(parsed, "row_count", 0) or 0),
+        pii_ack=pii_ack,
     )
     if not _is_execute_cleared(preflight):
+        # The decision reason names what holds Confirm (e.g. which columns a
+        # PII review flagged and how to acknowledge it) — never refuse blind.
+        reason = str(
+            ((preflight.get("proof_bundle") or {}).get("transfer_decision") or {}).get("reason")
+            or ""
+        ).strip()
         return _tool_result(
             tool,
             success=False,
             output={"preflight": preflight, "dataset": schema.name},
             error=_blocked(preflight) if not preflight.get("passed") else (
                 "Preflight is not approve — Confirm is blocked until Studio Execute would unlock."
+                + (f" Reason: {reason}" if reason else "")
             ),
         )
 
@@ -418,6 +433,11 @@ def stage_dataset_transfer(
     except ValueError as exc:
         return _tool_result(tool, success=False, error=str(exc))
     payload["skip_preflight"] = False
+    if pii_ack:
+        # Execute re-runs Validate: the same ack and its trail ride on the job.
+        payload["compliance_acknowledged"] = True
+        payload["acknowledgment_actor"] = pii_ack["approved_by"]
+        payload["acknowledgment_reason"] = pii_ack["reason"]
 
     preview = {
         "dataset": schema.name,
@@ -428,6 +448,8 @@ def stage_dataset_transfer(
         "mappings": len(mappings),
         "preflight_run_id": preflight.get("run_id") or "",
     }
+    if pii_ack:
+        preview["pii_acknowledgement"] = dict(pii_ack)
     from .ack_ledger import get_ack_ledger
 
     ack_id = get_ack_ledger().put(kind="start_transfer", payload=payload, preview=preview)

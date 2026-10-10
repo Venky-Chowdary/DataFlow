@@ -758,6 +758,15 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "contract_id": {"type": "string"},
                 "require_signed_contract": {"type": "boolean"},
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "(the finding names the columns and rule). Requires "
+                        "approved_by and reason; recorded on the job as "
+                        "compliance_acknowledged + acknowledgment_actor/reason."
+                    ),
+                },
             },
             "required": ["dataset_name"],
         },
@@ -3363,6 +3372,7 @@ class DataPilotTools:
         contract_id: str = "",
         require_signed_contract: Any = None,
         source_timezone: str = "",
+        pii_acknowledgement: dict | None = None,
     ) -> ToolResult:
         from .dataset_transfer import stage_dataset_transfer
 
@@ -3378,6 +3388,7 @@ class DataPilotTools:
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
             source_timezone=source_timezone,
+            pii_acknowledgement=pii_acknowledgement,
         )
 
     def _create_schedule(

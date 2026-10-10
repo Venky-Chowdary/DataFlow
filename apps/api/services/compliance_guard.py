@@ -7,8 +7,11 @@ execution or require human review.
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,18}[0-9]$")
@@ -20,6 +23,8 @@ SSN_RE = re.compile(r"^\d{3}-\d{2}-\d{4}$")
 ACCOUNT_RE = re.compile(r"^(?:\d{8,19}|[A-Z]{2}\d{12,30})$")
 
 _ACCOUNT_SURROGATE_NAME_RE = re.compile(r"account_?id\b")
+
+_TEMPORAL_VALUE_TYPES = frozenset({"DATE", "TIMESTAMP", "TIMESTAMPTZ"})
 
 _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
     "email": ((r"email", r"e_mail", r"\bmail\b"), 0.22),
@@ -95,6 +100,29 @@ def _value_hits(values: list[str]) -> list[str]:
     return list(dict.fromkeys(hits))
 
 
+def _temporal_column(col: str, values: list[str]) -> bool:
+    """Every sampled value is a date / instant, so its digits are not a phone.
+
+    ``1990-05-20``, ``20240115`` and epoch-ms ``1705312200000`` all match the
+    phone/account digit shapes. Formatted dates count as temporal on their
+    own; bare digits only under a temporal column name, because a 10-digit
+    phone number is epoch-shaped too. Name rules (``birth_date`` → dob) still
+    apply to the column.
+    """
+    from services.schema_inference import _classify_value, _is_date_field_name
+
+    non_empty = [v for v in values if v]
+    if not non_empty:
+        return False
+    temporal_name = _is_date_field_name(col)
+    for value in non_empty:
+        if value.lstrip("+-").isdigit() and not temporal_name:
+            return False
+        if _classify_value(value, field_name=col) not in _TEMPORAL_VALUE_TYPES:
+            return False
+    return True
+
+
 def detect_pii_fields(
     columns: list[str],
     rows: list[dict[str, Any]] | None = None,
@@ -117,6 +145,14 @@ def detect_pii_fields(
         name_hits = _field_hits(col)
         sample_values = [str(row.get(col, "")).strip() for row in sample_rows if col in row]
         value_hits = _value_hits(sample_values)
+        if value_hits and _temporal_column(col, sample_values):
+            _logger.info(
+                "PII value pattern(s) %s on column %r ignored: every sampled value "
+                "is a date/timestamp",
+                value_hits,
+                col,
+            )
+            value_hits = []
         non_empty = [v for v in sample_values if v]
         if (
             "account" in name_hits
