@@ -505,6 +505,9 @@ def fetch_redo_inventory(cur: Any) -> list[tuple[int, int, int, int, str]] | Non
             FROM V$ARCHIVED_LOG
             WHERE DELETED = 'NO'
               AND STANDBY_DEST = 'NO'
+              AND RESETLOGS_CHANGE# = (
+                    SELECT RESETLOGS_CHANGE# FROM V$DATABASE
+              )
             """
         )
         for row in cur.fetchall() or []:
@@ -518,6 +521,8 @@ def fetch_redo_inventory(cur: Any) -> list[tuple[int, int, int, int, str]] | Non
             """
             SELECT THREAD#, SEQUENCE#, FIRST_CHANGE#, NEXT_CHANGE#
             FROM V$LOG
+            WHERE STATUS <> 'UNUSED'
+              AND FIRST_CHANGE# > 0
             """
         )
         for row in cur.fetchall() or []:
@@ -536,6 +541,9 @@ def fetch_redo_inventory(cur: Any) -> list[tuple[int, int, int, int, str]] | Non
     return sorted(inventory.values(), key=lambda item: (item[0], item[1]))
 
 
+_REDO_INVENTORY_UNVERIFIED_WARNED: set[str] = set()
+
+
 def assert_redo_continuity(
     resume_scn: int,
     inventory: list[tuple[int, int, int, int, str]] | None,
@@ -546,17 +554,25 @@ def assert_redo_continuity(
     resume = int(resume_scn or 0)
     if resume <= 0:
         return
-    if not inventory:
+
+    def warn_unverified(reason: str) -> None:
+        warning_key = str(cursor_key or "<unknown>")
+        if warning_key in _REDO_INVENTORY_UNVERIFIED_WARNED:
+            return
+        _REDO_INVENTORY_UNVERIFIED_WARNED.add(warning_key)
         logger.warning(
-            "Oracle redo inventory is empty or undetermined; continuity is unverified "
-            "for cursor %s",
-            cursor_key or "<unknown>",
+            "Oracle redo inventory %s; continuity is unverified for cursor %s",
+            reason,
+            warning_key,
         )
+
+    if not inventory:
+        warn_unverified("is empty or undetermined")
         return
 
     by_thread: dict[int, dict[int, tuple[int, int, int, int, str]]] = {}
-    try:
-        for row in inventory:
+    for row in inventory:
+        try:
             thread, sequence, first_change, next_change, source = row
             thread, sequence = int(thread), int(sequence)
             first_change, next_change = int(first_change), int(next_change)
@@ -567,12 +583,14 @@ def assert_redo_continuity(
             current = entries.get(sequence)
             if current is None or candidate[4] == "online":
                 entries[sequence] = candidate
-    except (TypeError, ValueError, IndexError):
-        logger.warning(
-            "Oracle redo inventory is incomplete; continuity is unverified for "
-            "cursor %s",
-            cursor_key or "<unknown>",
-        )
+        except (TypeError, ValueError, IndexError):
+            logger.warning(
+                "Skipping invalid Oracle redo inventory row for cursor %s: %r",
+                cursor_key or "<unknown>",
+                row,
+            )
+    if not by_thread:
+        warn_unverified("contains no valid rows")
         return
 
     def raise_gap(thread: int, first_missing: int, last_missing: int) -> None:

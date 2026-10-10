@@ -131,7 +131,7 @@ def test_assert_redo_continuity_undetermined_inventory_warns(
     from connectors.oracle_logminer import assert_redo_continuity
 
     with caplog.at_level(logging.WARNING):
-        assert_redo_continuity(100, None, cursor_key="oracle:unknown")
+        assert_redo_continuity(100, None, cursor_key="oracle:undetermined")
 
     assert "unverified" in caplog.text.lower()
 
