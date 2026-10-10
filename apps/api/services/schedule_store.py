@@ -22,6 +22,8 @@ from services.cron_schedule import next_run as _cron_next_run
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 
+logger = logging.getLogger(__name__)
+
 try:
     from src.services.mongodb_service import get_mongodb_service
 except ImportError:
@@ -1336,13 +1338,18 @@ def _job_is_live(job_id: str) -> bool | None:
     return True
 
 
-def _job_lease_held(job_id: str) -> bool:
+def _job_lease_held(job_id: str) -> bool | None:
     try:
         from services.worker_leases import get_worker_lease_store
 
         return bool(get_worker_lease_store().is_held(job_id))
-    except Exception:
-        return False
+    except Exception as exc:
+        logger.warning(
+            "worker lease lookup failed for job %s (%s)",
+            job_id,
+            type(exc).__name__,
+        )
+        return None
 
 
 def _unbound_claim_grace() -> timedelta:
