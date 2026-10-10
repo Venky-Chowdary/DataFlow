@@ -3,15 +3,18 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-from services.brand_env import getenv_brand
+import re
 import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from services.platform_config import web_url
+from services.brand_env import getenv_brand
+from services.platform_config import is_production, web_url
 from pydantic import BaseModel, Field
 
 from services.user_store import get_user as get_stored_user
@@ -29,11 +32,26 @@ from ..services.auth_service import (
 )
 
 try:
-    from services.sso_state import generate_state, get_and_pop, get_state
+    from services import oidc_client
+    from services.sso_state import (
+        SsoStoreUnavailable,
+        claim_once,
+        generate_state,
+        get_state,
+        set_state,
+    )
 except ImportError:  # pragma: no cover - tests with src on PYTHONPATH
-    from src.services.sso_state import generate_state, get_and_pop, get_state
+    from src.services import oidc_client
+    from src.services.sso_state import (
+        SsoStoreUnavailable,
+        claim_once,
+        generate_state,
+        get_state,
+        set_state,
+    )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+logger = logging.getLogger(__name__)
 
 
 class LoginRequest(BaseModel):
@@ -116,27 +134,33 @@ def _saml_settings_dict(request: Request, cfg: dict[str, str]) -> dict[str, Any]
             "requestedAuthnContext": True,
             "requestedAuthnContextComparison": "exact",
             "wantXMLValidation": True,
-            "relaxDestinationValidation": True,
-            "destinationStrictlyMatches": False,
-            "rejectUnsolicitedResponsesWithInResponseTo": False,
+            "relaxDestinationValidation": False,
+            "destinationStrictlyMatches": True,
+            "rejectUnsolicitedResponsesWithInResponseTo": True,
+            "rejectDeprecatedAlgorithm": True,
+            "allowSingleLabelDomains": not is_production(),
             "wantMessagesSigned": False,
         },
     }
 
 
 def _saml_request_dict(request: Request, post_data: dict[str, str] | None = None) -> dict[str, Any]:
-    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("x-forwarded-host", request.url.hostname)
-    port = int(request.headers.get("x-forwarded-port", request.url.port or (443 if scheme == "https" else 80)))
+    acs = urlsplit(_saml_acs_url(request))
+    scheme = acs.scheme
+    host = acs.hostname or ""
+    port = acs.port or (443 if scheme == "https" else 80)
+    request_uri = acs.path or "/"
+    if acs.query:
+        request_uri = f"{request_uri}?{acs.query}"
     return {
         "https": "on" if scheme == "https" else "off",
         "http_host": host,
         "server_port": port,
-        "script_name": "/api/v1/auth/sso/saml",
+        "script_name": acs.path or "/",
         "get_data": {},
         "post_data": post_data or {},
         "lowercase_urlencoding": False,
-        "request_uri": str(request.url),
+        "request_uri": request_uri,
     }
 
 
@@ -207,105 +231,113 @@ def _redirect_with_token(email: str, expires_at: int | None = None) -> RedirectR
     return RedirectResponse(f"{_web_origin()}/#{params}", status_code=302)
 
 
-_JWKS_CACHE: dict[str, Any] = {}
-
-
 def _oidc_discovery_url(issuer: str) -> str:
     """Return the OIDC discovery document URL for an issuer."""
     base = issuer.rstrip("/")
     return f"{base}/.well-known/openid-configuration"
 
 
-def _fetch_oidc_jwks(issuer: str) -> list[dict[str, Any]]:
-    """Fetch and cache the JWKS keys for an OIDC issuer."""
-    import httpx
-
-    cached = _JWKS_CACHE.get(issuer)
-    if cached is not None:
-        return cached
-
+def _audit_sso_failure(sso_type: str, reason: str, resource: str) -> None:
     try:
-        discovery = httpx.get(_oidc_discovery_url(issuer), timeout=10.0)
-        discovery.raise_for_status()
-        jwks_uri = discovery.json().get("jwks_uri", "")
-        if not jwks_uri:
-            raise RuntimeError("OIDC discovery did not return a jwks_uri")
-        jwks_resp = httpx.get(jwks_uri, timeout=10.0)
-        jwks_resp.raise_for_status()
-        keys = jwks_resp.json().get("keys", [])
-        _JWKS_CACHE[issuer] = keys
-        return keys
-    except Exception as exc:
-        logging.getLogger(__name__).warning("Unable to fetch OIDC JWKS for %s: %s", issuer, exc)
-        return []
+        from services.audit_log import append_audit_event
 
-
-def _id_token_email(id_token: str, state_info: dict[str, Any]) -> str:
-    """Validate the OIDC id_token signature and claims, returning the email.
-
-    Uses PyJWT with the issuer's JWKS.  Falls back to unverified claim extraction
-    only during tests (``state_info['test_skip_signature']``) — never in production.
-    """
-    import jwt
-
-    issuer = (state_info.get("issuer") or "").rstrip("/")
-    client_id = state_info.get("client_id", "")
-    nonce = state_info.get("nonce", "")
-
-    # Basic header inspection.
-    try:
-        header = jwt.get_unverified_header(id_token)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Invalid id_token header: {exc}") from exc
-
-    keys = _fetch_oidc_jwks(issuer)
-    if not keys:
-        if state_info.get("test_skip_signature"):
-            payload = jwt.decode(id_token, options={"verify_signature": False})
-            return _email_from_profile(payload)
-        raise HTTPException(
-            status_code=502,
-            detail="Unable to fetch identity-provider signing keys; cannot validate id_token",
+        append_audit_event(
+            action="auth.sso.failure",
+            resource=resource,
+            level="error",
+            details={"provider": sso_type, "reason": reason},
+        )
+    except Exception:
+        logger.error(
+            "SSO failure audit append failed (sso_type=%s reason=audit_write_failed)",
+            sso_type,
         )
 
-    kid = header.get("kid")
-    jwk = next((k for k in keys if k.get("kid") == kid), None)
-    if not jwk:
-        raise HTTPException(status_code=502, detail=f"No JWKS key found for kid {kid!r}")
 
-    try:
-        public_key = jwt.PyJWK(jwk)
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Could not load identity-provider signing key: {exc}") from exc
-
-    try:
-        payload = jwt.decode(
-            id_token,
-            public_key,
-            algorithms=[header.get("alg", "RS256")],
-            audience=client_id,
-            issuer=issuer,
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"id_token validation failed: {exc}") from exc
-
-    if nonce and payload.get("nonce") != nonce:
-        raise HTTPException(status_code=401, detail="OIDC id_token nonce mismatch")
-
-    return _email_from_profile(payload)
-
-
-def _email_from_profile(profile: dict[str, Any]) -> str:
-    """Extract a usable email from an OIDC/SAML user profile."""
-    email = (
-        profile.get("email")
-        or profile.get("preferred_username")
-        or profile.get("upn")
-        or profile.get("sub")
+def _raise_sso_failure(
+    sso_type: str,
+    reason: str,
+    status_code: int,
+    detail: str,
+    *,
+    issuer: str = "",
+    resource: str | None = None,
+) -> None:
+    logger.warning(
+        "SSO request failed (sso_type=%s issuer=%s reason=%s)",
+        sso_type,
+        issuer,
+        reason,
     )
-    if not email:
-        raise HTTPException(status_code=502, detail="Identity provider did not return an email")
-    return str(email).strip()
+    _audit_sso_failure(
+        sso_type,
+        reason,
+        resource or f"/auth/sso/{sso_type}",
+    )
+    raise HTTPException(status_code=status_code, detail=detail)
+
+
+def _raise_oidc_failure(
+    exc: oidc_client.OidcError,
+    sso_type: str,
+    issuer: str,
+) -> None:
+    if isinstance(exc, oidc_client.OidcIdpUnavailable):
+        status_code = 503
+    elif isinstance(exc, oidc_client.OidcTokenInvalid):
+        status_code = 401
+    else:
+        status_code = 400
+    _raise_sso_failure(
+        sso_type,
+        exc.reason,
+        status_code,
+        f"SSO login failed ({exc.reason})",
+        issuer=issuer,
+        resource=f"/auth/sso/{sso_type}",
+    )
+
+
+def _oidc_issuer(sso_type: str, cfg: dict[str, Any]) -> str:
+    if sso_type == "azure_ad":
+        tenant = str(cfg.get("tenant_id") or "").strip()
+        if tenant.lower() in {"common", "organizations", "consumers"}:
+            raise oidc_client.OidcConfigError("multi_tenant_not_supported")
+        if not tenant or any(char in tenant for char in "/?#"):
+            raise oidc_client.OidcConfigError("invalid_tenant")
+        return f"https://login.microsoftonline.com/{tenant}/v2.0"
+    return str(cfg.get("issuer") or "").strip().rstrip("/")
+
+
+def _safe_idp_error(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"[^A-Za-z0-9_.-]", "", value[:64])
+
+
+def _saml_replay_expiry(value: Any) -> datetime:
+    now = datetime.now(timezone.utc)
+    expiry: datetime | None = None
+    if isinstance(value, datetime):
+        expiry = value
+    elif isinstance(value, (int, float)):
+        try:
+            expiry = datetime.fromtimestamp(value, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            expiry = None
+    elif isinstance(value, str):
+        try:
+            expiry = datetime.fromtimestamp(float(value), timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            try:
+                expiry = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                expiry = None
+    if expiry is None:
+        expiry = now
+    elif expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return max(expiry, now) + timedelta(seconds=300)
 
 
 @router.get("/sso/providers")
@@ -319,203 +351,305 @@ async def sso_providers():
 async def sso_start(sso_type: str, request: Request):
     from services.integrations_store import get_sso_config_raw, validate_sso_config
 
+    if sso_type not in ("oidc", "azure_ad", "saml"):
+        _raise_sso_failure(sso_type, "unsupported_sso_type", 400, "Unsupported SSO type")
     check = validate_sso_config(sso_type)
     if not check["ready"]:
-        raise HTTPException(status_code=400, detail=check["message"])
-
-    cfg = get_sso_config_raw(sso_type)
-    state = generate_state(sso_type)
-
-    if sso_type in ("oidc", "azure_ad"):
-        verifier, challenge = _pkce_pair()
-        nonce = secrets.token_urlsafe(16)
-        if sso_type == "azure_ad":
-            tenant = cfg["tenant_id"]
-            client_id = cfg["client_id"]
-            redirect_uri = cfg["redirect_uri"]
-            authorize = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
-            token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-            issuer = f"https://login.microsoftonline.com/{tenant}/v2.0"
-        else:
-            issuer = cfg["issuer"].rstrip("/")
-            client_id = cfg["client_id"]
-            redirect_uri = cfg["redirect_uri"]
-            authorize = f"{issuer}/authorize"
-            token_url = f"{issuer}/token"
-
-        state = generate_state(
+        _raise_sso_failure(
             sso_type,
-            extra={
-                "code_verifier": verifier,
-                "code_challenge": challenge,
-                "nonce": nonce,
-                "issuer": issuer,
-                "token_url": token_url,
-                "redirect_uri": redirect_uri,
-                "client_id": client_id,
-                "client_secret": cfg.get("client_secret", ""),
-            },
+            "sso_config_incomplete",
+            400,
+            check["message"],
         )
 
-        params = urlencode({
-            "client_id": client_id,
-            "response_type": "code",
-            "scope": cfg.get("scopes") or "openid email profile",
-            "redirect_uri": redirect_uri,
-            "state": state,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "nonce": nonce,
-        })
-        return RedirectResponse(f"{authorize}?{params}", status_code=302)
+    cfg = get_sso_config_raw(sso_type)
+
+    if sso_type in ("oidc", "azure_ad"):
+        issuer = ""
+        try:
+            issuer = _oidc_issuer(sso_type, cfg)
+            metadata = oidc_client.discover(issuer)
+            verifier, challenge = _pkce_pair()
+            nonce = secrets.token_urlsafe(16)
+            client_id = str(cfg["client_id"])
+            redirect_uri = str(cfg["redirect_uri"])
+            state = generate_state(
+                sso_type,
+                extra={
+                    "code_verifier": verifier,
+                    "nonce": nonce,
+                    "issuer": issuer,
+                    "redirect_uri": redirect_uri,
+                    "client_id": client_id,
+                },
+            )
+        except oidc_client.OidcError as exc:
+            _raise_oidc_failure(exc, sso_type, issuer)
+        except SsoStoreUnavailable:
+            _raise_sso_failure(
+                sso_type,
+                "store_unavailable",
+                503,
+                "SSO login failed (store_unavailable)",
+                issuer=issuer,
+            )
+
+        params = urlencode(
+            {
+                "client_id": client_id,
+                "response_type": "code",
+                "scope": cfg.get("scopes") or "openid email profile",
+                "redirect_uri": redirect_uri,
+                "state": state,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "nonce": nonce,
+            }
+        )
+        return RedirectResponse(
+            f"{metadata.authorization_endpoint}?{params}",
+            status_code=302,
+        )
 
     if sso_type == "saml":
         try:
             from onelogin.saml2.auth import OneLogin_Saml2_Auth
-        except Exception as exc:
+        except ImportError as exc:
+            logger.warning("SAML support unavailable (sso_type=saml reason=library_missing)")
             raise HTTPException(status_code=501, detail="SAML support is not installed") from exc
         saml_settings = _saml_settings_dict(request, cfg)
         req = _saml_request_dict(request)
         auth = OneLogin_Saml2_Auth(req, saml_settings)
-        return RedirectResponse(auth.login(return_to=state), status_code=302)
-
-    raise HTTPException(status_code=400, detail="Unsupported SSO type")
+        relay = secrets.token_urlsafe(16)
+        url = auth.login(return_to=relay)
+        try:
+            set_state(
+                relay,
+                "saml",
+                extra={"request_id": auth.get_last_request_id()},
+            )
+        except SsoStoreUnavailable:
+            _raise_sso_failure(
+                "saml",
+                "store_unavailable",
+                503,
+                "SSO login failed (store_unavailable)",
+                resource="/auth/sso/saml/start",
+            )
+        return RedirectResponse(url, status_code=302)
 
 
 @router.get("/sso/{sso_type}/callback")
 async def sso_callback(sso_type: str, code: str = "", state: str = "", error: str = ""):
-    if error:
-        raise HTTPException(status_code=400, detail=f"SSO error: {error}")
-
+    resource = f"/auth/sso/{sso_type}/callback"
     if sso_type not in ("oidc", "azure_ad"):
-        raise HTTPException(status_code=400, detail="Unsupported SSO callback")
+        _raise_sso_failure(
+            sso_type,
+            "unsupported_sso_type",
+            400,
+            "Unsupported SSO callback",
+            resource=resource,
+        )
+    if error:
+        if state:
+            try:
+                get_state(state, sso_type)
+            except SsoStoreUnavailable:
+                _raise_sso_failure(
+                    sso_type,
+                    "store_unavailable",
+                    503,
+                    "SSO login failed (store_unavailable)",
+                    resource=resource,
+                )
+        safe_error = _safe_idp_error(error)
+        logger.warning(
+            "Identity provider rejected SSO callback (sso_type=%s issuer= reason=idp_rejected idp_error=%s)",
+            sso_type,
+            safe_error,
+        )
+        _audit_sso_failure(sso_type, "idp_rejected", resource)
+        raise HTTPException(
+            status_code=400,
+            detail="SSO login was cancelled or rejected by the identity provider",
+        )
     if not code:
-        raise HTTPException(status_code=400, detail="Authorization code required")
-
-    state_info = get_state(state, sso_type)
+        _raise_sso_failure(
+            sso_type,
+            "missing_authorization_code",
+            400,
+            "Authorization code required",
+            resource=resource,
+        )
+    try:
+        state_info = get_state(state, sso_type)
+    except SsoStoreUnavailable:
+        _raise_sso_failure(
+            sso_type,
+            "store_unavailable",
+            503,
+            "SSO login failed (store_unavailable)",
+            resource=resource,
+        )
     if not state_info:
-        raise HTTPException(status_code=400, detail="Invalid SSO state")
-
-    # Pull PKCE parameters from the state store so they cannot be tampered with.
-    verifier = (state_info.get("extra") or {}).get("code_verifier", "")
-    redirect_uri = (state_info.get("extra") or {}).get("redirect_uri", "")
-    client_id = (state_info.get("extra") or {}).get("client_id", "")
-    client_secret = str((state_info.get("extra") or {}).get("client_secret") or "")
-    token_url = (state_info.get("extra") or {}).get("token_url", "")
-
-    # Always load confidential-client secret from SSO config (Azure AD / OIDC).
-    # Token URL in state must not skip secret — that broke Azure confidential apps.
+        _raise_sso_failure(
+            sso_type,
+            "invalid_state",
+            400,
+            "Invalid SSO state",
+            resource=resource,
+        )
     from services.integrations_store import get_sso_config_raw
 
+    extra = state_info.get("extra") or {}
     try:
         cfg = get_sso_config_raw(sso_type)
-    except Exception:
-        cfg = {}
-    if not client_secret and isinstance(cfg, dict):
-        client_secret = str(cfg.get("client_secret") or "")
-    if not token_url:
-        if sso_type == "azure_ad" and isinstance(cfg, dict) and cfg.get("tenant_id"):
-            tenant = cfg["tenant_id"]
-            token_url = f"https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
-        elif isinstance(cfg, dict) and cfg.get("issuer"):
-            token_url = f"{str(cfg['issuer']).rstrip('/')}/token"
-        if isinstance(cfg, dict):
-            redirect_uri = redirect_uri or str(cfg.get("redirect_uri") or "")
-            client_id = client_id or str(cfg.get("client_id") or "")
-    if not token_url or not client_id:
-        raise HTTPException(status_code=400, detail="Missing SSO token endpoint configuration")
-
+        issuer = _oidc_issuer(sso_type, cfg)
+    except oidc_client.OidcError as exc:
+        _raise_oidc_failure(exc, sso_type, "")
+    current_client_id = str(cfg.get("client_id") or "")
+    if (
+        extra.get("issuer") != issuer
+        or extra.get("client_id") != current_client_id
+    ):
+        _raise_sso_failure(
+            sso_type,
+            "sso_config_changed",
+            400,
+            "SSO login failed (sso_config_changed)",
+            issuer=issuer,
+            resource=resource,
+        )
+    verifier = str(extra.get("code_verifier") or "")
+    redirect_uri = str(extra.get("redirect_uri") or "")
+    client_id = current_client_id
+    nonce = str(extra.get("nonce") or "")
+    if not verifier or not redirect_uri or not client_id or not nonce:
+        _raise_sso_failure(
+            sso_type,
+            "invalid_state",
+            400,
+            "Invalid SSO state",
+            issuer=issuer,
+            resource=resource,
+        )
     try:
-        import httpx
-
+        metadata = oidc_client.discover(issuer)
         token_request_data: dict[str, str] = {
             "grant_type": "authorization_code",
             "code": code,
             "redirect_uri": redirect_uri,
             "client_id": client_id,
+            "code_verifier": verifier,
         }
-        if client_secret:
-            token_request_data["client_secret"] = client_secret
-        if verifier:
-            token_request_data["code_verifier"] = verifier
-
-        token_resp = httpx.post(
-            token_url,
-            data=token_request_data,
-            timeout=20.0,
-        )
-        token_resp.raise_for_status()
-        tokens = token_resp.json()
-
-        # Prefer a validated id_token over a separate userinfo call.
-        email = ""
-        id_token = tokens.get("id_token", "")
-        if id_token:
-            state_info_for_id_token = dict(state_info.get("extra") or {})
-            # Signature skip is pytest-only. Staging/Railway with ENV!=production
-            # must still verify JWKS — forged id_tokens are an auth bypass.
-            import os
-
-            state_info_for_id_token["test_skip_signature"] = (
-                os.getenv("DATAFLOW_TEST_SKIP_OIDC_SIGNATURE", "").strip().lower()
-                in ("1", "true", "yes")
-            )
-            try:
-                email = _id_token_email(id_token, state_info_for_id_token)
-            except HTTPException:
-                email = ""
-
-        if not email:
-            access_token = tokens.get("access_token", "")
-            if not access_token:
-                raise HTTPException(status_code=502, detail="No access token from identity provider")
-
-            if sso_type == "azure_ad":
-                userinfo_url = "https://graph.microsoft.com/oidc/userinfo"
-            else:
-                from services.integrations_store import get_sso_config_raw
-
-                cfg = get_sso_config_raw(sso_type)
-                userinfo_url = f"{cfg['issuer'].rstrip('/')}/userinfo"
-
-            user_resp = httpx.get(
-                userinfo_url,
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=15.0,
-            )
-            user_resp.raise_for_status()
-            email = _email_from_profile(user_resp.json())
-
-        _require_sso_authorization(email)
-
+        token_request_data["client_secret"] = str(cfg.get("client_secret") or "")
         try:
-            from services.audit_log import append_audit_event
-
-            append_audit_event(
-                action="auth.sso.login",
-                resource=f"/auth/sso/{sso_type}/callback",
-                actor=str(email),
-                level="success",
-                details={"provider": sso_type},
+            with oidc_client._http_client() as client:
+                token_resp = client.post(
+                    metadata.token_endpoint,
+                    data=token_request_data,
+                )
+        except httpx.HTTPError as exc:
+            raise oidc_client.OidcIdpUnavailable("token_exchange_failed") from exc
+        if token_resp.status_code >= 500:
+            raise oidc_client.OidcIdpUnavailable("token_exchange_failed")
+        if token_resp.status_code >= 400:
+            idp_error = ""
+            try:
+                error_body = token_resp.json()
+                if isinstance(error_body, dict):
+                    idp_error = _safe_idp_error(error_body.get("error"))
+            except (ValueError, TypeError):
+                idp_error = ""
+            logger.warning(
+                "OIDC code exchange rejected (sso_type=%s issuer=%s reason=code_exchange_rejected idp_error=%s)",
+                sso_type,
+                issuer,
+                idp_error,
             )
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-
+            raise oidc_client.OidcTokenInvalid("code_exchange_rejected")
+        try:
+            tokens = token_resp.json()
+        except (ValueError, TypeError) as exc:
+            raise oidc_client.OidcTokenInvalid("malformed_token_response") from exc
+        if not isinstance(tokens, dict):
+            raise oidc_client.OidcTokenInvalid("malformed_token_response")
+        id_token = tokens.get("id_token")
+        if not isinstance(id_token, str) or not id_token:
+            raise oidc_client.OidcTokenInvalid("no_id_token")
+        algorithms = oidc_client.allowed_algorithms(sso_type, metadata)
+        claims = oidc_client.validate_id_token(
+            id_token,
+            metadata=metadata,
+            client_id=client_id,
+            nonce=nonce,
+            algorithms=algorithms,
+            leeway=oidc_client.clock_skew_leeway(),
+            sso_type=sso_type,
+        )
+        email = oidc_client.email_from_claims(claims, sso_type=sso_type)
+        _require_sso_authorization(email)
+        _audit_sso_success(sso_type, email, resource)
         return _redirect_with_token(email)
+    except oidc_client.OidcError as exc:
+        _raise_oidc_failure(exc, sso_type, issuer)
+    except SsoStoreUnavailable:
+        _raise_sso_failure(
+            sso_type,
+            "store_unavailable",
+            503,
+            "SSO login failed (store_unavailable)",
+            issuer=issuer,
+            resource=resource,
+        )
     except HTTPException:
+        _audit_sso_failure(sso_type, "sso_unauthorized", resource)
         raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"SSO callback failed: {exc}") from exc
+    except Exception:
+        _audit_sso_failure(sso_type, "callback_failed", resource)
+        logger.exception(
+            "SSO callback failed (sso_type=%s issuer=%s reason=callback_failed)",
+            sso_type,
+            issuer,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="SSO login failed (callback_failed)",
+        ) from None
+
+
+def _audit_sso_success(sso_type: str, email: str, resource: str) -> None:
+    try:
+        from services.audit_log import append_audit_event
+
+        append_audit_event(
+            action="auth.sso.login",
+            resource=resource,
+            actor=email,
+            level="success",
+            details={"provider": sso_type},
+        )
+    except Exception:
+        logger.warning(
+            "SSO success audit append failed (sso_type=%s reason=audit_write_failed)",
+            sso_type,
+        )
 
 
 @router.post("/sso/{sso_type}/callback")
 async def sso_post_callback(sso_type: str, request: Request):
     if sso_type != "saml":
-        raise HTTPException(status_code=405, detail="POST callback is only supported for SAML")
+        _raise_sso_failure(
+            sso_type,
+            "unsupported_callback_method",
+            405,
+            "POST callback is only supported for SAML",
+        )
 
     try:
         from onelogin.saml2.auth import OneLogin_Saml2_Auth
-    except Exception as exc:
+    except ImportError as exc:
+        logger.warning("SAML support unavailable (sso_type=saml reason=library_missing)")
         raise HTTPException(status_code=501, detail="SAML support is not installed") from exc
 
     from services.integrations_store import get_sso_config_raw
@@ -526,46 +660,130 @@ async def sso_post_callback(sso_type: str, request: Request):
     relay_state = str(form.get("RelayState", ""))
     if not saml_response:
         raise HTTPException(status_code=400, detail="SAMLResponse is required")
-    if not relay_state or not get_and_pop(relay_state, sso_type):
-        raise HTTPException(status_code=400, detail="Invalid or missing SAML RelayState")
-
+    if not relay_state:
+        _raise_sso_failure(
+            "saml",
+            "missing_relay_state",
+            400,
+            "Invalid or missing SAML RelayState",
+            resource="/auth/sso/saml/callback",
+        )
+    try:
+        state_info = get_state(relay_state, "saml")
+    except SsoStoreUnavailable:
+        _raise_sso_failure(
+            "saml",
+            "store_unavailable",
+            503,
+            "SSO login failed (store_unavailable)",
+            resource="/auth/sso/saml/callback",
+        )
+    request_id = str((state_info or {}).get("extra", {}).get("request_id") or "")
+    if not state_info or not request_id:
+        _raise_sso_failure(
+            "saml",
+            "invalid_relay_state",
+            400,
+            "Invalid or missing SAML RelayState",
+            resource="/auth/sso/saml/callback",
+        )
     req = _saml_request_dict(request, post_data={"SAMLResponse": saml_response})
     saml_settings = _saml_settings_dict(request, cfg)
     auth = OneLogin_Saml2_Auth(req, saml_settings)
-    auth.process_response()
+    try:
+        auth.process_response(request_id=request_id)
+    except Exception:
+        logger.warning(
+            "SAML response processing failed (sso_type=saml reason=response_invalid)"
+        )
+        _audit_sso_failure(
+            "saml",
+            "response_invalid",
+            "/auth/sso/saml/callback",
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="SAML response invalid: malformed_response",
+        ) from None
     errors = auth.get_errors()
     if errors:
-        raise HTTPException(status_code=401, detail=f"SAML response invalid: {', '.join(errors)}")
+        logger.warning(
+            "SAML response rejected (sso_type=saml reason=response_invalid idp_reason=%s)",
+            auth.get_last_error_reason(),
+        )
+        _audit_sso_failure(
+            "saml",
+            "response_invalid",
+            "/auth/sso/saml/callback",
+        )
+        safe_errors = [str(item) for item in errors if isinstance(item, str)]
+        raise HTTPException(
+            status_code=401,
+            detail=f"SAML response invalid: {', '.join(safe_errors)}",
+        )
+    assertion_id = auth.get_last_assertion_id()
+    if not assertion_id:
+        _raise_sso_failure(
+            "saml",
+            "assertion_id_missing",
+            401,
+            "SAML response invalid: assertion_id_missing",
+            resource="/auth/sso/saml/callback",
+        )
+    expires = _saml_replay_expiry(auth.get_last_assertion_not_on_or_after())
+    try:
+        claimed = claim_once("saml_assertion", str(assertion_id), expires)
+    except SsoStoreUnavailable:
+        _raise_sso_failure(
+            "saml",
+            "store_unavailable",
+            503,
+            "SSO login failed (store_unavailable)",
+            resource="/auth/sso/saml/callback",
+        )
+    if not claimed:
+        _raise_sso_failure(
+            "saml",
+            "assertion_replay",
+            401,
+            "SAML response invalid: assertion_replay",
+            resource="/auth/sso/saml/callback",
+        )
     if not auth.is_authenticated():
-        raise HTTPException(status_code=401, detail="SAML authentication failed")
+        _raise_sso_failure(
+            "saml",
+            "authentication_failed",
+            401,
+            "SAML authentication failed",
+            resource="/auth/sso/saml/callback",
+        )
 
     name_id = auth.get_nameid()
-    email = name_id
+    email = str(name_id or "").strip()
     if not email or "@" not in email:
         email_attr = cfg.get("email_attribute", "email")
         attributes = auth.get_attributes()
-        email = (
-            (attributes.get(email_attr, [""])[0] if isinstance(attributes.get(email_attr), list) else attributes.get(email_attr, ""))
-            or name_id
-        )
+        email_value = attributes.get(email_attr, [""])
+        email = str(email_value[0] if isinstance(email_value, list) and email_value else email_value or "").strip()
     if not email or "@" not in email:
-        raise HTTPException(status_code=502, detail="SAML identity did not return an email")
-
-    _require_sso_authorization(email)
-
-    try:
-        from services.audit_log import append_audit_event
-
-        append_audit_event(
-            action="auth.sso.login",
-            resource=f"/auth/sso/{sso_type}/callback",
-            actor=str(email),
-            level="success",
-            details={"provider": sso_type},
+        _raise_sso_failure(
+            "saml",
+            "no_email",
+            401,
+            "SAML identity did not return an email",
+            resource="/auth/sso/saml/callback",
         )
-    except Exception as exc:
-        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-
+    email = normalize_email(email)
+    try:
+        _require_sso_authorization(email)
+    except HTTPException:
+        _audit_sso_failure(
+            "saml",
+            "sso_unauthorized",
+            "/auth/sso/saml/callback",
+        )
+        raise
+    _audit_sso_success("saml", email, "/auth/sso/saml/callback")
     return _redirect_with_token(email)
 
 
