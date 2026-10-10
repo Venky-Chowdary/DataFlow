@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -163,8 +163,8 @@ def paginate(
     stream: str = "",
     max_pages: int | None = None,
     record_limit: int | None = None,
-) -> list[Page]:
-    """Fetch every page or raise; partial page lists are never returned.
+) -> Generator[Page, None, None]:
+    """Yield validated pages one at a time.
 
     Offset and page pagination stop on a short page. Cursor and Link-header
     modes are at-least-once across an inclusive page boundary.
@@ -175,10 +175,11 @@ def paginate(
     if record_limit is not None and record_limit < 0:
         raise ValueError("record_limit cannot be negative")
     if record_limit == 0:
-        return []
+        return
 
-    pages: list[Page] = []
+    page_count = 0
     records_seen = 0
+    last_page: Page | None = None
     base_params = dict(params or {})
     current_url = url
     current_token: Any = paginator.initial_token
@@ -198,11 +199,11 @@ def paginate(
             if key in seen_urls:
                 raise _pagination_error(
                     f"pagination repeated URL {redact_url(current_url)}",
-                    pages[-1] if pages else None,
+                    last_page,
                     stream,
                 )
             seen_urls.add(key)
-            page_params: dict[str, Any] | None = base_params if not pages else None
+            page_params: dict[str, Any] | None = base_params if page_count == 0 else None
         else:
             page_params = dict(base_params)
             remaining = (
@@ -278,7 +279,6 @@ def paginate(
             next_token=next_token,
             next_url=next_url,
         )
-        pages.append(page)
         records_seen += len(records)
         if record_limit is not None and records_seen > record_limit:
             raise _pagination_error(
@@ -286,30 +286,9 @@ def paginate(
                 page,
                 stream,
             )
-        if record_limit is not None and records_seen == record_limit:
-            return pages
 
-        if paginator.type == "none":
-            return pages
-
-        if paginator.type in {"offset", "page"}:
-            if len(records) < request_page_size:
-                return pages
-            if len(pages) >= page_limit:
-                raise _pagination_error(
-                    f"pagination reached max_pages={page_limit} with more pages implied",
-                    page,
-                    stream,
-            )
-            if paginator.type == "offset":
-                offset += request_page_size
-            else:
-                page_number += 1
-            continue
-
-        if paginator.type == "cursor":
-            if next_token in (None, ""):
-                return pages
+        record_limit_reached = record_limit is not None and records_seen >= record_limit
+        if not record_limit_reached and paginator.type == "cursor" and next_token not in (None, ""):
             if not records:
                 raise _pagination_error(
                     "pagination received an empty page with a next token",
@@ -323,25 +302,61 @@ def paginate(
                     page,
                     stream,
                 )
-            if len(pages) >= page_limit:
+        elif not record_limit_reached and paginator.type == "link_header" and next_url:
+            if not records:
+                raise _pagination_error(
+                    "pagination received an empty page with a next URL",
+                    page,
+                    stream,
+                )
+            if _canonical_url(next_url) in seen_urls:
+                raise _pagination_error(
+                    f"pagination repeated URL {redact_url(next_url)}",
+                    page,
+                    stream,
+                )
+
+        page_count += 1
+        last_page = page
+        yield page
+
+        if record_limit_reached:
+            return
+
+        if paginator.type == "none":
+            return
+
+        if paginator.type in {"offset", "page"}:
+            if len(records) < request_page_size:
+                return
+            if page_count >= page_limit:
+                raise _pagination_error(
+                    f"pagination reached max_pages={page_limit} with more pages implied",
+                    page,
+                    stream,
+                )
+            if paginator.type == "offset":
+                offset += request_page_size
+            else:
+                page_number += 1
+            continue
+
+        if paginator.type == "cursor":
+            if next_token in (None, ""):
+                return
+            if page_count >= page_limit:
                 raise _pagination_error(
                     f"pagination reached max_pages={page_limit} with a next token",
                     page,
                     stream,
                 )
-            seen_tokens.add(token_key)
+            seen_tokens.add(str(next_token))
             current_token = next_token
             continue
 
         if not next_url:
-            return pages
-        if not records:
-            raise _pagination_error(
-                "pagination received an empty page with a next URL",
-                page,
-                stream,
-            )
-        if len(pages) >= page_limit:
+            return
+        if page_count >= page_limit:
             raise _pagination_error(
                 f"pagination reached max_pages={page_limit} with a next URL",
                 page,

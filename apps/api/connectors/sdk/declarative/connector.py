@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
+from itertools import chain
 from typing import Any, Iterator
 from urllib.parse import urljoin, urlsplit
 
@@ -118,7 +119,9 @@ class DeclarativeSource(BaseConnector):
                     stream=stream.name,
                     paginator=PaginatorSpec(type="none", max_pages=1),
                 )
-                schema = infer_json_schema(pages[0].records if pages else [])
+                first_page = next(pages, None)
+                pages.close()
+                schema = infer_json_schema(first_page.records if first_page else [])
             validate_stream_schema(
                 schema,
                 primary_key=stream.primary_key,
@@ -224,64 +227,70 @@ class DeclarativeSource(BaseConnector):
             max_pages=self.manifest.defaults.max_pages,
             record_limit=max_records,
         )
-        schema = stream_spec.json_schema
-        if schema is None:
-            schema = infer_json_schema(pages[0].records if pages else [])
-        validate_stream_schema(
-            schema,
-            primary_key=stream_spec.primary_key,
-            cursor_field=stream_spec.cursor.field if stream_spec.cursor else "",
-            path=f"streams[{list(self._streams).index(stream)}].json_schema",
-        )
-        stream_schema = StreamSchema(
-            name=stream,
-            properties={
-                str(key): str(
-                    next(
-                        (item for item in field_type if item != "null"),
-                        "null",
+        first_page = None
+        try:
+            schema = stream_spec.json_schema
+            if schema is None:
+                first_page = next(pages, None)
+                schema = infer_json_schema(first_page.records if first_page else [])
+            validate_stream_schema(
+                schema,
+                primary_key=stream_spec.primary_key,
+                cursor_field=stream_spec.cursor.field if stream_spec.cursor else "",
+                path=f"streams[{list(self._streams).index(stream)}].json_schema",
+            )
+            stream_schema = StreamSchema(
+                name=stream,
+                properties={
+                    str(key): str(
+                        next(
+                            (item for item in field_type if item != "null"),
+                            "null",
+                        )
+                        if isinstance(field_type, list)
+                        else field_type
                     )
-                    if isinstance(field_type, list)
-                    else field_type
-                )
-                for key, value in schema.get("properties", {}).items()
-                for field_type in [
-                    value.get("type", "string")
-                    if isinstance(value, Mapping)
-                    else "string"
-                ]
-            },
-            primary_key=list(stream_spec.primary_key),
-            cursor_field=stream_spec.cursor.field if stream_spec.cursor else "",
-            json_schema=dict(schema),
-            supported_sync_modes=(
-                ["full_refresh", "incremental"] if stream_spec.cursor else ["full_refresh"]
-            ),
-        )
-        for page in pages:
-            page_token: Any = (
-                page.next_url
-                if paginator.type == "link_header"
-                else page.next_token
+                    for key, value in schema.get("properties", {}).items()
+                    for field_type in [
+                        value.get("type", "string")
+                        if isinstance(value, Mapping)
+                        else "string"
+                    ]
+                },
+                primary_key=list(stream_spec.primary_key),
+                cursor_field=stream_spec.cursor.field if stream_spec.cursor else "",
+                json_schema=dict(schema),
+                supported_sync_modes=(
+                    ["full_refresh", "incremental"] if stream_spec.cursor else ["full_refresh"]
+                ),
             )
-            if stream_spec.cursor:
-                current_state = advance_stream_state(
-                    current_state,
-                    page.records,
-                    cursor_field=stream_spec.cursor.field,
-                    cursor_format=stream_spec.cursor.format,
-                    page_token=page_token,
+            page_iterator = chain((first_page,), pages) if first_page is not None else pages
+            for page in page_iterator:
+                page_token: Any = (
+                    page.next_url
+                    if paginator.type == "link_header"
+                    else page.next_token
+                )
+                if stream_spec.cursor:
+                    current_state = advance_stream_state(
+                        current_state,
+                        page.records,
+                        cursor_field=stream_spec.cursor.field,
+                        cursor_format=stream_spec.cursor.format,
+                        page_token=page_token,
+                        stream=stream,
+                    )
+                else:
+                    current_state = StreamState(
+                        cursor=current_state.cursor,
+                        page_token=page_token,
+                        pages_done=current_state.pages_done + 1,
+                    )
+                yield RecordBatch(
                     stream=stream,
+                    records=page.records,
+                    schema=stream_schema,
+                    state=current_state.to_dict(),
                 )
-            else:
-                current_state = StreamState(
-                    cursor=current_state.cursor,
-                    page_token=page_token,
-                    pages_done=current_state.pages_done + 1,
-                )
-            yield RecordBatch(
-                stream=stream,
-                records=page.records,
-                schema=stream_schema,
-                state=current_state.to_dict(),
-            )
+        finally:
+            pages.close()

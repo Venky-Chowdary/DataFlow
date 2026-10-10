@@ -29,12 +29,12 @@ def test_none_paginator_requests_one_page() -> None:
             FixtureResponse(body={"records": _records(1, 3)}),
         )
 
-        pages = paginate(
+        pages = list(paginate(
             _requester(),
             f"{fixture.base_url}/items",
             records_path="records",
             paginator=PaginatorSpec(type="none"),
-        )
+        ))
 
         assert len(pages) == 1
         assert pages[0].records == _records(1, 3)
@@ -52,12 +52,12 @@ def test_cursor_paginator_follows_three_tokens_and_stops_without_token() -> None
             ],
         )
 
-        pages = paginate(
+        pages = list(paginate(
             _requester(),
             f"{fixture.base_url}/items",
             records_path="records",
             paginator=PaginatorSpec(type="cursor", cursor_param="after", cursor_path="next"),
-        )
+        ))
 
         assert [page.records for page in pages] == [[{"id": 1}], [{"id": 2}], [{"id": 3}]]
         assert [page.next_token for page in pages] == ["a", "b", None]
@@ -83,7 +83,7 @@ def test_cursor_paginator_can_read_tokens_from_response_headers() -> None:
             ],
         )
 
-        pages = paginate(
+        pages = list(paginate(
             _requester(),
             f"{fixture.base_url}/header-cursor",
             records_path="records",
@@ -92,7 +92,7 @@ def test_cursor_paginator_can_read_tokens_from_response_headers() -> None:
                 cursor_param="cursor",
                 cursor_header="X-Next-Cursor",
             ),
-        )
+        ))
 
         assert [page.records for page in pages] == [
             [{"id": 1}],
@@ -116,14 +116,14 @@ def test_cursor_repeated_token_and_empty_page_with_token_fail_closed() -> None:
             ],
         )
         with pytest.raises(PaginationError, match="repeated"):
-            paginate(
+            list(paginate(
                 _requester(),
                 f"{fixture.base_url}/repeat",
                 records_path="records",
                 paginator=PaginatorSpec(
                     type="cursor", cursor_param="after", cursor_path="next"
                 ),
-            )
+            ))
 
     with FixtureServer() as fixture:
         fixture.add_route(
@@ -131,14 +131,14 @@ def test_cursor_repeated_token_and_empty_page_with_token_fail_closed() -> None:
             FixtureResponse(body={"records": [], "next": "continue"}),
         )
         with pytest.raises(PaginationError, match="empty"):
-            paginate(
+            list(paginate(
                 _requester(),
                 f"{fixture.base_url}/empty",
                 records_path="records",
                 paginator=PaginatorSpec(
                     type="cursor", cursor_param="after", cursor_path="next"
                 ),
-            )
+            ))
 
     with FixtureServer() as fixture:
         fixture.add_route(
@@ -146,7 +146,7 @@ def test_cursor_repeated_token_and_empty_page_with_token_fail_closed() -> None:
             FixtureResponse(body={"records": _records(1, 1), "next": "start"}),
         )
         with pytest.raises(PaginationError, match="repeated"):
-            paginate(
+            list(paginate(
                 _requester(),
                 f"{fixture.base_url}/initial-token",
                 records_path="records",
@@ -156,7 +156,7 @@ def test_cursor_repeated_token_and_empty_page_with_token_fail_closed() -> None:
                     cursor_path="next",
                     initial_token="start",
                 ),
-            )
+            ))
 
 
 def test_offset_and_page_paginators_stop_on_short_page() -> None:
@@ -169,7 +169,7 @@ def test_offset_and_page_paginators_stop_on_short_page() -> None:
                 FixtureResponse(body={"records": _records(5, 1)}),
             ],
         )
-        offset_pages = paginate(
+        offset_pages = list(paginate(
             _requester(),
             f"{fixture.base_url}/offset",
             records_path="records",
@@ -179,7 +179,7 @@ def test_offset_and_page_paginators_stop_on_short_page() -> None:
                 page_size_param="count",
                 page_size=2,
             ),
-        )
+        ))
         assert len(offset_pages) == 3
         assert [_query(item.target)["start"] for item in fixture.request_log] == [
             ["0"],
@@ -197,7 +197,7 @@ def test_offset_and_page_paginators_stop_on_short_page() -> None:
                 FixtureResponse(body={"records": _records(5, 1)}),
             ],
         )
-        page_results = paginate(
+        page_results = list(paginate(
             _requester(),
             f"{fixture.base_url}/page",
             records_path="records",
@@ -208,7 +208,7 @@ def test_offset_and_page_paginators_stop_on_short_page() -> None:
                 page_size_param="limit",
                 page_size=2,
             ),
-        )
+        ))
         assert len(page_results) == 3
         assert [_query(item.target)["page"] for item in fixture.request_log] == [
             ["3"],
@@ -217,24 +217,28 @@ def test_offset_and_page_paginators_stop_on_short_page() -> None:
         ]
 
 
-def test_max_pages_with_a_next_cursor_fails_instead_of_returning_partial() -> None:
+def test_max_pages_yields_allowed_page_before_failing_on_more_pages() -> None:
     with FixtureServer() as fixture:
         fixture.add_route(
             "/bounded",
             FixtureResponse(body={"records": _records(1, 1), "next": "more"}),
         )
+        pages = paginate(
+            _requester(),
+            f"{fixture.base_url}/bounded",
+            records_path="records",
+            paginator=PaginatorSpec(
+                type="cursor",
+                cursor_param="after",
+                cursor_path="next",
+                max_pages=1,
+            ),
+        )
+
+        assert next(pages).records == [{"id": 1}]
         with pytest.raises(PaginationError, match="max_pages"):
-            paginate(
-                _requester(),
-                f"{fixture.base_url}/bounded",
-                records_path="records",
-                paginator=PaginatorSpec(
-                    type="cursor",
-                    cursor_param="after",
-                    cursor_path="next",
-                    max_pages=1,
-                ),
-            )
+            next(pages)
+        assert len(fixture.request_log) == 1
 
 
 def test_record_limit_returns_checkpointable_pages_without_overfetch() -> None:
@@ -247,7 +251,7 @@ def test_record_limit_returns_checkpointable_pages_without_overfetch() -> None:
             ],
         )
 
-        pages = paginate(
+        pages = list(paginate(
             _requester(),
             f"{fixture.base_url}/limited",
             records_path="records",
@@ -258,7 +262,7 @@ def test_record_limit_returns_checkpointable_pages_without_overfetch() -> None:
                 page_size=2,
             ),
             record_limit=3,
-        )
+        ))
 
         assert [record for page in pages for record in page.records] == _records(1, 3)
         assert pages[-1].next_token == "b"
@@ -273,7 +277,7 @@ def test_record_limit_fails_closed_if_the_api_overshoots_the_cap() -> None:
         )
 
         with pytest.raises(PaginationError, match="record_limit"):
-            paginate(
+            list(paginate(
                 _requester(),
                 f"{fixture.base_url}/oversized",
                 records_path="records",
@@ -284,7 +288,7 @@ def test_record_limit_fails_closed_if_the_api_overshoots_the_cap() -> None:
                     page_size=2,
                 ),
                 record_limit=1,
-            )
+            ))
 
 
 def test_link_header_follows_relative_then_absolute_next_urls() -> None:
@@ -306,12 +310,12 @@ def test_link_header_follows_relative_then_absolute_next_urls() -> None:
         )
         fixture.add_route("/page3", FixtureResponse(body={"records": _records(3, 1)}))
 
-        pages = paginate(
+        pages = list(paginate(
             _requester(),
             f"{fixture.base_url}/links",
             records_path="records",
             paginator=PaginatorSpec(type="link_header"),
-        )
+        ))
 
         assert [page.records for page in pages] == [
             [{"id": 1}],
@@ -335,19 +339,19 @@ def test_link_header_repeated_url_and_invalid_records_path_fail_closed() -> None
             ),
         )
         with pytest.raises(PaginationError, match="repeated"):
-            paginate(
+            list(paginate(
                 _requester(),
                 f"{fixture.base_url}/repeat",
                 records_path="records",
                 paginator=PaginatorSpec(type="link_header"),
-            )
+            ))
 
     with FixtureServer() as fixture:
         fixture.add_route("/shape", FixtureResponse(body={"payload": []}))
         with pytest.raises(ResponseShapeError):
-            paginate(
+            list(paginate(
                 _requester(),
                 f"{fixture.base_url}/shape",
                 records_path="records",
                 paginator=PaginatorSpec(type="none"),
-            )
+            ))

@@ -1,6 +1,12 @@
 from __future__ import annotations
 
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
+
 from connectors.sdk.declarative.connector import DeclarativeSource
+from connectors.sdk.declarative.errors import TransientExhausted
+from connectors.sdk.declarative.incremental import run_sync
 from tests.connector_certification.fixture_server import FixtureResponse, FixtureServer
 
 
@@ -172,3 +178,71 @@ def test_oauth_client_credentials_refreshes_once_after_a_401() -> None:
             "Bearer first-token",
             "Bearer second-token",
         ]
+
+
+def test_run_sync_checkpoints_page_one_before_page_two_fault_and_resumes() -> None:
+    with FixtureServer() as fixture:
+        fixture.add_route(
+            "/users",
+            responses=[
+                FixtureResponse(
+                    body={
+                        "items": [
+                            {"id": 1, "updated_at": "2025-01-01T00:00:00Z"},
+                            {"id": 2, "updated_at": "2025-01-02T00:00:00Z"},
+                        ],
+                        "next": "page-2",
+                    }
+                ),
+                FixtureResponse(status=500, body={"error": "injected page-two fault"}),
+            ],
+        )
+        manifest = _manifest(fixture.base_url)
+        manifest["defaults"]["max_records"] = None
+        manifest["defaults"]["retry"]["max_attempts"] = 1
+        source = DeclarativeSource(
+            {"manifest": manifest, "credentials": {"api_key": "secret"}}
+        )
+        written: list[dict] = []
+        saved_states: list[dict] = []
+
+        def write_page(records: list[dict]) -> None:
+            written.extend(records)
+
+        def load_state(_stream: str) -> dict | None:
+            return saved_states[-1] if saved_states else None
+
+        def save_state(_stream: str, state: dict) -> None:
+            saved_states.append(state)
+
+        with pytest.raises(TransientExhausted):
+            run_sync(source, "users", write_page, load_state, save_state)
+
+        first_page = [
+            {"id": 1, "updated_at": "2025-01-01T00:00:00Z"},
+            {"id": 2, "updated_at": "2025-01-02T00:00:00Z"},
+        ]
+        assert written == first_page
+        assert len(saved_states) == 1
+        assert saved_states[0]["page_token"] == "page-2"
+
+        fixture.add_route(
+            "/users",
+            FixtureResponse(
+                body={
+                    "items": [
+                        {"id": 3, "updated_at": "2025-01-03T00:00:00Z"},
+                        {"id": 4, "updated_at": "2025-01-04T00:00:00Z"},
+                    ]
+                }
+            ),
+        )
+        fixture.clear_request_log()
+        resumed_source = DeclarativeSource(
+            {"manifest": manifest, "credentials": {"api_key": "secret"}}
+        )
+        run_sync(resumed_source, "users", write_page, load_state, save_state)
+
+        query = parse_qs(urlsplit(fixture.request_log[0].target).query)
+        assert query["after"] == ["page-2"]
+        assert {row["id"] for row in written} == {1, 2, 3, 4}
