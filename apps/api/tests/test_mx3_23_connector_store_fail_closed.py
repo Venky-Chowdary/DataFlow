@@ -108,3 +108,26 @@ def test_api_answers_store_refusal_as_503_with_reason():
     body = json.loads(resp.body)
     assert body["error"] == "connector_store_unavailable"
     assert "Fernet-encrypted" in body["detail"]
+
+
+def test_api_detail_masks_mongo_uri_credentials(monkeypatch, mongo_backend):
+    """pymongo errors can echo the connection URI; the 503 body must not leak it."""
+    import asyncio
+    import json
+
+    from starlette.requests import Request
+
+    from src.main import connector_store_error_handler
+
+    leak = RuntimeError(
+        "Authentication failed for mongodb://dfadmin:S3cretPw@mongo-prod.internal:27017/admin"
+    )
+    monkeypatch.setattr(cs, "_mongo_collection", lambda: _FailingColl(leak))
+    with pytest.raises(cs.ConnectorStoreError) as err:
+        cs.create_connector({"name": "mg", "type": "mongodb", "password": "s3cret"})
+    request = Request({"type": "http", "method": "POST", "path": "/api/v1/connectors", "headers": []})
+    resp = asyncio.run(connector_store_error_handler(request, err.value))
+    body = json.loads(resp.body)
+    assert resp.status_code == 503
+    assert "S3cretPw" not in body["detail"]
+    assert "mongodb://dfadmin:****@mongo-prod.internal" in body["detail"]

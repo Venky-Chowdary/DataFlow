@@ -46,12 +46,15 @@ class ConnectorStoreError(RuntimeError):
 def _mongo_write_failed(op: str, connector_id: str, exc: Exception) -> ConnectorStoreError:
     # Mongo is the system of record once selected: a local-file fallback would
     # report success, leave Mongo unchanged and put credentials on local disk.
+    # The full driver error stays in the server log; pymongo messages can carry
+    # hosts and URI fragments, so the operator-facing text is credential-masked.
     logger.error(
-        "MongoDB %s failed for connector %s; refusing file-store fallback: %s",
-        op, connector_id or "<new>", exc,
+        "MongoDB %s failed for connector %s; refusing file-store fallback",
+        op, connector_id or "<new>", exc_info=exc,
     )
     return ConnectorStoreError(
-        f"Connector {op} failed in MongoDB (the configured connector store); nothing was saved: {exc}"
+        f"Connector {op} failed in MongoDB (the configured connector store); "
+        f"nothing was saved: {_mask_conn_str(str(exc))}"
     )
 
 # Databases / warehouses / object stores that are valid as source *and* destination.
