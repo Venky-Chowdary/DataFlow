@@ -173,6 +173,22 @@ def safe_decimal_text(value: Decimal) -> str | None:
             return None
 
 
+def canonical_numeric_key_text(value: Any) -> str | None:
+    """Collapse numeric objects to the canonical text of their numeric value."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        return None
+    try:
+        decimal_value = Decimal(repr(value)) if isinstance(value, float) else Decimal(value)
+        if not decimal_value.is_finite():
+            return None
+        if decimal_value.is_zero():
+            return "0"
+        normalized = decimal_value.normalize()
+    except (DecimalException, ValueError, TypeError):
+        return None
+    return safe_decimal_text(normalized)
+
+
 def _is_na(value: Any) -> bool:
     """Detect pandas/numpy missing-like values without importing pandas."""
     try:

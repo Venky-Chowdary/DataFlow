@@ -1862,6 +1862,7 @@ def _g6_dynamodb_key_refusal(
         from connectors.dynamodb_schema import (
             DynamoTableSchema,
             key_contract_violations,
+            log_key_refusal,
         )
     except ImportError:
         return None
@@ -1900,7 +1901,21 @@ def _g6_dynamodb_key_refusal(
         mappings=mappings,
         column_types=source_types,
     )
-    return "; ".join(violations) if violations else None
+    table = str(
+        getattr(ctx.plan, "destination_table", "")
+        or getattr(ctx.plan, "stream_name", "")
+        or ""
+    )
+    for violation in violations:
+        log_key_refusal(
+            phase="validate",
+            table=table,
+            column=violation.column,
+            key_role=violation.key_role,
+            expected_scalar=violation.expected_scalar,
+            reason=violation.reason,
+        )
+    return "; ".join(str(violation) for violation in violations) if violations else None
 
 
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:

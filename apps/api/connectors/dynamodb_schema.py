@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-import re
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 DYNAMO_KEY_SCALARS = frozenset({"S", "N", "B"})
 _DYNAMO_NONSCALAR_CODES = frozenset({"BOOL", "NULL", "M", "L", "SS", "NS", "BS"})
+_NO_VALUE = object()
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -16,6 +19,18 @@ class DynamoKeyAttribute:
     name: str
     key_type: str
     attr_type: str
+
+
+@dataclass(frozen=True)
+class KeyContractViolation:
+    column: str
+    key_role: Literal["HASH", "RANGE", "INDEX"]
+    expected_scalar: str
+    reason: str
+    message: str
+
+    def __str__(self) -> str:
+        return self.message
 
 
 @dataclass(frozen=True)
@@ -154,54 +169,125 @@ def parse_table_description(info: Mapping[str, Any]) -> DynamoTableSchema:
     return DynamoTableSchema(keys=keys, index_attributes=indexes)
 
 
-def key_carrier_compatible(attr_type: str, logical: str) -> bool:
-    """Whether a logical source or explicit Map carrier can feed a Dynamo key."""
+def key_carrier_verdict(
+    attr_type: str, logical: str
+) -> Literal["compatible", "incompatible", "runtime_validated"]:
+    """Classify a declared carrier using the shared canonical type taxonomy."""
     scalar = str(attr_type or "").strip().upper()
     if scalar not in DYNAMO_KEY_SCALARS:
-        return False
-    raw = str(logical or "").strip().upper()
-    base = re.sub(r"\s*\([^)]*\)", "", raw).strip()
-    if not base:
-        return True
-    if base in _DYNAMO_NONSCALAR_CODES:
-        return False
-    if base in DYNAMO_KEY_SCALARS:
-        return base == scalar
+        return "incompatible"
+    raw = str(logical or "").strip()
+    token = raw.upper()
+    if token in DYNAMO_KEY_SCALARS:
+        return "compatible" if token == scalar else "incompatible"
+    if token in _DYNAMO_NONSCALAR_CODES:
+        return "incompatible"
+    if not raw:
+        return "runtime_validated"
 
-    from services.type_system import is_binary_type, is_structural_type
+    from services.decimal_identity import is_numeric_catalog_type
+    from services.encoding_capacity import is_string_catalog_type
+    from services.type_system import (
+        LOGICAL_BOOLEAN,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+        LOGICAL_OBJECTID,
+        LOGICAL_TEXT,
+        LOGICAL_TIME,
+        LOGICAL_UUID,
+        LOGICAL_VECTOR,
+        is_binary_type,
+        is_structural_type,
+        normalize_logical_type,
+    )
 
-    if is_structural_type(base):
-        return False
-    if is_binary_type(base) or base in {
-        "BINARY", "BLOB", "BYTEA", "VARBINARY", "LONGBLOB", "RAW", "IMAGE",
+    logical_type = normalize_logical_type(raw)
+    if is_structural_type(raw) or logical_type == LOGICAL_VECTOR:
+        return "incompatible"
+    if is_binary_type(raw):
+        return "compatible" if scalar == "B" else "incompatible"
+    if logical_type in {LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_FLOAT} or (
+        is_numeric_catalog_type(raw)
+    ):
+        return "compatible" if scalar in {"S", "N"} else "incompatible"
+    if logical_type in {
+        LOGICAL_BOOLEAN,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_TIME,
+        LOGICAL_UUID,
+        LOGICAL_OBJECTID,
     }:
-        return scalar == "B"
+        return "compatible" if scalar == "S" else "incompatible"
+    if is_string_catalog_type(raw) or logical_type == LOGICAL_TEXT:
+        return "compatible"
+    return "runtime_validated"
 
-    text_types = {
-        "CHAR", "CHARACTER", "CHARACTER VARYING", "CLOB", "NCHAR",
-        "ENUM", "NVARCHAR", "NVARCHAR2", "STRING", "TEXT", "UUID",
-        "VARCHAR", "VARCHAR2",
+
+def log_key_refusal(
+    *,
+    phase: str,
+    table: str,
+    column: str,
+    key_role: str,
+    expected_scalar: str,
+    reason: str,
+    value: Any = _NO_VALUE,
+) -> None:
+    """Emit a structured refusal without exposing binary or unbounded values."""
+    if expected_scalar == "B":
+        value_text = "<redacted:binary>"
+    elif value is _NO_VALUE:
+        value_text = "<n/a>"
+    else:
+        value_text = repr(value)
+        if len(value_text) > 64:
+            value_text = value_text[:63] + "…"
+    extra = {
+        "event": "dynamodb_key_refusal",
+        "phase": phase,
+        "table": table,
+        "column": column,
+        "key_role": key_role,
+        "expected_scalar": expected_scalar,
+        "reason": reason,
+        "value": value_text,
     }
-    numeric_types = {
-        "BIGINT", "BIGSERIAL", "DEC", "DECIMAL", "DECIMAL128", "DOUBLE",
-        "DOUBLE PRECISION", "FLOAT", "FLOAT4", "FLOAT8", "FLOAT64", "INT",
-        "INT2", "INT4", "INT8", "INT64", "INTEGER", "MONEY", "NUMBER",
-        "NUMERIC", "REAL", "SERIAL", "SMALLINT", "SMALLSERIAL", "TINYINT",
-        "UINT", "UINT8", "UINT16", "UINT32", "UINT64", "UNSIGNED", "VARINT",
-    }
-    temporal_types = {
-        "DATE", "DATETIME", "DATETIME2", "LOCALTIME", "TIMESTAMP",
-        "TIMESTAMP_NTZ", "TIMESTAMPTZ", "TIME", "TIME_TZ",
-    }
-    if base in text_types:
-        return True
-    if base in numeric_types:
-        return scalar in {"S", "N"}
-    if base in temporal_types:
-        return scalar == "S"
-    if base in {"BOOLEAN", "BOOL"}:
-        return scalar == "S"
-    return True
+    logger.warning(
+        "dynamodb_key_refusal phase=%s table=%s column=%s key_role=%s "
+        "expected_scalar=%s reason=%s value=%s",
+        phase,
+        table,
+        column,
+        key_role,
+        expected_scalar,
+        reason,
+        value_text,
+        extra=extra,
+    )
+
+
+def _log_runtime_validated(
+    *, column: str, key_role: str, expected_scalar: str, declared_type: str
+) -> None:
+    logger.info(
+        "dynamodb_key_runtime_validated column=%s key_role=%s "
+        "expected_scalar=%s declared_type=%s",
+        column,
+        key_role,
+        expected_scalar,
+        declared_type,
+        extra={
+            "event": "dynamodb_key_runtime_validated",
+            "column": column,
+            "key_role": key_role,
+            "expected_scalar": expected_scalar,
+            "declared_type": declared_type,
+        },
+    )
 
 
 def key_contract_violations(
@@ -210,7 +296,7 @@ def key_contract_violations(
     mappings: list[dict],
     column_types: Mapping[str, str] | None,
     conflict_columns: list[str] | None = None,
-) -> list[str]:
+) -> list[KeyContractViolation]:
     """Return identity and scalar mismatches before DynamoDB receives a write."""
     from services.mapping_constraints import write_mappings
 
@@ -221,7 +307,7 @@ def key_contract_violations(
         if str(mapping.get("target") or "").strip()
     ]
     types = column_types or {}
-    violations: list[str] = []
+    violations: list[KeyContractViolation] = []
     for key in schema.keys:
         mapped = [
             mapping
@@ -230,33 +316,97 @@ def key_contract_violations(
         ]
         if not mapped:
             violations.append(
-                f"DynamoDB key attribute {key.name!r} ({key.key_type}, {key.attr_type}) "
-                "is not mapped — refuse PutItem without table identity"
+                KeyContractViolation(
+                    column=key.name,
+                    key_role=key.key_type,
+                    expected_scalar=key.attr_type,
+                    reason="key_not_mapped",
+                    message=(
+                        f"DynamoDB key attribute {key.name!r} "
+                        f"({key.key_type}, {key.attr_type}) is not mapped — "
+                        "refuse PutItem without table identity"
+                    ),
+                )
             )
             continue
         for mapping in mapped:
             source = str(mapping.get("source") or mapping.get("source_column") or "").strip()
             source_type = mapping.get("source_type") or types.get(source) or ""
-            if not key_carrier_compatible(key.attr_type, str(source_type)):
+            source_verdict = key_carrier_verdict(key.attr_type, str(source_type))
+            if source_verdict == "incompatible":
                 violations.append(
-                    f"DynamoDB key attribute {key.name!r} ({key.key_type}, {key.attr_type}) "
-                    f"cannot carry source type {source_type!r}"
+                    KeyContractViolation(
+                        column=key.name,
+                        key_role=key.key_type,
+                        expected_scalar=key.attr_type,
+                        reason="incompatible_source_type",
+                        message=(
+                            f"DynamoDB key attribute {key.name!r} "
+                            f"({key.key_type}, {key.attr_type}) cannot carry "
+                            f"source type {source_type!r}"
+                        ),
+                    )
+                )
+            elif source_verdict == "runtime_validated":
+                _log_runtime_validated(
+                    column=key.name,
+                    key_role=key.key_type,
+                    expected_scalar=key.attr_type,
+                    declared_type=str(source_type),
                 )
             explicit = mapping.get("target_type") or mapping.get("dest_type")
-            if explicit and not key_carrier_compatible(key.attr_type, str(explicit)):
+            if explicit:
+                target_verdict = key_carrier_verdict(key.attr_type, str(explicit))
+            else:
+                target_verdict = "compatible"
+            if target_verdict == "incompatible":
                 violations.append(
-                    f"DynamoDB key attribute {key.name!r} ({key.key_type}, {key.attr_type}) "
-                    f"Map target type {explicit!r} would change the key schema"
+                    KeyContractViolation(
+                        column=key.name,
+                        key_role=key.key_type,
+                        expected_scalar=key.attr_type,
+                        reason="incompatible_target_type",
+                        message=(
+                            f"DynamoDB key attribute {key.name!r} "
+                            f"({key.key_type}, {key.attr_type}) Map target type "
+                            f"{explicit!r} would change the key schema"
+                        ),
+                    )
+                )
+            elif target_verdict == "runtime_validated":
+                _log_runtime_validated(
+                    column=key.name,
+                    key_role=key.key_type,
+                    expected_scalar=key.attr_type,
+                    declared_type=str(explicit),
                 )
 
     for mapping in active:
         target = str(mapping.get("target") or "").strip()
         index_type = schema.index_attributes.get(target)
         explicit = mapping.get("target_type") or mapping.get("dest_type")
-        if index_type and explicit and not key_carrier_compatible(index_type, str(explicit)):
+        if not index_type or not explicit:
+            continue
+        index_verdict = key_carrier_verdict(index_type, str(explicit))
+        if index_verdict == "incompatible":
             violations.append(
-                f"DynamoDB index key attribute {target!r} ({index_type}) "
-                f"Map target type {explicit!r} conflicts with its declared scalar"
+                KeyContractViolation(
+                    column=target,
+                    key_role="INDEX",
+                    expected_scalar=index_type,
+                    reason="incompatible_index_target_type",
+                    message=(
+                        f"DynamoDB index key attribute {target!r} ({index_type}) "
+                        f"Map target type {explicit!r} conflicts with its declared scalar"
+                    ),
+                )
+            )
+        elif index_verdict == "runtime_validated":
+            _log_runtime_validated(
+                column=target,
+                key_role="INDEX",
+                expected_scalar=index_type,
+                declared_type=str(explicit),
             )
 
     if conflict_columns:
@@ -264,9 +414,18 @@ def key_contract_violations(
 
         requested = resolve_conflict_targets(conflict_columns, targets, strict=False)
         if set(requested) != set(schema.key_names):
+            hash_key = next(key for key in schema.keys if key.key_type == "HASH")
             violations.append(
-                f"DynamoDB requested identity {requested!r} != table KeySchema "
-                f"{list(schema.key_names)!r} — refuse non-table identity"
+                KeyContractViolation(
+                    column=hash_key.name,
+                    key_role="HASH",
+                    expected_scalar=hash_key.attr_type,
+                    reason="conflict_columns_mismatch",
+                    message=(
+                        f"DynamoDB requested identity {requested!r} != table "
+                        f"KeySchema {list(schema.key_names)!r} — refuse non-table identity"
+                    ),
+                )
             )
     return violations
 

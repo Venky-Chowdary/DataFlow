@@ -1925,6 +1925,7 @@ def run_file_preflight(
         sync_mode=sync_mode,
         contract_primary_key=str(contract_primary_key or "").strip(),
         destination_pk_columns=list(destination_pk_columns or []),
+        destination_table=str(destination_table or ""),
         destination_dynamo_key_schema=[
             dict(row)
             for row in (destination_dynamo_key_schema or [])
