@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -261,6 +262,53 @@ def test_expired_api_key_cannot_be_rotated(token_app):
 
     with pytest.raises(ValueError, match="expired"):
         store.rotate_api_key(key["id"], actor="admin@example.com")
+
+
+def test_concurrent_rotation_of_same_key_has_one_success(tmp_path, monkeypatch):
+    from services import integrations_store as store
+
+    monkeypatch.setattr(store, "STORE_PATH", tmp_path / "integrations.json")
+    monkeypatch.setattr(store, "_keys_collection", lambda: None)
+    key = store.create_api_key(
+        "rotation race",
+        "operator@example.com",
+        role="editor",
+    )
+    original_upsert = store._upsert_api_key_record
+    source_writes = threading.Barrier(2)
+
+    def synchronize_unconditional_source_writes(record):
+        if record.get("rotated_to"):
+            source_writes.wait(timeout=3)
+        original_upsert(record)
+
+    monkeypatch.setattr(
+        store, "_upsert_api_key_record", synchronize_unconditional_source_writes
+    )
+    start = threading.Barrier(3)
+    results = []
+    errors = []
+
+    def rotate():
+        start.wait(timeout=3)
+        try:
+            results.append(
+                store.rotate_api_key(key["id"], actor="admin@example.com")
+            )
+        except ValueError as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=rotate) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    start.wait(timeout=3)
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert "already been rotated" in str(errors[0])
 
 
 def test_iam_is_admin_only_and_route_errors_are_mapped(token_app):

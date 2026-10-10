@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import secrets
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -35,6 +36,7 @@ _SSO_TYPES = ("saml", "oidc", "azure_ad")
 _CLOUD_PROVIDERS = ("openai", "anthropic")
 _MASK = "••••••••"
 _PILOT_ENGINES = ("auto", "local", "hybrid", "cloud")
+_API_KEY_ROTATION_LOCK = threading.Lock()
 
 
 def _now() -> str:
@@ -629,6 +631,13 @@ def _upsert_api_key_record(record: dict[str, Any]) -> None:
         logger.warning("workspace API key Mongo write failed; file copy kept", exc_info=True)
 
 
+def _save_file_api_key_record(record: dict[str, Any]) -> None:
+    stored = _record_for_store(record)
+    file_keys = [item for item in _file_key_records() if str(item.get("id")) != str(stored["id"])]
+    file_keys.append(stored)
+    _save_file_keys(file_keys)
+
+
 class ApiKeyNotFound(LookupError):
     """A requested workspace API key does not exist."""
 
@@ -728,64 +737,77 @@ def rotate_api_key(
 ) -> dict[str, Any]:
     if not isinstance(overlap_seconds, int) or not 0 <= overlap_seconds <= 604800:
         raise ValueError("overlap_seconds must be between 0 and 604800")
-    source = next(
-        (item for item in load_api_key_records() if str(item.get("id")) == key_id),
-        None,
-    )
-    if source is None:
-        raise ApiKeyNotFound(key_id)
-    if _is_revoked(source):
-        raise ValueError("revoked API keys cannot be rotated")
-    now = datetime.now(timezone.utc)
-    if _key_expired(source, now=now):
-        raise ValueError("expired API keys cannot be rotated")
-    if source.get("rotated_to"):
-        raise ValueError("API key has already been rotated")
+    with _API_KEY_ROTATION_LOCK:
+        source = next(
+            (item for item in load_api_key_records() if str(item.get("id")) == key_id),
+            None,
+        )
+        if source is None:
+            raise ApiKeyNotFound(key_id)
+        if _is_revoked(source):
+            raise ValueError("revoked API keys cannot be rotated")
+        now = datetime.now(timezone.utc)
+        if _key_expired(source, now=now):
+            raise ValueError("expired API keys cannot be rotated")
+        if source.get("rotated_to"):
+            raise ValueError("API key has already been rotated")
 
-    lifetime = source.get("lifetime") or (
-        "never" if not source.get("expires_at") else DEFAULT_API_KEY_LIFETIME
-    )
-    lifetime = parse_api_key_lifetime(lifetime)
-    kind = source.get("kind") or "api_key"
-    if kind not in {"api_key", "service_account", "scim"}:
-        raise ValueError("API key kind is invalid")
-    scopes = source.get("scopes")
-    if scopes is not None and (
-        not isinstance(scopes, list)
-        or any(not isinstance(scope, str) for scope in scopes)
-        or not scopes
-    ):
-        raise ValueError("API key scopes are invalid")
-    stored_scopes = sorted(set(scopes)) if scopes is not None else None
+        lifetime = source.get("lifetime") or (
+            "never" if not source.get("expires_at") else DEFAULT_API_KEY_LIFETIME
+        )
+        lifetime = parse_api_key_lifetime(lifetime)
+        kind = source.get("kind") or "api_key"
+        if kind not in {"api_key", "service_account", "scim"}:
+            raise ValueError("API key kind is invalid")
+        scopes = source.get("scopes")
+        if scopes is not None and (
+            not isinstance(scopes, list)
+            or any(not isinstance(scope, str) for scope in scopes)
+            or not scopes
+        ):
+            raise ValueError("API key scopes are invalid")
+        stored_scopes = sorted(set(scopes)) if scopes is not None else None
 
-    raw = f"dfk_{secrets.token_urlsafe(32)}"
-    new_id = str(uuid.uuid4())
-    new_record = {
-        "id": new_id,
-        "name": source.get("name", "API key"),
-        "prefix": raw[:12],
-        "role": resolve_stored_api_key_role(source.get("role")),
-        "key_hash": _hash_api_key(raw),
-        "created_at": now.isoformat(),
-        "created_by": actor,
-        "last_used_at": None,
-        "lifetime": lifetime,
-        "expires_at": _expires_at(lifetime, now=now),
-        "scopes": stored_scopes,
-        "kind": kind,
-        "rotated_from": key_id,
-    }
+        raw = f"dfk_{secrets.token_urlsafe(32)}"
+        new_id = str(uuid.uuid4())
+        new_record = {
+            "id": new_id,
+            "name": source.get("name", "API key"),
+            "prefix": raw[:12],
+            "role": resolve_stored_api_key_role(source.get("role")),
+            "key_hash": _hash_api_key(raw),
+            "created_at": now.isoformat(),
+            "created_by": actor,
+            "last_used_at": None,
+            "lifetime": lifetime,
+            "expires_at": _expires_at(lifetime, now=now),
+            "scopes": stored_scopes,
+            "kind": kind,
+            "rotated_from": key_id,
+        }
 
-    overlap_expiry = now + timedelta(seconds=overlap_seconds)
-    source_expiry = _parse_expires_at(source.get("expires_at"))
-    if source_expiry:
-        source["expires_at"] = min(source_expiry, overlap_expiry).isoformat()
-    else:
-        source["expires_at"] = overlap_expiry.isoformat()
-    source["rotated_to"] = new_id
-    _upsert_api_key_record(source)
-    _upsert_api_key_record(new_record)
-    return _public_api_key(new_record, secret=raw)
+        overlap_expiry = now + timedelta(seconds=overlap_seconds)
+        source_expiry = _parse_expires_at(source.get("expires_at"))
+        if source_expiry:
+            source["expires_at"] = min(source_expiry, overlap_expiry).isoformat()
+        else:
+            source["expires_at"] = overlap_expiry.isoformat()
+        source["rotated_to"] = new_id
+
+        _upsert_api_key_record(new_record)
+        coll = _keys_collection()
+        if coll is None:
+            _save_file_api_key_record(source)
+        else:
+            result = coll.update_one(
+                {"id": key_id, "rotated_to": {"$exists": False}},
+                {"$set": _record_for_store(source)},
+            )
+            if result.matched_count == 0:
+                revoke_api_key(new_id)
+                raise ValueError("API key has already been rotated")
+            _save_file_api_key_record(source)
+        return _public_api_key(new_record, secret=raw)
 
 
 def revoke_api_key(key_id: str) -> bool:
