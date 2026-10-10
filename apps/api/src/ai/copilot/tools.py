@@ -1270,6 +1270,28 @@ def _bind_tool_arguments(
     return bound, ""
 
 
+def _preview_endpoint(draft: dict[str, Any]) -> tuple[str, int | None, bool]:
+    """Host, port, and URL password the saved connector will really use.
+
+    A URL names its own port (or none: the driver/scheme default applies);
+    the draft's stamped default port and "a connection string exists" are not
+    evidence of either (QA MXD03 / MX1-04).
+    """
+    from connectors.url_authority import parse_url_authority
+
+    cs = str(draft.get("connection_string") or "").strip()
+    host = str(draft.get("host") or "").strip()
+    if cs and "://" in cs:
+        url = parse_url_authority(cs)
+        return url.host or host or "(from URL)", url.port or None, bool(url.password)
+    if cs:
+        return host or "(from URL)", draft.get("port") or None, False
+    if "://" in host:
+        url = parse_url_authority(host)
+        return host, url.port or draft.get("port") or None, bool(url.password)
+    return host or "(from URL)", draft.get("port"), False
+
+
 class DataPilotTools:
     """Execute Datawrap Pilot tools against live app state."""
 
@@ -1686,17 +1708,18 @@ class DataPilotTools:
                 logging.getLogger(__name__).info(
                     "create_connector readable-object check skipped: %s", exc
                 )
+        preview_host, preview_port, url_password = _preview_endpoint(draft)
         safe_preview = {
             "name": draft["name"],
             "type": draft["type"],
-            "host": draft.get("host") or "(from URL)",
-            "port": draft.get("port"),
+            "host": preview_host,
+            "port": preview_port,
             "database": draft.get("database") or "",
             "username": draft.get("username") or "",
             "ssl": bool(draft.get("ssl")),
             "auth_mode": draft.get("auth_mode") or "",
             "schema": draft.get("schema") or "",
-            "has_password": bool(draft.get("password") or draft.get("connection_string")),
+            "has_password": bool(draft.get("password") or url_password),
             "has_service_account": bool(draft.get("service_account")),
             "test": probe_msg or "skipped",
         }
