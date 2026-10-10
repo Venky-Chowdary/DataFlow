@@ -73,7 +73,10 @@ def test_logical_type_keeps_nvarchar_max_and_classic_datetime() -> None:
     ).compile(dialect=mssql.dialect())
     assert str(compiled) == "DATETIMEOFFSET(7)"
     naive = _sa_type_for_logical("datetime", "mssql", "sqlserver")
-    assert str(naive.compile(dialect=mssql.dialect())) == "DATETIME2(7)"
+    # Bare DATETIME2 is SQL Server's seven-digit default: same carrier, same
+    # canonical wire as a declared DATETIME2(7). Never classic DATETIME.
+    assert str(naive.compile(dialect=mssql.dialect())) in {"DATETIME2", "DATETIME2(7)"}
+    assert _logical_type_from_sa(naive) == "DATETIME2(7)"
 
 
 def test_classic_datetime_refuses_microsecond_before_bind() -> None:

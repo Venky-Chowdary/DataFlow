@@ -1848,7 +1848,11 @@ def _sub_second_naive_wire(dialect_name: str, db_type: str, logical: str = "") -
     if mssql is not None and (
         (dialect_name or "").lower() == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
     ):
-        return mssql.DATETIME2(precision=7)
+        # Bare DATETIME2 is already SQL Server's seven-digit carrier. Only a
+        # declared ``(n)`` is precision-bearing DDL; inventing ``(7)`` on a
+        # bare logical made the DDL disagree with the family it was mapped to.
+        fsp = _declared_temporal_fsp(logical, 7)
+        return mssql.DATETIME2() if fsp is None else mssql.DATETIME2(precision=fsp)
     if mysql is not None and _MYSQL_WIRES & {
         (dialect_name or "").lower(), (db_type or "").lower()
     }:
@@ -2033,8 +2037,13 @@ def _sa_type_for_logical(
         ):
             # sa.DateTime(timezone=True) compiles to DATETIMEOFFSET with no
             # precision argument. Name the seven digits the column keeps so a
-            # PostgreSQL microsecond cannot land on classic DATETIME.
-            return _maybe_nullable(mssql.DATETIMEOFFSET(precision=7))
+            # PostgreSQL microsecond cannot land on classic DATETIME. The
+            # dialect type defaults to timezone=False, which made the bind
+            # path strip the offset from a column that stores one.
+            fsp = _declared_temporal_fsp(raw, 7)
+            return _maybe_nullable(
+                mssql.DATETIMEOFFSET(precision=7 if fsp is None else fsp, timezone=True)
+            )
         return sa.DateTime(timezone=True)
     if (
         "timestamp_ntz" in raw_lower
