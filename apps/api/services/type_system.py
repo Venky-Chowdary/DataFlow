@@ -3231,6 +3231,9 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
 # other dialect spells a timestamp this way, which is what makes the default
 # safe to apply without knowing the source engine.
 SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS: Final[int] = 9
+# SQL Server DATETIME2 / DATETIMEOFFSET default. Introspection spells it out
+# on every column, so a ``(7)`` is the dialect default, not declared evidence.
+SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS: Final[int] = 7
 # Microseconds: the best precision mainstream destinations carry, so narrowing
 # an undeclared Snowflake timestamp to it is unavoidable rather than a fault.
 SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR: Final[int] = 6

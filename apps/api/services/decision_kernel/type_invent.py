@@ -2369,6 +2369,7 @@ def temporal_precision_would_narrow(
         DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
         SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS,
         SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR,
+        SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS,
         _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS,
         destination_temporal_fractional_digits,
         is_document_instant_token,
@@ -2405,7 +2406,7 @@ def temporal_precision_would_narrow(
         # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
         bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
         if bare_src in {"DATETIME2", "DATETIMEOFFSET"}:
-            src_p = 7
+            src_p = SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
         elif bare_src in _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS:
             if bare_src == re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip():
                 # Both sides carry the same unparameterized declaration, so the
@@ -2440,11 +2441,17 @@ def temporal_precision_would_narrow(
     # already at its documented maximum (PostgreSQL microseconds) cannot be
     # widened. Blocking that pair made every MSSQL→Postgres timestamp route
     # unrunnable. A destination below its own cap (TIMESTAMP(3) on Postgres)
-    # still blocks so the operator can widen it.
+    # still blocks so the operator can widen it. The exemption covers only that
+    # dialect-default tick: a declared ``(8)``/``(9)`` is nanosecond evidence,
+    # and dropping it needs the Risk Contract.
     from services.dest_dialect_facts import _normalize_dest_db
     from services.type_system import _TEMPORAL_FSP_CAPS
 
     cap = _TEMPORAL_FSP_CAPS.get(_normalize_dest_db(dest_db) if dest_db else "")
-    if cap is not None and tgt_p >= cap and src_p > cap:
+    if (
+        cap is not None
+        and tgt_p >= cap
+        and cap < src_p <= SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
+    ):
         return False
     return src_p > tgt_p
