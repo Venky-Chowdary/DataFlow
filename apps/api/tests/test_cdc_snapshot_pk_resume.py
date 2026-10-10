@@ -593,7 +593,8 @@ def test_logminer_fresh_snapshot_is_held_scan_not_row_number() -> None:
     conn = MagicMock()
     cur = MagicMock()
     cur.description = [("ID",), ("AMOUNT",)]
-    cur.fetchone.side_effect = [(9000,)]
+    handoff_scn = 9000
+    cur.fetchone.side_effect = [(handoff_scn,)]
     cur.fetchall.side_effect = [[("1", "10"), ("2", "20")], []]
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
@@ -610,7 +611,7 @@ def test_logminer_fresh_snapshot_is_held_scan_not_row_number() -> None:
     assert all("OFFSET" not in s.upper() for s in dump)
     assert decode_logminer_token(batches[0].resume_token)["last_pk"] == "2"
     assert decode_logminer_token(batches[-1].resume_token)["phase"] == "streaming"
-    assert decode_logminer_token(batches[-1].resume_token)["scn"] == 9000
+    assert decode_logminer_token(batches[-1].resume_token)["scn"] == handoff_scn - 1
     assert "last_pk" not in decode_logminer_token(batches[-1].resume_token) or not decode_logminer_token(
         batches[-1].resume_token
     ).get("last_pk")
@@ -623,8 +624,9 @@ def test_logminer_keyset_resume_keeps_scn() -> None:
         encode_logminer_token,
     )
 
+    handoff_scn = 1000
     token = encode_logminer_token(
-        1000, table="ORDERS", phase="snapshot", offset=2, last_pk="2"
+        handoff_scn, table="ORDERS", phase="snapshot", offset=2, last_pk="2"
     )
     assert decode_logminer_token(token)["last_pk"] == "2"
     cdc = OracleLogMinerCdc(
@@ -652,7 +654,7 @@ def test_logminer_keyset_resume_keeps_scn() -> None:
     assert dump
     assert all("ROW_NUMBER" not in s.upper() for s in dump)
     assert any("ROWNUM" in s.upper() and ">" in s for s in dump)
-    assert decode_logminer_token(batches[-1].resume_token)["scn"] == 1000
+    assert decode_logminer_token(batches[-1].resume_token)["scn"] == handoff_scn - 1
     assert decode_logminer_token(batches[0].resume_token)["last_pk"] == "3"
 
 
