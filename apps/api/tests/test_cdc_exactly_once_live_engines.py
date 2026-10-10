@@ -13,6 +13,7 @@ Skips when a container port is unreachable — never green by absence.
 
 from __future__ import annotations
 
+import os
 import socket
 import sys
 import uuid
@@ -48,35 +49,39 @@ from services.cdc_exactly_once import (  # noqa: E402
 ENGINES: dict[str, dict[str, Any]] = {
     "postgresql": dict(
         type="postgresql",
-        host="localhost",
-        port=5433,
-        database="dataflow",
-        username="postgres",
-        password="postgres",
+        host=os.getenv("DATAFLOW_PG_HOST") or "localhost",
+        port=int(os.getenv("DATAFLOW_PG_PORT") or 5433),
+        database=os.getenv("DATAFLOW_PG_DB") or "dataflow",
+        username=os.getenv("DATAFLOW_PG_USER") or "postgres",
+        password=os.getenv("DATAFLOW_PG_PASSWORD") or "postgres",
     ),
     "mysql": dict(
         type="mysql",
-        host="127.0.0.1",
-        port=3307,
-        database="dataflow",
-        username="root",
-        password="dataflow",
+        host=os.getenv("DATAFLOW_MYSQL_HOST") or "127.0.0.1",
+        port=int(os.getenv("DATAFLOW_MYSQL_PORT") or 3307),
+        database=os.getenv("DATAFLOW_MYSQL_DB") or "dataflow",
+        username=os.getenv("DATAFLOW_MYSQL_USER") or "root",
+        password=os.getenv("DATAFLOW_MYSQL_PASSWORD") or "dataflow",
     ),
     "oracle": dict(
         type="oracle",
-        host="127.0.0.1",
-        port=1521,
-        database="FREEPDB1",
-        username="system",
-        password="dataflow",
+        host=os.getenv("DATAFLOW_ORACLE_HOST") or "127.0.0.1",
+        port=int(os.getenv("DATAFLOW_ORACLE_PORT") or 1521),
+        database=(
+            os.getenv("DATAFLOW_ORACLE_SERVICE")
+            or os.getenv("DATAFLOW_ORACLE_DATABASE")
+            or "FREEPDB1"
+        ),
+        username=os.getenv("DATAFLOW_ORACLE_USER") or "system",
+        password=os.getenv("DATAFLOW_ORACLE_PASSWORD") or "dataflow",
     ),
     "sqlserver": dict(
         type="sqlserver",
-        host="127.0.0.1",
-        port=1433,
-        database="dataflow",
-        username="sa",
-        password="DataFlow_CDC_2022!",
+        host=os.getenv("DATAFLOW_SQLSERVER_HOST") or "127.0.0.1",
+        port=int(os.getenv("DATAFLOW_SQLSERVER_PORT") or 1433),
+        database=os.getenv("DATAFLOW_SQLSERVER_DATABASE") or "dataflow",
+        username=os.getenv("DATAFLOW_SQLSERVER_USER") or "sa",
+        password=os.getenv("DATAFLOW_SQLSERVER_PASSWORD") or "DataFlow_CDC_2022!",
     ),
 }
 
