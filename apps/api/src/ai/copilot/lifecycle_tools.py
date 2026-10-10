@@ -396,6 +396,25 @@ def _job_tool(
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} has no quarantined rows to replay.",
             )
+        from services.quarantine_dlq import replay_quarantine_details
+
+        stored = [
+            d for d in (
+                job.get("rejected_details")
+                or (job.get("destination_summary") or {}).get("rejected_details")
+                or []
+            )
+            if isinstance(d, dict)
+        ]
+        if stored and not replay_quarantine_details(stored):
+            return _tool_result(tool, success=False, output=None,
+                error=(
+                    f"Job {short} has only SKIP_ROW (contract skip) rows — they were "
+                    "dropped by the signed Risk Contract and are kept for audit, not "
+                    "quarantined for replay. Re-run the transfer without the SKIP_ROW "
+                    "contract to load them."
+                ),
+            )
         overrides, edited, edit_error = normalize_quarantine_replay_edits(
             transform_overrides, rows
         )

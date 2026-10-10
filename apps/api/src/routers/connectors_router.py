@@ -6,7 +6,6 @@ Manage connector configurations and data transfers
 import asyncio
 import json
 import logging
-import os
 from typing import Any, Optional
 
 from fastapi import (
@@ -1666,7 +1665,13 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                         "reason": "partial promote needs _df_qid on each finding",
                     }
             except Exception as exc:
+                logger.warning(
+                    "quarantine replay %s: DLQ promote stamp failed: %s", job_id, exc, exc_info=exc
+                )
                 promote_meta = {"error": str(exc)[:300]}
+        from services.quarantine_dlq import closure_with_promotion_outcome
+
+        compact = closure_with_promotion_outcome(compact, promote_meta, job_id=job_id)
         phase = "completed" if status != "failed" else "failed"
         mongo.update_job_status(
             child_job_id,
@@ -1774,6 +1779,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                 "durable_count": compact.get("durable_count"),
                 "next_action": compact.get("next_action") or "",
                 "note": compact.get("note") or "",
+                "promotion_error": compact.get("promotion_error") or "",
                 "migration_proven": False,
             },
         }
