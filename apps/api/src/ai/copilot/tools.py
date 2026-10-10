@@ -1665,7 +1665,7 @@ class DataPilotTools:
 
                         error = (
                             f"Could not connect with those credentials: {probe_msg}. "
-                            f"{probe_failure_advice(str(draft.get('type') or ''))}"
+                            f"{probe_failure_advice(str(draft.get('type') or ''), host=str(draft.get('host') or ''), connection_string=str(draft.get('connection_string') or ''))}"
                         )
                     return ToolResult(
                         name="create_connector",

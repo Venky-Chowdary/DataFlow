@@ -44,11 +44,9 @@ def _requests_session() -> Any:
 
 
 def _base_url(host: str, port: int, ssl: bool) -> str:
-    scheme = "https" if ssl else "http"
-    if not host:
-        host = "localhost"
-    port = port or 6333
-    return f"{scheme}://{host}:{port}"
+    from connectors.url_authority import http_service_base_url
+
+    return http_service_base_url(host, port, ssl, 6333)
 
 
 def _headers(api_key: str) -> dict[str, str]:

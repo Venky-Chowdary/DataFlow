@@ -113,6 +113,21 @@ def parse_url_authority(raw: str) -> UrlAuthority:
     )
 
 
+def http_service_base_url(host: str, port: int, ssl: bool, default_port: int) -> str:
+    """``scheme://host:port`` for an HTTP service; a scheme typed into ``host`` wins.
+
+    Operators paste ``http://host`` into the host field for HTTP engines; the
+    old per-driver f-string dialed ``http://http://host:port``.
+    """
+    raw = (host or "").strip().rstrip("/")
+    scheme = "https" if ssl else "http"
+    if "://" in raw:
+        url = parse_url_authority(raw)
+        scheme = (url.scheme or scheme).lower()
+        raw, port = url.host, url.port or port
+    return f"{scheme}://{raw or 'localhost'}:{port or default_port}"
+
+
 def looks_like_userinfo_host(raw: str) -> bool:
     """Scheme-less ``user:pass@host:port/db`` (Railway paste without scheme)."""
     text = (raw or "").strip()
