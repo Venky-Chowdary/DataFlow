@@ -338,6 +338,41 @@ _PATH_RULES: list[tuple[str, str, str]] = [
 # Exact method/path entries preserve fallback behavior on root and special
 # paths that cannot be represented safely by a prefix.
 _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
+    ("GET", "/api/v1/ops/cdc-cursors", Permission.WORKSPACE_MANAGE),
+    ("GET", "/api/v1/ops/cdc-cursors/keys", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/ops/cdc-cursors/clear", Permission.WORKSPACE_MANAGE),
+    ("GET", "/api/v1/ops/cdc-leases", Permission.WORKSPACE_MANAGE),
+    ("GET", "/api/v1/ops/cdc-leases/list", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/ops/cdc-leases/force-release", Permission.WORKSPACE_MANAGE),
+    ("GET", "/api/v1/ops/metrics/json", Permission.WORKSPACE_MANAGE),
+    ("GET", "/metrics", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/training-agent/run", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/training-agent/run/sync", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/transfer/execute", Permission.JOB_RUN),
+    ("POST", "/api/v1/transforms/{project_id}/run", Permission.JOB_RUN),
+    ("POST", "/api/v1/cdc/signals/ensure-table", Permission.JOB_RUN),
+    ("POST", "/api/v1/cdc/signals/execute-snapshot", Permission.JOB_RUN),
+    ("POST", "/api/v1/cdc/snapshots", Permission.JOB_RUN),
+    ("POST", "/api/v1/transfer/{job_id}/cdc/snapshots", Permission.JOB_RUN),
+    ("POST", "/api/v1/ops/cdc-retention/probe", Permission.JOB_RUN),
+    ("POST", "/api/v1/ops/source-ha/probe", Permission.JOB_RUN),
+    ("POST", "/api/v1/cdc/snapshots/{signal_id}/cancel", Permission.JOB_MANAGE),
+    (
+        "POST",
+        "/api/v1/transfer/{job_id}/cdc/snapshots/{signal_id}/cancel",
+        Permission.JOB_MANAGE,
+    ),
+    ("POST", "/api/v1/transfer/{job_id}/rollback/execute", Permission.JOB_MANAGE),
+    ("POST", "/api/v1/repair/proposals/{proposal_id}/decide", Permission.JOB_MANAGE),
+    ("POST", "/api/v1/transfer/analyze", Permission.JOB_PLAN),
+    ("POST", "/api/v1/transfer/analyze-file", Permission.JOB_PLAN),
+    ("POST", "/api/v1/transfer/introspect", Permission.JOB_PLAN),
+    ("POST", "/api/v1/transfer/map", Permission.JOB_PLAN),
+    ("POST", "/api/v1/transfer/plans", Permission.JOB_PLAN),
+    ("POST", "/api/v1/transfer/route", Permission.JOB_PLAN),
+    ("POST", "/api/v1/preflight/run", Permission.JOB_PLAN),
+    ("POST", "/api/v1/repair/propose/preflight", Permission.JOB_PLAN),
+    ("POST", "/api/v1/repair/propose/quarantine", Permission.JOB_PLAN),
     ("GET", "/", Permission.JOB_READ),
     ("GET", "/api/v1", Permission.JOB_READ),
     ("GET", "/api/v1/health", Permission.JOB_READ),
@@ -525,7 +560,10 @@ def _required_permission(method: str, path: str) -> str | _NoRule | None:
     if _is_public_path(path):
         return None
     for rule_method, exact_path, permission in _EXACT_PATH_RULES:
-        if method == rule_method and path == exact_path:
+        if method == rule_method and (
+            path == exact_path
+            or ("{" in exact_path and _compile_route_template(exact_path).fullmatch(path))
+        ):
             return permission
     for rule_method, prefix, permission in _PATH_RULES:
         if rule_method != "*" and method != rule_method:

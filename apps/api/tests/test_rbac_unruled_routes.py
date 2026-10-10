@@ -45,6 +45,18 @@ def rbac_client(monkeypatch):
     def usage_summary():
         return {"ok": True}
 
+    for method, path in (
+        ("GET", "/api/v1/ops/cdc-cursors"),
+        ("GET", "/api/v1/ops/cdc-leases"),
+        ("POST", "/api/v1/ops/cdc-leases/force-release"),
+        ("GET", "/api/v1/ops/metrics/json"),
+        ("GET", "/metrics"),
+        ("POST", "/api/v1/transfer/execute"),
+        ("POST", "/api/v1/transfer/x/cdc/snapshots/y/cancel"),
+        ("POST", "/api/v1/transfer/analyze"),
+    ):
+        app.add_api_route(path, lambda: {"ok": True}, methods=[method])
+
     return TestClient(app)
 
 
@@ -204,10 +216,53 @@ def test_new_explicit_rules_preserve_fallback_permissions(rbac_client, monkeypat
 
     monkeypatch.setattr(audit_coverage.audit_log, "append_audit_event", lambda **_event: None)
     monkeypatch.setattr(rbac, "normalize_role", lambda _role: "viewer")
-    assert rbac._required_permission("POST", "/api/v1/transfer/execute") == "connector.write"
+    assert rbac._required_permission("POST", "/api/v1/transfer/execute") == "job.run"
     assert rbac._required_permission("GET", "/api/v1/usage/summary") == "job.read"
     assert rbac_client.get("/api/v1/usage/summary", headers=_headers()).status_code == 200
     assert rbac_client.post("/api/v1/transfer/execute", headers=_headers()).status_code == 403
 
     monkeypatch.setattr(rbac, "normalize_role", lambda _role: "editor")
     assert rbac_client.post("/api/v1/transfer/execute", headers=_headers()).status_code == 200
+
+    monkeypatch.setattr(rbac, "normalize_role", lambda _role: "operator")
+    assert rbac_client.post("/api/v1/transfer/execute", headers=_headers()).status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "permission", "allowed_roles"),
+    (
+        ("/api/v1/ops/cdc-cursors", "GET", "workspace.manage", {"admin"}),
+        ("/api/v1/transfer/execute", "POST", "job.run", {"operator", "editor", "admin"}),
+        (
+            "/api/v1/transfer/x/cdc/snapshots/y/cancel",
+            "POST",
+            "job.manage",
+            {"operator", "editor", "admin"},
+        ),
+        ("/api/v1/transfer/analyze", "POST", "job.plan", {"editor", "admin"}),
+    ),
+)
+@pytest.mark.parametrize("role", ("viewer", "operator", "editor", "admin"))
+def test_tightened_permission_role_matrix(
+    rbac_client, monkeypatch, path, method, permission, allowed_roles, role
+):
+    from services import rbac
+
+    monkeypatch.setattr(rbac, "normalize_role", lambda _role: role)
+    assert rbac._required_permission(method, path) == permission
+    response = rbac_client.request(method, path, headers=_headers())
+    assert response.status_code == (200 if role in allowed_roles else 403)
+
+
+def test_operator_can_run_transfer_but_editor_cannot_manage_global_cdc(
+    rbac_client, monkeypatch
+):
+    from services import rbac
+
+    monkeypatch.setattr(rbac, "normalize_role", lambda _role: "operator")
+    assert rbac_client.post("/api/v1/transfer/execute", headers=_headers()).status_code == 200
+    monkeypatch.setattr(rbac, "normalize_role", lambda _role: "editor")
+    assert rbac_client.post(
+        "/api/v1/ops/cdc-leases/force-release", headers=_headers()
+    ).status_code == 403
+    assert rbac_client.get("/metrics", headers=_headers()).status_code == 403

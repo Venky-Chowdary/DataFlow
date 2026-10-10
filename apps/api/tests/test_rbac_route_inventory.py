@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+import json
 from collections.abc import Iterable
+from pathlib import Path
 
 import pytest
+from fastapi.routing import APIRoute
 from starlette.routing import Mount
 
 from services import rbac
@@ -123,7 +126,10 @@ def _walk_routes(routes: Iterable[object], prefix: str = ""):
 def _matching_rule(method: str, path: str) -> tuple[bool, str | None]:
     method = "GET" if method.upper() == "HEAD" else method.upper()
     for rule_method, exact_path, permission in rbac._EXACT_PATH_RULES:
-        if method == rule_method and path == exact_path:
+        if method == rule_method and (
+            path == exact_path
+            or ("{" in exact_path and rbac._compile_route_template(exact_path).fullmatch(path))
+        ):
             return True, permission
     for rule_method, prefix, permission in rbac._PATH_RULES:
         if rule_method not in ("*", method):
@@ -131,6 +137,79 @@ def _matching_rule(method: str, path: str) -> tuple[bool, str | None]:
         if path.startswith(prefix):
             return True, permission
     return False, None
+
+
+def _live_route_permissions(routes: Iterable[object]) -> dict[str, str]:
+    mapping = {}
+    for method, template, sample in _walk_routes(routes):
+        key = f"{method} {template}"
+        if (method, template) in MCP_TOOL_GATED_ROUTES:
+            mapping[key] = "MCP_TOOL_GATE"
+        elif rbac._is_public_path(sample):
+            mapping[key] = "PUBLIC"
+        else:
+            _matched, permission = _matching_rule(method, sample)
+            if permission is None:
+                permission = rbac._required_permission(method, sample)
+            mapping[key] = str(permission)
+    return dict(sorted(mapping.items()))
+
+
+def _snapshot_diff(actual: dict[str, str], expected: dict[str, str]) -> str:
+    lines = []
+    paste = []
+    for key in sorted(actual.keys() | expected.keys()):
+        current, prior = actual.get(key), expected.get(key)
+        if current == prior:
+            continue
+        if prior is None:
+            method, template = key.split(" ", 1)
+            sample = _sample_path(template)
+            matched, _permission = _matching_rule(method, sample)
+            inherited = next(
+                (
+                    prefix
+                    for rule_method, prefix, _value in rbac._PATH_RULES
+                    if matched and rule_method in ("*", method) and sample.startswith(prefix)
+                ),
+                None,
+            )
+            suffix = f" (inherited from prefix rule '{inherited}')" if inherited else ""
+            lines.append(f"+ {key} → {current}{suffix}")
+        elif current is None:
+            lines.append(f"- {key} → {prior}")
+        else:
+            lines.append(f"~ {key} → {prior} → {current}")
+        if current is not None:
+            paste.append(f'  "{key}": "{current}",')
+    if not lines:
+        return ""
+    return (
+        "\n".join(lines)
+        + "\nreview the permission for this route, add an explicit rule if the inherited one is wrong, "
+        "then update tests/fixtures/rbac_route_permissions.json\nJSON lines to paste:\n"
+        + "\n".join(paste)
+    )
+
+
+def test_live_route_permission_snapshot_matches_reviewed_fixture():
+    path = Path(__file__).parent / "fixtures" / "rbac_route_permissions.json"
+    expected = json.loads(path.read_text(encoding="utf-8"))
+    actual = _live_route_permissions(app.routes)
+    differences = _snapshot_diff(actual, expected)
+    assert not differences, differences
+
+
+def test_snapshot_comparison_reports_an_unreviewed_route_and_inherited_rule():
+    async def dummy():
+        return {"ok": True}
+
+    routes = [*app.routes, APIRoute("/api/v1/ops/dummy-new-route", dummy, methods=["POST"])]
+    expected = _live_route_permissions(app.routes)
+    actual = _live_route_permissions(routes)
+    differences = _snapshot_diff(actual, expected)
+    assert "+ POST /api/v1/ops/dummy-new-route → connector.write" in differences
+    assert "inherited from prefix rule '/api/v1/ops/'" in differences
 
 
 def _auth_middleware_treats_as_public(method: str, path: str) -> bool:
@@ -193,7 +272,14 @@ def test_real_app_routes_have_reviewed_public_or_explicit_rbac_policy():
         (method, exact_path, permission)
         for method, exact_path, permission in rbac._EXACT_PATH_RULES
         if not any(
-            method == route_method and sample == exact_path
+            method == route_method
+            and (
+                sample == exact_path
+                or (
+                    "{" in exact_path
+                    and rbac._compile_route_template(exact_path).fullmatch(sample)
+                )
+            )
             for route_method, _template, sample in routes
         )
     )
