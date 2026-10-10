@@ -281,7 +281,7 @@ export function McpPage() {
                             </td>
                             <td>
                               {log.client}
-                              {log.actor ? (
+                              {log.actor && log.actor !== log.client ? (
                                 <span className="df2-mcp-log-actor" title={log.actor}>
                                   {log.actor}
                                 </span>
