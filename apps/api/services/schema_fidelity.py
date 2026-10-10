@@ -691,7 +691,7 @@ def plan_create_new_fidelity(
     ]
     if catalog.primary_key and len(pk_dest) == len(catalog.primary_key):
         unindexable = [
-            c for c in pk_dest if dest in {"mysql", "mariadb"} and _mysql_index_requires_prefix(_dest_type(c))
+            c for c in pk_dest if dest in {"mysql", "mariadb"} and mysql_index_requires_prefix(_dest_type(c))
         ]
         if unindexable:
             report.items.append(
@@ -843,7 +843,7 @@ def plan_create_new_fidelity(
         if set(dest_uk_s) == pk_set and pk_set:
             continue  # covered by PRIMARY KEY
         if dest in {"mysql", "mariadb"} and any(
-            _mysql_index_requires_prefix(_dest_type(c)) for c in dest_uk_s
+            mysql_index_requires_prefix(_dest_type(c)) for c in dest_uk_s
         ):
             report.items.append(
                 SchemaFidelityItem(
@@ -2222,7 +2222,7 @@ def empty_unsupported_report(
 # ---------------------------------------------------------------------------
 
 
-def _mysql_index_requires_prefix(typ: str) -> bool:
+def mysql_index_requires_prefix(typ: str) -> bool:
     """True when MySQL/MariaDB would need a prefix length to index this type.
 
     TEXT/BLOB/JSON cannot be a PRIMARY KEY or UNIQUE without a prefix. Inventing

@@ -98,7 +98,40 @@ def proxy_stream_batch_size(
     return write_chunk_size(host, default=default, connection_string=connection_string)
 
 
+# MySQL/MariaDB codes that mean the session is gone, so a reconnect can help:
+# client CR_CONNECTION_ERROR/CR_CONN_HOST_ERROR (2002/2003), CR_SERVER_GONE_ERROR
+# (2006), CR_SERVER_LOST (2013), CR_SERVER_LOST_EXTENDED (2055); server
+# ER_SERVER_SHUTDOWN (1053), ER_ABORTING_CONNECTION (1152), ER_NET_READ_ERROR /
+# ER_NET_READ_INTERRUPTED / ER_NET_ERROR_ON_WRITE / ER_NET_WRITE_INTERRUPTED
+# (1158-1161), ER_CONNECTION_KILLED (1927), ER_CLIENT_INTERACTION_TIMEOUT (4031).
+# Every other server code (1064 syntax, 1071/1170 key DDL, 1146 missing table,
+# 1205 lock wait, 1406 data too long…) repeats identically on a fresh session.
+MYSQL_CONNECTION_LOST_CODES: frozenset[int] = frozenset(
+    {2002, 2003, 2006, 2013, 2055, 1053, 1152, 1158, 1159, 1160, 1161, 1927, 4031}
+)
+_MYSQL_DRIVER_MODULES = ("pymysql", "MySQLdb", "mysql.connector", "mariadb")
+
+
+def _mysql_error_code(exc: BaseException | str) -> int | None:
+    """Server/client error code of a MySQL-family driver exception, else None."""
+    if not isinstance(exc, BaseException):
+        return None
+    if not type(exc).__module__.startswith(_MYSQL_DRIVER_MODULES):
+        return None
+    code = getattr(exc, "errno", None)
+    if not isinstance(code, int) and exc.args and isinstance(exc.args[0], int):
+        code = exc.args[0]
+    # pymysql raises InterfaceError(0, "") on a closed socket: no code to read.
+    return code if isinstance(code, int) and code > 0 else None
+
+
 def is_connection_lost(exc: BaseException | str) -> bool:
+    mysql_code = _mysql_error_code(exc)
+    if mysql_code is not None:
+        # Classify by code, not message: an OperationalError wrapper around a
+        # DDL refusal (1170 "BLOB/TEXT column used in key specification")
+        # was retried as a dropped socket for the whole reconnect budget.
+        return mysql_code in MYSQL_CONNECTION_LOST_CODES
     text = str(exc).lower()
     name = type(exc).__name__.lower() if isinstance(exc, BaseException) else ""
     try:
