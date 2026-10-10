@@ -48,7 +48,10 @@ def get_mcp_oauth_config() -> McpOAuthConfig:
 
 def bearer_challenge() -> str:
     """Build the RFC 9728 resource-metadata challenge value."""
-    return f'Bearer resource_metadata="{get_mcp_oauth_config().metadata_url}"'
+    config = get_mcp_oauth_config()
+    if not config.enabled:
+        return "Bearer"
+    return f'Bearer resource_metadata="{config.metadata_url}"'
 
 
 def principal_from_access_token(

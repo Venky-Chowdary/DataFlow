@@ -371,6 +371,49 @@ def test_protected_resource_metadata_is_hidden_when_oauth_is_off(
         assert client.get(path).status_code == 404
 
 
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        (
+            "/api/v1/mcp",
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": "list_connectors", "arguments": {}},
+            },
+        ),
+        (
+            "/api/v1/mcp/tools/call",
+            {"name": "list_connectors", "arguments": {}},
+        ),
+    ],
+    ids=("streamable", "rest"),
+)
+def test_unauthenticated_calls_use_plain_bearer_when_oauth_is_disabled(
+    mcp_oauth_client,
+    monkeypatch,
+    path,
+    body,
+):
+    client, _make_token, _private_key = mcp_oauth_client
+    from services import integrations_store
+
+    monkeypatch.setenv("MCP_OAUTH_ISSUER", "")
+    monkeypatch.setenv("DATAFLOW_MCP_OAUTH_ISSUER", "")
+    monkeypatch.setenv("DATAWRAP_MCP_OAUTH_ISSUER", "")
+    monkeypatch.setattr(
+        integrations_store,
+        "get_sso_configs",
+        lambda: {"oidc": {"enabled": False, "issuer": ""}},
+    )
+
+    response = client.post(path, json=body)
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+
+
 def test_unauthenticated_tools_call_includes_bearer_challenge(mcp_oauth_client):
     client, _make_token, _private_key = mcp_oauth_client
 
@@ -389,6 +432,8 @@ def test_unauthenticated_tools_call_includes_bearer_challenge(mcp_oauth_client):
     assert response.headers["www-authenticate"] == (
         f'Bearer resource_metadata="{METADATA_URL}"'
     )
+    metadata = client.get("/.well-known/oauth-protected-resource/api/v1/mcp")
+    assert metadata.status_code == 200
 
 
 def test_unauthenticated_rest_tools_call_includes_bearer_challenge(mcp_oauth_client):
