@@ -12,6 +12,41 @@ from connectors.table_manager import DestinationDeleteError
 logger = logging.getLogger(__name__)
 
 
+def stale_cleanup_skipped_docs(
+    rejected_source_ids: set[str],
+    rejected_details: Sequence[Mapping[str, Any]],
+    *,
+    has_identityless: bool = False,
+) -> int:
+    rejected_row_labels = {
+        str(detail.get("row"))
+        for detail in rejected_details
+        if str(detail.get("row") or "").strip()
+    }
+    return max(len(rejected_source_ids), len(rejected_row_labels)) + int(
+        has_identityless
+    )
+
+
+def stale_cleanup_meta(deleted: int, skipped: int) -> dict[str, int]:
+    return {
+        "stale_chunks_deleted": int(deleted),
+        "vector_stale_cleanup_skipped_docs": int(skipped),
+    }
+
+
+def log_stale_cleanup_skipped(
+    engine_label: str, target: str, skipped: int, reason: str
+) -> None:
+    logger.warning(
+        "%s stale cleanup skipped %d document(s) for %s because %s",
+        engine_label,
+        skipped,
+        target,
+        reason,
+    )
+
+
 class VectorDeleteUnverifiedError(DestinationDeleteError):
     """A vector delete completed but its destination read-back was nonzero."""
 

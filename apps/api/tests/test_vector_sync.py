@@ -121,3 +121,31 @@ def test_canonical_document_key_preserves_unit_separator(destination):
     from services.vector_sync import vector_doc_key
 
     assert vector_doc_key((destination, 0, "0")) == f"{destination}\x1f0\x1f0"
+
+
+def test_stale_cleanup_reporting_helpers():
+    from services.vector_sync import (
+        log_stale_cleanup_skipped,
+        stale_cleanup_meta,
+        stale_cleanup_skipped_docs,
+    )
+
+    rejected_ids = {"doc-a"}
+    rejected_details = [
+        {"row": "1"},
+        {"row": "1"},
+        {"row": "2"},
+        {"row": ""},
+    ]
+    assert stale_cleanup_skipped_docs(rejected_ids, rejected_details) == 2
+    assert (
+        stale_cleanup_skipped_docs(
+            rejected_ids, rejected_details, has_identityless=True
+        )
+        == 3
+    )
+    assert stale_cleanup_meta(9, 2) == {
+        "stale_chunks_deleted": 9,
+        "vector_stale_cleanup_skipped_docs": 2,
+    }
+    log_stale_cleanup_skipped("Qdrant", "collection demo", 2, "chunk rejected")

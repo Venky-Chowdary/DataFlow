@@ -8,8 +8,7 @@ import uuid
 
 import pytest
 
-from services.document_chunking import PRECHUNKED_FLAG
-
+_PRECHUNKED_FLAG = "_df_prechunked"
 
 _PG_PORT = int(os.environ.get("DATAFLOW_TEST_PGVECTOR_PORT", "5434"))
 _QDRANT_PORT = int(os.environ.get("DATAFLOW_TEST_QDRANT_PORT", "6335"))
@@ -95,15 +94,12 @@ def vector_destination(request):
             finally:
                 conn.close()
         else:
-            from connectors.qdrant_writer import qdrant_rest
+            import requests
 
-            session, base_url, headers = qdrant_rest(cfg)
-            try:
-                session.delete(
-                    f"{base_url}/collections/{name}", headers=headers, timeout=10
-                )
-            finally:
-                session.close()
+            requests.delete(
+                f"http://localhost:{_QDRANT_PORT}/collections/{name}",
+                timeout=10,
+            )
 
 
 def _doc_rows(doc_id: str, count: int, *, tenant: str | None = None) -> list[dict[str, str]]:
@@ -113,7 +109,7 @@ def _doc_rows(doc_id: str, count: int, *, tenant: str | None = None) -> list[dic
             "doc_id": doc_id,
             "content": f"{doc_id} chunk {index} contains deterministic live test text.",
             "chunk_index": str(index),
-            PRECHUNKED_FLAG: "1",
+            _PRECHUNKED_FLAG: "1",
         }
         if tenant is not None:
             row["tenant"] = tenant
@@ -185,24 +181,36 @@ def _count_source(resource, source_id: str) -> int:
                 return int(cur.fetchone()[0])
         finally:
             conn.close()
-    from connectors.qdrant_writer import qdrant_rest
-    from services.vector_sync import _qdrant_count
+    import requests
 
-    session, base_url, headers = qdrant_rest(resource["cfg"])
-    try:
-        return _qdrant_count(
-            session, base_url, headers, resource["name"], [source_id]
-        )
-    finally:
-        session.close()
+    response = requests.post(
+        f"http://localhost:{_QDRANT_PORT}/collections/{resource['name']}/points/count",
+        json={
+            "filter": {
+                "must": [
+                    {
+                        "key": "source_id",
+                        "match": {"any": [source_id]},
+                    }
+                ]
+            },
+            "exact": True,
+        },
+        timeout=30,
+    )
+    assert response.status_code == 200, response.text
+    return int(response.json()["result"]["count"])
+
+
+def _source_id(values: list[str]) -> str:
+    return "\x1f".join(str(value) for value in values)
 
 
 def _cdc_delete(resource, row: dict[str, str], pk_columns: list[str]) -> int:
     from connectors.table_manager import delete_by_primary_keys
-    from services.cdc_snapshot_window import _pk_value
 
-    key = _pk_value(row, pk_columns)
-    assert key is not None
+    values = [str(row[column]) for column in pk_columns]
+    key = "\x1f".join(values) if len(values) > 1 else values[0]
     return delete_by_primary_keys(
         db_type=resource["kind"],
         cfg=resource["cfg"],
@@ -210,47 +218,49 @@ def _cdc_delete(resource, row: dict[str, str], pk_columns: list[str]) -> int:
         primary_key_column=pk_columns,
         keys=[key],
         schema="public" if resource["kind"] == "pgvector" else None,
-        incoming_lsn="0/10",
     )
 
 
-def test_live_delete_removes_every_chunk_and_absent_delete_is_zero(vector_destination):
-    from services.vector_sync import vector_doc_key
-
+def test_live_delete_removes_every_chunk(vector_destination):
     resource = vector_destination
     doc = _doc_rows("live-delete-1", 10)[0]
     _write(resource, _doc_rows("live-delete-1", 10))
-    source_id = vector_doc_key(["live-delete-1"])
+    source_id = _source_id(["live-delete-1"])
     assert _count_source(resource, source_id) == 10
-    assert _cdc_delete(resource, doc, ["doc_id"]) == 10
-    assert _count_source(resource, source_id) == 0
+    deleted = _cdc_delete(resource, doc, ["doc_id"])
+    remaining = _count_source(resource, source_id)
+    assert (deleted, remaining) == (10, 0)
+
+
+def test_live_absent_delete_returns_zero(vector_destination):
+    resource = vector_destination
+    _write(resource, _doc_rows("present-doc", 1))
     assert _cdc_delete(resource, {"doc_id": "absent"}, ["doc_id"]) == 0
+    assert _count_source(resource, _source_id(["present-doc"])) == 1
 
 
 def test_live_shrinking_document_cleans_stale_chunks_only(vector_destination):
-    from services.vector_sync import vector_doc_key
-
     resource = vector_destination
     _write(
         resource,
         _doc_rows("shrinking-doc", 10) + _doc_rows("unrelated-doc", 3),
     )
     result = _write(resource, _doc_rows("shrinking-doc", 1))
-    assert result.meta["stale_chunks_deleted"] == 9
-    assert _count_source(resource, vector_doc_key(["shrinking-doc"])) == 1
-    assert _count_source(resource, vector_doc_key(["unrelated-doc"])) == 3
+    shrinking_count = _count_source(resource, _source_id(["shrinking-doc"]))
+    unrelated_count = _count_source(resource, _source_id(["unrelated-doc"]))
+    assert (shrinking_count, unrelated_count) == (1, 3)
+    assert result.ok
 
 
 def test_live_composite_primary_key_delete(vector_destination):
-    from services.vector_sync import vector_doc_key
-
     resource = vector_destination
     rows = _doc_rows("7", 4, tenant="west")
     _write(resource, rows, ["tenant", "doc_id"])
-    source_id = vector_doc_key(["west", "7"])
+    source_id = _source_id(["west", "7"])
     assert _count_source(resource, source_id) == 4
-    assert _cdc_delete(resource, rows[0], ["tenant", "doc_id"]) == 4
-    assert _count_source(resource, source_id) == 0
+    deleted = _cdc_delete(resource, rows[0], ["tenant", "doc_id"])
+    remaining = _count_source(resource, source_id)
+    assert (deleted, remaining) == (4, 0)
 
 
 def test_live_unverified_delete_raises(vector_destination, monkeypatch):

@@ -9,7 +9,6 @@ field mapping.
 from __future__ import annotations
 
 import importlib.util
-import json
 import logging
 import re
 from dataclasses import dataclass
@@ -408,6 +407,11 @@ def write_mapped_rows(
             driver="none",
         )
 
+    from services.vector_sync import (
+        log_stale_cleanup_skipped,
+        stale_cleanup_meta,
+        stale_cleanup_skipped_docs,
+    )
     from connectors.writer_common import prepare_records_for_vector_write
 
     pk_cols = list(
@@ -469,23 +473,16 @@ def write_mapped_rows(
     if map_abort:
         from services.vector_sync import _rejected_doc_keys
 
-        skipped_docs = max(
-            len(_rejected_doc_keys(headers, data_rows, pk_cols, mappings, map_rejected)),
-            len(
-                {
-                    str(detail.get("row"))
-                    for detail in map_rejected
-                    if str(detail.get("row") or "").strip()
-                }
-            ),
+        skipped_docs = stale_cleanup_skipped_docs(
+            _rejected_doc_keys(headers, data_rows, pk_cols, mappings, map_rejected),
+            map_rejected,
         )
         if skipped_docs:
-            logger.warning(
-                "pgvector stale cleanup skipped %d document(s) for %s.%s "
-                "because row mapping was rejected",
+            log_stale_cleanup_skipped(
+                "pgvector",
+                f"{schema or 'public'}.{table_name}",
                 skipped_docs,
-                schema or "public",
-                table_name,
+                "row mapping was rejected",
             )
         return WriteResult(
             ok=False,
@@ -497,10 +494,7 @@ def write_mapped_rows(
             error=map_abort,
             rejected_details=map_rejected,
             rejected_rows=len(map_rejected),
-            meta={
-                "stale_chunks_deleted": 0,
-                "vector_stale_cleanup_skipped_docs": skipped_docs,
-            },
+            meta=stale_cleanup_meta(0, skipped_docs),
         )
     # Document identity must come from the contract PK, not just a column
     # literally named ``id`` (QA MX2-17 — see vector_identity_columns).
@@ -540,23 +534,15 @@ def write_mapped_rows(
         headers, data_rows, pk_cols, mappings, map_rejected
     )
     if not vector_rows:
-        skipped_docs = max(
-            len(rejected_source_ids),
-            len(
-                {
-                    str(detail.get("row"))
-                    for detail in map_rejected
-                    if str(detail.get("row") or "").strip()
-                }
-            ),
+        skipped_docs = stale_cleanup_skipped_docs(
+            rejected_source_ids, map_rejected
         )
         if skipped_docs:
-            logger.warning(
-                "pgvector stale cleanup skipped %d document(s) for %s.%s "
-                "because row mapping was rejected",
+            log_stale_cleanup_skipped(
+                "pgvector",
+                f"{schema or 'public'}.{table_name}",
                 skipped_docs,
-                schema or "public",
-                table_name,
+                "row mapping was rejected",
             )
         return WriteResult(
             ok=True,
@@ -568,10 +554,7 @@ def write_mapped_rows(
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
             warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
-            meta={
-                "stale_chunks_deleted": 0,
-                "vector_stale_cleanup_skipped_docs": skipped_docs,
-            },
+            meta=stale_cleanup_meta(0, skipped_docs),
         )
 
     # Determine dimension from valid embeddings only — never invent 384.
@@ -585,16 +568,19 @@ def write_mapped_rows(
             if row.get("source_id")
             and coerce_embedding(row.get("embedding"))[1]
         )
-        skipped_docs = len(rejected_source_ids) + int(
-            any(not str(row.get("source_id") or "") for row in vector_rows)
+        skipped_docs = stale_cleanup_skipped_docs(
+            rejected_source_ids,
+            (),
+            has_identityless=any(
+                not str(row.get("source_id") or "") for row in vector_rows
+            ),
         )
         if skipped_docs:
-            logger.warning(
-                "pgvector stale cleanup skipped %d document(s) for %s.%s "
-                "because embeddings were rejected",
+            log_stale_cleanup_skipped(
+                "pgvector",
+                f"{schema or 'public'}.{table_name}",
                 skipped_docs,
-                schema or "public",
-                table_name,
+                "embeddings were rejected",
             )
         return WriteResult(
             ok=False,
@@ -606,10 +592,7 @@ def write_mapped_rows(
             error=dim_err or "embedding dimension unknown — refuse fabricated defaults",
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
-            meta={
-                "stale_chunks_deleted": 0,
-                "vector_stale_cleanup_skipped_docs": skipped_docs,
-            },
+            meta=stale_cleanup_meta(0, skipped_docs),
         )
 
     inserted = 0
@@ -762,22 +745,14 @@ def write_mapped_rows(
                     rejected_rows=len(rejected_details),
                 )
             if not valid_rows and rejected_details:
-                skipped_docs = max(
-                    len(rejected_source_ids),
-                    len(
-                        {
-                            str(detail.get("row"))
-                            for detail in rejected_details
-                            if str(detail.get("row") or "").strip()
-                        }
-                    ),
+                skipped_docs = stale_cleanup_skipped_docs(
+                    rejected_source_ids, rejected_details
                 )
-                logger.warning(
-                    "pgvector stale cleanup skipped %d document(s) for %s.%s "
-                    "because all chunks were rejected",
+                log_stale_cleanup_skipped(
+                    "pgvector",
+                    f"{schema or 'public'}.{table_name}",
                     skipped_docs,
-                    schema or "public",
-                    table_name,
+                    "all chunks were rejected",
                 )
                 return WriteResult(
                     ok=False,
@@ -794,10 +769,7 @@ def write_mapped_rows(
                     or "all embeddings rejected",
                     rejected_details=rejected_details,
                     rejected_rows=len(rejected_details),
-                    meta={
-                        "stale_chunks_deleted": 0,
-                        "vector_stale_cleanup_skipped_docs": skipped_docs,
-                    },
+                    meta=stale_cleanup_meta(0, skipped_docs),
                 )
             total = len(valid_rows)
             for i in range(0, total, batch_size):
@@ -911,16 +883,19 @@ def write_mapped_rows(
                 source_id = str(row.get("source_id") or "")
                 if source_id and source_id not in rejected_source_ids:
                     cleanup_keep.setdefault(source_id, set()).add(str(row["id"]))
-            skipped_docs = len(rejected_source_ids) + int(
-                any(not str(row.get("source_id") or "") for row in vector_rows)
+            skipped_docs = stale_cleanup_skipped_docs(
+                rejected_source_ids,
+                (),
+                has_identityless=any(
+                    not str(row.get("source_id") or "") for row in vector_rows
+                ),
             )
             if skipped_docs:
-                logger.warning(
-                    "pgvector stale cleanup skipped %d document(s) for %s.%s "
-                    "because source identity was absent or a chunk was rejected",
+                log_stale_cleanup_skipped(
+                    "pgvector",
+                    f"{schema or 'public'}.{table_name}",
                     skipped_docs,
-                    schema or "public",
-                    table_name,
+                    "source identity was absent or a chunk was rejected",
                 )
             stale_chunks_deleted = pgvector_delete_stale_chunks(
                 cur, schema or "public", table_name, cleanup_keep
@@ -948,10 +923,7 @@ def write_mapped_rows(
             ),
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
-            meta={
-                "stale_chunks_deleted": stale_chunks_deleted,
-                "vector_stale_cleanup_skipped_docs": skipped_docs,
-            },
+            meta=stale_cleanup_meta(stale_chunks_deleted, skipped_docs),
         )
     finally:
         conn.close()
@@ -974,8 +946,7 @@ def write_mapped_rows(
         )
 
     meta = _pgvector_gate8_meta(written_rows)
-    meta["stale_chunks_deleted"] = stale_chunks_deleted
-    meta["vector_stale_cleanup_skipped_docs"] = skipped_docs
+    meta.update(stale_cleanup_meta(stale_chunks_deleted, skipped_docs))
     return WriteResult(
         ok=True,
         rows_written=inserted,
