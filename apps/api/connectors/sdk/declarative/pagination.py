@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -55,6 +55,8 @@ class Page:
     headers: Mapping[str, str]
     request_id: str
     url: str
+    next_token: Any = None
+    next_url: str = ""
 
 
 def _extract_records(
@@ -156,9 +158,11 @@ def paginate(
     paginator: PaginatorSpec,
     method: str = "GET",
     headers: Mapping[str, str] | None = None,
+    refresh_auth: Callable[[], Mapping[str, str]] | None = None,
     params: Mapping[str, Any] | None = None,
     stream: str = "",
     max_pages: int | None = None,
+    record_limit: int | None = None,
 ) -> list[Page]:
     """Fetch every page or raise; partial page lists are never returned.
 
@@ -168,8 +172,13 @@ def paginate(
     page_limit = max_pages if max_pages is not None else paginator.max_pages
     if page_limit < 1:
         raise ValueError("max_pages must be positive")
+    if record_limit is not None and record_limit < 0:
+        raise ValueError("record_limit cannot be negative")
+    if record_limit == 0:
+        return []
 
     pages: list[Page] = []
+    records_seen = 0
     base_params = dict(params or {})
     current_url = url
     current_token: Any = paginator.initial_token
@@ -196,8 +205,14 @@ def paginate(
             page_params: dict[str, Any] | None = base_params if not pages else None
         else:
             page_params = dict(base_params)
+            remaining = (
+                record_limit - records_seen
+                if record_limit is not None
+                else paginator.page_size
+            )
+            request_page_size = min(paginator.page_size, remaining)
             if paginator.type in {"cursor", "offset", "page"} and paginator.page_size_param:
-                page_params[paginator.page_size_param] = paginator.page_size
+                page_params[paginator.page_size_param] = request_page_size
             if paginator.type == "cursor" and current_token not in (None, ""):
                 page_params[paginator.cursor_param] = current_token
             elif paginator.type == "offset":
@@ -209,6 +224,7 @@ def paginate(
             method,
             current_url,
             headers=headers,
+            refresh_auth=refresh_auth,
             params=page_params,
             stream=stream,
         )
@@ -219,37 +235,79 @@ def paginate(
             stream=stream,
             status=result.response.status_code,
         )
-        page = Page(
+        page_preview = Page(
             records=records,
             headers=dict(result.response.headers),
             request_id=result.request_id,
             url=redact_url(current_url),
         )
+        next_token: Any = None
+        next_url = ""
+        if paginator.type == "cursor":
+            next_token = (
+                _header(result.response.headers, paginator.cursor_header)
+                if paginator.cursor_header
+                else _dig_path(result.payload, paginator.cursor_path)
+            )
+            if next_token == "":
+                next_token = None
+        elif paginator.type == "offset" and records:
+            next_token = offset + len(records)
+        elif paginator.type == "page" and records:
+            next_token = page_number + 1
+        elif paginator.type == "link_header":
+            link_value = _header(result.response.headers, "Link")
+            next_link = _next_link(link_value) if link_value else None
+            if next_link:
+                next_url = urljoin(current_url, next_link)
+                resolved = urlsplit(next_url)
+                if (
+                    resolved.scheme.lower() not in {"http", "https"}
+                    or (resolved.scheme.lower(), resolved.netloc.lower()) != origin
+                ):
+                    raise _pagination_error(
+                        f"pagination next URL must remain on the source origin: {redact_url(next_url)}",
+                        page_preview,
+                        stream,
+                    )
+        page = Page(
+            records=records,
+            headers=page_preview.headers,
+            request_id=result.request_id,
+            url=page_preview.url,
+            next_token=next_token,
+            next_url=next_url,
+        )
         pages.append(page)
+        records_seen += len(records)
+        if record_limit is not None and records_seen > record_limit:
+            raise _pagination_error(
+                f"response page exceeds record_limit={record_limit}",
+                page,
+                stream,
+            )
+        if record_limit is not None and records_seen == record_limit:
+            return pages
 
         if paginator.type == "none":
             return pages
 
         if paginator.type in {"offset", "page"}:
-            if len(records) < paginator.page_size:
+            if len(records) < request_page_size:
                 return pages
             if len(pages) >= page_limit:
                 raise _pagination_error(
                     f"pagination reached max_pages={page_limit} with more pages implied",
                     page,
                     stream,
-                )
+            )
             if paginator.type == "offset":
-                offset += paginator.page_size
+                offset += request_page_size
             else:
                 page_number += 1
             continue
 
         if paginator.type == "cursor":
-            if paginator.cursor_header:
-                next_token: Any = _header(result.response.headers, paginator.cursor_header)
-            else:
-                next_token = _dig_path(result.payload, paginator.cursor_path)
             if next_token in (None, ""):
                 return pages
             if not records:
@@ -275,9 +333,7 @@ def paginate(
             current_token = next_token
             continue
 
-        link_value = _header(result.response.headers, "Link")
-        next_link = _next_link(link_value) if link_value else None
-        if not next_link:
+        if not next_url:
             return pages
         if not records:
             raise _pagination_error(
@@ -291,14 +347,4 @@ def paginate(
                 page,
                 stream,
             )
-        current_url = urljoin(current_url, next_link)
-        resolved = urlsplit(current_url)
-        if (
-            resolved.scheme.lower() not in {"http", "https"}
-            or (resolved.scheme.lower(), resolved.netloc.lower()) != origin
-        ):
-            raise _pagination_error(
-                f"pagination next URL must remain on the source origin: {redact_url(current_url)}",
-                page,
-                stream,
-            )
+        current_url = next_url

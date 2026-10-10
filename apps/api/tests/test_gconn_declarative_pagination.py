@@ -60,6 +60,7 @@ def test_cursor_paginator_follows_three_tokens_and_stops_without_token() -> None
         )
 
         assert [page.records for page in pages] == [[{"id": 1}], [{"id": 2}], [{"id": 3}]]
+        assert [page.next_token for page in pages] == ["a", "b", None]
         assert _query(fixture.request_log[0].target).get("after") is None
         assert _query(fixture.request_log[1].target)["after"] == ["a"]
         assert _query(fixture.request_log[2].target)["after"] == ["b"]
@@ -236,6 +237,56 @@ def test_max_pages_with_a_next_cursor_fails_instead_of_returning_partial() -> No
             )
 
 
+def test_record_limit_returns_checkpointable_pages_without_overfetch() -> None:
+    with FixtureServer() as fixture:
+        fixture.add_route(
+            "/limited",
+            responses=[
+                FixtureResponse(body={"records": _records(1, 2), "next": "a"}),
+                FixtureResponse(body={"records": _records(3, 1), "next": "b"}),
+            ],
+        )
+
+        pages = paginate(
+            _requester(),
+            f"{fixture.base_url}/limited",
+            records_path="records",
+            paginator=PaginatorSpec(
+                type="cursor",
+                cursor_param="after",
+                cursor_path="next",
+                page_size=2,
+            ),
+            record_limit=3,
+        )
+
+        assert [record for page in pages for record in page.records] == _records(1, 3)
+        assert pages[-1].next_token == "b"
+        assert len(fixture.request_log) == 2
+
+
+def test_record_limit_fails_closed_if_the_api_overshoots_the_cap() -> None:
+    with FixtureServer() as fixture:
+        fixture.add_route(
+            "/oversized",
+            FixtureResponse(body={"records": _records(1, 2), "next": "a"}),
+        )
+
+        with pytest.raises(PaginationError, match="record_limit"):
+            paginate(
+                _requester(),
+                f"{fixture.base_url}/oversized",
+                records_path="records",
+                paginator=PaginatorSpec(
+                    type="cursor",
+                    cursor_param="after",
+                    cursor_path="next",
+                    page_size=2,
+                ),
+                record_limit=1,
+            )
+
+
 def test_link_header_follows_relative_then_absolute_next_urls() -> None:
     with FixtureServer() as fixture:
         absolute = f"{fixture.base_url}/page3"
@@ -267,6 +318,9 @@ def test_link_header_follows_relative_then_absolute_next_urls() -> None:
             [{"id": 2}],
             [{"id": 3}],
         ]
+        assert pages[0].next_url.endswith("/page2?batch=2")
+        assert pages[1].next_url == f"{fixture.base_url}/page3"
+        assert pages[2].next_url == ""
         assert urlsplit(fixture.request_log[1].target).path == "/page2"
         assert urlsplit(fixture.request_log[2].target).path == "/page3"
 

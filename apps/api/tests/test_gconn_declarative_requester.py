@@ -245,10 +245,14 @@ def test_redaction_scrubs_urls_and_logged_headers(caplog) -> None:
             requester.request_json(
                 "GET",
                 f"{fixture.base_url}/safe?access_token=very-secret",
-                headers={"Authorization": "Bearer very-secret"},
+                headers={
+                    "Authorization": "Bearer very-secret",
+                    "X-Secret-Token": "custom-very-secret",
+                },
             )
 
         assert "very-secret" not in caplog.text
+        assert "custom-very-secret" not in caplog.text
         assert "access_token=%2A%2A%2A" in caplog.text
         assert "Authorization" in caplog.text
 

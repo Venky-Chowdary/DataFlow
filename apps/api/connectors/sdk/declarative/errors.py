@@ -57,5 +57,10 @@ class SchemaDriftError(ConnectorError):
     pass
 
 
-class ManifestError(ConnectorError):
-    pass
+class ManifestError(ConnectorError, ValueError):
+    def __init__(self, message: str, *, path: str = "") -> None:
+        super().__init__(message)
+        self.path = path
+
+    def to_dict(self) -> dict[str, Any]:
+        return {**super().to_dict(), "path": self.path}

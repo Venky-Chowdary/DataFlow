@@ -73,7 +73,22 @@ def _redact_headers(headers: Mapping[str, Any]) -> dict[str, Any]:
     redacted: dict[str, Any] = {}
     for key, value in headers.items():
         normalized = str(key).lower().replace("-", "_")
-        redacted[str(key)] = redact_config({normalized: value})[normalized]
+        sensitive_name = any(
+            marker in normalized
+            for marker in (
+                "authorization",
+                "api_key",
+                "apikey",
+                "token",
+                "secret",
+                "password",
+                "credential",
+                "cookie",
+            )
+        )
+        redacted[str(key)] = (
+            "***" if sensitive_name else redact_config({normalized: value})[normalized]
+        )
     return redacted
 
 
@@ -109,7 +124,7 @@ class HttpRequester:
         self.rate_limit_per_second = rate_limit_per_second
         self.clock = clock or __import__("time").monotonic
         self.sleep = sleep or __import__("time").sleep
-        self.session = session or requests.Session()
+        self.session = session if session is not None else requests.Session()
         self._buckets = TokenBucketStore(clock=self.clock)
         self._bucket_scope = uuid.uuid4().hex
 
@@ -185,20 +200,20 @@ class HttpRequester:
             def perform_request() -> requests.Response:
                 nonlocal latest_response, latest_request_id
                 self._wait_for_rate_limit(url)
-                response = self.session.request(
-                    method.upper(),
-                    url,
-                    headers=current_headers,
-                    params=params,
-                    json=json,
-                    data=data,
-                    timeout=timeout_s or self.timeout_s,
-                )
+                request_kwargs = {
+                    "headers": current_headers,
+                    "params": params,
+                    "json": json,
+                    "data": data,
+                    "timeout": timeout_s or self.timeout_s,
+                }
+                response = self.session.request(method.upper(), url, **request_kwargs)
                 latest_response = response
                 latest_request_id = self._server_request_id(response) or request_id
-                if response.status_code >= 400:
+                status_code = getattr(response, "status_code", None)
+                if isinstance(status_code, int) and status_code >= 400:
                     raise requests.HTTPError(
-                        f"HTTP {response.status_code} {response.reason or 'Error'}",
+                        f"HTTP {status_code} {response.reason or 'Error'}",
                         response=response,
                     )
                 return response
@@ -221,6 +236,8 @@ class HttpRequester:
             except Exception as exc:
                 response = getattr(exc, "response", None) or latest_response
                 status = getattr(response, "status_code", None)
+                if not isinstance(status, int) or isinstance(status, bool):
+                    status = None
                 request_id_for_error = (
                     self._server_request_id(response) or latest_request_id or request_id
                 )
