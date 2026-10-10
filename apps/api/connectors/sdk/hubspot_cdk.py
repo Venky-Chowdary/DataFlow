@@ -7,7 +7,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 from connectors.saas_common import base_url, humanize_http_error, request, token
-from connectors.sdk import BaseConnector, RecordBatch, StreamSchema, register_connector
+from connectors.sdk import (
+    BaseConnector,
+    ConnectorDescriptor,
+    RecordBatch,
+    StreamSchema,
+    register_connector,
+)
 from services.value_serializer import load_http_json
 
 DEFAULT_HOST = "api.hubapi.com"
@@ -129,6 +135,18 @@ class HubSpotCDKConnector(BaseConnector):
     name = "hubspot_cdk"
     supports_read = True
     supports_write = False
+    descriptor = ConnectorDescriptor(
+        id="hubspot_cdk",
+        display_name="HubSpot",
+        roles=("source",),
+        auth_modes=("api_key",),
+        sync_modes=("full_refresh", "incremental"),
+        form_fields=(
+            {"name": "api_key", "sensitive": True},
+            {"name": "host", "sensitive": False},
+        ),
+        evidence="synthetic-fixture",
+    )
 
     def _token(self) -> str:
         return token(

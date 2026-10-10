@@ -7,7 +7,12 @@ from typing import Any, Iterator
 
 import requests
 
-from connectors.sdk import RecordBatch, StreamSchema, register_connector
+from connectors.sdk import (
+    ConnectorDescriptor,
+    RecordBatch,
+    StreamSchema,
+    register_connector,
+)
 from connectors.sdk.declarative.connector import DeclarativeSource
 
 __all__ = [
@@ -97,6 +102,18 @@ class DeclarativeHttpConnector(DeclarativeSource):
     name = "declarative_http"
     supports_read = True
     supports_write = False
+    descriptor = ConnectorDescriptor(
+        id="declarative_http",
+        display_name="Declarative HTTP (legacy config)",
+        roles=("source",),
+        auth_modes=("api_key",),
+        sync_modes=("full_refresh", "incremental"),
+        form_fields=(
+            {"name": "api_key", "sensitive": True},
+            {"name": "spec", "sensitive": False},
+        ),
+        evidence="synthetic-fixture",
+    )
 
     def __init__(self, config: dict[str, Any]) -> None:
         raw = config.get("spec") or config.get("declarative_spec") or {}
@@ -159,7 +176,11 @@ class DeclarativeHttpConnector(DeclarativeSource):
                 "type": "object",
                 "required": ["api_key", "spec"],
                 "properties": {
-                    "api_key": {"type": "string", "title": "API token"},
+                    "api_key": {
+                        "type": "string",
+                        "title": "API token",
+                        "airbyte_secret": True,
+                    },
                     "spec": {"type": "object", "title": "Declarative connector spec"},
                 },
             }

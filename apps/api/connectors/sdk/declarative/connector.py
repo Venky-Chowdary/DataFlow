@@ -5,7 +5,13 @@ from dataclasses import replace
 from typing import Any, Iterator
 from urllib.parse import urljoin, urlsplit
 
-from connectors.sdk import BaseConnector, RecordBatch, StreamSchema, register_connector
+from connectors.sdk import (
+    BaseConnector,
+    ConnectorDescriptor,
+    RecordBatch,
+    StreamSchema,
+    register_connector,
+)
 from connectors.sdk.declarative.auth import build_auth
 from connectors.sdk.declarative.errors import ManifestError
 from connectors.sdk.declarative.incremental import (
@@ -24,6 +30,30 @@ class DeclarativeSource(BaseConnector):
     name = "declarative_source"
     supports_read = True
     supports_write = False
+    descriptor = ConnectorDescriptor(
+        id="declarative_source",
+        display_name="Declarative HTTP source",
+        roles=("source",),
+        auth_modes=(
+            "none",
+            "api_key",
+            "bearer",
+            "basic",
+            "oauth2_refresh",
+            "oauth2_client_credentials",
+        ),
+        sync_modes=("full_refresh", "incremental"),
+        form_fields=(
+            {"name": "base_url", "sensitive": False},
+            {"name": "auth.value", "sensitive": True},
+            {"name": "auth.token", "sensitive": True},
+            {"name": "auth.password", "sensitive": True},
+            {"name": "auth.client_secret", "sensitive": True},
+            {"name": "auth.refresh_token", "sensitive": True},
+            {"name": "auth.access_token", "sensitive": True},
+        ),
+        evidence="synthetic-fixture",
+    )
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)

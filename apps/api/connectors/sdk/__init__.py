@@ -16,16 +16,56 @@ import subprocess  # nosec: B404 — used only to run operator-configured Singer
 import sys
 import tempfile
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Iterator
 
 # Runtime registry of SDK-loaded connectors (name -> cls)
 _SDK_REGISTRY: dict[str, type["BaseConnector"]] = {}
+_SDK_DESCRIPTORS: dict[str, "ConnectorDescriptor"] = {}
 
 from services.value_serializer import json_loads_exact
 
 logger = logging.getLogger(__name__)
+
+# Declarative manifest auth modes are separate from engine-level auth modes.
+SDK_AUTH_MODES = frozenset(
+    {
+        "none",
+        "bearer",
+        "basic",
+        "oauth2_refresh",
+        "oauth2_client_credentials",
+    }
+)
+
+
+@dataclass(frozen=True)
+class ConnectorDescriptor:
+    id: str
+    display_name: str
+    roles: tuple[str, ...]
+    auth_modes: tuple[str, ...]
+    sync_modes: tuple[str, ...]
+    form_fields: tuple[Mapping[str, Any], ...]
+    evidence: str
+    certification_skips: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "roles", tuple(self.roles))
+        object.__setattr__(self, "auth_modes", tuple(self.auth_modes))
+        object.__setattr__(self, "sync_modes", tuple(self.sync_modes))
+        object.__setattr__(
+            self,
+            "form_fields",
+            tuple(MappingProxyType(dict(item)) for item in self.form_fields),
+        )
+        skips = dict(self.certification_skips)
+        if any(not key or not str(reason).strip() for key, reason in skips.items()):
+            raise ValueError("certification skip names and reasons must be non-empty")
+        object.__setattr__(self, "certification_skips", MappingProxyType(skips))
 
 
 def load_sdk_protocol_message(line: str) -> dict[str, Any] | None:
@@ -76,6 +116,7 @@ class BaseConnector(ABC):
     name: str = "base"
     supports_read: bool = True
     supports_write: bool = False
+    descriptor: ConnectorDescriptor | None = None
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
@@ -120,10 +161,33 @@ class BaseConnector(ABC):
         raise NotImplementedError(f"{self.name} does not implement write()")
 
 
-def register_connector(cls: type[BaseConnector]) -> type[BaseConnector]:
+def register_connector(
+    cls: type[BaseConnector],
+    *,
+    descriptor: ConnectorDescriptor | None = None,
+) -> type[BaseConnector]:
     key = (cls.name or cls.__name__).lower()
+    registered_descriptor = descriptor or cls.__dict__.get("descriptor")
+    if registered_descriptor is not None:
+        if registered_descriptor.id.lower() != key:
+            raise ValueError(
+                f"Connector descriptor id {registered_descriptor.id!r} "
+                f"does not match registry id {key!r}"
+            )
+        cls.descriptor = registered_descriptor
+        _SDK_DESCRIPTORS[key] = registered_descriptor
+    else:
+        _SDK_DESCRIPTORS.pop(key, None)
     _SDK_REGISTRY[key] = cls
     return cls
+
+
+def get_descriptor(connector_id: str) -> ConnectorDescriptor | None:
+    return _SDK_DESCRIPTORS.get((connector_id or "").lower())
+
+
+def list_descriptors() -> list[ConnectorDescriptor]:
+    return [_SDK_DESCRIPTORS[key] for key in sorted(_SDK_DESCRIPTORS)]
 
 
 def get_sdk_connector(name: str) -> type[BaseConnector] | None:
@@ -146,6 +210,21 @@ class SingerTapBridge(BaseConnector):
     name = "singer_tap"
     supports_read = True
     supports_write = False
+    descriptor = ConnectorDescriptor(
+        id="singer_tap",
+        display_name="Singer tap",
+        roles=("source",),
+        auth_modes=(),
+        sync_modes=("full_refresh",),
+        form_fields=(
+            {"name": "tap_command", "sensitive": False},
+            {"name": "tap_config", "sensitive": True},
+        ),
+        evidence="synthetic-fixture",
+        certification_skips={
+            "rate_limit": "the tap owns HTTP; the bridge has no request layer"
+        },
+    )
 
     _SHELL_METACHARS = frozenset({";", "|", "&", ">", "<", "$", "`", "\\"})
 
