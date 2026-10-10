@@ -8,6 +8,16 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services import audit_log, integrations_store, scim_service, team_store
+from services.effective_role import (
+    membership_role_to_gate_role,
+    resolve_effective_role,
+    workspace_id_from_request_headers,
+)
+from services.rbac import (
+    PrivilegeEscalation,
+    assert_grant_within,
+    principal_permissions,
+)
 from services.workspace_access import actor_email
 
 router = APIRouter(prefix="/iam", tags=["IAM"])
@@ -59,10 +69,64 @@ def _audit_key_details(key: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _caller_permissions(request: Request) -> set[str]:
+    user = getattr(request.state, "user", None)
+    role = getattr(request.state, "effective_role", None)
+    if not role:
+        role = resolve_effective_role(
+            user,
+            workspace_id_from_request_headers(request.headers),
+        )
+    return principal_permissions(user, role)
+
+
+def _check_grant(
+    request: Request,
+    *,
+    route: str,
+    target_role: str,
+    target_scopes: list[str] | None,
+) -> None:
+    granted = principal_permissions(
+        {"scopes": target_scopes} if target_scopes is not None else {},
+        target_role,
+    )
+    try:
+        assert_grant_within(_caller_permissions(request), granted)
+    except PrivilegeEscalation as exc:
+        actor = actor_email(request)
+        audit_log.append_audit_event(
+            action="iam.privilege_escalation.denied",
+            resource=route,
+            actor=actor,
+            level="warn",
+            details={
+                "route": route,
+                "caller": actor,
+                "target_role": target_role,
+                "target_scopes": target_scopes,
+                "missing": list(exc.missing),
+            },
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Cannot grant permissions you do not hold: "
+                + ", ".join(exc.missing)
+            ),
+        ) from exc
+
+
 @router.post("/service-accounts")
 def create_service_account(body: ServiceAccountCreate, request: Request):
     if not body.name.strip():
         raise HTTPException(status_code=400, detail="name must not be blank")
+    _check_grant(
+        request,
+        route="POST /api/v1/iam/service-accounts",
+        target_role=body.role,
+        target_scopes=body.scopes,
+    )
     actor = actor_email(request)
     try:
         key = integrations_store.create_api_key(
@@ -97,6 +161,17 @@ def list_service_accounts():
 
 @router.post("/api-keys/{key_id}/rotate")
 def rotate_api_key(key_id: str, body: ApiKeyRotation, request: Request):
+    existing = next(
+        (item for item in integrations_store.list_api_keys() if item.get("id") == key_id),
+        None,
+    )
+    if existing is not None:
+        _check_grant(
+            request,
+            route=f"POST /api/v1/iam/api-keys/{key_id}/rotate",
+            target_role=existing.get("role") or "viewer",
+            target_scopes=existing.get("scopes"),
+        )
     actor = actor_email(request)
     try:
         key = integrations_store.rotate_api_key(
@@ -155,6 +230,12 @@ def revoke_service_account(key_id: str, request: Request):
 
 @router.post("/scim-token")
 def create_scim_token(request: Request, body: ScimTokenCreate | None = None):
+    _check_grant(
+        request,
+        route="POST /api/v1/iam/scim-token",
+        target_role="admin",
+        target_scopes=["scim.provision"],
+    )
     actor = actor_email(request)
     try:
         key = integrations_store.create_api_key(
@@ -196,6 +277,12 @@ def put_scim_group_mappings(body: ScimGroupMappingsUpdate, request: Request):
             raise HTTPException(status_code=400, detail="role is not a supported workspace role")
         if team_store.get_workspace(mapping.workspace_id) is None:
             raise HTTPException(status_code=400, detail="workspace_id does not exist")
+        _check_grant(
+            request,
+            route="PUT /api/v1/iam/scim/group-mappings",
+            target_role=membership_role_to_gate_role(mapping.role),
+            target_scopes=None,
+        )
         mappings[key] = {
             "workspace_id": mapping.workspace_id,
             "role": mapping.role,

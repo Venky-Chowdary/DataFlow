@@ -141,13 +141,34 @@ def test_discovery_authentication_and_scope_isolation(scim_client):
         "/api/v1/connectors/",
         headers=_auth(scim_client["scim"]),
     ).status_code == 403
-    for tool in ("get_transfer_capabilities", "start_transfer"):
-        response = client.post(
-            "/api/v1/mcp/tools/call",
-            headers=_auth(scim_client["scim"]),
-            json={"name": tool, "arguments": {}},
-        )
-        assert response.status_code == 403, response.text
+    streamable = client.post(
+        "/api/v1/mcp",
+        headers={
+            **_auth(scim_client["scim"]),
+            "Accept": "application/json",
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "list_jobs", "arguments": {}},
+        },
+    )
+    assert streamable.status_code == 200, streamable.text
+    stream_body = streamable.json()
+    stream_denial = (
+        stream_body.get("error", {}).get("message")
+        or (stream_body.get("result", {}).get("content") or [{}])[0].get("text", "")
+    )
+    assert "Your role" in str(stream_denial)
+
+    rest = client.post(
+        "/api/v1/mcp/tools/call",
+        headers=_auth(scim_client["scim"]),
+        json={"name": "list_jobs", "arguments": {}},
+    )
+    assert rest.status_code == 422, rest.text
+    assert "Your role" in rest.json()["detail"]["error"]
 
 
 def test_existing_account_is_linked_without_exposing_password(scim_client):

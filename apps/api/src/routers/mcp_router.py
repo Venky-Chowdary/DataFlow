@@ -240,14 +240,6 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     if mcp_auth_required():
         mcp_user = getattr(http_request.state, "user", None) or {}
         mcp_role = str(mcp_user.get("role") or "viewer")
-        if mcp_user.get("kind") == "scim":
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "Permission denied: ai.use",
-                    "required_permission": "ai.use",
-                },
-            )
     actor = getattr(getattr(http_request, "state", None), "user_email", None) or client
     correlation_id = getattr(http_request.state, "correlation_id", None)
     limit = check_mcp_rate_limit(str(actor or client))

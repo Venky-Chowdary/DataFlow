@@ -37,6 +37,10 @@ _MEMBERSHIP_TO_GATE_ROLE = {"admin": "admin", "editor": "editor", "viewer": "vie
 _ROLE_RANK = {"viewer": 0, "operator": 1, "editor": 2, "admin": 3}
 
 
+def membership_role_to_gate_role(role: str) -> str:
+    return _MEMBERSHIP_TO_GATE_ROLE.get((role or "").strip().lower(), "viewer")
+
+
 def _rank(role: str) -> int:
     return _ROLE_RANK.get(role, 0)
 

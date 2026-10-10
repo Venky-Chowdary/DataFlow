@@ -254,6 +254,21 @@ def principal_permissions(user: dict[str, Any] | None, role: str) -> set[str]:
     return permissions
 
 
+class PrivilegeEscalation(PermissionError):
+    def __init__(self, missing: set[str]):
+        self.missing = tuple(sorted(missing))
+        super().__init__(", ".join(self.missing))
+
+
+def assert_grant_within(
+    caller_permissions: set[str],
+    granted_permissions: set[str],
+) -> None:
+    missing = granted_permissions - caller_permissions
+    if missing:
+        raise PrivilegeEscalation(missing)
+
+
 def role_names() -> tuple[str, ...]:
     """The closed role set, least to most authority.
 
