@@ -3832,7 +3832,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
     try:
         from connectors.dynamodb_reader import (
             DDB_NULL_SENTINEL,
-            describe_key_schema,
+            describe_table_key_contract,
             describe_table_schema,
             estimate_item_count,
             list_tables,
@@ -3850,8 +3850,9 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
         }
         names, types = describe_table_schema(cfg, table)
         key_schema = []
+        index_attributes = {}
         try:
-            key_schema = describe_key_schema(cfg, table)
+            key_schema, index_attributes = describe_table_key_contract(cfg, table)
         except Exception:
             logger.debug("DynamoDB key schema describe failed for %s", table, exc_info=True)
         # Sample real items — union every attribute (sparse keys) + native types.
@@ -3916,6 +3917,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "row_estimate": row_estimate,
             "primary_key_columns": pk_names,
             "dynamo_key_schema": key_schema,
+            "dynamo_index_attributes": index_attributes,
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
