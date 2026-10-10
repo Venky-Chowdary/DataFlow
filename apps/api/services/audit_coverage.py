@@ -181,11 +181,21 @@ def _suppressed_since_last(actor: str, permission: str, path: str) -> int | None
     return suppressed
 
 
+def unruled_route_suppressed_since_last(request: Request) -> int | None:
+    """Apply the denial-window keying to an allowed unruled-route warning."""
+    return _suppressed_since_last(
+        audit_log.actor_from_request(request),
+        "no_rule",
+        request.url.path,
+    )
+
+
 def record_authz_denial(
     request: Request,
     *,
     required_permission: str,
     effective_role: str,
+    reason: str | None = None,
 ) -> None:
     actor = audit_log.actor_from_request(request)
     path = request.url.path
@@ -204,6 +214,8 @@ def record_authz_denial(
         "method": request.method.upper(),
         "suppressed_since_last": suppressed,
     }
+    if reason:
+        details["reason"] = reason
     if api_key_id:
         details["api_key_id"] = str(api_key_id)
 

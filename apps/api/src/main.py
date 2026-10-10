@@ -93,6 +93,9 @@ async def lifespan(app: FastAPI):
         configure_logging()
     except Exception as le:  # pragma: no cover - logging must never block boot
         print(f"[!] Logging bootstrap warning: {le}")
+    from services.rbac import record_unruled_routes_allowed_startup
+
+    record_unruled_routes_allowed_startup()
     os.environ.setdefault("DATAFLOW_VECTOR_STORE_DIR", str(vector_store_dir()))
     try:
         from services.integrations_store import apply_integrations_to_env

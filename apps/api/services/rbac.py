@@ -13,14 +13,94 @@ is not blocked, but production must still gate based on the actual role claim.
 
 from __future__ import annotations
 
+import logging
+import os
+import re
+import threading
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+from starlette.routing import Mount
 
 from src.services import auth_service as _auth_service
 
+logger = logging.getLogger(__name__)
+
+
+class RBACConfigError(ValueError):
+    """Invalid RBAC environment configuration."""
+
+
+class _NoRule:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NO_RULE"
+
+
+NO_RULE = _NoRule()
+
+UNRULED_ROUTES_ENV = "DATAFLOW_RBAC_UNRULED_ROUTES"
+
+
+def _parse_unruled_route_mode(value: str | None) -> str:
+    mode = "deny" if value is None else value.strip().lower()
+    if mode not in {"deny", "allow_and_log"}:
+        raise RBACConfigError(
+            f"Invalid {UNRULED_ROUTES_ENV} value {value!r}; expected 'deny' or "
+            "'allow_and_log'."
+        )
+    return mode
+
+
+def _load_unruled_route_mode(value: str | None) -> str:
+    try:
+        return _parse_unruled_route_mode(value)
+    except RBACConfigError as exc:
+        logger.error("%s", exc)
+        return "deny"
+
+
+UNRULED_ROUTE_MODE = _load_unruled_route_mode(os.getenv(UNRULED_ROUTES_ENV))
+_UNRULED_STARTUP_RECORDED = False
+_UNRULED_STARTUP_LOCK = threading.Lock()
+_APP_ROUTE_CACHE: WeakKeyDictionary[object, tuple[tuple[frozenset[str], re.Pattern[str]], ...]] = (
+    WeakKeyDictionary()
+)
+_APP_ROUTE_CACHE_LOCK = threading.Lock()
+
+
+def record_unruled_routes_allowed_startup() -> None:
+    """Warn and audit once per process when legacy unruled fallback is enabled."""
+    global _UNRULED_STARTUP_RECORDED
+    if UNRULED_ROUTE_MODE != "allow_and_log":
+        return
+    with _UNRULED_STARTUP_LOCK:
+        if _UNRULED_STARTUP_RECORDED:
+            return
+        _UNRULED_STARTUP_RECORDED = True
+    logger.warning(
+        "%s=allow_and_log preserves legacy permission fallbacks for unruled routes",
+        UNRULED_ROUTES_ENV,
+    )
+    try:
+        from services import audit_log
+
+        audit_log.append_audit_event(
+            action="authz.config.unruled_routes_allowed",
+            actor="system",
+            resource=UNRULED_ROUTES_ENV,
+            details={"mode": "allow_and_log", "environment_variable": UNRULED_ROUTES_ENV},
+        )
+    except Exception as exc:
+        logger.error(
+            "Unruled-route startup audit failed (%s)",
+            type(exc).__name__,
+            exc_info=exc,
+        )
 
 class Permission:
     JOB_READ = "job.read"
@@ -154,7 +234,6 @@ _PUBLIC_PATHS = {
 _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/iam/", Permission.IAM_MANAGE),
     ("*", "/api/v1/scim/v2", Permission.SCIM_PROVISION),
-    ("*", "/api/v1/admin/", Permission.WORKSPACE_MANAGE),
     # Rotating your own password is not workspace administration.
     ("POST", "/api/v1/auth/change-password", Permission.ACCOUNT_SELF),
     ("POST", "/auth/change-password", Permission.ACCOUNT_SELF),
@@ -227,9 +306,44 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/v1/connectors/", Permission.CONNECTOR_READ),
     ("*", "/api/v1/connectors/", Permission.CONNECTOR_WRITE),
     ("*", "/api/v1/query/", Permission.QUERY_USE),
-    ("GET", "/api/v1/jobs/", Permission.JOB_READ),
-    ("POST", "/api/v1/jobs/", Permission.JOB_MANAGE),
+    # Explicit rules for routes that previously relied on method fallbacks.
+    # Keep these after specific policy entries so the latter retain precedence.
+    ("POST", "/api/v1/audit/", Permission.CONNECTOR_WRITE),
+    ("GET", "/api/v1/auth/", Permission.JOB_READ),
+    ("GET", "/api/v1/automations/", Permission.JOB_READ),
+    ("GET", "/api/v1/cdc/", Permission.JOB_READ),
+    ("POST", "/api/v1/cdc/", Permission.CONNECTOR_WRITE),
+    ("GET", "/api/v1/contracts/", Permission.JOB_READ),
+    ("POST", "/api/v1/contracts/", Permission.CONNECTOR_WRITE),
+    ("GET", "/api/v1/ops/", Permission.JOB_READ),
+    ("POST", "/api/v1/ops/", Permission.CONNECTOR_WRITE),
+    ("GET", "/api/v1/preflight/", Permission.JOB_READ),
+    ("POST", "/api/v1/preflight/", Permission.CONNECTOR_WRITE),
+    ("GET", "/api/v1/repair/", Permission.JOB_READ),
+    ("POST", "/api/v1/repair/", Permission.CONNECTOR_WRITE),
+    ("GET", "/api/v1/training-agent/", Permission.JOB_READ),
+    ("POST", "/api/v1/training-agent/", Permission.CONNECTOR_WRITE),
+    ("POST", "/api/v1/transfer/", Permission.CONNECTOR_WRITE),
+    ("GET", "/api/v1/transforms/", Permission.JOB_READ),
+    ("POST", "/api/v1/transforms/", Permission.CONNECTOR_WRITE),
+    ("PATCH", "/api/v1/transforms/", Permission.CONNECTOR_WRITE),
+    ("DELETE", "/api/v1/transforms/", Permission.CONNECTOR_WRITE),
+    ("GET", "/api/v1/usage/", Permission.JOB_READ),
+    ("GET", "/auth/", Permission.JOB_READ),
+    ("GET", "/docs/", Permission.JOB_READ),
+    ("GET", "/health/", Permission.JOB_READ),
+    ("GET", "/metrics", Permission.JOB_READ),
 ]
+
+# Exact method/path entries preserve fallback behavior on root and special
+# paths that cannot be represented safely by a prefix.
+_EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
+    ("GET", "/", Permission.JOB_READ),
+    ("GET", "/api/v1", Permission.JOB_READ),
+    ("GET", "/api/v1/health", Permission.JOB_READ),
+    ("GET", "/api/v1/contracts", Permission.JOB_READ),
+    ("POST", "/api/v1/contracts", Permission.CONNECTOR_WRITE),
+)
 
 
 def normalize_role(role: str | None) -> str:
@@ -317,22 +431,108 @@ def _is_public_path(path: str) -> bool:
     return False
 
 
-def _required_permission(method: str, path: str) -> str | None:
-    if method == "POST" and path == "/api/v1/mcp/tools/call":
-        return None
-    if _is_public_path(path):
-        return None
-    for rule_method, prefix, permission in _PATH_RULES:
-        if rule_method != "*" and method != rule_method:
-            continue
-        if path.startswith(prefix):
-            return permission
-    # Default: GET is read, mutations require editor-level write.
+def _fallback_permission(method: str) -> str | None:
     if method == "GET":
         return Permission.JOB_READ
     if method in ("POST", "PUT", "PATCH", "DELETE"):
         return Permission.CONNECTOR_WRITE
     return None
+
+
+def _join_route_path(prefix: str, path: str) -> str:
+    if not prefix:
+        return path
+    if prefix.endswith("/") and path.startswith("/"):
+        return prefix + path[1:]
+    return prefix + path
+
+
+def _walk_route_patterns(routes: Any, prefix: str = ""):
+    for route in routes:
+        if isinstance(route, Mount):
+            children = getattr(route, "routes", None)
+            if children is None:
+                children = getattr(getattr(route, "app", None), "routes", ())
+            yield from _walk_route_patterns(
+                children or (), _join_route_path(prefix, route.path)
+            )
+            continue
+
+        if type(route).__name__ == "_IncludedRouter":
+            context = getattr(route, "include_context", None)
+            nested_prefix = getattr(context, "prefix", "") or ""
+            original_router = getattr(route, "original_router", None)
+            yield from _walk_route_patterns(
+                getattr(original_router, "routes", ()),
+                _join_route_path(prefix, nested_prefix),
+            )
+            continue
+
+        template = getattr(route, "path", None)
+        if template is None:
+            continue
+        methods = getattr(route, "methods", None) or {"GET"}
+        for method in methods:
+            yield method.upper(), _join_route_path(prefix, template)
+
+
+def _compile_route_template(template: str) -> re.Pattern[str]:
+    parts = re.split(r"(\{[^{}]+\})", template)
+    pattern = "".join(
+        ".*"
+        if part.startswith("{")
+        and part.endswith("}")
+        and part[1:-1].endswith(":path")
+        else (
+            "[^/]+"
+            if part.startswith("{") and part.endswith("}")
+            else re.escape(part)
+        )
+        for part in parts
+    )
+    return re.compile(f"^{pattern}$")
+
+
+def _app_route_patterns(
+    app: object,
+) -> tuple[tuple[frozenset[str], re.Pattern[str]], ...]:
+    with _APP_ROUTE_CACHE_LOCK:
+        cached = _APP_ROUTE_CACHE.get(app)
+        if cached is not None:
+            return cached
+        patterns = tuple(
+            (frozenset({method}), _compile_route_template(template))
+            for method, template in _walk_route_patterns(
+                getattr(app, "routes", ())
+            )
+        )
+        _APP_ROUTE_CACHE[app] = patterns
+        return patterns
+
+
+def _request_matches_real_route(app: object, method: str, path: str) -> bool:
+    method = "GET" if method.upper() == "HEAD" else method.upper()
+    return any(
+        method in methods and pattern.fullmatch(path)
+        for methods, pattern in _app_route_patterns(app)
+    )
+
+
+def _required_permission(method: str, path: str) -> str | _NoRule | None:
+    method = "GET" if method.upper() == "HEAD" else method.upper()
+    if method == "POST" and path == "/api/v1/mcp/tools/call":
+        return None
+    if _is_public_path(path):
+        return None
+    for rule_method, exact_path, permission in _EXACT_PATH_RULES:
+        if method == rule_method and path == exact_path:
+            return permission
+    for rule_method, prefix, permission in _PATH_RULES:
+        if rule_method != "*" and method != rule_method:
+            continue
+        if path.startswith(prefix):
+            return permission
+    return NO_RULE
 
 
 class RBACMiddleware(BaseHTTPMiddleware):
@@ -346,14 +546,82 @@ class RBACMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         path = request.url.path
-        if _is_public_path(path):
+        method = request.method.upper()
+        if _is_public_path(path) or (
+            method == "POST" and path == "/api/v1/mcp/tools/call"
+        ):
             return await call_next(request)
 
-        permission = _required_permission(request.method, path)
+        route_method = "GET" if method == "HEAD" else method
+        if _request_matches_real_route(request.app, route_method, path):
+            permission = _required_permission(route_method, path)
+        else:
+            permission = NO_RULE
+        user = getattr(request.state, "user", None)
+
+        if permission is NO_RULE:
+            if UNRULED_ROUTE_MODE == "allow_and_log":
+                suppressed = None
+                try:
+                    from services.audit_coverage import (
+                        unruled_route_suppressed_since_last,
+                    )
+
+                    suppressed = unruled_route_suppressed_since_last(request)
+                except Exception as exc:
+                    logger.error(
+                        "Unruled-route warning dedupe failed (%s)",
+                        type(exc).__name__,
+                        exc_info=exc,
+                    )
+                logger.warning(
+                    "Unruled RBAC route %s %s allowed by %s "
+                    "(deduplicated=%s, suppressed_since_last=%s)",
+                    request.method.upper(),
+                    path,
+                    UNRULED_ROUTES_ENV,
+                    suppressed is None,
+                    suppressed,
+                )
+                permission = _fallback_permission(request.method.upper())
+            else:
+                from services.effective_role import (
+                    resolve_effective_role,
+                    workspace_id_from_request_headers,
+                )
+
+                effective = resolve_effective_role(
+                    user, workspace_id_from_request_headers(request.headers)
+                )
+                request.state.effective_role = effective
+                try:
+                    from services.audit_coverage import record_authz_denial
+
+                    record_authz_denial(
+                        request,
+                        required_permission="no_rule",
+                        effective_role=effective,
+                        reason="no_rule",
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "RBAC no-rule denial audit failed (%s)",
+                        type(exc).__name__,
+                        exc_info=exc,
+                    )
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": "No RBAC rule is configured for this route.",
+                        "reason": "no_rule",
+                        "required_permission": "no_rule",
+                        "effective_role": effective,
+                    },
+                )
+
         if permission is None:
             return await call_next(request)
 
-        user = getattr(request.state, "user", None)
         # Imported here, not at module import: the resolver reads this module's
         # role table, so a module-level import would be circular.
         from services.effective_role import (
