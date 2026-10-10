@@ -157,7 +157,7 @@ def test_soft_drop_net_additive_under_propagate():
     assert any(s.get("kind") == "drop" for s in evo["soft_net_additive"])
     assert evo["action"] in {"propagate", "continue"}
 
-def test_warns_on_unmapped_destination_columns():
+def test_unmapped_destination_column_without_history_warns_not_review():
     report = detect_schema_drift(
         source_columns=["id"],
         source_schema={"id": "INTEGER"},
@@ -167,9 +167,29 @@ def test_warns_on_unmapped_destination_columns():
         table_exists=True,
     )
     assert report["orphan_targets"] == ["legacy_flag"]
-    # QA MX3-17: the column stops being fed — a drop that needs review.
+    assert report["severity"] == "warning"
+    assert "1 destination column(s) are unmapped" in report["issues"]
+    assert report["schema_evolution"]["action"] != "review"
+    assert report["schema_evolution"]["should_pause"] is False
+
+
+def test_previously_fed_destination_column_is_drop_review():
+    report = detect_schema_drift(
+        source_columns=["id"],
+        source_schema={"id": "INTEGER"},
+        target_columns=["id", "legacy_flag"],
+        target_schema={"id": "INTEGER", "legacy_flag": "BOOLEAN"},
+        mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
+        table_exists=True,
+        previous_source_columns=["id", "legacy_flag"],
+        previous_source_schema={"id": "INTEGER", "legacy_flag": "BOOLEAN"},
+    )
+    assert report["orphan_targets"] == ["legacy_flag"]
     assert report["schema_evolution"]["action"] == "review"
-    assert any(s.get("kind") == "drop" for s in report["schema_evolution"]["soft_net_additive"])
+    assert any(
+        change.get("kind") == "drop"
+        for change in report["schema_evolution"]["soft_net_additive"]
+    )
 
 
 def test_ignores_case_only_target_name_differences():
