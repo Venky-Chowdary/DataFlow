@@ -31,6 +31,7 @@ def _pg_reachable() -> bool:
 @pytest.mark.parametrize(
     ("value", "strict", "expected"),
     [
+        ("1,99", True, None),
         ("4,0", True, None),
         ("1.234,5", True, None),
         ("4,0", False, "4.0"),

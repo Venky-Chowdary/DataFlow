@@ -6,11 +6,10 @@ import logging
 import os
 from services.brand_env import getenv_brand
 import sys
-import threading
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Iterator, Optional, Sequence
+from typing import Any, Iterator, Optional
 
 try:
     import resource  # Unix-only; unavailable on Windows
@@ -51,13 +50,10 @@ try:
         confidence_threshold_for_mode,
         probe_destination,
         run_file_preflight,
-        run_transfer_policy_gates,
     )
     from services.row_filter import apply_row_filter
     from services.scd2_engine import apply_scd2
     from services.shape_apply import (
-        ShapeError,
-        ShapeRowError,
         ShapeRunner,
         shaped_schema,
     )
@@ -100,13 +96,10 @@ except (
         confidence_threshold_for_mode,
         probe_destination,
         run_file_preflight,
-        run_transfer_policy_gates,
     )
     from src.services.row_filter import apply_row_filter
     from src.services.scd2_engine import apply_scd2
     from src.services.shape_apply import (
-        ShapeError,
-        ShapeRowError,
         ShapeRunner,
         shaped_schema,
     )
@@ -154,7 +147,6 @@ from .models import (
 from .reconcile_step import run_reconciliation
 from .registry import validate_transfer
 from .stream import (
-    peek_stream_source,
     run_non_cdc_multi_stream_sequential,
     stream_database_transfer,
     stream_scd2_mirror_transfer,
@@ -4199,6 +4191,17 @@ class UniversalTransferEngine:
         contract_id = ""
         load_history_report: dict[str, Any] = {}
         verified = False
+        number_token = set_active_number_locale(_run_number_locale(request))
+        from services.transform_engine import (
+            reset_strict_number_reading,
+            set_strict_number_reading,
+        )
+
+        strict_number_token = set_strict_number_reading(
+            str(getattr(request, "validation_mode", "") or "strict").strip().lower()
+            == "strict"
+            and not str(getattr(request, "number_locale", "") or "").strip()
+        )
         try:
             mongo.update_job_status(
                 job_id,
@@ -4678,7 +4681,6 @@ class UniversalTransferEngine:
                 message=opening_batch_message(total_rows, request.stream_contracts),
             )
 
-            is_streaming = True
             stream_contract = resolve_sync_contract(request.stream_contracts)
             selected_streams = resolve_selected_sync_contracts(request.stream_contracts)
             multi_non_cdc = len(selected_streams) > 1
@@ -5227,6 +5229,9 @@ class UniversalTransferEngine:
                 operation=request.operation,
                 contract_id=contract_id,
             )
+        finally:
+            reset_strict_number_reading(strict_number_token)
+            reset_active_number_locale(number_token)
 
     def _execute_file_streaming(
         self,
@@ -5244,6 +5249,17 @@ class UniversalTransferEngine:
         contract_id = ""
         load_history_report: dict[str, Any] = {}
         verified = False
+        number_token = set_active_number_locale(_run_number_locale(request))
+        from services.transform_engine import (
+            reset_strict_number_reading,
+            set_strict_number_reading,
+        )
+
+        strict_number_token = set_strict_number_reading(
+            str(getattr(request, "validation_mode", "") or "strict").strip().lower()
+            == "strict"
+            and not str(getattr(request, "number_locale", "") or "").strip()
+        )
         try:
             filename = request.source_filename or "upload.csv"
             content = prepare_stream_content(
@@ -5652,7 +5668,6 @@ class UniversalTransferEngine:
                 message=opening_batch_message(total_rows, request.stream_contracts),
             )
 
-            is_streaming = True
             stream_contract = resolve_sync_contract(request.stream_contracts)
             effective_sync = resolve_effective_sync_mode(
                 request.sync_mode,
@@ -5988,6 +6003,9 @@ class UniversalTransferEngine:
                 operation=request.operation,
                 contract_id=contract_id,
             )
+        finally:
+            reset_strict_number_reading(strict_number_token)
+            reset_active_number_locale(number_token)
 
     def _create_pending_job(self, request: TransferRequest) -> str:
         self._resolve_saved_connectors(request)
