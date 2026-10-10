@@ -41,6 +41,37 @@ def test_mysql_errors_are_classified_by_code_not_by_wrapper(code, message, lost)
     assert is_connection_lost(pymysql.err.OperationalError(code, message)) is lost
 
 
+@pytest.mark.parametrize("code,lost", [(1170, False), (1071, False), (2013, True), (2006, True)])
+def test_sqlalchemy_wrapped_mysql_errors_are_classified_by_the_driver_code(code, lost):
+    from sqlalchemy import exc as sa_exc
+
+    orig = pymysql.err.OperationalError(code, "driver message")
+    wrapped = sa_exc.OperationalError("CREATE TABLE t (...)", {}, orig)
+    assert type(wrapped).__module__ == "sqlalchemy.exc"
+    assert is_connection_lost(wrapped) is lost
+    assert is_connection_lost(sa_exc.DBAPIError("stmt", {}, orig)) is lost
+
+
+@pytest.mark.parametrize("code,lost", [(1170, False), (2013, True)])
+def test_chained_mysql_errors_are_classified_by_the_driver_code(code, lost):
+    class WriterSetupError(RuntimeError):
+        pass
+
+    try:
+        try:
+            raise pymysql.err.OperationalError(code, "driver message")
+        except pymysql.err.OperationalError as driver_exc:
+            raise WriterSetupError("connection setup failed") from driver_exc
+    except WriterSetupError as chained:
+        assert is_connection_lost(chained) is lost
+
+
+def test_cyclic_error_chain_is_bounded():
+    a, b = RuntimeError("operational a"), RuntimeError("operational b")
+    a.__cause__, b.__cause__ = b, a
+    assert is_connection_lost(a) is False
+
+
 def test_closed_socket_without_a_code_stays_a_lost_connection():
     assert is_connection_lost(pymysql.err.InterfaceError(0, "")) is True
 

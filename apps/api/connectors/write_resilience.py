@@ -112,15 +112,46 @@ MYSQL_CONNECTION_LOST_CODES: frozenset[int] = frozenset(
 _MYSQL_DRIVER_MODULES = ("pymysql", "MySQLdb", "mysql.connector", "mariadb")
 
 
+_WRAPPED_ERROR_DEPTH = 5
+
+
+def _mysql_driver_error(exc: BaseException) -> BaseException | None:
+    """The MySQL-family driver exception inside ``exc``, if any.
+
+    SQLAlchemy (generic_sql) wraps the driver error as ``DBAPIError.orig``;
+    other layers chain it via ``raise … from`` / implicit context. Depth is
+    bounded so a cyclic chain cannot spin.
+    """
+    seen: set[int] = set()
+    frontier: list[BaseException] = [exc]
+    for _ in range(_WRAPPED_ERROR_DEPTH):
+        nxt: list[BaseException] = []
+        for err in frontier:
+            if id(err) in seen:
+                continue
+            seen.add(id(err))
+            if type(err).__module__.startswith(_MYSQL_DRIVER_MODULES):
+                return err
+            context = None if err.__suppress_context__ else err.__context__
+            for inner in (getattr(err, "orig", None), err.__cause__, context):
+                if isinstance(inner, BaseException):
+                    nxt.append(inner)
+        if not nxt:
+            break
+        frontier = nxt
+    return None
+
+
 def _mysql_error_code(exc: BaseException | str) -> int | None:
-    """Server/client error code of a MySQL-family driver exception, else None."""
+    """Server/client error code of a (possibly wrapped) MySQL driver error, else None."""
     if not isinstance(exc, BaseException):
         return None
-    if not type(exc).__module__.startswith(_MYSQL_DRIVER_MODULES):
+    err = _mysql_driver_error(exc)
+    if err is None:
         return None
-    code = getattr(exc, "errno", None)
-    if not isinstance(code, int) and exc.args and isinstance(exc.args[0], int):
-        code = exc.args[0]
+    code = getattr(err, "errno", None)
+    if not isinstance(code, int) and err.args and isinstance(err.args[0], int):
+        code = err.args[0]
     # pymysql raises InterfaceError(0, "") on a closed socket: no code to read.
     return code if isinstance(code, int) and code > 0 else None
 
