@@ -760,6 +760,15 @@ def introspect_endpoint(
     if fmt in _SAAS_INTROSPECT_DRIVERS:
         return _saas_introspect(out, endpoint, cfg, fmt)
 
+    if fmt == "rest_api":
+        # Reachability + field names come from the canonical describe; typing
+        # stays with the sampled read Map already uses. Stamping the describe's
+        # carriers here made Validate disagree with Map (NUMERIC(6,2) vs TEXT).
+        described = _saas_introspect(out, endpoint, cfg, fmt)
+        described["schema"] = {}
+        described.pop("column_nullability", None)
+        return described
+
     specialty = _specialty_object_list(fmt, cfg)
     if specialty is not None:
         connected, names, kind, message = specialty

@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 from urllib.parse import unquote, urlparse
 
 from connectors.sql_dsn import parse_sql_url
+
+_logger = logging.getLogger(__name__)
 
 
 # Longer tokens first. ``postgres`` must not swallow ``postgresql``, and
@@ -45,11 +48,30 @@ _TYPE_ALIASES = {
 
 
 def normalize_connector_type(raw: str) -> str:
-    t = (raw or "").strip().lower().replace("_", " ")
-    t = _TYPE_ALIASES.get(t, t.replace(" ", ""))
-    if t == "postgres":
-        t = "postgresql"
-    return t
+    """Canonical connector type for an operator/tool spelling.
+
+    Registered driver ids keep their underscores (``generic_sql``,
+    ``rest_api``, ``google_sheets``); collapsing them to ``genericsql`` made
+    every probe/read/write lookup answer "Unsupported connector type".
+    """
+    spaced = re.sub(r"[\s_\-]+", " ", (raw or "").strip().lower()).strip()
+    if not spaced:
+        return ""
+    if spaced in _TYPE_ALIASES:
+        return _TYPE_ALIASES[spaced]
+    from src.transfer.connector_capabilities import get_capabilities, resolve_driver_type
+
+    snake = spaced.replace(" ", "_")
+    collapsed = spaced.replace(" ", "")
+    for candidate in dict.fromkeys((snake, collapsed)):
+        if get_capabilities(resolve_driver_type(candidate)).get("test"):
+            return candidate
+    _logger.info(
+        "Connector type %r is not a registered driver; keeping %r for the probe to report",
+        raw,
+        snake,
+    )
+    return snake
 
 
 def parse_mongodb_url(url: str) -> dict[str, Any]:

@@ -56,7 +56,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "zendesk": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "notion": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True, "certified": False},
     "airtable": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
-    "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "rest_api": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
     "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "neo4j": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
     "couchbase": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
@@ -125,6 +125,9 @@ def typed_wire_number_locale(source_kind: str, source_format: str) -> str:
 
 # Catalog marketplace id → driver / format type
 CATALOG_ID_ALIASES: dict[str, str] = {
+    # Rows saved by the pre-MXD13 Pilot normaliser, which dropped underscores.
+    "genericsql": "generic_sql",
+    "restapi": "rest_api",
     "csv___tsv": "csv",
     "amazon_s3": "s3",
     "aws_s3": "s3",

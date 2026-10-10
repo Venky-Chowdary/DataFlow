@@ -3593,6 +3593,17 @@ def introspect_table_schema(
     try:
         schema = _schema_name(cfg)
         inspector = inspect(engine)
+        if not (table or "").strip():
+            # No object named: this is the catalog list (Pilot "list tables",
+            # Destination pickers). Reflecting columns of "" only ever failed.
+            names = sorted(str(n) for n in inspector.get_table_names(schema=schema))
+            logger.info(
+                "generic_sql listed %d table(s) for %s (schema=%s)",
+                len(names),
+                cfg.get("type") or "generic_sql",
+                schema or "default",
+            )
+            return {"ok": True, "columns": [], "tables": names, "schema": schema or ""}
         try:
             columns = inspector.get_columns(table, schema=schema)
         except Exception:
