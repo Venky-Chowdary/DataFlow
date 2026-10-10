@@ -750,7 +750,7 @@ def rotate_api_key(
         if _key_expired(source, now=now):
             raise ValueError("expired API keys cannot be rotated")
         if source.get("rotated_to"):
-            raise ValueError("API key has already been rotated")
+            raise ValueError("already been rotated")
 
         lifetime = source.get("lifetime") or (
             "never" if not source.get("expires_at") else DEFAULT_API_KEY_LIFETIME
@@ -805,7 +805,7 @@ def rotate_api_key(
             )
             if result.matched_count == 0:
                 revoke_api_key(new_id)
-                raise ValueError("API key has already been rotated")
+                raise ValueError("already been rotated")
             _save_file_api_key_record(source)
         return _public_api_key(new_record, secret=raw)
 
