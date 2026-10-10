@@ -45,6 +45,24 @@ def _ensure_container_up(name: str, host: str, port: int) -> None:
         _wait_for_port(host, port)
 
 
+def _wait_for_sqlserver_login(bootstrap, host: str, port: int) -> None:
+    deadline = time.monotonic() + 90.0
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            with bootstrap._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+            return
+        except Exception as exc:
+            last_error = exc
+            time.sleep(0.25)
+    raise AssertionError(
+        f"SQL Server did not accept a query at {host}:{port}: {last_error}"
+    ) from last_error
+
+
 def _restart_container(name: str) -> None:
     subprocess.run(
         ["docker", "restart", name],
@@ -118,22 +136,39 @@ def test_sqlserver_eos_runner_recovers_from_source_restart(
     from test_cdc_sqlserver_native_integration import (
         CFG,
         _enable_cdc_on_table,
-        _sqlserver_native_ready,
     )
     from test_cdc_oracle_logminer_txn_live import _pg_ready
 
-    if not _sqlserver_native_ready() or not _pg_ready():
+    sqlserver_cfg = {
+        **CFG,
+        "host": getenv_brand("DATAFLOW_SQLSERVER_HOST", str(CFG["host"]))
+        or str(CFG["host"]),
+        "port": int(
+            getenv_brand("DATAFLOW_SQLSERVER_PORT", str(CFG.get("port", 1433)))
+            or CFG.get("port", 1433)
+        ),
+    }
+    if (
+        not SqlServerNativeCdc(
+            sqlserver_cfg, table="cdc_native_orders", primary_key="id"
+        ).is_available()
+        or not _pg_ready()
+    ):
         pytest.skip("df-mssql or df-pg is not reachable")
     table = "GCDC_RECONNECT_" + uuid.uuid4().hex[:8].upper()
     target = table.lower() + "_dest"
     job_id = "mssql-reconnect-" + uuid.uuid4().hex[:8]
     holder = "mssql-reconnect-" + uuid.uuid4().hex[:8]
-    cfg = {**CFG, "lease_holder_id": holder, "job_id": holder}
+    cfg = {**sqlserver_cfg, "lease_holder_id": holder, "job_id": holder}
     pg = _pg_cfg()
     bootstrap = SqlServerNativeCdc(cfg, table="cdc_native_orders", primary_key="id")
     created = False
     src = EndpointConfig(
-        kind="database", format="sqlserver", table=table, schema="dbo", **CFG
+        kind="database",
+        format="sqlserver",
+        table=table,
+        schema="dbo",
+        **sqlserver_cfg,
     )
     dst = EndpointConfig(
         kind="database",
@@ -157,16 +192,31 @@ def test_sqlserver_eos_runner_recovers_from_source_restart(
         }
     ]
     restarted = False
+    polling = False
     original_conn = SqlServerNativeCdc._conn
+    original_poll_once = SqlServerNativeCdc._poll_once
 
     @contextmanager
     def restart_during_stream(self):
         nonlocal restarted
         with original_conn(self) as conn:
-            if not restarted and self.phase == "streaming":
+            if not restarted and polling and self.phase == "streaming":
                 restarted = True
                 _restart_container("df-mssql")
+                _wait_for_sqlserver_login(
+                    bootstrap,
+                    str(sqlserver_cfg["host"]),
+                    int(sqlserver_cfg["port"]),
+                )
             yield conn
+
+    def poll_once_during_stream(self):
+        nonlocal polling
+        polling = True
+        try:
+            yield from original_poll_once(self)
+        finally:
+            polling = False
 
     def source_rows() -> list[tuple[int, str]]:
         with bootstrap._conn() as conn:
@@ -193,6 +243,9 @@ def test_sqlserver_eos_runner_recovers_from_source_restart(
             conn.commit()
         with pytest.MonkeyPatch.context() as monkeypatch:
             monkeypatch.setattr(SqlServerNativeCdc, "_conn", restart_during_stream)
+            monkeypatch.setattr(
+                SqlServerNativeCdc, "_poll_once", poll_once_during_stream
+            )
             with caplog.at_level(logging.WARNING):
                 _run_postgres_eos_transfer(
                     src,
@@ -222,11 +275,12 @@ def test_sqlserver_eos_runner_recovers_from_source_restart(
         assert actual == expected == [(1, "99.00"), (2, "20.00"), (3, "30.00")]
         assert len(actual) == len({row[0] for row in actual})
     finally:
-        _ensure_container_up(
-            "df-mssql", str(CFG["host"]), int(CFG.get("port", 1433))
-        )
+        _ensure_container_up("df-mssql", str(sqlserver_cfg["host"]), int(sqlserver_cfg["port"]))
         _delete_postgres_target(pg, target)
         if created:
+            _wait_for_sqlserver_login(
+                bootstrap, str(sqlserver_cfg["host"]), int(sqlserver_cfg["port"])
+            )
             with bootstrap._conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
