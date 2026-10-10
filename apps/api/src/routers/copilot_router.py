@@ -130,8 +130,7 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
     try:
         from ..ai.copilot import get_copilot_agent
         from ..ai.copilot.pilot_agent import carries_evidence
-        from ..ai.copilot.tool_permissions import caller_role
-        from services.rbac import principal_permissions
+        from ..ai.copilot.tool_permissions import bind_request_principal
 
         from services.effective_role import workspace_id_from_request_headers
 
@@ -142,14 +141,7 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         ws = workspace_id_from_request_headers(http_request.headers)
         if ws:
             data_context["workspace_id"] = ws
-        with caller_role(
-            role,
-            permissions=(
-                principal_permissions(getattr(http_request.state, "user", None), role)
-                if role
-                else None
-            ),
-        ):
+        with bind_request_principal(http_request, role):
             result = agent.chat(request.message, history, data_context=data_context or None)
         return CopilotChatResponse(
             answer=result.answer,
@@ -413,11 +405,10 @@ async def copilot_confirm(
 
     from ..ai.copilot.ack_ledger import get_ack_ledger
     from ..ai.copilot.tool_permissions import (
-        caller_role,
+        bind_request_principal,
         can_confirm_kind,
         confirm_denial_message,
     )
-    from services.rbac import principal_permissions
 
     ack_id = (request.ack_id or "").strip()
     if not ack_id:
@@ -437,14 +428,7 @@ async def copilot_confirm(
         )
 
     role, session_actor = _caller(http_request)
-    with caller_role(
-        role,
-        permissions=(
-            principal_permissions(getattr(http_request.state, "user", None), role)
-            if role
-            else None
-        ),
-    ):
+    with bind_request_principal(http_request, role):
         can_confirm = can_confirm_kind(role, str(peek.get("kind") or ""))
     if not can_confirm:
         raise HTTPException(

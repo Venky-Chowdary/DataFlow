@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -16,9 +17,12 @@ if str(_API_ROOT) not in sys.path:
 from services.rbac import Permission
 from src.ai.copilot.tool_permissions import (
     allowed_tools,
+    bind_request_principal,
     bind_current_context,
     caller_role,
     can_confirm_kind,
+    current_caller_permissions,
+    current_caller_role,
     denial_message,
     is_permission_denial,
     is_tool_allowed,
@@ -121,9 +125,25 @@ def test_unscoped_editor_keeps_role_permissions(scoped_client):
     assert not is_permission_denial(rest_error)
 
 
-def test_permission_binding_narrows_tools_and_confirmation_and_reaches_workers():
-    from src.ai.copilot.tool_permissions import current_caller_permissions
+def test_rest_scoped_key_reaches_tool_gate_not_path_rbac(scoped_client):
+    client, token, _unscoped = scoped_client
+    response = client.post(
+        "/api/v1/mcp/tools/call",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "start_transfer", "arguments": {}},
+    )
+    body = response.json()
+    assert not (response.status_code == 403 and "required_permission" in response.text)
+    detail = body.get("detail", body)
+    if isinstance(detail, dict):
+        result = str(detail.get("error") or detail.get("detail") or body.get("output") or detail)
+    else:
+        result = str(body.get("output") or detail)
+    assert is_permission_denial(result)
+    assert "Your role" in result
 
+
+def test_permission_binding_narrows_tools_and_confirmation_and_reaches_workers():
     granted = {Permission.JOB_READ}
     with caller_role("editor", permissions=granted):
         assert current_caller_permissions() == frozenset(granted)
@@ -144,6 +164,22 @@ def test_permission_binding_narrows_tools_and_confirmation_and_reaches_workers()
             ).result()
         assert scoped_result == (frozenset(granted), False)
     assert current_caller_permissions() is None
+
+
+def test_bind_request_principal_applies_scopes_and_skips_empty_role():
+    scoped_request = SimpleNamespace(
+        state=SimpleNamespace(user={"scopes": [Permission.JOB_READ]})
+    )
+    with bind_request_principal(scoped_request, "editor"):
+        assert current_caller_permissions() == frozenset({Permission.JOB_READ})
+        assert is_tool_allowed("editor", "get_job")
+        assert not is_tool_allowed("editor", "start_transfer")
+
+    open_request = SimpleNamespace(state=SimpleNamespace(user=None))
+    with bind_request_principal(open_request, ""):
+        assert current_caller_role() == ""
+        assert current_caller_permissions() is None
+        assert is_tool_allowed("", "start_transfer")
 
 
 def test_ack_kind_outside_the_bound_scope_cannot_be_confirmed():

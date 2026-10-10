@@ -212,6 +212,19 @@ def caller_role(role: str, permissions: Iterable[str] | None = None) -> Iterator
         reset_caller_role(role_token)
 
 
+@contextlib.contextmanager
+def bind_request_principal(http_request: Any, role: str) -> Iterator[None]:
+    """Bind the role and scoped permissions for an HTTP request principal."""
+    from services.rbac import principal_permissions
+
+    user = getattr(http_request.state, "user", None)
+    with caller_role(
+        role,
+        permissions=principal_permissions(user, role) if role else None,
+    ):
+        yield
+
+
 def bind_current_context(fn: Callable[..., T]) -> Callable[..., T]:
     """Wrap ``fn`` so a worker thread runs it inside the caller's context.
 
