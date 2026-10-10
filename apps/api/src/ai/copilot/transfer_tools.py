@@ -917,6 +917,10 @@ def plan_transfer(
         pii_ack=pii_ack,
     )
 
+    contract_refusal = _plan_contract_refusal(contract_id, require_signed_contract)
+    if contract_refusal:
+        preflight = _block_plan_on_contract(preflight, contract_refusal)
+
     conversions = _type_conversions(mappings)
     unmapped = [
         r["name"]
@@ -994,6 +998,7 @@ def plan_transfer(
             # Align with Execute unlock — passed alone must not invent safe_to_start.
             "safe_to_start": _is_execute_cleared(preflight),
             **_preview_bound_contract(contract_id, require_signed_contract),
+            **({"contract_blocker": contract_refusal} if contract_refusal else {}),
         },
     )
 
@@ -1759,6 +1764,42 @@ def _preview_bound_contract(
         else "not_found"
     )
     return preview
+
+
+def _plan_contract_refusal(contract_id: str = "", require_signed_contract: Any = None) -> str:
+    """Why Confirm would refuse this contract bind; ``""`` when it would not.
+
+    Same check as staging, so plan_transfer cannot approve a bind that
+    start_transfer then refuses (QA MX3-02).
+    """
+    try:
+        _stage_bound_contract(contract_id, require_signed_contract)
+    except ValueError as exc:
+        _LOG.warning("plan_transfer: contract bind %r refused: %s", contract_id, exc)
+        return str(exc)
+    return ""
+
+
+def _block_plan_on_contract(preflight: dict[str, Any], refusal: str) -> dict[str, Any]:
+    """Turn the plan's verdict into block for a contract bind Confirm refuses."""
+    out = dict(preflight)
+    bundle = dict(out.get("proof_bundle") or {})
+    bundle["transfer_decision"] = {
+        **dict(bundle.get("transfer_decision") or {}),
+        "decision": "block",
+        "reason": refusal,
+    }
+    out["proof_bundle"] = bundle
+    out["blockers"] = [
+        *(out.get("blockers") or []),
+        {
+            "id": "contract_bind",
+            "severity": "block",
+            "message": refusal,
+            "fix": "Bind an existing SIGNED contract, or turn off require_signed_contract.",
+        },
+    ]
+    return out
 
 
 def _stage_bound_contract(
