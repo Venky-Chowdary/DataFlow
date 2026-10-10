@@ -282,3 +282,178 @@ def test_sdk_transfer_engine_pages_full_reread_upsert_without_duplicates(
         assert _SECRET not in stored_text
         assert _SECRET not in str(fake.jobs.get(f"{job_id}-retry", {}))
         assert _SECRET not in caplog.text
+
+
+def test_intercom_fresh_destination_reads_three_pages_with_epoch_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = _EngineFakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
+    monkeypatch.setenv("RETRY_BASE_DELAY_SECONDS", "0")
+    monkeypatch.setenv("RETRY_MAX_DELAY_SECONDS", "0")
+    monkeypatch.setenv("RETRY_JITTER", "false")
+
+    pages = [_records("intercom", 1, 100), _records("intercom", 101, 100), _records("intercom", 201, 50)]
+    destination_path = tmp_path / "intercom.sqlite"
+    job_id = f"gconn-intercom-fresh-{uuid.uuid4().hex[:12]}"
+
+    with FixtureServer() as fixture:
+        _configure_route(fixture, "intercom", pages, fail_page_two=False)
+        request = TransferRequest(
+            source=_endpoint("intercom", fixture.base_url, destination_path),
+            destination=_destination(destination_path, "contacts"),
+            sync_mode="upsert",
+            skip_preflight=True,
+            validation_mode="strict",
+            stream_contracts=[
+                {
+                    "name": "contacts",
+                    "primary_key": ["id"],
+                    "sync_mode": "upsert",
+                    "selected": True,
+                }
+            ],
+        )
+
+        with caplog.at_level(logging.WARNING):
+            result = UniversalTransferEngine().execute_tracked(request, job_id)
+
+        assert result.success, result.error
+        assert len(fixture.request_log) >= 3
+        rows = _table_rows(destination_path, "contacts")
+        assert len(rows) == 250
+        assert len(set(rows)) == 250
+        sample = _sample_row(destination_path, "contacts", "1")
+        assert "Intercom contact 1" in sample
+        assert "1767225500" in sample
+        assert "1767225600" in sample
+        assert _SECRET not in json.dumps(fake.jobs.get(job_id, {}), default=str)
+        assert _SECRET not in caplog.text
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="engine retry re-maps epoch INTEGER to TIMESTAMP; see CONNECTOR_CERTIFICATION.md known gap (a)",
+)
+def test_intercom_fault_then_full_reread_retry_uses_pk_upsert(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = _EngineFakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
+    monkeypatch.setenv("RETRY_BASE_DELAY_SECONDS", "0")
+    monkeypatch.setenv("RETRY_MAX_DELAY_SECONDS", "0")
+    monkeypatch.setenv("RETRY_JITTER", "false")
+
+    pages = [_records("intercom", 1, 100), _records("intercom", 101, 100), _records("intercom", 201, 50)]
+    destination_path = tmp_path / "intercom-retry.sqlite"
+    job_id = f"gconn-intercom-retry-{uuid.uuid4().hex[:12]}"
+
+    with FixtureServer() as fixture:
+        _configure_route(fixture, "intercom", pages, fail_page_two=True)
+        request = TransferRequest(
+            source=_endpoint("intercom", fixture.base_url, destination_path),
+            destination=_destination(destination_path, "contacts"),
+            sync_mode="upsert",
+            skip_preflight=True,
+            validation_mode="strict",
+            stream_contracts=[
+                {
+                    "name": "contacts",
+                    "primary_key": ["id"],
+                    "sync_mode": "upsert",
+                    "selected": True,
+                }
+            ],
+        )
+
+        with caplog.at_level(logging.WARNING):
+            failed = UniversalTransferEngine().execute_tracked(request, job_id)
+        assert not failed.success
+        assert failed.error and ("500" in failed.error or "HTTP" in failed.error)
+        assert len(_table_rows(destination_path, "contacts")) == 100
+
+        _configure_route(fixture, "intercom", pages, fail_page_two=False)
+        with caplog.at_level(logging.WARNING):
+            retried = UniversalTransferEngine().execute_tracked(request, f"{job_id}-retry")
+
+        assert retried.success, retried.error
+        rows = _table_rows(destination_path, "contacts")
+        assert len(rows) == 250
+        assert len(set(rows)) == 250
+        assert "1767225500" in _sample_row(destination_path, "contacts", "1")
+        assert _SECRET not in json.dumps(fake.jobs, default=str)
+        assert _SECRET not in caplog.text
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="SDK resume fails strict Gate-8 on a session-only write digest; see CONNECTOR_CERTIFICATION.md known gap (b)",
+)
+def test_github_resume_uses_saved_page_two_state_and_reconciles_population(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from connectors.sdk.transfer_bridge import _decode_cursor_state
+
+    fake = _EngineFakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
+    monkeypatch.setenv("RETRY_BASE_DELAY_SECONDS", "0")
+    monkeypatch.setenv("RETRY_MAX_DELAY_SECONDS", "0")
+    monkeypatch.setenv("RETRY_JITTER", "false")
+
+    pages = [_records("github", 1, 100), _records("github", 101, 100), _records("github", 201, 50)]
+    destination_path = tmp_path / "github-resume.sqlite"
+    job_id = f"gconn-github-resume-{uuid.uuid4().hex[:12]}"
+
+    with FixtureServer() as fixture:
+        _configure_route(fixture, "github", pages, fail_page_two=True)
+        request = TransferRequest(
+            source=_endpoint("github", fixture.base_url, destination_path),
+            destination=_destination(destination_path, "issues"),
+            sync_mode="upsert",
+            skip_preflight=True,
+            validation_mode="strict",
+            stream_contracts=[
+                {
+                    "name": "issues",
+                    "primary_key": ["id"],
+                    "sync_mode": "upsert",
+                    "selected": True,
+                }
+            ],
+        )
+        failed = UniversalTransferEngine().execute_tracked(request, job_id)
+        assert not failed.success
+        assert len(_table_rows(destination_path, "issues")) == 100
+        checkpoint = fake.jobs.get(job_id, {}).get("checkpoint") or {}
+        cursor_value = checkpoint.get("cursor_value") if isinstance(checkpoint, dict) else None
+        assert cursor_value
+        assert _decode_cursor_state(cursor_value).get("page_token")
+
+        route = "/repos/acme/widgets/issues"
+        fixture.add_route(
+            route,
+            responses=[
+                FixtureResponse(
+                    body=pages[1],
+                    headers={
+                        "Link": f"<{fixture.base_url}{route}?page=3>; rel=\"next\""
+                    },
+                ),
+                FixtureResponse(body=pages[2]),
+            ],
+        )
+        request_start = len(fixture.request_log)
+        resumed = UniversalTransferEngine().execute_tracked(
+            request, job_id, resume=True
+        )
+        resume_requests = fixture.request_log[request_start:]
+        assert resume_requests and "page=2" in resume_requests[0].target
+        assert resumed.success, resumed.error
+        rows = _table_rows(destination_path, "issues")
+        assert len(rows) == 250
+        assert len(set(rows)) == 250
