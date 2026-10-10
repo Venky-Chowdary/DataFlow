@@ -1307,6 +1307,8 @@ def transfer_live_driver_types() -> list[str]:
     keys = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql"}
     for k in keys:
         caps = get_capabilities(k)
+        if caps.get("evidence") == "synthetic-fixture":
+            continue
         if transfer_ready(caps) or _source_only_ready(caps):
             live.append(k)
     return sorted(set(live))
