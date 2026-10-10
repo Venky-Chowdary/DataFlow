@@ -21,6 +21,7 @@ from services.team_store import (
     MemberAlreadyExists,
     MemberNotFound,
     PermissionDenied,
+    TeamStoreBusy,
     TeamStoreError,
     WorkspaceNotFound,
     add_workspace_member,
@@ -125,6 +126,7 @@ _TEAM_ERROR_STATUS: dict[type[TeamStoreError], int] = {
     WorkspaceNotFound: 404,
     MemberNotFound: 404,
     PermissionDenied: 403,
+    TeamStoreBusy: 503,
     # A state conflict, not malformed input: the request is well-formed and would
     # be accepted once another admin exists.
     LastAdminProtected: 409,

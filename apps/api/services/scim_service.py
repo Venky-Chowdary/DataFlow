@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from typing import Any
 
@@ -535,6 +536,39 @@ def _apply_group_members(
     actor: str,
 ) -> dict[str, Any]:
     proposed = sorted(set(proposed_members))
+    affected_ids, desired = _group_proposals(group, proposed)
+    managed = _store_call(scim_store.get_managed_memberships)
+    affected_emails = {
+        user["userName"]
+        for user_id in affected_ids
+        if (user := _store_call(scim_store.get_user, user_id)) is not None
+    }
+    workspace_ids = {
+        workspace_id
+        for (user_id, workspace_id) in desired
+        if user_id in affected_ids
+    }
+    workspace_ids.update(
+        workspace_id
+        for workspace_id, email in managed
+        if email in affected_emails
+    )
+    try:
+        with ExitStack() as locks:
+            for workspace_id in sorted(workspace_ids):
+                locks.enter_context(team_store.workspace_membership_lock(workspace_id))
+            return _apply_group_members_locked(group, proposed, actor=actor)
+    except team_store.TeamStoreBusy as exc:
+        _fail(503, str(exc), "serverError")
+
+
+def _apply_group_members_locked(
+    group: dict[str, Any],
+    proposed_members: list[str],
+    *,
+    actor: str,
+) -> dict[str, Any]:
+    proposed = sorted(set(proposed_members))
     previous = set(group.get("members", []))
     affected_ids, desired = _group_proposals(group, proposed)
     managed = _store_call(scim_store.get_managed_memberships)
@@ -626,6 +660,8 @@ def _apply_group_members(
                     )
     except team_store.LastAdminProtected as exc:
         _fail(409, str(exc), "mutability")
+    except team_store.TeamStoreBusy as exc:
+        _fail(503, str(exc), "serverError")
     except team_store.TeamStoreError as exc:
         _fail(409, str(exc), "invalidValue")
 

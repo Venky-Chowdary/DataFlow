@@ -16,14 +16,24 @@ replace rather than a second row, and the write is atomic.
 
 from __future__ import annotations
 
+import hashlib
+import threading
+import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from pymongo import ReturnDocument
 from pymongo.database import Database
-from pymongo.errors import ConfigurationError, OperationFailure, PyMongoError
+from pymongo.errors import (
+    ConfigurationError,
+    DuplicateKeyError,
+    OperationFailure,
+    PyMongoError,
+)
 
 from services.brand_env import getenv_brand
 from services.metadata_backend import json_doc_transaction, load_json_doc, mongo_database
@@ -40,6 +50,9 @@ ROLES = ("admin", "editor", "viewer")
 _LEGACY_ROLE_ALIASES = {"owner": "admin"}
 _ADMIN_ROLES = ("admin",)
 _WRITE_ROLES = ("admin", "editor")
+_membership_lock_registry: dict[str, threading.RLock] = {}
+_membership_lock_registry_guard = threading.Lock()
+_membership_lock_state = threading.local()
 
 
 class TeamStoreError(Exception):
@@ -50,6 +63,10 @@ class TeamStoreError(Exception):
     role, or the change would leave the workspace with no administrator. Each
     reason is its own type so the operator is told which one happened.
     """
+
+
+class TeamStoreBusy(TeamStoreError):
+    """The workspace membership lock could not be acquired promptly."""
 
 
 class WorkspaceNotFound(TeamStoreError):
@@ -76,6 +93,103 @@ class MemberAlreadyExists(TeamStoreError):
     silently demote an admin to viewer on a typo. The role change has its own
     route, so the add path refuses and names the role held today.
     """
+
+
+@contextmanager
+def workspace_membership_lock(workspace_id: str):
+    """Serialize membership changes for one workspace."""
+    workspace_id = str(workspace_id or "")
+    with _membership_lock_registry_guard:
+        lock = _membership_lock_registry.setdefault(workspace_id, threading.RLock())
+    lock.acquire()
+
+    depths = getattr(_membership_lock_state, "depths", None)
+    if depths is None:
+        depths = {}
+        _membership_lock_state.depths = depths
+    depth = depths.get(workspace_id, 0)
+    if depth:
+        depths[workspace_id] = depth + 1
+        try:
+            yield
+        finally:
+            depths[workspace_id] = depth
+            lock.release()
+        return
+
+    depths[workspace_id] = 1
+    db: Database | None = None
+    token: str | None = None
+    lock_file = None
+    file_locked = False
+    try:
+        db = _database()
+        if db is None:
+            try:
+                import fcntl
+            except ImportError:  # pragma: no cover - non-POSIX platform
+                fcntl = None
+            lock_path = (
+                data_dir()
+                / "team_locks"
+                / f"{hashlib.sha256(workspace_id.encode('utf-8')).hexdigest()}.lock"
+            )
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = lock_path.open("a+", encoding="utf-8")
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                file_locked = True
+        else:
+            token = uuid.uuid4().hex
+            collection = db["workspace_locks"]
+            deadline = time.monotonic() + 5.0
+            while True:
+                now = datetime.now(timezone.utc)
+                try:
+                    lease = collection.find_one_and_update(
+                        {
+                            "_id": workspace_id,
+                            "$or": [
+                                {"expires_at": {"$lt": now}},
+                                {"_id": {"$exists": False}},
+                            ],
+                        },
+                        {
+                            "$set": {
+                                "holder": token,
+                                "expires_at": now + timedelta(seconds=15),
+                            }
+                        },
+                        upsert=True,
+                        return_document=ReturnDocument.AFTER,
+                    )
+                except DuplicateKeyError:
+                    lease = None
+                except PyMongoError as exc:
+                    raise TeamStoreBusy("Workspace membership lock is unavailable") from exc
+                if lease and lease.get("holder") == token:
+                    break
+                if time.monotonic() >= deadline:
+                    raise TeamStoreBusy("Workspace membership lock is busy")
+                time.sleep(0.05)
+        yield
+    finally:
+        try:
+            if db is not None and token is not None:
+                db["workspace_locks"].delete_one(
+                    {"_id": workspace_id, "holder": token}
+                )
+            elif lock_file is not None:
+                if file_locked:
+                    import fcntl
+
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                lock_file.close()
+        finally:
+            depths.pop(workspace_id, None)
+            if not depths:
+                del _membership_lock_state.depths
+            lock.release()
 
 
 def _assert_not_last_admin(workspace_id: str, email: str) -> None:
@@ -411,6 +525,26 @@ def add_workspace_member(
     actor_is_platform_admin: bool = False,
     refuse_existing: bool = False,
 ) -> Membership:
+    with workspace_membership_lock(workspace_id):
+        return _add_workspace_member(
+            workspace_id=workspace_id,
+            email=email,
+            role=role,
+            added_by=added_by,
+            actor_is_platform_admin=actor_is_platform_admin,
+            refuse_existing=refuse_existing,
+        )
+
+
+def _add_workspace_member(
+    *,
+    workspace_id: str,
+    email: str,
+    role: str,
+    added_by: str,
+    actor_is_platform_admin: bool = False,
+    refuse_existing: bool = False,
+) -> Membership:
     """Add or re-role a member, or raise the reason it cannot be done.
 
     ``refuse_existing`` is what an invitation passes: it makes an existing
@@ -452,6 +586,22 @@ def add_workspace_member(
 
 
 def remove_workspace_member(
+    *,
+    workspace_id: str,
+    email: str,
+    removed_by: str,
+    actor_is_platform_admin: bool = False,
+) -> None:
+    with workspace_membership_lock(workspace_id):
+        _remove_workspace_member(
+            workspace_id=workspace_id,
+            email=email,
+            removed_by=removed_by,
+            actor_is_platform_admin=actor_is_platform_admin,
+        )
+
+
+def _remove_workspace_member(
     *,
     workspace_id: str,
     email: str,
