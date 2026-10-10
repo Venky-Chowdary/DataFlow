@@ -61,6 +61,8 @@ class ConnectorDescriptor:
     form_fields: tuple[Mapping[str, Any], ...]
     evidence: str
     certification_skips: Mapping[str, str] = field(default_factory=dict)
+    docs: str = ""
+    description: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "roles", frozenset(self.roles))

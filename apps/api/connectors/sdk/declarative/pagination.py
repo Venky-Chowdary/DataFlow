@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from copy import deepcopy
 from collections.abc import Callable, Generator, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -25,6 +26,7 @@ class PaginatorSpec:
     page_param: str = "page"
     start_index: int = 1
     cursor_param: str = "cursor"
+    cursor_location: Literal["query", "body"] = "query"
     cursor_path: str = ""
     cursor_header: str = ""
     initial_token: str | None = None
@@ -32,6 +34,10 @@ class PaginatorSpec:
     def __post_init__(self) -> None:
         if self.type not in {"none", "cursor", "offset", "page", "link_header"}:
             raise ValueError(f"unsupported paginator type {self.type!r}")
+        if self.cursor_location not in {"query", "body"}:
+            raise ValueError("cursor_location must be query or body")
+        if self.type != "cursor" and self.cursor_location != "query":
+            raise ValueError("cursor_location applies only to cursor pagination")
         if self.page_size < 1:
             raise ValueError("page_size must be positive")
         if self.max_pages < 1:
@@ -41,6 +47,8 @@ class PaginatorSpec:
         if self.type == "cursor":
             if not self.cursor_param:
                 raise ValueError("cursor paginator requires cursor_param")
+            if self.cursor_location not in {"query", "body"}:
+                raise ValueError("cursor_location must be query or body")
             if bool(self.cursor_path) == bool(self.cursor_header):
                 raise ValueError("cursor paginator requires exactly one token path or header")
         if self.type == "offset" and not self.offset_param:
@@ -150,6 +158,33 @@ def _pagination_error(message: str, page: Page | None, stream: str) -> Paginatio
     )
 
 
+def _set_nested_request_value(body: Any, path: str, value: Any) -> None:
+    parts = path.split(".")
+    if not path or any(not part for part in parts):
+        raise ValueError("request-body path must be non-empty")
+    current = body
+    for index, part in enumerate(parts):
+        final = index == len(parts) - 1
+        if isinstance(current, dict):
+            if final:
+                current[part] = value
+                return
+            if part not in current:
+                current[part] = [] if parts[index + 1].isdigit() else {}
+            current = current[part]
+        elif isinstance(current, list) and part.isdigit():
+            list_index = int(part)
+            if list_index >= len(current):
+                raise ValueError("request-body list index is out of range")
+            if final:
+                current[list_index] = value
+                return
+            current = current[list_index]
+        else:
+            raise ValueError("request-body path does not match the template")
+    raise ValueError("request-body path does not resolve to a value")
+
+
 def paginate(
     requester: HttpRequester,
     url: str,
@@ -160,6 +195,7 @@ def paginate(
     headers: Mapping[str, str] | None = None,
     refresh_auth: Callable[[], Mapping[str, str]] | None = None,
     params: Mapping[str, Any] | None = None,
+    json_body: Mapping[str, Any] | None = None,
     stream: str = "",
     max_pages: int | None = None,
     record_limit: int | None = None,
@@ -194,6 +230,7 @@ def paginate(
     offset = paginator.start_offset
 
     while True:
+        page_body = deepcopy(dict(json_body)) if json_body is not None else None
         if paginator.type == "link_header":
             key = _canonical_url(current_url)
             if key in seen_urls:
@@ -215,7 +252,27 @@ def paginate(
             if paginator.type in {"cursor", "offset", "page"} and paginator.page_size_param:
                 page_params[paginator.page_size_param] = request_page_size
             if paginator.type == "cursor" and current_token not in (None, ""):
-                page_params[paginator.cursor_param] = current_token
+                if paginator.cursor_location == "body":
+                    if page_body is None:
+                        raise _pagination_error(
+                            "body cursor pagination requires a request body",
+                            last_page,
+                            stream,
+                        )
+                    try:
+                        _set_nested_request_value(
+                            page_body,
+                            paginator.cursor_param,
+                            current_token,
+                        )
+                    except ValueError:
+                        raise _pagination_error(
+                            "cursor token does not match the request-body template",
+                            last_page,
+                            stream,
+                        ) from None
+                else:
+                    page_params[paginator.cursor_param] = current_token
             elif paginator.type == "offset":
                 page_params[paginator.offset_param] = offset
             elif paginator.type == "page":
@@ -227,6 +284,7 @@ def paginate(
             headers=headers,
             refresh_auth=refresh_auth,
             params=page_params,
+            json=page_body,
             stream=stream,
         )
         records = _extract_records(

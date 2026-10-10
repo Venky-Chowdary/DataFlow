@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 from urllib.parse import urlsplit
@@ -60,6 +61,8 @@ class CursorSpec:
     request_param: str
     format: Literal["iso8601", "epoch_s", "epoch_ms"] = "iso8601"
     lookback_s: float = 0.0
+    request_template: str = ""
+    request_location: Literal["query", "body"] = "query"
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,8 @@ class StreamSpec:
     cursor: CursorSpec | None = None
     paginator: PaginatorSpec = field(default_factory=PaginatorSpec)
     json_schema: dict[str, Any] | None = None
+    request_params: dict[str, Any] = field(default_factory=dict)
+    request_body_template: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +87,7 @@ class Manifest:
     streams: tuple[StreamSpec, ...]
     defaults: RequestDefaults = field(default_factory=RequestDefaults)
     rate_limit_per_second: float | None = None
+    docs: str = ""
 
 
 def _mapping(value: Any, path: str) -> dict[str, Any]:
@@ -259,7 +265,7 @@ def _parse_paginator(
     fields = {
         "type", "page_size", "page_size_param", "max_pages", "offset_param",
         "start_offset", "page_param", "start_index", "cursor_param",
-        "cursor_path", "cursor_header", "initial_token",
+        "cursor_location", "cursor_path", "cursor_header", "initial_token",
     }
     _check_keys(obj, fields, path)
     obj.setdefault("page_size", default_page_size)
@@ -282,11 +288,18 @@ def _parse_paginator(
         "offset_param",
         "page_param",
         "cursor_param",
+        "cursor_location",
         "cursor_path",
         "cursor_header",
     ):
         if key in obj and not isinstance(obj[key], str):
             raise ManifestError(f"{path}.{key}: expected a string", path=f"{path}.{key}")
+    cursor_location = obj.get("cursor_location", "query")
+    if cursor_location not in {"query", "body"}:
+        raise ManifestError(
+            f"{path}.cursor_location: expected query or body",
+            path=f"{path}.cursor_location",
+        )
     if "initial_token" in obj and obj["initial_token"] is not None and not isinstance(
         obj["initial_token"], str
     ):
@@ -304,7 +317,7 @@ def _parse_paginator(
 
 def parse_manifest(raw: dict[str, Any]) -> Manifest:
     obj = _mapping(raw, "")
-    _check_keys(obj, {"name", "base_url", "auth", "streams", "defaults", "rate_limit"}, "")
+    _check_keys(obj, {"name", "base_url", "auth", "streams", "defaults", "rate_limit", "docs"}, "")
     name = obj.get("name")
     if not isinstance(name, str) or not name.strip():
         raise ManifestError("name: must be a non-empty string", path="name")
@@ -321,6 +334,21 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
         raise ManifestError("base_url: URL credentials are not allowed", path="base_url")
     if parsed_url.query or parsed_url.fragment:
         raise ManifestError("base_url: query and fragment are not allowed", path="base_url")
+    docs = obj.get("docs", "")
+    if not isinstance(docs, str):
+        raise ManifestError("docs: expected an absolute HTTP(S) URL", path="docs")
+    if docs:
+        try:
+            docs_url = urlsplit(docs)
+        except (TypeError, ValueError):
+            raise ManifestError("docs: expected an absolute HTTP(S) URL", path="docs") from None
+        if (
+            docs_url.scheme.lower() not in {"http", "https"}
+            or not docs_url.netloc
+            or docs_url.username is not None
+            or docs_url.password is not None
+        ):
+            raise ManifestError("docs: expected an absolute HTTP(S) URL", path="docs")
     raw_streams = obj.get("streams")
     if not isinstance(raw_streams, list) or not raw_streams:
         raise ManifestError("streams: expected a non-empty array", path="streams")
@@ -332,7 +360,18 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
         stream = _mapping(raw_stream, path)
         _check_keys(
             stream,
-            {"name", "path", "method", "records_path", "primary_key", "cursor", "paginator", "json_schema"},
+            {
+                "name",
+                "path",
+                "method",
+                "records_path",
+                "primary_key",
+                "cursor",
+                "paginator",
+                "json_schema",
+                "request_params",
+                "request_body_template",
+            },
             path,
         )
         stream_name = stream.get("name")
@@ -365,11 +404,51 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
             raise ManifestError(f"{path}.primary_key: expected an array of field names", path=f"{path}.primary_key")
         if len(set(primary_key)) != len(primary_key):
             raise ManifestError(f"{path}.primary_key: duplicate field", path=f"{path}.primary_key")
+        request_params_raw = stream.get("request_params", {})
+        request_params_obj = _mapping(request_params_raw, f"{path}.request_params")
+        for key, value in request_params_obj.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ManifestError(
+                    f"{path}.request_params: parameter names must be non-empty strings",
+                    path=f"{path}.request_params",
+                )
+            if value is not None and not isinstance(value, (str, int, float, bool)):
+                raise ManifestError(
+                    f"{path}.request_params.{key}: expected a scalar value",
+                    path=f"{path}.request_params.{key}",
+                )
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ManifestError(
+                    f"{path}.request_params.{key}: value must be finite",
+                    path=f"{path}.request_params.{key}",
+                )
+        request_body_template = stream.get("request_body_template")
+        if request_body_template is not None:
+            request_body_template = _mapping(
+                request_body_template,
+                f"{path}.request_body_template",
+            )
+            if method != "POST":
+                raise ManifestError(
+                    f"{path}.request_body_template: requires method POST",
+                    path=f"{path}.request_body_template",
+                )
         cursor = None
         if stream.get("cursor") is not None:
             cursor_path = f"{path}.cursor"
             cursor_raw = _mapping(stream["cursor"], cursor_path)
-            _check_keys(cursor_raw, {"field", "request_param", "format", "lookback_s"}, cursor_path)
+            _check_keys(
+                cursor_raw,
+                {
+                    "field",
+                    "request_param",
+                    "format",
+                    "lookback_s",
+                    "request_template",
+                    "request_location",
+                },
+                cursor_path,
+            )
             for key in ("field", "request_param"):
                 if not isinstance(cursor_raw.get(key), str) or not cursor_raw[key]:
                     raise ManifestError(f"{cursor_path}.{key}: must be non-empty", path=f"{cursor_path}.{key}")
@@ -377,13 +456,57 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
             if cursor_format not in {"iso8601", "epoch_s", "epoch_ms"}:
                 raise ManifestError(f"{cursor_path}.format: unsupported format", path=f"{cursor_path}.format")
             lookback = _positive_number(cursor_raw.get("lookback_s", 0), f"{cursor_path}.lookback_s", allow_zero=True)
-            cursor = CursorSpec(cursor_raw["field"], cursor_raw["request_param"], cursor_format, lookback)
+            request_template = cursor_raw.get("request_template", "")
+            if not isinstance(request_template, str):
+                raise ManifestError(
+                    f"{cursor_path}.request_template: expected a string",
+                    path=f"{cursor_path}.request_template",
+                )
+            if request_template:
+                rendered_parts = re.sub(r"\{cursor(?::[^{}]*)?\}", "", request_template)
+                if (
+                    "{cursor" not in request_template
+                    or "{" in rendered_parts
+                    or "}" in rendered_parts
+                ):
+                    raise ManifestError(
+                        f"{cursor_path}.request_template: expected a {{cursor}} placeholder",
+                        path=f"{cursor_path}.request_template",
+                    )
+            request_location = cursor_raw.get("request_location", "query")
+            if not isinstance(request_location, str) or request_location not in {"query", "body"}:
+                raise ManifestError(
+                    f"{cursor_path}.request_location: expected query or body",
+                    path=f"{cursor_path}.request_location",
+                )
+            if request_location == "body" and (
+                method != "POST" or request_body_template is None
+            ):
+                raise ManifestError(
+                    f"{cursor_path}.request_location: body cursors require a POST request_body_template",
+                    path=f"{cursor_path}.request_location",
+                )
+            cursor = CursorSpec(
+                field=cursor_raw["field"],
+                request_param=cursor_raw["request_param"],
+                format=cursor_format,
+                lookback_s=lookback,
+                request_template=request_template,
+                request_location=request_location,
+            )
         paginator = _parse_paginator(
             stream.get("paginator", {"type": "none"}),
             f"{path}.paginator",
             default_page_size=defaults.page_size,
             default_max_pages=defaults.max_pages,
         )
+        if paginator.cursor_location == "body" and (
+            method != "POST" or request_body_template is None
+        ):
+            raise ManifestError(
+                f"{path}.paginator.cursor_location: body cursors require a POST request_body_template",
+                path=f"{path}.paginator.cursor_location",
+            )
         if cursor is not None and paginator.type == "cursor" and cursor.request_param == paginator.cursor_param:
             raise ManifestError(
                 f"{path}.paginator.cursor_param: cannot share the incremental cursor parameter",
@@ -411,6 +534,8 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
                 cursor=cursor,
                 paginator=paginator,
                 json_schema=json_schema,
+                request_params=dict(request_params_obj),
+                request_body_template=request_body_template,
             )
         )
     rate_limit = None
@@ -426,4 +551,5 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
         streams=tuple(streams),
         defaults=defaults,
         rate_limit_per_second=rate_limit,
+        docs=docs,
     )
