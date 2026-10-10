@@ -473,6 +473,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     saFields.push(
       textarea("serviceAccount", "Service account JSON or file path", {
         rows: 6,
+        sensitive: true,
         placeholder: '{\n  "type": "service_account",\n  ...\n}',
         hint: "Paste the JSON contents from Google Cloud, or enter an absolute path to the key file on the server.",
       }),
@@ -485,6 +486,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     saFields.push(
       textarea("serviceAccount", "Service principal JSON", {
         rows: 4,
+        sensitive: true,
         placeholder: '{\n  "tenantId": "...",\n  "clientId": "...",\n  "clientSecret": "..."\n}',
         hint: "Azure AD application with Storage Blob Data Contributor role.",
       }),
@@ -519,6 +521,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("database", "Index (optional)", { optional: true }),
       textarea("apiKey", "API key", {
         rows: 2,
+        sensitive: true,
         placeholder: "id:api_key or encoded API key",
         hint: "Enter id:secret for key pairs, or the full encoded key from Elastic Cloud.",
       }),
@@ -532,6 +535,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("apiKey", "API key (optional)", {
         rows: 2,
         optional: true,
+        sensitive: true,
         placeholder: "Weaviate API key",
         hint: "Required for Weaviate Cloud; optional for local.",
       }),
@@ -551,6 +555,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       }),
       textarea("apiKey", "API key", {
         rows: 2,
+        sensitive: true,
         placeholder: "pcsk_…",
         hint: "Required. Namespace defaults to the destination table name.",
       })
@@ -563,6 +568,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("apiKey", "API key / token", {
         rows: 2,
         optional: true,
+        sensitive: true,
         placeholder: "root:Milvus or Zilliz Cloud API key",
         hint: "Milvus REST uses Bearer user:pass or a cloud API key.",
       }),
@@ -596,6 +602,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("database", "Object / table (optional)", { optional: true, placeholder: defaultObject[resolved] }),
       textarea("apiKey", resolved === "stripe" ? "Secret key" : isSalesforce ? "Access token (Bearer)" : "API token", {
         rows: 2,
+        sensitive: true,
         placeholder: resolved === "stripe" ? "sk_..." : isSalesforce ? "00D…!AQEA… (session access token)" : "Paste access token",
         hint: isSalesforce
           ? `Paste a Bearer access token (not username/password). ${objectHint}`
@@ -680,6 +687,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         text("username", "Username"),
         textarea("privateKey", "PKCS#8 private key", {
           rows: 6,
+          sensitive: true,
           placeholder: "-----BEGIN PRIVATE KEY-----",
         }),
         password("password", "Key passphrase (optional)", { optional: true }),
