@@ -476,6 +476,17 @@ def _render_schedule_detail(s: dict[str, Any]) -> str:
         f"• next `{s.get('next_run_at') or '—'}` · last **{s.get('last_status') or 'never'}**"
         f" ({s.get('run_count', 0)} runs)."
     )
+    if s.get("needs_approval"):
+        park = (
+            f"• Parked on approval `{s.get('approval_id') or '?'}`"
+            + (f" ({s.get('approval_code')})" if s.get("approval_code") else "")
+            + f": {s.get('approval_finding') or 'finding not recorded'}."
+            + " Scheduled runs are skipped until it is "
+            + ("approved or rejected" if s.get("approvable") else "fixed and re-armed")
+            + " in the approvals inbox."
+        )
+        fix = str(s.get("approval_corrective_action") or "").strip()
+        lines.append(park + (f" Fix: {fix}" if fix else ""))
     return "\n".join(lines)
 
 

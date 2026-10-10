@@ -313,3 +313,57 @@ def test_render_schedule_detail_unbound_does_not_invent_enforce():
     assert "No data contract bound" in text
     assert "enforce stays unset" in text
     assert "Data / migration rules" not in text
+
+
+def _parked_sched(status: str = "open"):
+    class _Sched:
+        id = "sched_parked_1"
+        name = "Orders upsert"
+        enabled = True
+        interval = "hourly"
+        cron = ""
+        timezone = "UTC"
+        source_table = "orders"
+        dest_table = "orders_wh"
+        sync_mode = "incremental_upsert"
+        next_run_at = "2026-10-10T12:45:00+00:00"
+        last_run_at = "2026-10-10T11:45:00+00:00"
+        last_status = "needs_approval"
+        run_count = 4
+        approval_request = {
+            "id": "apr_9f3c",
+            "status": status,
+            "code": "rc-type-narrowing",
+            "finding": "updated_at TIMESTAMP would narrow to DATE",
+            "corrective_action": "Widen orders_wh.updated_at to TIMESTAMP",
+            "approvable": False,
+        }
+
+    return _Sched()
+
+
+def test_get_schedule_says_why_a_schedule_is_parked():
+    """MX3-24: a parked schedule's next_run_at stops; Pilot must say on what."""
+    from src.ai.copilot.pilot_agent import _render_schedule_detail
+    from src.ai.copilot.tools import DataPilotTools
+
+    row = DataPilotTools()._schedule_summary(_parked_sched())
+    assert row["needs_approval"] is True
+    assert row["approval_id"] == "apr_9f3c"
+    assert row["approval_code"] == "rc-type-narrowing"
+    assert row["approval_finding"] == "updated_at TIMESTAMP would narrow to DATE"
+    assert row["approvable"] is False
+    text = _render_schedule_detail(row)
+    assert "Parked on approval `apr_9f3c` (rc-type-narrowing)" in text
+    assert "updated_at TIMESTAMP would narrow to DATE" in text
+    assert "fixed and re-armed" in text
+    assert "Widen orders_wh.updated_at" in text
+
+
+def test_get_schedule_resolved_approval_is_not_reported_as_parked():
+    from src.ai.copilot.pilot_agent import _render_schedule_detail
+    from src.ai.copilot.tools import DataPilotTools
+
+    row = DataPilotTools()._schedule_summary(_parked_sched(status="approved"))
+    assert "needs_approval" not in row
+    assert "Parked" not in _render_schedule_detail(row)

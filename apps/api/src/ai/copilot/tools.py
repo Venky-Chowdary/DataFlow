@@ -2867,7 +2867,7 @@ class DataPilotTools:
         return None, None
 
     def _schedule_summary(self, s) -> dict:
-        from services.schedule_store import schedule_bind_summary
+        from services.schedule_store import has_open_approval, schedule_bind_summary
 
         row = {
             "id": s.id,
@@ -2891,6 +2891,18 @@ class DataPilotTools:
         if schema_policy:
             row["schema_policy"] = schema_policy
         row.update(schedule_bind_summary(s))
+        if has_open_approval(s):
+            # Parked: due_schedules skips it until a human decides, so
+            # next_run_at stops advancing. Say why instead of looking stuck.
+            req = s.approval_request
+            row.update(
+                needs_approval=True,
+                approval_id=str(req.get("id") or ""),
+                approval_code=str(req.get("code") or ""),
+                approval_finding=str(req.get("finding") or ""),
+                approval_corrective_action=str(req.get("corrective_action") or ""),
+                approvable=bool(req.get("approvable")),
+            )
         return row
 
     def _list_schedules(self, limit: int = 20) -> ToolResult:
