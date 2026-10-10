@@ -223,3 +223,46 @@ def test_manifest_template_extensions_reject_invalid_values_with_paths() -> None
     with pytest.raises(ManifestError) as cursor_error:
         parse_manifest(manifest)
     assert cursor_error.value.path == "streams[0].cursor.request_template"
+
+
+def test_static_manifest_request_headers_reach_each_request() -> None:
+    with FixtureServer() as fixture:
+        fixture.add_route(
+            "/items",
+            FixtureResponse(body=[{"id": 1}]),
+        )
+        manifest = {
+            "name": "header-template",
+            "base_url": fixture.base_url,
+            "auth": {"type": "none"},
+            "streams": [
+                {
+                    "name": "items",
+                    "path": "items",
+                    "records_path": "$",
+                    "primary_key": ["id"],
+                    "request_headers": {
+                        "Accept": "application/vnd.github+json",
+                        "X-GitHub-Api-Version": "2022-11-28",
+                    },
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {"id": {"type": "integer"}},
+                    },
+                }
+            ],
+        }
+
+        source = DeclarativeSource({"manifest": manifest})
+        assert list(source.read("items"))
+        request_headers = {
+            key.lower(): value for key, value in fixture.request_log[0].headers.items()
+        }
+        assert request_headers["accept"] == "application/vnd.github+json"
+        assert request_headers["x-github-api-version"] == "2022-11-28"
+
+        assert source.test_connection()
+        connection_headers = {
+            key.lower(): value for key, value in fixture.request_log[1].headers.items()
+        }
+        assert connection_headers["x-github-api-version"] == "2022-11-28"

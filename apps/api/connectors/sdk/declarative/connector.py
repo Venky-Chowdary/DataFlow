@@ -178,11 +178,13 @@ class DeclarativeSource(BaseConnector):
                     f"streams[{index}].request_body_template: expected an object",
                     path=f"streams[{index}].request_body_template",
                 )
+        headers = dict(self.auth.headers)
+        headers.update(stream.request_headers)
         self.requester.request_json(
             stream.method,
             url,
             stream=stream.name,
-            headers=self.auth.headers,
+            headers=headers,
             params=params,
             refresh_auth=self.auth.refresh_auth,
             json=body if stream.method == "POST" else None,
@@ -202,12 +204,14 @@ class DeclarativeSource(BaseConnector):
                 url = urljoin(self._base_url, stream_path.lstrip("/"))
                 params = dict(self.auth.params)
                 params.update(stream.request_params)
+                headers = dict(self.auth.headers)
+                headers.update(stream.request_headers)
                 pages = paginate(
                     self.requester,
                     url,
                     method=stream.method,
                     records_path=stream.records_path,
-                    headers=self.auth.headers,
+                    headers=headers,
                     refresh_auth=self.auth.refresh_auth,
                     params=params,
                     json_body=stream.request_body_template,
@@ -306,6 +310,8 @@ class DeclarativeSource(BaseConnector):
 
         params = dict(self.auth.params)
         params.update(stream_spec.request_params)
+        headers = dict(self.auth.headers)
+        headers.update(stream_spec.request_headers)
         request_body = dict(stream_spec.request_body_template or {})
         if stream_spec.cursor:
             cursor_value = cursor_for_request(
@@ -347,7 +353,7 @@ class DeclarativeSource(BaseConnector):
             request_url,
             method=stream_spec.method,
             records_path=stream_spec.records_path,
-            headers=self.auth.headers,
+            headers=headers,
             refresh_auth=self.auth.refresh_auth,
             params=params,
             json_body=request_body if stream_spec.method == "POST" else None,

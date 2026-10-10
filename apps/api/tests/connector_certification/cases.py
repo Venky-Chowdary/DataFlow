@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from connectors.sdk import SingerTapBridge
 from connectors.sdk.declarative.connector import DeclarativeSource
+from connectors.sdk.github import GitHubSource
 from connectors.sdk.http_declarative import DeclarativeHttpConnector
 from connectors.sdk.hubspot_cdk import HubSpotCDKConnector
 from tests.connector_certification.fixture_server import FixtureResponse, FixtureServer
@@ -480,6 +481,154 @@ def build_certification_cases(tmp_path: Path) -> dict[str, CertificationCase]:
         assert_incremental_cursor=assert_hubspot_cursor,
     )
 
+    github_fixture_dir = Path(__file__).parent / "fixtures" / "github"
+    github_issue_pages = [
+        json.loads((github_fixture_dir / filename).read_text(encoding="utf-8"))
+        for filename in ("issues_page_1.json", "issues_page_2.json")
+    ]
+    github_repository_pages = [
+        json.loads((github_fixture_dir / filename).read_text(encoding="utf-8"))
+        for filename in ("repositories_page_1.json", "repositories_page_2.json")
+    ]
+    github_records = tuple(
+        dict(record) for page in github_issue_pages for record in page
+    )
+    github_issues_path = "/repos/fixture-owner/fixture-repository/issues"
+    github_next_page = (
+        f"<{github_issues_path}?state=all&sort=updated&direction=asc"
+        "&per_page=100&page=2>; rel=\"next\""
+    )
+
+    def github_routes(
+        fixture: FixtureServer,
+        phase: str,
+        fixture_records: Sequence[Mapping[str, Any]],
+    ) -> None:
+        page_one = [dict(row) for row in fixture_records[:2]]
+        page_two = [dict(row) for row in fixture_records[2:]]
+        if phase == "auth":
+            fixture.add_route(
+                "/user/repos",
+                FixtureResponse(status=401, body={"message": "unauthorized"}),
+            )
+            fixture.add_route(
+                github_issues_path,
+                FixtureResponse(status=401, body={"message": "unauthorized"}),
+            )
+        elif phase == "check":
+            fixture.add_route(
+                "/user/repos",
+                FixtureResponse(body=github_repository_pages[0]),
+            )
+        elif phase == "incremental":
+            fixture.add_route(
+                github_issues_path,
+                FixtureResponse(body=[dict(row) for row in fixture_records[1:]]),
+            )
+        elif phase == "fault":
+            fixture.add_route(
+                github_issues_path,
+                responses=[
+                    FixtureResponse(
+                        body=page_one,
+                        headers={"Link": github_next_page},
+                    ),
+                    FixtureResponse(status=500, body={"message": "synthetic fault"}),
+                    FixtureResponse(status=500, body={"message": "synthetic fault"}),
+                ],
+            )
+        elif phase == "resume":
+            fixture.add_route(
+                github_issues_path,
+                FixtureResponse(body=page_two),
+            )
+        elif phase == "rate_limit":
+            fixture.add_route(
+                github_issues_path,
+                responses=[
+                    FixtureResponse(
+                        status=429,
+                        body={"message": "rate limited"},
+                        headers={"Retry-After": "2"},
+                    ),
+                    FixtureResponse(
+                        body=page_one,
+                        headers={"Link": github_next_page},
+                    ),
+                    FixtureResponse(body=page_two),
+                ],
+            )
+        else:
+            fixture.add_route(
+                github_issues_path,
+                responses=[
+                    FixtureResponse(
+                        body=page_one,
+                        headers={"Link": github_next_page},
+                    ),
+                    FixtureResponse(body=page_two),
+                ],
+            )
+
+    def github_factory(
+        base_url: str,
+        _phase: str,
+        _fixture_records: Sequence[Mapping[str, Any]],
+        _sleep: Any = None,
+    ) -> GitHubSource:
+        return GitHubSource(
+            {
+                "access_token": _SECRET,
+                "owner": "fixture-owner",
+                "repo": "fixture-repository",
+                "base_url": base_url or "https://api.github.com",
+            }
+        )
+
+    def mutate_github(
+        original: Sequence[Mapping[str, Any]],
+    ) -> tuple[list[dict[str, Any]], set[str], set[str]]:
+        changed = [dict(row) for row in original]
+        changed[1]["updated_at"] = "2026-01-05T00:00:00Z"
+        changed[2]["updated_at"] = "2026-01-06T00:00:00Z"
+        added = dict(changed[-1])
+        added.update(
+            {
+                "id": 9005,
+                "number": 5,
+                "title": "Synthetic issue added",
+                "updated_at": "2026-01-07T00:00:00Z",
+                "created_at": "2026-01-07T00:00:00Z",
+            }
+        )
+        changed.append(added)
+        return changed, {"9002", "9003", "9005"}, {"9004"}
+
+    def assert_github_cursor(
+        fixture: FixtureServer,
+        state: Mapping[str, Any],
+    ) -> None:
+        query = parse_qs(urlsplit(fixture.request_log[0].target).query)
+        stream_state = state.get("issues", {})
+        cursor = stream_state.get("cursor") if isinstance(stream_state, Mapping) else None
+        if cursor is None:
+            cursor = state.get("cursor")
+        if query.get("since") != [str(cursor)]:
+            raise AssertionError(f"GitHub issues request omitted saved cursor {cursor!r}")
+
+    github_case = CertificationCase(
+        connector_id="github",
+        connector_factory=github_factory,
+        fixture_routes=github_routes,
+        stream="issues",
+        mutate_fixture=mutate_github,
+        fixture_records=github_records,
+        primary_key=("id",),
+        cursor_field="updated_at",
+        secret=_SECRET,
+        assert_incremental_cursor=assert_github_cursor,
+    )
+
     tap_script = _tap_source(tmp_path)
 
     def singer_factory(
@@ -527,5 +676,6 @@ def build_certification_cases(tmp_path: Path) -> dict[str, CertificationCase]:
             hubspot_case,
             declarative_case,
             shim_case,
+            github_case,
         )
     }

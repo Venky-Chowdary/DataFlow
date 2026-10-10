@@ -633,7 +633,7 @@ def sdk_read_as_matrix(
 
 
 def _load_builtin_connectors() -> None:
-    """Register declarative HTTP + HubSpot CDK golden connector."""
+    """Register built-in SDK connectors."""
     try:
         from connectors.sdk import http_declarative  # noqa: F401
     except Exception as exc:
@@ -648,6 +648,14 @@ def _load_builtin_connectors() -> None:
         logger.warning(
             "built-in connector module %s failed to load (%s)",
             "connectors.sdk.hubspot_cdk",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import github  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.github",
             type(exc).__name__,
         )
 

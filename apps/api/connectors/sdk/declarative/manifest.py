@@ -76,6 +76,7 @@ class StreamSpec:
     paginator: PaginatorSpec = field(default_factory=PaginatorSpec)
     json_schema: dict[str, Any] | None = None
     request_params: dict[str, Any] = field(default_factory=dict)
+    request_headers: dict[str, str] = field(default_factory=dict)
     request_body_template: dict[str, Any] | None = None
 
 
@@ -95,6 +96,31 @@ def _mapping(value: Any, path: str) -> dict[str, Any]:
         label = path or "$"
         raise ManifestError(f"{label}: expected an object", path=label)
     return value
+
+
+def _parse_request_headers(value: Any, path: str) -> dict[str, str]:
+    if not isinstance(value, dict):
+        raise ManifestError(f"{path}: expected an object", path=path)
+    headers: dict[str, str] = {}
+    for raw_name, raw_value in value.items():
+        if (
+            not isinstance(raw_name, str)
+            or not raw_name.strip()
+            or any(character in raw_name for character in ":\r\n")
+        ):
+            raise ManifestError(f"{path}: invalid header name", path=path)
+        header_path = f"{path}.{raw_name}"
+        if (
+            not isinstance(raw_value, str)
+            or "\r" in raw_value
+            or "\n" in raw_value
+        ):
+            raise ManifestError(
+                f"{header_path}: expected a string without line breaks",
+                path=header_path,
+            )
+        headers[raw_name] = raw_value
+    return headers
 
 
 def _check_keys(value: dict[str, Any], allowed: set[str], path: str) -> None:
@@ -370,6 +396,7 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
                 "paginator",
                 "json_schema",
                 "request_params",
+                "request_headers",
                 "request_body_template",
             },
             path,
@@ -422,6 +449,10 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
                     f"{path}.request_params.{key}: value must be finite",
                     path=f"{path}.request_params.{key}",
                 )
+        request_headers = _parse_request_headers(
+            stream.get("request_headers", {}),
+            f"{path}.request_headers",
+        )
         request_body_template = stream.get("request_body_template")
         if request_body_template is not None:
             request_body_template = _mapping(
@@ -535,6 +566,7 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
                 paginator=paginator,
                 json_schema=json_schema,
                 request_params=dict(request_params_obj),
+                request_headers=request_headers,
                 request_body_template=request_body_template,
             )
         )

@@ -330,14 +330,13 @@ def certify(case: CertificationCase) -> CertificationReport:
                 failed = True
             if not failed:
                 raise AssertionError("injected page-one fault did not fail the first sync")
-        if not states or not any(kind == "write" for kind, _ in events):
-            raise AssertionError("fault occurred before a durable page checkpoint")
-        if any(
-            kind == "save" and (index == 0 or events[index - 1][0] != "write")
-            for index, (kind, _count) in enumerate(events)
-        ):
-            raise AssertionError("checkpoint state was saved before its page was written")
-        with FixtureServer() as fixture:
+            if not states or not any(kind == "write" for kind, _ in events):
+                raise AssertionError("fault occurred before a durable page checkpoint")
+            if any(
+                kind == "save" and (index == 0 or events[index - 1][0] != "write")
+                for index, (kind, _count) in enumerate(events)
+            ):
+                raise AssertionError("checkpoint state was saved before its page was written")
             case.fixture_routes(fixture, "resume", case.fixture_records)
             case.sync_runner(
                 factory(fixture.base_url, "resume"),
