@@ -775,6 +775,35 @@ def _login_client_ip(request: Request) -> str:
     return client_ip_from_request(request) or "unknown"
 
 
+def _login_audit_actor(email: str) -> str:
+    return normalize_email(email)[:254]
+
+
+def _record_login_audit(
+    request: Request,
+    *,
+    action: str,
+    actor: str,
+    reason: str | None = None,
+    level: str = "warn",
+) -> None:
+    try:
+        from services.audit_log import append_audit_event
+
+        append_audit_event(
+            action=action,
+            resource="/auth/login",
+            actor=actor,
+            level=level,
+            correlation_id=request.headers.get("X-Correlation-ID"),
+            details={"reason": reason} if reason else {},
+        )
+    except Exception as exc:
+        logger.warning(
+            "Login audit write failed (%s)", type(exc).__name__, exc_info=exc
+        )
+
+
 @router.post("/logout")
 async def logout(request: Request):
     """Revoke the current Bearer session (Phase D3). Idempotent."""
@@ -812,12 +841,38 @@ async def login(body: LoginRequest, request: Request):
     ip = _login_client_ip(request)
     limited = check_login_rate_limit(ip=ip, email=body.email)
     if not limited.get("allowed"):
+        actor = _login_audit_actor(body.email)
+        if limited.get("newly_locked"):
+            _record_login_audit(
+                request,
+                action="auth.login.locked",
+                actor=actor,
+                reason="locked",
+            )
+        _record_login_audit(
+            request,
+            action="auth.login.failure",
+            actor=actor,
+            reason="locked",
+        )
         retry = float(limited.get("retry_after_sec") or 60)
         raise HTTPException(
             status_code=429,
             detail="Too many login attempts. Try again later.",
             headers={"Retry-After": str(int(max(1, retry)))},
         )
+
+    actor = _login_audit_actor(body.email)
+    stored_account = get_stored_user(actor)
+    if stored_account and stored_account.get("status") == "disabled":
+        record_login_failure(ip=ip, email=body.email)
+        _record_login_audit(
+            request,
+            action="auth.login.failure",
+            actor=actor,
+            reason="disabled",
+        )
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
 
     status = auth_bootstrap_status()
     if not status.get("has_users"):
@@ -834,6 +889,12 @@ async def login(body: LoginRequest, request: Request):
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not user:
         record_login_failure(ip=ip, email=body.email)
+        _record_login_audit(
+            request,
+            action="auth.login.failure",
+            actor=actor,
+            reason="bad_credentials",
+        )
         # What an anonymous caller is told is exactly what happened: the pair did
         # not authenticate. Deployment advice (env var escaping) belongs to the
         # operator configuring the service, not to an unauthenticated 401 — it
@@ -855,7 +916,9 @@ async def login(body: LoginRequest, request: Request):
             level="success",
         )
     except Exception as exc:
-        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        logger.warning(
+            "Login success audit write failed (%s)", type(exc).__name__, exc_info=exc
+        )
     account = get_stored_user(user["email"])
     return {
         "token": token,
