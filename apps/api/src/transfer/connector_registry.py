@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from connectors.sdk import list_descriptors
+
 from .connector_capabilities import _DRIVER_CAPS, default_port, file_source_types
 
 
@@ -256,8 +258,6 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         writer_fn="write_not_supported",
     ),
 }
-
-from connectors.sdk import list_descriptors
 
 for _sdk_descriptor in list_descriptors():
     if "source" not in _sdk_descriptor.roles or not _sdk_descriptor.catalog_ids:

@@ -9,6 +9,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, FrozenSet
 
+from connectors.sdk import list_descriptors
+
 # Driver-level capabilities (implemented in connectors/ + adapters.py)
 _DRIVER_CAPS: dict[str, dict[str, Any]] = {
     "postgresql": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
@@ -62,8 +64,6 @@ _DRIVER_CAPS: dict[str, dict[str, Any]] = {
     "couchbase": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "singer_tap": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
-
-from connectors.sdk import list_descriptors
 
 for _sdk_descriptor in list_descriptors():
     if "source" not in _sdk_descriptor.roles or not _sdk_descriptor.catalog_ids:
