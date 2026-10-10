@@ -88,6 +88,7 @@ from connectors.lsn_guards import (
     extract_cdc_commit_position,
     extract_cdc_lsn,
     lsn_family,
+    lsn_sort_key,
 )
 from services.cdc_effectively_once import (
     DELIVERY_CLASS_AT_LEAST_ONCE,
@@ -1306,6 +1307,9 @@ class DestWmView:
     exists: bool = False
 
 
+_legacy_composite_warnings: set[tuple[str, str]] = set()
+
+
 def assert_comparable_lsn(incoming_lsn: str | None, dest_lsn: str | None) -> None:
     """Refuse a skip/apply decision across LSN families.
 
@@ -1485,6 +1489,28 @@ def decide_from_view(
         dest_resume = decode_resume_blob(dest.resume_blob)
         if extract_cdc_lsn(dest_resume) == dest_lsn:
             dest_lsn = batch_lsn(dest_resume) or dest_lsn
+    incoming_family = lsn_family(incoming_lsn)
+    dest_family = lsn_family(dest_lsn) if dest_lsn else "empty"
+    incoming_key = lsn_sort_key(incoming_lsn)
+    dest_key = lsn_sort_key(dest_lsn) if dest_lsn else ()
+    if (
+        incoming_family in {"oracle_scn", "mssql_lsn"}
+        and dest_family == incoming_family
+        and incoming_key[1] == dest_key[1]
+        and incoming_key[2] > 0
+        and dest_key
+        and dest_key[2] == 0
+    ):
+        warning_key = (str(dest_lsn), str(incoming_lsn))
+        if warning_key not in _legacy_composite_warnings:
+            _legacy_composite_warnings.add(warning_key)
+            _logger.warning(
+                "cdc_eos: legacy dest watermark compared with composite incoming "
+                "position; stream_key unavailable, warning deduplicated by dest "
+                "LSN pair dest=%s incoming=%s",
+                dest_lsn,
+                incoming_lsn,
+            )
     return decide_eos_apply(
         incoming_lsn=incoming_lsn,
         dest_lsn=dest_lsn,

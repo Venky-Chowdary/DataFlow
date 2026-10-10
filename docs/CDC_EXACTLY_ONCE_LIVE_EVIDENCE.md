@@ -102,3 +102,9 @@ four. SQL Server passed all nine scenarios on its first live run.
 - Snapshot→stream handoff and incremental-snapshot window closure are proven on
   SQLite fixtures; the live scenarios above cover streaming batches, fencing and
   bundle atomicity.
+
+Upgrade note: when an existing legacy SCN/LSN watermark is first compared with
+a composite position at the same major coordinate, the legacy boundary may be
+redelivered once. This is idempotent for primary-key upsert sinks. Append-only
+sinks are refused for exactly-once by
+`services.cdc_exactly_once.classify_exactly_once_route` (`REASON_APPEND`).

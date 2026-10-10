@@ -27,6 +27,21 @@ LsnMatcher = Callable[[str, str], str]
 # Destination metadata column for CDC monotonic apply (PK + LSN guard).
 DF_LSN_COL = "_df_lsn"
 
+
+def _parse_oracle_rs_id(rs_id: str) -> tuple[int, int, int] | None:
+    parts = [part.strip() for part in str(rs_id or "").strip().split(".")]
+    if len(parts) != 3:
+        return None
+    if parts[0].lower().startswith("0x"):
+        parts[0] = parts[0][2:]
+    if any(not re.fullmatch(r"[0-9a-f]+", part, flags=re.IGNORECASE) for part in parts):
+        return None
+    try:
+        return tuple(int(part, 16) for part in parts)  # type: ignore[return-value]
+    except ValueError:
+        return None
+
+
 def lsn_family(lsn: Any) -> str:
     """Return CDC stamp family for LSN-guard compares (Debezium-class).
 
@@ -45,11 +60,12 @@ def lsn_family(lsn: Any) -> str:
     if lower.startswith("gtid:"):
         return "mysql_gtid"
     if lower.startswith("scn:"):
-        if re.fullmatch(
-            r"scn:\d+(?:\.c|\.p.+\.\d{10})?",
-            text,
-            flags=re.IGNORECASE,
-        ):
+        if re.fullmatch(r"scn:\d+(?:\.c)?", text, flags=re.IGNORECASE):
+            return "oracle_scn"
+        partial = re.fullmatch(
+            r"scn:\d+\.p(.+)\.\d{10}", text, flags=re.IGNORECASE
+        )
+        if partial and _parse_oracle_rs_id(partial.group(1)) is not None:
             return "oracle_scn"
         return "opaque"
     if lower.startswith("mongo:"):
@@ -98,12 +114,15 @@ def lsn_sort_key(lsn: Any) -> tuple:
             text,
             flags=re.IGNORECASE,
         )
-        if partial:
+        rs_id = _parse_oracle_rs_id(partial.group(2)) if partial else None
+        if partial and rs_id is not None:
+            rs_seq, rs_blk, rs_off = rs_id
+            ssn = int(partial.group(3))
             return (
                 1,
                 int(partial.group(1)),
                 1,
-                f"{partial.group(2)}.{partial.group(3)}",
+                f"{rs_seq:020d}{rs_blk:020d}{rs_off:010d}{ssn:020d}",
             )
         complete = re.fullmatch(r"scn:(\d+)\.c", text, flags=re.IGNORECASE)
         if complete:
@@ -130,11 +149,12 @@ def lsn_sort_key(lsn: Any) -> tuple:
     )
     if mssql_composite:
         rank = 1 if mssql_composite.group(2) is not None else 2
+        seqval = mssql_composite.group(2)
         return (
             4,
             int(mssql_composite.group(1), 16),
             rank,
-            mssql_composite.group(2) or "",
+            f"{int(seqval, 16):040d}" if seqval is not None else "",
         )
     mssql_legacy = lower[2:] if lower.startswith("0x") else lower
     if (
