@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from connectors.sdk import RecordBatch
+from services.json_tabular import _dig_path
 
 logger = logging.getLogger(__name__)
 
@@ -166,9 +167,9 @@ def advance_stream_state(
     for record in records:
         if not isinstance(record, Mapping):
             raise ValueError("incremental records must be objects")
-        if cursor_field not in record or record[cursor_field] is None:
+        value = _dig_path(record, cursor_field)
+        if value is None:
             continue
-        value = record[cursor_field]
         parsed = _parse_cursor(value, str(cursor_format))
         if best_parsed is not None and parsed < best_parsed:
             logger.warning(

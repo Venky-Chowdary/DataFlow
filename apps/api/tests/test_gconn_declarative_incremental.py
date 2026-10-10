@@ -61,6 +61,17 @@ def test_regressing_cursor_does_not_move_state_backwards(caplog) -> None:
     assert previous.cursor not in caplog.text
 
 
+def test_incremental_state_reads_nested_cursor_fields() -> None:
+    state = advance_stream_state(
+        None,
+        [{"id": "1001", "fields": {"updated": "2026-01-02T03:04:05Z"}}],
+        cursor_field="fields.updated",
+        cursor_format="iso8601",
+    )
+
+    assert state.cursor == "2026-01-02T03:04:05Z"
+
+
 @pytest.mark.parametrize(
     ("cursor_format", "cursor", "lookback_s", "expected"),
     [

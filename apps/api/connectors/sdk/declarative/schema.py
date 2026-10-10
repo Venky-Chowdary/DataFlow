@@ -130,11 +130,24 @@ def validate_stream_schema(
                 f"{path}.primary_key: field {key!r} is absent from schema",
                 path=f"{path}.primary_key",
             )
-    if cursor_field and cursor_field not in properties:
+    if cursor_field and _schema_path_definition(schema, cursor_field) is None:
         raise ManifestError(
             f"{path}.cursor: field {cursor_field!r} is absent from schema",
             path=f"{path}.cursor",
         )
+
+
+def _schema_path_definition(schema: Mapping[str, Any], path: str) -> Mapping[str, Any] | None:
+    current: Mapping[str, Any] = schema
+    for component in path.split("."):
+        properties = current.get("properties")
+        if not isinstance(properties, Mapping):
+            return None
+        definition = properties.get(component)
+        if not isinstance(definition, Mapping):
+            return None
+        current = definition
+    return current
 
 
 def _schema_columns(schema: Mapping[str, Any]) -> tuple[list[str], dict[str, str]]:
@@ -177,9 +190,16 @@ def detect_stream_drift(
     new_columns, new_types = _schema_columns(new_json_schema)
     removed = sorted(field for field in old_properties if field not in new_properties)
     for field in primary_key:
-        if field in removed:
+        if (
+            _schema_path_definition(old_json_schema, field) is not None
+            and _schema_path_definition(new_json_schema, field) is None
+        ):
             raise SchemaDriftError(f"schema drift removed primary key field {field!r}")
-    if cursor_field and cursor_field in removed:
+    if (
+        cursor_field
+        and _schema_path_definition(old_json_schema, cursor_field) is not None
+        and _schema_path_definition(new_json_schema, cursor_field) is None
+    ):
         raise SchemaDriftError(f"schema drift removed cursor field {cursor_field!r}")
 
     detect_schema_drift(
@@ -192,7 +212,7 @@ def detect_stream_drift(
         previous_source_schema=old_types,
         previous_primary_key=list(primary_key),
         live_primary_key=list(primary_key),
-        cursor_fields=[cursor_field] if cursor_field else [],
+        cursor_fields=[cursor_field] if cursor_field and "." not in cursor_field else [],
     )
 
     added = sorted(field for field in new_properties if field not in old_properties)

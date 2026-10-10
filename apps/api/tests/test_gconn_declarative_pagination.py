@@ -217,6 +217,41 @@ def test_offset_and_page_paginators_stop_on_short_page() -> None:
         ]
 
 
+def test_offset_paginator_uses_server_terminal_flag_for_short_pages() -> None:
+    with FixtureServer() as fixture:
+        fixture.add_route(
+            "/projects",
+            responses=[
+                FixtureResponse(
+                    body={"values": _records(1, 2), "isLast": False}
+                ),
+                FixtureResponse(
+                    body={"values": _records(3, 1), "isLast": True}
+                ),
+            ],
+        )
+        pages = list(
+            paginate(
+                _requester(),
+                f"{fixture.base_url}/projects",
+                records_path="values",
+                paginator=PaginatorSpec(
+                    type="offset",
+                    offset_param="startAt",
+                    page_size_param="maxResults",
+                    page_size=3,
+                    stop_path="isLast",
+                ),
+            )
+        )
+
+    assert [record["id"] for page in pages for record in page.records] == [1, 2, 3]
+    assert [_query(item.target)["startAt"] for item in fixture.request_log] == [
+        ["0"],
+        ["2"],
+    ]
+
+
 def test_max_pages_yields_allowed_page_before_failing_on_more_pages() -> None:
     with FixtureServer() as fixture:
         fixture.add_route(

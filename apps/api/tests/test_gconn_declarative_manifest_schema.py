@@ -129,6 +129,38 @@ def test_schema_inference_preserves_null_only_and_nullable_types() -> None:
     assert props["mixed"]["type"] == ["integer", "string"]
 
 
+def test_nested_cursor_paths_are_validated_and_protected_from_schema_removal() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "fields": {
+                "type": "object",
+                "properties": {
+                    "updated": {"type": "string", "format": "date-time"},
+                },
+            },
+        },
+    }
+
+    validate_stream_schema(schema, primary_key=("id",), cursor_field="fields.updated")
+    changed = {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string"},
+            "fields": {"type": "object", "properties": {}},
+        },
+    }
+
+    with pytest.raises(SchemaDriftError, match="cursor field"):
+        detect_stream_drift(
+            schema,
+            changed,
+            primary_key=("id",),
+            cursor_field="fields.updated",
+        )
+
+
 def test_schema_validation_requires_primary_key_and_cursor_fields() -> None:
     with pytest.raises(ManifestError, match="primary_key"):
         validate_stream_schema(

@@ -30,6 +30,7 @@ class PaginatorSpec:
     cursor_path: str = ""
     cursor_header: str = ""
     initial_token: str | None = None
+    stop_path: str = ""
 
     def __post_init__(self) -> None:
         if self.type not in {"none", "cursor", "offset", "page", "link_header"}:
@@ -55,6 +56,8 @@ class PaginatorSpec:
             raise ValueError("offset paginator requires offset_param")
         if self.type == "page" and not self.page_param:
             raise ValueError("page paginator requires page_param")
+        if self.stop_path and self.type != "offset":
+            raise ValueError("stop_path applies only to offset pagination")
 
 
 @dataclass(frozen=True)
@@ -294,6 +297,20 @@ def paginate(
             stream=stream,
             status=result.response.status_code,
         )
+        page_is_last: bool | None = None
+        if paginator.stop_path:
+            page_is_last = _dig_path(result.payload, paginator.stop_path)
+            if not isinstance(page_is_last, bool):
+                raise _pagination_error(
+                    f"pagination stop_path={paginator.stop_path!r} must resolve to a boolean",
+                    Page(
+                        records=records,
+                        headers=dict(result.response.headers),
+                        request_id=result.request_id,
+                        url=redact_url(current_url),
+                    ),
+                    stream,
+                )
         page_preview = Page(
             records=records,
             headers=dict(result.response.headers),
@@ -310,7 +327,7 @@ def paginate(
             )
             if next_token == "":
                 next_token = None
-        elif paginator.type == "offset" and records:
+        elif paginator.type == "offset" and records and page_is_last is not True:
             next_token = offset + len(records)
         elif paginator.type == "page" and records:
             next_token = page_number + 1
@@ -346,6 +363,18 @@ def paginate(
             )
 
         record_limit_reached = record_limit is not None and records_seen >= record_limit
+        if (
+            not record_limit_reached
+            and paginator.type == "offset"
+            and paginator.stop_path
+            and page_is_last is False
+            and not records
+        ):
+            raise _pagination_error(
+                "offset pagination has an empty page marked as non-final",
+                page,
+                stream,
+            )
         if not record_limit_reached and paginator.type == "cursor" and next_token not in (None, ""):
             if not records:
                 raise _pagination_error(
@@ -383,6 +412,18 @@ def paginate(
 
         if paginator.type == "none":
             return
+
+        if paginator.type == "offset" and paginator.stop_path:
+            if page_is_last:
+                return
+            if page_count >= page_limit:
+                raise _pagination_error(
+                    f"pagination reached max_pages={page_limit} with more pages implied",
+                    page,
+                    stream,
+                )
+            offset += len(records)
+            continue
 
         if paginator.type in {"offset", "page"}:
             if len(records) < request_page_size:

@@ -226,10 +226,25 @@ def certify(case: CertificationCase) -> CertificationReport:
         stream_schema = next((item for item in streams if item.name == case.stream), None)
         if stream_schema is None:
             raise AssertionError(f"discover() omitted stream {case.stream!r}")
-        properties = stream_schema.json_schema.get("properties", {})
         for key in (*case.primary_key, case.cursor_field):
-            if key and key not in properties:
-                raise AssertionError(f"discovered schema omitted required field {key!r}")
+            if not key:
+                continue
+            definition: Any = stream_schema.json_schema
+            for component in key.split("."):
+                path_properties = (
+                    definition.get("properties")
+                    if isinstance(definition, Mapping)
+                    else None
+                )
+                definition = (
+                    path_properties.get(component)
+                    if isinstance(path_properties, Mapping)
+                    else None
+                )
+                if not isinstance(definition, Mapping):
+                    raise AssertionError(
+                        f"discovered schema omitted required field {key!r}"
+                    )
         discovered_modes = {
             mode for item in streams for mode in item.supported_sync_modes
         }
@@ -409,7 +424,26 @@ def certify(case: CertificationCase) -> CertificationReport:
             raise AssertionError("schema drift omitted added-field/type changes")
         for field_name in (*case.primary_key, case.cursor_field):
             removed = json.loads(json.dumps(old_schema))
-            removed["properties"].pop(field_name, None)
+            path_parts = field_name.split(".")
+            definition: Any = removed
+            for component in path_parts[:-1]:
+                path_properties = (
+                    definition.get("properties")
+                    if isinstance(definition, Mapping)
+                    else None
+                )
+                definition = (
+                    path_properties.get(component)
+                    if isinstance(path_properties, Mapping)
+                    else None
+                )
+            path_properties = (
+                definition.get("properties")
+                if isinstance(definition, Mapping)
+                else None
+            )
+            if isinstance(path_properties, dict):
+                path_properties.pop(path_parts[-1], None)
             try:
                 detect_stream_drift(
                     old_schema,

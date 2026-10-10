@@ -291,7 +291,7 @@ def _parse_paginator(
     fields = {
         "type", "page_size", "page_size_param", "max_pages", "offset_param",
         "start_offset", "page_param", "start_index", "cursor_param",
-        "cursor_location", "cursor_path", "cursor_header", "initial_token",
+        "cursor_location", "cursor_path", "cursor_header", "initial_token", "stop_path",
     }
     _check_keys(obj, fields, path)
     obj.setdefault("page_size", default_page_size)
@@ -317,6 +317,7 @@ def _parse_paginator(
         "cursor_location",
         "cursor_path",
         "cursor_header",
+        "stop_path",
     ):
         if key in obj and not isinstance(obj[key], str):
             raise ManifestError(f"{path}.{key}: expected a string", path=f"{path}.{key}")
@@ -325,6 +326,11 @@ def _parse_paginator(
         raise ManifestError(
             f"{path}.cursor_location: expected query or body",
             path=f"{path}.cursor_location",
+        )
+    if obj.get("stop_path") and obj.get("type", "none") != "offset":
+        raise ManifestError(
+            f"{path}.stop_path: supported only for offset pagination",
+            path=f"{path}.stop_path",
         )
     if "initial_token" in obj and obj["initial_token"] is not None and not isinstance(
         obj["initial_token"], str
