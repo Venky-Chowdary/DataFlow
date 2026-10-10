@@ -1388,7 +1388,7 @@ def _stream_database_transfer_impl(
         job_id=job_id,
         has_primary_key=bool(pk_target_cols),
     )
-    if src_type not in _STREAMING_SOURCES:
+    if src_type not in _STREAMING_SOURCES and not sdk_source:
         raise ValueError(f"Streaming source '{src_type}' not supported")
     if dest_type not in _STREAMING_DESTINATIONS:
         raise ValueError(f"Streaming destination '{dest_type}' not supported")

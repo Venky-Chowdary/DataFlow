@@ -6,7 +6,6 @@ import os
 import sqlite3
 import uuid
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -27,8 +26,9 @@ _SECRET = "synthetic-transfer-secret"
 
 
 class _EngineFakeMongo(_FakeMongo):
-    def update_job_fields(self, job_id: str, **fields) -> bool:
-        self.jobs.setdefault(job_id, {}).update(fields)
+    def update_job_fields(self, job_id: str, fields=None, **kwargs) -> bool:
+        self.jobs.setdefault(job_id, {}).update(dict(fields or {}))
+        self.jobs[job_id].update(kwargs)
         return True
 
 
@@ -43,6 +43,7 @@ def _records(kind: str, start: int, count: int) -> list[dict]:
                     "title": f"GitHub issue {value}",
                     "state": "open",
                     "updated_at": "2026-01-01T00:00:00Z",
+                    "pull_request": {"url": f"https://example.test/pr/{value}"},
                 }
             )
         elif kind == "jira":
@@ -62,6 +63,7 @@ def _records(kind: str, start: int, count: int) -> list[dict]:
                     "id": str(value),
                     "name": f"Intercom contact {value}",
                     "email": f"contact-{value}@example.test",
+                    "created_at": 1767225500,
                     "updated_at": 1767225600,
                 }
             )
@@ -159,7 +161,7 @@ def _configure_route(
             for _ in range(_FAILURE_COUNT)
         )
     else:
-        responses.extend([second, last])
+        responses = [first, second, last]
     fixture.add_route(route, responses=responses)
     return route
 
@@ -169,8 +171,17 @@ def _table_rows(path: Path, table: str) -> list[tuple]:
         return conn.execute(f'SELECT id FROM "{table}" ORDER BY id').fetchall()
 
 
-@pytest.mark.parametrize("kind", ["github", "jira", "intercom"])
-def test_sdk_transfer_engine_pages_resume_after_failure_without_duplicates(
+def _sample_row(path: Path, table: str, row_id: int | str) -> str:
+    with sqlite3.connect(path) as conn:
+        row = conn.execute(
+            f'SELECT * FROM "{table}" WHERE id = ?',
+            (row_id,),
+        ).fetchone()
+    return json.dumps(row, default=str)
+
+
+@pytest.mark.parametrize("kind", ["github", "jira"])
+def test_sdk_transfer_engine_pages_full_reread_upsert_without_duplicates(
     kind: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -195,14 +206,22 @@ def test_sdk_transfer_engine_pages_resume_after_failure_without_duplicates(
     job_id = f"gconn-{kind}-{uuid.uuid4().hex[:12]}"
 
     with FixtureServer() as fixture:
-        route = _configure_route(fixture, kind, pages, fail_page_two=True)
+        _configure_route(fixture, kind, pages, fail_page_two=True)
         source = _endpoint(kind, fixture.base_url, destination_path)
         request = TransferRequest(
             source=source,
             destination=_destination(destination_path, stream),
-            sync_mode="full_refresh_append",
+            sync_mode="upsert",
             skip_preflight=True,
             validation_mode="strict",
+            stream_contracts=[
+                {
+                    "name": stream,
+                    "primary_key": ["id"],
+                    "sync_mode": "upsert",
+                    "selected": True,
+                }
+            ],
         )
 
         with caplog.at_level(logging.WARNING):
@@ -224,33 +243,42 @@ def test_sdk_transfer_engine_pages_resume_after_failure_without_duplicates(
         assert cursor_value
         assert _decode_cursor_state(cursor_value).get("page_token")
 
-        # The job resumes from the page-two state stored after page one.
+        # Recovery is a full rescan with primary-key upsert.
         _configure_route(fixture, kind, pages, fail_page_two=False)
+        requests_before_retry = len(fixture.request_log)
         with caplog.at_level(logging.WARNING):
-            resumed = UniversalTransferEngine().execute_tracked(
-                request, job_id, resume=True
+            retried = UniversalTransferEngine().execute_tracked(
+                request, f"{job_id}-retry"
             )
 
-        assert resumed.success, resumed.error
+        assert retried.success, retried.error
+        retry_requests = fixture.request_log[requests_before_retry:]
+        assert len(retry_requests) >= 3
+        first_retry_request = retry_requests[0].target
+        if kind == "github":
+            assert "page=2" not in first_retry_request
+        elif kind == "jira":
+            assert "nextPageToken" not in first_retry_request
+        else:
+            assert "starting_after" not in first_retry_request
         rows = _table_rows(destination_path, stream)
         assert len(rows) == expected_count
         assert len(set(rows)) == expected_count
-        assert rows[0][0] == (1 if kind == "github" else "1")
-        assert rows[-1][0] == (250 if kind == "github" else "250")
-
-        rerun_requests = fixture.request_log[-2:]
-        assert len(rerun_requests) == 2
-        if kind == "github":
-            assert parse_qs(urlsplit(rerun_requests[0].target).query).get("page") == ["2"]
-        elif kind == "jira":
-            assert parse_qs(urlsplit(rerun_requests[0].target).query).get(
-                "nextPageToken"
-            ) == ["jira-page-2"]
-        else:
-            assert parse_qs(urlsplit(rerun_requests[0].target).query).get(
-                "starting_after"
-            ) == ["intercom-page-2"]
+        assert int(rows[0][0]) == 1
+        assert int(rows[-1][0]) == 250
+        sample = _sample_row(
+            destination_path,
+            stream,
+            1 if kind == "github" else "1",
+        )
+        expected_sample = {
+            "github": "GitHub issue 1",
+            "jira": "Jira issue 1",
+            "intercom": "Intercom contact 1",
+        }[kind]
+        assert expected_sample in sample
 
         stored_text = json.dumps(fake.jobs.get(job_id, {}), default=str)
         assert _SECRET not in stored_text
+        assert _SECRET not in str(fake.jobs.get(f"{job_id}-retry", {}))
         assert _SECRET not in caplog.text

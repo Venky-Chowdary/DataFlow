@@ -30,6 +30,7 @@ def test_sdk_transfer_bridge_reads_one_page_and_encodes_resume_state() -> None:
 
         assert first.headers[:2] == ["id", "number"] or "id" in first.headers
         assert first.rows[0][first.headers.index("title")] == "first"
+        assert first.meta["native_types"]["id"] == "INTEGER"
         assert first.meta["sdk_done"] is False
         token = first.meta["sdk_state"]
         assert token and "=" not in token

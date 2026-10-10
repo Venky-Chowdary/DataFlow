@@ -53,6 +53,34 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
     return config
 
 
+def _native_types(schema: Any) -> dict[str, str]:
+    properties = getattr(schema, "properties", None)
+    if not isinstance(properties, Mapping):
+        return {}
+    result: dict[str, str] = {}
+    type_map = {
+        "array": "JSON",
+        "boolean": "BOOLEAN",
+        "integer": "INTEGER",
+        "number": "NUMERIC",
+        "object": "JSON",
+        "string": "TEXT",
+    }
+    for name, definition in properties.items():
+        declared = (
+            definition.get("type")
+            if isinstance(definition, Mapping)
+            else definition
+        )
+        candidates = declared if isinstance(declared, list) else [declared]
+        for candidate in candidates:
+            native_type = type_map.get(str(candidate or ""))
+            if native_type:
+                result[str(name)] = native_type
+                break
+    return result
+
+
 def read_object(
     *,
     cfg: dict[str, Any],
@@ -112,7 +140,7 @@ def read_object(
             "sdk_done": not has_more,
             "sdk_state": _encode_cursor_state(state) if state else "",
             "sdk_stream": object,
-            "native_types": dict(page.schema.properties) if page.schema else {},
+            "native_types": _native_types(page.schema),
         },
         raw_page_rows=len(rows),
     )
