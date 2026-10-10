@@ -92,7 +92,7 @@ def test_weaviate_create_table_false_missing_class():
     session = MagicMock()
     session.get.return_value = MagicMock(status_code=404)
     with patch(
-        "connectors.weaviate_writer.vectorize_records",
+        "services.vectorization.vectorize_records",
         return_value=[{"content": "hi", "embedding": [0.1, 0.2], "source_id": "1", "chunk_index": 0}],
     ), patch(
         "connectors.weaviate_writer.build_weaviate_objects",

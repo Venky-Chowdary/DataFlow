@@ -144,7 +144,7 @@ def test_elasticsearch_transform_fail_skips_bulk():
 def test_pinecone_strict_policy_blocks_partial_vectors():
     from connectors.pinecone_writer import write_mapped_rows
 
-    with patch("connectors.pinecone_writer.vectorize_records") as vz:
+    with patch("services.vectorization.vectorize_records") as vz:
         vz.return_value = [
             {"id": "a", "content": "ok", "embedding": [0.1, 0.2, 0.3]},
             {"id": "b", "content": "bad", "embedding": None},
@@ -206,10 +206,14 @@ def test_weaviate_batch_object_errors_fail_strict():
             "result": {"errors": {"error": [{"message": "invalid vector"}]}},
         },
     ]
-    session.get.return_value = schema_ok
+    empty_list_resp = MagicMock(status_code=200, content=b'{"objects": []}')
+    empty_list_resp.json.return_value = {"objects": []}
+    session.get.side_effect = lambda url, **_kwargs: (
+        schema_ok if url.endswith("/v1/schema/DataflowChunk") else empty_list_resp
+    )
     session.post.return_value = batch_resp
 
-    with patch("connectors.weaviate_writer.vectorize_records") as vz:
+    with patch("services.vectorization.vectorize_records") as vz:
         vz.return_value = [
             {
                 "id": "11111111-1111-1111-1111-111111111111",
@@ -222,7 +226,9 @@ def test_weaviate_batch_object_errors_fail_strict():
                 "embedding": [0.3, 0.4],
             },
         ]
-        with patch("connectors.weaviate_writer._requests_session", return_value=session):
+        with patch(
+            "services.vector_fingerprint.enforce_fingerprint", return_value="created"
+        ), patch("connectors.weaviate_writer._requests_session", return_value=session):
             result = write_mapped_rows(
                 host="localhost",
                 port=8080,
