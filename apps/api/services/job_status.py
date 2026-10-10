@@ -55,6 +55,33 @@ def refuse_job_status_write(
     return None
 
 
+def cancel_outcome_for(rows_committed: int | None) -> dict:
+    """What a cancel left behind: committed rows are never rolled back.
+
+    Cancel is honoured at the next checkpoint, so a chunk (or the whole load)
+    can already be committed when the job turns ``cancelled``. The job must
+    say so instead of reading as a clean stop (QA MXD10).
+    """
+    try:
+        rows = max(0, int(rows_committed or 0))
+    except (TypeError, ValueError):
+        rows = 0
+    if rows:
+        message = (
+            f"Cancelled after {rows:,} row(s) were already committed to the "
+            "destination — they were not rolled back. Re-run with "
+            "full_refresh_overwrite or clear the destination table to undo them."
+        )
+    else:
+        message = "Transfer cancelled by user"
+    return {
+        "partial_write": bool(rows),
+        "rows_committed": rows,
+        "rolled_back": False,
+        "message": message,
+    }
+
+
 def terminal_status_for(rejected_rows: int = 0, coerced_null_rows: int = 0) -> str:
     """Pick the success terminal status based on data-integrity accounting."""
     if int(rejected_rows or 0) > 0 or int(coerced_null_rows or 0) > 0:

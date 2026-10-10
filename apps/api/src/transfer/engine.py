@@ -1332,6 +1332,61 @@ def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
         )
 
 
+def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -> Any:
+    """Write the success terminal status, or record the commit on a cancelled job.
+
+    Cancel is sticky, so a success write landing after Cancel is refused —
+    but by then the rows are committed. Leaving the cancelled job at its
+    last heartbeat hid them (QA MXD10).
+    """
+    from services.job_status import cancel_outcome_for
+
+    written = mongo.update_job_status(job_id, status, **fields)
+    if written is not False:
+        return written
+    try:
+        job = mongo.get_job(job_id) or {}
+    except Exception as exc:  # noqa: BLE001 - the refusal itself is returned
+        logger.error(
+            "Job %s: success write refused and the job could not be read: %s",
+            job_id,
+            exc,
+            exc_info=exc,
+        )
+        return written
+    if not (job.get("cancel_requested") or str(job.get("status") or "") == "cancelled"):
+        return written
+    outcome = cancel_outcome_for(fields.get("records_processed"))
+    logger.warning(
+        "Job %s: cancel landed after %s row(s) committed; recording them on the cancelled job",
+        job_id,
+        outcome["rows_committed"],
+    )
+    kept = {
+        key: fields[key]
+        for key in (
+            "records_processed",
+            "rejected_rows",
+            "coerced_null_rows",
+            "rejected_details",
+            "destination_summary",
+            "reconciliation",
+            "destination_database",
+            "destination_collection",
+        )
+        if key in fields
+    }
+    mongo.update_job_status(
+        job_id,
+        "cancelled",
+        phase="cancelled",
+        message=outcome["message"],
+        cancel_outcome=outcome,
+        **kept,
+    )
+    return written
+
+
 def _pin_overwrite_rows_before(
     destination: EndpointConfig,
     checkpoint: Any = None,
@@ -1531,7 +1586,8 @@ def _finish_verified_run(
     )
     for attempt in range(_TERMINAL_WRITE_ATTEMPTS):
         try:
-            mongo.update_job_status(
+            _write_success_status(
+                mongo,
                 job_id,
                 terminal,
                 records_processed=rows_written,
@@ -3880,7 +3936,8 @@ class UniversalTransferEngine:
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
-            mongo.update_job_status(
+            _write_success_status(
+                mongo,
                 job_id,
                 terminal_status,
                 records_processed=rows_written,
@@ -4930,7 +4987,8 @@ class UniversalTransferEngine:
             else:
                 release_args = None
             _settle_overwrite_backup(request.destination, restore=False)
-            status_written = mongo.update_job_status(
+            status_written = _write_success_status(
+                mongo,
                 job_id,
                 terminal_status,
                 records_processed=rows_written,
@@ -5722,7 +5780,8 @@ class UniversalTransferEngine:
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
-            mongo.update_job_status(
+            _write_success_status(
+                mongo,
                 job_id,
                 terminal_status,
                 records_processed=rows_written,
