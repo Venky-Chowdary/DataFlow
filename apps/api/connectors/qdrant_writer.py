@@ -497,10 +497,49 @@ def write_mapped_rows(
     chunk_size: int = 512,
     chunk_overlap: int = 50,
     skip_chunking: bool = False,
+    chunk_strategy: str = "recursive",
+    chunk_unit: str = "chars",
+    chunk_tokenizer: Any = None,
+    text_template: str | None = None,
     durable_embedding_cache: bool | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     """Write text rows as embedded points into a Qdrant collection."""
+    logger.info(
+        "Vector write target=%s strategy=%s size=%s overlap=%s unit=%s template=%s",
+        table_name or "dataflow_vectors",
+        chunk_strategy,
+        chunk_size,
+        chunk_overlap,
+        chunk_unit,
+        "on" if text_template is not None else "off",
+    )
+    if text_template is not None:
+        from services.vector_template import (
+            TemplateConfigError,
+            _mapped_excluded_fields,
+            _mapped_template_fields,
+            validate_template,
+        )
+
+        try:
+            validate_template(
+                text_template,
+                available_fields=_mapped_template_fields(headers, mappings),
+                excluded_fields=_mapped_excluded_fields(
+                    exclude_pii_columns or (), mappings
+                ),
+            )
+        except TemplateConfigError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=f"Invalid vector text template: {exc}",
+            )
     if importlib.util.find_spec("requests") is None:
         return WriteResult(
             ok=False,
@@ -740,6 +779,10 @@ def write_mapped_rows(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             skip_chunking=skip_chunking,
+            chunk_strategy=chunk_strategy,
+            chunk_unit=chunk_unit,
+            chunk_tokenizer=chunk_tokenizer,
+            text_template=text_template,
             durable_embedding_cache=durable_embedding_cache,
             identity_columns=vector_identity_columns(pk_cols, mappings, records),
             usage=usage,
@@ -1061,6 +1104,12 @@ def write_mapped_rows(
             chunk_overlap=chunk_overlap,
             skip_chunking=skip_chunking,
             embedding_column=embedding_column,
+            chunk_strategy=chunk_strategy,
+            chunk_unit=chunk_unit,
+            chunk_tokenizer=(
+                chunk_tokenizer if isinstance(chunk_tokenizer, str) else None
+            ),
+            text_template=text_template,
         )
         try:
             fingerprint_status = enforce_fingerprint(

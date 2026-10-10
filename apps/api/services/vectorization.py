@@ -236,58 +236,20 @@ def chunk_text(
     then on whitespace. This respects document structure better than purely
     character-based splitting.
     """
-    if not text or not text.strip():
-        return []
+    from services.chunkers import ChunkerConfig, chunk
 
-    def _paragraphs(t: str) -> list[str]:
-        return [p.strip() for p in t.split("\n\n") if p.strip()]
-
-    def _sentences(t: str) -> list[str]:
-        import re
-
-        parts = re.split(r"(?<=[.!?])\s+", t)
-        return [p.strip() for p in parts if p.strip()]
-
-    def _split(t: str) -> list[str]:
-        if split_on:
-            return [p.strip() for p in split_on(t) if p.strip()]
-        paragraphs = _paragraphs(t)
-        if all(len(p) <= chunk_size for p in paragraphs):
-            return paragraphs
-        out: list[str] = []
-        for p in paragraphs:
-            if len(p) <= chunk_size:
-                out.append(p)
-                continue
-            for s in _sentences(p):
-                if len(s) <= chunk_size:
-                    out.append(s)
-                else:
-                    out.extend(_fixed_chunks(s, chunk_size, chunk_overlap))
-        return out
-
-    def _fixed_chunks(t: str, size: int, overlap: int) -> list[str]:
-        step = max(1, size - overlap)
-        chunks = []
-        start = 0
-        while start < len(t):
-            chunks.append(t[start : start + size].strip())
-            start += step
-        return [c for c in chunks if c]
-
-    chunks = _split(text)
-    merged: list[str] = []
-    current = ""
-    for c in chunks:
-        if len(current) + len(c) + 1 <= chunk_size:
-            current = f"{current}\n\n{c}".strip() if current else c
-        else:
-            if current:
-                merged.append(current)
-            current = c
-    if current:
-        merged.append(current)
-    return merged
+    return [
+        part.text
+        for part in chunk(
+            text,
+            ChunkerConfig(
+                strategy="recursive",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            ),
+            split_on=split_on,
+        )
+    ]
 
 
 # In-process L1 cache for repeated identical content within a process.
@@ -577,6 +539,10 @@ def vectorize_records(
     chunk_size: int = 512,
     chunk_overlap: int = 50,
     skip_chunking: bool = False,
+    chunk_strategy: str = "recursive",
+    chunk_unit: str = "chars",
+    chunk_tokenizer: Any = None,
+    text_template: str | None = None,
     durable_embedding_cache: bool | None = None,
     identity_columns: list[str] | None = None,
     usage: Any = None,
@@ -596,8 +562,32 @@ def vectorize_records(
     (fail-closed — never embed or store excluded PII in the vector store).
     """
     from services.document_chunking import PRECHUNKED_FLAG
+    from services.chunkers import ChunkerConfig, chunk as chunk_records
+    from services.vector_template import (
+        TemplateConfigError,
+        TemplateFieldMissingError,
+        TemplateFieldRenderError,
+        _parse_template,
+        render_record_template,
+    )
 
     exclude = {str(c) for c in (exclude_pii_columns or []) if c}
+    if text_template is not None:
+        excluded_folded = {field.casefold() for field in exclude}
+        for _, field, _ in _parse_template(text_template):
+            if field in exclude or (
+                field is not None and field.casefold() in excluded_folded
+            ):
+                raise TemplateConfigError(
+                    f"Template field {field!r} is excluded by the PII policy"
+                )
+    chunker_config = ChunkerConfig(
+        strategy=chunk_strategy,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        unit=chunk_unit,
+        tokenizer=chunk_tokenizer if isinstance(chunk_tokenizer, str) else None,
+    )
     if content_column and content_column in exclude:
         raise ValueError(
             f"content_column '{content_column}' is excluded as PII — "
@@ -610,7 +600,13 @@ def vectorize_records(
         prechunked = skip_chunking or str(rec.get(PRECHUNKED_FLAG) or "") in {"1", "true", "True"}
 
         content = ""
-        if content_column and content_column in rec:
+        template_error = ""
+        if text_template is not None:
+            try:
+                content = render_record_template(text_template, rec)
+            except (TemplateFieldMissingError, TemplateFieldRenderError) as exc:
+                template_error = str(exc)
+        elif content_column and content_column in rec:
             content = str(rec[content_column])
         else:
             # Prefer columns flagged as text/embedding content by heuristic.
@@ -700,7 +696,20 @@ def vectorize_records(
             chunk_index_error = str(exc)
             existing_chunk_index = 0
 
-        if chunk_index_error:
+        if template_error:
+            bounded, meta = _bounded_vector_content("", metadata)
+            rows.append({
+                "id": _stable_vector_row_id(
+                    source_id, existing_chunk_index, "template-reject", multi_chunk=False
+                ),
+                "content": bounded,
+                "embedding": None,
+                "metadata": meta,
+                "source_id": source_id,
+                "chunk_index": existing_chunk_index,
+                "_df_embed_error": template_error,
+            })
+        elif chunk_index_error:
             bounded, meta = _bounded_vector_content(content, metadata)
             rows.append({
                 "id": _stable_vector_row_id(
@@ -759,26 +768,37 @@ def vectorize_records(
                 "chunk_index": existing_chunk_index,
             })
         elif content:
-            chunks = chunk_text(content, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            chunks = chunk_records(
+                content,
+                chunker_config,
+                tokenizer=chunk_tokenizer
+                if not isinstance(chunk_tokenizer, str)
+                else None,
+            )
             if not chunks:
-                chunks = [content]
+                from services.chunkers import Chunk
+
+                chunks = [Chunk(content, 0)]
             multi = len(chunks) > 1
             embeddings = embed(
-                chunks, model=model, durable=durable_embedding_cache,
+                [part.text for part in chunks], model=model,
+                durable=durable_embedding_cache,
                 usage=usage, embedding_extra=embedding_extra,
             )
-            for idx, (chunk, vector) in enumerate(zip(chunks, embeddings)):
-                bounded, meta = _bounded_vector_content(chunk, metadata)
+            for part, vector in zip(chunks, embeddings):
+                bounded, meta = _bounded_vector_content(part.text, metadata)
+                if part.section is not None:
+                    meta["_df_section"] = part.section
                 _annotate_embed_backend(meta, model)
                 rows.append({
                     "id": _stable_vector_row_id(
-                        source_id, idx, bounded, multi_chunk=multi
+                        source_id, part.index, bounded, multi_chunk=multi
                     ),
                     "content": bounded,
                     "embedding": vector,
                     "metadata": meta,
                     "source_id": source_id,
-                    "chunk_index": idx,
+                    "chunk_index": part.index,
                 })
         else:
             # No content and no embedding: still index metadata as a sparse row.

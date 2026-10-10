@@ -39,6 +39,64 @@ def test_fingerprint_digest_is_canonical_and_stable():
     assert first.digest == second.digest
 
 
+def test_default_chunker_fingerprint_is_byte_compatible_with_m2():
+    assert _fingerprint().to_dict()["chunker"] == {
+        "strategy": "recursive",
+        "chunk_size": 512,
+        "chunk_overlap": 50,
+        "skip_chunking": False,
+    }
+
+
+def test_non_default_chunking_and_template_are_fingerprinted():
+    from services.chunkers import ChunkerConfig
+    from services.vector_fingerprint import fingerprint_for_write
+
+    assert ChunkerConfig().strategy == "recursive"
+    fingerprint = fingerprint_for_write(
+        model="hash/32",
+        dimension=32,
+        distance="cosine",
+        chunk_size=256,
+        chunk_overlap=20,
+        skip_chunking=False,
+        embedding_column=None,
+        chunk_strategy="markdown",
+        chunk_unit="tokens",
+        chunk_tokenizer="cl100k_base",
+        text_template="{title}: {body}",
+    )
+    chunker = fingerprint.to_dict()["chunker"]
+    assert chunker["strategy"] == "markdown"
+    assert chunker["unit"] == "tokens"
+    assert chunker["tokenizer"] == "cl100k_base"
+    assert len(chunker["template_sha256"]) == 64
+    assert "{title}" not in chunker["template_sha256"]
+
+
+def test_template_change_changes_fingerprint():
+    from services.vector_template import validate_template
+    from services.vector_fingerprint import fingerprint_for_write
+
+    assert validate_template(
+        "{title}", available_fields={"title"}, excluded_fields=set()
+    ) == ["title"]
+
+    def build(template):
+        return fingerprint_for_write(
+            model="hash/32",
+            dimension=32,
+            distance="cosine",
+            chunk_size=512,
+            chunk_overlap=50,
+            skip_chunking=False,
+            embedding_column=None,
+            text_template=template,
+        )
+
+    assert build("{title}: {body}").digest != build("{body}").digest
+
+
 def test_deterministic_model_alias_matches_hash_model():
     deterministic = _fingerprint(model="deterministic/32")
     hash_model = _fingerprint(model="hash/32")

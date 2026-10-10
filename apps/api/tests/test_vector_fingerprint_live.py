@@ -673,3 +673,150 @@ def test_embedding_column_fingerprint_and_dimension_gate(fingerprint_destination
     assert rejected.ok is False
     assert "dimension" in (rejected.error or "").lower()
     assert _source_count(resource, row["doc_id"]) == count_before
+
+
+def test_record_template_writes_rendered_content(fingerprint_destination, caplog):
+    resource = fingerprint_destination
+    row = {
+        "doc_id": f"template-{resource['engine']}",
+        "content": "release notes",
+        "title": "January",
+    }
+    result = _write(
+        resource,
+        [row],
+        text_template="{title}: {content}",
+        skip_chunking=True,
+    )
+    assert result.ok, result.error
+    stored = _source_snapshot(resource, row["doc_id"])
+    assert len(stored) == 1
+    assert stored[0][1] == "January: release notes"
+    assert "January: release notes" not in caplog.text
+
+
+def test_missing_template_field_is_quarantined_per_row(fingerprint_destination):
+    from connectors.pgvector_writer import write_mapped_rows as write_pgvector
+    from connectors.qdrant_writer import write_mapped_rows as write_qdrant
+
+    resource = fingerprint_destination
+    cfg = resource["cfg"]
+    headers = ["doc_id", "content", "title"]
+    mappings = [
+        {"source": field, "target": field, "target_type": "VARCHAR"}
+        for field in headers
+    ]
+    options = {
+        **cfg,
+        "table_name": resource["name"],
+        "headers": headers,
+        "data_rows": [
+            ["template-valid", "first document", "Valid"],
+            ["template-missing", "second document"],
+        ],
+        "mappings": mappings,
+        "column_types": {field: "string" for field in headers},
+        "destination_column_types": {field: "VARCHAR" for field in headers},
+        "error_policy": "quarantine",
+        "content_column": "content",
+        "embedding_model": "hash/32",
+        "chunk_size": 512,
+        "chunk_overlap": 50,
+        "skip_chunking": True,
+        "text_template": "{title}: {content}",
+        "conflict_columns": ["doc_id"],
+        "write_mode": "upsert",
+        "sync_mode": "cdc",
+        "durable_embedding_cache": False,
+    }
+    writer = write_pgvector if resource["engine"] == "pgvector" else write_qdrant
+    result = writer(**options)
+    assert result.ok, result.error
+    assert result.rows_written == 1
+    assert result.rejected_rows == 1
+    assert "title" in result.rejected_details[0]["reason"]
+    assert result.meta["vector_stale_cleanup_skipped_docs"] == 1
+    assert _source_count(resource, "template-valid") == 1
+    assert _source_count(resource, "template-missing") == 0
+
+
+def test_markdown_sections_are_stored_in_vector_metadata(fingerprint_destination):
+    resource = fingerprint_destination
+    row = {
+        "doc_id": f"markdown-{resource['engine']}",
+        "content": "# Install\nLinux setup instructions",
+    }
+    result = _write(
+        resource,
+        [row],
+        skip_chunking=False,
+        chunk_strategy="markdown",
+        chunk_size=128,
+        chunk_overlap=8,
+    )
+    assert result.ok, result.error
+    if resource["engine"] == "pgvector":
+        import psycopg2
+        from psycopg2 import sql
+
+        cfg = resource["cfg"]
+        conn = psycopg2.connect(
+            host=cfg["host"],
+            port=cfg["port"],
+            dbname=cfg["database"],
+            user=cfg["username"],
+            password=cfg["password"],
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    sql.SQL(
+                        "SELECT metadata->>'_df_section' FROM {}.{} "
+                        "WHERE content LIKE %s"
+                    ).format(sql.Identifier("public"), sql.Identifier(resource["name"])),
+                    ("%Linux setup instructions%",),
+                )
+                section = cur.fetchone()[0]
+        finally:
+            conn.close()
+    else:
+        import requests
+
+        response = requests.post(
+            f"{_QDRANT_URL}/collections/{resource['name']}/points/scroll",
+            json={"limit": 100, "with_payload": True, "with_vector": False},
+            timeout=10,
+        )
+        assert response.status_code == 200, response.text
+        section = next(
+            point["payload"].get("_df_section")
+            for point in response.json()["result"]["points"]
+            if "Linux setup instructions"
+            in point["payload"].get("content", "")
+        )
+    assert section == "Install"
+
+
+def test_changing_chunk_strategy_is_rejected_by_existing_fingerprint(
+    fingerprint_destination,
+):
+    resource = fingerprint_destination
+    row = {
+        "doc_id": f"strategy-{resource['engine']}",
+        "content": "stable strategy content",
+    }
+    first = _write(resource, [row], skip_chunking=True)
+    assert first.ok, first.error
+    count_before = _source_count(resource, row["doc_id"])
+
+    changed = _write(
+        resource,
+        [row],
+        skip_chunking=True,
+        chunk_strategy="fixed",
+    )
+
+    assert changed.ok is False
+    assert "chunker.strategy" in (changed.error or "")
+    assert "new collection/table" in (changed.error or "")
+    assert _source_count(resource, row["doc_id"]) == count_before

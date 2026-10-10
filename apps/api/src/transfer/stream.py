@@ -710,6 +710,10 @@ def _write_batch(
             kwargs["chunk_size"] = int(extra.get("chunk_size", 512)) if extra.get("chunk_size") else 512
             kwargs["chunk_overlap"] = int(extra.get("chunk_overlap", 50)) if extra.get("chunk_overlap") else 50
             kwargs["skip_chunking"] = bool(extra.get("skip_chunking"))
+            kwargs["chunk_strategy"] = extra.get("chunk_strategy", "recursive")
+            kwargs["chunk_unit"] = extra.get("chunk_unit", "chars")
+            kwargs["chunk_tokenizer"] = extra.get("chunk_tokenizer")
+            kwargs["text_template"] = extra.get("text_template")
             for option in (
                 "embedding_api_key",
                 "embedding_base_url",

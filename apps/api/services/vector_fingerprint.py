@@ -121,6 +121,10 @@ def fingerprint_for_write(
     chunk_overlap: int,
     skip_chunking: bool,
     embedding_column: str | None,
+    chunk_strategy: str = "recursive",
+    chunk_unit: str = "chars",
+    chunk_tokenizer: str | None = None,
+    text_template: str | None = None,
 ) -> EmbeddingFingerprint:
     """Build a credential-free identity for one vector write configuration."""
     from services import vectorization
@@ -189,17 +193,26 @@ def fingerprint_for_write(
             canonical_model = f"hash/{model_dimension}"
     if "://" in canonical_model:
         raise ValueError("embedding model identity must not contain a URL")
+    chunker: dict[str, Any] = {
+        "strategy": chunk_strategy,
+        "chunk_size": int(chunk_size),
+        "chunk_overlap": int(chunk_overlap),
+        "skip_chunking": bool(skip_chunking),
+    }
+    if chunk_unit != "chars":
+        chunker["unit"] = chunk_unit
+    if chunk_tokenizer is not None:
+        chunker["tokenizer"] = str(chunk_tokenizer)
+    if text_template is not None:
+        chunker["template_sha256"] = hashlib.sha256(
+            text_template.encode("utf-8")
+        ).hexdigest()
     return EmbeddingFingerprint(
         provider=provider,
         model=canonical_model,
         dimension=dimension,
         distance=str(distance),
-        chunker={
-            "strategy": "recursive",
-            "chunk_size": int(chunk_size),
-            "chunk_overlap": int(chunk_overlap),
-            "skip_chunking": bool(skip_chunking),
-        },
+        chunker=chunker,
     )
 
 
