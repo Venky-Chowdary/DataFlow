@@ -97,6 +97,9 @@ def _poll_stubs(
     with ExitStack() as stack:
         stack.enter_context(patch.object(reader, "_conn", return_value=conn))
         stack.enter_context(patch.object(reader, "_acquire_cdc_lease"))
+        stack.enter_context(
+            patch.object(reader, "_capture_instance_exists", return_value=True)
+        )
         if reader._shared:
             def resolve_captures(_cur):
                 reader._captures = {"orders": "dbo_orders", "users": "dbo_users"}

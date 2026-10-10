@@ -124,6 +124,7 @@ def test_native_poll_ops_1_2_4() -> None:
     # resolve capture, min_lsn (arg eval), max_lsn, then change rows
     cur.fetchone.side_effect = [
         ("dbo_orders",),
+        (1,),  # capture instance exists
         (bytes.fromhex("0a"),),  # min_lsn ≤ resume
         (bytes.fromhex("0c"),),  # max_lsn
     ]
@@ -284,6 +285,8 @@ def test_mssql_shared_poll_demuxes_two_tables() -> None:
     cur.fetchone.side_effect = [
         ("dbo_orders",),
         ("dbo_users",),
+        (1,),  # orders capture exists
+        (1,),  # users capture exists
         (bytes.fromhex("0a"),),  # min orders
         (bytes.fromhex("0a"),),  # min users
         (bytes.fromhex("0b"),),  # max_lsn
@@ -373,6 +376,7 @@ def test_poll_fails_closed_when_resume_before_min_lsn() -> None:
     conn = MagicMock()
     cur = MagicMock()
     cur.fetchone.side_effect = [
+        (1,),  # capture instance exists
         (bytes.fromhex("0b"),),  # min_lsn
     ]
     conn.__enter__ = MagicMock(return_value=conn)

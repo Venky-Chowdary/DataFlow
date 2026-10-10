@@ -755,7 +755,16 @@ class SqlServerNativeCdc:
             (table, self.schema),
         )
         row = cur.fetchone()
-        capture = str(row[0]) if row and row[0] else f"{self.schema}_{table}"
+        capture = (
+            str(row[0])
+            if row and row[0]
+            else self._captures.get(table)
+            or (
+                self.capture_instance
+                if table == self.table and self.capture_instance
+                else f"{self.schema}_{table}"
+            )
+        )
         self._captures[table] = capture
         if table == self.table:
             self.capture_instance = capture
@@ -765,6 +774,28 @@ class SqlServerNativeCdc:
 
     def _resolve_capture_instance(self, cur) -> str:
         return self._resolve_capture_for_table(cur, self.table)
+
+    def _capture_instance_exists(self, cur, capture_instance: str) -> bool:
+        if not capture_instance:
+            return False
+        cur.execute(
+            "SELECT 1 FROM cdc.change_tables WHERE capture_instance = %s",
+            (capture_instance,),
+        )
+        return cur.fetchone() is not None
+
+    def _missing_capture_error(
+        self,
+        table: str,
+        capture_instance: str,
+    ) -> CdcLsnGapError:
+        return CdcLsnGapError(
+            f"SQL Server CDC capture instance {capture_instance!r} for table "
+            f"{self.schema}.{table} is no longer available. Re-enable CDC on the "
+            "table with sys.sp_cdc_enable_table, then re-snapshot before resuming.",
+            resume_lsn=self.start_lsn,
+            cursor_key=self.cursor_key,
+        )
 
     def _resolve_all_captures(self, cur) -> dict[str, str]:
         for t in self.tables:
@@ -1314,7 +1345,9 @@ class SqlServerNativeCdc:
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
-                    self._resolve_capture_instance(cur)
+                    capture = self._resolve_capture_instance(cur)
+                    if not self._capture_instance_exists(cur, capture):
+                        raise self._missing_capture_error(self.table, capture)
                     self._maybe_record_capture_schema(cur, offset=self.start_lsn)
                     min_lsn = self._min_lsn(cur)
                     if min_lsn:
@@ -1516,6 +1549,12 @@ class SqlServerNativeCdc:
             with self._conn() as conn:
                 with conn.cursor() as cur:
                     self._resolve_all_captures(cur)
+                    for table_name in self.tables:
+                        capture = self._captures.get(table_name) or ""
+                        failed_table = table_name
+                        failed_capture_instance = capture
+                        if not self._capture_instance_exists(cur, capture):
+                            raise self._missing_capture_error(table_name, capture)
                     # Shared reader: any capture's min_lsn past resume is a gap.
                     for cap in (self._captures or {}).values():
                         if cap:

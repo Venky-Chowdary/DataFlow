@@ -8,8 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from connectors.sqlserver_cdc_native import SqlServerNativeCdc
-from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
+from connectors.sqlserver_change_stream import (
+    SqlServerChangeTrackingCdc,
+    encode_sqlserver_resume_token,
+)
 from connectors.write_resilience import is_connection_lost
+from services.cdc_cursor_gap import CdcCtGapError, CdcLsnGapError
 
 
 CFG = {
@@ -168,6 +172,70 @@ def test_shared_poll_surfaces_cdc_tvf_error_313() -> None:
     assert error.cursor_key == reader.cursor_key
 
 
+def test_native_poll_fails_closed_when_capture_instance_is_missing() -> None:
+    reader = _native_reader()
+    reader.phase = "streaming"
+    reader.start_lsn = "00000000000000000010"
+    cur = MagicMock()
+    conn = _connection(cur)
+
+    with (
+        patch.object(reader, "_conn", return_value=conn),
+        patch.object(reader, "_acquire_cdc_lease"),
+        patch.object(reader, "_resolve_capture_instance", return_value="dbo_orders"),
+        patch.object(reader, "_capture_instance_exists", return_value=False),
+    ):
+        with pytest.raises(CdcLsnGapError) as exc:
+            list(reader.poll())
+
+    assert "dbo_orders" in str(exc.value)
+    assert "re-enable cdc" in str(exc.value).lower()
+    assert "re-snapshot" in str(exc.value)
+    assert exc.value.resume_lsn == reader.start_lsn
+    cur.execute.assert_not_called()
+
+
+def test_shared_poll_fails_closed_for_missing_table_capture_instance() -> None:
+    reader = _native_reader(shared=True)
+    reader.phase = "streaming"
+    reader.start_lsn = "00000000000000000010"
+    cur = MagicMock()
+    conn = _connection(cur)
+
+    def resolve_captures(_cur):
+        reader._captures = {"orders": "dbo_orders", "users": "dbo_users"}
+
+    with (
+        patch.object(reader, "_conn", return_value=conn),
+        patch.object(reader, "_acquire_cdc_lease"),
+        patch.object(reader, "_resolve_all_captures", side_effect=resolve_captures),
+        patch.object(
+            reader,
+            "_capture_instance_exists",
+            side_effect=lambda _cur, capture: capture == "dbo_orders",
+        ),
+    ):
+        with pytest.raises(CdcLsnGapError) as exc:
+            list(reader.poll())
+
+    assert "dbo_users" in str(exc.value)
+    assert "dbo.users" in str(exc.value)
+    assert "re-enable cdc" in str(exc.value).lower()
+    assert "re-snapshot" in str(exc.value)
+    cur.execute.assert_not_called()
+
+
+def test_native_capture_resolution_preserves_last_known_capture_name() -> None:
+    reader = _native_reader()
+    reader.capture_instance = "custom_orders_capture"
+    cur = MagicMock()
+    cur.fetchone.return_value = None
+
+    capture = reader._resolve_capture_for_table(cur, "orders")
+
+    assert capture == "custom_orders_capture"
+
+
 def test_change_tracking_poll_surfaces_query_error_313() -> None:
     from connectors.sqlserver_cdc_native import SqlServerCdcReadError
 
@@ -192,3 +260,34 @@ def test_change_tracking_poll_surfaces_query_error_313() -> None:
     assert error.capture_instance == ""
     assert error.cursor_key == "mssql-ct:dataflow:dbo.orders"
     assert "table 'dbo.orders'" in str(error)
+
+
+def test_change_tracking_disabled_gap_names_table_and_remedy() -> None:
+    reader = SqlServerChangeTrackingCdc(
+        CFG,
+        table="orders",
+        primary_key="id",
+        schema="dbo",
+        batch_size=2,
+        resume_token=encode_sqlserver_resume_token(
+            10,
+            table="orders",
+            phase="streaming",
+        ),
+    )
+    reader.phase = "streaming"
+    reader.version = 10
+    cur = MagicMock()
+
+    with patch.object(
+        reader,
+        "_min_valid_and_current",
+        return_value=(None, None, False),
+    ):
+        with pytest.raises(CdcCtGapError) as exc:
+            reader._assert_version_within_retention(cur)
+
+    assert "dbo.orders" in str(exc.value)
+    assert "re-enable change tracking" in str(exc.value).lower()
+    assert "re-snapshot" in str(exc.value)
+    assert exc.value.resume_version == 10

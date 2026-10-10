@@ -292,12 +292,25 @@ class SqlServerChangeTrackingCdc:
         min_valid, _current, enabled = self._min_valid_and_current(cur)
         if not self._resume_expected:
             return
-        assert_resume_version_in_retention(
-            self.version,
-            min_valid,
-            cursor_key=self.cursor_key,
-            ct_enabled=enabled,
-        )
+        try:
+            assert_resume_version_in_retention(
+                self.version,
+                min_valid,
+                cursor_key=self.cursor_key,
+                ct_enabled=enabled,
+            )
+        except CdcCtGapError as exc:
+            if enabled is not False:
+                raise
+            raise CdcCtGapError(
+                f"SQL Server Change Tracking is disabled for table "
+                f"{self.schema}.{self.table} while resume version {self.version} "
+                "is present. Re-enable Change Tracking on the table and "
+                f"re-snapshot before resuming. {exc}",
+                resume_version=self.version,
+                min_valid_version="ct_disabled",
+                cursor_key=self.cursor_key,
+            ) from exc
 
     def _row_to_record(self, cols: list[str], row: tuple) -> dict[str, str]:
         from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
