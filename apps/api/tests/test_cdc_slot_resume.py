@@ -184,7 +184,7 @@ def test_pre_retire_slot_resume_persists_and_reads_back_all_tokens(
     pre_retire = getattr(cdc_slot_resume, "pre_retire_slot_resume", None)
     assert callable(pre_retire)
 
-    tokens = pre_retire(
+    tokens, new_entries = pre_retire(
         slot_name="df_orders",
         cursor_keys=["pg:qa:orders"],
         job_tokens=["lsn=0/11744550|slot=df_orders", "0/11744570"],
@@ -193,10 +193,206 @@ def test_pre_retire_slot_resume_persists_and_reads_back_all_tokens(
     )
 
     assert tokens == ["0/11744550", "0/11744570", "0/11744560"]
+    assert new_entries == [
+        ("0/11744550", "pg:qa:orders", "df_orders"),
+        ("0/11744570", "pg:qa:orders", "df_orders"),
+        ("0/11744560", "pg:qa:orders", "df_orders"),
+    ]
     assert all(
         slot_lsn_retired(token, cursor_key="pg:qa:orders", slot_name="df_orders")
         for token in tokens
     )
+
+
+@pytest.mark.parametrize("slot_state", ["active", "kept"])
+def test_kept_active_slot_unretires_only_new_markers_and_next_open_resumes(
+    retired_store, monkeypatch, tmp_path, slot_state
+) -> None:
+    from connectors.cdc_eos_sql import open_eos_session
+
+    cursor_key = "pg:qa:current"
+    slot = "df_current"
+    token = "0/11744550"
+    resume = f"lsn={token}|slot={slot}"
+    retire_slot_lsn(
+        token, cursor_key="pg:qa:other", slot_name="df_other"
+    )
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "services.sync_cursor.cursor_keys_for_job", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr("services.sync_cursor.get_watermark", lambda _key: None)
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: {"slot": slot_state, "slot_name": slot},
+    )
+
+    result = release_finished_cdc_slot(
+        {
+            "cdc_slot_name": slot,
+            "cursor_key": cursor_key,
+            "cursor_value": resume,
+        },
+        reason="failed",
+        source_cfg={"type": "postgresql"},
+        job_id="job-active-slot",
+        worker_closed=True,
+    )
+
+    assert result["released"] is False
+    assert result["reason"] == slot_state
+    assert slot_lsn_retired(token, cursor_key="pg:qa:other", slot_name="df_other")
+    assert not slot_lsn_retired(token, cursor_key=cursor_key, slot_name=slot)
+    opened = open_eos_session(
+        dest_type="sqlite",
+        dest_cfg={"type": "sqlite", "database": str(tmp_path / "next-open.db")},
+        stream_key=cursor_key,
+        incoming_fence=0,
+        job_resume=resume,
+    )
+    assert opened.resume == resume
+
+
+def test_unretire_slot_lsns_removes_only_exact_entries_idempotently(
+    retired_store,
+) -> None:
+    from services.cdc_slot_resume import unretire_slot_lsns
+
+    retire_slot_lsn("0/20", cursor_key="key-a", slot_name="slot-a")
+    retire_slot_lsn("0/20", cursor_key="key-b", slot_name="slot-b")
+    retire_slot_lsn("0/21", cursor_key="key-a", slot_name="slot-a")
+
+    unretire_slot_lsns([("0/20", "key-a", "slot-a")])
+    unretire_slot_lsns([("0/20", "key-a", "slot-a")])
+
+    assert not slot_lsn_retired("0/20", cursor_key="key-a", slot_name="slot-a")
+    assert slot_lsn_retired("0/20", cursor_key="key-b", slot_name="slot-b")
+    assert slot_lsn_retired("0/21", cursor_key="key-a", slot_name="slot-a")
+
+
+def test_unknown_slot_release_keeps_retirement_markers(
+    retired_store, monkeypatch, caplog
+) -> None:
+    cursor_key = "pg:qa:unknown"
+    slot = "df_unknown"
+    token = "0/11744560"
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "services.sync_cursor.cursor_keys_for_job", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr("services.sync_cursor.get_watermark", lambda _key: None)
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("source unavailable")),
+    )
+
+    with caplog.at_level("ERROR"):
+        result = release_finished_cdc_slot(
+            {
+                "cdc_slot_name": slot,
+                "cursor_key": cursor_key,
+                "cursor_value": f"lsn={token}|slot={slot}",
+            },
+            reason="failed",
+            source_cfg={"type": "postgresql"},
+            job_id="job-unknown-slot",
+            worker_closed=True,
+        )
+
+    assert result["released"] is False
+    assert result["reason"] == "source_unreachable"
+    assert result["retired_markers_left"] is True
+    assert slot_lsn_retired(token, cursor_key=cursor_key, slot_name=slot)
+    assert (
+        "next start will not resume from the old position if the slot survived"
+        in caplog.text
+    )
+
+
+def test_unretire_failure_reports_markers_left(
+    retired_store, monkeypatch, caplog
+) -> None:
+    from services import cdc_slot_resume
+
+    cursor_key = "pg:qa:active-unretire-failure"
+    slot = "df_active_unretire_failure"
+    token = "0/11744570"
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "services.sync_cursor.cursor_keys_for_job", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr("services.sync_cursor.get_watermark", lambda _key: None)
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: {"slot": "active", "slot_name": slot},
+    )
+    monkeypatch.setattr(
+        cdc_slot_resume,
+        "unretire_slot_lsns",
+        lambda _entries: (_ for _ in ()).throw(OSError("retirement store unavailable")),
+        raising=False,
+    )
+
+    with caplog.at_level("ERROR"):
+        result = release_finished_cdc_slot(
+            {
+                "cdc_slot_name": slot,
+                "cursor_key": cursor_key,
+                "cursor_value": f"lsn={token}|slot={slot}",
+            },
+            reason="failed",
+            source_cfg={"type": "postgresql"},
+            job_id="job-unretire-failure",
+            worker_closed=True,
+        )
+
+    assert result["released"] is False
+    assert result["retired_markers_left"] is True
+    assert slot_lsn_retired(token, cursor_key=cursor_key, slot_name=slot)
+    assert slot in caplog.text
+    assert "OSError" in caplog.text
+
+
+@pytest.mark.parametrize("slot_state", ["absent", "missing"])
+def test_absent_slot_keeps_retirement_markers(
+    retired_store, monkeypatch, slot_state
+) -> None:
+    cursor_key = "pg:qa:absent"
+    slot = "df_absent"
+    token = "0/11744580"
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "services.sync_cursor.cursor_keys_for_job", lambda *_a, **_k: []
+    )
+    monkeypatch.setattr("services.sync_cursor.get_watermark", lambda _key: None)
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: {"slot": slot_state, "slot_name": slot},
+    )
+
+    result = release_finished_cdc_slot(
+        {
+            "cdc_slot_name": slot,
+            "cursor_key": cursor_key,
+            "cursor_value": f"lsn={token}|slot={slot}",
+        },
+        reason="failed",
+        source_cfg={"type": "postgresql"},
+        job_id="job-absent-slot",
+        worker_closed=True,
+    )
+
+    assert result["released"] is False
+    assert result["reason"] == slot_state
+    assert slot_lsn_retired(token, cursor_key=cursor_key, slot_name=slot)
 
 
 def test_pre_retire_slot_resume_refuses_failed_readback(retired_store, monkeypatch) -> None:

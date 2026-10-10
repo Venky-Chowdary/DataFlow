@@ -196,7 +196,7 @@ def pre_retire_slot_resume(
     job_tokens: list[Any],
     dest_type: str = "",
     dest_cfg: dict[str, Any] | None = None,
-) -> list[str]:
+) -> tuple[list[str], list[tuple[str, str, str]]]:
     slot = str(slot_name or "").strip()
     keys = [str(key).strip() for key in cursor_keys if str(key).strip()]
     tokens_by_key: dict[str, list[Any]] = {}
@@ -219,12 +219,22 @@ def pre_retire_slot_resume(
         raise CdcSlotRetirementError(slot, exc) from exc
 
     retired: list[str] = []
+    new_entries: list[tuple[str, str, str]] = []
     for key, raw_tokens in tokens_by_key.items():
         for raw in raw_tokens:
             token = _lsn_of(raw)
             if not token:
                 continue
             try:
+                was_retired = slot_lsn_retired(
+                    token, cursor_key=key, slot_name=slot
+                )
+                entry_exists = any(
+                    str(row.get("lsn") or "") == token
+                    and str(row.get("cursor_key") or "") == key
+                    and str(row.get("slot_name") or "") == slot
+                    for row in _load()
+                )
                 if not retire_slot_lsn(
                     token, cursor_key=key, slot_name=slot
                 ):
@@ -237,7 +247,44 @@ def pre_retire_slot_resume(
                 raise CdcSlotRetirementError(slot, exc) from exc
             if token not in retired:
                 retired.append(token)
-    return retired
+            if not entry_exists:
+                if not was_retired or any(
+                    str(row.get("lsn") or "") == token
+                    and str(row.get("cursor_key") or "") == key
+                    and str(row.get("slot_name") or "") == slot
+                    for row in _load()
+                ):
+                    entry = (token, key, slot)
+                    if entry not in new_entries:
+                        new_entries.append(entry)
+    return retired, new_entries
+
+
+def unretire_slot_lsns(entries: list[tuple[str, str, str]]) -> None:
+    markers = {
+        (
+            _lsn_of(token) or str(token or "").strip(),
+            str(cursor_key or "").strip(),
+            str(slot_name or "").strip()[:63],
+        )
+        for token, cursor_key, slot_name in entries
+    }
+    markers.discard(("", "", ""))
+    if not markers:
+        return
+    rows = _load()
+    remaining = [
+        row
+        for row in rows
+        if (
+            str(row.get("lsn") or ""),
+            str(row.get("cursor_key") or ""),
+            str(row.get("slot_name") or ""),
+        )
+        not in markers
+    ]
+    if len(remaining) != len(rows):
+        _save(remaining)
 
 
 def resume_token_retired(resume: Any, *, cursor_key: str = "") -> bool:

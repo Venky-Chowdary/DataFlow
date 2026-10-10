@@ -399,7 +399,7 @@ def release_finished_cdc_slot(
     for field in ("cursor_value", "eos_committed_lsn", "cdc_confirmed_flush_lsn"):
         if job.get(field):
             extra.append(job.get(field))
-    pre_retire_slot_resume(
+    _, new_entries = pre_retire_slot_resume(
         slot_name=slot_name,
         cursor_keys=keys,
         job_tokens=extra,
@@ -414,12 +414,13 @@ def release_finished_cdc_slot(
             cfg, slot_name=slot_name, publication_name=publication
         )
     except Exception as exc:
-        _logger.warning(
-            "Could not drop Postgres slot %s after CDC job %s (%s): %s",
+        _logger.error(
+            "Could not confirm release of Postgres slot %s after CDC job %s "
+            "(%s); the next start will not resume from the old position if "
+            "the slot survived",
             slot_name,
             jid,
-            reason,
-            exc,
+            type(exc).__name__,
         )
         return {
             "released": False,
@@ -427,9 +428,30 @@ def release_finished_cdc_slot(
             "job_id": jid,
             "slot_name": slot_name,
             "error": str(exc),
+            "retired_markers_left": True,
         }
     if detail.get("slot") != "dropped":
-        return {"released": False, "reason": str(detail.get("slot") or "kept"), "job_id": jid, **detail}
+        slot_state = str(detail.get("slot") or "kept").strip().lower()
+        result = {
+            "released": False,
+            "reason": slot_state,
+            "job_id": jid,
+            **detail,
+        }
+        if slot_state not in {"absent", "missing"}:
+            try:
+                from services.cdc_slot_resume import unretire_slot_lsns
+
+                unretire_slot_lsns(new_entries)
+            except Exception as exc:  # noqa: BLE001
+                _logger.error(
+                    "CDC slot %s was kept but its pre-retirement markers "
+                    "could not be removed (%s)",
+                    slot_name,
+                    type(exc).__name__,
+                )
+                result["retired_markers_left"] = True
+        return result
 
     cleared_keys: list[str] = []
     prior_by_key: dict[str, Any] = {}
