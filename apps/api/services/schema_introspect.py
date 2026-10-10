@@ -3714,6 +3714,22 @@ def prefer_bson_numeric_carrier(
     return merged
 
 
+def prefer_bson_source_carrier(
+    schema: dict[str, str] | None,
+    bson_types: dict[str, str] | None,
+) -> dict[str, str]:
+    """Preserve BSON-declared carriers lost when samples are stringified."""
+    merged = prefer_bson_numeric_carrier(schema, bson_types)
+    schema_names = {str(name).casefold(): str(name) for name in merged}
+    for col, bson_type in (bson_types or {}).items():
+        if str(bson_type).strip().upper() != "TIMESTAMPTZ":
+            continue
+        name = schema_names.get(str(col).casefold())
+        if name is not None:
+            merged[name] = "TIMESTAMPTZ"
+    return merged
+
+
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     try:

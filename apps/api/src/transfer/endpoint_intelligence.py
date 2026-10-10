@@ -869,7 +869,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             # once ``10.01`` is text the stored ``double`` is unrecoverable.
             from services.schema_introspect import (
                 mongodb_bson_column_types,
-                prefer_bson_numeric_carrier,
+                prefer_bson_source_carrier,
             )
 
             bson_types = mongodb_bson_column_types(records)
@@ -918,7 +918,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 for col in columns
             }
             schema, intel = infer_schema_map(samples_by_field)
-            schema = prefer_bson_numeric_carrier(schema, bson_types)
+            schema = prefer_bson_source_carrier(schema, bson_types)
             for col in columns:
                 if col not in schema:
                     schema[col] = "VARCHAR"
