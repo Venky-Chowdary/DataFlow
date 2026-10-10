@@ -175,7 +175,7 @@ class SqlServerChangeTrackingCdc:
         }
 
     def _conn(self):
-        from connectors.generic_sql import get_connection
+        from connectors.generic_sql import connection_options, get_connection
 
         return get_connection(
             host=self.cfg.get("host") or "localhost",
@@ -186,6 +186,7 @@ class SqlServerChangeTrackingCdc:
             connection_string=self.cfg.get("connection_string") or "",
             ssl=bool(self.cfg.get("ssl")),
             db_type="sqlserver",
+            **connection_options(self.cfg),
         )
 
     def _qualified(self) -> str:
