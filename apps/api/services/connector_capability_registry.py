@@ -316,7 +316,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "common_issues": [
-            "The partition key must have a consistent type (S/N/B). Datawrap infers the key type from the source sample.",
+            "DynamoDB AttributeDefinitions cover table and index keys only; ordinary item attributes are schemaless and may be absent.",
+            "Every HASH/RANGE key and mapped GSI/LSI key must use its declared S/N/B scalar type and exact attribute name.",
             "DynamoDB items cannot exceed 400 KB including attribute names.",
         ],
         "recommended_batch_size": 25,
