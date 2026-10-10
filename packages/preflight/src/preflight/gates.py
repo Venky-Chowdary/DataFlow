@@ -3229,15 +3229,30 @@ def _plan_mapping_dicts(ctx: PreflightContext) -> list[dict[str, Any]]:
 
 
 def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
-    """CDC / SCD2 / mirror + callable extract is refuse-closed. Hosted policy gate may replace this."""
+    """CDC / SCD2 / mirror + callable extract is refuse-closed. Hosted policy gate may replace this.
+
+    Evaluates the plan's own stream contracts: an empty list made every keyed
+    mode report "Missing primary key" here even when the contract carried one,
+    and that stale block outlived the policy gate that replaced it (QA T1).
+    """
     start = time.perf_counter()
     mode = str(getattr(ctx.plan.source, "source_read_mode", "") or "").strip().lower()
     sync = str(ctx.plan.sync_mode or "").strip().lower()
     try:
         from services.preflight_cursor_gate import build_sync_contract_gate
 
+        contracts = [
+            dict(c)
+            for c in (getattr(ctx.plan, "stream_contracts", None) or [])
+            if isinstance(c, dict) and c.get("selected", True)
+        ]
+        contract_pk = [
+            part.strip()
+            for part in str(getattr(ctx.plan, "contract_primary_key", "") or "").split(",")
+            if part.strip()
+        ]
         payload = build_sync_contract_gate(
-            [],
+            contracts,
             sync=sync,
             validation=str(ctx.plan.validation_mode or "strict"),
             dest=str(ctx.plan.destination.db_type or ""),
@@ -3247,6 +3262,9 @@ def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
             pass_status="pass",
             block_status="block",
             source_read_mode=mode,
+            catalog_primary_key_columns=contract_pk or None,
+            mappings=_plan_mapping_dicts(ctx),
+            source_table=str(getattr(ctx.plan, "stream_name", "") or ""),
         )
         return _host_gate_to_result(GateId.G9_SYNC_CONTRACT, payload, start)
     except ImportError:

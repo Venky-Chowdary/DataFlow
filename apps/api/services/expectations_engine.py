@@ -10,6 +10,7 @@ Each expectation returns failing rows + pass/fail — same contract as dbt/GX.
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections import Counter
@@ -19,6 +20,8 @@ from typing import Any, Callable
 from services.column_case import lookup_row_value
 from services.db_type_utils import SCHEMALESS_DESTS
 from services.value_serializer import is_null_evidence, present_cell_text
+
+_logger = logging.getLogger(__name__)
 
 ExpectationFn = Callable[..., dict[str, Any]]
 
@@ -436,12 +439,29 @@ def infer_expectations_for_schema(
     schema: dict[str, str],
     *,
     primary_key: str | None = None,
+    primary_key_columns: list[str] | None = None,
     dest_kind: str = "",
     validation_mode: str = "strict",
     sync_mode: str = "",
 ) -> list[dict[str, Any]]:
-    """Auto-generate standard expectations from schema metadata (dbt-style)."""
+    """Auto-generate standard expectations from schema metadata (dbt-style).
+
+    ``primary_key_columns`` with more than one column is a composite identity.
+    Its components repeat by design (``region`` in ``(region, id)``), so no
+    per-column uniqueness is asserted on them; tuple uniqueness is owned by
+    ``services.data_integrity._check_duplicate_keys``.
+    """
     specs: list[dict[str, Any]] = []
+    composite = [str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()]
+    if len(composite) < 2:
+        composite = []
+    composite_folded = {c.lower() for c in composite}
+    if composite:
+        _logger.debug(
+            "expectations: composite identity %s — component uniqueness left to "
+            "the tuple duplicate check",
+            composite,
+        )
     schemaless = (dest_kind or "").lower() in SCHEMALESS_DESTS
     require_unique = True
     try:
@@ -453,8 +473,16 @@ def infer_expectations_for_schema(
     for col in columns:
         t = (schema.get(col) or "VARCHAR").upper()
         is_id = col.lower().endswith("_id") or col.lower() == "id"
-        is_primary = col == primary_key
-        if is_primary or is_id:
+        in_composite = col.lower() in composite_folded
+        is_primary = col == primary_key or in_composite
+        if in_composite:
+            specs.append({
+                "fn": "expect_column_not_null",
+                "column": col,
+                "max_null_rate": 0.0,
+                "severity": "block",
+            })
+        elif is_primary or is_id:
             # Schemaless destinations only enforce uniqueness/nullability on the
             # primary `_id`; other `*_id` fields are normal FKs and may repeat.
             if schemaless and not is_primary and col.lower() != "_id":
@@ -563,6 +591,7 @@ def run_auto_expectations(
     schema: dict[str, str],
     *,
     primary_key: str | None = None,
+    primary_key_columns: list[str] | None = None,
     baseline_rows: list[dict[str, Any]] | None = None,
     dest_kind: str = "",
     validation_mode: str = "strict",
@@ -573,6 +602,7 @@ def run_auto_expectations(
         columns,
         schema,
         primary_key=primary_key,
+        primary_key_columns=primary_key_columns,
         dest_kind=dest_kind,
         validation_mode=validation_mode,
         sync_mode=sync_mode,

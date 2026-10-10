@@ -11,9 +11,12 @@ recovery, quarantine, rollback, and documentation — not just an error string.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 _FIDELITY_RE = re.compile(
     r"fidelity.?collapse|lossy|precision.?loss|scale.?truncat|"
@@ -500,6 +503,31 @@ def _is_duplicate_signal(
     if _DUP_RE.search(blob):
         return True
     return gate_id in _DUP_GATE_IDS and bool(_DUP_RE.search(blob))
+
+
+def _raw_signal_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Blockers that are evidence, not a previous pass's conclusions.
+
+    Preflight collapses roots twice (file preflight, then policy gates). The
+    second pass sees the first pass's ``rc-*`` blockers and their ``proof_N``
+    echoes; their remediation prose ("needs an identity key") matched the
+    duplicate regex and minted a duplicate_identity root no data produced
+    (QA T1: constant rc-duplicate-identity-87d820160a90 on unique keys).
+    """
+    prior_roots = {
+        str(b.get("message") or "")
+        for b in blockers
+        if (b.get("details") or {}).get("root_cause")
+    }
+    return [
+        b
+        for b in blockers
+        if not (b.get("details") or {}).get("root_cause")
+        and not (
+            str(b.get("id") or "").startswith("proof_")
+            and str(b.get("message") or "") in prior_roots
+        )
+    ]
 
 
 def _source_from_pair_label(label: str) -> str:
@@ -1489,7 +1517,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
     ]
     dup_blockers = [
         b
-        for b in blockers
+        for b in _raw_signal_blockers(blockers)
         if not _is_destination_collision_signal(b.get("details") or {})
         and not _is_uniqueness_probe_signal(
             str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
@@ -1510,6 +1538,12 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             for b in dup_blockers:
                 cols.extend(_columns_from_details(b.get("details") or {}))
             cols = list(dict.fromkeys(cols))
+            _logger.info(
+                "root_cause: duplicate_identity from gates=%s blockers=%s columns=%s",
+                [g.get("id") for g in dup_gates],
+                [b.get("id") for b in dup_blockers],
+                cols,
+            )
             roots.append(
                 MigrationRootCause(
                     root_id=_root_id("duplicate_identity", cols, absorbed),
@@ -1557,7 +1591,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
     # no remediation. Give the operator the contract root with the actual fix.
     contract_blockers = [
         b
-        for b in blockers
+        for b in [*blockers, *[g for g in gates if g.get("status") == "block"]]
         if str(b.get("id") or "") == "g9_sync_contract"
         and re.search(
             r"missing (?:primary key|cursor)|sync mode contract incomplete",

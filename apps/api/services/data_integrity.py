@@ -1714,6 +1714,7 @@ def run_integrity_audit(
             source_columns,
             source_types,
             primary_key=pk_uniqueness,
+            primary_key_columns=pk_columns_uniqueness,
             dest_kind=dest_kind,
             validation_mode=validation_mode,
             sync_mode=sync_mode,
