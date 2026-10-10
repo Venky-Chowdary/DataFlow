@@ -112,6 +112,7 @@ def _orphan_scan(
         p_cols = [_table_col(parent, name) for name in parent_columns]
     except KeyError:
         return {"available": False, "reason": "join column missing from catalog"}
+    child_keys = list(getattr(getattr(child, "primary_key", None), "columns", None) or [])
     return scan_orphan_anti_join(
         conn,
         child=child,
@@ -119,6 +120,7 @@ def _orphan_scan(
         parent=parent,
         parent_columns=p_cols,
         match=match,
+        child_key_columns=child_keys,
     )
 
 
@@ -514,12 +516,19 @@ def build_dest_ri_gate(
     if orphan_rows > 0 or orphan_rels:
         named = ", ".join(str(r) for r in orphan_rels[:4]) or "relationship"
         origin = str(evidence.get("anomaly_origin") or "undetermined")
+        samples = [
+            str(x)
+            for r in relations
+            for x in (r.get("child_examples") or r.get("examples") or [])
+        ][:5]
         return {
             "id": GATE_ID,
             "status": "block",
             "message": (
                 f"Destination referential integrity failed: {orphan_rows} orphan "
-                f"row(s) on {named}. A matching row count does not prove parents exist."
+                f"row(s) on {named}"
+                + (f" (sample: {', '.join(samples)})" if samples else "")
+                + ". A matching row count does not prove parents exist."
                 + _ANOMALY_ORIGIN_NOTE.get(origin, "")
             ),
             "duration_ms": 0,
@@ -528,6 +537,7 @@ def build_dest_ri_gate(
                 "declared": True,
                 "orphan_rows": orphan_rows,
                 "orphan_relations": orphan_rels,
+                "orphan_samples": samples,
                 "relations": relations,
                 "anomaly_origin": origin,
                 "source_orphan_rows": evidence.get("source_orphan_rows"),
