@@ -17,7 +17,7 @@ import os
 import threading
 from services.brand_env import getenv_brand
 from functools import lru_cache
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from services.value_serializer import sanitize_json_value
 
@@ -547,6 +547,9 @@ def vectorize_records(
     identity_columns: list[str] | None = None,
     usage: Any = None,
     embedding_extra: dict[str, Any] | None = None,
+    existing_vector_docs: Mapping[str, Mapping[str, Any]] | None = None,
+    doc_fingerprint_digest: str | None = None,
+    skip_unchanged: bool = True,
 ) -> list[dict[str, Any]]:
     """Expand records into vector rows: id, content, embedding, metadata, source_id, chunk_index.
 
@@ -563,6 +566,12 @@ def vectorize_records(
     """
     from services.document_chunking import PRECHUNKED_FLAG
     from services.chunkers import ChunkerConfig, chunk as chunk_records
+    from services.vector_sync import (
+        vector_document_hash,
+        vector_document_is_unchanged,
+        vector_metadata_hash,
+        vector_record_key,
+    )
     from services.vector_template import (
         TemplateConfigError,
         TemplateFieldMissingError,
@@ -595,7 +604,18 @@ def vectorize_records(
         )
 
     rows: list[dict[str, Any]] = []
+    prechunked_counts: dict[str, int] = {}
     for record in records:
+        if skip_chunking or str(record.get(PRECHUNKED_FLAG) or "") in {
+            "1",
+            "true",
+            "True",
+        }:
+            key = vector_record_key(record, identity_columns)
+            if key:
+                prechunked_counts[key] = prechunked_counts.get(key, 0) + 1
+    for record in records:
+        row_start = len(rows)
         rec = {k: v for k, v in record.items() if v is not None}
         prechunked = skip_chunking or str(rec.get(PRECHUNKED_FLAG) or "") in {"1", "true", "True"}
 
@@ -696,6 +716,48 @@ def vectorize_records(
             chunk_index_error = str(exc)
             existing_chunk_index = 0
 
+        prepared_chunks = None
+        if content and not prechunked and not embedding and not template_error:
+            prepared_chunks = chunk_records(
+                content,
+                chunker_config,
+                tokenizer=chunk_tokenizer
+                if not isinstance(chunk_tokenizer, str)
+                else None,
+            )
+            if not prepared_chunks:
+                from services.chunkers import Chunk
+
+                prepared_chunks = [Chunk(content, 0)]
+        doc_chunk_count = (
+            prechunked_counts.get(source_id, 1)
+            if prechunked
+            else len(prepared_chunks)
+            if prepared_chunks is not None
+            else 1
+        )
+        metadata_hash = vector_metadata_hash(metadata)
+        if (
+            not template_error
+            and not chunk_index_error
+            and not embed_column_parse_failed
+            and doc_fingerprint_digest
+            and vector_document_is_unchanged(
+                (existing_vector_docs or {}).get(source_id),
+                doc_hash=vector_document_hash(content, doc_fingerprint_digest),
+                chunk_count=doc_chunk_count,
+                metadata_hash=metadata_hash,
+                enabled=skip_unchanged,
+            )
+        ):
+            rows.append(
+                {
+                    "source_id": source_id,
+                    "_df_unchanged_skipped": True,
+                }
+            )
+            continue
+
         if template_error:
             bounded, meta = _bounded_vector_content("", metadata)
             rows.append({
@@ -768,17 +830,7 @@ def vectorize_records(
                 "chunk_index": existing_chunk_index,
             })
         elif content:
-            chunks = chunk_records(
-                content,
-                chunker_config,
-                tokenizer=chunk_tokenizer
-                if not isinstance(chunk_tokenizer, str)
-                else None,
-            )
-            if not chunks:
-                from services.chunkers import Chunk
-
-                chunks = [Chunk(content, 0)]
+            chunks = prepared_chunks or []
             multi = len(chunks) > 1
             embeddings = embed(
                 [part.text for part in chunks], model=model,
@@ -821,6 +873,11 @@ def vectorize_records(
                 "source_id": source_id,
                 "chunk_index": 0,
             })
+        for row in rows[row_start:]:
+            if not row.get("_df_embed_error"):
+                row["_df_document_text"] = content
+                row["_df_chunk_count"] = doc_chunk_count
+                row["_df_metadata_hash"] = metadata_hash
     # Two records can still collapse to the same vector id — identical embedded
     # content under the no-PK hash path, or two chunks of one record that are
     # byte-identical. A single INSERT ... ON CONFLICT DO UPDATE refuses to touch

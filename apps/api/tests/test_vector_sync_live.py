@@ -341,6 +341,7 @@ def test_live_qdrant_cleanup_failure_reports_upsert_landed(vector_destination, m
         ),
     )
     row = _doc_rows("cleanup-failure", 1)[0]
+    row["content"] = "cleanup-failure content changed before stale cleanup"
     headers = list(row)
     mappings = [
         {"source": column, "target": column, "target_type": "VARCHAR"}

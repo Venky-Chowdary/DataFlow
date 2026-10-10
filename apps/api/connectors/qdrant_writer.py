@@ -626,7 +626,6 @@ def write_mapped_rows(
             # Schemaless collections stay Map-tolerant. Typed payload_schema is
             # the invent cliff — Studio may fill; else require_physical.
             if schema_types:
-                live_payload_types.update(schema_types)
                 mapped_existing = [
                     c
                     for c in mapped_targets
@@ -637,19 +636,8 @@ def write_mapped_rows(
                         or str(c).upper() in schema_types
                     )
                 ]
-                effective = dict(live_payload_types)
-                if isinstance(studio_live, dict):
-                    for c in mapped_existing:
-                        if (
-                            effective.get(c)
-                            or effective.get(str(c).lower())
-                            or effective.get(str(c).upper())
-                        ):
-                            continue
-                        st = str(studio_live.get(c) or "").strip()
-                        if st:
-                            effective[c] = st
                 if mapped_existing:
+                    effective = {**schema_types, **live_payload_types}
                     phys_err = require_physical_types_for_existing_table(
                         table_existed=True,
                         physical=effective,
@@ -666,7 +654,6 @@ def write_mapped_rows(
                             chunks_completed=0,
                             error=phys_err,
                         )
-                live_payload_types = effective
         elif status == 404:
             if not create_table:
                 return WriteResult(
@@ -718,9 +705,8 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="qdrant",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        # Pass Studio/live whenever present — partial Studio fail-closes in
-        # prepare_records (never soft-bind Map invent on create-new).
-        # Schemaless empty collections with no Studio still Map-bind (None).
+        # Qdrant's live payload_schema lists indexed fields, not a complete
+        # destination row schema. Only explicit Studio types constrain mapping.
         destination_column_types=(
             live_payload_types if live_payload_types else None
         ),
@@ -752,6 +738,11 @@ def write_mapped_rows(
             meta=stale_cleanup_meta(0, skipped_docs),
         )
     from services.vectorization import vector_identity_columns
+    from services.vector_sync import (
+        qdrant_read_document_states,
+        vector_dimension_hint,
+        vector_record_key,
+    )
 
     from services.embedding_providers import (
         EmbeddingProviderError,
@@ -765,6 +756,73 @@ def write_mapped_rows(
         provider=(embedding_model or "unknown").split("/", 1)[0],
         model=embedding_model or "unknown",
     )
+    skip_setting = _kwargs.get("vector_skip_unchanged", True)
+    vector_skip_unchanged = str(skip_setting).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    vector_doc_states: dict[str, dict[str, Any]] = {}
+    skip_fingerprint = None
+    identity_columns = vector_identity_columns(pk_cols, mappings, records)
+    if vector_skip_unchanged:
+        source_ids = sorted(
+            {
+                vector_record_key(record, identity_columns)
+                for record in records
+                if vector_record_key(record, identity_columns)
+            }
+        )
+        try:
+            if collection_existed and source_ids:
+                vector_doc_states = qdrant_read_document_states(
+                    {
+                        "host": host,
+                        "port": port,
+                        "ssl": ssl,
+                        "connection_string": connection_string,
+                        "api_key": api_key,
+                    },
+                    collection,
+                    source_ids,
+                )
+            dimension_hint = vector_dimension_hint(
+                embedding_model,
+                embedding_extra,
+                records=records,
+                embedding_column=embedding_column,
+            ) or cached_live_dim
+            distance_hint = cached_live_distance or "Cosine"
+            if dimension_hint:
+                from services.vector_fingerprint import fingerprint_for_write
+
+                skip_fingerprint = fingerprint_for_write(
+                    model=embedding_model,
+                    dimension=int(dimension_hint),
+                    distance=distance_hint,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    skip_chunking=skip_chunking,
+                    embedding_column=embedding_column,
+                    chunk_strategy=chunk_strategy,
+                    chunk_unit=chunk_unit,
+                    chunk_tokenizer=(
+                        chunk_tokenizer if isinstance(chunk_tokenizer, str) else None
+                    ),
+                    text_template=text_template,
+                )
+        except Exception as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "Qdrant unchanged-document lookup failed before embedding "
+                    f"({type(exc).__name__})"
+                ),
+                meta={"embedding_usage": usage.to_dict()},
+            )
     try:
         usage = create_embedding_usage(
             embedding_model, embedding_extra, embedding_column
@@ -787,6 +845,11 @@ def write_mapped_rows(
             identity_columns=vector_identity_columns(pk_cols, mappings, records),
             usage=usage,
             embedding_extra=embedding_extra,
+            existing_vector_docs=vector_doc_states,
+            doc_fingerprint_digest=(
+                skip_fingerprint.digest if skip_fingerprint is not None else None
+            ),
+            skip_unchanged=vector_skip_unchanged,
         )
     except EmbeddingProviderError as exc:
         return WriteResult(
@@ -823,6 +886,76 @@ def write_mapped_rows(
     rejected_source_ids = _rejected_doc_keys(
         headers, data_rows, pk_cols, mappings, map_rejected
     )
+    skipped_source_ids = {
+        str(row.get("source_id") or "")
+        for row in vector_rows
+        if row.get("_df_unchanged_skipped") and row.get("source_id")
+    }
+    vector_rows = [
+        row for row in vector_rows if not row.get("_df_unchanged_skipped")
+    ]
+    vector_skip_meta = {
+        "vector_docs_unchanged_skipped": len(skipped_source_ids),
+        "vector_docs_embedded": len(
+            {
+                str(row.get("source_id") or "")
+                for row in vector_rows
+                if row.get("source_id") and row.get("embedding") is not None
+            }
+        ),
+    }
+    if not vector_rows and skipped_source_ids:
+        from services.vector_fingerprint import (
+            VectorFingerprintMismatchError,
+            enforce_fingerprint,
+        )
+
+        verify_session = _requests_session()
+        try:
+            fingerprint_status = enforce_fingerprint(
+                "qdrant",
+                {},
+                collection,
+                skip_fingerprint,
+                session=verify_session,
+                base_url=base_url,
+                headers=_headers(api_key),
+            )
+        except VectorFingerprintMismatchError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                meta={
+                    **vector_skip_meta,
+                    "vector_fingerprint_status": "mismatch",
+                    "vector_fingerprint_digest": skip_fingerprint.digest,
+                    "embedding_usage": usage.to_dict(),
+                },
+            )
+        finally:
+            verify_session.close()
+        return WriteResult(
+            ok=True,
+            rows_written=0,
+            table_name=collection,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={
+                **stale_cleanup_meta(0, 0),
+                **vector_skip_meta,
+                "vector_fingerprint_status": fingerprint_status,
+                "vector_fingerprint_digest": skip_fingerprint.digest,
+                "embedding_usage": usage.to_dict(),
+            },
+        )
     if not vector_rows:
         from connectors.writer_common import refuse_empty_vectorization
 
@@ -1149,6 +1282,11 @@ def write_mapped_rows(
             "vector_fingerprint_status": fingerprint_status,
             "vector_fingerprint_digest": incoming_fingerprint.digest,
         })
+        from services.vector_sync import stamp_vector_document_metadata
+
+        stamp_vector_document_metadata(vector_rows, incoming_fingerprint.digest)
+        points, embed_rejected = build_qdrant_points(vector_rows, dimension=dimension)
+        rejected = list(map_rejected) + list(embed_rejected)
 
         from services.vector_sync import _ensure_qdrant_source_id_index
 
@@ -1238,6 +1376,7 @@ def write_mapped_rows(
             rejected_rows=len(rejected),
             meta={
                 **stale_cleanup_meta(stale_chunks_deleted, skipped_docs),
+                **vector_skip_meta,
                 **fingerprint_meta,
             },
         )
@@ -1262,6 +1401,7 @@ def write_mapped_rows(
 
     meta = _qdrant_gate8_meta(points)
     meta.update(stale_cleanup_meta(stale_chunks_deleted, skipped_docs))
+    meta.update(vector_skip_meta)
     meta.update(fingerprint_meta)
     return WriteResult(
         ok=True,

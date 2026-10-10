@@ -1063,7 +1063,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "transfer_ready": True,
         "tier": TIER_HIGH,
         "pattern": "batch",
-        "supports_cdc": False,
+        "supports_cdc": True,
         "supports_streaming": False,
         "supports_upsert": True,
         "supports_append": True,
@@ -1074,15 +1074,19 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "Vector dimension must be declared — refuse inventing 1536.",
             "Rides PostgreSQL driver; extension must be installed on the target.",
+            "CDC: at-least-once; deletes by document key; no LSN guard.",
         ],
         "recommended_batch_size": 500,
         "supports_lsn_guard": False,
+        "cdc_prerequisites": (
+            "At-least-once; deletes by document key; no LSN guard."
+        ),
     },
     "qdrant": {
         "transfer_ready": True,
         "tier": TIER_HIGH,
         "pattern": "batch",
-        "supports_cdc": False,
+        "supports_cdc": True,
         "supports_streaming": False,
         "supports_upsert": True,
         "supports_append": True,
@@ -1090,9 +1094,15 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": False,
         "requires_schema": False,
         "supports_binary": True,
-        "common_issues": ["Point id + vector required; payload schema is soft."],
+        "common_issues": [
+            "Point id + vector required; payload schema is soft.",
+            "CDC: at-least-once; deletes by document key; no LSN guard.",
+        ],
         "recommended_batch_size": 500,
         "supports_lsn_guard": False,
+        "cdc_prerequisites": (
+            "At-least-once; deletes by document key; no LSN guard."
+        ),
     },
     "weaviate": {
         "transfer_ready": True,

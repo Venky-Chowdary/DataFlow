@@ -254,12 +254,13 @@ def _pgvector_gate_existing_physical(
     schema: str,
     table_name: str,
     mapped_targets: list[str],
+    mapped_value_types: dict[str, str] | None,
     studio_live: dict[str, Any] | None,
     studio_typed_all: bool,
 ) -> tuple[bool, dict[str, str] | None, str | None]:
-    """Probe existing pgvector table DDL before Map bind.
+    """Probe the existing table and resolve write-time field types.
 
-    Returns ``(table_existed, destination_column_types|None, error|None)``.
+    Returns ``(table_existed, write_types|None, error|None)``.
     """
     from connectors.postgresql_writer import _fetch_pg_column_types
     from connectors.writer_common import require_physical_types_for_existing_table
@@ -343,13 +344,10 @@ def _pgvector_gate_existing_physical(
                 )
                 if phys_err:
                     return True, None, phys_err
-            # Every remaining mapped field is carried by the table's ``metadata``
-            # JSONB column, so name that carrier rather than leaving a gap. The
-            # gap read as "no physical type for this column" to the downstream
-            # coverage check, which refused the whole write — on a table where
-            # those fields were never meant to be columns. JSONB is the true
-            # carrier here and imposes no width or precision limit, so the
-            # per-cell truncation checks it feeds are correctly no-ops.
+            # Remaining mapped fields are JSONB payload members, but the JSONB
+            # carrier type is not the member's logical type. Preserve the Map/
+            # source type so text members stay text instead of being JSON-quoted.
+            mapped_value_types = mapped_value_types or {}
             for col in mapped_targets:
                 if not col or str(col).lower() == "embedding":
                     continue
@@ -359,7 +357,11 @@ def _pgvector_gate_existing_physical(
                     or effective.get(str(col).upper())
                 ):
                     continue
-                effective[col] = "JSONB"
+                effective[col] = str(
+                    mapped_value_types.get(col)
+                    or mapped_value_types.get(str(col).lower())
+                    or "TEXT"
+                )
             return True, effective, None
     finally:
         conn.close()
@@ -472,6 +474,17 @@ def write_mapped_rows(
         and bool(mapped_targets)
         and all(str(studio_live.get(c) or "").strip() for c in mapped_targets)
     )
+    mapped_value_types = {}
+    for mapping in mappings or []:
+        target = str(mapping.get("target") or mapping.get("source") or "").strip()
+        source = str(mapping.get("source") or "").strip()
+        value_type = (
+            mapping.get("target_type")
+            or column_types.get(source)
+            or column_types.get(target)
+        )
+        if target and value_type:
+            mapped_value_types[target] = str(value_type)
     _existed, gated_types, gate_err = _pgvector_gate_existing_physical(
         host=host,
         port=port,
@@ -483,6 +496,7 @@ def write_mapped_rows(
         schema=schema or "public",
         table_name=table_name,
         mapped_targets=mapped_targets,
+        mapped_value_types=mapped_value_types,
         studio_live=studio_live if isinstance(studio_live, dict) else None,
         studio_typed_all=studio_typed_all,
     )
@@ -541,6 +555,18 @@ def write_mapped_rows(
     from services.vectorization import vector_identity_columns
 
     identity_columns = vector_identity_columns(pk_cols, mappings, records)
+    from services.vector_sync import (
+        pgvector_read_document_states,
+        vector_dimension_hint,
+        vector_record_key,
+    )
+
+    skip_setting = _kwargs.get("vector_skip_unchanged", True)
+    vector_skip_unchanged = str(skip_setting).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    vector_doc_states: dict[str, dict[str, Any]] = {}
+    skip_fingerprint = None
     from services.embedding_providers import (
         EmbeddingProviderError,
         EmbeddingUsage,
@@ -553,6 +579,70 @@ def write_mapped_rows(
         provider=(embedding_model or "unknown").split("/", 1)[0],
         model=embedding_model or "unknown",
     )
+    if vector_skip_unchanged:
+        source_ids = sorted(
+            {
+                vector_record_key(record, identity_columns)
+                for record in records
+                if vector_record_key(record, identity_columns)
+            }
+        )
+        try:
+            if source_ids:
+                state_conn = get_connection(
+                    host=host,
+                    port=port,
+                    database=database,
+                    username=username,
+                    password=password,
+                    connection_string=connection_string,
+                    ssl=ssl,
+                )
+                try:
+                    with state_conn.cursor() as state_cur:
+                        vector_doc_states = pgvector_read_document_states(
+                            state_cur, schema or "public", table_name, source_ids
+                        )
+                finally:
+                    state_conn.close()
+            dimension_hint = vector_dimension_hint(
+                embedding_model,
+                embedding_extra,
+                records=records,
+                embedding_column=embedding_column,
+            )
+            if dimension_hint:
+                from services.vector_fingerprint import fingerprint_for_write
+
+                skip_fingerprint = fingerprint_for_write(
+                    model=embedding_model,
+                    dimension=dimension_hint,
+                    distance="cosine",
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    skip_chunking=skip_chunking,
+                    embedding_column=embedding_column,
+                    chunk_strategy=chunk_strategy,
+                    chunk_unit=chunk_unit,
+                    chunk_tokenizer=(
+                        chunk_tokenizer if isinstance(chunk_tokenizer, str) else None
+                    ),
+                    text_template=text_template,
+                )
+        except Exception as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "public",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "pgvector unchanged-document lookup failed before embedding "
+                    f"({type(exc).__name__})"
+                ),
+                meta={"embedding_usage": usage.to_dict()},
+            )
     try:
         usage = create_embedding_usage(
             embedding_model, embedding_extra, embedding_column
@@ -575,6 +665,11 @@ def write_mapped_rows(
             identity_columns=identity_columns or None,
             usage=usage,
             embedding_extra=embedding_extra,
+            existing_vector_docs=vector_doc_states,
+            doc_fingerprint_digest=(
+                skip_fingerprint.digest if skip_fingerprint is not None else None
+            ),
+            skip_unchanged=vector_skip_unchanged,
         )
     except EmbeddingProviderError as exc:
         return WriteResult(
@@ -611,6 +706,95 @@ def write_mapped_rows(
     rejected_source_ids = _rejected_doc_keys(
         headers, data_rows, pk_cols, mappings, map_rejected
     )
+    skipped_source_ids = {
+        str(row.get("source_id") or "")
+        for row in vector_rows
+        if row.get("_df_unchanged_skipped") and row.get("source_id")
+    }
+    vector_rows = [
+        row for row in vector_rows if not row.get("_df_unchanged_skipped")
+    ]
+    vector_skip_meta = {
+        "vector_docs_unchanged_skipped": len(skipped_source_ids),
+        "vector_docs_embedded": len(
+            {
+                str(row.get("source_id") or "")
+                for row in vector_rows
+                if row.get("source_id") and row.get("embedding") is not None
+            }
+        ),
+    }
+    if not vector_rows and skipped_source_ids:
+        if skip_fingerprint is not None:
+            from services.vector_fingerprint import (
+                VectorFingerprintMismatchError,
+                enforce_fingerprint,
+            )
+
+            verify_conn = get_connection(
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                ssl=ssl,
+            )
+            try:
+                with verify_conn.cursor() as verify_cur:
+                    fingerprint_status = enforce_fingerprint(
+                        "pgvector",
+                        {},
+                        table_name,
+                        skip_fingerprint,
+                        schema=schema or "public",
+                        cursor=verify_cur,
+                    )
+                verify_conn.commit()
+            except VectorFingerprintMismatchError as exc:
+                verify_conn.rollback()
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=str(exc),
+                    meta={
+                        **vector_skip_meta,
+                        "vector_fingerprint_status": "mismatch",
+                        "vector_fingerprint_digest": skip_fingerprint.digest,
+                        "embedding_usage": usage.to_dict(),
+                    },
+                )
+            finally:
+                verify_conn.close()
+        else:
+            fingerprint_status = "verified"
+        return WriteResult(
+            ok=True,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={
+                **stale_cleanup_meta(0, 0),
+                **vector_skip_meta,
+                **(
+                    {
+                        "vector_fingerprint_status": fingerprint_status,
+                        "vector_fingerprint_digest": skip_fingerprint.digest,
+                    }
+                    if skip_fingerprint is not None
+                    else {}
+                ),
+                "embedding_usage": usage.to_dict(),
+            },
+        )
     if not vector_rows:
         skipped_docs = stale_cleanup_skipped_docs(
             rejected_source_ids, map_rejected
@@ -903,6 +1087,9 @@ def write_mapped_rows(
                             "embedding_usage": usage.to_dict(),
                         },
                 )
+            from services.vector_sync import stamp_vector_document_metadata
+
+            stamp_vector_document_metadata(valid_rows, incoming_fingerprint.digest)
             fingerprint_meta.update({
                 "vector_fingerprint_status": fingerprint_status,
                 "vector_fingerprint_digest": incoming_fingerprint.digest,
@@ -1069,6 +1256,7 @@ def write_mapped_rows(
 
     meta = _pgvector_gate8_meta(written_rows)
     meta.update(stale_cleanup_meta(stale_chunks_deleted, skipped_docs))
+    meta.update(vector_skip_meta)
     meta.update(fingerprint_meta)
     from connectors.writer_common import reject_on_strict_policy as _reject_final
 

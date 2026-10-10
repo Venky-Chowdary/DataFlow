@@ -152,6 +152,10 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     meta = getattr(result, "meta", None) or {}
     if isinstance(meta, dict) and meta.get("schema_fidelity"):
         out["schema_fidelity"] = meta["schema_fidelity"]
+    if isinstance(meta, dict):
+        for key in ("vector_docs_unchanged_skipped", "vector_docs_embedded"):
+            if isinstance(meta.get(key), (int, float)):
+                out[key] = int(meta[key])
     if isinstance(meta, dict) and isinstance(meta.get("embedding_usage"), dict):
         out["embedding_usage"] = dict(meta["embedding_usage"])
     return out
@@ -714,6 +718,9 @@ def _write_batch(
             kwargs["chunk_unit"] = extra.get("chunk_unit", "chars")
             kwargs["chunk_tokenizer"] = extra.get("chunk_tokenizer")
             kwargs["text_template"] = extra.get("text_template")
+            kwargs["vector_skip_unchanged"] = extra.get(
+                "vector_skip_unchanged", True
+            )
             for option in (
                 "embedding_api_key",
                 "embedding_base_url",

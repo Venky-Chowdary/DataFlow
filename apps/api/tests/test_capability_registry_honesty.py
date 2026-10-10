@@ -75,3 +75,16 @@ def test_transfer_ready_catalog_ids_have_honest_tier():
         else:
             # Package missing on this runner → planned/connect_only/source_only OK
             assert tier in {"planned", "connect_only", "source_only", "certified"}, (cid, tier)
+
+
+def test_only_live_proven_vector_sinks_claim_cdc():
+    expected_cdc = {"pgvector", "qdrant"}
+    for key in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
+        cap = get_connector_capability(key)
+        assert cap.get("supports_cdc") is (key in expected_cdc), key
+        assert cap.get("supports_lsn_guard") is False, key
+        if key in expected_cdc:
+            note = str(cap.get("cdc_prerequisites") or "").lower()
+            assert "at-least-once" in note
+            assert "deletes by document key" in note
+            assert "no lsn guard" in note
