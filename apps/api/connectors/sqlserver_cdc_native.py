@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+from itertools import groupby
 from typing import Any, Iterator
 
 from connectors.sql_identifiers import quote_table_ref
@@ -819,24 +820,54 @@ class SqlServerNativeCdc:
     def _min_lsn(self, cur) -> str:
         return self._min_lsn_for(cur, self.capture_instance)
 
-    def _snapshot_handoff_lsn(self, cur, capture: str = "") -> str:
-        """Database max_lsn, never below this capture's retention floor.
+    def _capture_start_lsn_for(self, cur, capture_instance: str) -> str:
+        cur.execute(
+            "SELECT ct.start_lsn FROM cdc.change_tables ct "
+            "WHERE ct.capture_instance = %s",
+            (capture_instance,),
+        )
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            return ""
+        return _lsn_to_hex(row[0])
 
-        Enabling a new capture instance can set ``min_lsn`` above the previous
-        database ``max_lsn`` until ``sp_cdc_scan`` advances the mapping.
-        Handing off below ``min_lsn`` makes ``fn_cdc_get_all_changes`` fail
-        (error 313) and the resume gap check refuse a brand-new table.
-        """
+    def _snapshot_handoff_lsn(
+        self,
+        cur,
+        capture: str = "",
+        *,
+        database_max_lsn: str | None = None,
+    ) -> str:
+        """Return a handoff at or beyond the database and capture floors."""
         cap = capture or self.capture_instance
-        max_lsn = self._max_lsn(cur)
+        max_lsn = (
+            self._max_lsn(cur)
+            if database_max_lsn is None
+            else database_max_lsn
+        )
+        start_lsn = self._capture_start_lsn_for(cur, cap) if cap else ""
         min_lsn = self._min_lsn_for(cur, cap) if cap else ""
-        if not max_lsn:
-            return min_lsn
-        if not min_lsn:
-            return max_lsn
-        if compare_mssql_hex_lsn(max_lsn, min_lsn) < 0:
-            return min_lsn
-        return max_lsn
+        handoff_lsn = start_lsn
+        if min_lsn and (
+            not handoff_lsn
+            or compare_mssql_hex_lsn(min_lsn, handoff_lsn) > 0
+        ):
+            handoff_lsn = min_lsn
+        if max_lsn and (
+            not handoff_lsn
+            or compare_mssql_hex_lsn(max_lsn, handoff_lsn) > 0
+        ):
+            handoff_lsn = max_lsn
+        logger.debug(
+            "SQL Server CDC snapshot handoff capture_instance=%s db_max_lsn=%s "
+            "start_lsn=%s min_lsn=%s handoff_lsn=%s",
+            cap,
+            max_lsn,
+            start_lsn,
+            min_lsn,
+            handoff_lsn,
+        )
+        return handoff_lsn
 
     def _min_lsn_for(self, cur, capture_instance: str) -> str:
         cur.execute("SELECT sys.fn_cdc_get_min_lsn(%s)", (capture_instance,))
@@ -861,8 +892,11 @@ class SqlServerNativeCdc:
         capture_instance: str | None = None,
         last_pk: str = "",
     ) -> str:
+        token_lsn = str(lsn or "").strip()
+        if token_lsn.isdigit():
+            token_lsn = f"0x{token_lsn}"
         return encode_mssql_cdc_token(
-            lsn,
+            token_lsn,
             table=table or self._token_table_label(),
             phase=phase,
             offset=offset,
@@ -928,14 +962,21 @@ class SqlServerNativeCdc:
             with conn.cursor() as cur:
                 self._resolve_all_captures(cur)
                 if not handoff:
-                    handoff = self._max_lsn(cur)
-                for t in self.tables:
-                    cap = self._captures.get(t, "")
-                    floor = self._min_lsn_for(cur, cap) if cap else ""
-                    if floor and (
-                        not handoff or compare_mssql_hex_lsn(handoff, floor) < 0
-                    ):
-                        handoff = floor
+                    database_max_lsn = self._max_lsn(cur)
+                    handoff = database_max_lsn
+                    for t in self.tables:
+                        cap = self._captures.get(t, "")
+                        if cap:
+                            candidate = self._snapshot_handoff_lsn(
+                                cur,
+                                cap,
+                                database_max_lsn=database_max_lsn,
+                            )
+                            if candidate and (
+                                not handoff
+                                or compare_mssql_hex_lsn(handoff, candidate) < 0
+                            ):
+                                handoff = candidate
                 for table_name in tables:
                     cap = self._captures.get(table_name, "")
                     if cap:
@@ -1263,39 +1304,71 @@ class SqlServerNativeCdc:
             yield from self._poll_shared_multi()
             return
 
-        from services.cdc_incremental_runner import interleave_incremental_snapshot
-
-        yield from interleave_incremental_snapshot(
-            self.source_key,
-            table=self.table,
-            fetch_chunk=self._fetch_incremental_chunk,
-            stream_events_during_chunk=self._peek_stream_events_during_chunk,
-            max_chunks_per_poll=1,
-            dest_resume=self.resume_token,
-        )
-
-        fn = self._changes_tvf()
         inserts: list[dict[str, Any]] = []
         updates: list[dict[str, Any]] = []
         deletes: list[str] = []
-        next_lsn = self.start_lsn
-        next_seq = self.start_seqval
+        lsn_groups: list[
+            tuple[str, str, list[dict[str, Any]], list[dict[str, Any]], list[str]]
+        ] = []
+        max_lsn = ""
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
                     self._resolve_capture_instance(cur)
-                    fn = self._changes_tvf()
                     self._maybe_record_capture_schema(cur, offset=self.start_lsn)
-                    assert_resume_lsn_in_retention(
-                        self.start_lsn,
-                        self._min_lsn(cur),
-                        cursor_key=self.cursor_key,
-                    )
+                    min_lsn = self._min_lsn(cur)
+                    if min_lsn:
+                        assert_resume_lsn_in_retention(
+                            self.start_lsn,
+                            min_lsn,
+                            cursor_key=self.cursor_key,
+                        )
                     max_lsn = self._max_lsn(cur)
+                    if not min_lsn:
+                        logger.debug(
+                            "SQL Server CDC capture min_lsn unavailable; emitting "
+                            "heartbeat without advancing (capture_instance=%s "
+                            "resume_lsn=%s db_max_lsn=%s min_lsn=%s)",
+                            self.capture_instance,
+                            self.start_lsn,
+                            max_lsn,
+                            min_lsn,
+                        )
+                        yield ChangeBatch(
+                            resume_token=self._token(
+                                lsn=self.start_lsn,
+                                phase="streaming",
+                                seqval=self.start_seqval,
+                            ),
+                            table=self.table,
+                        )
+                        return
+                    if not max_lsn or compare_mssql_hex_lsn(
+                        max_lsn, self.start_lsn
+                    ) < 0:
+                        logger.debug(
+                            "SQL Server CDC database max_lsn is behind resume; "
+                            "emitting heartbeat without advancing "
+                            "(capture_instance=%s resume_lsn=%s db_max_lsn=%s "
+                            "min_lsn=%s)",
+                            self.capture_instance,
+                            self.start_lsn,
+                            max_lsn,
+                            min_lsn,
+                        )
+                        yield ChangeBatch(
+                            resume_token=self._token(
+                                lsn=self.start_lsn,
+                                phase="streaming",
+                                seqval=self.start_seqval,
+                            ),
+                            table=self.table,
+                        )
+                        return
                     # A mid-LSN seqval cursor — or an unread handoff LSN — still
                     # has rows at start_lsn even when max_lsn has not advanced.
-                    if not max_lsn or (
-                        max_lsn == self.start_lsn
+                    if (
+                        compare_mssql_hex_lsn(max_lsn, self.start_lsn) == 0
                         and not self.start_seqval
                         and not self._resume_inclusive
                     ):
@@ -1308,6 +1381,19 @@ class SqlServerNativeCdc:
                             table=self.table,
                         )
                         return
+                    from services.cdc_incremental_runner import (
+                        interleave_incremental_snapshot,
+                    )
+
+                    yield from interleave_incremental_snapshot(
+                        self.source_key,
+                        table=self.table,
+                        fetch_chunk=self._fetch_incremental_chunk,
+                        stream_events_during_chunk=self._peek_stream_events_during_chunk,
+                        max_chunks_per_poll=1,
+                        dest_resume=self.resume_token,
+                    )
+                    fn = self._changes_tvf()
                     # from_lsn is INCLUSIVE per Microsoft docs. We over-fetch
                     # and drop rows at/before (start_lsn, start_seqval) so a
                     # mid-LSN resume does not re-emit the already-acked prefix.
@@ -1334,27 +1420,46 @@ class SqlServerNativeCdc:
                         from_seqval_hex=self.start_seqval,
                         inclusive=self._resume_inclusive,
                     )
-                    rows, next_lsn, next_seq = self._truncate_at_lsn_boundary(
+                    rows, _, _ = self._truncate_at_lsn_boundary(
                         raw_rows, cols, self.batch_size
                     )
-                    records = [
-                        {cols[i]: row[i] for i in range(len(cols))} for row in rows
-                    ]
-                    inserts, updates, deletes = classify_mssql_cdc_rows(
-                        records,
-                        primary_key=self.primary_key,
-                        row_filter=self.row_filter,
-                    )
-                    if inserts or updates or deletes:
-                        self._last_event_at = datetime.now(timezone.utc)
-                    if next_lsn:
-                        self.start_lsn = next_lsn
-                        self.start_seqval = next_seq
-                        # Everything up to (next_lsn, next_seq) is now consumed.
-                        self._resume_inclusive = False
-                    elif max_lsn:
-                        self.start_lsn = max_lsn
-                        self._resume_inclusive = False
+                    if rows:
+                        lsn_idx = cols.index("__$start_lsn")
+                        seq_idx = (
+                            cols.index("__$seqval") if "__$seqval" in cols else -1
+                        )
+                        for group_lsn, grouped_rows in groupby(
+                            rows,
+                            key=lambda row: _lsn_to_hex(row[lsn_idx]),
+                        ):
+                            row_group = list(grouped_rows)
+                            group_seq = (
+                                _lsn_to_hex(row_group[-1][seq_idx])
+                                if seq_idx >= 0
+                                else ""
+                            )
+                            records = [
+                                {cols[i]: row[i] for i in range(len(cols))}
+                                for row in row_group
+                            ]
+                            group_inserts, group_updates, group_deletes = (
+                                classify_mssql_cdc_rows(
+                                    records,
+                                    primary_key=self.primary_key,
+                                    row_filter=self.row_filter,
+                                )
+                            )
+                            if group_inserts or group_updates or group_deletes:
+                                self._last_event_at = datetime.now(timezone.utc)
+                            lsn_groups.append(
+                                (
+                                    group_lsn,
+                                    group_seq,
+                                    group_inserts,
+                                    group_updates,
+                                    group_deletes,
+                                )
+                            )
         except CdcLsnGapError:
             raise
         except Exception as exc:
@@ -1367,19 +1472,29 @@ class SqlServerNativeCdc:
             logger.error("%s", read_error)
             raise read_error from exc
 
+        if lsn_groups:
+            for group_lsn, group_seq, inserts, updates, deletes in lsn_groups:
+                self.start_lsn = group_lsn
+                self.start_seqval = group_seq
+                self._resume_inclusive = False
+                yield ChangeBatch(
+                    inserts=inserts,
+                    updates=updates,
+                    deletes=deletes,
+                    resume_token=self._token(
+                        lsn=group_lsn, phase="streaming", seqval=group_seq
+                    ),
+                    table=self.table,
+                )
+            return
+
+        if max_lsn:
+            self.start_lsn = max_lsn
+            self._resume_inclusive = False
         token = self._token(
             lsn=self.start_lsn, phase="streaming", seqval=self.start_seqval
         )
-        if inserts or updates or deletes:
-            yield ChangeBatch(
-                inserts=inserts,
-                updates=updates,
-                deletes=deletes,
-                resume_token=token,
-                table=self.table,
-            )
-        else:
-            yield ChangeBatch(resume_token=token, table=self.table)
+        yield ChangeBatch(resume_token=token, table=self.table)
 
     def _poll_shared_multi(self) -> Iterator[ChangeBatch]:
         """Merge LSN-ordered changes across capture instances; demux by table.
@@ -1396,21 +1511,63 @@ class SqlServerNativeCdc:
         max_lsn = ""
         failed_table = self.table
         failed_capture_instance = ""
+        missing_min_captures: list[str] = []
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
                     self._resolve_all_captures(cur)
                     # Shared reader: any capture's min_lsn past resume is a gap.
-                    for _t, cap in (self._captures or {}).items():
+                    for cap in (self._captures or {}).values():
                         if cap:
+                            min_lsn = self._min_lsn_for(cur, cap)
+                            if not min_lsn:
+                                missing_min_captures.append(cap)
+                                continue
                             assert_resume_lsn_in_retention(
                                 self.start_lsn,
-                                self._min_lsn_for(cur, cap),
+                                min_lsn,
                                 cursor_key=self.cursor_key,
                             )
                     max_lsn = self._max_lsn(cur)
-                    if not max_lsn or (
-                        max_lsn == self.start_lsn
+                    if missing_min_captures:
+                        logger.debug(
+                            "SQL Server shared CDC capture min_lsn unavailable; "
+                            "emitting heartbeat without advancing "
+                            "(captures=%s resume_lsn=%s db_max_lsn=%s)",
+                            missing_min_captures,
+                            self.start_lsn,
+                            max_lsn,
+                        )
+                        yield ChangeBatch(
+                            resume_token=self._token(
+                                lsn=self.start_lsn,
+                                phase="streaming",
+                                seqval=self.start_seqval,
+                            ),
+                            ack_barrier=True,
+                        )
+                        return
+                    if not max_lsn or compare_mssql_hex_lsn(
+                        max_lsn, self.start_lsn
+                    ) < 0:
+                        logger.debug(
+                            "SQL Server shared CDC database max_lsn is behind "
+                            "resume; emitting heartbeat without advancing "
+                            "(resume_lsn=%s db_max_lsn=%s)",
+                            self.start_lsn,
+                            max_lsn,
+                        )
+                        yield ChangeBatch(
+                            resume_token=self._token(
+                                lsn=self.start_lsn,
+                                phase="streaming",
+                                seqval=self.start_seqval,
+                            ),
+                            ack_barrier=True,
+                        )
+                        return
+                    if (
+                        compare_mssql_hex_lsn(max_lsn, self.start_lsn) == 0
                         and not self.start_seqval
                         and not self._resume_inclusive
                     ):

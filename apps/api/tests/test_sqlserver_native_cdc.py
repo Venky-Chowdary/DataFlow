@@ -72,6 +72,7 @@ def test_native_snapshot_handoff_and_capture_resolve() -> None:
         ("dbo_orders",),  # resolve
         (bytes.fromhex("0abc"),),  # max lsn
         (bytes.fromhex("0abc"),),  # min lsn (floor)
+        (bytes.fromhex("0abc"),),  # capture start lsn
     ]
     cur.fetchall.side_effect = [
         [],  # captured_columns
@@ -348,6 +349,7 @@ def test_snapshot_handoff_clamps_to_capture_min_lsn() -> None:
     cur.fetchone.side_effect = [
         (bytes.fromhex("0a"),),  # max_lsn below floor
         (bytes.fromhex("0b"),),  # capture min_lsn
+        (bytes.fromhex("0b"),),  # capture start_lsn
     ]
     assert cdc._snapshot_handoff_lsn(cur, "dbo_orders") == "0b"
 

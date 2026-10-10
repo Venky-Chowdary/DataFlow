@@ -21,7 +21,12 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from connectors.sqlserver_cdc_native import SqlServerNativeCdc  # noqa: E402
+from connectors.sqlserver_cdc_native import (  # noqa: E402
+    SqlServerNativeCdc,
+    _hex_to_lsn,
+    compare_mssql_hex_lsn,
+    decode_mssql_cdc_token,
+)
 from src.transfer.cdc_transfer import run_cdc_database_transfer  # noqa: E402
 from src.transfer.models import EndpointConfig  # noqa: E402
 
@@ -100,6 +105,57 @@ def _dest_rows(path: Path, table: str) -> list[tuple]:
         con.close()
 
 
+def _wait_for_cdc_events(
+    reader: SqlServerNativeCdc,
+    resume_lsn: str,
+    expected: set[tuple[int, int]],
+    *,
+    timeout_sec: float = 20.0,
+) -> None:
+    deadline = time.monotonic() + timeout_sec
+    last_state: dict[str, object] = {}
+    while time.monotonic() < deadline:
+        with reader._conn() as conn:
+            with conn.cursor() as cur:
+                reader._resolve_capture_instance(cur)
+                min_lsn = reader._min_lsn(cur)
+                max_lsn = reader._max_lsn(cur)
+                last_state = {"min_lsn": min_lsn, "max_lsn": max_lsn, "events": set()}
+                if min_lsn and compare_mssql_hex_lsn(resume_lsn, min_lsn) < 0:
+                    raise AssertionError(
+                        f"CDC retention passed the handoff before test changes were "
+                        f"visible (resume={resume_lsn}, min_lsn={min_lsn})"
+                    )
+                if (
+                    min_lsn
+                    and max_lsn
+                    and compare_mssql_hex_lsn(max_lsn, resume_lsn) >= 0
+                ):
+                    cur.execute(
+                        f"""
+                        SELECT *
+                        FROM {reader._changes_tvf()}(%s, %s, %s)
+                        ORDER BY __$start_lsn, __$seqval
+                        """,
+                        (_hex_to_lsn(resume_lsn), _hex_to_lsn(max_lsn), "all"),
+                    )
+                    cols = [desc[0] for desc in (cur.description or [])]
+                    operation_idx = cols.index("__$operation")
+                    id_idx = cols.index("id")
+                    events = {
+                        (int(row[operation_idx]), int(row[id_idx]))
+                        for row in (cur.fetchall() or [])
+                    }
+                    last_state["events"] = events
+                    if expected.issubset(events):
+                        return
+        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+    raise AssertionError(
+        f"CDC capture did not expose expected events before transfer: "
+        f"expected={expected}, observed={last_state}"
+    )
+
+
 def test_sqlserver_native_transfer_snapshot_resume_delete(tmp_path: Path) -> None:
     table = "cdc_sx_" + uuid.uuid4().hex[:8]
     dest_path = tmp_path / "sqlserver_native_dest.db"
@@ -159,21 +215,29 @@ def test_sqlserver_native_transfer_snapshot_resume_delete(tmp_path: Path) -> Non
                 cur.execute(f"UPDATE dbo.[{table}] SET amount = 99.00 WHERE id = 1")
                 cur.execute(f"DELETE FROM dbo.[{table}] WHERE id = 2")
             conn.commit()
-        runner = SqlServerNativeCdc(
-            cfg, table=table, primary_key="id", schema="dbo"
-        )
-        runner.force_cdc_scan()
-        time.sleep(0.4)
+            runner = SqlServerNativeCdc(
+                cfg, table=table, primary_key="id", schema="dbo"
+            )
+            runner.force_cdc_scan()
+            handoff_lsn = decode_mssql_cdc_token(
+                (summary1.get("cdc") or {}).get("watermark")
+            )["lsn"]
+            assert handoff_lsn, summary1
+            _wait_for_cdc_events(
+                runner,
+                handoff_lsn,
+                {(1, 2), (2, 3), (4, 1)},
+            )
 
-        rows2, ddl2, summary2, _ = run_cdc_database_transfer(
-            src,
-            dst,
-            mappings,
-            schema,
-            sync_mode="cdc",
-            stream_contracts=stream,
-            job_id=job_id,
-        )
+            rows2, ddl2, summary2, _ = run_cdc_database_transfer(
+                src,
+                dst,
+                mappings,
+                schema,
+                sync_mode="cdc",
+                stream_contracts=stream,
+                job_id=job_id,
+            )
         assert any("CDC(sqlserver_native)" in line for line in ddl2), ddl2
         dest2 = _dest_rows(dest_path, table)
         ids = [int(r[0]) for r in dest2]
