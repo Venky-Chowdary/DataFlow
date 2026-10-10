@@ -424,13 +424,37 @@ class SingerTapBridge(BaseConnector):
             if cfg_path:
                 argv.extend(["--config", cfg_path])
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)  # nosec: B603 — argv is shell-safe and shell=False
-            return self._parse_streams(proc.stdout)
+            if proc.returncode != 0:
+                detail = self._safe_tap_stderr(proc.stderr or proc.stdout)
+                if not detail:
+                    detail = "tap returned no error details"
+                raise SingerTapError(
+                    f"Singer tap --discover exited with status {proc.returncode}: {detail}"
+                )
+            streams = self._parse_streams(proc.stdout)
+            if not streams:
+                detail = self._safe_tap_stderr(proc.stderr or proc.stdout)
+                if not detail:
+                    detail = "no valid Singer SCHEMA messages were emitted"
+                raise SingerTapError(
+                    "Singer tap --discover produced no parseable streams: "
+                    f"{detail}"
+                )
+            return streams
         except subprocess.TimeoutExpired:
-            return []
-        except OSError:
-            return []
-        except Exception:
-            return []
+            raise SingerTapError(
+                "Singer tap --discover timed out (TimeoutExpired)"
+            ) from None
+        except OSError as exc:
+            error_type = type(exc).__name__
+            detail = (
+                "Singer tap binary not found"
+                if isinstance(exc, FileNotFoundError)
+                else "Singer tap execution failed"
+            )
+            raise SingerTapError(
+                f"Singer tap --discover failed ({error_type}): {detail}"
+            ) from None
         finally:
             if cfg_path:
                 Path(cfg_path).unlink(missing_ok=True)
@@ -611,11 +635,19 @@ def _load_builtin_connectors() -> None:
     try:
         from connectors.sdk import http_declarative  # noqa: F401
     except Exception as exc:
-        logger.debug("declarative_http not loaded: %s", exc)
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.http_declarative",
+            type(exc).__name__,
+        )
     try:
         from connectors.sdk import hubspot_cdk  # noqa: F401
     except Exception as exc:
-        logger.debug("hubspot_cdk not loaded: %s", exc)
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.hubspot_cdk",
+            type(exc).__name__,
+        )
 
 
 _load_builtin_connectors()

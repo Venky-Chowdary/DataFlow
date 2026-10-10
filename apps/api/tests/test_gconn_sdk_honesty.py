@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import builtins
+import logging
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
 
-from connectors.sdk import SingerTapBridge, StreamSchema
+import connectors.sdk as sdk
+from connectors.sdk import SingerTapBridge, SingerTapError, StreamSchema
 from connectors.sdk.http_declarative import DeclarativeHttpConnector
 
 
@@ -117,6 +121,106 @@ def test_singer_check_fallback_rejects_empty_discovery(tmp_path: Path) -> None:
     assert ok is False
     assert message.startswith("unverified: tap has no --check and --discover produced no streams")
     assert "(exit 0):" in message
+
+
+@pytest.mark.parametrize(
+    ("outcome", "expected_fragment"),
+    [
+        (
+            subprocess.TimeoutExpired(
+                cmd=["tap", "--discover", "planted-secret"],
+                timeout=120,
+            ),
+            "timed out",
+        ),
+        (FileNotFoundError("planted-secret"), "FileNotFoundError"),
+        (
+            subprocess.CompletedProcess(
+                args=["tap", "--discover"],
+                returncode=3,
+                stdout="",
+                stderr=(
+                    "planted-secret "
+                    "https://api.example.test/items?access_token=planted-secret "
+                    + "x" * 800
+                ),
+            ),
+            "status 3",
+        ),
+        (
+            subprocess.CompletedProcess(
+                args=["tap", "--discover"],
+                returncode=0,
+                stdout="not-json planted-secret",
+                stderr="",
+            ),
+            "parseable streams",
+        ),
+    ],
+)
+def test_singer_discover_raises_typed_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    outcome: Exception | subprocess.CompletedProcess[str],
+    expected_fragment: str,
+) -> None:
+    secret = "planted-secret"
+    bridge = SingerTapBridge(
+        {
+            "tap_command": ["tap", "--discover"],
+            "tap_config": {"api_key": secret},
+        }
+    )
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(sdk.subprocess, "run", fake_run)
+    with caplog.at_level(logging.DEBUG, logger=sdk.__name__):
+        with pytest.raises(SingerTapError) as raised:
+            bridge.discover()
+
+    assert expected_fragment in str(raised.value)
+    assert len(str(raised.value)) <= 600
+    assert secret not in str(raised.value)
+    assert secret not in caplog.text
+
+
+def test_builtin_import_failures_are_warnings_without_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret = "loader-planted-secret"
+    original_import = builtins.__import__
+
+    def fail_declarative_import(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> object:
+        if name == "connectors.sdk" and "http_declarative" in fromlist:
+            raise ImportError(secret)
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fail_declarative_import)
+    with caplog.at_level(logging.WARNING, logger=sdk.__name__):
+        sdk._load_builtin_connectors()
+
+    messages = [record.getMessage() for record in caplog.records]
+    warning_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert any(
+        "connectors.sdk.http_declarative" in message and "ImportError" in message
+        for message in warning_messages
+    )
+    assert secret not in "\n".join(messages)
 
 
 def test_singer_config_and_state_files_are_removed_after_subprocesses(
