@@ -281,14 +281,18 @@ def reread_pagination_plan(
     *,
     src_type: str,
     incremental: bool = False,
+    callable_source: bool = False,
 ) -> dict[str, Any]:
     """How the independent re-read pages.
 
     ``mode=scan`` carries a fresh ``scan_state`` so ``_read_batch`` holds one
     SELECT/find + fetchmany/getmore. ``use_offset`` is False on that path —
     the reader ignores the numeric offset.
+
+    A query-mode / procedure source pages its result spool by offset and has
+    no held scan: a scan plan there re-read page one forever (QA MXD09).
     """
-    if incremental:
+    if incremental or callable_source:
         return {"mode": "cursor_or_offset", "scan_state": None, "use_offset": True}
     if src_type in SNAPSHOT_SCAN_SOURCES:
         return {"mode": "scan", "scan_state": {}, "use_offset": False}

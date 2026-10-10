@@ -3732,7 +3732,11 @@ def _stream_database_transfer_impl(
 
         checksum_started = time.perf_counter()
         fp_accumulator = FingerprintAccumulator()
-        reread_plan = reread_pagination_plan(src_type=src_type, incremental=incremental)
+        reread_plan = reread_pagination_plan(
+            src_type=src_type,
+            incremental=incremental,
+            callable_source=bool(is_callable_source(source) or is_callable_source(src_cfg)),
+        )
         reread_scan = reread_plan.get("scan_state")
         use_reread_offset = bool(reread_plan.get("use_offset"))
         cursor_type_for_read: str | None = None
