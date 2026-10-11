@@ -212,7 +212,6 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "smallint unsigned": LOGICAL_INTEGER,
     "int unsigned": LOGICAL_INTEGER,
     "bigint unsigned": LOGICAL_DECIMAL,  # MySQL BIGINT UNSIGNED → DECIMAL (fidelity)
-    "smallserial": LOGICAL_INTEGER,
     "year": LOGICAL_INTEGER,
     "bit": LOGICAL_BOOLEAN,
     "year_month": LOGICAL_INTERVAL,
@@ -267,7 +266,6 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "tinytext": LOGICAL_TEXT,
     "long varchar": LOGICAL_TEXT,
     "national character large object": LOGICAL_TEXT,
-    "timestamp with time zone": LOGICAL_DATETIME,
     "timestamp with local time zone": LOGICAL_DATETIME,
     "timestamp without time zone": LOGICAL_DATETIME,
     "time with time zone": LOGICAL_TIME,
