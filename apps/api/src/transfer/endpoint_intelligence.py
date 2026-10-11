@@ -869,10 +869,12 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             # once ``10.01`` is text the stored ``double`` is unrecoverable.
             from services.schema_introspect import (
                 mongodb_bson_column_types,
+                mongodb_bson_homogeneous_date_fields,
                 prefer_bson_source_carrier,
             )
 
             bson_types = mongodb_bson_column_types(records)
+            homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(records)
             # Match Execute path (mongodb_reader): expand nested docs + string
             # matrix via cell_to_string so Map/Validate columns ≡ write headers.
             from services.json_intelligence import expand_mongo_documents
@@ -918,7 +920,11 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 for col in columns
             }
             schema, intel = infer_schema_map(samples_by_field)
-            schema = prefer_bson_source_carrier(schema, bson_types)
+            schema = prefer_bson_source_carrier(
+                schema,
+                bson_types,
+                homogeneous_date_fields=homogeneous_date_fields,
+            )
             for col in columns:
                 if col not in schema:
                     schema[col] = "VARCHAR"

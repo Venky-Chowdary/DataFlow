@@ -10,6 +10,7 @@ success. The stored BSON type is the declared domain, so it owns the carrier.
 
 from services.schema_introspect import (
     mongodb_bson_column_types,
+    mongodb_bson_homogeneous_date_fields,
     prefer_bson_numeric_carrier,
 )
 
@@ -78,13 +79,63 @@ def test_bson_date_keeps_instant_carrier_after_sample_stringification():
 
     from services.schema_introspect import prefer_bson_source_carrier
 
-    bson_types = mongodb_bson_column_types(
-        [{"ts_utc": datetime(2025, 1, 1, 0, 0)}]
-    )
+    docs = [{"ts_utc": datetime(2025, 1, 1, 0, 0)}]
+    bson_types = mongodb_bson_column_types(docs)
     assert bson_types["ts_utc"] == "TIMESTAMPTZ"
     assert prefer_bson_source_carrier(
-        {"ts_utc": "TIMESTAMP"}, bson_types
+        {"ts_utc": "TIMESTAMP"},
+        bson_types,
+        homogeneous_date_fields=mongodb_bson_homogeneous_date_fields(docs),
     ) == {"ts_utc": "TIMESTAMPTZ"}
+
+
+def test_mixed_bson_date_and_zoneless_string_keeps_sampled_carrier():
+    from datetime import datetime
+
+    from services.schema_inference import infer_schema_map
+    from services.schema_introspect import prefer_bson_source_carrier
+    from services.value_serializer import cell_to_string
+
+    docs = [
+        {"created": datetime(2025, 1, 1, 0, 0)},
+        {"created": "2025-06-01"},
+    ]
+    bson_types = mongodb_bson_column_types(docs)
+    assert bson_types["created"] == "TIMESTAMPTZ"
+
+    samples, _intel = infer_schema_map(
+        {
+            "created": [
+                cell_to_string(doc["created"])
+                for doc in docs
+            ]
+        }
+    )
+    assert samples["created"] == "DATE"
+    assert prefer_bson_source_carrier(
+        samples,
+        bson_types,
+        homogeneous_date_fields=mongodb_bson_homogeneous_date_fields(docs),
+    ) == samples
+
+
+def test_bson_date_with_null_or_absent_values_keeps_instant_carrier():
+    from datetime import datetime
+
+    from services.schema_introspect import prefer_bson_source_carrier
+
+    docs = [
+        {"created": datetime(2025, 1, 1, 0, 0)},
+        {"created": None},
+        {"other": "field absent"},
+    ]
+    bson_types = mongodb_bson_column_types(docs)
+    assert mongodb_bson_homogeneous_date_fields(docs) == {"created"}
+    assert prefer_bson_source_carrier(
+        {"created": "DATE"},
+        bson_types,
+        homogeneous_date_fields=mongodb_bson_homogeneous_date_fields(docs),
+    ) == {"created": "TIMESTAMPTZ"}
 
 
 def test_non_bson_date_text_is_not_promoted_to_an_instant():

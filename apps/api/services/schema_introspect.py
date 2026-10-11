@@ -25,7 +25,7 @@ from services.foreign_key_metadata import probe_foreign_keys
 from services.identity_carry import apply_identity_probe
 from services.physical_storage_metadata import probe_physical_storage
 from services.secondary_indexes import probe_secondary_indexes
-from services.value_serializer import json_default
+from services.value_serializer import cell_to_string, json_default
 
 logger = logging.getLogger(__name__)
 _si = sys.modules[__name__]
@@ -2891,6 +2891,22 @@ def mongodb_bson_column_types(documents: Any) -> dict[str, str]:
     return types
 
 
+def mongodb_bson_homogeneous_date_fields(documents: Any) -> set[str]:
+    """Fields whose non-null sampled values are all BSON Date datetimes."""
+    homogeneous: dict[str, bool] = {}
+    for doc in documents or []:
+        if not isinstance(doc, dict):
+            continue
+        for key, value in doc.items():
+            if value is None:
+                continue
+            name = str(key)
+            homogeneous[name] = homogeneous.get(name, True) and isinstance(
+                value, datetime.datetime
+            )
+    return {name for name, is_homogeneous in homogeneous.items() if is_homogeneous}
+
+
 def prefer_bson_numeric_carrier(
     schema: dict[str, str] | None,
     bson_types: dict[str, str] | None,
@@ -2925,12 +2941,19 @@ def prefer_bson_numeric_carrier(
 def prefer_bson_source_carrier(
     schema: dict[str, str] | None,
     bson_types: dict[str, str] | None,
+    *,
+    homogeneous_date_fields: set[str] | None = None,
 ) -> dict[str, str]:
-    """Preserve BSON-declared carriers lost when samples are stringified."""
+    """Preserve BSON carriers lost by stringification when their evidence fits."""
     merged = prefer_bson_numeric_carrier(schema, bson_types)
     schema_names = {str(name).casefold(): str(name) for name in merged}
+    homogeneous_dates = {
+        str(name).casefold() for name in (homogeneous_date_fields or set())
+    }
     for col, bson_type in (bson_types or {}).items():
         if str(bson_type).strip().upper() != "TIMESTAMPTZ":
+            continue
+        if str(col).casefold() not in homogeneous_dates:
             continue
         name = schema_names.get(str(col).casefold())
         if name is not None:
@@ -2982,6 +3005,7 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     ", ".join(expanded[:12]),
                 )
         resolved, mix_notes = _mongodb_types_with_notes(docs)
+        homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(docs)
         for doc in docs:
             for key, val in list(doc.items()):
                 sample_text = "" if val is None else str(val)
@@ -3005,6 +3029,23 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
             name = str(col.get("name") or "")
             if resolved.get(name):
                 col["inferred_type"] = resolved[name]
+                if (
+                    col["inferred_type"] == "TIMESTAMPTZ"
+                    and name not in homogeneous_date_fields
+                ):
+                    from services.schema_inference import infer_schema_map
+
+                    samples = [
+                        cell_to_string(doc[name], preserve_sql_null=True)
+                        for doc in docs
+                        if isinstance(doc, dict)
+                        and name in doc
+                        and doc[name] is not None
+                    ]
+                    sampled_schema, _intel = infer_schema_map({name: samples})
+                    col["inferred_type"] = sampled_schema.get(name) or col[
+                        "inferred_type"
+                    ]
                 if mix_notes.get(name):
                     col["type_mix_warning"] = mix_notes[name]
             elif not col.get("inferred_type"):
