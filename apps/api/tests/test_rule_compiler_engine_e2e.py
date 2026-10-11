@@ -129,13 +129,40 @@ def _db(path: Path) -> None:
     conn.close()
 
 
-def _dest_db(path: Path) -> None:
+def _db_clean(path: Path) -> None:
+    """Every row passes the contracts — strict mode reaches Gate-8 instead of
+    aborting on quarantine cells (FAIL_JOB)."""
+    conn = sqlite3.connect(str(path))
+    with conn:
+        conn.execute(
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY, fname TEXT, status TEXT, "
+            "email TEXT, amount TEXT, mystery TEXT, notes TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO customers VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, " alice ", "A", "a@x.com", "10", "m1", "Texas"),
+                (2, "bob", "I", "b@x.com", "5", "m2", "Ohio"),
+                (3, "carol", "A", "c@x.com", "7", "m3", "Maine"),
+            ],
+        )
+    conn.close()
+
+
+def _dest_db(path: Path, *, corrupt_first_name: bool = False) -> None:
     conn = sqlite3.connect(str(path))
     with conn:
         conn.execute(
             "CREATE TABLE customers (id INTEGER PRIMARY KEY, first_name TEXT, "
             "status TEXT, email TEXT, amount NUMERIC, segment TEXT, notes TEXT)"
         )
+        if corrupt_first_name:
+            conn.execute(
+                "CREATE TRIGGER corrupt_first_name AFTER INSERT ON customers "
+                "WHEN NEW.id = 1 BEGIN "
+                "UPDATE customers SET first_name = 'CORRUPT' WHERE id = NEW.id; "
+                "END"
+            )
     conn.close()
 
 
@@ -149,7 +176,9 @@ def _rows(path: Path) -> list[tuple]:
         conn.close()
 
 
-def _request(src: Path, dst: Path, mappings: list[dict]) -> TransferRequest:
+def _request(
+    src: Path, dst: Path, mappings: list[dict], *, validation_mode: str = "balanced"
+) -> TransferRequest:
     return TransferRequest(
         source=EndpointConfig(
             kind="database", format="sqlite", database=str(src), table="customers"
@@ -160,7 +189,7 @@ def _request(src: Path, dst: Path, mappings: list[dict]) -> TransferRequest:
         mappings=mappings,
         sync_mode="full_refresh_overwrite",
         skip_preflight=True,
-        validation_mode="balanced",
+        validation_mode=validation_mode,
     )
 
 
@@ -182,10 +211,12 @@ def engine_env(tmp_path: Path, monkeypatch):
     return fake, persisted
 
 
-def _run(fake, src: Path, dst: Path, mappings: list[dict]):
+def _run(fake, src: Path, dst: Path, mappings: list[dict], *, validation_mode: str = "balanced"):
     job_id = "br" + uuid.uuid4().hex[:16]
     fake.update_job_status(job_id, "pending", transfer_request={})
-    return UniversalTransferEngine().execute_tracked(_request(src, dst, mappings), job_id)
+    return UniversalTransferEngine().execute_tracked(
+        _request(src, dst, mappings, validation_mode=validation_mode), job_id
+    )
 
 
 def test_report_shape_and_contracts_compile():
@@ -360,3 +391,57 @@ def test_retry_reruns_the_full_cell_pipeline_not_just_the_transform():
     reasons = " | ".join(str(d.get("reason") or "") for d in rejected)
     assert "business rule r1" in reasons, reasons
     assert "unmapped code" in reasons or "crosswalk" in reasons, reasons
+
+
+@pytest.mark.parametrize("validation_mode", ["strict", "balanced"])
+def test_gate8_row_fingerprints_catch_corrupt_row(
+    validation_mode, tmp_path: Path, engine_env
+):
+    """Contract mappings force ``comparable_column_pairs`` → ``None``, which in
+    Gate-8 falls back to per-row fingerprint compare (never a skip). An AFTER
+    INSERT trigger corrupting a written row must still fail the job's
+    reconciliation in every validation mode. Source rows all pass the
+    contracts so strict mode reaches Gate-8 — with failing rows it aborts
+    earlier on the FAIL_JOB quarantine policy, never reaching reconciliation.
+    """
+    fake, _persisted = engine_env
+    report = _report()
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _db_clean(src)
+    _dest_db(dst, corrupt_first_name=True)
+    result = _run(
+        fake,
+        src,
+        dst,
+        _wire_mappings(report, include_review=False),
+        validation_mode=validation_mode,
+    )
+    assert not result.success, (
+        validation_mode,
+        result.destination_summary,
+        result.reconciliation,
+    )
+    recon = result.reconciliation or {}
+    assert recon.get("passed") is False, recon
+    mismatches = (recon.get("sample_compare") or {}).get("mismatches") or []
+    named = {
+        (str(m.get("source") or ""), str(m.get("target") or "")) for m in mismatches
+    }
+    assert ("fname", "first_name") in named, (recon.get("message"), mismatches)
+
+
+def test_gate8_clean_run_passes_reconciliation(tmp_path: Path, engine_env):
+    """Same run without the trigger: Gate-8 passes and accounts for the
+    written population (source minus the quarantined contract failures)."""
+    fake, _persisted = engine_env
+    report = _report()
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _db(src)
+    _dest_db(dst)
+    result = _run(fake, src, dst, _wire_mappings(report, include_review=False))
+    assert result.success, result.error
+    recon = result.reconciliation or {}
+    assert recon.get("passed") is True, recon
+    assert int(recon.get("source_rows") or 0) == 5
+    assert int(recon.get("rejected_rows") or 0) == 3
+    assert int(recon.get("target_rows") or 0) == 2

@@ -161,6 +161,7 @@ def comparable_column_pairs(
             return None
         if mapping.get("rule_contracts"):
             # Contract failures are quarantined, so source ≠ dest population.
+            # Gate-8 reads None as "per-row fingerprint compare", never a skip.
             return None
         left = src_types.get(source.lower())
         right = dst_types.get(target.lower())
