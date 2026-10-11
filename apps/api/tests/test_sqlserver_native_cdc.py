@@ -200,7 +200,7 @@ def test_normalize_and_classify_before_image_and_net() -> None:
     assert "fn_cdc_get_net_changes_" in cdc._changes_tvf()
 
 
-def test_native_cdc_binary_wire_roundtrips_bytes_empty_and_null() -> None:
+def test_native_cdc_binary_wire_roundtrips_bytes_and_empty_values() -> None:
     from connectors.sql_bind import coerce_binary_wire
     from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
 
@@ -220,13 +220,43 @@ def test_native_cdc_binary_wire_roundtrips_bytes_empty_and_null() -> None:
     by_id = {record["id"]: record["payload"] for record in inserts}
     assert coerce_binary_wire(by_id["1"]) == payload
     assert coerce_binary_wire(by_id["2"]) == b""
-    assert coerce_binary_wire(by_id["3"]) is None
+    assert by_id["3"] == ""
 
 
-def test_native_snapshot_binary_wire_roundtrips_bytes_empty_and_null() -> None:
+def test_native_cdc_non_binary_values_preserve_legacy_wire_format() -> None:
+    from datetime import date, datetime
+    from decimal import Decimal
+    from uuid import UUID
+
+    from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
+
+    values = {
+        "null_value": None,
+        "timestamp": datetime(2024, 3, 4, 5, 6, 7, 890123),
+        "event_date": date(2024, 3, 4),
+        "enabled": True,
+        "amount": Decimal("123.4500"),
+        "guid": UUID("3a95e6d0-0200-4b2c-a7f9-15b3e8de4c11"),
+        "text": "unchanged",
+    }
+    inserts, updates, deletes = classify_mssql_cdc_rows(
+        [{"__$operation": 2, "id": 1, **values}],
+        primary_key="id",
+        row_filter="all",
+    )
+
+    assert not updates
+    assert not deletes
+    expected = {
+        name: "" if value is None else str(value)
+        for name, value in values.items()
+    }
+    assert {name: inserts[0][name] for name in values} == expected
+
+
+def test_native_snapshot_binary_wire_roundtrips_bytes_and_empty_values() -> None:
     from connectors.sql_bind import coerce_binary_wire
     from connectors.sqlserver_cdc_native import SqlServerNativeCdc
-    from services.value_serializer import SQL_NULL_SENTINEL
 
     cdc = SqlServerNativeCdc(
         {"host": "localhost", "database": "app"},
@@ -260,14 +290,69 @@ def test_native_snapshot_binary_wire_roundtrips_bytes_empty_and_null() -> None:
     record = batches[0].inserts[0]
     assert coerce_binary_wire(record["payload"]) == b"\x00\xffsnapshot"
     assert coerce_binary_wire(record["empty_payload"]) == b""
-    assert record["null_payload"] == SQL_NULL_SENTINEL
-    assert coerce_binary_wire(record["null_payload"]) is None
+    assert record["null_payload"] == ""
+
+
+def test_native_incremental_snapshot_preserves_legacy_values_and_binary_wire() -> None:
+    from datetime import datetime
+    from decimal import Decimal
+
+    from connectors.sql_bind import coerce_binary_wire
+
+    cdc = SqlServerNativeCdc(
+        {"host": "localhost", "database": "app"},
+        table="orders",
+        primary_key="id",
+    )
+
+    class _Sig:
+        primary_key = "id"
+        chunk_size = 2
+        last_pk = ""
+        table = "orders"
+
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.description = [
+        ("id",),
+        ("created_at",),
+        ("enabled",),
+        ("amount",),
+        ("payload",),
+        ("null_payload",),
+    ]
+    payload = b"\x00\xffincremental"
+    cur.fetchall.return_value = [
+        (
+            1,
+            datetime(2024, 3, 4, 5, 6, 7, 890123),
+            True,
+            Decimal("123.4500"),
+            payload,
+            None,
+        )
+    ]
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        records, new_last, done = cdc._fetch_incremental_chunk(_Sig())
+
+    record = records[0]
+    assert record["created_at"] == "2024-03-04 05:06:07.890123"
+    assert record["enabled"] == "True"
+    assert record["amount"] == "123.4500"
+    assert coerce_binary_wire(record["payload"]) == payload
+    assert record["null_payload"] == ""
+    assert new_last == "1"
+    assert done is True
 
 
 def test_native_cdc_update_old_before_image_nulls_are_not_written() -> None:
     from connectors.sql_bind import coerce_binary_wire
     from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
-    from services.value_serializer import SQL_NULL_SENTINEL
 
     payload = b"\x00\xfeafter-image"
     inserts, updates, deletes = classify_mssql_cdc_rows(
@@ -284,8 +369,78 @@ def test_native_cdc_update_old_before_image_nulls_are_not_written() -> None:
     assert len(updates) == 1
     assert coerce_binary_wire(updates[0]["payload"]) == payload
     assert updates[0]["large_value"] == "new"
-    assert updates[0]["_df_before"]["payload"] == SQL_NULL_SENTINEL
-    assert updates[0]["_df_before"]["large_value"] == SQL_NULL_SENTINEL
+    assert updates[0]["_df_before"]["payload"] == ""
+    assert updates[0]["_df_before"]["large_value"] == ""
+
+
+def test_native_cdc_legacy_value_redelivery_is_already_committed(tmp_path) -> None:
+    from datetime import datetime
+    from decimal import Decimal
+
+    from connectors.cdc_eos_sql import (
+        apply_change_batch_exactly_once,
+        dest_engine_count,
+    )
+    from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
+    from services.cdc_engine import ChangeBatch
+
+    source_values = {
+        "created_at": datetime(2024, 3, 4, 5, 6, 7, 890123),
+        "enabled": True,
+        "amount": Decimal("123.4500"),
+    }
+    legacy_row = {
+        "id": "1",
+        **{
+            name: "" if value is None else str(value)
+            for name, value in source_values.items()
+        },
+    }
+    token = {"lsn": "0/3A", "phase": "streaming"}
+    dest_cfg = {"database": str(tmp_path / "serializer-upgrade.db")}
+    columns = ["id", *source_values]
+    mappings = [
+        {"source": name, "target": name, "confidence": 1.0}
+        for name in columns
+    ]
+    column_types = dict.fromkeys(columns, "string")
+
+    rows, _checksum, committed, _deleted = apply_change_batch_exactly_once(
+        dest_type="sqlite",
+        dest_cfg=dest_cfg,
+        dest_table="orders",
+        change=ChangeBatch(inserts=[legacy_row], resume_token=token),
+        mappings=mappings,
+        column_types=column_types,
+        headers=columns,
+        pk_target_cols=["id"],
+        cursor_key="serializer-upgrade|orders",
+    )
+    assert rows == 1
+    assert committed["exactly_once_active"] is True
+
+    inserts, updates, deletes = classify_mssql_cdc_rows(
+        [{"__$operation": 2, "id": 1, **source_values}],
+        primary_key="id",
+        row_filter="all",
+    )
+    assert not updates
+    assert not deletes
+    rows2, _checksum2, replayed, _deleted2 = apply_change_batch_exactly_once(
+        dest_type="sqlite",
+        dest_cfg=dest_cfg,
+        dest_table="orders",
+        change=ChangeBatch(inserts=inserts, resume_token=token),
+        mappings=mappings,
+        column_types=column_types,
+        headers=columns,
+        pk_target_cols=["id"],
+        cursor_key="serializer-upgrade|orders",
+    )
+
+    assert replayed["eos_already_committed"] is True
+    assert rows2 == 0
+    assert dest_engine_count(dest_cfg, "orders") == 1
 
 
 def test_mssql_shared_reader_init_and_lease() -> None:

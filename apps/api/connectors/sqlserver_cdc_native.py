@@ -347,6 +347,12 @@ def normalize_mssql_row_filter(value: str | None) -> str:
     return ROW_FILTER_ALL
 
 
+def _sqlserver_native_wire_value(value: Any) -> str:
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return cell_to_string(value, preserve_sql_null=True)
+    return "" if value is None else str(value)
+
+
 def classify_mssql_cdc_rows(
     rows: list[dict[str, Any]],
     *,
@@ -379,7 +385,7 @@ def classify_mssql_cdc_rows(
         except (TypeError, ValueError):
             op_i = -1
         clean = {
-            k: cell_to_string(v, preserve_sql_null=True)
+            k: _sqlserver_native_wire_value(v)
             for k, v in rec.items()
             if not str(k).startswith("__$")
         }
@@ -1406,7 +1412,7 @@ class SqlServerNativeCdc:
                 break
             records = [
                 {
-                    cols[i]: cell_to_string(row[i], preserve_sql_null=True)
+                    cols[i]: _sqlserver_native_wire_value(row[i])
                     for i in range(len(cols))
                 }
                 for row in rows
@@ -1473,7 +1479,7 @@ class SqlServerNativeCdc:
                 rows = cur.fetchall() or []
         records = [
             {
-                cols[i]: cell_to_string(row[i], preserve_sql_null=True)
+                cols[i]: _sqlserver_native_wire_value(row[i])
                 for i in range(len(cols))
             }
             for row in rows
