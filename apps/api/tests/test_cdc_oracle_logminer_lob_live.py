@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import socket
 import subprocess
 import uuid
 from typing import Any
@@ -25,26 +24,44 @@ from test_cdc_oracle_logminer_txn_live import _pg_cfg
 
 pytestmark = pytest.mark.skipif(
     not _oracle_logminer_ready(),
-    reason="Oracle LogMiner not reachable — set DATAFLOW_ORACLE_ENABLE=1 on a CDC-ready :1521",
+    reason=(
+        "Oracle LogMiner endpoint/authentication unavailable — configure "
+        "DATAFLOW_ORACLE_* for a CDC-ready :1521"
+    ),
 )
 
 
 def _pg_runtime_cfg() -> dict[str, Any]:
     cfg = _pg_cfg()
-    values = dict(
-        line.split("=", 1)
-        for line in subprocess.check_output(
-            ["docker", "exec", "df-pg", "sh", "-c", "env"],
+    try:
+        values = subprocess.check_output(
+            [
+                "docker",
+                "exec",
+                "df-pg",
+                "sh",
+                "-c",
+                "printf '%s\\n' \"${POSTGRES_DB:-}\" \"${POSTGRES_USER:-}\" "
+                "\"${POSTGRES_PASSWORD:-}\"",
+            ],
             text=True,
         ).splitlines()
-        if "=" in line
-    )
+    except (OSError, subprocess.CalledProcessError):
+        values = []
+    values.extend([""] * (3 - len(values)))
+    database, username, password = values[:3]
     cfg.update(
         {
-            "host": "localhost",
-            "port": 5432,
-            "database": values.get("POSTGRES_DB") or cfg["database"],
-            "username": values.get("POSTGRES_USER") or cfg["username"],
+            "host": getenv_brand("PG_HOST", "localhost").strip(),
+            "port": int(getenv_brand("PG_PORT", "5432") or 5432),
+            "database": getenv_brand("PG_DB", database or str(cfg["database"]))
+            or cfg["database"],
+            "username": getenv_brand("PG_USER", username or str(cfg["username"]))
+            or cfg["username"],
+            "password": getenv_brand(
+                "PG_PASSWORD", password or str(cfg["password"])
+            )
+            or cfg["password"],
         }
     )
     return cfg
@@ -217,12 +234,13 @@ def _exercise_oracle_lob_capture(
     oracle = _oracle_cfg()
     postgres = _pg_runtime_cfg()
     try:
-        with socket.create_connection(
-            (str(postgres["host"]), int(postgres["port"])), timeout=2
-        ):
+        with pg_connection(**postgres):
             pass
-    except OSError:
-        pytest.skip("df-pg PostgreSQL endpoint is not reachable")
+    except Exception as exc:
+        pytest.skip(
+            "PostgreSQL endpoint/authentication unavailable "
+            f"({type(exc).__name__}); verify PG_* settings and df-pg credentials"
+        )
 
     monkeypatch.setenv("DATAFLOW_JOB_STORE", "memory")
     monkeypatch.setenv("DATAFLOW_DISABLE_OBJECT_STORE", "1")
