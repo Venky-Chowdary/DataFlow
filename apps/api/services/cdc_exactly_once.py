@@ -579,6 +579,7 @@ def combine_change_batch(change: Any, *, pk_cols: list[str]) -> Any:
         resume_token=getattr(change, "resume_token", None),
         table=getattr(change, "table", None),
         ack_barrier=bool(getattr(change, "ack_barrier", True)),
+        lookup_columns=getattr(change, "lookup_columns", None) or {},
     )
 
 
@@ -1276,6 +1277,12 @@ def batch_apply_checksum(
     from services.cdc_snapshot_window import _pk_value
 
     combined = combine_change_batch(change, pk_cols=pk_cols)
+    batch_table = str(getattr(change, "table", "") or "").upper()
+    skipped_columns: set[str] = set()
+    for table, columns in (getattr(change, "lookup_columns", None) or {}).items():
+        table_name = str(table or "").upper()
+        if table_name == batch_table or table_name.rsplit(".", 1)[-1] == batch_table:
+            skipped_columns.update(str(column).upper() for column in columns or [])
     updates = []
     for rec in list(combined.inserts or []) + list(combined.updates or []):
         if not isinstance(rec, dict):
@@ -1284,6 +1291,7 @@ def batch_apply_checksum(
             str(k): _checksum_cell(rec.get(k))
             for k in sorted(rec)
             if not str(k).startswith("_df_")
+            and str(k).upper() not in skipped_columns
         }
         updates.append(
             {

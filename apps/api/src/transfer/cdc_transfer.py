@@ -1132,6 +1132,7 @@ def _apply_change_batch(
             table=change.table,
             ack_barrier=change.ack_barrier,
             rejected=rejected_details,
+            lookup_columns=change.lookup_columns,
         )
 
     inherit_note = ""
