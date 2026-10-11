@@ -205,8 +205,8 @@ class FitScanReport:
     #: Columns whose declared source type cannot exceed the destination carrier,
     #: so no value scan is needed to decide them.
     safe_by_declaration: tuple[str, ...] = field(default=())
-    #: Why a population walk stopped early: ``row`` or ``time``. Empty when
-    #: the walk finished or never started.
+    #: Why a population walk stopped early: ``row``, ``time`` or ``walk``.
+    #: Empty when the walk finished or never started.
     truncated_reason: str = ""
     #: Wall-clock of this walk. Studio hero must not sum other gates as 10ms
     #: after a multi-second 1M scan.
@@ -216,6 +216,7 @@ class FitScanReport:
     #: True when that cheap continuation exhausted the iterator.
     envelope_complete: bool = False
     max_observed_widths: tuple[tuple[str, int], ...] = ()
+    probe_error: str = ""
 
     @property
     def scanned_population(self) -> bool:
@@ -250,6 +251,7 @@ class FitScanReport:
             "envelope_rows_scanned": self.envelope_rows_scanned,
             "envelope_complete": self.envelope_complete,
             "max_observed_widths": dict(self.max_observed_widths),
+            "probe_error": self.probe_error,
             "note": self.note,
         }
 
@@ -1587,6 +1589,23 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
     held_out = report.held_out_findings
     details: dict[str, Any] = report.to_dict()
     duration_ms = int(report.duration_ms or 0)
+
+    probe_error = str(report.probe_error or "").strip()
+    if probe_error or report.truncated_reason == "walk":
+        error = probe_error or "source population walk did not complete"
+        details["probe_failed"] = True
+        details["probe_error"] = error
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": (
+                f"Population probe failed: {error}. The source population was "
+                "not fully scanned, so bounded destination-carrier fit is "
+                "unproven. Retry Validate after the source is reachable."
+            ),
+            "duration_ms": duration_ms,
+            "details": details,
+        }
 
     if not report.targets:
         safe = len(report.safe_by_declaration)

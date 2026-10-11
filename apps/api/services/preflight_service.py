@@ -1702,6 +1702,7 @@ def run_file_preflight(
                 evidence=EVIDENCE_UNMEASURED,
                 rows_total=int(row_count or 0),
                 truncated_reason="walk" if pre_gate_fit_error else "",
+                probe_error=pre_gate_fit_error,
                 note=(
                     "Pre-gate population scan failed; fit is unproven."
                     if pre_gate_fit_error

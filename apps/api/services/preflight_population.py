@@ -420,6 +420,7 @@ def scan_existing_table_population_fit(
             fit_report,
             truncated_reason="walk",
             note="Population scan stopped because the source table walk failed.",
+            probe_error=population_walk_error,
         )
     if destination_table_exists is False and replay_source is not None:
         from services.population_fit_scan import create_new_population_widen

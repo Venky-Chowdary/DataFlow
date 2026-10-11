@@ -42,6 +42,7 @@ def _proven_pairs(
     }
     rows_scanned = int(getattr(fit_report, "rows_scanned", 0) or 0)
     rows_total = int(getattr(fit_report, "rows_total", 0) or 0)
+    probe_error = str(getattr(fit_report, "probe_error", "") or "").strip()
     complete_scan = (
         destination_table_exists is True
         and getattr(fit_report, "evidence", "") == "exact"
@@ -49,6 +50,7 @@ def _proven_pairs(
         and rows_scanned == rows_total
         and rows_scanned > 0
         and not getattr(fit_report, "truncated_reason", "")
+        and not probe_error
     )
 
     proven: dict[WidthPair, Mapping[str, int]] = {}
@@ -139,15 +141,18 @@ def unproven_width_message(target: str, fit_report: Any) -> str:
     rows_total = int(getattr(fit_report, "rows_total", 0) or 0)
     reason = str(getattr(fit_report, "truncated_reason", "") or "")
     evidence = str(getattr(fit_report, "evidence", "") or "")
-    if evidence == "unmeasured" and rows_scanned <= 0:
+    probe_error = str(getattr(fit_report, "probe_error", "") or "").strip()
+    if not probe_error and evidence == "unmeasured" and rows_scanned <= 0:
         return declared_capacity
-    if reason == "reused_validate":
+    if not probe_error and reason == "reused_validate":
         return declared_capacity
-    if rows_scanned <= 0 and not reason:
+    if not probe_error and rows_scanned <= 0 and not reason:
         return declared_capacity
-    if rows_scanned >= rows_total and not reason:
+    if not probe_error and rows_scanned >= rows_total and not reason:
         return declared_capacity
-    if reason == "walk":
+    if probe_error:
+        reason = f"source population probe failed: {probe_error}"
+    elif reason == "walk":
         reason = "source population walk failed"
     if not reason and rows_total and rows_scanned < rows_total:
         reason = "walk ended before the population was exhausted"
