@@ -1,4 +1,4 @@
-import type { AuditExportFormat, WorkspaceApiKeyLifetime } from "./api.js";
+import type { AuditExportFormat, WorkspaceApiKey, WorkspaceApiKeyLifetime } from "./api.js";
 
 export const API_KEY_LIFETIME_OPTIONS: Array<{
   value: WorkspaceApiKeyLifetime;
@@ -11,6 +11,10 @@ export const API_KEY_LIFETIME_OPTIONS: Array<{
   { value: "365d", label: "1 year" },
   { value: "never", label: "No expiration" },
 ];
+
+export function filterWorkspaceApiKeys(keys: WorkspaceApiKey[]): WorkspaceApiKey[] {
+  return keys.filter((key) => key.kind !== "service_account" && key.kind !== "scim");
+}
 
 // Mirrors apps/api/services/team_store.py:ROLES.
 export const SCIM_GROUP_MAPPING_ROLES = ["admin", "editor", "viewer"] as const;

@@ -5,6 +5,7 @@ import {
   API_KEY_LIFETIME_OPTIONS,
   auditExportFilename,
   buildScimGroupMappingsPayload,
+  filterWorkspaceApiKeys,
   scopeOptions,
 } from "./iamAdmin.js";
 
@@ -46,6 +47,18 @@ describe("IAM admin helpers", () => {
     assert.deepEqual(API_KEY_LIFETIME_OPTIONS.map(({ value }) => value), [
       "7d", "30d", "60d", "90d", "365d", "never",
     ]);
+  });
+
+  it("excludes IAM service-account and SCIM keys from the workspace API-key list", () => {
+    assert.deepEqual(
+      filterWorkspaceApiKeys([
+        { id: "api-1", name: "Workspace key", prefix: "dfk_api", kind: "api_key" },
+        { id: "service-1", name: "Service account", prefix: "dfk_svc", kind: "service_account" },
+        { id: "scim-1", name: "SCIM token", prefix: "dfk_scim", kind: "scim" },
+        { id: "legacy-1", name: "Legacy key", prefix: "dfk_old" },
+      ]).map(({ id }) => id),
+      ["api-1", "legacy-1"],
+    );
   });
 
   it("keeps the existing audit filename prefix with an unambiguous timestamp", () => {

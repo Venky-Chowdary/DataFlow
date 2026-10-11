@@ -19,7 +19,7 @@ import { useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
 import { useTheme } from "../lib/useTheme";
 import type { ThemePreference } from "../lib/theme";
-import { auditExportFilename, API_KEY_LIFETIME_OPTIONS } from "../lib/iamAdmin";
+import { auditExportFilename, API_KEY_LIFETIME_OPTIONS, filterWorkspaceApiKeys } from "../lib/iamAdmin";
 import { ServiceAccountsPanel } from "./settings/ServiceAccountsPanel";
 import { ScimSettings } from "./settings/ScimSettings";
 
@@ -63,6 +63,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [logFilter, setLogFilter] = useState<"all" | AuditLog["level"]>("all");
   const [auditEvents, setAuditEvents] = useState<AuditLog[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
+  const [auditExportFormat, setAuditExportFormat] = useState<AuditExportFormat>("csv");
   /** Last chain verification result. Null means nobody has asked yet — which is not "intact". */
   const [chainReport, setChainReport] = useState<AuditChainVerification | null>(null);
   const [chainVerifying, setChainVerifying] = useState(false);
@@ -182,7 +183,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     setApiKeysLoading(true);
     fetchWorkspaceApiKeys()
       .then((keys) => {
-        setApiKeys(keys);
+        setApiKeys(filterWorkspaceApiKeys(keys));
         setApiKeysError("");
       })
       .catch((err: unknown) => {
@@ -430,11 +431,12 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         expires_at: created.expires_at,
         lifetime: created.lifetime || newKeyLifetime,
         expired: false,
+        kind: "api_key",
       };
       setApiKeys((prev) => [optimistic, ...prev.filter((k) => k.id !== created.id)]);
       setRevealedKey(created.key);
       toast({ title: "API key created", message: "Copy it now — it won't be shown again.", tone: "success" });
-      fetchWorkspaceApiKeys().then(setApiKeys).catch(() => {});
+      fetchWorkspaceApiKeys().then((keys) => setApiKeys(filterWorkspaceApiKeys(keys))).catch(() => {});
     } catch (err) {
       toast({
         title: "Generation failed",
@@ -959,7 +961,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   </p>
                 </div>
               </section>
-              <ScimSettings />
+              <ScimSettings onOpenTeamSettings={() => setTab("team")} />
               </>
             )}
 
@@ -1220,7 +1222,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       description="Use the toolbar above to authenticate programmatic transfers and MCP calls."
                     />
                   ) : (
-                    <div className="df2-api-key-list" role="list" aria-label="Workspace API keys">
+                    <div className="df2-api-key-list" role="list" aria-label="Workspace API keys" data-testid="workspace-api-key-list">
                       {apiKeys.map((key) => (
                         <article key={key.id} className="df2-api-key-card" role="listitem">
                           <div className="df2-api-key-card-main">
@@ -1228,20 +1230,26 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                               <DtIcon name="key" size={18} />
                             </div>
                             <div className="df2-api-key-card-copy">
-                              <strong>{key.name}</strong>
-                              <code>{key.prefix}…</code>
-                              <span className="df2-api-key-card-meta">{key.role || "editor"}</span>
-                              <span className="df2-api-key-card-meta">
-                                Created {key.created_at ? new Date(key.created_at).toLocaleString() : "—"}
-                                {" · "}
-                                Last used {key.last_used_at ? new Date(key.last_used_at).toLocaleString() : "Never"}
-                                {" · "}
-                                {key.expired
-                                  ? `Expired ${key.expires_at ? new Date(key.expires_at).toLocaleString() : ""}`
-                                  : key.expires_at
-                                    ? `Expires ${new Date(key.expires_at).toLocaleString()}`
-                                    : "No expiration"}
-                              </span>
+                              <div className="df2-api-key-card-title">
+                                <strong>{key.name}</strong>
+                              </div>
+                              <div className="df2-api-key-card-meta-row">
+                                <span className="df2-api-key-card-meta">Prefix: <code>{key.prefix}…</code></span>
+                                <span className="df2-api-key-card-meta">Role: {key.role || "editor"}</span>
+                                <span className="df2-api-key-card-meta">
+                                  Created {key.created_at ? new Date(key.created_at).toLocaleString() : "—"}
+                                </span>
+                                <span className="df2-api-key-card-meta">
+                                  Last used {key.last_used_at ? new Date(key.last_used_at).toLocaleString() : "Never"}
+                                </span>
+                                <span className="df2-api-key-card-meta">
+                                  {key.expired
+                                    ? `Expired ${key.expires_at ? new Date(key.expires_at).toLocaleString() : ""}`
+                                    : key.expires_at
+                                      ? `Expires ${new Date(key.expires_at).toLocaleString()}`
+                                      : "No expiration"}
+                                </span>
+                              </div>
                             </div>
                           </div>
                           <div className="df2-api-key-card-actions">
@@ -1266,6 +1274,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
             )}
 
             {tab === "logs" && (
+              <>
               <section className="df2-settings-section">
                 <div className="df2-settings-section-head">
                   <div>
@@ -1275,7 +1284,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       Verify walks the platform HMAC chain; findings named here are this workspace&apos;s records.
                     </p>
                   </div>
-                  <div className="df2-settings-section-actions">
+                  <div className="df2-settings-section-actions df2-iam-audit-actions">
                     <button
                       type="button"
                       className="df2-btn df2-btn-secondary df2-btn-sm"
@@ -1285,98 +1294,31 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     >
                       <DtIcon name="shield" size={14} /> {chainVerifying ? "Verifying…" : "Verify chain"}
                     </button>
+                    <label className="df2-iam-audit-export-format">
+                      <span>Format</span>
+                      <select
+                        className="df2-select"
+                        data-testid="audit-export-format"
+                        value={auditExportFormat}
+                        onChange={(event) => setAuditExportFormat(event.target.value as AuditExportFormat)}
+                      >
+                        <option value="csv">CSV</option>
+                        <option value="json">JSON</option>
+                        <option value="ndjson">NDJSON</option>
+                        <option value="cef">CEF</option>
+                      </select>
+                    </label>
                     <button
                       type="button"
                       className="df2-btn df2-btn-secondary df2-btn-sm"
-                      data-testid="audit-export-csv"
-                      onClick={() => void downloadAuditExport("csv")}
+                      data-testid="audit-export"
+                      onClick={() => void downloadAuditExport(auditExportFormat)}
                     >
-                      <DtIcon name="download" size={14} /> Export CSV
-                    </button>
-                    <button
-                      type="button"
-                      className="df2-btn df2-btn-ghost df2-btn-sm"
-                      data-testid="audit-export-json"
-                      onClick={() => void downloadAuditExport("json")}
-                    >
-                      Export JSON
-                    </button>
-                    <button
-                      type="button"
-                      className="df2-btn df2-btn-ghost df2-btn-sm"
-                      data-testid="audit-export-ndjson"
-                      onClick={() => void downloadAuditExport("ndjson")}
-                    >
-                      Export NDJSON
-                    </button>
-                    <button
-                      type="button"
-                      className="df2-btn df2-btn-ghost df2-btn-sm"
-                      data-testid="audit-export-cef"
-                      onClick={() => void downloadAuditExport("cef")}
-                    >
-                      Export CEF
+                      <DtIcon name="download" size={14} /> Export
                     </button>
                   </div>
                 </div>
                 <div className="df2-settings-section-body">
-                  <section className="df2-settings-policy-grid" data-testid="audit-retention">
-                    <div>
-                      <h3>Retention</h3>
-                      <p>Preview expired-event removal before purging. Purges record a retention checkpoint.</p>
-                    </div>
-                    <PermissionNotice
-                      allowed={workspaceManage.allowed}
-                      reason={workspaceManage.reason}
-                      what="Audit retention requires workspace.manage."
-                    />
-                    <div className="df2-settings-section-actions">
-                      <Button
-                        variant="secondary"
-                        disabled={!workspaceManage.allowed || retentionLoading}
-                        title={workspaceManage.reason || undefined}
-                        data-testid="audit-retention-preview"
-                        onClick={() => void previewAuditRetention()}
-                      >
-                        {retentionLoading ? "Working…" : "Preview purge"}
-                      </Button>
-                      <Button
-                        variant="danger"
-                        disabled={retentionPurgeDisabled}
-                        title={workspaceManage.reason || undefined}
-                        data-testid="audit-retention-purge"
-                        onClick={() => void purgeAuditRetentionNow()}
-                      >
-                        Purge now
-                      </Button>
-                    </div>
-                    {retentionError && (
-                      <div className="df2-permission-notice" role="alert" data-testid="audit-retention-error">
-                        {retentionError}
-                      </div>
-                    )}
-                    {retentionResult && (
-                      <div className="df2-settings-policy-row" role="status" data-testid="audit-retention-result">
-                        <div>
-                          {retentionResult.dry_run ? (
-                            <p>Would remove: {retentionResult.would_remove ?? "not reported by the API"}</p>
-                          ) : (
-                            <p>Removed: {retentionResult.removed}</p>
-                          )}
-                          <p>Legal hold: {retentionResult.legal_hold ? "Enabled" : "Off"}</p>
-                          <p>
-                            {retentionResult.retention_days === null
-                              ? "Retention is off"
-                              : `Retention window: ${retentionResult.retention_days} days`}
-                          </p>
-                          {retentionResult.legal_hold && <p>Purge is disabled while legal hold is enabled.</p>}
-                          {!retentionResult.legal_hold && retentionResult.retention_days === null && (
-                            <p>Purge is disabled because retention is off.</p>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </section>
                   {chainReport && (
                     <div
                       className={`df2-chain-verdict ${chainReport.verified ? "is-ok" : "is-broken"}`}
@@ -1458,6 +1400,68 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   </div>
                 </div>
               </section>
+              <section className="df2-settings-section" data-testid="audit-retention">
+                <div className="df2-settings-section-head">
+                  <div>
+                    <h2>Retention</h2>
+                    <p>Preview expired-event removal before purging. Purges record a retention checkpoint.</p>
+                  </div>
+                </div>
+                <div className="df2-settings-section-body">
+                  <PermissionNotice
+                    allowed={workspaceManage.allowed}
+                    reason={workspaceManage.reason}
+                    what="Audit retention requires workspace.manage."
+                  />
+                  <div className="df2-settings-section-actions">
+                    <Button
+                      variant="secondary"
+                      disabled={!workspaceManage.allowed || retentionLoading}
+                      title={workspaceManage.reason || undefined}
+                      data-testid="audit-retention-preview"
+                      onClick={() => void previewAuditRetention()}
+                    >
+                      {retentionLoading ? "Working…" : "Preview purge"}
+                    </Button>
+                    <Button
+                      variant="danger"
+                      disabled={retentionPurgeDisabled}
+                      title={workspaceManage.reason || undefined}
+                      data-testid="audit-retention-purge"
+                      onClick={() => void purgeAuditRetentionNow()}
+                    >
+                      Purge now
+                    </Button>
+                  </div>
+                  {retentionError && (
+                    <div className="df2-permission-notice" role="alert" data-testid="audit-retention-error">
+                      {retentionError}
+                    </div>
+                  )}
+                  {retentionResult && (
+                    <div className="df2-settings-policy-row" role="status" data-testid="audit-retention-result">
+                      <div>
+                        {retentionResult.dry_run ? (
+                          <p>Would remove: {retentionResult.would_remove ?? "not reported by the API"}</p>
+                        ) : (
+                          <p>Removed: {retentionResult.removed}</p>
+                        )}
+                        <p>Legal hold: {retentionResult.legal_hold ? "Enabled" : "Off"}</p>
+                        <p>
+                          {retentionResult.retention_days === null
+                            ? "Retention is off"
+                            : `Retention window: ${retentionResult.retention_days} days`}
+                        </p>
+                        {retentionResult.legal_hold && <p>Purge is disabled while legal hold is enabled.</p>}
+                        {!retentionResult.legal_hold && retentionResult.retention_days === null && (
+                          <p>Purge is disabled because retention is off.</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+              </>
             )}
           </div>
         </div>

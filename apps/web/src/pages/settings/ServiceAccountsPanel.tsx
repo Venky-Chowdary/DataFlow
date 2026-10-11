@@ -141,7 +141,7 @@ export function ServiceAccountsPanel() {
       />
       {manage.allowed && (
         <div className="df2-settings-section-body">
-          <form className="df2-settings-grid" data-testid="service-account-create-form" onSubmit={(event) => void createAccount(event)}>
+          <form className="df2-iam-create-form" data-testid="service-account-create-form" onSubmit={(event) => void createAccount(event)}>
             <label className="df2-settings-field">
               <span>Name</span>
               <input data-testid="service-account-name" className="df2-input" value={name} onChange={(event) => setName(event.target.value)} />
@@ -163,25 +163,25 @@ export function ServiceAccountsPanel() {
                 ))}
               </select>
             </label>
-            <fieldset className="df2-settings-field" data-testid="service-account-scopes">
-              <legend>Scopes held by your identity</legend>
-              {availableScopes.map((scope) => (
-                <label key={scope} className="df2-settings-policy-row">
-                  <input
-                    type="checkbox"
-                    checked={scopes.includes(scope)}
-                    onChange={(event) => setScopes((current) => event.target.checked
-                      ? [...current, scope]
-                      : current.filter((value) => value !== scope))}
-                  />
-                  <span>{scope}</span>
-                </label>
-              ))}
-            </fieldset>
             <Button type="submit" variant="primary" disabled={saving} data-testid="service-account-create">
               {saving ? "Creating…" : "Create service account"}
             </Button>
           </form>
+          <fieldset className="df2-iam-scope-grid" data-testid="service-account-scopes">
+            <legend>Scopes held by your identity</legend>
+            {availableScopes.map((scope) => (
+              <label key={scope} className="df2-iam-scope-option">
+                <input
+                  type="checkbox"
+                  checked={scopes.includes(scope)}
+                  onChange={(event) => setScopes((current) => event.target.checked
+                    ? [...current, scope]
+                    : current.filter((value) => value !== scope))}
+                />
+                <span>{scope}</span>
+              </label>
+            ))}
+          </fieldset>
           {formError && <p className="df2-permission-notice" role="alert">{formError}</p>}
           {revealedSecret && (
             <div className="df2-alert df2-alert-success df2-alert-banner df2-mb-md" role="status" data-testid="service-account-secret">

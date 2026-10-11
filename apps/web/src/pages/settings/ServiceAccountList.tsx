@@ -26,30 +26,34 @@ export function ServiceAccountList({
         const expired = account.expired === true
           || Boolean(account.expires_at && Date.parse(account.expires_at) < Date.now());
         return (
-          <article key={account.id} className="df2-api-key-card" role="listitem">
+          <article key={account.id} className="df2-api-key-card df2-iam-service-account" role="listitem">
             <div className="df2-api-key-card-main">
               <div className="df2-api-key-card-copy">
-                <strong>{account.name}</strong>
-                <span className="df2-badge df2-badge-muted" data-testid="service-account-kind">
-                  {account.kind === "scim" ? "SCIM" : "service account"}
-                </span>
-                <span className="df2-api-key-card-meta">Role: {account.role || "—"}</span>
-                <span className="df2-api-key-card-meta">
-                  Scopes: {account.scopes?.length ? account.scopes.join(", ") : "None"}
-                </span>
-                <code>{account.prefix}…</code>
-                <span className="df2-api-key-card-meta" data-testid="service-account-expiry">
-                  {expired
-                    ? "Expired"
-                    : account.expires_at
-                      ? `Expires ${new Date(account.expires_at).toLocaleString()}`
-                      : "No expiration"}
-                </span>
+                <div className="df2-api-key-card-title">
+                  <strong>{account.name}</strong>
+                  <span className="df2-badge df2-badge-muted" data-testid="service-account-kind">
+                    {account.kind === "scim" ? "SCIM" : "service account"}
+                  </span>
+                </div>
+                <div className="df2-api-key-card-meta-row">
+                  <span className="df2-api-key-card-meta">Role: {account.role || "—"}</span>
+                  <span className="df2-api-key-card-meta">
+                    Scopes: {account.scopes?.length ? account.scopes.join(", ") : "None"}
+                  </span>
+                  <span className="df2-api-key-card-meta">Prefix: <code>{account.prefix}…</code></span>
+                  <span className="df2-api-key-card-meta" data-testid="service-account-expiry">
+                    {expired
+                      ? "Expired"
+                      : account.expires_at
+                        ? `Expires ${new Date(account.expires_at).toLocaleString()}`
+                        : "No expiration"}
+                  </span>
+                </div>
               </div>
             </div>
-            <div className="df2-api-key-card-actions">
-              <label className="df2-settings-field">
-                <span>Rotation overlap</span>
+            <div className="df2-api-key-card-actions df2-iam-service-account-actions">
+              <label className="df2-iam-overlap-field">
+                <span>Overlap</span>
                 <select
                   className="df2-select"
                   value={overlaps[account.id] ?? 86400}

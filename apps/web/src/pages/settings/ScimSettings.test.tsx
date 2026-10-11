@@ -15,5 +15,8 @@ describe("ScimGroupMappingRows", () => {
     }));
     assert.match(markup, /role="alert"/);
     assert.match(markup, /Enter an IdP group name\./);
+    assert.match(markup, /df2-scim-mapping-row/);
+    assert.match(markup, /df2-scim-mapping-remove/);
+    assert.match(markup, /IdP group name/);
   });
 });

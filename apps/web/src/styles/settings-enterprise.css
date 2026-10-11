@@ -271,6 +271,214 @@
   height: 42px;
 }
 
+.df2-api-key-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.df2-api-key-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  min-width: 0;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--df-line, #e2e8f0);
+}
+
+.df2-api-key-card:last-child {
+  border-bottom: 0;
+}
+
+.df2-api-key-card-main {
+  display: flex;
+  flex: 1 1 320px;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.df2-api-key-card-icon {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+}
+
+.df2-api-key-card-copy {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.df2-api-key-card-title,
+.df2-api-key-card-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 16px;
+  min-width: 0;
+}
+
+.df2-api-key-card-meta-row {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--df-text-muted);
+}
+
+.df2-api-key-card-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.df2-iam-create-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  align-items: end;
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+.df2-iam-create-form > .df2-btn {
+  align-self: end;
+  justify-self: start;
+  width: auto;
+  white-space: nowrap;
+}
+
+.df2-scim-token-form {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+}
+
+.df2-scim-token-form > .df2-btn {
+  justify-self: start;
+  width: auto;
+}
+
+.df2-iam-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px 12px;
+  width: 100%;
+  min-width: 0;
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  box-sizing: border-box;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 8px;
+}
+
+.df2-iam-scope-option {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 0;
+  text-align: left;
+}
+
+.df2-page-settings .df2-iam-scope-option input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: auto;
+  min-height: 0;
+}
+
+.df2-iam-service-account-actions {
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.df2-iam-overlap-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: auto;
+  white-space: nowrap;
+  font-size: 12px;
+}
+
+.df2-page-settings .df2-iam-overlap-field select {
+  width: 112px;
+  min-height: 34px;
+  padding: 6px 8px;
+}
+
+.df2-iam-audit-actions {
+  flex: 0 0 auto;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 10px;
+}
+
+.df2-iam-audit-export-format {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.df2-page-settings .df2-iam-audit-export-format select {
+  width: auto;
+  min-width: 112px;
+  min-height: 34px;
+  padding: 6px 8px;
+}
+
+.df2-scim-no-workspaces {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 8px;
+  background: var(--df-surface-muted);
+}
+
+.df2-scim-no-workspaces p {
+  margin: 0;
+  color: var(--df-text-muted);
+  font-size: 13px;
+}
+
+.df2-scim-mapping-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.df2-scim-mapping-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.3fr) minmax(110px, 0.7fr) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-radius: 8px;
+}
+
+.df2-scim-mapping-row .df2-settings-field {
+  min-width: 0;
+}
+
+.df2-scim-mapping-remove {
+  justify-self: start;
+  white-space: nowrap;
+}
+
 /* API keys: one field + button */
 .df2-api-key-toolbar:has(> .df2-btn:nth-child(2)) {
   grid-template-columns: minmax(0, 1fr) auto;
@@ -322,6 +530,59 @@
 
   .df2-api-key-toolbar > .df2-btn {
     width: 100%;
+  }
+
+  .df2-iam-create-form {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
+
+  .df2-scim-token-form {
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  }
+
+  .df2-scim-token-form > .df2-btn {
+    width: auto;
+  }
+
+  .df2-api-key-card {
+    align-items: flex-start;
+  }
+
+  .df2-api-key-card-actions {
+    margin-left: auto;
+  }
+
+  .df2-iam-service-account-actions {
+    flex-wrap: wrap;
+  }
+
+  .df2-iam-scope-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-iam-audit-actions {
+    flex-wrap: wrap;
+  }
+
+  .df2-scim-mapping-row {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-scim-mapping-remove {
+    justify-self: start;
+  }
+}
+
+@media (min-width: 721px) and (max-width: 1100px) {
+  .df2-iam-scope-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .df2-iam-create-form > .df2-btn,
+  .df2-scim-token-form > .df2-btn {
+    grid-column: 1 / -1;
+    justify-self: start;
+    width: auto;
   }
 }
 

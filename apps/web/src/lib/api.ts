@@ -3402,6 +3402,7 @@ export type WorkspaceApiKey = {
   id: string;
   name: string;
   prefix: string;
+  kind?: string;
   role?: WorkspaceApiKeyRole | string;
   created_at?: string;
   created_by?: string;

@@ -23,7 +23,7 @@ import {
   type WorkspaceOption,
 } from "./ScimGroupMappingRows";
 
-export function ScimSettings() {
+export function ScimSettings({ onOpenTeamSettings }: { onOpenTeamSettings?: () => void }) {
   const manage = useWriteGate(PERMISSIONS.iamManage);
   const { toast } = useToast();
   const [loading, setLoading] = useState(true);
@@ -134,7 +134,7 @@ export function ScimSettings() {
       />
       {manage.allowed && (
         <div className="df2-settings-section-body">
-          <form className="df2-settings-grid" data-testid="scim-token-form" onSubmit={(event) => void generateToken(event)}>
+          <form className="df2-api-key-toolbar df2-scim-token-form" data-testid="scim-token-form" onSubmit={(event) => void generateToken(event)}>
             <label className="df2-settings-field">
               <span>Token name</span>
               <input data-testid="scim-token-name" className="df2-input" value={tokenName} onChange={(event) => setTokenName(event.target.value)} />
@@ -189,7 +189,12 @@ export function ScimSettings() {
           ) : !mappingLoadError && (
             <>
               {!workspaceLoadError && workspaces.length === 0 && (
-                <p className="df2-settings-hint">No workspaces are available for group mappings.</p>
+                <div className="df2-scim-no-workspaces" data-testid="scim-workspaces-empty">
+                  <p>No workspaces are available for group mappings.</p>
+                  <Button variant="secondary" size="sm" onClick={onOpenTeamSettings}>
+                    Open Team settings to create a workspace
+                  </Button>
+                </div>
               )}
               {mappingError && <p className="df2-permission-notice" role="alert" data-testid="scim-group-mapping-error">{mappingError}</p>}
               {rows.length === 0 ? (
@@ -212,11 +217,11 @@ export function ScimSettings() {
                 />
               )}
               <div className="df2-settings-section-actions">
-                <Button variant="secondary" data-testid="scim-mapping-add" onClick={() => {
+                <Button variant="secondary" data-testid="scim-mapping-add" disabled={saving || workspaces.length === 0} onClick={() => {
                   setRows((current) => [...current, { group: "", workspace_id: "", role: "viewer" }]);
                   setMappingError("");
                 }}>Add mapping</Button>
-                <Button variant="primary" data-testid="scim-mapping-save" disabled={saving || Boolean(workspaceLoadError)} onClick={() => void saveMappings()}>
+                <Button variant="primary" data-testid="scim-mapping-save" disabled={saving || Boolean(workspaceLoadError) || workspaces.length === 0} onClick={() => void saveMappings()}>
                   {saving ? "Saving…" : "Save mappings"}
                 </Button>
               </div>

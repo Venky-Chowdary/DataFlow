@@ -26,6 +26,9 @@ describe("ServiceAccountList", () => {
     assert.match(markup, /service account/);
     assert.match(markup, /Expired/);
     assert.match(markup, /job\.run, workspace\.read/);
+    assert.match(markup, /df2-api-key-card-title/);
+    assert.match(markup, /df2-api-key-card-meta-row/);
+    assert.match(markup, /Prefix:/);
     assert.doesNotMatch(markup, /secret-value-must-not-render|hash-value-must-not-render/);
   });
 
