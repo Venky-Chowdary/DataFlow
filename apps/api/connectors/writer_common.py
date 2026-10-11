@@ -1844,6 +1844,19 @@ def build_mapped_rows_with_details(
                     target=tgt_name,
                 ):
                     converted, err = None, None
+                if not err and isinstance(mapping, dict):
+                    contracts = mapping.get("rule_contracts")
+                    if contracts:
+                        from services.rule_compiler.apply import evaluate_contract
+
+                        for contract in contracts:
+                            reason = evaluate_contract(converted, contract, missing=False)
+                            if reason:
+                                err = (
+                                    f"business rule {contract.get('rule_id') or '?'} "
+                                    f"failed: {reason}"
+                                )
+                                break
             cell_policy = policy
             exec_pol: str | None = None
             risk_id: str | None = None

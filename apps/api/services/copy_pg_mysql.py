@@ -112,6 +112,8 @@ def mapping_is_plain_carry(mappings: list[dict]) -> tuple[bool, str]:
             return False, f"transform {transform!r} changes values"
         if declared_crosswalk(item):
             return False, "code crosswalk rewrites values"
+        if item.get("rule_contracts"):
+            return False, "rule contracts quarantine rows"
         source = str(item.get("source") or "").strip()
         target = str(item.get("target") or "").strip()
         if not source or not target:

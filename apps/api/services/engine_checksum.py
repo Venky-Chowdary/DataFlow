@@ -159,6 +159,9 @@ def comparable_column_pairs(
             # A code crosswalk rewrites the cell (A→active); the populations
             # are meant to differ, so neither COPY nor a digest may carry it.
             return None
+        if mapping.get("rule_contracts"):
+            # Contract failures are quarantined, so source ≠ dest population.
+            return None
         left = src_types.get(source.lower())
         right = dst_types.get(target.lower())
         if not left or not right:

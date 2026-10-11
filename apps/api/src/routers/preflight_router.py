@@ -76,6 +76,8 @@ class MappingItem(BaseModel):
     # population code is seen. Empty dict is still a declaration.
     code_crosswalk: dict[str, str] | None = None
     code_crosswalk_system: str | None = None
+    # Execute-enforced business-rule contracts attached to this write.
+    rule_contracts: list[dict[str, Any]] | None = None
     # G21 — opt-in independent SUM of this monetary column after write.
     # Must survive Validate → Execute; extra=ignore would drop it.
     control_total: bool | None = None

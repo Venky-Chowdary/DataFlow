@@ -4833,12 +4833,23 @@ def sample_compare_rows(
             # Same order as writer_common: transform, then the declared
             # crosswalk. Comparing the source token to the rewritten dest cell
             # as identity is a false Gate-8 failure of a correct conversion.
-            if declared_crosswalk(m) is not None:
+            rule_contracts = m.get("rule_contracts")
+            if declared_crosswalk(m) is not None or rule_contracts:
                 converted, err = apply_transform(raw_src, transform or "none")
-                if not err:
+                if not err and declared_crosswalk(m) is not None:
                     converted, xwalk_err = apply_code_crosswalk(converted, m)
                     if xwalk_err:
                         converted = None
+                if not err and isinstance(rule_contracts, list):
+                    # Rows a rule contract rejects are quarantined at write —
+                    # never in the dest image. Fingerprint the value the
+                    # writer saw; a failing row must not read as a Gate-8 miss.
+                    from services.rule_compiler.apply import evaluate_contract
+
+                    for contract in rule_contracts:
+                        if evaluate_contract(converted, contract, missing=False):
+                            converted = None
+                            break
                 src_val = _fingerprint(
                     converted, transform=None, tgt_col=tgt_col
                 )
