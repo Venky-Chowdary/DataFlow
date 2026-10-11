@@ -75,3 +75,59 @@ def test_bad_extension_is_400():
         files={"file": ("rules.exe", b"MZ", "application/octet-stream")},
     )
     assert response.status_code == 400
+
+
+def _audit_store(tmp_path, monkeypatch):
+    from services import audit_log as audit
+
+    path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(audit, "STORE_PATH", path)
+    monkeypatch.setattr(audit, "_mongo_collection", lambda: None)
+    return audit, path
+
+
+def test_import_writes_one_compiled_event_and_is_idempotent(tmp_path, monkeypatch):
+    audit, _path = _audit_store(tmp_path, monkeypatch)
+    client = _client()
+    r1 = client.post("/api/v1/transfer/rules/import", files=_csv_file())
+    r2 = client.post("/api/v1/transfer/rules/import", files=_csv_file())
+    assert r1.status_code == 200 and r2.status_code == 200
+    h1, h2 = r1.json()["audit_event_hash"], r2.json()["audit_event_hash"]
+    assert h1 and h1 == h2
+    events = [
+        e for e in audit.list_audit_events(limit=500)
+        if e.get("action") == "business_rules.compiled"
+    ]
+    assert len(events) == 1
+    assert events[0]["details"]["report_fingerprint"] == r1.json()["report_fingerprint"]
+    assert events[0]["details"]["filename"] == "rules.csv"
+
+
+def test_different_payload_writes_a_new_event(tmp_path, monkeypatch):
+    audit, _path = _audit_store(tmp_path, monkeypatch)
+    client = _client()
+    r1 = client.post("/api/v1/transfer/rules/import", files=_csv_file())
+    other = b"Source Column,Destination Column,Rule\nfname,first_name,Upper\n"
+    r2 = client.post("/api/v1/transfer/rules/import", files=_csv_file(other))
+    assert r1.status_code == 200 and r2.status_code == 200
+    events = [
+        e for e in audit.list_audit_events(limit=500)
+        if e.get("action") == "business_rules.compiled"
+    ]
+    assert len(events) == 2
+    assert r1.json()["audit_event_hash"] != r2.json()["audit_event_hash"]
+
+
+def test_compiled_event_carries_no_cell_values_or_rule_text(tmp_path, monkeypatch):
+    _audit, path = _audit_store(tmp_path, monkeypatch)
+    client = _client()
+    payload = (
+        "Source Column,Destination Column,Rule\n"
+        "ZXQWCOL,secret_target,Must equal TOPSECRET-MARKER\n"
+    ).encode()
+    r = client.post("/api/v1/transfer/rules/import", files=_csv_file(payload))
+    assert r.status_code == 200, r.text
+    raw = path.read_bytes()
+    assert b"TOPSECRET-MARKER" not in raw
+    assert b"secret_target" not in raw
+    assert b"ZXQWCOL" not in raw

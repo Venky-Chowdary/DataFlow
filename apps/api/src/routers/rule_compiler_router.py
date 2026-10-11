@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
 from services.rule_compiler import RuleIngestError, compile_rule_workbook
 from services.rule_compiler.ingest import MAX_FILE_BYTES
@@ -73,6 +73,7 @@ def _json_list(raw: str, field: str = "source_columns") -> list[str]:
 
 @router.post("/import")
 async def import_rule_workbook(
+    request: Request,
     file: UploadFile = File(...),
     source_columns: str = Form(""),
     dest_columns: str = Form(""),
@@ -95,7 +96,7 @@ async def import_rule_workbook(
         )
     filename = file.filename or "rules"
     try:
-        return compile_rule_workbook(
+        report = compile_rule_workbook(
             filename,
             payload,
             source_columns=_json_list(source_columns, "source_columns"),
@@ -112,3 +113,14 @@ async def import_rule_workbook(
         )
     except RuleIngestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    from services.audit_log import workspace_id_from_request
+    from services.rule_compiler.audit import record_rule_report_compiled
+
+    workspace_id = workspace_id_from_request(request)
+    report["audit_event_hash"] = record_rule_report_compiled(
+        report=report,
+        filename=filename,
+        actor=getattr(request.state, "user_email", None) or "anonymous",
+        workspace_id=workspace_id,
+    )
+    return report

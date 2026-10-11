@@ -526,3 +526,50 @@ def test_sample_compare_missing_column_still_compares_as_null():
     assert res["passed"] is False, res
     assert res["rows_excluded_quarantined"] == 0
     assert res["mismatches"][0]["target"] == "email"
+
+
+def test_engine_writes_one_executed_event_linked_to_compiled(
+    tmp_path: Path, engine_env, monkeypatch
+):
+    """One business_rules.executed event per job, linked by fingerprint to the
+    compiled event; a rerun appends a second executed event with the same link."""
+    from services import audit_log as audit
+    from services.rule_compiler.audit import record_rule_report_compiled
+
+    path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(audit, "STORE_PATH", path)
+    monkeypatch.setattr(audit, "_mongo_collection", lambda: None)
+
+    fake, _persisted = engine_env
+    report = _report()
+    compiled_hash = record_rule_report_compiled(
+        report=report, filename="customer_rules.csv", actor="qa@x", workspace_id=""
+    )
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _db(src)
+    _dest_db(dst)
+    mappings = _wire_mappings(report, include_review=False)
+    for m in mappings:
+        m["business_rule"] = {
+            "rule_id": "shape-evidence",
+            "report_fingerprint": report["report_fingerprint"],
+        }
+    r1 = _run(fake, src, dst, mappings)
+    assert r1.success, r1.error
+    r2 = _run(fake, src, dst, mappings)
+    assert r2.success, r2.error
+
+    events = [
+        e for e in audit.list_audit_events(limit=500)
+        if e.get("action") == "business_rules.executed"
+    ]
+    assert len(events) == 2
+    for event, res in zip(events, (r2, r1), strict=False):
+        assert event["resource"] == f"job:{res.job_id}"
+        assert event["correlation_id"] == res.job_id
+        assert event["details"]["compiled_event_hash"] == compiled_hash
+        assert report["report_fingerprint"] in event["details"]["report_fingerprints"]
+        assert event["details"]["approved_at"]
+    raw = path.read_bytes()
+    assert b"a@x.com" not in raw
+

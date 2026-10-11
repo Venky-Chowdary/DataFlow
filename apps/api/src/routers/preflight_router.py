@@ -78,6 +78,9 @@ class MappingItem(BaseModel):
     code_crosswalk_system: str | None = None
     # Execute-enforced business-rule contracts attached to this write.
     rule_contracts: list[dict[str, Any]] | None = None
+    # Compiled-rule evidence (rule_id, report_fingerprint) — must survive
+    # Validate → Execute so the job can link back to the compiled audit event.
+    business_rule: dict[str, Any] | None = None
     # G21 — opt-in independent SUM of this monetary column after write.
     # Must survive Validate → Execute; extra=ignore would drop it.
     control_total: bool | None = None

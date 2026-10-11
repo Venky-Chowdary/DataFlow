@@ -244,6 +244,10 @@ export interface MappingBusinessRule {
   sheet?: string;
   row?: number;
   issues?: string[];
+  /** Compiled rule id — links this mapping's evidence to the report row. */
+  ruleId?: string;
+  /** Compile-report fingerprint — links to the business_rules.compiled audit event. */
+  reportFingerprint?: string;
 }
 
 /** Reduction reason codes — keep aligned with ``REDUCTION_DISPOSITIONS``. */
@@ -2316,6 +2320,8 @@ export function buildPreflightMappings(
               sheet: safe.businessRule.sheet,
               row: safe.businessRule.row,
               issues: safe.businessRule.issues,
+              rule_id: safe.businessRule.ruleId,
+              report_fingerprint: safe.businessRule.reportFingerprint,
             }
           : undefined,
       };
@@ -2457,6 +2463,8 @@ export function editableFromPipelineMappings(
       sheet?: string;
       row?: number;
       issues?: string[];
+      rule_id?: string;
+      report_fingerprint?: string;
     };
   }>,
   sampleRows?: Record<string, unknown>[],
@@ -2660,6 +2668,10 @@ export function editableFromPipelineMappings(
             sheet: m.business_rule.sheet,
             row: m.business_rule.row,
             issues: m.business_rule.issues,
+            ruleId: m.business_rule.rule_id ? String(m.business_rule.rule_id) : undefined,
+            reportFingerprint: m.business_rule.report_fingerprint
+              ? String(m.business_rule.report_fingerprint)
+              : undefined,
           }
         : undefined,
     };

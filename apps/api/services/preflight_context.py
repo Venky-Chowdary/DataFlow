@@ -97,6 +97,7 @@ class FilePreflightContext(PreflightContext):
             "code_crosswalk": getattr(m, "code_crosswalk", None),
             "code_crosswalk_system": getattr(m, "code_crosswalk_system", None),
             "rule_contracts": getattr(m, "rule_contracts", None),
+            "business_rule": getattr(m, "business_rule", None),
         }
 
     def _dest_nullability(self) -> dict[str, bool]:

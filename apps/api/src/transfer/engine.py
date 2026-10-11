@@ -1602,6 +1602,84 @@ class UniversalTransferEngine:
             except Exception:
                 # Audit best-effort — contracts are already on the job document.
                 pass
+        # Business-rule evidence: one executed event per job, linked back to the
+        # compile event by report fingerprint. Best-effort — never fails a run.
+        try:
+            _br_mappings = [
+                m
+                for m in (request.mappings or [])
+                if isinstance(m, dict)
+                and (
+                    m.get("rule_contracts")
+                    or (
+                        isinstance(m.get("business_rule"), dict)
+                        and str((m.get("business_rule") or {}).get("report_fingerprint") or "")
+                    )
+                )
+            ]
+            if _br_mappings:
+                from datetime import datetime, timezone
+
+                from services.audit_log import append_audit_event
+                from services.rule_compiler.audit import find_rule_report_event
+
+                _br_ws = str(getattr(request, "workspace_id", "") or "")
+                _fps = sorted(
+                    {
+                        str((m.get("business_rule") or {}).get("report_fingerprint") or "")
+                        for m in _br_mappings
+                    }
+                    - {""}
+                )
+                _compiled = {
+                    fp: str((find_rule_report_event(fp, _br_ws) or {}).get("event_hash") or "")
+                    or None
+                    for fp in _fps
+                }
+                _contract_ids = sorted(
+                    {
+                        str(c.get("rule_id") or "")
+                        for m in _br_mappings
+                        for c in (m.get("rule_contracts") or [])
+                        if isinstance(c, dict) and c.get("rule_id")
+                    }
+                )
+                _shape_ids = sorted(
+                    {
+                        str((m.get("business_rule") or {}).get("rule_id") or "")
+                        for m in _br_mappings
+                    }
+                    - {""}
+                )
+                append_audit_event(
+                    action="business_rules.executed",
+                    resource=f"job:{job_id}",
+                    actor=str(getattr(request, "triggered_by", "") or "unknown"),
+                    level="info",
+                    correlation_id=job_id,
+                    workspace_id=_br_ws or None,
+                    details={
+                        "report_fingerprints": _fps,
+                        "compiled_event_hash": (
+                            _compiled[_fps[0]] if len(_fps) == 1 else (_compiled or None)
+                        ),
+                        "rule_ids_contracts": _contract_ids,
+                        "rule_ids_transforms": _shape_ids,
+                        # Job submit time = this execute call; TransferRequest
+                        # carries no earlier timestamp field.
+                        "approved_at": datetime.now(timezone.utc).isoformat(),
+                    },
+                )
+        except Exception:
+            logger.warning(
+                "business_rules audit event unavailable for %s", job_id, exc_info=True
+            )
+            try:
+                get_mongodb_service().update_job_fields(
+                    job_id, {"business_rules_audit": "unavailable"}
+                )
+            except Exception:
+                pass
         # Stamp declared mask/hash/redact so the certificate still lists them
         # after transfer_request mappings are redacted away. Best-effort —
         # harvest at export time if this write does not land.

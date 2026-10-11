@@ -170,6 +170,7 @@ export function ruleToEvidence(rule: CompiledRule): MappingBusinessRule {
     sheet: rule.provenance?.sheet,
     row: rule.provenance?.row,
     issues: rule.issues,
+    ruleId: rule.rule_id || undefined,
   };
 }
 
@@ -367,6 +368,20 @@ export function mergeBusinessRules(
     next[idx] = applyOne(existing, rule);
   }
   attachRuleContracts(next, report, tableFold);
+  // Stamp the compile-report fingerprint on every carried rule so the Execute
+  // wire links back to the business_rules.compiled audit event.
+  const fingerprint = (report.report_fingerprint || "").trim();
+  if (fingerprint) {
+    for (let i = 0; i < next.length; i += 1) {
+      const br = next[i].businessRule;
+      if (br && !br.reportFingerprint) {
+        next[i] = {
+          ...next[i],
+          businessRule: { ...br, reportFingerprint: fingerprint },
+        };
+      }
+    }
+  }
   return next;
 }
 
