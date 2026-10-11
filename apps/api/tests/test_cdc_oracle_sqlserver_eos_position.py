@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from connectors.lsn_guards import compare_lsn, lsn_family, lsn_sort_key
-from connectors.oracle_logminer import encode_logminer_token
+from connectors.lsn_guards import (
+    compare_lsn,
+    extract_cdc_commit_position,
+    lsn_family,
+    lsn_sort_key,
+)
+from connectors.oracle_logminer import decode_logminer_token, encode_logminer_token
 from connectors.sqlserver_cdc_native import encode_mssql_cdc_token
 from services.cdc_exactly_once import (
     DestWmView,
@@ -124,7 +131,6 @@ def test_composite_position_text_and_ordering() -> None:
         batch_lsn(encode_logminer_token(100, table="T", rs_id="0x17.ffff.ffff", ssn=9)),
         batch_lsn(encode_logminer_token(100, table="T", rs_id="0x18.0.0", ssn=0)),
     ) < 0
-
     sqlserver_lsn = "0000002E000001D80030"
     sqlserver_seq1 = "0000002E000001D80002"
     sqlserver_seq2 = "0000002E000001D80005"
@@ -157,6 +163,82 @@ def test_composite_position_text_and_ordering() -> None:
     ) < 0
     assert len(lsn_sort_key(batch_lsn(sqlserver_partial))) == 4
     assert isinstance(lsn_sort_key(batch_lsn(sqlserver_partial))[3], str)
+
+
+@pytest.mark.parametrize("txn_buffer", [False, True], ids=["buffer-off", "buffer-on"])
+def test_legacy_oracle_empty_cursor_keeps_published_complete_eos_position(
+    txn_buffer: bool,
+) -> None:
+    legacy = {
+        "kind": "oracle-logminer",
+        "table": "T",
+        "scn": 100,
+        "phase": "streaming",
+        "txn_buffer": txn_buffer,
+    }
+    if txn_buffer:
+        legacy.update(
+            {
+                "low_scn": 90,
+                "poll_scn": 100,
+                "commit_scn": 100,
+                "commit_xid": "1.2.3",
+            }
+        )
+
+    destination_lsn = "scn:100.c"
+    assert extract_cdc_commit_position(legacy) == destination_lsn
+    assert lsn_sort_key(extract_cdc_commit_position(legacy)) == lsn_sort_key(
+        destination_lsn
+    )
+    resumed, proof = clamp_job_resume_to_dest(
+        legacy,
+        destination_lsn,
+        encode_resume_blob(legacy),
+    )
+    assert proof["reason"] == "dest_resume_blob_authoritative"
+    assert not proof["clamped"]
+    assert resumed == legacy
+    if txn_buffer:
+        assert decode_logminer_token(resumed)["low_scn"] == 90
+
+    at_x = encode_logminer_token(100, table="T", rs_id="0x1.1.1", ssn=1)
+    at_x_later = encode_logminer_token(100, table="T", rs_id="0x1.1.2", ssn=2)
+    at_x_plus_one = encode_logminer_token(
+        101, table="T", rs_id="0x1.1.1", ssn=1
+    )
+    for token in (at_x, at_x_later):
+        position = extract_cdc_commit_position(token)
+        assert position is not None
+        assert decide_eos_apply(
+            incoming_lsn=position,
+            dest_lsn=destination_lsn,
+        )[0] == "already_committed"
+    next_position = extract_cdc_commit_position(at_x_plus_one)
+    assert next_position is not None
+    assert decide_eos_apply(
+        incoming_lsn=next_position,
+        dest_lsn=destination_lsn,
+    )[0] == "apply"
+
+
+def test_explicit_incomplete_oracle_token_keeps_same_scn_inclusive() -> None:
+    token = encode_logminer_token(100, table="T", scn_complete=False)
+    state = decode_logminer_token(token)
+    assert state["scn_complete"] is False
+    assert extract_cdc_commit_position(token) == "scn:100"
+    assert lsn_sort_key(extract_cdc_commit_position(token)) == lsn_sort_key(
+        "scn:100"
+    )
+
+
+def test_oracle_encoder_always_emits_scn_complete_boolean() -> None:
+    for token in (
+        encode_logminer_token(100, table="T"),
+        encode_logminer_token(100, table="T", scn_complete=True),
+        encode_logminer_token(100, table="T", phase="snapshot"),
+    ):
+        assert isinstance(json.loads(token)["scn_complete"], bool)
 
 
 def test_live_oracle_rsid_samples_match_logminer_order() -> None:

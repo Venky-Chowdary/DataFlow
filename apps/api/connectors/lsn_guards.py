@@ -488,7 +488,9 @@ def extract_cdc_commit_position(resume_token: Any) -> str | None:
             return None
         rs_id = str(token.get("rs_id") or "").strip()
         if not rs_id:
-            return f"{major_lsn}.c" if token.get("scn_complete") else major_lsn
+            if token.get("scn_complete") or "scn_complete" not in token:
+                return f"{major_lsn}.c"
+            return major_lsn
         raw_ssn = token.get("ssn")
         try:
             ssn = int(raw_ssn or 0)

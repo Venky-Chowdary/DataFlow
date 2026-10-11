@@ -230,8 +230,7 @@ def encode_logminer_token(
         "scn": int(scn),
         "phase": phase,
     }
-    if scn_complete:
-        payload["scn_complete"] = True
+    payload["scn_complete"] = bool(scn_complete)
     if rs_id:
         payload["rs_id"] = str(rs_id)
         payload["ssn"] = int(ssn or 0)
@@ -298,11 +297,18 @@ def decode_logminer_token(token: Any) -> dict[str, Any]:
             )
         if isinstance(data, dict) and data.get("kind") == "oracle-logminer":
             scn = int(data.get("scn") or 0)
+            phase = str(data.get("phase") or "streaming")
+            rs_id = str(data.get("rs_id") or "")
+            scn_complete = (
+                bool(data.get("scn_complete"))
+                if "scn_complete" in data
+                else phase == "streaming" and not rs_id and scn > 0
+            )
             return {
                 "scn": scn,
-                "phase": str(data.get("phase") or "streaming"),
+                "phase": phase,
                 "table": str(data.get("table") or ""),
-                "rs_id": str(data.get("rs_id") or ""),
+                "rs_id": rs_id,
                 "ssn": int(data.get("ssn") or 0),
                 "offset": int(data.get("offset") or 0),
                 "last_pk": str(data.get("last_pk") or ""),
@@ -316,7 +322,7 @@ def decode_logminer_token(token: Any) -> dict[str, Any]:
                 "commit_ssn": int(data.get("commit_ssn") or 0),
                 "commit_xid": str(data.get("commit_xid") or ""),
                 "txn_buffer": bool(data.get("txn_buffer")),
-                "scn_complete": bool(data.get("scn_complete")),
+                "scn_complete": scn_complete,
             }
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)

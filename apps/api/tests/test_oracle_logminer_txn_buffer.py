@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from connectors.oracle_logminer import OracleLogMinerCdc, encode_logminer_token
+from connectors.oracle_logminer import (
+    OracleLogMinerCdc,
+    decode_logminer_token,
+    encode_logminer_token,
+)
 from connectors.oracle_logminer_txn import (
     OracleTxnBuffer,
     mining_position,
@@ -14,8 +18,18 @@ from connectors.oracle_logminer_txn import (
     rs_id_sort_key,
 )
 from connectors.oracle_logminer import logminer_txn_contents_sql
-from connectors.lsn_guards import compare_lsn, parse_oracle_rs_id
-from services.cdc_exactly_once import batch_lsn
+from connectors.lsn_guards import (
+    compare_lsn,
+    extract_cdc_commit_position,
+    lsn_sort_key,
+    parse_oracle_rs_id,
+)
+from services.cdc_exactly_once import (
+    batch_lsn,
+    clamp_job_resume_to_dest,
+    decide_eos_apply,
+    encode_resume_blob,
+)
 from services.cdc_transaction_buffer import CdcTxnBufferOverflow
 
 
@@ -49,10 +63,9 @@ def test_oracle_txn_buffer_is_opt_in_by_default(monkeypatch: pytest.MonkeyPatch)
 def test_legacy_token_shape_and_low_scn_fallback_remain_compatible() -> None:
     token = encode_logminer_token(123, table="T")
     assert token == (
-        '{"kind":"oracle-logminer","table":"T","scn":123,"phase":"streaming"}'
+        '{"kind":"oracle-logminer","table":"T","scn":123,"phase":"streaming",'
+        '"scn_complete":false}'
     )
-    from connectors.oracle_logminer import decode_logminer_token
-
     assert decode_logminer_token(token)["low_scn"] == 123
 
 
@@ -369,7 +382,7 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
         "table": "T",
         "scn": emitted_commit_scn,
         "phase": "streaming",
-        "rs_id": "0x000001.0001.0005",
+        "rs_id": "",
         "ssn": 0,
         "low_scn": low_scn,
         "poll_scn": emitted_commit_scn,
@@ -417,6 +430,18 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
         resume_token=token,
     )
     reader.phase = "streaming"
+    assert decode_logminer_token(token)["scn_complete"] is True
+    destination_lsn = extract_cdc_commit_position(token)
+    assert destination_lsn == "scn:111.c"
+    assert lsn_sort_key(destination_lsn) == lsn_sort_key("scn:111.c")
+    clamped, proof = clamp_job_resume_to_dest(
+        token,
+        destination_lsn,
+        encode_resume_blob(token),
+    )
+    assert proof["reason"] == "dest_resume_blob_authoritative"
+    assert clamped == token
+    assert reader.low_scn == low_scn
     assert reader.scn == low_scn
     assert reader._txn_buffer.emitted_commit == (
         emitted_commit_scn,
@@ -485,6 +510,12 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
     assert [row for batch in data_batches for row in batch.inserts] == [
         {"ID": "1", "V": "long"}
     ]
+    assert len(data_batches) == 1
+    assert decide_eos_apply(
+        incoming_lsn=batch_lsn(data_batches[0].resume_token),
+        dest_lsn=destination_lsn,
+        change=data_batches[0],
+    )[0] == "apply"
     assert mining_starts == [low_scn]
 
 
