@@ -94,6 +94,8 @@ def telemetry_resource() -> Any:
             "service.name": getenv_brand("SERVICE_NAME", "dataflow-api"),
             "service.namespace": getenv_brand("SERVICE_NAMESPACE", "dataflow"),
             "deployment.environment.name": environment,
+            # Pre-1.27 semconv key; Grafana Application Observability still filters on it.
+            "deployment.environment": environment,
         }
     )
 

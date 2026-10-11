@@ -85,3 +85,18 @@ def test_otel_logs_are_opt_in(monkeypatch):
     monkeypatch.delenv("DATAFLOW_OTEL_LOGS", raising=False)
     monkeypatch.delenv("DATAWRAP_OTEL_LOGS", raising=False)
     assert otel_logging.otel_logs_enabled() is False
+
+
+def test_telemetry_resource_emits_current_and_legacy_environment_keys(monkeypatch):
+    from services.tracing import telemetry_resource
+
+    monkeypatch.setenv("DATAFLOW_SERVICE_NAME", "dataflow-api-production")
+    monkeypatch.setenv("DATAFLOW_SERVICE_NAMESPACE", "dataflow")
+    monkeypatch.setenv("DATAFLOW_ENVIRONMENT", "production")
+
+    attrs = telemetry_resource().attributes
+
+    assert attrs["service.name"] == "dataflow-api-production"
+    assert attrs["service.namespace"] == "dataflow"
+    assert attrs["deployment.environment.name"] == "production"
+    assert attrs["deployment.environment"] == "production"
