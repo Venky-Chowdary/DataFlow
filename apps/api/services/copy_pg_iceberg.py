@@ -285,10 +285,11 @@ def copy_postgres_to_iceberg(
 
         if dest_occupied and not replace_destination:
             raise FastPathUnavailable(
-                f"append into occupied Iceberg table "
-                f"{endpoint.get('schema') or 'default'}.{dest_table} is refused: "
-                "equal row counts are not identity proof and no PK-range check "
-                "is available; use overwrite, upsert with a key, or an empty target"
+                "COPY fast path declined: occupied destination has no identity "
+                "proof; continuing on the row path. Occupied Iceberg table "
+                f"{endpoint.get('schema') or 'default'}.{dest_table} was refused "
+                "because equal row counts are not identity proof and no PK-range "
+                "check is available; use overwrite, upsert with a key, or an empty target"
             )
 
         select_list = ", ".join(_quote(c) for c in source_cols)

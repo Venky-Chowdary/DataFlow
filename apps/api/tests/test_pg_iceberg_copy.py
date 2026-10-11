@@ -297,6 +297,45 @@ def test_live_pg_iceberg_skip_when_dest_count_matches():
             )
         assert dest in str(exc_info.value)
         assert _dest_count(dest) == 800
+        from src.transfer.models import EndpointConfig
+        from src.transfer.stream import stream_database_transfer
+
+        source = EndpointConfig.from_dict(
+            "database",
+            {
+                **_pg_cfg(),
+                "format": "postgresql",
+                "table": src,
+            },
+        )
+        destination = EndpointConfig.from_dict(
+            "database",
+            {
+                **_iceberg_cfg(dest),
+                "format": "iceberg",
+                "extra": _iceberg_extra(),
+            },
+        )
+        transferred, _ddl, summary, _columns = stream_database_transfer(
+            source,
+            destination,
+            [
+                {"source": "id", "target": "id", "type": "BIGINT", "transform": "none"},
+                {
+                    "source": "label",
+                    "target": "label",
+                    "type": "VARCHAR(32)",
+                    "transform": "none",
+                },
+            ],
+            {"id": "BIGINT", "label": "VARCHAR(32)"},
+            sync_mode="full_refresh_append",
+        )
+        assert transferred == 800
+        assert summary.get("copy_fast_path") == "declined"
+        assert "COPY fast path declined:" in summary.get("copy_decline_reason", "")
+        assert "continuing on the row path" in summary.get("copy_decline_reason", "")
+        assert _dest_count(dest) == 1600
     finally:
         with pg.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS public."{src}"')

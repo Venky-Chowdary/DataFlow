@@ -390,6 +390,42 @@ def test_live_iceberg_pg_dest_count(monkeypatch):
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
             assert int(cur.fetchone()[0]) == 800
+        from src.transfer.models import EndpointConfig
+        from src.transfer.stream import stream_database_transfer
+
+        source = EndpointConfig.from_dict(
+            "database",
+            {
+                **_iceberg_cfg(ice),
+                "format": "iceberg",
+                "extra": _iceberg_extra(),
+            },
+        )
+        destination = EndpointConfig.from_dict(
+            "database", {**_pg_cfg(), "format": "postgresql", "table": dest}
+        )
+        transferred, _ddl, summary, _columns = stream_database_transfer(
+            source,
+            destination,
+            [
+                {"source": "id", "target": "id", "type": "BIGINT", "transform": "none"},
+                {
+                    "source": "label",
+                    "target": "label",
+                    "type": "VARCHAR(32)",
+                    "transform": "none",
+                },
+            ],
+            {"id": "BIGINT", "label": "VARCHAR(32)"},
+            sync_mode="full_refresh_append",
+        )
+        assert transferred == 800
+        assert summary.get("copy_fast_path") == "declined"
+        assert "COPY fast path declined:" in summary.get("copy_decline_reason", "")
+        assert "continuing on the row path" in summary.get("copy_decline_reason", "")
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
+            assert int(cur.fetchone()[0]) == 1600
             cur.execute(f'SELECT id, label FROM public."{dest}" WHERE id = 1')
             row = cur.fetchone()
             assert int(row[0]) == 1
