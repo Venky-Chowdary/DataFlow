@@ -477,6 +477,7 @@ class SqlServerNativeCdc:
         self.snapshot_table = str(state.get("table") or "")
         self.resume_token = resume_token
         self._last_event_at: datetime | None = None
+        self._last_completed_poll_to_lsn = ""
         self._last_schema_fingerprint: dict[str, str] = {}
         self._pending_capture_switches: dict[str, tuple[str, str]] = {}
         self._capture_start_waiting: set[str] = set()
@@ -1119,6 +1120,12 @@ class SqlServerNativeCdc:
             return None
         return f"{str(max_lsn).lower().removeprefix('0x').zfill(20)}.c"
 
+    def capture_reader_position(self) -> str | None:
+        poll_to_lsn = str(getattr(self, "_last_completed_poll_to_lsn", "") or "")
+        if not poll_to_lsn:
+            return None
+        return f"{poll_to_lsn.lower().removeprefix('0x').zfill(20)}.c"
+
     def is_available(self) -> bool:
         try:
             with self._conn() as conn:
@@ -1694,6 +1701,7 @@ class SqlServerNativeCdc:
         ] = []
         max_lsn = ""
         poll_to_lsn = ""
+        window_complete = False
         switch_boundary: tuple[str, str, str] | None = None
         capture_switched = False
         try:
@@ -1829,8 +1837,10 @@ class SqlServerNativeCdc:
                         ),
                     )
                     cols = [d[0] for d in (cur.description or [])]
+                    fetched_rows = list(cur.fetchall() or [])
+                    window_complete = len(fetched_rows) < self.batch_size + 1
                     raw_rows = self._after_cursor(
-                        list(cur.fetchall() or []),
+                        fetched_rows,
                         cols,
                         from_lsn_hex=self.start_lsn,
                         from_seqval_hex=self.start_seqval,
@@ -1906,6 +1916,9 @@ class SqlServerNativeCdc:
             logger.error("%s", read_error)
             raise read_error from exc
 
+        if poll_to_lsn and window_complete and not capture_switched:
+            self._last_completed_poll_to_lsn = poll_to_lsn
+
         if lsn_groups:
             for group_lsn, group_seq, inserts, updates, deletes in lsn_groups:
                 self.start_lsn = group_lsn
@@ -1956,6 +1969,7 @@ class SqlServerNativeCdc:
         failed_capture_instance = ""
         missing_min_captures: list[str] = []
         poll_to_lsn = ""
+        window_complete = False
         switch_boundary: tuple[str, str, str, str] | None = None
         capture_switched = False
         try:
@@ -2085,10 +2099,12 @@ class SqlServerNativeCdc:
                     from_lsn = _hex_to_lsn(self.start_lsn)
                     to_lsn = _hex_to_lsn(poll_to_lsn)
                     filter_arg = self._row_filter_sql_arg()
+                    window_complete = True
                     for table_name in self.tables:
                         failed_table = table_name
                         cap = self._captures.get(table_name) or ""
                         if not cap:
+                            window_complete = False
                             continue
                         failed_capture_instance = cap
                         fn = self._changes_tvf_for(cap)
@@ -2101,7 +2117,10 @@ class SqlServerNativeCdc:
                         )
                         cur.execute(sql, (from_lsn, to_lsn, filter_arg))
                         cols = [d[0] for d in (cur.description or [])]
-                        for row in cur.fetchall() or []:
+                        fetched_rows = cur.fetchall() or []
+                        if len(fetched_rows) >= per_limit:
+                            window_complete = False
+                        for row in fetched_rows:
                             rec = {cols[i]: row[i] for i in range(len(cols))}
                             lsn_h = _lsn_to_hex(rec.get("__$start_lsn"))
                             seq_h = _lsn_to_hex(rec.get("__$seqval"))
@@ -2149,6 +2168,9 @@ class SqlServerNativeCdc:
             )
             logger.error("%s", read_error)
             raise read_error from exc
+
+        if poll_to_lsn and window_complete and not capture_switched:
+            self._last_completed_poll_to_lsn = poll_to_lsn
 
         if not tagged:
             if not capture_switched:

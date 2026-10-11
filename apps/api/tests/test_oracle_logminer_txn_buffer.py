@@ -626,6 +626,7 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
         change=data_batches[0],
     )[0] == "apply"
     assert mining_starts == [low_scn]
+    assert reader.capture_reader_position() == "scn:140.c"
 
 
 @pytest.mark.parametrize("buffer_mode", [False, True], ids=["buffer-off", "buffer-on"])

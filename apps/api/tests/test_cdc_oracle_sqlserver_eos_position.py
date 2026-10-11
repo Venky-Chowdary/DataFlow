@@ -12,8 +12,15 @@ from connectors.lsn_guards import (
     lsn_family,
     lsn_sort_key,
 )
-from connectors.oracle_logminer import decode_logminer_token, encode_logminer_token
-from connectors.sqlserver_cdc_native import encode_mssql_cdc_token
+from connectors.oracle_logminer import (
+    OracleLogMinerCdc,
+    decode_logminer_token,
+    encode_logminer_token,
+)
+from connectors.sqlserver_cdc_native import (
+    SqlServerNativeCdc,
+    encode_mssql_cdc_token,
+)
 from services.cdc_exactly_once import (
     DestWmView,
     ExactlyOnceRouteError,
@@ -92,6 +99,26 @@ def test_sqlserver_digit_only_lsn_family_matches_next_hex_lsn() -> None:
         f"EOS decision={decision or decision_error}"
     )
     assert decision is not None and decision[0] == "apply"
+
+
+def test_capture_reader_positions_require_a_completed_window_and_match_head_family():
+    oracle = object.__new__(OracleLogMinerCdc)
+    sqlserver = object.__new__(SqlServerNativeCdc)
+
+    assert oracle.capture_reader_position() is None
+    assert sqlserver.capture_reader_position() is None
+
+    oracle._last_completed_window_scn = 123456
+    sqlserver._last_completed_poll_to_lsn = "0x0000002e000001d80030"
+
+    oracle_position = oracle.capture_reader_position()
+    sqlserver_position = sqlserver.capture_reader_position()
+    assert oracle_position == "scn:123456.c"
+    assert sqlserver_position == "0000002e000001d80030.c"
+    assert lsn_family(oracle_position) == lsn_family("scn:123456.c")
+    assert lsn_family(sqlserver_position) == lsn_family(
+        "0000002e000001d80040.c"
+    )
 
 
 def test_composite_position_text_and_ordering() -> None:

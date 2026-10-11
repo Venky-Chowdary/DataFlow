@@ -750,6 +750,8 @@ def _seed_image_repair_scenario(
         "scan_calls": 0,
         "head_read": False,
         "head_position": "0/200",
+        "reader_position": "0/100",
+        "reader_position_after_poll": None,
     }
 
     class FakeCdc:
@@ -763,6 +765,9 @@ def _seed_image_repair_scenario(
         def capture_head_position(self):
             state["head_read"] = True
             return state["head_position"]
+
+        def capture_reader_position(self):
+            return state["reader_position"]
 
         def is_available(self):
             return True
@@ -780,6 +785,9 @@ def _seed_image_repair_scenario(
                 )
             elif state["head_read"] and state["repair"] and not self.sent_pending:
                 self.sent_pending = True
+                state["reader_position"] = (
+                    state["reader_position_after_poll"] or state["head_position"]
+                )
                 pending_rows = [
                     row for row in source_rows if row["id"] in state["pending_ids"]
                 ]
@@ -789,6 +797,7 @@ def _seed_image_repair_scenario(
                         row["id"] for row in pending_rows
                     )
                     self.start_lsn = "0/200"
+                    state["reader_position"] = "0/200"
                     yield ChangeBatch(
                         updates=pending_rows,
                         resume_token="slot=drift|phase=streaming|lsn=0/200",
@@ -980,6 +989,118 @@ def test_eos_redrain_refuses_only_keys_still_drifting(tmp_path, monkeypatch):
     assert evidence["capture_pending"] is False
 
 
+def test_eos_redrain_refusal_uses_post_drain_committed_position(
+    tmp_path, monkeypatch
+):
+    from services.cdc_drift_repair import CdcDriftRequiresFencedRepair
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+
+    source, destination, _dest_cfg, _cursor_key, state = _seed_image_repair_scenario(
+        tmp_path, monkeypatch, row_count=2, pending_count=1
+    )
+    with pytest.raises(CdcDriftRequiresFencedRepair) as caught:
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 1.0},
+                {"source": "v", "target": "v", "confidence": 1.0},
+            ],
+            schema={"id": "string", "v": "string"},
+            sync_mode="cdc",
+            stream_contracts=[
+                {
+                    "name": "orders",
+                    "selected": True,
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                    "sync_mode": "cdc",
+                }
+            ],
+            delivery_guarantee="exactly_once",
+            delivery_pinned=True,
+        )
+
+    assert state["event_count"] == 1
+    assert caught.value.evidence["drift_count"] == 1
+    assert (
+        caught.value.evidence["committed_position"]
+        == "slot=drift|phase=streaming|lsn=0/200"
+    )
+    assert caught.value.evidence["keys"][0]["key_id"]
+
+
+def test_eos_redrain_keeps_initial_keys_when_both_rescans_are_incomplete(
+    tmp_path, monkeypatch
+):
+    import services.cdc_value_digest as value_digest
+    from services.cdc_drift_repair import (
+        CdcDriftRequiresFencedRepair,
+        _build_drift_evidence,
+    )
+    from services.cdc_value_digest import CdcValueScanIncomplete
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+
+    source, destination, _dest_cfg, cursor_key, state = _seed_image_repair_scenario(
+        tmp_path, monkeypatch, row_count=3
+    )
+    initial_scan = value_digest.identity_rows_missing_on_dest
+    scans = 0
+
+    def incomplete_after_initial_scan(**kwargs):
+        nonlocal scans
+        scans += 1
+        if scans == 1:
+            return initial_scan(**kwargs)
+        raise CdcValueScanIncomplete("test rescan is incomplete")
+
+    def incomplete_pk_scan(**_kwargs):
+        raise CdcValueScanIncomplete("test primary-key rescan is incomplete")
+
+    monkeypatch.setattr(
+        value_digest, "identity_rows_missing_on_dest", incomplete_after_initial_scan
+    )
+    monkeypatch.setattr(
+        value_digest, "rows_absent_by_primary_key", incomplete_pk_scan
+    )
+    with pytest.raises(CdcDriftRequiresFencedRepair) as caught:
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 1.0},
+                {"source": "v", "target": "v", "confidence": 1.0},
+            ],
+            schema={"id": "string", "v": "string"},
+            sync_mode="cdc",
+            stream_contracts=[
+                {
+                    "name": "orders",
+                    "selected": True,
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                    "sync_mode": "cdc",
+                }
+            ],
+            delivery_guarantee="exactly_once",
+            delivery_pinned=True,
+        )
+
+    expected = _build_drift_evidence(
+        cursor_key=cursor_key,
+        source_table="orders",
+        dest_table="orders_copy",
+        pk_fields=["id"],
+        committed_position="0/100",
+        rows=state["source_rows"],
+    )
+    evidence = caught.value.evidence
+    assert [item["key_id"] for item in evidence["keys"]] == [
+        item["key_id"] for item in expected["keys"]
+    ]
+    assert evidence["capture_pending_reason"] == "rescan_incomplete"
+
+
 def test_eos_redrain_reports_capture_pending_when_head_is_not_reached(
     tmp_path, monkeypatch
 ):
@@ -987,9 +1108,10 @@ def test_eos_redrain_reports_capture_pending_when_head_is_not_reached(
     from src.transfer.cdc_transfer import run_cdc_database_transfer
     from src.transfer.job_failure import _job_failure_fields
 
-    source, destination, _dest_cfg, _cursor_key, _state = _seed_image_repair_scenario(
+    source, destination, _dest_cfg, _cursor_key, state = _seed_image_repair_scenario(
         tmp_path, monkeypatch
     )
+    state["reader_position_after_poll"] = "0/100"
     with pytest.raises(CdcDriftRequiresFencedRepair) as caught:
         run_cdc_database_transfer(
             source,

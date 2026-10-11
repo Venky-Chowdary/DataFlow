@@ -193,6 +193,31 @@ def test_poll_emits_distinct_batches_for_distinct_lsns() -> None:
     assert batches[1].updates == [{"id": "1", "amount": "99.00"}]
     assert batch_lsn(batches[0].resume_token) == f"{EARLIER_LSN}.p{first_seq}"
     assert batch_lsn(batches[1].resume_token) == f"{LATER_LSN}.p{second_seq}"
+    assert reader.capture_reader_position() == f"{LATER_LSN}.c"
+
+
+def test_poll_does_not_report_bound_for_full_lookahead_window() -> None:
+    reader = _reader()
+    reader.start_lsn = EARLIER_LSN
+    columns = ["__$start_lsn", "__$seqval", "__$operation", "id", "amount"]
+    cursor = MagicMock()
+    cursor.description = [(name,) for name in columns]
+    cursor.fetchall.return_value = [
+        (bytes.fromhex(EARLIER_LSN), bytes.fromhex("05"), 2, 1, "10.00"),
+        (bytes.fromhex(LATER_LSN), bytes.fromhex("10"), 4, 1, "99.00"),
+        (bytes.fromhex(LATER_LSN), bytes.fromhex("11"), 4, 2, "100.00"),
+    ]
+
+    with _poll_stubs(
+        reader,
+        min_lsn=EARLIER_LSN,
+        max_lsn=LATER_LSN,
+    ) as (poll_cursor, _tvf, _interleave):
+        poll_cursor.description = cursor.description
+        poll_cursor.fetchall.return_value = cursor.fetchall.return_value
+        list(reader.poll())
+
+    assert reader.capture_reader_position() is None
 
 
 def test_snapshot_handoff_uses_capture_start_when_database_max_lags() -> None:

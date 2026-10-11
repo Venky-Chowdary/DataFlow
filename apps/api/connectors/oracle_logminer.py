@@ -1316,6 +1316,7 @@ class OracleLogMinerCdc:
         self._poll_scn = int(state.get("poll_scn") or self.scn)
         self._poll_rs_id = str(state.get("poll_rs_id") or self.rs_id)
         self._poll_ssn = int(state.get("poll_ssn") or self.ssn)
+        self._last_completed_window_scn = 0
         self._emitted_commit = (
             int(state.get("commit_scn") or (0 if state.get("txn_buffer") else self.scn)),
             str(state.get("commit_rs_id") or ("" if state.get("txn_buffer") else self.rs_id)),
@@ -1772,6 +1773,12 @@ class OracleLogMinerCdc:
         if not row or row[0] is None:
             return None
         return f"scn:{int(row[0])}.c"
+
+    def capture_reader_position(self) -> str | None:
+        window_scn = int(getattr(self, "_last_completed_window_scn", 0) or 0)
+        if window_scn <= 0:
+            return None
+        return f"scn:{window_scn}.c"
 
     @staticmethod
     def infer_cdb_service(pdb_service: str) -> str:
@@ -2950,6 +2957,10 @@ class OracleLogMinerCdc:
             fetched=fetched,
             limit=self.batch_size,
         )
+        if fetched < self.batch_size:
+            self._last_completed_window_scn = max(
+                self._last_completed_window_scn, int(end_scn)
+            )
 
         token = self._token()
         if inserts or updates or deletes or rejected:
@@ -3041,6 +3052,7 @@ class OracleLogMinerCdc:
                     cur.execute("SELECT current_scn FROM v$database")
                     head = cur.fetchone()
                     head_scn = int(head[0] or self.scn) if head else self.scn
+                    end_scn = max(self.scn, head_scn)
                     in_list = self._table_in_sql()
                     table_predicate = (
                         f"TABLE_NAME IN ({in_list}) OR SEG_NAME IN ({in_list})"
@@ -3048,12 +3060,12 @@ class OracleLogMinerCdc:
                     with _logminer_session(
                         cur,
                         start_scn=max(1, mine_from_scn),
-                        end_scn=max(self.scn, head_scn),
+                        end_scn=end_scn,
                         committed_only=False,
                         reader_identity=self._logminer_reader_identity(),
                         step_context="transaction_buffer",
                     ):
-                        raw_rows, _ = _fetch_logminer_csf_window(
+                        raw_rows, was_truncated = _fetch_logminer_csf_window(
                             cur,
                             sql=logminer_txn_contents_sql(
                                 table_predicate=table_predicate
@@ -3418,6 +3430,11 @@ class OracleLogMinerCdc:
             working_commit_xid = txn.xid
         self._poll_scn, self._poll_rs_id, self._poll_ssn = window_poll_cursor
 
+        if not was_truncated:
+            self._last_completed_window_scn = max(
+                self._last_completed_window_scn, int(end_scn)
+            )
+
         if not yielded:
             token = self._buffered_token(
                 position_scn=self._poll_scn,
@@ -3617,6 +3634,10 @@ class OracleLogMinerCdc:
                 fetched=0,
                 limit=1,
             )
+            if not was_truncated:
+                self._last_completed_window_scn = max(
+                    self._last_completed_window_scn, int(end_scn)
+                )
             yield ChangeBatch(
                 resume_token=self._token(table=self._token_table_label()),
                 ack_barrier=True,
@@ -3741,6 +3762,10 @@ class OracleLogMinerCdc:
                 end_scn=end_scn,
                 fetched=len(tagged),
                 limit=look_ahead_lim,
+            )
+        if not was_truncated:
+            self._last_completed_window_scn = max(
+                self._last_completed_window_scn, int(end_scn)
             )
         token = self._token(table=self._token_table_label())
         if shared_rejected:

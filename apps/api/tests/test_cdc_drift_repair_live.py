@@ -325,6 +325,21 @@ def test_cdc_drift_repair_live(route: str, tmp_path: Path, monkeypatch, caplog) 
                         )
                 conn.commit()
             source_table_created = True
+            with source_reader._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM cdc.change_tables
+                        WHERE source_object_id <> OBJECT_ID(%s)
+                        """,
+                        (f"{source_schema}.{source_table}",),
+                    )
+                    other_cdc_enabled_tables = int(cur.fetchone()[0] or 0)
+            assert other_cdc_enabled_tables >= 1, (
+                "SQL Server drift proof requires another CDC-enabled table "
+                "in the database"
+            )
 
         resolved_source_cfg = resolve_connector_config(
             source_endpoint, workspace_id=workspace_id
@@ -457,6 +472,17 @@ def test_cdc_drift_repair_live(route: str, tmp_path: Path, monkeypatch, caplog) 
         assert isinstance(evidence, dict)
         assert evidence.get("drift_count") == 3
         assert len(evidence.get("keys") or []) == 3
+        assert evidence.get("capture_pending") is False
+        assert evidence.get("capture_pending_reason") is None
+        head_position = evidence.get("capture_head_position")
+        reader_position = evidence.get("reader_position")
+        assert head_position and reader_position, evidence
+        from connectors.lsn_guards import compare_lsn, lsn_family
+
+        reader_family = lsn_family(reader_position)
+        assert reader_family is not None, evidence
+        assert reader_family == lsn_family(head_position), evidence
+        assert compare_lsn(reader_position, head_position) >= 0, evidence
         assert extract_cdc_commit_position(evidence.get("committed_position")) == p_eos
         assert str(evidence.get("cursor_key") or "") == cursor_key
         assert saved_job.get("cdc_lease_cursor_key") == cursor_key
