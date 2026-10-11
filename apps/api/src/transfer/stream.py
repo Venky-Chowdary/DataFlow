@@ -2627,31 +2627,33 @@ def _stream_database_transfer_impl(
             records = [dict(zip(batch.headers, row)) for row in batch.rows]
             write_op = partial(write_procedure_chunk, destination, records, row_apply_plan)
         else:
+            from .stream_write import _write_batch
+
             write_op = partial(
-            _write_batch,
-            dest_type,
-            destination,
-            dest_cfg,
-            dest_table,
-            batch.headers,
-            batch.rows,
-            mappings,
-            column_types,
-            create_table=not ddl_state["created"],
-            on_checkpoint=None,
-            chunk_idx=idx,
-            total_chunks=chunks,
-            rows_so_far=0,
-            write_mode=write_mode,
-            conflict_columns=pk_target_cols or None,
-            sync_mode=effective_sync,
-            backfill_new_fields=backfill_new_fields,
-            error_policy=stream_error_policy,
-            job_id=job_id,
-            skip_preflight=skip_preflight,
-            source_schema_catalog=source_schema_catalog,
-            **write_kwargs,
-        )
+                _write_batch,
+                dest_type,
+                destination,
+                dest_cfg,
+                dest_table,
+                batch.headers,
+                batch.rows,
+                mappings,
+                column_types,
+                create_table=not ddl_state["created"],
+                on_checkpoint=None,
+                chunk_idx=idx,
+                total_chunks=chunks,
+                rows_so_far=0,
+                write_mode=write_mode,
+                conflict_columns=pk_target_cols or None,
+                sync_mode=effective_sync,
+                backfill_new_fields=backfill_new_fields,
+                error_policy=stream_error_policy,
+                job_id=job_id,
+                skip_preflight=skip_preflight,
+                source_schema_catalog=source_schema_catalog,
+                **write_kwargs,
+            )
         if keyed_census_acc is not None:
             observe_keyed_batch(
                 keyed_census_acc,
