@@ -7,7 +7,9 @@ asserted without falling back to file.
 
 from __future__ import annotations
 
+import json
 import socket
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -261,3 +263,222 @@ def test_assert_holder_raises_when_never_acquired(memory_store) -> None:
     g = CdcLeaseGuard(cursor_key="ck-na", resource="res-na", holder_id="x")
     with pytest.raises(CdcLeaseConflict, match="not held"):
         g.assert_holder()
+
+
+@pytest.fixture(params=("memory", "file", "redis"))
+def generation_store(request, tmp_path):
+    backend = request.param
+    if backend == "memory":
+        store = MemoryLeaseStore()
+    elif backend == "file":
+        path = str(tmp_path / "generation-leases.json")
+        store = FileLeaseStore(path=path, data_dir=str(tmp_path))
+    else:
+        if not _redis_ready():
+            pytest.skip("Redis unavailable; start df-redis on 127.0.0.1:6379")
+        prefix = f"df-test-lease-gen-{uuid.uuid4().hex}:"
+        store = RedisLeaseStore("redis://127.0.0.1:6379/15", key_prefix=prefix)
+    yield store
+    if backend == "redis":
+        client = store._connect()
+        keys = list(client.scan_iter(match=f"{store._prefix}*"))
+        if keys:
+            client.delete(*keys)
+        client.close()
+
+
+def test_release_does_not_reset_generation(generation_store) -> None:
+    store = generation_store
+    generations = []
+    for i in range(6):
+        lease = store.acquire(
+            cursor_key="ck-cycles",
+            resource="res-cycles",
+            holder_id=f"cycle-{i}",
+            ttl_sec=20,
+            meta={},
+            now=100 + i,
+        )
+        generations.append(lease["generation"])
+        if i < 5:
+            assert store.release(
+                cursor_key="ck-cycles",
+                holder_id=f"cycle-{i}",
+                generation=lease["generation"],
+            )
+    assert generations == [1, 2, 3, 4, 5, 6]
+    assert all(a < b for a, b in zip(generations, generations[1:]))
+
+
+def test_release_takeover_generation_is_accepted_by_sqlite_eos(
+    generation_store, tmp_path
+) -> None:
+    from connectors.cdc_eos_sql import apply_change_batch_exactly_once
+    from services.cdc_engine import ChangeBatch
+
+    store = generation_store
+    cursor_key = "ck-eos-generation"
+    resource = "res-eos-generation"
+    a = store.acquire(
+        cursor_key=cursor_key,
+        resource=resource,
+        holder_id="holder-a",
+        ttl_sec=10,
+        meta={},
+        now=100,
+    )
+    assert a["generation"] == 1
+    store.debug_set_heartbeat(cursor_key, 0)
+    b = store.acquire(
+        cursor_key=cursor_key,
+        resource=resource,
+        holder_id="holder-b",
+        ttl_sec=10,
+        meta={},
+        now=100,
+    )
+    assert b["generation"] == 2
+
+    dest_cfg = {"database": str(tmp_path / "lease-fence.db")}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 1.0},
+        {"source": "v", "target": "v", "confidence": 1.0},
+    ]
+    types = {"id": "string", "v": "string"}
+
+    def apply(lsn: str, row: dict[str, str], fence: int) -> int:
+        rows, _checksum, _summary, _deleted = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=ChangeBatch(inserts=[row], resume_token={"lsn": lsn}),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="eos-generation|orders",
+            writer_fence=fence,
+        )
+        return rows
+
+    assert apply("0/1", {"id": "1", "v": "b"}, b["generation"]) == 1
+    assert store.release(
+        cursor_key=cursor_key,
+        holder_id="holder-b",
+        generation=b["generation"],
+    )
+    c = store.acquire(
+        cursor_key=cursor_key,
+        resource=resource,
+        holder_id="holder-c",
+        ttl_sec=10,
+        meta={},
+        now=101,
+    )
+    assert apply("0/2", {"id": "2", "v": "c"}, c["generation"]) == 1
+    assert c["generation"] == 3
+
+
+def test_concurrent_acquires_do_not_duplicate_generations(
+    generation_store, tmp_path
+) -> None:
+    store = generation_store
+    stores = [store, store]
+    if isinstance(store, FileLeaseStore):
+        stores = [
+            FileLeaseStore(path=store.path, data_dir=store.data_dir),
+            FileLeaseStore(path=store.path, data_dir=store.data_dir),
+        ]
+    elif isinstance(store, RedisLeaseStore):
+        stores = [
+            store,
+            RedisLeaseStore(store.url, key_prefix=store._prefix),
+        ]
+    barrier = threading.Barrier(2)
+
+    def acquire(i: int):
+        barrier.wait()
+        try:
+            return stores[i].acquire(
+                cursor_key="ck-concurrent-generation",
+                resource="res-concurrent-generation",
+                holder_id=f"concurrent-{i}",
+                ttl_sec=30,
+                meta={},
+                now=100,
+            )
+        except CdcLeaseConflict:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(acquire, range(2)))
+    winners = [result for result in results if result is not None]
+    assert len(winners) == 1
+    assert winners[0]["generation"] == 1
+
+
+def test_old_lease_without_generation_counters_continues_its_generation(
+    generation_store,
+) -> None:
+    store = generation_store
+    cursor_key = "ck-old-generation"
+    resource = "res-old-generation"
+    old_lease = {
+        "cursor_key": cursor_key,
+        "resource": resource,
+        "holder_id": "old-holder",
+        "acquired_at": 1,
+        "heartbeat_at": 0,
+        "ttl_sec": 10,
+        "generation": 7,
+        "meta": {},
+    }
+    if isinstance(store, MemoryLeaseStore):
+        store._leases[cursor_key] = old_lease
+        store._by_resource[resource] = cursor_key
+    elif isinstance(store, FileLeaseStore):
+        with open(store.path, "w", encoding="utf-8") as f:
+            json.dump({"leases": {cursor_key: old_lease}}, f)
+    else:
+        client = store._connect()
+        client.set(store._lease_key(cursor_key), json.dumps(old_lease))
+        client.set(store._res_key(resource), cursor_key)
+
+    acquired = store.acquire(
+        cursor_key=cursor_key,
+        resource=resource,
+        holder_id="new-holder",
+        ttl_sec=10,
+        meta={},
+        now=100,
+    )
+    assert acquired["generation"] == 8
+
+
+def test_resource_handover_after_release_increments_generation(
+    generation_store,
+) -> None:
+    store = generation_store
+    first = store.acquire(
+        cursor_key="ck-handover-a",
+        resource="res-handover",
+        holder_id="handover-a",
+        ttl_sec=20,
+        meta={},
+        now=100,
+    )
+    assert first["generation"] == 1
+    assert store.release(
+        cursor_key="ck-handover-a",
+        holder_id="handover-a",
+        generation=first["generation"],
+    )
+    second = store.acquire(
+        cursor_key="ck-handover-b",
+        resource="res-handover",
+        holder_id="handover-b",
+        ttl_sec=20,
+        meta={},
+        now=101,
+    )
+    assert second["generation"] == 2
