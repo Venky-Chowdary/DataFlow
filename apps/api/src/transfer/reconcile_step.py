@@ -1521,60 +1521,53 @@ def _engine_population_digests(
     return source_digest.checksum, dest_digest.checksum, dest_digest.row_count
 
 
+def _unique_check_dialect(db_type: str) -> str | None:
+    """Identifier dialect for post-load rule checks, or ``None`` when the
+    destination is not a SQL engine the shared warehouse helper serves
+    (SQLite/Postgres/MySQL/MariaDB plus every ``warehouse_sql_quote_dialect``
+    family: MSSQL, Oracle, Snowflake, BigQuery, DuckDB, Databricks, Redshift)."""
+    from services.dest_precount import count_dialect
+    from services.dialect_profiles import warehouse_sql_quote_dialect
+
+    db = count_dialect(str(db_type or ""))
+    if db == "mariadb":
+        db = "mysql"
+    if db in {"sqlite", "postgresql", "mysql", "clickhouse"}:
+        return db
+    return warehouse_sql_quote_dialect(db)
+
+
 def _count_dest_duplicates(
-    dest_type: str,
+    dialect: str,
     dest_cfg: dict[str, Any],
     *,
     endpoint: EndpointConfig,
     table: str,
     column: str,
 ) -> int:
-    """``COUNT(*) - COUNT(DISTINCT col) WHERE col IS NOT NULL`` on the dest."""
-    from connectors.sql_identifiers import (
-        quote_sql_identifier,
-        require_safe_identifier,
+    """``COUNT(*) - COUNT(DISTINCT col) WHERE col IS NOT NULL`` on the dest,
+    through the canonical warehouse-SQL engine + table-ref helpers."""
+    import sqlalchemy as sa
+
+    from connectors.sql_identifiers import require_safe_identifier
+    from services.dest_precount import (
+        _warehouse_sql_engine,
+        _warehouse_sql_table_ref,
     )
 
-    qcol = quote_sql_identifier(require_safe_identifier(column, preserve_case=True))
-    if dest_type == "sqlite":
-        import sqlite3
-
-        qtable = quote_sql_identifier(
-            require_safe_identifier(table, preserve_case=True)
+    table_ref = _warehouse_sql_table_ref(
+        dialect, dest_cfg, str(endpoint.schema or ""), table
+    )
+    with _warehouse_sql_engine(dialect, dest_cfg) as engine:
+        qcol = engine.dialect.identifier_preparer.quote(
+            require_safe_identifier(column, preserve_case=True)
         )
-        conn = sqlite3.connect(str(dest_cfg.get("database") or ""))
-        try:
-            row = conn.execute(
-                f"SELECT COUNT(*) - COUNT(DISTINCT {qcol}) FROM {qtable} "
-                f"WHERE {qcol} IS NOT NULL"
-            ).fetchone()
-        finally:
-            conn.close()
-        return int((row or [0])[0] or 0)
-    from connectors.postgresql_conn import get_connection
-    from connectors.sql_identifiers import quote_table_ref
-
-    qref = quote_table_ref(
-        table, endpoint.schema or "public", dialect="postgresql"
-    )
-    conn = get_connection(
-        host=str(dest_cfg.get("host") or ""),
-        port=int(dest_cfg.get("port") or 5432),
-        database=str(dest_cfg.get("database") or ""),
-        username=str(dest_cfg.get("username") or ""),
-        password=str(dest_cfg.get("password") or ""),
-        connection_string=str(dest_cfg.get("connection_string") or ""),
-        ssl=bool(dest_cfg.get("ssl", False)),
-    )
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT COUNT(*) - COUNT(DISTINCT {qcol}) FROM {qref} "
-                f"WHERE {qcol} IS NOT NULL"
-            )
-            return int(cur.fetchone()[0] or 0)
-    finally:
-        conn.close()
+        stmt = sa.text(
+            f"SELECT COUNT(*) - COUNT(DISTINCT {qcol}) FROM {table_ref} "
+            f"WHERE {qcol} IS NOT NULL"
+        )
+        with engine.connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)
 
 
 def _run_unique_rule_checks(
@@ -1612,18 +1605,24 @@ def _run_unique_rule_checks(
             "type": "unique",
             "column": target,
         }
-        if dest_type not in {"sqlite", "postgresql", "redshift"} or not table:
-            checks.append({**entry, "status": "unverified"})
+        dialect = _unique_check_dialect(dest_type)
+        if dialect is None or not table:
+            checks.append(
+                {**entry, "status": "unverified", "reason": "unsupported_destination"}
+            )
             continue
         try:
             duplicates = _count_dest_duplicates(
-                dest_type, dest_cfg, endpoint=endpoint, table=table, column=target
+                dialect, dest_cfg, endpoint=endpoint, table=table, column=target
             )
         except Exception as exc:
-            logging.getLogger(__name__).info(
-                "unique rule check unverified for %s: %s", target, exc
+            # Type name only — the exception text may carry values.
+            _logger.warning(
+                "unique rule check failed: error_type=%s", type(exc).__name__
             )
-            checks.append({**entry, "status": "unverified"})
+            checks.append(
+                {**entry, "status": "unverified", "reason": "count_error"}
+            )
             continue
         if duplicates:
             checks.append({**entry, "status": "failed", "duplicates": duplicates})
@@ -1637,6 +1636,7 @@ def _apply_unique_rule_checks(
     mappings: list[dict] | None,
     *,
     endpoint: EndpointConfig,
+    validation_mode: str = "strict",
 ) -> None:
     """Apply post-load unique-contract outcomes onto a recon payload."""
     rule_checks = _run_unique_rule_checks(mappings, endpoint=endpoint)
@@ -1654,8 +1654,20 @@ def _apply_unique_rule_checks(
         payload["message"] = f"{payload.get('message') or ''} {detail}".strip()
     unverified = [c for c in rule_checks if c.get("status") == "unverified"]
     if unverified:
-        # The row proof still stands, but the run must not read as fully
-        # verified — name what could not be checked.
+        # Same convention as file-export Gate-8: an unverified check must not
+        # read as a green pass — unproven, never migration_proven. Strict
+        # additionally fails the job (balanced completes, still unproven).
+        payload["unverified_rules"] = [
+            {"rule_id": c.get("rule_id"), "reason": c.get("reason") or "unverified"}
+            for c in unverified
+        ]
+        payload["unproven"] = True
+        payload["migration_proven"] = False
+        if str(validation_mode or "").strip().lower() in {"strict", "maximum"}:
+            payload["passed"] = False
+            details = dict(payload.get("details") or {})
+            details["reason"] = "business_rule_unverified"
+            payload["details"] = details
         note = (
             f"{len(unverified)} business-rule uniqueness check(s) "
             "unverified for this destination"
@@ -3135,5 +3147,7 @@ def run_reconciliation(
         source_spool=source_spool,
     )
     if not (recon or {}).get("rule_checks"):
-        _apply_unique_rule_checks(recon, mappings, endpoint=endpoint)
+        _apply_unique_rule_checks(
+            recon, mappings, endpoint=endpoint, validation_mode=validation_mode
+        )
     return recon

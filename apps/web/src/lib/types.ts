@@ -502,6 +502,20 @@ export interface Gate8ReconciliationPayload {
     cells_compared?: number;
     rows_compared?: number;
   };
+  /** Post-load business-rule checks (e.g. unique contracts). */
+  rule_checks?: {
+    rule_id?: string;
+    type?: string;
+    column?: string;
+    status?: "passed" | "failed" | "unverified";
+    duplicates?: number;
+    reason?: string;
+  }[];
+  /** Rule checks that could not be verified — the run stays unproven. */
+  unverified_rules?: {
+    rule_id?: string;
+    reason?: string;
+  }[];
   /** Why two digests disagree when no sampled cell does. */
   mismatch_class?: string;
   digest_basis?: Record<string, unknown>;

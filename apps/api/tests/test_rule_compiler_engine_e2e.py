@@ -678,3 +678,140 @@ def test_unique_check_runs_on_early_return_paths(tmp_path: Path):
     failed = [c for c in checks if c.get("status") == "failed"]
     assert [c["rule_id"] for c in failed] == ["uniq-email"], checks
     assert failed[0]["duplicates"] == 1
+
+
+def test_unique_unverified_fails_strict_with_typed_reason(
+    tmp_path: Path, engine_env, monkeypatch, caplog
+):
+    """(a) An unverified uniqueness check must fail a strict job with the
+    typed reason, never carrying the exception message (which could leak
+    values) into the log."""
+    import logging as _logging
+
+    from src.transfer import reconcile_step as step
+
+    fake, _persisted = engine_env
+    report = _report()
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _db_clean(src)
+    _dest_db(dst)
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("driver refused near value a@x.com")
+
+    monkeypatch.setattr(step, "_count_dest_duplicates", _boom)
+    with caplog.at_level(_logging.WARNING, logger="src.transfer.reconcile_step"):
+        result = _run(
+            fake, src, dst, _unique_wire(report), validation_mode="strict"
+        )
+    assert not result.success, (result.destination_summary, result.reconciliation)
+    recon = result.reconciliation or {}
+    assert recon.get("passed") is False, recon
+    assert recon.get("unproven") is True
+    assert recon.get("migration_proven") is False
+    assert (recon.get("details") or {}).get("reason") == "business_rule_unverified"
+    unverified = recon.get("unverified_rules") or []
+    assert [u["rule_id"] for u in unverified] == ["uniq-email"], unverified
+    assert unverified[0]["reason"] == "count_error"
+    log = "\n".join(
+        r.getMessage() for r in caplog.records if "unique rule check" in r.getMessage()
+    )
+    assert "error_type=RuntimeError" in log, caplog.records
+    assert "a@x.com" not in log, caplog.records
+
+
+def test_unique_unverified_balanced_completes_but_stays_unproven(
+    tmp_path: Path, engine_env, monkeypatch
+):
+    """(b) Balanced mode completes the job, but the recon cannot read as a
+    green verified pass: unproven + unverified_rules."""
+    from src.transfer import reconcile_step as step
+
+    fake, _persisted = engine_env
+    report = _report()
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _db_clean(src)
+    _dest_db(dst)
+    monkeypatch.setattr(
+        step,
+        "_count_dest_duplicates",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("x")),
+    )
+    result = _run(
+        fake, src, dst, _unique_wire(report), validation_mode="balanced"
+    )
+    assert result.success, result.error
+    recon = result.reconciliation or {}
+    assert recon.get("passed") is True, recon
+    assert recon.get("unproven") is True, recon
+    assert recon.get("migration_proven") is False
+    assert [u["rule_id"] for u in recon.get("unverified_rules") or []] == [
+        "uniq-email"
+    ]
+
+
+def test_unique_check_unsupported_destination_reason(tmp_path: Path):
+    """(c) A non-SQL destination reports the check unverified with reason
+    unsupported_destination instead of a silent pass."""
+    from src.transfer.reconcile_step import run_reconciliation
+
+    endpoint = EndpointConfig(
+        kind="database", format="mongodb", table="customers"
+    )
+    recon = run_reconciliation(
+        endpoint=endpoint,
+        records=[],
+        columns=[],
+        rows_written=2,
+        writer_checksum="",
+        dest_summary={},
+        mappings=[
+            {
+                "source": "email",
+                "target": "email",
+                "rule_contracts": [{"rule_id": "uniq-email", "type": "unique"}],
+            }
+        ],
+        validation_mode="balanced",
+    )
+    checks = recon.get("rule_checks") or []
+    assert [c.get("status") for c in checks] == ["unverified"], checks
+    assert checks[0]["reason"] == "unsupported_destination"
+    unverified = recon.get("unverified_rules") or []
+    assert unverified[0]["reason"] == "unsupported_destination", unverified
+    assert recon.get("unproven") is True
+
+
+def test_unique_duplicates_persisted_in_job_reconciliation(
+    tmp_path: Path, engine_env
+):
+    """(d) The rule_checks entry survives onto the job-store reconciliation
+    record, not just the in-memory result."""
+    fake, _persisted = engine_env
+    report = _report()
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _db_dup_email(src)
+    _dest_db(dst)
+    result = _run(fake, src, dst, _unique_wire(report))
+    assert not result.success
+    stored = fake.jobs[result.job_id].get("reconciliation") or {}
+    checks = stored.get("rule_checks") or []
+    failed = [c for c in checks if c.get("status") == "failed"]
+    assert [c["rule_id"] for c in failed] == ["uniq-email"], stored
+    assert failed[0]["duplicates"] == 1
+
+
+def test_unique_clean_run_has_no_unverified_rules(
+    tmp_path: Path, engine_env
+):
+    """(e) A clean run carries no unverified_rules and is not unproven."""
+    fake, _persisted = engine_env
+    report = _report()
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _db_clean(src)
+    _dest_db(dst)
+    result = _run(fake, src, dst, _unique_wire(report))
+    assert result.success, result.error
+    recon = result.reconciliation or {}
+    assert not recon.get("unverified_rules"), recon
+    assert recon.get("unproven") is not True, recon
