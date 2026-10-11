@@ -22,10 +22,10 @@ import pytest
 
 from services.timezone_policy import POLICY_UTC_INVENT, resolve_timezone_policy
 from services.type_system import (
-    document_instant_wire_preserved,
     is_lossy_coercion,
     is_precision_collapse_coercion,
 )
+from services.document_instant import document_instant_wire_preserved
 
 
 def _reachable(host: str, port: int) -> bool:
@@ -203,6 +203,144 @@ def test_declared_target_date_is_calendar_day_for_text_source(monkeypatch):
     assert captured["docs"][0]["date_of_birth"] == datetime(
         1985, 3, 15, tzinfo=timezone.utc
     )
+
+
+def _write_typed_mongo_value(
+    monkeypatch,
+    *,
+    value,
+    source_type: str,
+    target_type: str = "date",
+    risk_contract: dict | None = None,
+):
+    from connectors.mongodb_writer import write_mapped_rows
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "connectors.mongodb_common._mongo_client",
+        lambda *_args, **_kwargs: _capturing_client(captured),
+    )
+    mapping = {
+        "source": "created_at",
+        "target": "created_at",
+        "source_type": source_type,
+        "target_type": target_type,
+    }
+    if risk_contract is not None:
+        mapping["risk_contract"] = risk_contract
+    result = write_mapped_rows(
+        host="localhost",
+        port=27017,
+        database="dataflow_test",
+        username="",
+        password="",
+        connection_string="",
+        ssl=False,
+        schema="dataflow_test",
+        table_name="temporal_policy",
+        headers=["created_at"],
+        data_rows=[[value]],
+        mappings=[mapping],
+        column_types={"created_at": source_type},
+        error_policy="fail",
+    )
+    return result, captured
+
+
+@pytest.mark.parametrize("value", ["2024-06-01", "2024-06-01 00:00:00"])
+def test_source_date_midnight_normalizes_to_utc_midnight(monkeypatch, value):
+    from datetime import datetime, timezone
+
+    result, captured = _write_typed_mongo_value(
+        monkeypatch, value=value, source_type="DATE"
+    )
+
+    assert result.ok is True, result.error
+    assert captured["docs"][0]["created_at"] == datetime(
+        2024, 6, 1, tzinfo=timezone.utc
+    )
+
+
+def test_source_date_non_midnight_is_refused_without_contract(monkeypatch):
+    result, captured = _write_typed_mongo_value(
+        monkeypatch, value="2024-06-01 06:30:00", source_type="DATE"
+    )
+
+    assert result.ok is False
+    assert "non-midnight" in (result.error or "")
+    assert result.rows_written == 0
+    assert captured.get("docs", []) == []
+
+
+def test_source_date_non_midnight_is_truncated_with_clearing_contract(monkeypatch):
+    from datetime import datetime, timezone
+
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column="created_at",
+        source_type="DATE",
+        destination_type="DATE",
+        approved_by="admin@dataflow.app",
+        reason="Accept date truncation for this column",
+        execution_policy="CAST_AND_CONTINUE",
+        expected_precision_loss=True,
+        expected_truncation=True,
+    ).to_dict()
+    result, captured = _write_typed_mongo_value(
+        monkeypatch,
+        value="2024-06-01 06:30:00",
+        source_type="DATE",
+        risk_contract=contract,
+    )
+
+    assert result.ok is True, result.error
+    assert captured["docs"][0]["created_at"] == datetime(
+        2024, 6, 1, tzinfo=timezone.utc
+    )
+
+
+def test_timestamp_source_to_mongodb_physical_date_keeps_instant(monkeypatch):
+    from datetime import timezone
+
+    result, captured = _write_typed_mongo_value(
+        monkeypatch,
+        value="2024-06-01T06:30:00+00:00",
+        source_type="TIMESTAMPTZ",
+    )
+
+    assert result.ok is True, result.error
+    value = captured["docs"][0]["created_at"].astimezone(timezone.utc)
+    assert (value.hour, value.minute) == (6, 30)
+
+
+def test_text_target_date_timestamp_with_zone_keeps_instant(monkeypatch):
+    from datetime import timezone
+
+    result, captured = _write_typed_mongo_value(
+        monkeypatch,
+        value="2024-06-01T06:30:00+00:00",
+        source_type="TEXT",
+        target_type="DATE",
+    )
+
+    assert result.ok is True, result.error
+    value = captured["docs"][0]["created_at"].astimezone(timezone.utc)
+    assert (value.hour, value.minute) == (6, 30)
+
+
+def test_text_target_date_naive_timestamp_is_refused_without_truncation(monkeypatch):
+    result, captured = _write_typed_mongo_value(
+        monkeypatch,
+        value="2024-06-01 06:30:00",
+        source_type="TEXT",
+        target_type="DATE",
+    )
+
+    assert result.ok is False
+    assert "naive wall-clock" in (result.error or "")
+    assert result.rows_written == 0
+    assert captured.get("docs", []) == []
 
 
 def test_timestamp_ntz_naive_wire_still_needs_a_contract(monkeypatch):

@@ -98,22 +98,33 @@ def _target_is_temporal(target_type: str) -> bool:
     return normalize_logical_type(target_type) in {LOGICAL_DATE, LOGICAL_DATETIME}
 
 
-def _declares_calendar_day(mapping: Mapping[str, Any]) -> bool:
-    """True when either declared side represents a calendar day."""
+def _declares_calendar_day(
+    mapping: Mapping[str, Any], source_type: str = ""
+) -> bool:
+    """True when the resolved source type declares a calendar day."""
     from services.type_system import LOGICAL_DATE, normalize_logical_type
 
-    declared_types = (
-        mapping.get("source_type"),
-        mapping.get("sourceType"),
-        mapping.get("target_type"),
-        mapping.get("targetType"),
-    )
-    return any(
-        isinstance(declared, str)
-        and declared.strip()
-        and normalize_logical_type(declared) == LOGICAL_DATE
-        for declared in declared_types
-    )
+    return normalize_logical_type(source_type) == LOGICAL_DATE
+
+
+def _is_pure_date_value(value: Any) -> bool:
+    """True for a date value with no clock component."""
+    import re
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+
+    from connectors.sql_temporal import parse_sql_date
+
+    if isinstance(value, _datetime):
+        return False
+    if isinstance(value, _date):
+        return True
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if re.search(r"(?:[Tt]\s*\d|\s+\d{1,2}:\d{2})", text):
+        return False
+    return parse_sql_date(text) is not None
 
 
 def declared_source_is_instant(source_type: str) -> bool:
@@ -144,6 +155,38 @@ def _mapping_source_type(
     if looked is None:
         looked = column_types.get(source_name.lower(), "")
     return str(looked or "").strip()
+
+
+def _row_projection_column_types(
+    mappings: list[dict[str, Any]],
+    column_types: Mapping[str, str],
+    dest_types: Mapping[str, Any],
+) -> dict[str, str]:
+    """Keep BSON-date cells raw until the writer applies per-cell policy."""
+    from services.type_system import LOGICAL_DATE, normalize_logical_type
+
+    projected = dict(column_types)
+    for mapping in mappings:
+        target_name = sanitize_identifier(
+            mapping.get("target") or mapping.get("source"), preserve_case=True
+        )
+        target_type = (
+            dest_types.get(target_name)
+            or dest_types.get(target_name.lower())
+            or dest_types.get(target_name.upper())
+            or mapping.get("target_type")
+            or mapping.get("targetType")
+            or ""
+        )
+        transform = str(mapping.get("transform") or "").strip().lower()
+        if (
+            normalize_logical_type(str(target_type)) == LOGICAL_DATE
+            and transform in {"", "none", "null", "identity"}
+        ):
+            source_name = str(mapping.get("source") or "")
+            if source_name:
+                projected[source_name] = "VARCHAR"
+    return projected
 
 
 # MongoDB commands handle ~1000-document batches most reliably through proxies
@@ -237,7 +280,9 @@ def _mongo_rematerialize_if_physical_differs(
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
-        column_types=column_types,
+        column_types=_row_projection_column_types(
+            mappings, column_types or {}, live_dest_types
+        ),
         dest_types=live_dest_types,
         error_policy=policy,
         preserve_case=True,
@@ -393,6 +438,9 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="MongoDB",
+    )
+    row_column_types = _row_projection_column_types(
+        mappings, column_types, dest_types
     )
     policy = transform_error_policy(error_policy)
 
@@ -567,7 +615,7 @@ def write_mapped_rows(
                         data_rows=data_rows,
                         mappings=mappings,
                         target_cols=target_cols,
-                        column_types=column_types,
+                        column_types=row_column_types,
                         dest_types=dest_types,
                         error_policy=policy,
                         preserve_case=True,
@@ -584,7 +632,7 @@ def write_mapped_rows(
                 data_rows=data_rows,
                 mappings=mappings,
                 target_cols=target_cols,
-                column_types=column_types,
+                column_types=row_column_types,
                 dest_types=dest_types,
                 error_policy=policy,
                 preserve_case=True,
@@ -657,8 +705,60 @@ def write_mapped_rows(
                 m.get("target") or m.get("source"), preserve_case=True
             )
             for m in mappings
-            if _declares_calendar_day(m)
+            if _declares_calendar_day(m, _mapping_source_type(m, column_types))
         }
+        from services.type_system import (
+            LOGICAL_DATETIME,
+            LOGICAL_DATE,
+            LOGICAL_TIME,
+            normalize_logical_type,
+        )
+
+        pure_date_target_cols = set()
+        for mapping in mappings:
+            source_type = _mapping_source_type(mapping, column_types)
+            source_logical = normalize_logical_type(source_type)
+            target_name = sanitize_identifier(
+                mapping.get("target") or mapping.get("source"),
+                preserve_case=True,
+            )
+            target_logical = normalize_logical_type(
+                str(
+                    dest_types.get(target_name)
+                    or mapping.get("target_type")
+                    or mapping.get("targetType")
+                    or ""
+                )
+            )
+            if (
+                source_logical not in {LOGICAL_DATETIME, LOGICAL_TIME}
+                and target_logical == LOGICAL_DATE
+            ):
+                pure_date_target_cols.add(
+                    sanitize_identifier(
+                        mapping.get("target") or mapping.get("source"),
+                        preserve_case=True,
+                    )
+                )
+        calendar_day_truncation_contract_cols = set()
+        from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+        for mapping in mappings:
+            column = sanitize_identifier(
+                mapping.get("target") or mapping.get("source"),
+                preserve_case=True,
+            )
+            contract = mapping.get("risk_contract") or mapping.get("riskContract")
+            if (
+                column in calendar_day_cols
+                and isinstance(contract, dict)
+                and mapping_has_clearing_risk_contract(mapping)
+                and (
+                    contract.get("expected_precision_loss")
+                    or contract.get("expected_truncation")
+                )
+            ):
+                calendar_day_truncation_contract_cols.add(column)
         # Polarity is a property of the column, not the cell. Resolving it
         # once keeps a million-row write off the DDL regex.
         instant_cols = {
@@ -756,10 +856,41 @@ def write_mapped_rows(
             if _target_is_temporal(upper) and (
                 transform_narrows_to_calendar_day(transform)
                 or column in calendar_day_cols
+                or (
+                    column in pure_date_target_cols
+                    and _is_pure_date_value(value)
+                )
             ):
-                from connectors.sql_temporal import coerce_sql_temporal
+                from connectors.sql_temporal import (
+                    coerce_sql_temporal,
+                    parse_sql_date,
+                    parse_sql_datetime,
+                )
                 from datetime import timezone as _tz
 
+                parsed = parse_sql_datetime(value, wall_clock=True)
+                if (
+                    parsed is not None
+                    and any(
+                        (
+                            parsed.hour,
+                            parsed.minute,
+                            parsed.second,
+                            parsed.microsecond,
+                        )
+                    )
+                    and column in calendar_day_cols
+                    and column not in calendar_day_truncation_contract_cols
+                ):
+                    raise ValueError(
+                        "non-midnight value for logical DATE would truncate "
+                        "time-of-day — refuse silent truncation without a "
+                        "covering Risk Contract"
+                    )
+                if parsed is None and parse_sql_date(value) is None:
+                    raise ValueError(
+                        f"cannot parse {value!r} as a pure logical DATE"
+                    )
                 coerced = coerce_sql_temporal(value, "DATE")
                 # DATE → BSON Date as UTC midnight (calendar date instant), never
                 # leave naive for PyMongo local-TZ invent.
