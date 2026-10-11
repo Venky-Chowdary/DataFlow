@@ -1,3 +1,8 @@
+logging {
+  level  = coalesce(sys.env("ALLOY_LOG_LEVEL"), "info")
+  format = "logfmt"
+}
+
 otelcol.auth.basic "grafana_cloud" {
   // Alloy 1.19.2's client_auth block rejects environment-backed credentials
   // during graph construction. Keep the pinned-version-compatible arguments
@@ -115,4 +120,13 @@ otelcol.receiver.prometheus "dataflow_api" {
   output {
     metrics = [otelcol.processor.memory_limiter.default.input]
   }
+}
+
+prometheus.exporter.self "alloy" {}
+
+prometheus.scrape "alloy_self" {
+  targets         = prometheus.exporter.self.alloy.targets
+  job_name        = "dataflow-alloy"
+  scrape_interval = "60s"
+  forward_to      = [otelcol.receiver.prometheus.dataflow_api.receiver]
 }
