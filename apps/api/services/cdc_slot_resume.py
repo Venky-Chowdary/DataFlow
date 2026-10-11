@@ -78,7 +78,11 @@ def _load() -> list[dict[str, Any]]:
         try:
             docs = list(coll.find({}, {"_id": 0}))
             if docs:
-                return [doc for doc in docs if isinstance(doc, dict)]
+                return [
+                    doc
+                    for doc in docs
+                    if isinstance(doc, dict) and doc.get("kind") != "horizon"
+                ]
         except Exception as exc:  # noqa: BLE001
             _logger.debug("retired-slot mongo read failed: %s", exc)
     if not STORE_PATH.exists():
@@ -95,6 +99,66 @@ def _load() -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
+def _merge_horizons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from connectors.lsn_guards import lsn_family, lsn_sort_key
+    from services.cdc_exactly_once import assert_comparable_lsn
+
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        token = _lsn_of(row.get("lsn"))
+        if not token:
+            continue
+        key = str(row.get("cursor_key") or "").strip()
+        slot = str(row.get("slot_name") or "").strip()[:63]
+        if not key and not slot:
+            continue
+        family = lsn_family(token)
+        identity = (slot, key, family)
+        current = merged.get(identity)
+        if current is not None:
+            if family == "opaque":
+                continue
+            assert_comparable_lsn(token, str(current["lsn"]))
+            if lsn_sort_key(token) <= lsn_sort_key(current["lsn"]):
+                continue
+        merged[identity] = {
+            "lsn": token,
+            "cursor_key": key,
+            "slot_name": slot,
+            "family": family,
+        }
+    return list(merged.values())
+
+
+def _load_horizons() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    coll = _mongo_retired()
+    if coll is not None:
+        try:
+            rows.extend(
+                doc
+                for doc in coll.find({"kind": "horizon"}, {"_id": 0})
+                if isinstance(doc, dict)
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.debug(
+                "retired-slot mongo horizon read failed (%s)",
+                type(exc).__name__,
+            )
+    try:
+        import json
+
+        payload = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        payload = {}
+    horizons = payload.get("horizons") if isinstance(payload, dict) else None
+    if isinstance(horizons, list):
+        rows.extend(row for row in horizons if isinstance(row, dict))
+    return _merge_horizons(rows)
+
+
 class CdcSlotRetirementError(RuntimeError):
     def __init__(self, slot_name: str, cause: Exception) -> None:
         self.slot_name = str(slot_name or "").strip()
@@ -109,12 +173,32 @@ class CdcSlotRetirementError(RuntimeError):
 
 
 def _save(rows: list[dict[str, Any]]) -> None:
-    kept = rows[-_MAX_RECORDS:]
+    evicted = rows[:-_MAX_RECORDS] if _MAX_RECORDS else rows
+    kept = rows[-_MAX_RECORDS:] if _MAX_RECORDS else []
+    horizons = _merge_horizons([*_load_horizons(), *evicted])
+    write_json_atomic(
+        STORE_PATH,
+        {"resumes": kept, "horizons": horizons},
+        indent=2,
+        default=json_default,
+    )
     coll = _mongo_retired()
     mongo_error: Exception | None = None
     if coll is not None:
         try:
-            coll.delete_many({})
+            for horizon in horizons:
+                selector = {
+                    "kind": "horizon",
+                    "slot_name": horizon["slot_name"],
+                    "cursor_key": horizon["cursor_key"],
+                    "family": horizon["family"],
+                }
+                coll.replace_one(
+                    selector,
+                    {"kind": "horizon", **horizon},
+                    upsert=True,
+                )
+            coll.delete_many({"kind": {"$ne": "horizon"}})
             if kept:
                 coll.insert_many(kept)
         except Exception as exc:  # noqa: BLE001
@@ -122,7 +206,6 @@ def _save(rows: list[dict[str, Any]]) -> None:
                 "retired-slot mongo write failed (%s)", type(exc).__name__
             )
             mongo_error = exc
-    write_json_atomic(STORE_PATH, {"resumes": kept}, indent=2, default=json_default)
     if mongo_error is not None:
         raise mongo_error
 
@@ -185,6 +268,25 @@ def slot_lsn_retired(
         if key and row_key == key:
             return True
         if slot and row_slot == slot:
+            return True
+    from connectors.lsn_guards import lsn_family, lsn_sort_key
+    from services.cdc_exactly_once import assert_comparable_lsn
+
+    family = lsn_family(token)
+    for horizon in _load_horizons():
+        horizon_key = str(horizon.get("cursor_key") or "")
+        horizon_slot = str(horizon.get("slot_name") or "")
+        if key and horizon_key != key:
+            continue
+        if slot and horizon_slot != slot:
+            continue
+        horizon_lsn = str(horizon.get("lsn") or "")
+        if lsn_family(horizon_lsn) != family:
+            continue
+        if family == "opaque":
+            return True
+        assert_comparable_lsn(token, horizon_lsn)
+        if lsn_sort_key(token) <= lsn_sort_key(horizon_lsn):
             return True
     return False
 

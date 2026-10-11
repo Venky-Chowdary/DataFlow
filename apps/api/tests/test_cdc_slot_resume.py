@@ -639,6 +639,133 @@ def test_cursor_keys_for_job_strict_reraises_read_errors(
         sync_cursor.cursor_keys_for_job("job-strict", strict=True)
 
 
+def test_evicted_resume_is_retired_by_file_horizon(retired_store, monkeypatch) -> None:
+    import json
+
+    from services import cdc_slot_resume
+    from services.cdc_slot_resume import resume_token_retired
+
+    slot = "df_orders"
+    key = "pg:qa:orders"
+    monkeypatch.setattr(cdc_slot_resume, "_MAX_RECORDS", 2)
+    for token in ("0/10", "0/20", "0/30"):
+        retire_slot_lsn(token, cursor_key=key, slot_name=slot)
+
+    payload = json.loads(cdc_slot_resume.STORE_PATH.read_text(encoding="utf-8"))
+    assert payload["horizons"] == [
+        {
+            "lsn": "0/10",
+            "cursor_key": key,
+            "slot_name": slot,
+            "family": "pg_wal",
+        }
+    ]
+    assert slot_lsn_retired("0/10", cursor_key=key, slot_name=slot)
+    assert not slot_lsn_retired("0/11", cursor_key=key, slot_name=slot)
+    assert not slot_lsn_retired("1", cursor_key=key, slot_name=slot)
+    assert not slot_lsn_retired(
+        "0/10", cursor_key="pg:qa:other", slot_name=slot
+    )
+    assert not slot_lsn_retired("0/10", cursor_key=key, slot_name="df_other")
+    assert resume_token_retired(
+        "lsn=0/10|slot=df_orders", cursor_key=key
+    )
+
+    view = DestWmView(
+        committed_lsn="0/10",
+        resume_blob="lsn=0/10|slot=df_orders",
+    )
+    stripped, job_resume = without_retired_slot_resume(
+        view, "lsn=0/10|slot=df_orders", cursor_key=key
+    )
+    assert stripped.committed_lsn is None
+    assert stripped.resume_blob == ""
+    assert job_resume is None
+
+    above_horizon = DestWmView(
+        committed_lsn="0/11",
+        resume_blob="lsn=0/11|slot=df_orders",
+    )
+    unchanged, job_resume = without_retired_slot_resume(
+        above_horizon, "lsn=0/11|slot=df_orders", cursor_key=key
+    )
+    assert unchanged.committed_lsn == "0/11"
+    assert unchanged.resume_blob == "lsn=0/11|slot=df_orders"
+    assert job_resume == "lsn=0/11|slot=df_orders"
+
+
+def test_retirement_horizons_are_kept_per_lsn_family(
+    retired_store, monkeypatch
+) -> None:
+    import json
+
+    from services import cdc_slot_resume
+
+    slot = "df_orders"
+    key = "pg:qa:orders"
+    monkeypatch.setattr(cdc_slot_resume, "_MAX_RECORDS", 1)
+    for token in ("0/10", "1", "0/20", "2", "0/15"):
+        retire_slot_lsn(token, cursor_key=key, slot_name=slot)
+
+    payload = json.loads(cdc_slot_resume.STORE_PATH.read_text(encoding="utf-8"))
+    assert {
+        (row["family"], row["lsn"]) for row in payload["horizons"]
+    } == {("pg_wal", "0/20"), ("numeric_version", "2")}
+    assert slot_lsn_retired("0/10", cursor_key=key, slot_name=slot)
+    assert slot_lsn_retired("1", cursor_key=key, slot_name=slot)
+    assert not slot_lsn_retired("0/30", cursor_key=key, slot_name=slot)
+    assert not slot_lsn_retired("3", cursor_key=key, slot_name=slot)
+
+
+def test_retirement_horizon_survives_mongo_reload(retired_store, monkeypatch) -> None:
+    import json
+
+    from services import cdc_slot_resume
+
+    class _Mongo:
+        def __init__(self):
+            self.docs = []
+
+        def find(self, query=None, *_args, **_kwargs):
+            query = query or {}
+            return [
+                dict(doc)
+                for doc in self.docs
+                if all(doc.get(key) == value for key, value in query.items())
+            ]
+
+        def replace_one(self, selector, replacement, *, upsert=False):
+            for index, doc in enumerate(self.docs):
+                if all(doc.get(key) == value for key, value in selector.items()):
+                    self.docs[index] = dict(replacement)
+                    return
+            if upsert:
+                self.docs.append(dict(replacement))
+
+        def delete_many(self, _query):
+            self.docs = [doc for doc in self.docs if doc.get("kind") == "horizon"]
+
+        def insert_many(self, docs):
+            self.docs.extend(dict(doc) for doc in docs)
+
+    mongo = _Mongo()
+    monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: mongo)
+    monkeypatch.setattr(cdc_slot_resume, "_MAX_RECORDS", 2)
+    slot = "df_orders"
+    key = "pg:qa:orders"
+    for token in ("0/10", "0/20", "0/30"):
+        retire_slot_lsn(token, cursor_key=key, slot_name=slot)
+
+    assert any(doc.get("kind") == "horizon" for doc in mongo.docs)
+    assert all(
+        doc.get("kind") != "horizon" for doc in cdc_slot_resume._load()
+    )
+    cdc_slot_resume.STORE_PATH.write_text(
+        json.dumps({"resumes": [], "horizons": []}), encoding="utf-8"
+    )
+    assert slot_lsn_retired("0/10", cursor_key=key, slot_name=slot)
+
+
 def test_post_drop_retirement_failure_is_reported(retired_store, monkeypatch, caplog) -> None:
     from services import cdc_slot_resume
 
