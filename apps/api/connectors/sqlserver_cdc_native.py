@@ -176,6 +176,7 @@ def encode_mssql_cdc_token(
     offset: int = 0,
     seqval: bytes | str | None = None,
     capture_instance: str = "",
+    capture_instances: dict[str, str] | None = None,
     last_pk: str = "",
 ) -> str:
     if isinstance(lsn, (bytes, bytearray)):
@@ -198,6 +199,12 @@ def encode_mssql_cdc_token(
         payload["seqval"] = seq_hex
     if capture_instance:
         payload["capture_instance"] = capture_instance
+    if capture_instances:
+        payload["capture_instances"] = {
+            str(table_name): str(instance)
+            for table_name, instance in sorted(capture_instances.items())
+            if table_name and instance
+        }
     if last_pk:
         payload["last_pk"] = str(last_pk)
     return json.dumps(payload, separators=(",", ":"))
@@ -226,7 +233,7 @@ def decode_mssql_cdc_token(token: Any) -> dict[str, Any]:
                 data.get("kind"),
             )
         if isinstance(data, dict) and data.get("kind") == "mssql-cdc":
-            return {
+            state = {
                 "lsn": str(data.get("lsn") or ""),
                 "phase": str(data.get("phase") or "streaming"),
                 "table": str(data.get("table") or ""),
@@ -235,6 +242,14 @@ def decode_mssql_cdc_token(token: Any) -> dict[str, Any]:
                 "capture_instance": str(data.get("capture_instance") or ""),
                 "last_pk": str(data.get("last_pk") or ""),
             }
+            capture_instances = data.get("capture_instances")
+            if isinstance(capture_instances, dict):
+                state["capture_instances"] = {
+                    str(table): str(instance)
+                    for table, instance in capture_instances.items()
+                    if table and instance
+                }
+            return state
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     return {
@@ -424,8 +439,8 @@ class SqlServerNativeCdc:
         self.primary_key = self.primary_keys[self.table]
         self.batch_size = max(1, int(batch_size or 500))
         self._shared = len(self.tables) > 1
-        self._captures: dict[str, str] = {}
         state = decode_mssql_cdc_token(resume_token)
+        self._captures: dict[str, str] = dict(state.get("capture_instances") or {})
         self.capture_instance = (
             capture_instance
             or state.get("capture_instance")
@@ -433,7 +448,7 @@ class SqlServerNativeCdc:
         )
         self._capture_resolved = bool(capture_instance or state.get("capture_instance"))
         if self._shared and self.capture_instance:
-            self._captures[self.table] = self.capture_instance
+            self._captures.setdefault(self.table, self.capture_instance)
         self.row_filter = normalize_mssql_row_filter(
             row_filter
             or cfg.get("cdc_row_filter")
@@ -455,7 +470,8 @@ class SqlServerNativeCdc:
         self.snapshot_table = str(state.get("table") or "")
         self.resume_token = resume_token
         self._last_event_at: datetime | None = None
-        self._last_schema_fingerprint: str = ""
+        self._last_schema_fingerprint: dict[str, str] = {}
+        self._pending_capture_switches: dict[str, tuple[str, str]] = {}
         from services.cdc_schema_history import connection_fingerprint
 
         self.source_key = connection_fingerprint(
@@ -488,6 +504,7 @@ class SqlServerNativeCdc:
             meta={
                 "engine": "sqlserver_native",
                 "capture_instance": self.capture_instance,
+                "captures": dict(self._captures),
                 "table": self.table,
                 "tables": list(self.tables),
                 "row_filter": self.row_filter,
@@ -755,8 +772,17 @@ class SqlServerNativeCdc:
         # Net TVF ignores filter text but still requires an option; 'all' is valid.
         return "all"
 
-    def _maybe_record_capture_schema(self, cur, *, offset: str = "") -> None:
+    def _maybe_record_capture_schema(
+        self,
+        cur,
+        *,
+        offset: str = "",
+        table: str | None = None,
+        ddl: str = "",
+        force: bool = False,
+    ) -> None:
         """Persist captured column list when it changes (schema history)."""
+        table_name = table or self.table
         try:
             cur.execute(
                 """
@@ -779,14 +805,17 @@ class SqlServerNativeCdc:
             if not cols:
                 return
             fingerprint = json.dumps(cols, separators=(",", ":"), sort_keys=True)
-            if fingerprint == self._last_schema_fingerprint:
+            if (
+                fingerprint == self._last_schema_fingerprint.get(table_name)
+                and not force
+            ):
                 return
             from services.cdc_schema_history import record_ddl
 
             entry = record_ddl(
                 self.source_key,
-                f"{self.schema}.{self.table}",
-                ddl=f"cdc.capture_instance={self.capture_instance}",
+                f"{self.schema}.{table_name}",
+                ddl=ddl or f"cdc.capture_instance={self.capture_instance}",
                 offset=offset or self.start_lsn or self.capture_instance,
                 schema_snapshot={
                     "capture_instance": self.capture_instance,
@@ -794,22 +823,37 @@ class SqlServerNativeCdc:
                     "columns": cols,
                 },
             )
-            self._last_schema_fingerprint = fingerprint
+            self._last_schema_fingerprint[table_name] = fingerprint
             try:
                 from services.cdc_mapping_review import flag_mapping_review
 
                 flag_mapping_review(
                     source_key=self.source_key,
-                    table=f"{self.schema}.{self.table}",
+                    table=f"{self.schema}.{table_name}",
                     reason="cdc_schema_drift",
                     schema_version=int(entry.get("version") or 0) or None,
                     ddl=str(entry.get("ddl") or ""),
                     column_names=[str(c.get("name") or "") for c in cols if c.get("name")],
                 )
-            except Exception:
-                logger.debug("SQL Server CDC mapping review flag skipped", exc_info=True)
+            except Exception as exc:
+                logger.warning(
+                    "SQL Server CDC mapping review could not be recorded for "
+                    "%s.%s; operator review is required: %s",
+                    self.schema,
+                    table_name,
+                    exc,
+                    exc_info=True,
+                )
         except Exception as exc:
-            logger.debug("SQL Server CDC schema history skipped: %s", exc)
+            logger.warning(
+                "SQL Server CDC schema history could not be recorded for %s.%s "
+                "at offset %s; operator review is required: %s",
+                self.schema,
+                table_name,
+                offset or self.start_lsn,
+                exc,
+                exc_info=True,
+            )
 
     def _conn(self):
         from connectors.generic_sql import connection_options, get_connection
@@ -826,36 +870,146 @@ class SqlServerNativeCdc:
             **connection_options(self.cfg),
         )
 
-    def _resolve_capture_for_table(self, cur, table: str) -> str:
-        """Prefer the live capture instance name from ``cdc.change_tables``."""
+    def _capture_instances_for_table(
+        self, cur, table: str
+    ) -> list[tuple[str, str]]:
         cur.execute(
             """
-            SELECT TOP 1 ct.capture_instance
+            SELECT TOP (2) ct.capture_instance, ct.start_lsn
             FROM cdc.change_tables ct
             JOIN sys.tables t ON t.object_id = ct.source_object_id
             JOIN sys.schemas s ON s.schema_id = t.schema_id
             WHERE t.name = %s AND s.name = %s
-            ORDER BY ct.create_date DESC
+            ORDER BY ct.create_date DESC, ct.capture_instance DESC
             """,
             (table, self.schema),
         )
-        row = cur.fetchone()
-        capture = (
-            str(row[0])
+        return [
+            (str(row[0]), _lsn_to_hex(row[1]))
+            for row in (cur.fetchall() or [])
             if row and row[0]
-            else self._captures.get(table)
-            or (
-                self.capture_instance
-                if table == self.table and self.capture_instance
-                else f"{self.schema}_{table}"
-            )
-        )
+        ]
+
+    def _store_capture_for_table(self, table: str, capture: str) -> None:
         self._captures[table] = capture
         if table == self.table:
             self.capture_instance = capture
             self._capture_resolved = True
             self._lease.meta["capture_instance"] = self.capture_instance
-        return capture
+        self._lease.meta["captures"] = dict(self._captures)
+
+    def _switch_capture_instance(
+        self,
+        cur,
+        *,
+        table: str,
+        old_capture: str,
+        new_capture: str,
+        switch_lsn: str,
+    ) -> None:
+        self._pending_capture_switches.pop(table, None)
+        previous_capture = self.capture_instance
+        self._store_capture_for_table(table, new_capture)
+        if self._shared:
+            self.capture_instance = new_capture
+        try:
+            self._maybe_record_capture_schema(
+                cur,
+                offset=switch_lsn,
+                table=table,
+                ddl=f"cdc.capture_instance switch {old_capture}->{new_capture}",
+                force=True,
+            )
+        finally:
+            if self._shared and table != self.table:
+                self.capture_instance = previous_capture
+        self.resume_token = self._token(
+            lsn=self.start_lsn,
+            phase="streaming",
+            seqval=self.start_seqval,
+        )
+        logger.info(
+            "SQL Server CDC capture instance switched table=%s.%s old=%s "
+            "new=%s switch_lsn=%s",
+            self.schema,
+            table,
+            old_capture,
+            new_capture,
+            switch_lsn,
+        )
+
+    def _resolve_capture_for_table(self, cur, table: str) -> str:
+        """Drain an older instance before selecting the newest capture."""
+        instances = self._capture_instances_for_table(cur, table)
+        previous = self._captures.get(table) or (
+            self.capture_instance if table == self.table else ""
+        )
+        fallback = previous or f"{self.schema}_{table}"
+        self._pending_capture_switches.pop(table, None)
+        if not instances:
+            self._store_capture_for_table(table, fallback)
+            return fallback
+
+        newest, newest_start = instances[0]
+        resume_lsn = _lsn_to_hex(self.start_lsn)
+        if (
+            resume_lsn
+            and len(instances) > 1
+            and not newest_start
+            and previous != newest
+        ):
+            raise self._missing_capture_error(
+                table,
+                previous or instances[1][0],
+                next_capture_instance=newest,
+            )
+        if not resume_lsn or not newest_start:
+            self._store_capture_for_table(table, newest)
+            return newest
+
+        if compare_mssql_hex_lsn(resume_lsn, newest_start) < 0:
+            older = next(
+                (
+                    (capture, start_lsn)
+                    for capture, start_lsn in instances[1:]
+                    if capture == previous
+                ),
+                None,
+            )
+            if older is None and len(instances) > 1:
+                older = instances[1]
+            if older is None:
+                raise self._missing_capture_error(
+                    table,
+                    previous or fallback,
+                    next_capture_instance=newest,
+                    next_start_lsn=newest_start,
+                )
+            old_capture, old_start = older
+            if old_start and compare_mssql_hex_lsn(resume_lsn, old_start) < 0:
+                raise self._missing_capture_error(
+                    table,
+                    old_capture,
+                    next_capture_instance=newest,
+                    next_start_lsn=newest_start,
+                )
+            self._store_capture_for_table(table, old_capture)
+            self._pending_capture_switches[table] = (newest, newest_start)
+            return old_capture
+
+        old_capture = previous if previous != newest else ""
+        if not old_capture and not previous:
+            old_capture = instances[1][0] if len(instances) > 1 else ""
+        self._store_capture_for_table(table, newest)
+        if old_capture and old_capture != newest:
+            self._switch_capture_instance(
+                cur,
+                table=table,
+                old_capture=old_capture,
+                new_capture=newest,
+                switch_lsn=newest_start,
+            )
+        return newest
 
     def _resolve_capture_instance(self, cur) -> str:
         return self._resolve_capture_for_table(cur, self.table)
@@ -873,7 +1027,31 @@ class SqlServerNativeCdc:
         self,
         table: str,
         capture_instance: str,
+        *,
+        next_capture_instance: str = "",
+        next_start_lsn: str = "",
     ) -> CdcLsnGapError:
+        if next_capture_instance and not next_start_lsn:
+            return CdcLsnGapError(
+                f"SQL Server CDC cannot safely switch from capture instance "
+                f"{capture_instance!r} to {next_capture_instance!r} for table "
+                f"{self.schema}.{table}: the newer capture instance has not "
+                "reported start_lsn yet. Retry after CDC metadata is populated.",
+                resume_lsn=self.start_lsn,
+                cursor_key=self.cursor_key,
+            )
+        if next_capture_instance:
+            return CdcLsnGapError(
+                f"SQL Server CDC cannot safely drain capture instance "
+                f"{capture_instance!r} for table {self.schema}.{table} before "
+                f"switching to {next_capture_instance!r}: the cursor "
+                f"{self.start_lsn!r} is before its start_lsn {next_start_lsn!r}, "
+                "but the older capture instance is missing or cannot cover that "
+                "position. Re-snapshot the table before resuming.",
+                resume_lsn=self.start_lsn,
+                min_lsn=next_start_lsn,
+                cursor_key=self.cursor_key,
+            )
         return CdcLsnGapError(
             f"SQL Server CDC capture instance {capture_instance!r} for table "
             f"{self.schema}.{table} is no longer available. Re-enable CDC on the "
@@ -922,6 +1100,8 @@ class SqlServerNativeCdc:
                         if cur.fetchone() is None:
                             return False
                     return True
+        except CdcLsnGapError:
+            raise
         except Exception as exc:
             logger.debug("SQL Server native CDC unavailable: %s", exc)
             return False
@@ -945,6 +1125,20 @@ class SqlServerNativeCdc:
         row = cur.fetchone()
         if not row or row[0] is None:
             return ""
+        return _lsn_to_hex(row[0])
+
+    def _decrement_lsn_for(self, cur, lsn: str) -> str:
+        cur.execute("SELECT sys.fn_cdc_decrement_lsn(%s)", (_hex_to_lsn(lsn),))
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            raise CdcLsnGapError(
+                f"SQL Server CDC could not calculate the LSN before {lsn!r} "
+                "while draining a capture-instance switch; re-snapshot before "
+                "resuming.",
+                resume_lsn=self.start_lsn,
+                min_lsn=lsn,
+                cursor_key=self.cursor_key,
+            )
         return _lsn_to_hex(row[0])
 
     def _snapshot_handoff_lsn(
@@ -1020,6 +1214,7 @@ class SqlServerNativeCdc:
             capture_instance=capture_instance
             if capture_instance is not None
             else ("" if self._shared else self.capture_instance),
+            capture_instances=self._captures if self._shared else None,
             last_pk=last_pk if phase == "snapshot" else "",
         )
 
@@ -1452,12 +1647,21 @@ class SqlServerNativeCdc:
             tuple[str, str, list[dict[str, Any]], list[dict[str, Any]], list[str]]
         ] = []
         max_lsn = ""
+        poll_to_lsn = ""
+        switch_boundary: tuple[str, str, str] | None = None
+        capture_switched = False
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
                     capture = self._resolve_capture_instance(cur)
                     if not self._capture_instance_exists(cur, capture):
-                        raise self._missing_capture_error(self.table, capture)
+                        pending = self._pending_capture_switches.get(self.table)
+                        raise self._missing_capture_error(
+                            self.table,
+                            capture,
+                            next_capture_instance=pending[0] if pending else "",
+                            next_start_lsn=pending[1] if pending else "",
+                        )
                     self._maybe_record_capture_schema(cur, offset=self.start_lsn)
                     min_lsn = self._min_lsn(cur)
                     if min_lsn:
@@ -1467,6 +1671,18 @@ class SqlServerNativeCdc:
                             cursor_key=self.cursor_key,
                         )
                     max_lsn = self._max_lsn(cur)
+                    poll_to_lsn = max_lsn
+                    pending_switch = self._pending_capture_switches.get(self.table)
+                    if pending_switch and max_lsn:
+                        new_capture, new_start_lsn = pending_switch
+                        switch_ceiling = self._decrement_lsn_for(cur, new_start_lsn)
+                        switch_boundary = (
+                            new_capture,
+                            new_start_lsn,
+                            switch_ceiling,
+                        )
+                        if compare_mssql_hex_lsn(max_lsn, switch_ceiling) > 0:
+                            poll_to_lsn = switch_ceiling
                     if not min_lsn:
                         logger.debug(
                             "SQL Server CDC capture min_lsn unavailable; emitting "
@@ -1514,6 +1730,7 @@ class SqlServerNativeCdc:
                         compare_mssql_hex_lsn(max_lsn, self.start_lsn) == 0
                         and not self.start_seqval
                         and not self._resume_inclusive
+                        and not switch_boundary
                     ):
                         yield ChangeBatch(
                             resume_token=self._token(
@@ -1551,7 +1768,7 @@ class SqlServerNativeCdc:
                         sql,
                         (
                             _hex_to_lsn(self.start_lsn),
-                            _hex_to_lsn(max_lsn),
+                            _hex_to_lsn(poll_to_lsn),
                             self._row_filter_sql_arg(),
                         ),
                     )
@@ -1603,6 +1820,24 @@ class SqlServerNativeCdc:
                                     group_deletes,
                                 )
                             )
+                    if (
+                        not raw_rows
+                        and switch_boundary
+                        and compare_mssql_hex_lsn(poll_to_lsn, switch_boundary[2]) == 0
+                        and compare_mssql_hex_lsn(max_lsn, switch_boundary[2]) >= 0
+                    ):
+                        old_capture = self.capture_instance
+                        self.start_lsn = switch_boundary[1]
+                        self.start_seqval = ""
+                        self._resume_inclusive = True
+                        self._switch_capture_instance(
+                            cur,
+                            table=self.table,
+                            old_capture=old_capture,
+                            new_capture=switch_boundary[0],
+                            switch_lsn=switch_boundary[1],
+                        )
+                        capture_switched = True
         except CdcLsnGapError:
             raise
         except Exception as exc:
@@ -1631,8 +1866,17 @@ class SqlServerNativeCdc:
                 )
             return
 
-        if max_lsn:
-            self.start_lsn = max_lsn
+        if capture_switched:
+            yield ChangeBatch(
+                resume_token=self._token(
+                    lsn=self.start_lsn, phase="streaming", seqval=self.start_seqval
+                ),
+                table=self.table,
+            )
+            return
+
+        if poll_to_lsn:
+            self.start_lsn = poll_to_lsn
             self._resume_inclusive = False
         token = self._token(
             lsn=self.start_lsn, phase="streaming", seqval=self.start_seqval
@@ -1655,6 +1899,9 @@ class SqlServerNativeCdc:
         failed_table = self.table
         failed_capture_instance = ""
         missing_min_captures: list[str] = []
+        poll_to_lsn = ""
+        switch_boundary: tuple[str, str, str, str] | None = None
+        capture_switched = False
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
@@ -1664,7 +1911,13 @@ class SqlServerNativeCdc:
                         failed_table = table_name
                         failed_capture_instance = capture
                         if not self._capture_instance_exists(cur, capture):
-                            raise self._missing_capture_error(table_name, capture)
+                            pending = self._pending_capture_switches.get(table_name)
+                            raise self._missing_capture_error(
+                                table_name,
+                                capture,
+                                next_capture_instance=pending[0] if pending else "",
+                                next_start_lsn=pending[1] if pending else "",
+                            )
                     # Shared reader: any capture's min_lsn past resume is a gap.
                     for cap in (self._captures or {}).values():
                         if cap:
@@ -1678,6 +1931,37 @@ class SqlServerNativeCdc:
                                 cursor_key=self.cursor_key,
                             )
                     max_lsn = self._max_lsn(cur)
+                    poll_to_lsn = max_lsn
+                    for table_name in self.tables:
+                        pending = self._pending_capture_switches.get(table_name)
+                        if not pending:
+                            continue
+                        new_capture, new_start_lsn = pending
+                        if (
+                            switch_boundary is None
+                            or compare_mssql_hex_lsn(
+                                new_start_lsn, switch_boundary[2]
+                            )
+                            < 0
+                        ):
+                            switch_boundary = (
+                                table_name,
+                                new_capture,
+                                new_start_lsn,
+                                "",
+                            )
+                    if switch_boundary and max_lsn:
+                        switch_ceiling = self._decrement_lsn_for(
+                            cur, switch_boundary[2]
+                        )
+                        switch_boundary = (
+                            switch_boundary[0],
+                            switch_boundary[1],
+                            switch_boundary[2],
+                            switch_ceiling,
+                        )
+                        if compare_mssql_hex_lsn(max_lsn, switch_ceiling) > 0:
+                            poll_to_lsn = switch_ceiling
                     if missing_min_captures:
                         logger.debug(
                             "SQL Server shared CDC capture min_lsn unavailable; "
@@ -1719,6 +2003,7 @@ class SqlServerNativeCdc:
                         compare_mssql_hex_lsn(max_lsn, self.start_lsn) == 0
                         and not self.start_seqval
                         and not self._resume_inclusive
+                        and not switch_boundary
                     ):
                         yield ChangeBatch(
                             resume_token=self._token(
@@ -1732,7 +2017,7 @@ class SqlServerNativeCdc:
                     # Per-table look-ahead so merge can form complete LSN groups.
                     per_limit = max(self.batch_size + 1, 64)
                     from_lsn = _hex_to_lsn(self.start_lsn)
-                    to_lsn = _hex_to_lsn(max_lsn)
+                    to_lsn = _hex_to_lsn(poll_to_lsn)
                     filter_arg = self._row_filter_sql_arg()
                     for table_name in self.tables:
                         failed_table = table_name
@@ -1766,6 +2051,27 @@ class SqlServerNativeCdc:
                                     # LSN already fully consumed by a prior poll.
                                     continue
                             tagged.append((lsn_h, seq_h, table_name, rec))
+                    if (
+                        not tagged
+                        and switch_boundary
+                        and compare_mssql_hex_lsn(poll_to_lsn, switch_boundary[3]) == 0
+                        and compare_mssql_hex_lsn(max_lsn, switch_boundary[3]) >= 0
+                    ):
+                        self.start_lsn = switch_boundary[2]
+                        self.start_seqval = ""
+                        self._resume_inclusive = True
+                        for table_name in self.tables:
+                            pending = self._pending_capture_switches.get(table_name)
+                            if pending and pending[1] == switch_boundary[2]:
+                                old_capture = self._captures.get(table_name) or ""
+                                self._switch_capture_instance(
+                                    cur,
+                                    table=table_name,
+                                    old_capture=old_capture,
+                                    new_capture=pending[0],
+                                    switch_lsn=pending[1],
+                                )
+                        capture_switched = True
         except CdcLsnGapError:
             raise
         except Exception as exc:
@@ -1779,7 +2085,8 @@ class SqlServerNativeCdc:
             raise read_error from exc
 
         if not tagged:
-            self.start_lsn = max_lsn or self.start_lsn
+            if not capture_switched:
+                self.start_lsn = poll_to_lsn or self.start_lsn
             yield ChangeBatch(
                 resume_token=self._token(
                     lsn=self.start_lsn, phase="streaming", seqval=self.start_seqval
@@ -1887,6 +2194,10 @@ class SqlServerNativeCdc:
                 self._capture_resolved = True
                 if self.table:
                     self._captures[self.table] = self.capture_instance
+            for table, capture in (state.get("capture_instances") or {}).items():
+                self._captures[str(table)] = str(capture)
+            if self._shared:
+                self._lease.meta["captures"] = dict(self._captures)
 
     def lag_seconds(self) -> float | None:
         if self._last_event_at is None:

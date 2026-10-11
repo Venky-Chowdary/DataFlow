@@ -229,7 +229,7 @@ def test_native_capture_resolution_preserves_last_known_capture_name() -> None:
     reader = _native_reader()
     reader.capture_instance = "custom_orders_capture"
     cur = MagicMock()
-    cur.fetchone.return_value = None
+    cur.fetchall.return_value = []
 
     capture = reader._resolve_capture_for_table(cur, "orders")
 

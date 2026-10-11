@@ -69,12 +69,12 @@ def test_native_snapshot_handoff_and_capture_resolve() -> None:
     cur.description = [("id",), ("amount",)]
     # resolve capture, max_lsn, schema columns, page1, page2, empty
     cur.fetchone.side_effect = [
-        ("dbo_orders",),  # resolve
         (bytes.fromhex("0abc"),),  # max lsn
         (bytes.fromhex("0abc"),),  # min lsn (floor)
         (bytes.fromhex("0abc"),),  # capture start lsn
     ]
     cur.fetchall.side_effect = [
+        [("dbo_orders", bytes.fromhex("0abc"))],  # resolve capture instances
         [],  # captured_columns
         [("1", "10"), ("2", "20")],
         [("3", "30")],
@@ -123,12 +123,12 @@ def test_native_poll_ops_1_2_4() -> None:
     ]
     # resolve capture, min_lsn (arg eval), max_lsn, then change rows
     cur.fetchone.side_effect = [
-        ("dbo_orders",),
         (1,),  # capture instance exists
         (bytes.fromhex("0a"),),  # min_lsn ≤ resume
         (bytes.fromhex("0c"),),  # max_lsn
     ]
     cur.fetchall.side_effect = [
+        [("dbo_orders", bytes.fromhex("0a"))],  # resolve capture instances
         [],  # captured_columns
         [
             (lsn, bytes.fromhex("01"), 2, "3", "30"),
