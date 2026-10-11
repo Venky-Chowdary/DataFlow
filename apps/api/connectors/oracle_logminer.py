@@ -1233,7 +1233,9 @@ class OracleLogMinerCdc:
         Oracle catalog introspection is current-state, not guaranteed flashback.
         A later DDL or a later ``ALL_OBJECTS.LAST_DDL_TIME`` therefore makes the
         schema version ambiguous; the stream pauses rather than recording a
-        potentially incorrect history entry.
+        potentially incorrect history entry. An operator can acknowledge the
+        matching mapping review to record the then-current schema and release
+        only that DDL marker.
         """
         owner_name = str(owner or "").upper()
         table_name = str(table or "").upper()
@@ -1257,6 +1259,7 @@ class OracleLogMinerCdc:
 
         timing_ambiguity = False
         timing_error: BaseException | None = None
+        acknowledged_review = False
         if ddl_timestamp is not None:
             try:
                 catalog_time = self._oracle_ddl_last_ddl_time(owner_name, table_name)
@@ -1292,22 +1295,72 @@ class OracleLogMinerCdc:
                 )
             )
             try:
-                from services.cdc_mapping_review import flag_mapping_review
+                from services.cdc_mapping_review import (
+                    flag_mapping_review,
+                    list_reviews,
+                )
 
-                flag_mapping_review(
-                    source_key=self.source_key,
-                    table=qualified,
-                    reason="cdc_schema_drift",
-                    ddl=f"{str(ddl or '')[:2000]} [ambiguous schema as of DDL SCN: {ambiguity}]",
-                    column_names=[],
+                marker = (
+                    f"oracle-ddl@scn={scn},rs_id={str(offset.get('rs_id') or '')},"
+                    f"ssn={int(offset.get('ssn') or 0)}"
                 )
+                matching_reviews = [
+                    review
+                    for review in list_reviews(
+                        source_key=self.source_key, status="all", limit=1000
+                    )
+                    if review.get("table") == qualified
+                    and review.get("reason") == "cdc_schema_drift"
+                    and str(review.get("ddl") or "").startswith(f"[{marker}]")
+                ]
             except Exception as exc:
+                raise_ddl_error("mapping-review read", exc)
+
+            open_review = next(
+                (
+                    review
+                    for review in matching_reviews
+                    if review.get("status") == "open"
+                ),
+                None,
+            )
+            acknowledged = next(
+                (
+                    review
+                    for review in matching_reviews
+                    if review.get("status") == "acknowledged"
+                ),
+                None,
+            )
+            if open_review:
                 raise_ddl_error(
-                    "mapping-review write for ambiguous schema as of DDL SCN",
-                    exc,
+                    "ambiguous schema as of DDL SCN",
+                    timing_error or RuntimeError(ambiguity),
                 )
-            cause = timing_error or RuntimeError(ambiguity)
-            raise_ddl_error("ambiguous schema as of DDL SCN", cause)
+            if acknowledged:
+                acknowledged_review = True
+                logger.info(
+                    "Acknowledged Oracle DDL mapping review %s releases %s at SCN %s",
+                    acknowledged.get("id"),
+                    qualified,
+                    scn,
+                )
+            else:
+                try:
+                    flag_mapping_review(
+                        source_key=self.source_key,
+                        table=qualified,
+                        reason="cdc_schema_drift",
+                        ddl=(
+                            f"[{marker}] [ambiguous schema as of DDL SCN: "
+                            f"{ambiguity}] {str(ddl or '')}"
+                        ),
+                        column_names=[],
+                    )
+                except Exception as exc:
+                    raise_ddl_error("mapping-review write", exc)
+                cause = timing_error or RuntimeError(ambiguity)
+                raise_ddl_error("ambiguous schema as of DDL SCN", cause)
 
         try:
             from services.cdc_schema_history import (
@@ -1357,22 +1410,23 @@ class OracleLogMinerCdc:
         except Exception as exc:
             raise_ddl_error("schema-history write", exc)
         self.last_ddl_at = str(entry.get("recorded_at") or "") or None
-        try:
-            from services.cdc_mapping_review import flag_mapping_review
+        if not acknowledged_review:
+            try:
+                from services.cdc_mapping_review import flag_mapping_review
 
-            flag_mapping_review(
-                source_key=self.source_key,
-                table=qualified,
-                reason="cdc_schema_drift",
-                schema_version=int(entry.get("version") or 0) or None,
-                ddl=str(entry.get("ddl") or ""),
-                column_names=[
-                    str(column.get("name") or "")
-                    for column in snapshot["columns"]
-                ],
-            )
-        except Exception as exc:
-            raise_ddl_error("mapping-review write", exc)
+                flag_mapping_review(
+                    source_key=self.source_key,
+                    table=qualified,
+                    reason="cdc_schema_drift",
+                    schema_version=int(entry.get("version") or 0) or None,
+                    ddl=str(entry.get("ddl") or ""),
+                    column_names=[
+                        str(column.get("name") or "")
+                        for column in snapshot["columns"]
+                    ],
+                )
+            except Exception as exc:
+                raise_ddl_error("mapping-review write", exc)
         logger.info(
             "Recorded Oracle LogMiner schema change for %s v%s",
             qualified,

@@ -164,16 +164,20 @@ def test_oracle_logminer_records_live_ddl_without_emitting_it_as_data(
 )
 @pytest.mark.parametrize("txn_buffer", [False, True], ids=["buffer-off", "buffer-on"])
 def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
-    txn_buffer: bool, monkeypatch: pytest.MonkeyPatch
+    txn_buffer: bool, monkeypatch: pytest.MonkeyPatch, tmp_path
 ) -> None:
     from connectors.generic_sql import get_connection as oracle_connection
     from connectors.postgresql_conn import get_connection as pg_connection
     from services.cdc_exactly_once import WATERMARK_TABLE
     from services.brand_env import getenv_brand
+    from services.cdc_mapping_review import acknowledge_review
     from src.transfer.cdc_transfer import run_cdc_database_transfer
     from src.transfer.models import EndpointConfig
 
     monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1" if txn_buffer else "0")
+    monkeypatch.setenv(
+        "CDC_MAPPING_REVIEW_STORE", str(tmp_path / "cdc_mapping_reviews.jsonl")
+    )
     cfg = _oracle_cfg()
     pg = _pg_cfg()
     schema = str(cfg["schema"])
@@ -239,6 +243,7 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
             "sync_mode": "cdc",
         }
     ]
+    reader = None
 
     def run_transfer():
         return run_cdc_database_transfer(
@@ -333,14 +338,7 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
             with conn.cursor() as cur:
                 cur.execute(f"ALTER TABLE {table_ref} ADD (NOTE VARCHAR2(50))")
             conn.commit()
-        with pg_connection(**pg) as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f'ALTER TABLE "public"."{dest_table}" ADD COLUMN note VARCHAR(50)'
-                )
-            conn.commit()
-        mappings.append({"source": "NOTE", "target": "note"})
-        column_types["NOTE"] = "VARCHAR(50)"
+        time.sleep(2.1)
         with oracle_connection(
             host=cfg["host"],
             port=cfg["port"],
@@ -352,11 +350,59 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
             db_type="oracle",
         ) as conn:
             with conn.cursor() as cur:
+                cur.execute(f"GRANT SELECT ON {table_ref} TO PUBLIC")
                 cur.execute(
                     f"INSERT INTO {table_ref} (ID, V, NOTE) "
                     "VALUES (2, 'r2', 'after-ddl')"
                 )
             conn.commit()
+
+        with pg_connection(**pg) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f'ALTER TABLE "public"."{dest_table}" ADD COLUMN note VARCHAR(50)'
+                )
+            conn.commit()
+        mappings.append({"source": "NOTE", "target": "note"})
+        column_types["NOTE"] = "VARCHAR(50)"
+        from connectors.oracle_logminer import OracleLogMinerCdc, OracleLogMinerReadError
+
+        reader = OracleLogMinerCdc(
+            cfg,
+            table=table,
+            primary_key="ID",
+            schema=schema,
+            cursor_key=f"o6-ddl-eos:{table}",
+        )
+
+        with pytest.raises(OracleLogMinerReadError, match="ambiguous schema as of DDL SCN"):
+            run_transfer()
+        first_reviews = [
+            item
+            for item in list_reviews(
+                source_key=reader.source_key, status="all", limit=1000
+            )
+            if item.get("table") == qualified
+            and item.get("reason") == "cdc_schema_drift"
+        ]
+        assert len(first_reviews) == 1
+        assert first_reviews[0]["status"] == "open"
+        assert first_reviews[0]["ddl"].startswith("[oracle-ddl@scn=")
+        assert dest_rows() == [("1", "r1", None)]
+
+        with pytest.raises(OracleLogMinerReadError, match="ambiguous schema as of DDL SCN"):
+            run_transfer()
+        assert len(
+            [
+                item
+                for item in list_reviews(
+                    source_key=reader.source_key, status="all", limit=1000
+                )
+                if item.get("table") == qualified
+                and item.get("reason") == "cdc_schema_drift"
+            ]
+        ) == 1
+        assert acknowledge_review(first_reviews[0]["id"])["status"] == "acknowledged"
 
         run_transfer()
         run_transfer()
@@ -367,21 +413,67 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
             ("2", "r2", "after-ddl"),
         ]
         assert len(actual) == len({row[0] for row in actual})
+        assert len(list_history(reader.source_key, qualified)) == 1
 
-        from connectors.oracle_logminer import OracleLogMinerCdc
+        with oracle_connection(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg["username"],
+            password=cfg["password"],
+            connection_string="",
+            ssl=False,
+            db_type="oracle",
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"ALTER TABLE {table_ref} ADD (NOTE2 VARCHAR2(50))")
+            conn.commit()
+        time.sleep(2.1)
+        with oracle_connection(
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg["username"],
+            password=cfg["password"],
+            connection_string="",
+            ssl=False,
+            db_type="oracle",
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f"GRANT SELECT ON {table_ref} TO PUBLIC")
+                cur.execute(
+                    f"INSERT INTO {table_ref} (ID, V, NOTE, NOTE2) "
+                    "VALUES (3, 'r3', 'after-ddl-2', 'new')"
+                )
+            conn.commit()
+        with pytest.raises(OracleLogMinerReadError, match="ambiguous schema as of DDL SCN"):
+            run_transfer()
 
-        reader = OracleLogMinerCdc(
-            cfg,
-            table=table,
-            primary_key="ID",
-            schema=schema,
-            cursor_key=f"o6-ddl-eos:{table}",
-        )
+        all_reviews = [
+            item
+            for item in list_reviews(
+                source_key=reader.source_key, status="all", limit=1000
+            )
+            if item.get("table") == qualified
+            and item.get("reason") == "cdc_schema_drift"
+        ]
+        assert len(all_reviews) == 2, all_reviews
+        assert sum(item["status"] == "open" for item in all_reviews) == 1
+        assert sum(item["status"] == "acknowledged" for item in all_reviews) == 1
+        assert all_reviews[0]["ddl"].split("] [", 1)[0] != all_reviews[1]["ddl"].split(
+            "] [", 1
+        )[0]
+        assert dest_rows() == [
+            row for row in source_rows() if row[0] in {"1", "2"}
+        ]
+        assert "3" not in {row[0] for row in dest_rows()}
+
         history = list_history(reader.source_key, qualified)
         assert len(history) == 1, history
         assert "ADD" in history[0]["ddl"].upper(), history
-        reader.close()
     finally:
+        if reader is not None:
+            reader.close()
         try:
             with pg_connection(**pg) as conn:
                 with conn.cursor() as cur:
@@ -876,6 +968,11 @@ def _install_buffered_ddl_window(
         "flag_mapping_review",
         lambda **signal: reviews.append(signal),
     )
+    monkeypatch.setattr(
+        cdc_mapping_review,
+        "list_reviews",
+        lambda **_params: [],
+    )
 
     def row(scn, position, operation, sql_redo, table, xid, timestamp=None):
         return (
@@ -989,6 +1086,175 @@ def test_oracle_ambiguous_ddl_fails_closed_without_history(
     assert mining_position(reader.scn, reader.rs_id, reader.ssn) < mining_position(
         20, _oracle_test_rs_id(20), 0
     )
+
+
+def test_oracle_open_ambiguous_ddl_review_pauses_without_reflagging(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from connectors.oracle_logminer import OracleLogMinerReadError
+    from services import cdc_mapping_review
+
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    reader = _unit_reader()
+    reader.phase = "streaming"
+    reader.scn = 1
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    history, reviews, _calls, _connection = _install_buffered_ddl_window(
+        monkeypatch, reader, additional_ddl=True
+    )
+    marker = f"oracle-ddl@scn=20,rs_id={_oracle_test_rs_id(20)},ssn=0"
+    matches = [
+        {
+            "id": "review-open",
+            "table": "DATAFLOW.T1",
+            "reason": "cdc_schema_drift",
+            "ddl": f"[{marker}] [ambiguous schema as of DDL SCN: earlier probe] ALTER TABLE T1",
+            "status": "open",
+        }
+    ]
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        cdc_mapping_review,
+        "list_reviews",
+        lambda **kwargs: calls.append(kwargs) or matches,
+    )
+
+    poll = reader._poll_txn_buffered()
+    before = next(poll)
+    reader.ack(before.resume_token)
+    with pytest.raises(OracleLogMinerReadError, match="ambiguous schema as of DDL SCN"):
+        next(poll)
+
+    assert calls == [
+        {"source_key": reader.source_key, "status": "all", "limit": 1000}
+    ]
+    assert history == []
+    assert reviews == []
+
+
+def test_oracle_acknowledged_ambiguous_review_records_then_passes_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services import cdc_mapping_review
+
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    reader = _unit_reader()
+    reader.phase = "streaming"
+    reader.scn = 1
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    history, reviews, calls, connection_factory = _install_buffered_ddl_window(
+        monkeypatch, reader, additional_ddl=True
+    )
+    marker = f"oracle-ddl@scn=20,rs_id={_oracle_test_rs_id(20)},ssn=0"
+    acknowledged = {
+        "id": "review-ack",
+        "table": "DATAFLOW.T1",
+        "reason": "cdc_schema_drift",
+        "ddl": f"[{marker}] [ambiguous schema as of DDL SCN: operator-approved] ALTER TABLE T1",
+        "status": "acknowledged",
+    }
+    monkeypatch.setattr(
+        cdc_mapping_review, "list_reviews", lambda **_kwargs: [acknowledged]
+    )
+
+    poll = reader._poll_txn_buffered()
+    before = next(poll)
+    reader.ack(before.resume_token)
+    remaining = list(poll)
+    assert [row["ID"] for batch in remaining for row in batch.inserts] == ["2"]
+    assert len(history) == 1
+    assert len(calls) == 1
+    assert reviews == []
+
+    restarted = _unit_reader(resume_token=before.resume_token)
+    monkeypatch.setattr(
+        restarted,
+        "_oracle_ddl_schema_snapshot",
+        lambda _table: {"columns": [{"name": "ID"}, {"name": "NOTE"}]},
+    )
+    monkeypatch.setattr(restarted, "_mining_conn", connection_factory)
+    restarted._record_oracle_ddl(
+        owner="DATAFLOW",
+        table="T1",
+        ddl="ALTER TABLE T1 ADD NOTE",
+        offset={"scn": 20, "rs_id": _oracle_test_rs_id(20), "ssn": 0},
+        ambiguous_later_ddl=True,
+    )
+    assert len(history) == 1
+    assert len(calls) == 1
+    assert reviews == []
+
+
+def test_oracle_acknowledged_review_for_another_ddl_marker_still_pauses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from connectors.oracle_logminer import OracleLogMinerReadError
+    from services import cdc_mapping_review
+
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    reader = _unit_reader()
+    reader.phase = "streaming"
+    reader.scn = 1
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    history, reviews, _calls, _connection = _install_buffered_ddl_window(
+        monkeypatch, reader, additional_ddl=True
+    )
+    different_marker = f"oracle-ddl@scn=19,rs_id={_oracle_test_rs_id(19)},ssn=0"
+    monkeypatch.setattr(
+        cdc_mapping_review,
+        "list_reviews",
+        lambda **_kwargs: [
+            {
+                "id": "different",
+                "table": "DATAFLOW.T1",
+                "reason": "cdc_schema_drift",
+                "ddl": f"[{different_marker}] prior review",
+                "status": "acknowledged",
+            }
+        ],
+    )
+
+    poll = reader._poll_txn_buffered()
+    before = next(poll)
+    reader.ack(before.resume_token)
+    with pytest.raises(OracleLogMinerReadError, match="ambiguous schema as of DDL SCN"):
+        next(poll)
+
+    expected_marker = f"oracle-ddl@scn=20,rs_id={_oracle_test_rs_id(20)},ssn=0"
+    assert history == []
+    assert len(reviews) == 1
+    assert reviews[0]["ddl"].startswith(
+        f"[{expected_marker}] [ambiguous schema as of DDL SCN: "
+    )
+
+
+def test_oracle_mapping_review_read_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from connectors.oracle_logminer import OracleLogMinerReadError
+    from services import cdc_mapping_review
+
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    reader = _unit_reader()
+    reader.phase = "streaming"
+    reader.scn = 1
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    history, reviews, _calls, _connection = _install_buffered_ddl_window(
+        monkeypatch, reader, additional_ddl=True
+    )
+
+    def fail_read(**_kwargs):
+        raise OSError("mapping review store unavailable")
+
+    monkeypatch.setattr(cdc_mapping_review, "list_reviews", fail_read)
+    poll = reader._poll_txn_buffered()
+    before = next(poll)
+    reader.ack(before.resume_token)
+    with pytest.raises(OracleLogMinerReadError, match="mapping-review read"):
+        next(poll)
+
+    assert history == []
+    assert reviews == []
 
 
 @pytest.mark.parametrize(

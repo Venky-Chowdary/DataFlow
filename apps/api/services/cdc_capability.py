@@ -16,6 +16,11 @@ newer than a mined DDL SCN: a later same-window DDL or an
 ``ALL_OBJECTS.LAST_DDL_TIME`` more than one second after the redo timestamp
 pauses CDC for schema review. A GRANT or recompile can also bump that catalog
 timestamp and cause a false pause; the conservative behavior is intentional.
+After reviewing the matching marker, an operator can release that one DDL by
+acknowledging its ``cdc_mapping_review`` through
+``POST /cdc/mapping-reviews/{review_id}/acknowledge``
+(``acknowledge_cdc_mapping_review``); the stream records the then-current
+schema and continues from that DDL.
 """
 
 from __future__ import annotations
