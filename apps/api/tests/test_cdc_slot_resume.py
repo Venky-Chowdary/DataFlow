@@ -736,14 +736,28 @@ def test_retirement_horizon_survives_mongo_reload(retired_store, monkeypatch) ->
 
         def replace_one(self, selector, replacement, *, upsert=False):
             for index, doc in enumerate(self.docs):
-                if all(doc.get(key) == value for key, value in selector.items()):
+                if all(
+                    doc.get(key) != value["$ne"]
+                    if isinstance(value, dict) and "$ne" in value
+                    else doc.get(key) == value
+                    for key, value in selector.items()
+                ):
                     self.docs[index] = dict(replacement)
                     return
             if upsert:
                 self.docs.append(dict(replacement))
 
-        def delete_many(self, _query):
-            self.docs = [doc for doc in self.docs if doc.get("kind") == "horizon"]
+        def delete_many(self, query):
+            selectors = query.get("$nor", [])
+            self.docs = [
+                doc
+                for doc in self.docs
+                if doc.get("kind") == "horizon"
+                or any(
+                    all(doc.get(key) == value for key, value in selector.items())
+                    for selector in selectors
+                )
+            ]
 
         def insert_many(self, docs):
             self.docs.extend(dict(doc) for doc in docs)
@@ -764,6 +778,94 @@ def test_retirement_horizon_survives_mongo_reload(retired_store, monkeypatch) ->
         json.dumps({"resumes": [], "horizons": []}), encoding="utf-8"
     )
     assert slot_lsn_retired("0/10", cursor_key=key, slot_name=slot)
+
+
+def test_retirement_load_unions_mongo_and_file_rows(retired_store, monkeypatch) -> None:
+    import json
+
+    from services import cdc_slot_resume
+
+    class _Mongo:
+        def find(self, *_args, **_kwargs):
+            return [{"lsn": "0/10", "cursor_key": "mongo-key", "slot_name": "slot"}]
+
+    monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: _Mongo())
+    cdc_slot_resume.STORE_PATH.write_text(
+        json.dumps(
+            {
+                "resumes": [
+                    {"lsn": "0/20", "cursor_key": "file-key", "slot_name": "slot"}
+                ],
+                "horizons": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert {
+        (row["lsn"], row["cursor_key"], row["slot_name"])
+        for row in cdc_slot_resume._load()
+    } == {("0/10", "mongo-key", "slot"), ("0/20", "file-key", "slot")}
+
+
+def test_retirement_survives_old_delete_insert_crash_window(
+    retired_store, monkeypatch
+) -> None:
+    import json
+
+    from services import cdc_slot_resume
+
+    class _Mongo:
+        def __init__(self):
+            self.docs = []
+
+        def find(self, *_args, **_kwargs):
+            return [dict(doc) for doc in self.docs]
+
+        def delete_many(self, _query):
+            self.docs.clear()
+
+    mongo = _Mongo()
+    monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: mongo)
+    row = {"lsn": "0/20", "cursor_key": "key", "slot_name": "slot"}
+    cdc_slot_resume.STORE_PATH.write_text(
+        json.dumps({"resumes": [row], "horizons": []}), encoding="utf-8"
+    )
+    mongo.delete_many({"kind": {"$ne": "horizon"}})
+
+    assert slot_lsn_retired("0/20", cursor_key="key", slot_name="slot")
+
+
+def test_retirement_upserts_before_stale_mongo_delete(
+    retired_store, monkeypatch
+) -> None:
+    from services import cdc_slot_resume
+
+    class _Mongo:
+        def __init__(self):
+            self.docs = []
+            self.calls = []
+
+        def find(self, *_args, **_kwargs):
+            return [dict(doc) for doc in self.docs]
+
+        def replace_one(self, selector, replacement, *, upsert=False):
+            self.calls.append("upsert")
+            self.docs.append(dict(replacement))
+
+        def delete_many(self, _query):
+            self.calls.append("delete")
+            raise OSError("crash after upsert")
+
+    mongo = _Mongo()
+    monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: mongo)
+    row = {"lsn": "0/20", "cursor_key": "key", "slot_name": "slot"}
+
+    with pytest.raises(OSError, match="crash after upsert"):
+        cdc_slot_resume._save([row])
+
+    assert mongo.calls == ["upsert", "delete"]
+    assert slot_lsn_retired("0/20", cursor_key="key", slot_name="slot")
 
 
 def test_post_drop_retirement_failure_is_reported(retired_store, monkeypatch, caplog) -> None:

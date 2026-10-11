@@ -73,30 +73,36 @@ def _mongo_retired():  # type: ignore[no-untyped-def]
 
 
 def _load() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     coll = _mongo_retired()
     if coll is not None:
         try:
             docs = list(coll.find({}, {"_id": 0}))
-            if docs:
-                return [
-                    doc
-                    for doc in docs
-                    if isinstance(doc, dict) and doc.get("kind") != "horizon"
-                ]
+            rows.extend(
+                doc
+                for doc in docs
+                if isinstance(doc, dict) and doc.get("kind") != "horizon"
+            )
         except Exception as exc:  # noqa: BLE001
             _logger.debug("retired-slot mongo read failed: %s", exc)
-    if not STORE_PATH.exists():
-        return []
     try:
         import json
 
         payload = json.loads(STORE_PATH.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
-        return []
-    rows = payload.get("resumes") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-        return []
-    return [row for row in rows if isinstance(row, dict)]
+        payload = {}
+    file_rows = payload.get("resumes") if isinstance(payload, dict) else None
+    if isinstance(file_rows, list):
+        rows.extend(row for row in file_rows if isinstance(row, dict))
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        identity = (
+            str(row.get("lsn") or ""),
+            str(row.get("cursor_key") or ""),
+            str(row.get("slot_name") or ""),
+        )
+        merged[identity] = row
+    return list(merged.values())
 
 
 def _merge_horizons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -193,14 +199,27 @@ def _save(rows: list[dict[str, Any]]) -> None:
                     "cursor_key": horizon["cursor_key"],
                     "family": horizon["family"],
                 }
-                coll.replace_one(
-                    selector,
-                    {"kind": "horizon", **horizon},
-                    upsert=True,
+                coll.replace_one(selector, {"kind": "horizon", **horizon}, upsert=True)
+            selectors = []
+            for row in kept:
+                selector = {
+                    "kind": {"$ne": "horizon"},
+                    "lsn": str(row.get("lsn") or ""),
+                    "cursor_key": str(row.get("cursor_key") or ""),
+                    "slot_name": str(row.get("slot_name") or ""),
+                }
+                coll.replace_one(selector, row, upsert=True)
+                selectors.append(
+                    {
+                        "lsn": selector["lsn"],
+                        "cursor_key": selector["cursor_key"],
+                        "slot_name": selector["slot_name"],
+                    }
                 )
-            coll.delete_many({"kind": {"$ne": "horizon"}})
-            if kept:
-                coll.insert_many(kept)
+            stale = {"kind": {"$ne": "horizon"}}
+            if selectors:
+                stale["$nor"] = selectors
+            coll.delete_many(stale)
         except Exception as exc:  # noqa: BLE001
             _logger.warning(
                 "retired-slot mongo write failed (%s)", type(exc).__name__
