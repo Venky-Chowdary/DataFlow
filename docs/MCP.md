@@ -69,6 +69,7 @@ defined by `services.rbac`.
 | `rank_connector_tables` | `query.use` | `read` |
 | `recommend_sync_mode` | `workspace.read` | `read` |
 | `remediate_validation` | `job.plan` | `plan` |
+| `repair_cdc_drift` | `job.manage` | `mutate` |
 | `replay_quarantine` | `job.manage` | `mutate` |
 | `resume_job` | `job.manage` | `mutate` |
 | `retry_job` | `job.manage` | `mutate` |
@@ -85,6 +86,12 @@ defined by `services.rbac`.
 | `test_connector` | `connector.read` | `read` |
 | `update_connector` | `connector.write` | `mutate` |
 | `update_schedule` | `schedule.manage` | `mutate` |
+
+`repair_cdc_drift` never writes when called. It stages a confirmation for
+the job's recorded CDC drift evidence; the fenced re-copy of the selected keys
+runs only after `confirm_action`, which re-checks `job.manage`, the workspace and
+that the evidence belongs to the job and table. This is state convergence /
+reconciliation, not log replay.
 
 Unknown tools are denied. `confirm_action` is not implicitly enabled when
 another mutating tool is allowed; it is governed independently.
