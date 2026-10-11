@@ -18,6 +18,7 @@ migration_proven. Not platform exactly-once.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ _logger = logging.getLogger(__name__)
 
 STORE_PATH = data_dir() / "cdc_retired_slot_resumes.json"
 _MAX_RECORDS = 500
+_MAX_OPAQUE_HASHES = 500
 
 
 def _now() -> str:
@@ -110,17 +112,30 @@ def _merge_horizons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from services.cdc_exactly_once import assert_comparable_lsn
 
     merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    opaque: dict[tuple[str, str], set[str]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
         token = _lsn_of(row.get("lsn"))
-        if not token:
-            continue
         key = str(row.get("cursor_key") or "").strip()
         slot = str(row.get("slot_name") or "").strip()[:63]
         if not key and not slot:
             continue
-        family = lsn_family(token)
+        family = str(row.get("family") or lsn_family(token))
+        if family == "opaque":
+            hashes = opaque.setdefault((slot, key), set())
+            existing_hashes = row.get("opaque_hashes")
+            if isinstance(existing_hashes, list):
+                hashes.update(
+                    str(value)
+                    for value in existing_hashes
+                    if isinstance(value, str) and value
+                )
+            if token:
+                hashes.add(hashlib.sha256(token.encode("utf-8")).hexdigest())
+            continue
+        if not token:
+            continue
         identity = (slot, key, family)
         current = merged.get(identity)
         if current is not None:
@@ -135,7 +150,17 @@ def _merge_horizons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "slot_name": slot,
             "family": family,
         }
-    return list(merged.values())
+    output = list(merged.values())
+    for (slot, key), hashes in opaque.items():
+        output.append(
+            {
+                "cursor_key": key,
+                "slot_name": slot,
+                "family": "opaque",
+                "opaque_hashes": sorted(hashes)[-_MAX_OPAQUE_HASHES:],
+            }
+        )
+    return output
 
 
 def _load_horizons() -> list[dict[str, Any]]:
@@ -299,11 +324,17 @@ def slot_lsn_retired(
             continue
         if slot and horizon_slot != slot:
             continue
-        horizon_lsn = str(horizon.get("lsn") or "")
-        if lsn_family(horizon_lsn) != family:
+        horizon_family = str(
+            horizon.get("family") or lsn_family(horizon.get("lsn") or "")
+        )
+        if horizon_family != family:
             continue
         if family == "opaque":
-            return True
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            if token_hash in horizon.get("opaque_hashes", []):
+                return True
+            continue
+        horizon_lsn = str(horizon.get("lsn") or "")
         assert_comparable_lsn(token, horizon_lsn)
         if lsn_sort_key(token) <= lsn_sort_key(horizon_lsn):
             return True

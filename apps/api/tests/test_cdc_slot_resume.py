@@ -717,6 +717,37 @@ def test_retirement_horizons_are_kept_per_lsn_family(
     assert not slot_lsn_retired("3", cursor_key=key, slot_name=slot)
 
 
+def test_opaque_eviction_uses_exact_bounded_hashes(
+    retired_store, monkeypatch
+) -> None:
+    import hashlib
+    import json
+
+    from services import cdc_slot_resume
+
+    slot = "reused_slot"
+    key = "pg:job:stream"
+    monkeypatch.setattr(cdc_slot_resume, "_MAX_RECORDS", 1)
+    cdc_slot_resume.retire_slot_lsn(
+        "opaque-token-old", cursor_key=key, slot_name=slot
+    )
+    cdc_slot_resume.retire_slot_lsn(
+        "opaque-token-current", cursor_key=key, slot_name=slot
+    )
+
+    payload = json.loads(cdc_slot_resume.STORE_PATH.read_text(encoding="utf-8"))
+    opaque_horizon = next(
+        row for row in payload["horizons"] if row["family"] == "opaque"
+    )
+    assert opaque_horizon["opaque_hashes"] == [
+        hashlib.sha256(b"opaque-token-old").hexdigest()
+    ]
+    assert "opaque-token-old" not in json.dumps(opaque_horizon)
+    assert slot_lsn_retired("opaque-token-old", cursor_key=key, slot_name=slot)
+    assert slot_lsn_retired("opaque-token-current", cursor_key=key, slot_name=slot)
+    assert not slot_lsn_retired("opaque-token-fresh", cursor_key=key, slot_name=slot)
+
+
 def test_retirement_horizon_survives_mongo_reload(retired_store, monkeypatch) -> None:
     import json
 
