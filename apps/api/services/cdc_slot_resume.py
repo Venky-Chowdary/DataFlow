@@ -112,7 +112,7 @@ def _merge_horizons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     from services.cdc_exactly_once import assert_comparable_lsn
 
     merged: dict[tuple[str, str, str], dict[str, Any]] = {}
-    opaque: dict[tuple[str, str], set[str]] = {}
+    opaque: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -123,16 +123,28 @@ def _merge_horizons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         family = str(row.get("family") or lsn_family(token))
         if family == "opaque":
-            hashes = opaque.setdefault((slot, key), set())
+            state = opaque.setdefault(
+                (slot, key), {"hashes": set(), "overflow": False}
+            )
+            hashes = state["hashes"]
+            if row.get("opaque_overflow"):
+                state["overflow"] = True
             existing_hashes = row.get("opaque_hashes")
-            if isinstance(existing_hashes, list):
-                hashes.update(
-                    str(value)
-                    for value in existing_hashes
-                    if isinstance(value, str) and value
-                )
-            if token:
-                hashes.add(hashlib.sha256(token.encode("utf-8")).hexdigest())
+            if not state["overflow"] and isinstance(existing_hashes, list):
+                for value in existing_hashes:
+                    if not isinstance(value, str) or not value or value in hashes:
+                        continue
+                    if len(hashes) >= _MAX_OPAQUE_HASHES:
+                        state["overflow"] = True
+                        break
+                    hashes.add(value)
+            if not state["overflow"] and token:
+                token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+                if token_hash not in hashes:
+                    if len(hashes) >= _MAX_OPAQUE_HASHES:
+                        state["overflow"] = True
+                    else:
+                        hashes.add(token_hash)
             continue
         if not token:
             continue
@@ -151,15 +163,16 @@ def _merge_horizons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "family": family,
         }
     output = list(merged.values())
-    for (slot, key), hashes in opaque.items():
-        output.append(
-            {
-                "cursor_key": key,
-                "slot_name": slot,
-                "family": "opaque",
-                "opaque_hashes": sorted(hashes)[-_MAX_OPAQUE_HASHES:],
-            }
-        )
+    for (slot, key), state in opaque.items():
+        horizon = {
+            "cursor_key": key,
+            "slot_name": slot,
+            "family": "opaque",
+            "opaque_hashes": sorted(state["hashes"]),
+        }
+        if state["overflow"]:
+            horizon["opaque_overflow"] = True
+        output.append(horizon)
     return output
 
 
@@ -330,6 +343,8 @@ def slot_lsn_retired(
         if horizon_family != family:
             continue
         if family == "opaque":
+            if horizon.get("opaque_overflow"):
+                return True
             token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
             if token_hash in horizon.get("opaque_hashes", []):
                 return True
@@ -339,6 +354,34 @@ def slot_lsn_retired(
         if lsn_sort_key(token) <= lsn_sort_key(horizon_lsn):
             return True
     return False
+
+
+def _opaque_overflow_slot(
+    lsn: Any, *, cursor_key: str, slot_name: str
+) -> str | None:
+    token = _lsn_of(lsn)
+    if not token:
+        return None
+    from connectors.lsn_guards import lsn_family
+
+    if lsn_family(token) != "opaque":
+        return None
+    key = str(cursor_key or "").strip()
+    slot = str(slot_name or "").strip()[:63]
+    if not key and not slot:
+        return None
+    for horizon in _load_horizons():
+        if str(horizon.get("family") or "") != "opaque":
+            continue
+        horizon_key = str(horizon.get("cursor_key") or "")
+        horizon_slot = str(horizon.get("slot_name") or "")
+        if key and horizon_key != key:
+            continue
+        if slot and horizon_slot != slot:
+            continue
+        if horizon.get("opaque_overflow"):
+            return horizon_slot or slot or "(unknown)"
+    return None
 
 
 def pre_retire_slot_resume(
@@ -455,6 +498,23 @@ def without_retired_slot_resume(
     key = str(cursor_key or "").strip()
     dest_lsn = getattr(view, "committed_lsn", None)
     blob = getattr(view, "resume_blob", None)
+    for raw in (dest_lsn, blob, job_resume):
+        overflow_slot = _opaque_overflow_slot(
+            raw,
+            cursor_key=key,
+            slot_name=_slot_of(raw) or _slot_of(blob),
+        )
+        if overflow_slot:
+            from services.cdc_cursor_gap import CdcSlotGapError
+
+            raise CdcSlotGapError(
+                f"PostgreSQL slot {overflow_slot} has opaque resume-retirement "
+                "history overflow; a fresh snapshot is required before opening "
+                "this cursor.",
+                slot_name=overflow_slot,
+                wal_status="opaque_retirement_overflow",
+                cursor_key=key,
+            )
     if slot_lsn_retired(dest_lsn, cursor_key=key, slot_name=_slot_of(blob)) or slot_lsn_retired(
         blob, cursor_key=key, slot_name=_slot_of(blob)
     ):
