@@ -84,7 +84,7 @@ def list_reviews(
         lines = path.read_text(encoding="utf-8").splitlines()
     except Exception as exc:
         logger.error("Failed reading CDC mapping review store: %s", exc)
-        raise
+        return []
     for line in reversed(lines):
         if not line.strip():
             continue

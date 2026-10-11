@@ -1466,6 +1466,47 @@ def test_oracle_mapping_review_read_failure_fails_closed(
     assert reviews == []
 
 
+def test_oracle_corrupt_mapping_review_store_fails_closed_without_later_dml(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from connectors.oracle_logminer import OracleLogMinerReadError
+    from services import cdc_mapping_review
+
+    store_path = tmp_path / "cdc_mapping_reviews.jsonl"
+    store_path.write_text("{corrupt json\n", encoding="utf-8")
+    monkeypatch.setenv("CDC_MAPPING_REVIEW_STORE", str(store_path))
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    real_list_reviews = cdc_mapping_review.list_reviews
+    reader = _unit_reader()
+    reader.phase = "streaming"
+    reader.scn = 1
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    history, reviews, _calls, _connection = _install_buffered_ddl_window(
+        monkeypatch, reader, additional_ddl=True
+    )
+    monkeypatch.setattr(cdc_mapping_review, "list_reviews", real_list_reviews)
+    assert (
+        cdc_mapping_review.list_reviews(
+            source_key=reader.source_key, status="all", limit=1000
+        )
+        == []
+    )
+
+    poll = reader._poll_txn_buffered()
+    before = next(poll)
+    assert [row["ID"] for row in before.inserts] == ["1"]
+    reader.ack(before.resume_token)
+    with pytest.raises(
+        OracleLogMinerReadError, match="ambiguous schema as of DDL SCN"
+    ):
+        next(poll)
+
+    assert history == []
+    assert len(reviews) == 1
+    assert reviews[0]["reason"] == "cdc_schema_drift"
+
+
 @pytest.mark.parametrize(
     ("failure_stage", "expected_history_count"),
     [
