@@ -748,38 +748,123 @@ def test_opaque_eviction_uses_exact_bounded_hashes(
     assert not slot_lsn_retired("opaque-token-fresh", cursor_key=key, slot_name=slot)
 
 
-def _opaque_overflow_rows(slot: str, key: str) -> tuple[list[dict[str, str]], str, str]:
+class _FakeRetiredMongo:
+    def __init__(self):
+        self.docs = []
+
+    def find(self, query=None, *_args, **_kwargs):
+        query = query or {}
+        return [
+            dict(doc)
+            for doc in self.docs
+            if all(doc.get(key) == value for key, value in query.items())
+        ]
+
+    def replace_one(self, selector, replacement, *, upsert=False):
+        for index, doc in enumerate(self.docs):
+            if all(
+                doc.get(key) != value["$ne"]
+                if isinstance(value, dict) and "$ne" in value
+                else doc.get(key) == value
+                for key, value in selector.items()
+            ):
+                self.docs[index] = dict(replacement)
+                return
+        if upsert:
+            self.docs.append(dict(replacement))
+
+    def delete_many(self, query):
+        selectors = query.get("$nor", [])
+        self.docs = [
+            doc
+            for doc in self.docs
+            if doc.get("kind") == "horizon"
+            or any(
+                all(doc.get(key) == value for key, value in selector.items())
+                for selector in selectors
+            )
+        ]
+
+    def insert_many(self, docs):
+        self.docs.extend(dict(doc) for doc in docs)
+
+
+def _opaque_overflow_rows(
+    slot: str, key: str, token_count: int = 503
+) -> tuple[list[dict[str, str]], str, str]:
     import hashlib
+    import random
 
     tokens = sorted(
-        (f"opaque-overflow-{index}" for index in range(503)),
+        (f"opaque-overflow-{index}" for index in range(token_count)),
         key=lambda token: hashlib.sha256(token.encode("utf-8")).hexdigest(),
     )
-    first, middle = tokens[:2]
-    rows = [{"lsn": first, "cursor_key": key, "slot_name": slot}]
-    rows.extend(
+    first = tokens[0]
+    middle = random.Random(17).choice(tokens[1:-1])
+    rows = [
         {"lsn": token, "cursor_key": key, "slot_name": slot}
-        for token in tokens[2:251]
-    )
-    rows.append({"lsn": middle, "cursor_key": key, "slot_name": slot})
-    rows.extend(
-        {"lsn": token, "cursor_key": key, "slot_name": slot}
-        for token in tokens[251:]
-    )
+        for token in tokens
+    ]
     return rows, first, middle
 
 
-def test_opaque_overflow_refuses_retired_tokens_on_open(
-    retired_store, monkeypatch
+@pytest.mark.parametrize("store", ["file", "mongo"])
+def test_opaque_overflow_is_fail_closed_and_persisted_for_each_store(
+    store, retired_store, monkeypatch
 ) -> None:
+    import json
+
     from services import cdc_slot_resume
     from services.cdc_cursor_gap import CdcSlotGapError
 
     slot = "reused_slot"
     key = "pg:job:stream"
-    rows, first, middle = _opaque_overflow_rows(slot, key)
-    monkeypatch.setattr(cdc_slot_resume, "_MAX_RECORDS", 1)
+    rows, first, middle = _opaque_overflow_rows(
+        slot, key, cdc_slot_resume._MAX_OPAQUE_HASHES + 1
+    )
+    mongo = None
+    if store == "file":
+        monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: None)
+    else:
+        mongo = _FakeRetiredMongo()
+        monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: mongo)
+    monkeypatch.setattr(cdc_slot_resume, "_MAX_RECORDS", 0)
     cdc_slot_resume._save(rows)
+
+    payload = json.loads(cdc_slot_resume.STORE_PATH.read_text(encoding="utf-8"))
+    if store == "file":
+        horizon = next(
+            row
+            for row in payload["horizons"]
+            if row["slot_name"] == slot
+            and row["cursor_key"] == key
+            and row["family"] == "opaque"
+        )
+    else:
+        assert mongo is not None
+        horizon = next(
+            row
+            for row in mongo.docs
+            if row.get("kind") == "horizon"
+            and row["slot_name"] == slot
+            and row["cursor_key"] == key
+            and row["family"] == "opaque"
+        )
+        payload["horizons"] = []
+        cdc_slot_resume.STORE_PATH.write_text(
+            json.dumps(payload), encoding="utf-8"
+        )
+
+    assert horizon["opaque_overflow"] is True
+    assert len(horizon["opaque_hashes"]) == cdc_slot_resume._MAX_OPAQUE_HASHES
+    reloaded = cdc_slot_resume._load_horizons()
+    assert any(
+        row["slot_name"] == slot
+        and row["cursor_key"] == key
+        and row["family"] == "opaque"
+        and row["opaque_overflow"] is True
+        for row in reloaded
+    )
 
     for token in (first, middle):
         resume = f"lsn={token}|slot={slot}"
@@ -792,111 +877,45 @@ def test_opaque_overflow_refuses_retired_tokens_on_open(
         assert raised.value.slot_name == slot
         assert "fresh snapshot is required" in str(raised.value).lower()
 
-    fresh_resume = "lsn=opaque-never-retired|slot=another_slot"
-    fresh_view = DestWmView(
-        committed_lsn="opaque-never-retired",
-        resume_blob=fresh_resume,
-    )
-    unchanged, job_resume = without_retired_slot_resume(
-        fresh_view,
-        fresh_resume,
-        cursor_key="another-key",
-    )
-    assert unchanged.committed_lsn == "opaque-never-retired"
-    assert job_resume == fresh_resume
+    for fresh_slot, fresh_key in (
+        ("another_slot", key),
+        (slot, "pg:job:another-stream"),
+    ):
+        token = f"opaque-never-retired-{store}-{fresh_slot}-{fresh_key}"
+        resume = f"lsn={token}|slot={fresh_slot}"
+        fresh_view = DestWmView(committed_lsn=token, resume_blob=resume)
+        assert not slot_lsn_retired(
+            token, cursor_key=fresh_key, slot_name=fresh_slot
+        )
+        unchanged, job_resume = without_retired_slot_resume(
+            fresh_view, resume, cursor_key=fresh_key
+        )
+        assert unchanged.committed_lsn == token
+        assert unchanged.resume_blob == resume
+        assert job_resume == resume
 
 
-def test_opaque_overflow_flag_survives_file_reload(
-    retired_store, monkeypatch
-) -> None:
+def test_opaque_overflow_union_uses_or_semantics(retired_store, monkeypatch) -> None:
     import json
 
     from services import cdc_slot_resume
 
-    slot = "reused_slot"
-    key = "pg:job:stream"
-    rows, first, middle = _opaque_overflow_rows(slot, key)
-    monkeypatch.setattr(cdc_slot_resume, "_MAX_RECORDS", 1)
-    cdc_slot_resume._save(rows)
-
-    payload = json.loads(cdc_slot_resume.STORE_PATH.read_text(encoding="utf-8"))
-    horizon = next(row for row in payload["horizons"] if row["family"] == "opaque")
-    assert horizon["opaque_overflow"] is True
-    assert len(horizon["opaque_hashes"]) == cdc_slot_resume._MAX_OPAQUE_HASHES
-    cdc_slot_resume.STORE_PATH.write_text(json.dumps(payload), encoding="utf-8")
-
-    assert slot_lsn_retired(first, cursor_key=key, slot_name=slot)
-    assert slot_lsn_retired(middle, cursor_key=key, slot_name=slot)
-
-
-def test_opaque_overflow_flag_survives_mongo_reload_and_unions_with_file(
-    retired_store, monkeypatch
-) -> None:
-    import json
-
-    from services import cdc_slot_resume
-
-    class _Mongo:
-        def __init__(self):
-            self.docs = []
-
-        def find(self, query=None, *_args, **_kwargs):
-            query = query or {}
-            return [
-                dict(doc)
-                for doc in self.docs
-                if all(doc.get(key) == value for key, value in query.items())
-            ]
-
-        def replace_one(self, selector, replacement, *, upsert=False):
-            for index, doc in enumerate(self.docs):
-                if all(
-                    doc.get(key) != value["$ne"]
-                    if isinstance(value, dict) and "$ne" in value
-                    else doc.get(key) == value
-                    for key, value in selector.items()
-                ):
-                    self.docs[index] = dict(replacement)
-                    return
-            if upsert:
-                self.docs.append(dict(replacement))
-
-        def delete_many(self, query):
-            selectors = query.get("$nor", [])
-            self.docs = [
-                doc
-                for doc in self.docs
-                if doc.get("kind") == "horizon"
-                or any(
-                    all(doc.get(key) == value for key, value in selector.items())
-                    for selector in selectors
-                )
-            ]
-
-    mongo = _Mongo()
+    mongo = _FakeRetiredMongo()
     monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: mongo)
-    monkeypatch.setattr(cdc_slot_resume, "_MAX_RECORDS", 1)
+    monkeypatch.setattr(cdc_slot_resume, "_MAX_RECORDS", 0)
     slot = "reused_slot"
     key = "pg:job:stream"
-    rows, _first, middle = _opaque_overflow_rows(slot, key)
+    rows, _first, _middle = _opaque_overflow_rows(
+        slot, key, cdc_slot_resume._MAX_OPAQUE_HASHES + 1
+    )
     cdc_slot_resume._save(rows)
-
     mongo_horizon = next(
         doc for doc in mongo.docs if doc.get("kind") == "horizon"
     )
     assert mongo_horizon["opaque_overflow"] is True
-    payload = json.loads(cdc_slot_resume.STORE_PATH.read_text(encoding="utf-8"))
-    payload["horizons"] = []
-    cdc_slot_resume.STORE_PATH.write_text(json.dumps(payload), encoding="utf-8")
-    assert cdc_slot_resume._load_horizons()[0]["opaque_overflow"] is True
-    assert slot_lsn_retired(middle, cursor_key=key, slot_name=slot)
 
-    payload["horizons"] = [
-        {
-            **mongo_horizon,
-            "opaque_overflow": False,
-        }
-    ]
+    payload = json.loads(cdc_slot_resume.STORE_PATH.read_text(encoding="utf-8"))
+    payload["horizons"] = [{**mongo_horizon, "opaque_overflow": False}]
     cdc_slot_resume.STORE_PATH.write_text(json.dumps(payload), encoding="utf-8")
     assert cdc_slot_resume._load_horizons()[0]["opaque_overflow"] is True
 
