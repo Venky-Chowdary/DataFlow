@@ -327,7 +327,7 @@ def _cdc_transfer_harness(
     monkeypatch.setattr(
         cdc_eos_sql,
         "open_eos_session",
-        lambda **_kwargs: SimpleNamespace(resume=None),
+        lambda **_kwargs: SimpleNamespace(resume=None, dest_lsn=None, fence_epoch=0),
     )
     monkeypatch.setattr(
         cdc_eos_sql,
