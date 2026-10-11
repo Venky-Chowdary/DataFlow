@@ -1614,7 +1614,14 @@ def _write_destination_database(
                 f"SNOWFLAKE COLUMN {col} {ddl_type('snowflake', schema.get(col, 'string'))}"
             )
         result = write_mapped_rows(
-            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+            source_timezone=str(
+                (endpoint.extra or {}).get("source_timezone")
+                or (cfg.get("extra") or {}).get("source_timezone")
+                or ""
+            ),
         )
         if not result.ok:
             raise_writer_failure(result, "Snowflake write failed")

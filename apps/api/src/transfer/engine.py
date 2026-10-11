@@ -1389,6 +1389,11 @@ class UniversalTransferEngine:
         request.destination = resolve_endpoint(
             request.destination, workspace_id=request.workspace_id
         )
+        if request.source_timezone:
+            request.destination.extra = {
+                **(request.destination.extra or {}),
+                "source_timezone": request.source_timezone,
+            }
 
     def execute_tracked(
         self, request: TransferRequest, job_id: str, resume: bool = False

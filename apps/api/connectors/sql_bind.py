@@ -2361,6 +2361,7 @@ def normalize_sql_bind_value(
     ddl_type: str,
     *,
     engine: str = "",
+    source_timezone: str = "",
 ) -> Any:
     """Route value through shared boolean/JSON/binary bind for ``ddl_type``.
 
@@ -2385,7 +2386,12 @@ def normalize_sql_bind_value(
         return coerce_set_wire(value, ddl_type=route.ddl_arg, as_list=route.pg_list)
 
     if route.is_temporal_candidate:
-        temporal = coerce_sql_temporal(value, ddl_type, engine=route.eng)
+        temporal = coerce_sql_temporal(
+            value,
+            ddl_type,
+            engine=route.eng,
+            source_timezone=source_timezone,
+        )
         if temporal is not value:
             return temporal
 

@@ -277,6 +277,7 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
         request = TransferRequest(
             source=source,
             destination=_snowflake_endpoint(dst_table),
+            source_timezone="UTC",
             sync_mode="full_refresh_overwrite",
             stream_contracts=[{"name": src_collection, "sync_mode": "full_refresh_overwrite",
                                "primary_key": "id", "selected": True}],
@@ -304,6 +305,91 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
         c = MongoClient("localhost", 27017, serverSelectionTimeoutMS=5000)
         c["dataflow"][src_collection].drop()
         c.close()
+
+
+def test_mongodb_to_snowflake_messy_docs_refuses_zoneless_without_source_timezone():
+    pytest.importorskip("fakesnow")
+    try:
+        with socket.create_connection(("localhost", 27017), timeout=1):
+            pass
+    except OSError as exc:
+        pytest.skip(f"Emulator not reachable: {exc}")
+
+    from datetime import datetime, timezone
+
+    from bson.decimal128 import Decimal128
+    from pymongo import MongoClient
+
+    src_collection = "mdb_to_sf_src_" + uuid.uuid4().hex[:8]
+    dst_table = "mdb_to_sf_" + uuid.uuid4().hex[:8]
+    client = MongoClient("localhost", 27017, serverSelectionTimeoutMS=5000)
+    client["dataflow"][src_collection].insert_many([
+        {"id": 1, "name": "alice", "profile": {"age": 30, "city": "NYC"},
+         "tags": ["vip", "beta"], "score": 10, "active": True,
+         "created": datetime(2024, 1, 1, tzinfo=timezone.utc), "balance": Decimal128("100.50")},
+        {"id": 2, "name": "bob", "profile": {"age": "unknown"}, "tags": "single",
+         "score": "N/A", "active": "true", "created": "2024-06-01", "extra": "surprise"},
+        {"id": 3, "name": None, "profile": None, "tags": [], "score": 3.14,
+         "nested_array": [{"k": 1}, {"k": 2}]},
+    ])
+    client.close()
+
+    source = EndpointConfig(
+        kind="database",
+        format="mongodb",
+        host="localhost",
+        port=27017,
+        database="dataflow",
+        table=src_collection,
+    )
+    try:
+        request = TransferRequest(
+            source=source,
+            destination=_snowflake_endpoint(dst_table),
+            sync_mode="full_refresh_overwrite",
+            stream_contracts=[{"name": src_collection, "sync_mode": "full_refresh_overwrite",
+                               "primary_key": "id", "selected": True}],
+            skip_preflight=True,
+        )
+        result = UniversalTransferEngine().execute_tracked(
+            request, uuid.uuid4().hex[:24]
+        )
+        assert (
+            result.success is False
+            or int(result.reconciliation.get("rejected_rows", 0) or 0) > 0
+        )
+        detail = (result.error or "") + repr(result.reconciliation)
+        assert "created" in detail.lower()
+        assert "row 2" in detail.lower()
+        assert "source_timezone" in detail
+
+        from connectors.snowflake_conn import get_connection
+        from connectors.sql_temporal import input_has_timezone
+
+        conn = get_connection(
+            account="localhost", username="t", password="t",
+            database="dataflow", schema="public", warehouse="", connection_string="",
+        )
+        try:
+            cur = conn.cursor()
+            try:
+                cur.execute(f'SELECT "created" FROM "{dst_table}" WHERE "id" = 2')
+            except Exception as exc:
+                if not any(
+                    marker in str(exc).lower()
+                    for marker in ("does not exist", "not found", "unknown table")
+                ):
+                    raise
+            else:
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    assert not input_has_timezone(row[0]), row[0]
+        finally:
+            conn.close()
+    finally:
+        cleanup = MongoClient("localhost", 27017, serverSelectionTimeoutMS=5000)
+        cleanup["dataflow"][src_collection].drop()
+        cleanup.close()
 
 
 def test_dynamodb_to_snowflake():

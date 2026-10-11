@@ -719,6 +719,7 @@ def _bind_rows_for_snowflake(
     policy: str,
     *,
     mappings: list[dict[str, Any]] | None = None,
+    source_timezone: str = "",
 ) -> list[tuple]:
     """Normalize every cell with shared sql_bind before COPY / INSERT / MERGE.
 
@@ -739,6 +740,7 @@ def _bind_rows_for_snowflake(
         engine="snowflake",
         dialect_label="Snowflake",
         mappings=mappings,
+        source_timezone=source_timezone,
     )
 
 
@@ -1005,6 +1007,7 @@ def _load_rows_into_table(
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
     mappings: list[dict[str, Any]] | None = None,
+    source_timezone: str = "",
 ) -> str:
     """Load rows into ``table_name`` via COPY INTO when possible; else INSERT.
 
@@ -1019,6 +1022,7 @@ def _load_rows_into_table(
         details,
         policy,
         mappings=mappings,
+        source_timezone=source_timezone,
     )
     total = len(mapped_rows)
     use_copy = (
@@ -1116,6 +1120,7 @@ def _merge_batch_via_temp(
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
     mappings: list[dict[str, Any]] | None = None,
+    source_timezone: str = "",
 ) -> int:
     """Stage the batch into a temp table, then run a single MERGE into the target."""
     if not mapped_rows:
@@ -1148,6 +1153,7 @@ def _merge_batch_via_temp(
             rejected_details=rejected_details,
             policy=policy,
             mappings=mappings,
+            source_timezone=source_timezone,
         )
         merge_sql = build_snowflake_merge_sql(
             table_name,
@@ -1262,6 +1268,7 @@ def write_mapped_rows(
     _sql_extra = (
         _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
     )
+    source_timezone = str(_kwargs.get("source_timezone") or "").strip()
     _sql_src = sql_source_from_writer(_kwargs, _sql_extra)
     del port, ssl, _kwargs
     from connectors.writer_common import resolve_writer_backfill
@@ -1808,6 +1815,7 @@ def write_mapped_rows(
                             dialect_label="Snowflake",
                             mappings=mappings,
                             row_numbers=finished.sparse_row_numbers or None,
+                            source_timezone=source_timezone,
                         )
                         sparse_written, sparse_skipped, sparse_checksum = (
                             _sf_apply_sparse_upsert(
@@ -1837,6 +1845,7 @@ def write_mapped_rows(
                             rejected_details=rejected_details,
                             policy=policy,
                             mappings=mappings,
+                            source_timezone=source_timezone,
                         )
                         load_method = "merge_batch"
                     else:
@@ -1851,6 +1860,7 @@ def write_mapped_rows(
                             rejected_details=rejected_details,
                             policy=policy,
                             mappings=mappings,
+                            source_timezone=source_timezone,
                         )
                         written += len(finished.dense_rows)
                     write_acc.note_collapsed_duplicates(

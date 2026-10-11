@@ -256,6 +256,7 @@ class ExecuteTransferRequest(BaseModel):
     require_signed_contract: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
+    source_timezone: str = ""
     # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''.
     number_locale: str = ""
     # Delivery guarantee — auto selects dest-owned exactly-once on an eligible
@@ -852,6 +853,7 @@ async def execute_transfer_json(
     request_obj = TransferRequest(
         source=src,
         destination=dst,
+        source_timezone=body.source_timezone or "",
         mappings=list(body.mappings or []),
         column_types=dict(body.column_types or {}),
         # Public execute never honors client skip_preflight (enterprise fail-closed).

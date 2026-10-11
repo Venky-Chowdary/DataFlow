@@ -169,6 +169,7 @@ class TransferRequest:
     # Programmatic skip_preflight stamps inline when empty.
     approved_decision_artifact_hash: str = ""
     decision_artifact: dict = field(default_factory=dict)
+    source_timezone: str = ""
 
     @property
     def operation(self) -> str:
@@ -409,6 +410,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
     return TransferRequest(
         source=EndpointConfig.from_dict(src.get("kind", "database"), src),
         destination=EndpointConfig.from_dict(dst.get("kind", "database"), dst),
+        source_timezone=str(data.get("source_timezone") or "").strip(),
         mappings=data.get("mappings") or [],
         column_types=data.get("column_types") or {},
         skip_preflight=bool(data.get("skip_preflight")),

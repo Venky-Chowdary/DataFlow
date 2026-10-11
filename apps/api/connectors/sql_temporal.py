@@ -322,7 +322,13 @@ def sql_type_is_temporal(source_type: str) -> bool:
     return sql_base_type(source_type) in _TEMPORAL_BASES
 
 
-def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> Any:
+def coerce_sql_temporal(
+    value: Any,
+    source_type: str,
+    *,
+    engine: str = "",
+    source_timezone: str = "",
+) -> Any:
     """Coerce a cell to a Python temporal for the given SQL DDL type, else return value.
 
     ``engine`` disambiguates the bare ``TIMESTAMP`` token. On MySQL it is an
@@ -386,10 +392,23 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
         "TIMESTAMP_LTZ",
     }:
         # Refuse naive wall-clock → UTC invent (parity with BQ TIMESTAMP / TIMETZ).
+        if not input_has_timezone(value) and source_timezone:
+            from services.transform_engine import apply_transform
+
+            raw_value = value.isoformat() if hasattr(value, "isoformat") else str(value)
+            value, transform_error = apply_transform(
+                raw_value, f"assume_timezone:{source_timezone}"
+            )
+            if transform_error:
+                raise ValueError(
+                    f"{base} could not apply source_timezone "
+                    f"{source_timezone!r}: {transform_error}"
+                )
         if not input_has_timezone(value):
             raise ValueError(
                 f"{base} refuses naive wall-clock (would invent UTC). "
-                "Provide an offset/Z, or map to TIMESTAMP_NTZ / DATETIME."
+                "Provide an offset/Z, set source_timezone to declare the "
+                "wall-clock zone, or map to TIMESTAMP_NTZ / DATETIME."
             )
         parsed = parse_sql_datetime(value, aware_utc=True)
         if parsed is None:
