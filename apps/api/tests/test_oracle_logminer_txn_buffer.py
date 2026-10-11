@@ -33,6 +33,15 @@ from services.cdc_exactly_once import (
 from services.cdc_transaction_buffer import CdcTxnBufferOverflow
 
 
+@pytest.fixture(autouse=True)
+def _no_lob_schema_in_unit_readers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        OracleLogMinerCdc,
+        "_lob_columns_for_table",
+        lambda _self, _table: [],
+    )
+
+
 def _dml(
     buffer: OracleTxnBuffer,
     xid: str,

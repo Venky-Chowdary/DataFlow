@@ -682,6 +682,7 @@ def test_oracle_single_table_poll_keeps_transactions_whole(
     )
     cdc.phase = "streaming"
     cdc.scn = 100
+    cdc._lob_column_cache["T"] = ()
 
     conn = MagicMock()
     cur = MagicMock()

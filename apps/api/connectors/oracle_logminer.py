@@ -23,6 +23,7 @@ from connectors.write_resilience import (
 )
 from services.cdc_cursor_gap import CdcScnGapError
 from services.cdc_engine import ChangeBatch
+from services.value_serializer import cell_to_string
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,8 @@ _OP_MAP = {
 }
 
 UNPARSED_SQL_REDO_FLAG = "_df_unparsed_sql_redo"
+_LOB_LOCATOR_MARKER = "_df_lob_locator_trigger"
+_LOB_LOOKUP_MARKER = "_df_lob_lookup_required"
 _UNPARSED_TRUTHY = frozenset({"1", "true", "yes"})
 
 
@@ -185,6 +188,14 @@ def classify_sql_redo(
     table: str = "",
 ) -> tuple[str, dict[str, Any]]:
     """Return ``('ok', row)`` or ``('unparsed', reject_detail)``."""
+    if not str(sql_redo or "").strip():
+        parsed = {
+            UNPARSED_SQL_REDO_FLAG: "1",
+            "_df_parse_error": "empty SQL_REDO",
+        }
+        return "unparsed", sql_redo_reject_detail(
+            parsed, op=op, sql_redo=sql_redo, table=table
+        )
     parsed = _parse_sql_redo(sql_redo or "", op=op)
     if is_unparsed_sql_redo(parsed):
         if sql_redo and not parsed.get("_df_sql_redo"):
@@ -486,7 +497,7 @@ def logminer_contents_sql(
           WHERE SEG_OWNER = :owner
             AND ({table_predicate})
             AND (
-              OPERATION IN ('INSERT','UPDATE','DELETE')
+              OPERATION IN ('INSERT','UPDATE','DELETE','SEL_LOB_LOCATOR')
               OR OPERATION = 'DDL'
             )
             AND (
@@ -533,7 +544,7 @@ def logminer_txn_contents_sql(
                   (
                     SEG_OWNER = :owner
                     AND ({table_predicate})
-                    AND OPERATION IN ('INSERT','UPDATE','DELETE')
+                    AND OPERATION IN ('INSERT','UPDATE','DELETE','SEL_LOB_LOCATOR')
                   )
                OR (
                     SEG_OWNER = :owner
@@ -547,7 +558,7 @@ def logminer_txn_contents_sql(
                       FROM v$logmnr_contents
                       WHERE SEG_OWNER = :owner
                         AND ({table_predicate})
-                        AND OPERATION IN ('INSERT','UPDATE','DELETE')
+                        AND OPERATION IN ('INSERT','UPDATE','DELETE','SEL_LOB_LOCATOR')
                     )
                   )
             )
@@ -562,12 +573,17 @@ def _logminer_position_key(row: Any) -> tuple[int, str, int]:
 
 
 def _logminer_row_has_csf(row: Any, csf_index: int) -> bool:
-    if len(row) <= csf_index:
+    index = csf_index
+    if len(row) <= index:
+        # Keep the fake-reader and legacy adapter shape usable while real
+        # contents queries include XID columns before CSF.
+        index = 9 if csf_index == 12 and len(row) > 9 else -1
+    if index < 0:
         return False
     try:
-        return int(row[csf_index] or 0) == 1
+        return int(row[index] or 0) == 1
     except (TypeError, ValueError):
-        return str(row[csf_index] or "").strip() == "1"
+        return str(row[index] or "").strip() == "1"
 
 
 def _raise_logminer_window_error(
@@ -1049,7 +1065,9 @@ class OracleLogMinerCdc:
 
     Pass ``table`` as a list (and optional ``primary_keys``) to share one
     LogMiner session across N tables — Debezium-class demux with ``ack_barrier``.
-    Delivery remains **at-least-once**.
+    LOB values are read by primary key at capture time. The final state converges,
+    but between two changes a row may briefly carry a LOB value newer than its
+    other columns. Delivery remains **at-least-once**.
     """
 
     def __init__(
@@ -1136,6 +1154,9 @@ class OracleLogMinerCdc:
         self._last_acked_token = resume_token
         self._last_event_at: datetime | None = None
         self.last_ddl_at: str | None = None
+        self._lob_column_cache: dict[str, tuple[str, ...]] = {}
+        self._lob_lookup_missing = 0
+        self._lob_locator_xids: dict[tuple[str, int, int, int], None] = {}
         from services.cdc_schema_history import connection_fingerprint
 
         self.source_key = connection_fingerprint(
@@ -1191,8 +1212,348 @@ class OracleLogMinerCdc:
             "tables": list(self.tables),
             "shared_reader": self._shared,
             "last_ddl_at": self.last_ddl_at,
+            "lob_lookup_missing": self._lob_lookup_missing,
             **self._lease.theater_fields(),
         }
+
+    def _raise_lob_read_error(
+        self,
+        table: str,
+        message: str,
+        cause: BaseException | None = None,
+    ) -> None:
+        error = cause or ValueError(message)
+        raise OracleLogMinerReadError(
+            error,
+            table=f"{self.schema}.{table}",
+            cursor_key=self.cursor_key,
+            message=message,
+        ) from error
+
+    def _required_lob_primary_key(self, table: str) -> str:
+        table_name = str(table or self.table).upper()
+        primary_key = self.primary_keys.get(table_name)
+        if primary_key:
+            return primary_key
+        self._raise_lob_read_error(
+            table_name,
+            f"Oracle LogMiner LOB activity for {self.schema}.{table_name} "
+            "requires a primary key; add a primary key before enabling LOB CDC.",
+        )
+        raise AssertionError("unreachable")
+
+    def _remember_lob_locator_xid(
+        self, table: str, xid_parts: tuple[int, int, int]
+    ) -> None:
+        if xid_parts == (0, 0, 0):
+            return
+        key = (str(table or "").upper(), *xid_parts)
+        self._lob_locator_xids.pop(key, None)
+        self._lob_locator_xids[key] = None
+        while len(self._lob_locator_xids) > 4096:
+            self._lob_locator_xids.pop(next(iter(self._lob_locator_xids)))
+
+    def _has_lob_locator_xid(
+        self, table: str, xid_parts: tuple[int, int, int]
+    ) -> bool:
+        return (str(table or "").upper(), *xid_parts) in self._lob_locator_xids
+
+    def _lob_columns_for_table(self, table: str) -> list[str]:
+        table_name = str(table or self.table).upper()
+        cached = self._lob_column_cache.get(table_name)
+        if cached is not None:
+            return list(cached)
+        try:
+            snapshot = self._oracle_ddl_schema_snapshot(table_name)
+        except Exception as exc:
+            self._raise_lob_read_error(
+                table_name,
+                f"Oracle LogMiner could not discover LOB columns for "
+                f"{self.schema}.{table_name}: {exc}",
+                exc,
+            )
+        columns = snapshot.get("columns") if isinstance(snapshot, dict) else None
+        lob_columns: list[str] = []
+        for column in columns if isinstance(columns, list) else []:
+            if not isinstance(column, dict):
+                continue
+            name = str(column.get("name") or "").strip()
+            data_type = str(
+                column.get("data_type") or column.get("type") or ""
+            ).strip().upper()
+            if name and data_type.split("(", 1)[0].strip() in {
+                "CLOB",
+                "NCLOB",
+                "BLOB",
+            }:
+                lob_columns.append(name.upper())
+        self._lob_column_cache[table_name] = tuple(lob_columns)
+        return lob_columns
+
+    def _parse_lob_locator_pk(
+        self,
+        sql_redo: str,
+        primary_key: str,
+        *,
+        table: str | None = None,
+    ) -> dict[str, str]:
+        table_name = str(table or self.table).upper()
+        pk = str(primary_key or "").upper()
+        if not pk:
+            pk = self._required_lob_primary_key(table_name)
+        parsed = _parse_sql_redo(str(sql_redo or ""), op="update")
+        if parsed.get(UNPARSED_SQL_REDO_FLAG) or pk not in parsed:
+            self._raise_lob_read_error(
+                table_name,
+                "Oracle LogMiner SEL_LOB_LOCATOR could not parse primary key "
+                f"{pk!r} for {self.schema}.{table_name}; refusing to emit it.",
+            )
+        return {pk: parsed[pk]}
+
+    def _lookup_lob_rows_by_pk(
+        self,
+        table: str,
+        primary_key: str,
+        lob_columns: list[str],
+        values: list[Any],
+    ) -> dict[str, dict[str, str]]:
+        unique_values: dict[str, Any] = {}
+        for value in values:
+            if value is not None:
+                unique_values.setdefault(str(value), value)
+        found: dict[str, dict[str, str]] = {}
+        if not unique_values:
+            return found
+        selected_columns = [primary_key, *lob_columns]
+        select_sql = ", ".join(
+            quote_sql_identifier(column) for column in selected_columns
+        )
+        table_ref = self._qualified(table)
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    requested = list(unique_values.items())
+                    for offset in range(0, len(requested), 500):
+                        chunk = requested[offset : offset + 500]
+                        binds = {
+                            f"pk_{index}": value
+                            for index, (_key, value) in enumerate(chunk)
+                        }
+                        placeholders = ", ".join(
+                            f":pk_{index}" for index in range(len(chunk))
+                        )
+                        cur.execute(
+                            f"SELECT {select_sql} FROM {table_ref} "
+                            f"WHERE {quote_sql_identifier(primary_key)} "
+                            f"IN ({placeholders})",
+                            binds,
+                        )
+                        for row in cur.fetchall() or []:
+                            key = str(row[0])
+                            lob_values: dict[str, str] = {}
+                            for index, column in enumerate(lob_columns, start=1):
+                                value = row[index]
+                                read_lob = getattr(value, "read", None)
+                                if callable(read_lob):
+                                    value = read_lob()
+                                lob_values[column] = cell_to_string(
+                                    value, preserve_sql_null=True
+                                )
+                            found[key] = lob_values
+        except OracleLogMinerReadError:
+            raise
+        except Exception as exc:
+            self._raise_lob_read_error(
+                table,
+                f"Oracle LogMiner LOB lookup failed for "
+                f"{self.schema}.{table}: {exc}",
+                exc,
+            )
+        return found
+
+    @staticmethod
+    def _event_row_value(row: dict[str, Any], column: str) -> Any:
+        return next(
+            (
+                value
+                for name, value in row.items()
+                if str(name).upper() == column.upper()
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _set_event_row_value(row: dict[str, Any], column: str, value: Any) -> None:
+        existing = next(
+            (
+                name
+                for name in row
+                if str(name).upper() == column.upper()
+            ),
+            column,
+        )
+        row[existing] = value
+
+    @staticmethod
+    def _drop_event_row_column(row: dict[str, Any], column: str) -> None:
+        for name in tuple(row):
+            if str(name).upper() == column.upper():
+                row.pop(name, None)
+
+    def _coalesce_lob_locator_events(
+        self, events: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        dml_by_key: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        locator_by_key: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        locator_indexes: dict[tuple[str, str, str], list[int]] = {}
+
+        def event_key(event: dict[str, Any]) -> tuple[str, str, str] | None:
+            xid = event.get("xid")
+            if xid is None or xid == "":
+                return None
+            table = str(event.get("table") or self.table).upper()
+            primary_key = self.primary_keys.get(table, self.primary_key)
+            row = event.get("row")
+            if not primary_key or not isinstance(row, dict):
+                return None
+            value = self._event_row_value(row, primary_key)
+            if value is None:
+                return None
+            xid_key = (
+                ".".join(str(part) for part in xid)
+                if isinstance(xid, (tuple, list))
+                else str(xid)
+            )
+            return xid_key, table, str(value)
+
+        for index, event in enumerate(events):
+            row = event.get("row")
+            if not isinstance(row, dict):
+                continue
+            operation = str(event.get("op") or "").lower()
+            operation = {"c": "insert", "u": "update", "d": "delete"}.get(
+                operation, operation
+            )
+            is_locator = bool(event.get("lob_locator")) or bool(
+                row.get(_LOB_LOCATOR_MARKER)
+            )
+            key = event_key(event)
+            if key is None:
+                continue
+            if is_locator:
+                locator_by_key.setdefault(key, []).append(event)
+                locator_indexes.setdefault(key, []).append(index)
+            elif operation in {"insert", "update", "delete"}:
+                dml_by_key.setdefault(key, []).append(event)
+
+        drop_indexes: set[int] = set()
+        for key, locator_events in locator_by_key.items():
+            dml_events = dml_by_key.get(key, [])
+            if dml_events:
+                if not any(
+                    str(event.get("op") or "").lower() in {"delete", "d"}
+                    for event in dml_events
+                ):
+                    for event in dml_events:
+                        row = event.get("row")
+                        if not isinstance(row, dict):
+                            continue
+                        operation = str(event.get("op") or "").lower()
+                        if operation in {"update", "u"}:
+                            row[_LOB_LOOKUP_MARKER] = True
+                drop_indexes.update(locator_indexes[key])
+                continue
+            indexes = locator_indexes[key]
+            drop_indexes.update(indexes[:-1])
+
+        return [
+            event for index, event in enumerate(events) if index not in drop_indexes
+        ]
+
+    def _enrich_lob_lookup_events(
+        self, events: list[dict[str, Any]]
+    ) -> dict[str, list[str]]:
+        candidates: dict[str, list[tuple[dict[str, Any], dict[str, Any], Any]]] = {}
+        lob_columns_by_table: dict[str, list[str]] = {}
+        primary_keys_by_table: dict[str, str] = {}
+        for event in events:
+            row = event.get("row")
+            if not isinstance(row, dict):
+                continue
+            table_name = str(event.get("table") or self.table).upper()
+            locator_trigger = bool(event.pop("lob_locator", False))
+            locator_trigger = bool(row.pop(_LOB_LOCATOR_MARKER, False)) or locator_trigger
+            force_lookup = bool(row.pop(_LOB_LOOKUP_MARKER, False))
+            operation = str(event.get("op") or "").lower()
+            operation = {"c": "insert", "u": "update", "d": "delete"}.get(
+                operation, operation
+            )
+            if operation not in {"insert", "update"}:
+                continue
+            lob_columns = self._lob_columns_for_table(table_name)
+            if not lob_columns:
+                if locator_trigger:
+                    self._raise_lob_read_error(
+                        table_name,
+                        "Oracle LogMiner SEL_LOB_LOCATOR did not resolve to "
+                        f"LOB columns for {self.schema}.{table_name}.",
+                    )
+                continue
+            lob_names = {column.upper() for column in lob_columns}
+            references_lob = (
+                locator_trigger
+                or force_lookup
+                or operation == "insert"
+                or any(str(column).upper() in lob_names for column in row)
+            )
+            if not references_lob:
+                continue
+            primary_key = self._required_lob_primary_key(table_name)
+            pk_value = self._event_row_value(row, primary_key)
+            if pk_value is None:
+                self._raise_lob_read_error(
+                    table_name,
+                    f"Oracle LogMiner LOB {operation} for {self.schema}.{table_name} "
+                    f"does not contain primary key {primary_key!r}.",
+                )
+            if locator_trigger:
+                for column in tuple(row):
+                    if str(column).upper() != primary_key.upper():
+                        row.pop(column, None)
+            candidates.setdefault(table_name, []).append((event, row, pk_value))
+            lob_columns_by_table[table_name] = lob_columns
+            primary_keys_by_table[table_name] = primary_key
+
+        for table_name, table_candidates in candidates.items():
+            lob_columns = lob_columns_by_table[table_name]
+            primary_key = primary_keys_by_table[table_name]
+            found = self._lookup_lob_rows_by_pk(
+                table_name,
+                primary_key,
+                lob_columns,
+                [candidate[2] for candidate in table_candidates],
+            )
+            for _event, row, pk_value in table_candidates:
+                values = found.get(str(pk_value))
+                if values is None:
+                    for column in lob_columns:
+                        self._drop_event_row_column(row, column)
+                    self._lob_lookup_missing += 1
+                    continue
+                for column in lob_columns:
+                    self._set_event_row_value(row, column, values[column])
+        return {
+            table_name: list(columns)
+            for table_name, columns in lob_columns_by_table.items()
+        }
+
+    @staticmethod
+    def _logminer_row_xid(row: Any) -> tuple[int, int, int] | None:
+        try:
+            values = tuple(int(value or 0) for value in row[7:10])
+        except (TypeError, ValueError):
+            return None
+        return values if len(values) == 3 else None
 
     def _conn(self):
         from connectors.generic_sql import get_connection
@@ -1533,6 +1894,7 @@ class OracleLogMinerCdc:
             )
         except Exception as exc:
             raise_ddl_error("schema-history write", exc)
+        self._lob_column_cache.pop(table_name, None)
         self.last_ddl_at = str(entry.get("recorded_at") or "") or None
         if not acknowledged_review:
             try:
@@ -1574,14 +1936,17 @@ class OracleLogMinerCdc:
     ) -> list[Any]:
         rows, _ = _fetch_logminer_csf_window(
             cur,
-            sql=logminer_contents_sql(table_predicate=table_predicate),
+            sql=logminer_contents_sql(
+                table_predicate=table_predicate,
+                include_xid=True,
+            ),
             binds={
                 "owner": self.schema,
                 "tbl": self.table,
                 **self._resume_binds(),
             },
             limit=limit,
-            csf_index=9,
+            csf_index=12,
             table=f"{self.schema}.{self.table}",
             cursor_key=self.cursor_key,
         )
@@ -1965,7 +2330,7 @@ class OracleLogMinerCdc:
                     )
                     ddl_positions = [
                         (
-                            str(candidate[5] or candidate[7] or "").upper(),
+                            str(candidate[5] or candidate[10] or "").upper(),
                             int(candidate[0] or 0),
                             str(candidate[1] or ""),
                             int(candidate[2] or 0),
@@ -1973,6 +2338,11 @@ class OracleLogMinerCdc:
                         for candidate in peek_rows
                         if str(candidate[3] or "").upper() == "DDL"
                     ]
+                    lob_locator_scns = {
+                        tuple(int(value or 0) for value in candidate[7:10])
+                        for candidate in peek_rows
+                        if str(candidate[3] or "").upper() == "SEL_LOB_LOCATOR"
+                    }
                     for row in peek_rows:
                         scn = int(row[0] or 0)
                         rs_id = str(row[1] or "")
@@ -1982,10 +2352,10 @@ class OracleLogMinerCdc:
                         if operation == "DDL":
                             self._record_oracle_ddl(
                                 owner=str(row[6] or ""),
-                                table=str(row[5] or row[7] or ""),
+                                table=str(row[5] or row[10] or ""),
                                 ddl=str(sql_redo or ""),
                                 offset={"scn": scn, "rs_id": rs_id, "ssn": ssn},
-                                ddl_timestamp=row[8] if len(row) > 8 else None,
+                                ddl_timestamp=row[11] if len(row) > 11 else None,
                                 ambiguous_later_ddl=any(
                                     name == str(row[5] or row[7] or "").upper()
                                     and (later_scn, later_rs, later_ssn)
@@ -1994,6 +2364,38 @@ class OracleLogMinerCdc:
                                     in ddl_positions
                                 ),
                             )
+                            continue
+                        if operation == "SEL_LOB_LOCATOR":
+                            self._remember_lob_locator_xid(
+                                self.table,
+                                tuple(int(value or 0) for value in row[7:10]),
+                            )
+                            primary_key = self._required_lob_primary_key(self.table)
+                            parsed = self._parse_lob_locator_pk(
+                                sql_redo or "",
+                                primary_key,
+                                table=self.table,
+                            )
+                            events.append(
+                                {
+                                    "op": "u",
+                                    "table": self.table,
+                                    "xid": self._logminer_row_xid(row),
+                                    "position": (scn, rs_id, ssn),
+                                    "lob_locator": True,
+                                    "row": {
+                                        **parsed,
+                                        _LOB_LOCATOR_MARKER: True,
+                                    },
+                                }
+                            )
+                            continue
+                        if (
+                            operation == "UPDATE"
+                            and not str(sql_redo or "").strip()
+                            and tuple(int(value or 0) for value in row[7:10])
+                            in lob_locator_scns
+                        ):
                             continue
                         op = _OP_MAP.get(str(operation or "").upper())
                         if not op:
@@ -2006,11 +2408,36 @@ class OracleLogMinerCdc:
                             continue
                         key = parsed.get(self.primary_key, "")
                         if op == "delete" and key:
-                            events.append({"op": "d", "pk": key, "row": {self.primary_key: key}})
+                            events.append(
+                                {
+                                    "op": "d",
+                                    "table": self.table,
+                                    "xid": self._logminer_row_xid(row),
+                                    "position": (scn, rs_id, ssn),
+                                    "pk": key,
+                                    "row": {self.primary_key: key},
+                                }
+                            )
                         elif op == "insert":
-                            events.append({"op": "c", "row": parsed})
+                            events.append(
+                                {
+                                    "op": "c",
+                                    "table": self.table,
+                                    "xid": self._logminer_row_xid(row),
+                                    "position": (scn, rs_id, ssn),
+                                    "row": parsed,
+                                }
+                            )
                         else:
-                            events.append({"op": "u", "row": parsed})
+                            events.append(
+                                {
+                                    "op": "u",
+                                    "table": self.table,
+                                    "xid": self._logminer_row_xid(row),
+                                    "position": (scn, rs_id, ssn),
+                                    "row": parsed,
+                                }
+                            )
                     try:
                         cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
                     except Exception as exc:
@@ -2025,7 +2452,11 @@ class OracleLogMinerCdc:
                     cursor_key=self.cursor_key,
                 )
                 raise read_error from exc
+            events = self._coalesce_lob_locator_events(events)
+            self._enrich_lob_lookup_events(events)
             return events
+        events = self._coalesce_lob_locator_events(events)
+        self._enrich_lob_lookup_events(events)
         return events
 
     def poll(self) -> Iterator[ChangeBatch]:
@@ -2097,9 +2528,7 @@ class OracleLogMinerCdc:
             dest_resume=self.resume_token,
         )
 
-        inserts: list[dict[str, Any]] = []
-        updates: list[dict[str, Any]] = []
-        deletes: list[str] = []
+        events: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
         last_scn = self.scn
         last_rs_id = self.rs_id
@@ -2137,7 +2566,7 @@ class OracleLogMinerCdc:
                     fetched = len(rows)
                     ddl_positions = [
                         (
-                            str(candidate[5] or candidate[7] or "").upper(),
+                            str(candidate[5] or candidate[10] or "").upper(),
                             int(candidate[0] or 0),
                             str(candidate[1] or ""),
                             int(candidate[2] or 0),
@@ -2151,7 +2580,7 @@ class OracleLogMinerCdc:
                         ssn = int(row[2] or 0)
                         operation = str(row[3] or "").upper()
                         sql_redo = row[4]
-                        table_name = str(row[5] or row[7] or "").upper()
+                        table_name = str(row[5] or row[10] or "").upper()
                         owner = str(row[6] or "").upper()
                         last_scn, last_rs_id, last_ssn = scn, rs_id, ssn
                         if operation == "DDL":
@@ -2165,7 +2594,7 @@ class OracleLogMinerCdc:
                                     "rs_id": rs_id,
                                     "ssn": ssn,
                                 },
-                                ddl_timestamp=row[8] if len(row) > 8 else None,
+                                ddl_timestamp=row[11] if len(row) > 11 else None,
                                 ambiguous_later_ddl=any(
                                     name == table_name
                                     and (later_scn, later_rs, later_ssn)
@@ -2173,6 +2602,42 @@ class OracleLogMinerCdc:
                                     for name, later_scn, later_rs, later_ssn in ddl_positions
                                 ),
                             )
+                            continue
+                        if operation == "SEL_LOB_LOCATOR":
+                            self._remember_lob_locator_xid(
+                                self.table,
+                                tuple(int(value or 0) for value in row[7:10]),
+                            )
+                            primary_key = self._required_lob_primary_key(self.table)
+                            parsed = self._parse_lob_locator_pk(
+                                sql_redo or "",
+                                primary_key,
+                                table=self.table,
+                            )
+                            events.append(
+                                {
+                                    "op": "update",
+                                    "table": self.table,
+                                    "xid": tuple(
+                                        int(value or 0) for value in row[7:10]
+                                    ),
+                                    "position": (scn, rs_id, ssn),
+                                    "lob_locator": True,
+                                    "row": {
+                                        **parsed,
+                                        _LOB_LOCATOR_MARKER: True,
+                                    },
+                                }
+                            )
+                            continue
+                        if (
+                            operation == "UPDATE"
+                            and not str(sql_redo or "").strip()
+                            and self._has_lob_locator_xid(
+                                self.table,
+                                tuple(int(value or 0) for value in row[7:10]),
+                            )
+                        ):
                             continue
                         op = _OP_MAP.get(str(operation or "").upper())
                         if not op:
@@ -2189,11 +2654,35 @@ class OracleLogMinerCdc:
                         key = parsed.get(self.primary_key, "")
                         if op == "delete":
                             if key:
-                                deletes.append(key)
+                                events.append(
+                                    {
+                                        "op": "delete",
+                                        "table": self.table,
+                                        "xid": self._logminer_row_xid(row),
+                                        "position": (scn, rs_id, ssn),
+                                        "row": {self.primary_key: key},
+                                    }
+                                )
                         elif op == "insert":
-                            inserts.append(parsed)
+                            events.append(
+                                {
+                                    "op": "insert",
+                                    "table": self.table,
+                                    "xid": self._logminer_row_xid(row),
+                                    "position": (scn, rs_id, ssn),
+                                    "row": parsed,
+                                }
+                            )
                         else:
-                            updates.append(parsed)
+                            events.append(
+                                {
+                                    "op": "update",
+                                    "table": self.table,
+                                    "xid": self._logminer_row_xid(row),
+                                    "position": (scn, rs_id, ssn),
+                                    "row": parsed,
+                                }
+                            )
                     try:
                         cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
                     except Exception as exc:
@@ -2219,6 +2708,19 @@ class OracleLogMinerCdc:
             )
             raise read_error from exc
 
+        events = self._coalesce_lob_locator_events(events)
+        lookup_columns = self._enrich_lob_lookup_events(events)
+        inserts = [
+            event["row"] for event in events if event.get("op") == "insert"
+        ]
+        updates = [
+            event["row"] for event in events if event.get("op") == "update"
+        ]
+        deletes = [
+            str(event["row"].get(self.primary_key) or "")
+            for event in events
+            if event.get("op") == "delete" and event["row"].get(self.primary_key)
+        ]
         self._advance_offset(
             last_scn=last_scn,
             last_rs_id=last_rs_id,
@@ -2237,6 +2739,7 @@ class OracleLogMinerCdc:
                 resume_token=token,
                 table=self.table,
                 rejected=rejected,
+                lookup_columns=lookup_columns,
             )
         else:
             yield ChangeBatch(resume_token=token, table=self.table)
@@ -2403,6 +2906,19 @@ class OracleLogMinerCdc:
                 )
             xid = ".".join(str(value) for value in xid_parts)
             mapped_table = table_by_lower.get(table_raw.lower(), table_raw)
+            if operation == "SEL_LOB_LOCATOR":
+                self._remember_lob_locator_xid(mapped_table, xid_parts)
+            if (
+                operation == "UPDATE"
+                and not str(sql_redo or "").strip()
+                and self._has_lob_locator_xid(mapped_table, xid_parts)
+            ):
+                self._poll_scn, self._poll_rs_id, self._poll_ssn = (
+                    scn,
+                    rs_id,
+                    ssn,
+                )
+                continue
             feed_args: dict[str, Any] = {
                 "xid": xid,
                 "scn": scn,
@@ -2410,17 +2926,33 @@ class OracleLogMinerCdc:
                 "ssn": ssn,
                 "operation": operation,
             }
-            if operation in _OP_MAP and table_raw in table_set:
-                op = _OP_MAP[operation]
-                kind, parsed = classify_sql_redo(
-                    sql_redo or "", op=op, table=mapped_table
-                )
+            if table_raw in table_set and (
+                operation in _OP_MAP or operation == "SEL_LOB_LOCATOR"
+            ):
                 pk = self.primary_keys.get(mapped_table, self.primary_key)
+                if operation == "SEL_LOB_LOCATOR":
+                    pk = self._required_lob_primary_key(mapped_table)
+                    parsed = self._parse_lob_locator_pk(
+                        sql_redo or "",
+                        pk,
+                        table=mapped_table,
+                    )
+                    parsed[_LOB_LOCATOR_MARKER] = True
+                    op = "update"
+                    kind = "ok"
+                    event_row_id = ""
+                else:
+                    op = _OP_MAP[operation]
+                    kind, parsed = classify_sql_redo(
+                        sql_redo or "", op=op, table=mapped_table
+                    )
+                    event_row_id = row_id
                 feed_args.update(
+                    operation=op,
                     table=mapped_table,
                     row=parsed if kind == "ok" else {"_df_rejected": parsed},
                     rollback=row[10] in (1, "1", True),
-                    row_id=row_id,
+                    row_id=event_row_id,
                 )
                 if kind == "ok" and pk:
                     feed_args["primary_key"] = pk
@@ -2502,6 +3034,22 @@ class OracleLogMinerCdc:
                 continue
 
             txn: OracleCommittedTxn = payload
+            row_events = [
+                {
+                    "xid": txn.xid,
+                    "position": (event.scn, event.rs_id, event.ssn),
+                    "op": event.op,
+                    "table": event.table,
+                    "row": event.row,
+                    "_source": event,
+                }
+                for event in txn.rows
+            ]
+            retained_rows = {
+                id(event["_source"])
+                for event in self._coalesce_lob_locator_events(row_events)
+            }
+            txn.rows = [event for event in txn.rows if id(event) in retained_rows]
             if first_ddl_position is not None and _position < first_ddl_position:
                 self._poll_scn = txn.commit_scn
                 self._poll_rs_id = txn.commit_rs_id
@@ -2512,6 +3060,17 @@ class OracleLogMinerCdc:
             for chunk_index, chunk in enumerate(parts):
                 final_chunk = chunk_index == len(parts) - 1
                 endpoint = chunk[-1]
+                chunk_lookup_columns = self._enrich_lob_lookup_events(
+                    [
+                        {
+                            "op": event.op,
+                            "table": event.table,
+                            "row": event.row,
+                        }
+                        for event in chunk
+                        if event.op in {"insert", "update"}
+                    ]
+                )
                 commit_cursor = (
                     (txn.commit_scn, txn.commit_rs_id, txn.commit_ssn)
                     if final_chunk
@@ -2614,6 +3173,12 @@ class OracleLogMinerCdc:
                     resume_token=token,
                     table_order=self.tables,
                 )
+                for batch in batches:
+                    table_name = str(batch.table or "").upper()
+                    if table_name in chunk_lookup_columns:
+                        batch.lookup_columns = {
+                            table_name: chunk_lookup_columns[table_name]
+                        }
                 if rejected:
                     batches.append(
                         ChangeBatch(
@@ -2752,10 +3317,45 @@ class OracleLogMinerCdc:
                         xid_key = f"{row[7] or 0}.{row[8] or 0}.{row[9] or 0}"
                         if not xid_key or xid_key == "0.0.0":
                             xid_key = f"scn:{scn}"
-                        op = _OP_MAP.get(str(operation or "").upper())
-                        if not op or tbl_raw not in table_set:
+                        if tbl_raw not in table_set:
                             continue
                         table_name = table_by_lower.get(tbl_raw.lower(), tbl_raw)
+                        if operation == "SEL_LOB_LOCATOR":
+                            self._remember_lob_locator_xid(
+                                tbl_raw,
+                                tuple(int(value or 0) for value in row[7:10]),
+                            )
+                            primary_key = self._required_lob_primary_key(table_name)
+                            parsed = self._parse_lob_locator_pk(
+                                sql_redo or "",
+                                primary_key,
+                                table=table_name,
+                            )
+                            parsed[_LOB_LOCATOR_MARKER] = True
+                            tagged.append(
+                                (
+                                    xid_key,
+                                    scn,
+                                    rs_id,
+                                    ssn,
+                                    table_name,
+                                    "update",
+                                    parsed,
+                                )
+                            )
+                            continue
+                        if (
+                            operation == "UPDATE"
+                            and not str(sql_redo or "").strip()
+                            and self._has_lob_locator_xid(
+                                tbl_raw,
+                                tuple(int(value or 0) for value in row[7:10]),
+                            )
+                        ):
+                            continue
+                        op = _OP_MAP.get(str(operation or "").upper())
+                        if not op:
+                            continue
                         kind, parsed = classify_sql_redo(
                             sql_redo or "", op=op, table=table_name
                         )
@@ -2815,6 +3415,23 @@ class OracleLogMinerCdc:
         for xid_key, group_iter in groupby(tagged, key=lambda x: x[0]):
             group = list(group_iter)
             group_scn = max(item[1] for item in group)
+            group_endpoint = group[-1][1:4]
+            group_events = [
+                {
+                    "xid": item[0],
+                    "position": item[1:4],
+                    "table": item[4],
+                    "op": item[5],
+                    "row": item[6],
+                    "_source": item,
+                }
+                for item in group
+            ]
+            retained_items = {
+                id(event["_source"])
+                for event in self._coalesce_lob_locator_events(group_events)
+            }
+            group = [item for item in group if id(item) in retained_items]
             if len(group) == 1 and group[0][5] == "ddl":
                 _xid, scn, rs_id, ssn, table_name, _op, ddl_row = group[0]
                 last_scn, last_rs_id, last_ssn = scn, rs_id, ssn
@@ -2842,6 +3459,19 @@ class OracleLogMinerCdc:
                 )
                 emitted = True
                 continue
+            lookup_columns = self._enrich_lob_lookup_events(
+                [
+                    {
+                        "xid": item[0],
+                        "position": item[1:4],
+                        "op": item[5],
+                        "table": item[4],
+                        "row": item[6],
+                    }
+                    for item in group
+                    if item[5] in {"insert", "update"}
+                ]
+            )
             buf.begin(xid_key, lsn=str(group_scn))
             for _xid, scn, rs_id, ssn, table_name, op, row in group:
                 last_scn, last_rs_id, last_ssn = scn, rs_id, ssn
@@ -2861,11 +3491,18 @@ class OracleLogMinerCdc:
             self.scn = last_scn
             self.rs_id = last_rs_id
             self.ssn = last_ssn
+            last_scn, last_rs_id, last_ssn = group_endpoint
+            self.scn, self.rs_id, self.ssn = last_scn, last_rs_id, last_ssn
             self.scn_complete = False
             token = self._token(table=self._token_table_label())
             for batch in buf.commit(
                 lsn=str(group_scn), resume_token=token, table_order=self.tables
             ):
+                table_name = str(batch.table or "").upper()
+                if table_name in lookup_columns:
+                    batch.lookup_columns = {
+                        table_name: lookup_columns[table_name]
+                    }
                 emitted = True
                 self._last_event_at = datetime.now(timezone.utc)
                 yield batch

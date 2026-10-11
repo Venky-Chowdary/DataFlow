@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from connectors.oracle_logminer import (
     OracleLogMinerCdc,
     _logminer_options_sql,
@@ -12,6 +14,15 @@ from connectors.oracle_logminer import (
     logminer_contents_sql,
     start_logminer_session,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_lob_schema_in_unit_readers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        OracleLogMinerCdc,
+        "_lob_columns_for_table",
+        lambda _self, _table: [],
+    )
 
 
 def test_logminer_options_are_committed_only_without_continuous_mine():

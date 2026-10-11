@@ -130,7 +130,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
-        "cdc_prerequisites": "Prefer LogMiner CDC when privileges allow; Flashback Query is the fallback. Query-based CDC requires a monotonic cursor column.",
+        "cdc_prerequisites": "Prefer LogMiner CDC when privileges allow; Flashback Query is the fallback. Query-based CDC requires a monotonic cursor column. Oracle LOB values are read by primary key at capture time; final state converges, though between two changes a row may briefly carry a LOB value newer than its other columns. LOB CDC requires a primary key.",
         "common_issues": [
             "Table names may be case-sensitive. Use uppercase unless quoted.",
             "NUMBER with no precision maps to a wide decimal.",

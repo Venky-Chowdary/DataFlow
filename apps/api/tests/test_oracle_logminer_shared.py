@@ -17,6 +17,15 @@ from connectors.oracle_logminer import (
 from services.cdc_multi_table import can_share_log_reader
 
 
+@pytest.fixture(autouse=True)
+def _no_lob_schema_in_unit_readers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        OracleLogMinerCdc,
+        "_lob_columns_for_table",
+        lambda _self, _table: [],
+    )
+
+
 def test_oracle_can_share_log_reader() -> None:
     assert can_share_log_reader("oracle", 2) is True
     assert can_share_log_reader("oracle", 1) is False

@@ -132,6 +132,7 @@ def _reader(*, batch_size: int = 2) -> OracleLogMinerCdc:
         batch_size=batch_size,
     )
     reader.phase = "streaming"
+    reader._lob_column_cache["T"] = ()
     return reader
 
 

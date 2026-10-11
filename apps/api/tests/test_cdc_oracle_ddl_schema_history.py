@@ -823,6 +823,7 @@ def test_oracle_buffered_poll_emits_commits_around_ddl_barrier(
     reader = _unit_reader()
     reader.phase = "streaming"
     reader.scn = 1
+    reader._lob_column_cache["T1"] = ()
     monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
     monkeypatch.setattr(logminer, "assert_resume_scn_in_redo", lambda *_a, **_k: None)
     monkeypatch.setattr(logminer, "fetch_oldest_available_scn", lambda _cur: 1)
@@ -1101,6 +1102,7 @@ def test_oracle_ambiguous_ddl_fails_closed_without_history(
     reader = _unit_reader()
     reader.phase = "streaming"
     reader.scn = 1
+    reader._lob_column_cache["T1"] = ()
     monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
     history, reviews, _calls, _connection = _install_buffered_ddl_window(
         monkeypatch,
@@ -1531,6 +1533,7 @@ def test_oracle_ddl_failure_stops_at_barrier_and_keeps_retry_position(
     reader = _unit_reader()
     reader.phase = "streaming"
     reader.scn = 1
+    reader._lob_column_cache["T1"] = ()
     monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
     history, _reviews, _calls, _connection_factory = _install_buffered_ddl_window(
         monkeypatch, reader
