@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import logging
 import os
 import re
-import threading
-from services.brand_env import getenv_brand
 import socket
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from services.schedule_store import due_schedules
+from services.brand_env import getenv_brand
 from services.failure_retry_policy import DETERMINISTIC
+from services.schedule_store import due_schedules
 from services.standing_authorization import (
     CODE_NO_AUTHORIZATION,
     SCOPE_NET_ADDITIVE_DRIFT,
@@ -1538,7 +1540,8 @@ async def run_schedule_loop() -> None:
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
     try:
         await asyncio.get_running_loop().run_in_executor(
-            _executor, _clear_stale_running_schedules
+            _executor,
+            functools.partial(contextvars.copy_context().run, _clear_stale_running_schedules),
         )
     except Exception:  # noqa: BLE001 — a bad document must not kill the loop
         logger.exception(
@@ -1548,7 +1551,8 @@ async def run_schedule_loop() -> None:
         from services.schedule_store import import_file_schedules_into_mongo
 
         imported = await asyncio.get_running_loop().run_in_executor(
-            _executor, import_file_schedules_into_mongo
+            _executor,
+            functools.partial(contextvars.copy_context().run, import_file_schedules_into_mongo),
         )
         if imported:
             logger.info("Imported %s schedule(s) from schedules.json into MongoDB", imported)
@@ -1556,7 +1560,10 @@ async def run_schedule_loop() -> None:
         logger.exception("Schedule file→Mongo import failed")
     while True:
         try:
-            count = await asyncio.get_running_loop().run_in_executor(_executor, _run_due_schedules)
+            count = await asyncio.get_running_loop().run_in_executor(
+                _executor,
+                functools.partial(contextvars.copy_context().run, _run_due_schedules),
+            )
             if count:
                 logger.info("Scheduler started %s pipeline run(s)", count)
         except Exception:
@@ -1567,7 +1574,10 @@ async def run_schedule_loop() -> None:
 
             wait = float(
                 await asyncio.get_running_loop().run_in_executor(
-                    _executor, seconds_until_next_schedule
+                    _executor,
+                    functools.partial(
+                        contextvars.copy_context().run, seconds_until_next_schedule
+                    ),
                 )
             )
         except Exception:  # noqa: BLE001 — a bad store falls back to the poll cap

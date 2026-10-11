@@ -88,7 +88,9 @@ def test_otel_logs_are_opt_in(monkeypatch):
 
 
 def test_telemetry_resource_emits_current_and_legacy_environment_keys(monkeypatch):
-    from services.tracing import telemetry_resource
+    from services import tracing
+
+    monkeypatch.setattr(tracing.socket, "gethostname", lambda: "api-host-123")
 
     monkeypatch.setenv("DATAFLOW_SERVICE_NAME", "dataflow-api-production")
     monkeypatch.setenv("DATAFLOW_SERVICE_NAMESPACE", "dataflow")
@@ -96,11 +98,13 @@ def test_telemetry_resource_emits_current_and_legacy_environment_keys(monkeypatc
     monkeypatch.setenv("DATAFLOW_SERVICE_INSTANCE_ID", "replica-123")
     monkeypatch.setenv("DATAFLOW_SERVICE_VERSION", "commit-abc")
 
-    attrs = telemetry_resource().attributes
+    attrs = tracing.telemetry_resource().attributes
 
     assert attrs["service.name"] == "dataflow-api-production"
     assert attrs["service.namespace"] == "dataflow"
     assert attrs["service.instance.id"] == "replica-123"
     assert attrs["service.version"] == "commit-abc"
+    assert attrs["grafana.host.id"] == "replica-123"
+    assert attrs["host.name"] == "api-host-123"
     assert attrs["deployment.environment.name"] == "production"
     assert attrs["deployment.environment"] == "production"

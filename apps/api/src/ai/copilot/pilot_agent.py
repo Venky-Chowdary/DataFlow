@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from services.tracing import submit_in_context
 from services.value_serializer import json_default
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
 from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
@@ -1433,7 +1434,8 @@ class DataPilotAgent:
         native = self._first_available_native_agent()
         if native is not None:
             llm_futs.append(
-                _executor.submit(
+                submit_in_context(
+                    _executor,
                     bind_current_context(native),
                     message, history or [], system, data_context,
                 )

@@ -351,10 +351,12 @@ async def add_timing_header(request: Request, call_next):
 
     span_cm = (
         start_span(
-            f"HTTP {request.method} {request.url.path}",
+            request.method,
             attributes={
+                "http.request.method": request.method,
                 "http.method": request.method,
-                "http.route": request.url.path,
+                "url.path": request.url.path,
+                "url.scheme": request.url.scheme,
                 "dataflow.correlation_id": correlation_id,
             },
             kind="server",
@@ -365,8 +367,43 @@ async def add_timing_header(request: Request, call_next):
 
     trace_id = ""
     try:
-        with span_cm:
-            response = await call_next(request)
+        with span_cm as span:
+            try:
+                response = await call_next(request)
+            except BaseException:
+                if span is not None:
+                    try:
+                        span.set_attributes(
+                            {
+                                "http.response.status_code": 500,
+                                "http.status_code": 500,
+                            }
+                        )
+                    except Exception as span_exc:
+                        logger.debug("Could not set HTTP span status attributes: %s", span_exc)
+                raise
+            finally:
+                route_template = getattr(request.scope.get("route"), "path", None)
+                if route_template and span is not None:
+                    try:
+                        span.update_name(f"{request.method} {route_template}")
+                        span.set_attributes({"http.route": route_template})
+                    except Exception as span_exc:
+                        logger.debug("Could not set HTTP span route: %s", span_exc)
+            if span is not None:
+                try:
+                    span.set_attributes(
+                        {
+                            "http.response.status_code": response.status_code,
+                            "http.status_code": response.status_code,
+                        }
+                    )
+                    if response.status_code >= 500:
+                        from opentelemetry.trace import Status, StatusCode
+
+                        span.set_status(Status(StatusCode.ERROR))
+                except Exception as span_exc:
+                    logger.debug("Could not set HTTP span response status: %s", span_exc)
             try:
                 trace_id = current_trace_id() or ""
             except Exception:

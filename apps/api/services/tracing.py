@@ -26,14 +26,17 @@ request to the job it started.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
-from services.brand_env import getenv_brand
 import re
+import socket
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator
+
+from services.brand_env import getenv_brand
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,17 @@ def otlp_http_signal_endpoint(signal: str) -> str:
     return f"{endpoint}/v1/{signal}"
 
 
+def _service_instance_id() -> str:
+    return (
+        getenv_brand("SERVICE_INSTANCE_ID")
+        or os.getenv("OTEL_SERVICE_INSTANCE_ID")
+        or os.getenv("RAILWAY_REPLICA_ID")
+        or os.getenv("RAILWAY_DEPLOYMENT_ID")
+        or os.getenv("HOSTNAME")
+        or "local"
+    )
+
+
 def telemetry_resource() -> Any:
     from opentelemetry.sdk.resources import Resource
 
@@ -89,14 +103,11 @@ def telemetry_resource() -> Any:
         or os.getenv("RAILWAY_ENVIRONMENT_NAME")
         or "development"
     )
-    instance_id = (
-        getenv_brand("SERVICE_INSTANCE_ID")
-        or os.getenv("OTEL_SERVICE_INSTANCE_ID")
-        or os.getenv("RAILWAY_REPLICA_ID")
-        or os.getenv("RAILWAY_DEPLOYMENT_ID")
-        or os.getenv("HOSTNAME")
-        or "local"
-    )
+    instance_id = _service_instance_id()
+    try:
+        host_name = socket.gethostname()
+    except OSError:
+        host_name = ""
     service_version = (
         getenv_brand("SERVICE_VERSION")
         or os.getenv("OTEL_SERVICE_VERSION")
@@ -109,6 +120,8 @@ def telemetry_resource() -> Any:
             "service.namespace": getenv_brand("SERVICE_NAMESPACE", "dataflow"),
             "service.instance.id": instance_id,
             "service.version": service_version,
+            "grafana.host.id": instance_id,
+            "host.name": host_name or instance_id,
             "deployment.environment.name": environment,
             # Pre-1.27 semconv key; Grafana Application Observability still filters on it.
             "deployment.environment": environment,
@@ -185,13 +198,26 @@ def start_span(
 
     span_kind = _span_kind(kind)
     try:
-        with tracer.start_as_current_span(name, kind=span_kind, attributes=attrs) as span:
-            yield span
+        cm = tracer.start_as_current_span(name, kind=span_kind, attributes=attrs)
+        span = cm.__enter__()
     except Exception as exc:
-        # Tracing must never break a transfer. Log once and yield a no-op so
-        # the caller's ``with`` block still runs.
         logger.debug("tracing span %s failed open: %s", name, exc, exc_info=exc)
         yield _NoopSpan()
+        return
+
+    try:
+        yield span
+    except BaseException as exc:
+        try:
+            cm.__exit__(type(exc), exc, exc.__traceback__)
+        except Exception as exit_exc:
+            logger.debug("tracing span %s exit failed: %s", name, exit_exc, exc_info=exit_exc)
+        raise
+    else:
+        try:
+            cm.__exit__(None, None, None)
+        except Exception as exit_exc:
+            logger.debug("tracing span %s exit failed: %s", name, exit_exc, exc_info=exit_exc)
 
 
 def set_span_error(span: Any, exc: BaseException) -> None:
@@ -263,6 +289,14 @@ def detach_context(token: Any) -> None:
         ctx_api.detach(token)
     except Exception as exc:
         logger.debug("detach_context failed: %s", exc)
+
+
+def submit_in_context(executor: Any, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Submit with a fresh copy of the caller's contextvars
+    (OTel context, correlation id, job id).
+    """
+    ctx = contextvars.copy_context()
+    return executor.submit(ctx.run, fn, *args, **kwargs)
 
 
 def ensure_provider() -> bool:
@@ -380,6 +414,12 @@ def reset_for_tests() -> None:
 
 
 class _NoopSpan:
+    def update_name(self, *_a: Any, **_k: Any) -> None:
+        return None
+
+    def set_attributes(self, *_a: Any, **_k: Any) -> None:
+        return None
+
     def set_attribute(self, *_a: Any, **_k: Any) -> None:
         return None
 

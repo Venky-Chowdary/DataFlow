@@ -11,6 +11,7 @@ CDC default remains at-least-once upsert. A running job is not Approve.
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 import uuid
@@ -78,7 +79,8 @@ def start_plan_preflight_job(
                 job["finished_at"] = time.time()
 
     threading.Thread(
-        target=_run,
+        target=contextvars.copy_context().run,
+        args=(_run,),
         name=f"plan-preflight-{plan_id[:8]}",
         daemon=True,
     ).start()

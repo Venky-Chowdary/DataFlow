@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from services.brand_env import getenv_brand
+from services.tracing import submit_in_context
 from .data_analyst import get_data_analyst
 
 # The reads below decorate an answer; they never carry it. A tool that must see
@@ -66,7 +67,7 @@ def _gather(
     """
     degraded = [name for name in reads if _cooling_off(name)]
     futures = {
-        name: _pool.submit(read)
+        name: submit_in_context(_pool, read)
         for name, (read, _fallback) in reads.items()
         if name not in degraded
     }

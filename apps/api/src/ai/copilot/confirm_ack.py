@@ -99,7 +99,11 @@ def confirm_action_blocking(ack_id: str, reason: str, http_request: Any, role: s
         except BaseException as exc:  # noqa: BLE001 — surfaced to the caller
             error.append(exc)
 
-    thread = threading.Thread(target=_target, name="pilot-confirm")
+    thread = threading.Thread(
+        target=contextvars.copy_context().run,
+        args=(_target,),
+        name="pilot-confirm",
+    )
     thread.start()
     thread.join()
     if error:

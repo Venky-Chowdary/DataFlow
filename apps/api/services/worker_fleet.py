@@ -17,6 +17,7 @@ from typing import Any, Callable
 
 from services.brand_env import getenv_brand
 from services.scheduler_mode import api_claim_loop_enabled, claim_queue_enabled
+from services.tracing import submit_in_context
 from services.worker_leases import WorkerLeaseStore, requires_distributed_backend, worker_id
 
 _logger = logging.getLogger(__name__)
@@ -483,7 +484,8 @@ def run_fleet_loop(
         # Heartbeat here — submit's heartbeat does not run on this path.
         if pool is None:
             raise RuntimeError("Fleet pool was not opened for a concurrent claim loop")
-        inflight[job_id] = pool.submit(
+        inflight[job_id] = submit_in_context(
+            pool,
             _run_with_lease_heartbeat, store, job_id, handler, lease_ttl
         )
         time.sleep(0.05)
