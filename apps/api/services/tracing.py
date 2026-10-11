@@ -65,6 +65,39 @@ def otlp_endpoint() -> str:
     ).strip()
 
 
+def otlp_protocol() -> str:
+    return (os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL") or "http/protobuf").strip().lower()
+
+
+def otlp_http_signal_endpoint(signal: str) -> str:
+    endpoint = otlp_endpoint().rstrip("/")
+    if not endpoint:
+        return ""
+    for known in ("traces", "metrics", "logs"):
+        suffix = f"/v1/{known}"
+        if endpoint.endswith(suffix):
+            return f"{endpoint[:-len(suffix)]}/v1/{signal}"
+    return f"{endpoint}/v1/{signal}"
+
+
+def telemetry_resource() -> Any:
+    from opentelemetry.sdk.resources import Resource
+
+    environment = (
+        getenv_brand("ENVIRONMENT")
+        or getenv_brand("ENV")
+        or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+        or "development"
+    )
+    return Resource.create(
+        {
+            "service.name": getenv_brand("SERVICE_NAME", "dataflow-api"),
+            "service.namespace": getenv_brand("SERVICE_NAMESPACE", "dataflow"),
+            "deployment.environment.name": environment,
+        }
+    )
+
+
 def set_correlation_id(value: str | None) -> None:
     _CORRELATION_ID.set((value or "").strip())
 
@@ -227,7 +260,6 @@ def ensure_provider() -> bool:
         _PROVIDER_READY = True
         try:
             from opentelemetry import trace
-            from opentelemetry.sdk.resources import Resource
             from opentelemetry.sdk.trace import TracerProvider
             from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
         except ImportError:
@@ -239,35 +271,39 @@ def ensure_provider() -> bool:
             return False
 
         service_name = getenv_brand("SERVICE_NAME", "dataflow-api")
-        resource = Resource.create(
-            {
-                "service.name": service_name,
-                "service.namespace": "dataflow",
-            }
-        )
+        resource = telemetry_resource()
         provider = TracerProvider(resource=resource)
 
         endpoint = otlp_endpoint()
         exporter: Any = None
         if endpoint:
-            try:
-                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                    OTLPSpanExporter,
-                )
+            protocol = otlp_protocol()
+            if protocol in {"grpc", "grpc/protobuf"}:
+                try:
+                    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                        OTLPSpanExporter,
+                    )
 
-                exporter = OTLPSpanExporter(endpoint=endpoint, insecure=_otlp_insecure())
-            except ImportError:
+                    exporter = OTLPSpanExporter(
+                        endpoint=endpoint,
+                        insecure=_otlp_insecure(),
+                    )
+                except ImportError:
+                    logger.warning(
+                        "OTLP gRPC tracing requested but the gRPC exporter is not installed"
+                    )
+            else:
                 try:
                     from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                         OTLPSpanExporter as HttpExporter,
                     )
 
-                    exporter = HttpExporter(endpoint=endpoint)
+                    exporter = HttpExporter(
+                        endpoint=otlp_http_signal_endpoint("traces"),
+                    )
                 except ImportError:
                     logger.warning(
-                        "OTLP endpoint configured (%s) but no OTLP exporter "
-                        "package is installed; falling back to console exporter.",
-                        endpoint,
+                        "OTLP HTTP endpoint configured but the HTTP exporter is not installed"
                     )
         if exporter is None and getenv_brand("TRACE_CONSOLE", "0").lower() in (
             "1",

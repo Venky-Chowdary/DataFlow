@@ -1,0 +1,24 @@
+# Railway Grafana Alloy collector for production logs, metrics, and traces.
+# Create from this repository and set Config file path to this file.
+#
+# Required sealed variables:
+#   GRAFANA_CLOUD_API_KEY
+#   DATAFLOW_METRICS_BEARER_TOKEN
+#
+# Required non-secret variables:
+#   GRAFANA_CLOUD_OTLP_ENDPOINT
+#   GRAFANA_CLOUD_INSTANCE_ID
+#   DATAFLOW_METRICS_HOST
+#   OTEL_RESOURCE_ATTRIBUTES
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile.alloy"
+watchPatterns = ["Dockerfile.alloy", "deploy/alloy/**", "deploy/railway/alloy.toml"]
+
+[deploy]
+healthcheckPath = "/-/ready"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
+numReplicas = 1

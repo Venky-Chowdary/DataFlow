@@ -253,6 +253,12 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     try:
+        from services.otel_logging import shutdown_otel_logging
+
+        shutdown_otel_logging()
+    except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
+        logger.debug("OpenTelemetry log shutdown failed: %s", exc)
+    try:
         from services.tracing import shutdown_tracing
 
         shutdown_tracing()

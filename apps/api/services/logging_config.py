@@ -40,6 +40,7 @@ from contextvars import ContextVar, Token
 from typing import Any, Iterator
 
 from services.brand_env import getenv_brand
+from services.log_redaction import redact_log_text, redact_log_value
 
 #: Job currently being executed on this task/thread. Bound by
 #: :func:`job_log_context` so engine and connector logs self-identify.
@@ -171,16 +172,18 @@ class JsonFormatter(logging.Formatter):
             "ts": self.formatTime(record),
             "level": record.levelname,
             "logger": record.name,
-            "msg": record.getMessage(),
+            "msg": redact_log_text(record.getMessage()),
         }
         for field in _CONTEXT_FIELDS:
             value = getattr(record, field, "")
             if value:
                 payload[field] = value
         if record.exc_info:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = redact_log_text(
+                self.formatException(record.exc_info)
+            )
         if record.stack_info:
-            payload["stack"] = self.formatStack(record.stack_info)
+            payload["stack"] = redact_log_text(self.formatStack(record.stack_info))
         # Anything the caller passed via extra= becomes a first-class field so
         # structured queries can filter on it (rows=, table=, dest_type=, ...).
         for key, value in record.__dict__.items():
@@ -188,7 +191,7 @@ class JsonFormatter(logging.Formatter):
                 continue
             if key.startswith("_"):
                 continue
-            payload[key] = _jsonable(value)
+            payload[key] = _jsonable(redact_log_value(key, value))
         return json.dumps(payload, default=str)
 
 
@@ -257,6 +260,16 @@ def configure_logging(*, force: bool = False) -> None:
         root.removeHandler(existing)
     root.addHandler(handler)
     root.setLevel(level)
+    try:
+        from services.otel_logging import install_otel_log_handler
+
+        install_otel_log_handler(root)
+    except Exception as exc:  # noqa: BLE001 - local logging must remain available
+        # Local logging must remain available even if remote export is broken.
+        logging.getLogger(__name__).warning(
+            "OpenTelemetry log handler bootstrap failed: %s",
+            exc,
+        )
 
     # Uvicorn's loggers propagate to root once their own handlers are dropped,
     # so access and error logs pick up the same format and context fields.
