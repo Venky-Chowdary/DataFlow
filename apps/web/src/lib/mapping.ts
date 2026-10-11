@@ -216,6 +216,22 @@ export interface EditableMapping {
    * for "why this dest column" — not a second confidence score.
    */
   businessRule?: MappingBusinessRule;
+  /**
+   * Execute-enforced business-rule contracts attached to this write. Emitted
+   * as ``rule_contracts``; the writer quarantines rows that fail them.
+   */
+  ruleContracts?: RuleContractWire[];
+}
+
+/** A compiled validate contract carried to Execute on the mapping that writes its dest. */
+export interface RuleContractWire {
+  rule_id: string;
+  type: string;
+  value?: string;
+  values?: string[];
+  op?: string;
+  pattern?: string;
+  rule_text?: string;
 }
 
 /** One compiled rule from an uploaded Excel / CSV / JSON workbook. */
@@ -2253,6 +2269,7 @@ export function buildPreflightMappings(
         // G20 — a declared code map travels with the mapping, never invented.
         code_crosswalk: omitted ? undefined : (safe.codeCrosswalk || undefined),
         code_crosswalk_system: omitted ? undefined : (safe.codeCrosswalkSystem?.trim() || undefined),
+        rule_contracts: omitted ? undefined : (safe.ruleContracts?.length ? safe.ruleContracts : undefined),
         // Existing dest: never invent target_type from inferredType when Map
         // left destType blank (partial Studio honesty — write path fail-closes).
         // Create-new may still preview from inferredType / destType stamp.
@@ -2429,6 +2446,7 @@ export function editableFromPipelineMappings(
     false_friend_confirmed?: boolean;
     code_crosswalk?: Record<string, string>;
     code_crosswalk_system?: string;
+    rule_contracts?: RuleContractWire[];
     control_total?: boolean;
     business_rule?: {
       kind?: string;
@@ -2613,6 +2631,19 @@ export function editableFromPipelineMappings(
           )
         : undefined,
       codeCrosswalkSystem: m.code_crosswalk_system || undefined,
+      ruleContracts: Array.isArray(m.rule_contracts)
+        ? m.rule_contracts
+            .filter((c) => c && typeof c === "object")
+            .map((c) => ({
+              rule_id: String(c.rule_id || ""),
+              type: String(c.type || ""),
+              value: c.value,
+              values: c.values,
+              op: c.op,
+              pattern: c.pattern,
+              rule_text: c.rule_text,
+            }))
+        : undefined,
       controlTotal: typeof m.control_total === "boolean"
         ? m.control_total
         : defaultControlTotal(sourceType, destType, m.semantic_role),
