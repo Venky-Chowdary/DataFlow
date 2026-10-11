@@ -477,19 +477,23 @@ describe("rule contracts reach the mapping wire", () => {
         status: "executable",
         contract: { type: "unique" },
         enforced_at_execute: false,
+        enforced_post_load: true,
         rule_id: "c2",
       },
     ],
   };
 
-  it("attaches execute-enforced contracts to the matching mapping, deduped", () => {
+  it("attaches execute- and post-load-enforced contracts, deduped", () => {
     const next = mergeBusinessRules(seed, contractReport);
     const fname = next.find((m) => m.source === "fname")!;
-    assert.equal(fname.ruleContracts?.length, 1);
-    assert.equal(fname.ruleContracts?.[0].rule_id, "c1");
+    assert.deepEqual(
+      (fname.ruleContracts || []).map((c) => c.rule_id),
+      ["c1", "c2"],
+    );
     assert.equal(fname.ruleContracts?.[0].type, "not_null");
+    assert.equal(fname.ruleContracts?.[1].type, "unique");
     const again = mergeBusinessRules(next, contractReport);
-    assert.equal(again.find((m) => m.source === "fname")!.ruleContracts?.length, 1);
+    assert.equal(again.find((m) => m.source === "fname")!.ruleContracts?.length, 2);
   });
 
   it("emits rule_contracts on the preflight wire", () => {
@@ -498,7 +502,7 @@ describe("rule contracts reach the mapping wire", () => {
     const fname = wire.find((m) => m.source === "fname")!;
     assert.deepEqual(
       (fname.rule_contracts || []).map((c) => c.rule_id),
-      ["c1"],
+      ["c1", "c2"],
     );
   });
 
@@ -598,11 +602,13 @@ describe("proofRuleClaim counts only what executes", () => {
           rule_text: "Must be unique", kind: "contract", kind_label: "Validate contract",
           plane: "validate", confidence: 0.98, status: "executable",
           contract: { type: "unique" }, enforced_at_execute: false,
+          enforced_post_load: true,
         },
       ],
     };
     const claim = proofRuleClaim(mixed);
-    assert.match(claim, /3 business rules/);
-    assert.match(claim, /not enforced at Run/i);
+    assert.match(claim, /4 business rules/);
+    assert.match(claim, /1 rule\(s\) are checked after load/);
+    assert.doesNotMatch(claim, /not enforced at Run/i);
   });
 });

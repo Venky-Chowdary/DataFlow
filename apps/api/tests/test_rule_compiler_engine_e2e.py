@@ -573,3 +573,68 @@ def test_engine_writes_one_executed_event_linked_to_compiled(
     raw = path.read_bytes()
     assert b"a@x.com" not in raw
 
+
+def _db_dup_email(path: Path) -> None:
+    """All rows pass the row-local contracts but two share an email — a
+    population-unique violation only a post-load check can catch."""
+    conn = sqlite3.connect(str(path))
+    with conn:
+        conn.execute(
+            "CREATE TABLE customers (id INTEGER PRIMARY KEY, fname TEXT, status TEXT, "
+            "email TEXT, amount TEXT, mystery TEXT, notes TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO customers VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (1, " alice ", "A", "a@x.com", "10", "m1", "Texas"),
+                (2, "bob", "I", "b@x.com", "5", "m2", "Ohio"),
+                (3, "carol", "A", "a@x.com", "7", "m3", "Maine"),
+            ],
+        )
+    conn.close()
+
+
+def _unique_wire(report) -> list[dict]:
+    mappings = _wire_mappings(report, include_review=False)
+    for m in mappings:
+        if m.get("target") == "email":
+            m["rule_contracts"] = [
+                {
+                    "rule_id": "uniq-email",
+                    "type": "unique",
+                    "rule_text": "Must be unique",
+                }
+            ]
+    return mappings
+
+
+def test_unique_contract_fails_gate8_on_duplicate_population(
+    tmp_path: Path, engine_env
+):
+    fake, _persisted = engine_env
+    report = _report()
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _db_dup_email(src)
+    _dest_db(dst)
+    result = _run(fake, src, dst, _unique_wire(report))
+    assert not result.success, (result.destination_summary, result.reconciliation)
+    recon = result.reconciliation or {}
+    assert recon.get("passed") is False, recon
+    checks = recon.get("rule_checks") or []
+    failed = [c for c in checks if c.get("status") == "failed"]
+    assert [c["rule_id"] for c in failed] == ["uniq-email"], checks
+    assert failed[0]["duplicates"] == 1
+    assert "a@x.com" not in str(checks)
+
+
+def test_unique_contract_passes_on_clean_population(tmp_path: Path, engine_env):
+    fake, _persisted = engine_env
+    report = _report()
+    src, dst = tmp_path / "src.sqlite", tmp_path / "dst.sqlite"
+    _db_clean(src)
+    _dest_db(dst)
+    result = _run(fake, src, dst, _unique_wire(report))
+    assert result.success, result.error
+    recon = result.reconciliation or {}
+    checks = recon.get("rule_checks") or []
+    assert checks and all(c.get("status") == "passed" for c in checks), checks

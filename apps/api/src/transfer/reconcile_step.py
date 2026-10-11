@@ -1521,6 +1521,117 @@ def _engine_population_digests(
     return source_digest.checksum, dest_digest.checksum, dest_digest.row_count
 
 
+def _count_dest_duplicates(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    *,
+    endpoint: EndpointConfig,
+    table: str,
+    column: str,
+) -> int:
+    """``COUNT(*) - COUNT(DISTINCT col) WHERE col IS NOT NULL`` on the dest."""
+    from connectors.sql_identifiers import (
+        quote_sql_identifier,
+        require_safe_identifier,
+    )
+
+    qcol = quote_sql_identifier(require_safe_identifier(column, preserve_case=True))
+    if dest_type == "sqlite":
+        import sqlite3
+
+        qtable = quote_sql_identifier(
+            require_safe_identifier(table, preserve_case=True)
+        )
+        conn = sqlite3.connect(str(dest_cfg.get("database") or ""))
+        try:
+            row = conn.execute(
+                f"SELECT COUNT(*) - COUNT(DISTINCT {qcol}) FROM {qtable} "
+                f"WHERE {qcol} IS NOT NULL"
+            ).fetchone()
+        finally:
+            conn.close()
+        return int((row or [0])[0] or 0)
+    from connectors.postgresql_conn import get_connection
+    from connectors.sql_identifiers import quote_table_ref
+
+    qref = quote_table_ref(
+        table, endpoint.schema or "public", dialect="postgresql"
+    )
+    conn = get_connection(
+        host=str(dest_cfg.get("host") or ""),
+        port=int(dest_cfg.get("port") or 5432),
+        database=str(dest_cfg.get("database") or ""),
+        username=str(dest_cfg.get("username") or ""),
+        password=str(dest_cfg.get("password") or ""),
+        connection_string=str(dest_cfg.get("connection_string") or ""),
+        ssl=bool(dest_cfg.get("ssl", False)),
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*) - COUNT(DISTINCT {qcol}) FROM {qref} "
+                f"WHERE {qcol} IS NOT NULL"
+            )
+            return int(cur.fetchone()[0] or 0)
+    finally:
+        conn.close()
+
+
+def _run_unique_rule_checks(
+    mappings: list[dict] | None,
+    *,
+    endpoint: EndpointConfig,
+) -> list[dict[str, Any]]:
+    """Post-load population checks for ``unique`` business-rule contracts.
+
+    Runs once per table at Gate-8 for each mapping carrying a unique contract —
+    the writer never sees it (``evaluate_contract`` ignores non-row-local
+    types). Entries name the rule and outcome only, never the values.
+    """
+    contracts: list[tuple[str, dict]] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        target = str(m.get("target") or "").strip()
+        if not target:
+            continue
+        for c in m.get("rule_contracts") or []:
+            if isinstance(c, dict) and str(c.get("type") or "") == "unique":
+                contracts.append((target, c))
+    checks: list[dict[str, Any]] = []
+    if not contracts:
+        return checks
+    from .connector_capabilities import resolve_driver_type
+
+    dest_type = resolve_driver_type(endpoint.format or "")
+    dest_cfg = resolve_connector_config(endpoint)
+    table = str(endpoint.table or dest_cfg.get("table") or "")
+    for target, contract in contracts:
+        entry = {
+            "rule_id": str(contract.get("rule_id") or ""),
+            "type": "unique",
+            "column": target,
+        }
+        if dest_type not in {"sqlite", "postgresql", "redshift"} or not table:
+            checks.append({**entry, "status": "unverified"})
+            continue
+        try:
+            duplicates = _count_dest_duplicates(
+                dest_type, dest_cfg, endpoint=endpoint, table=table, column=target
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).info(
+                "unique rule check unverified for %s: %s", target, exc
+            )
+            checks.append({**entry, "status": "unverified"})
+            continue
+        if duplicates:
+            checks.append({**entry, "status": "failed", "duplicates": duplicates})
+        else:
+            checks.append({**entry, "status": "passed"})
+    return checks
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -2957,4 +3068,26 @@ def run_reconciliation(
         checksum_scope=keyed_scope,
         keyed_expected_delta=keyed_delta,
     )
-    return _finalize(report.to_dict())
+    payload = report.to_dict()
+    rule_checks = _run_unique_rule_checks(mappings, endpoint=endpoint)
+    if rule_checks:
+        payload["rule_checks"] = rule_checks
+        failed = [c for c in rule_checks if c.get("status") == "failed"]
+        if failed:
+            payload["passed"] = False
+            detail = "; ".join(
+                f"business rule {c['rule_id']} failed: "
+                f"{c['duplicates']} duplicate value(s) in {c['column']} after load"
+                for c in failed
+            )
+            payload["message"] = f"{payload.get('message') or ''} {detail}".strip()
+        unverified = [c for c in rule_checks if c.get("status") == "unverified"]
+        if unverified:
+            # The row proof still stands, but the run must not read as fully
+            # verified — name what could not be checked.
+            note = (
+                f"{len(unverified)} business-rule uniqueness check(s) "
+                "unverified for this destination"
+            )
+            payload["message"] = f"{payload.get('message') or ''} — {note}".strip()
+    return _finalize(payload)

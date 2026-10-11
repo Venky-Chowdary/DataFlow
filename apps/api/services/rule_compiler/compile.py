@@ -47,6 +47,14 @@ RULE_COMPILER_VERSION = "1"
 
 _CONTRACT_EXECUTE_TYPES = frozenset({"not_null", "contains", "in_set", "compare", "pattern"})
 
+# Population-unique contracts are verified post-load on the destination, not
+# per cell at write.
+_CONTRACT_POST_LOAD_TYPES = frozenset({"unique"})
+
+# An in_lookup that names its values compiles to in_set — capped so a giant
+# reference sheet does not turn into a per-cell set literal at Run.
+_MAX_LOOKUP_VALUES = 10_000
+
 _KIND_TO_TRANSFORM = {
     "trim": "trim",
     "case_lower": "lower",
@@ -597,6 +605,7 @@ def compile_rule_workbook(
         item["rule_id"] = _rule_id(item)
         if item.get("kind") == "contract":
             item["enforced_at_execute"] = _contract_enforced_at_execute(item)
+            item["enforced_post_load"] = _contract_enforced_post_load(item)
     buckets = {
         "executable": sum(1 for r in compiled if r["status"] == "executable"),
         "needs_confirmation": sum(1 for r in compiled if r["status"] == "needs_confirmation"),
@@ -790,6 +799,11 @@ def _rule_id(item: dict[str, Any]) -> str:
 def _contract_enforced_at_execute(item: dict[str, Any]) -> bool:
     contract = item.get("contract") or {}
     return str(contract.get("type") or "") in _CONTRACT_EXECUTE_TYPES
+
+
+def _contract_enforced_post_load(item: dict[str, Any]) -> bool:
+    contract = item.get("contract") or {}
+    return str(contract.get("type") or "") in _CONTRACT_POST_LOAD_TYPES
 
 
 def _report_fingerprint(
@@ -2192,7 +2206,13 @@ def _compile_row(
                     lookup_pairs, spoken_src, spoken_dst, source_column, dest_column,
                 ) or pairs
             )
-            if values:
+            if len(values) > _MAX_LOOKUP_VALUES:
+                issues.append(
+                    f"reference set exceeds {_MAX_LOOKUP_VALUES} values; "
+                    "not enforceable at Run"
+                )
+                status = "needs_confirmation"
+            elif values:
                 classified["contract"] = {"type": "in_set", "values": values}
                 classified["interpretation"] = "Exist in named lookup"
                 issues = [

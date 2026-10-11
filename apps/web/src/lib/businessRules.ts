@@ -30,6 +30,7 @@ export interface CompiledRule {
   confidence: number;
   contract?: { type: string; value?: string; values?: string[]; op?: string; pattern?: string } | null;
   enforced_at_execute?: boolean;
+  enforced_post_load?: boolean;
   transform?: string;
   engine_transform?: string;
   timezone?: string;
@@ -130,11 +131,19 @@ export function proofRuleClaim(report: RuleCompileReport): string {
   const conflict = report.coverage?.conflict ?? report.buckets?.conflict ?? 0;
   const rules = report.rules || [];
   const validateOnly = rules.filter((rule) => rule.status === "executable"
-    && rule.kind === "contract" && !rule.enforced_at_execute).length;
+    && rule.kind === "contract"
+    && !rule.enforced_at_execute && !rule.enforced_post_load).length;
+  const postLoad = rules.filter((rule) => rule.status === "executable"
+    && rule.kind === "contract"
+    && !rule.enforced_at_execute && rule.enforced_post_load).length;
   const enforced = Math.max(0, executable - validateOnly);
-  const suffix = validateOnly
-    ? `; ${validateOnly} validation rule(s) are checked at Validate only, not enforced at Run`
-    : "";
+  const parts = [
+    validateOnly
+      ? `${validateOnly} validation rule(s) are checked at Validate only, not enforced at Run`
+      : "",
+    postLoad ? `${postLoad} rule(s) are checked after load` : "",
+  ].filter(Boolean);
+  const suffix = parts.length ? `; ${parts.join("; ")}` : "";
   if (review || conflict) {
     return `Migration compiled ${enforced} executable business rule(s); review remains${suffix}`;
   }
@@ -276,7 +285,10 @@ function attachRuleContracts(
 ): void {
   for (const rule of report.rules) {
     if (rule.kind !== "contract") continue;
-    if (rule.status !== "executable" || !rule.enforced_at_execute) continue;
+    if (
+      rule.status !== "executable"
+      || !(rule.enforced_at_execute || rule.enforced_post_load)
+    ) continue;
     if (tableFold) {
       const ruleTable = (rule.source_table || "").trim().toLowerCase();
       if (ruleTable && ruleTable !== tableFold) continue;

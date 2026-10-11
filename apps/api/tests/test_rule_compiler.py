@@ -2429,3 +2429,43 @@ def test_arithmetic_without_a_schema_stays_executable():
     proven = checked["rules"][0]
     assert proven["status"] == "executable"
     assert proven["shape_step"]["options"]["expression"] == "salary * 12"
+
+
+def test_in_lookup_bound_large_reference_set_stays_review():
+    """Over _MAX_LOOKUP_VALUES the in_lookup rule is review-required with the
+    bound named; at/under it compiles to executable in_set.
+
+    Workbook ingest truncates sheets below the bound, so the edge is driven
+    through ``_compile_row`` with a populated lookup edge directly.
+    """
+    from services.rule_compiler.compile import _MAX_LOOKUP_VALUES, _compile_row
+
+    def _rule(n_values: int):
+        return _compile_row(
+            {
+                "source_column": "state_code",
+                "rule": "Must exist in lookup",
+                "action": "QUARANTINE",
+                "rule_name": "V1",
+            },
+            src_cols=["state"],
+            dst_cols=["state_code"],
+            source_table="customers",
+            dest_table="customers",
+            lookup_pairs={
+                ("state", "state_code"): {f"C{i}": f"C{i}" for i in range(n_values)}
+            },
+            sheet_kind="validation",
+        )
+
+    under = _rule(_MAX_LOOKUP_VALUES)
+    assert under["status"] == "executable"
+    assert under["contract"]["type"] == "in_set"
+    assert len(under["contract"]["values"]) == _MAX_LOOKUP_VALUES
+
+    over = _rule(_MAX_LOOKUP_VALUES + 1)
+    assert over["status"] == "needs_confirmation"
+    assert any(
+        f"exceeds {_MAX_LOOKUP_VALUES} values" in item
+        for item in over.get("issues") or []
+    )

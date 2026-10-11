@@ -376,7 +376,7 @@ export function TransferMapStep({
                 Destination names, write transforms, and lookups land here.
                 Transform kept the pre-load image. Validate contracts never write
                 a column — row-level ones quarantine failing rows at Run, and
-                population ones (unique) are checked at Validate only.
+                population ones (unique) are checked after load.
                 Click a rule for provenance — customer document → compiled IR → dest.
               </p>
               {ruleReport.honesty ? (
