@@ -64,7 +64,6 @@ interface TransferTransformStepProps {
    * because both schemas exist here; Map owns the per-column evidence.
    */
   onApplyRules?: (report: RuleCompileReport) => void;
-  onAcceptRuleDirect?: (index: number) => void;
   ruleReport?: RuleCompileReport | null;
   sourceTable?: string;
   destTable?: string;
@@ -127,7 +126,6 @@ export function TransferTransformStep({
   onContinue,
   syncMode,
   onApplyRules,
-  onAcceptRuleDirect,
   ruleReport,
   sourceTable = "",
   destTable = "",
@@ -598,16 +596,16 @@ export function TransferTransformStep({
               Anything we cannot execute stays in review — unused destination
               columns are not written. Applied rows land on this recipe and Map
               immediately. Closed-form Validate checks compile as destination
-              contracts — they never write. Review is for sentences that are
-              not a closed form or did not bind. Accept as Direct on a leftover
-              bound rename, or continue to Map to remap.
+              contracts — they never write a column. Review is for sentences
+              that are not a closed form or did not bind. A leftover bound
+              rename can be accepted as Direct on Map, or remapped there.
               {sourceTables.length > 1
                 ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins stay in review — this compiler will not invent a grain.`
                 : ""}
             </p>
           </details>
           {ruleReport ? <p className="df2-rule-import-summary">{ruleReport.filename}</p> : null}
-          {ruleError ? <p className="df2-rule-import-error">{ruleError}</p> : null}
+          {ruleError ? <p className="df2-rule-import-error" role="alert">{ruleError}</p> : null}
         </div>
         <div className="df2-rule-import-actions">
           <input
@@ -816,7 +814,6 @@ export function TransferTransformStep({
         <BusinessRuleLedger
           report={ruleReport}
           embedded
-          onAcceptDirect={onAcceptRuleDirect}
         />
       ) : null}
       </div>

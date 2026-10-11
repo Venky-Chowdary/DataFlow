@@ -54,7 +54,7 @@ function edgeLabel(rule: CompiledRule): string {
   return `${rule.source_column || "—"} → ${rule.dest_column || "—"}`;
 }
 
-function reviewHint(rule: CompiledRule): string {
+function reviewHint(rule: CompiledRule, canAcceptHere: boolean): string {
   if (rule.kind === "contract" && rule.status === "executable") {
     return "Destination validation — compiled IR, not a Transform write.";
   }
@@ -65,6 +65,9 @@ function reviewHint(rule: CompiledRule): string {
     return "Joins stay in review — this compiler will not invent a grain.";
   }
   if (canAcceptAsDirect(rule)) {
+    if (!canAcceptHere) {
+      return "Clear rename / passthrough the compiler left for you. Accept it as Direct on Map, or remap there.";
+    }
     return "Clear rename / passthrough the compiler left for you. Accept as Direct to put it on Map, or leave it and remap there.";
   }
   return "The compiler will not invent an algorithm from this sentence. Confirm or remap on Map.";
@@ -225,7 +228,7 @@ export function BusinessRuleLedger({
               ) : null}
               {rule.status === "needs_confirmation" ? (
                 <span className="df2-rule-line-next">
-                  <span>{reviewHint(rule)}</span>
+                  <span>{reviewHint(rule, Boolean(onAcceptDirect))}</span>
                   {onAcceptDirect && canAcceptAsDirect(rule) ? (
                     <Button
                       type="button"

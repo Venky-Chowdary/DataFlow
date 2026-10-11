@@ -374,7 +374,9 @@ export function TransferMapStep({
             <div className="df2-rule-map-body">
               <p className="df2-rule-map-kicker">
                 Destination names, write transforms, and lookups land here.
-                Transform kept the pre-load image. Validate contracts never write.
+                Transform kept the pre-load image. Validate contracts never write
+                a column — row-level ones quarantine failing rows at Run, and
+                population ones (unique) are checked at Validate only.
                 Click a rule for provenance — customer document → compiled IR → dest.
               </p>
               {ruleReport.honesty ? (

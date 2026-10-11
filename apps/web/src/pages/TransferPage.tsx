@@ -7641,7 +7641,6 @@ export function TransferPage({
           onContinue={() => void goToMapping()}
           syncMode={syncMode}
           ruleReport={businessRuleReport}
-          onAcceptRuleDirect={acceptWorkbookRuleAsDirect}
           sourceTable={primarySourceStream || sourceTable}
           destTable={targetCollection}
           sourceTables={multiStreamNames.length ? multiStreamNames : undefined}
