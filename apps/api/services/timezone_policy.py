@@ -286,7 +286,7 @@ def columns_with_naive_instants(
     mappings: list[dict[str, Any]],
 ) -> set[str]:
     """Find mapped temporal columns with at least one zoneless instant sample."""
-    from services.schema_inference import _classify_value
+    from services.schema_inference import classify_value
     from services.type_system import datetime_timezone_polarity
 
     by_name = {str(row.get("name") or ""): row for row in source_rows}
@@ -306,7 +306,7 @@ def columns_with_naive_instants(
             continue
         samples = list(by_name.get(source, {}).get("samples") or [])
         if any(
-            _classify_value(str(sample), field_name=source) in {"DATE", "TIMESTAMP"}
+            classify_value(str(sample), field_name=source) in {"DATE", "TIMESTAMP"}
             for sample in samples
         ):
             found.add(source)

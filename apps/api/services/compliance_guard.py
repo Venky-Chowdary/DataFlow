@@ -109,7 +109,7 @@ def _temporal_column(col: str, values: list[str]) -> bool:
     phone number is epoch-shaped too. Name rules (``birth_date`` → dob) still
     apply to the column.
     """
-    from services.schema_inference import _classify_value, _is_date_field_name
+    from services.schema_inference import _is_date_field_name, classify_value
 
     non_empty = [v for v in values if v]
     if not non_empty:
@@ -118,7 +118,7 @@ def _temporal_column(col: str, values: list[str]) -> bool:
     for value in non_empty:
         if value.lstrip("+-").isdigit() and not temporal_name:
             return False
-        if _classify_value(value, field_name=col) not in _TEMPORAL_VALUE_TYPES:
+        if classify_value(value, field_name=col) not in _TEMPORAL_VALUE_TYPES:
             return False
     return True
 

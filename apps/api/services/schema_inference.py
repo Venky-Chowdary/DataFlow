@@ -18,7 +18,8 @@ this module before Map / preflight / CREATE TABLE. Rules are fail-safe:
 4. **Widen to VARCHAR/TEXT** on mixed or ambiguous columns — never invent a
    tight type that will fail dry-run on the next unseen value.
 
-Public API: ``infer_type``, ``infer_column``, ``infer_columns_from_rows``.
+Public API: ``classify_value``, ``infer_type``, ``infer_column``,
+``infer_columns_from_rows``.
 """
 
 from __future__ import annotations
@@ -495,7 +496,7 @@ def _has_explicit_timezone_suffix(value: str) -> bool:
     )
 
 
-def _classify_value(value: str, *, field_name: str | None = None) -> str:
+def classify_value(value: str, *, field_name: str | None = None) -> str:
     s = value.strip()
     if not s or s.lower() in NULL_SENTINELS:
         return "VARCHAR"
@@ -588,6 +589,9 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
     if _EMAIL_RE.match(s):
         return "VARCHAR"
     return "VARCHAR"
+
+
+_classify_value = classify_value
 
 
 @contextmanager
