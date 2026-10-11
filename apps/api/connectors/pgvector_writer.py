@@ -658,8 +658,16 @@ def write_mapped_rows(
         log_stale_cleanup_skipped,
         stale_cleanup_meta,
         stale_cleanup_skipped_docs,
+        vector_dimension_hint,
     )
     from connectors.writer_common import prepare_records_for_vector_write
+    from services.embedding_providers import (
+        EmbeddingProviderError,
+        EmbeddingUsage,
+        create_embedding_usage,
+        provider_extra_from_options,
+    )
+    from services.type_ddl_specialty import pgvector_dimension_limit_error
 
     pk_cols = list(
         _kwargs.get("destination_pk_columns")
@@ -667,6 +675,56 @@ def write_mapped_rows(
         or []
     ) or None
     studio_live = _kwargs.get("destination_column_types")
+    embedding_extra = provider_extra_from_options(_kwargs)
+    usage = EmbeddingUsage(
+        provider=(embedding_model or "unknown").split("/", 1)[0],
+        model=embedding_model or "unknown",
+    )
+    if embedding_column:
+        dimension_hint_records, _, _ = prepare_records_for_vector_write(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            column_types=column_types,
+            error_policy=error_policy,
+            dest_kind="pgvector",
+            destination_pk_columns=pk_cols,
+            stream_contracts=_kwargs.get("stream_contracts"),
+            contract_primary_key=_kwargs.get("contract_primary_key"),
+            label="pgvector",
+            destination_column_nullability=_kwargs.get(
+                "destination_column_nullability"
+            ),
+            destination_column_types=(
+                studio_live if isinstance(studio_live, dict) else None
+            ),
+        )
+    else:
+        dimension_hint_records = ()
+    dimension_hint = vector_dimension_hint(
+        embedding_model,
+        embedding_extra,
+        records=dimension_hint_records,
+        embedding_column=embedding_column,
+    )
+    if dimension_hint is not None:
+        dimension_error = pgvector_dimension_limit_error(
+            dimension_hint,
+            storage=vector_storage,
+            index=vector_index,
+        )
+        if dimension_error:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "public",
+                checksum="",
+                chunks_completed=0,
+                error=dimension_error,
+                meta={"embedding_usage": usage.to_dict()},
+            )
+
     mapped_targets = [
         str(m.get("target") or m.get("source") or "").strip()
         for m in (mappings or [])
@@ -762,7 +820,6 @@ def write_mapped_rows(
     identity_columns = vector_identity_columns(pk_cols, mappings, records)
     from services.vector_sync import (
         pgvector_read_document_states,
-        vector_dimension_hint,
         vector_record_key,
     )
 
@@ -772,18 +829,6 @@ def write_mapped_rows(
     }
     vector_doc_states: dict[str, dict[str, Any]] = {}
     skip_fingerprint = None
-    from services.embedding_providers import (
-        EmbeddingProviderError,
-        EmbeddingUsage,
-        create_embedding_usage,
-        provider_extra_from_options,
-    )
-
-    embedding_extra = provider_extra_from_options(_kwargs)
-    usage = EmbeddingUsage(
-        provider=(embedding_model or "unknown").split("/", 1)[0],
-        model=embedding_model or "unknown",
-    )
     if vector_skip_unchanged:
         source_ids = sorted(
             {
@@ -1140,7 +1185,12 @@ def write_mapped_rows(
             },
         )
 
-    if vector_storage == "halfvec" and dimension > 4000:
+    dimension_error = pgvector_dimension_limit_error(
+        dimension,
+        storage=vector_storage,
+        index=vector_index,
+    )
+    if dimension_error:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -1148,10 +1198,7 @@ def write_mapped_rows(
             target_schema=schema or "public",
             checksum="",
             chunks_completed=0,
-            error=(
-                f"halfvec supports at most 4000 dimensions; this embedding has "
-                f"{dimension}. Use vector storage or a lower-dimensional model."
-            ),
+            error=dimension_error,
             meta={"embedding_usage": usage.to_dict()},
         )
 

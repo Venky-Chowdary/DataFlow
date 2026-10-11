@@ -45,15 +45,16 @@ from services.cdc_exactly_once import (  # noqa: E402
     EosCrash,
     decide_eos_apply,
 )
+from tests.scale.engines import PG  # noqa: E402
 
 ENGINES: dict[str, dict[str, Any]] = {
     "postgresql": dict(
         type="postgresql",
-        host=os.getenv("DATAFLOW_PG_HOST") or "localhost",
-        port=int(os.getenv("DATAFLOW_PG_PORT") or 5433),
-        database=os.getenv("DATAFLOW_PG_DB") or "dataflow",
-        username=os.getenv("DATAFLOW_PG_USER") or "postgres",
-        password=os.getenv("DATAFLOW_PG_PASSWORD") or "postgres",
+        host=PG["host"],
+        port=PG["port"],
+        database=PG["database"],
+        username=PG["username"],
+        password=PG["password"],
     ),
     "mysql": dict(
         type="mysql",

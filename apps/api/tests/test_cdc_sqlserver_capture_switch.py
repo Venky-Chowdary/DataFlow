@@ -19,9 +19,13 @@ from connectors.sqlserver_cdc_native import (
 )
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.brand_env import getenv_brand
-from test_cdc_sqlserver_native_integration import CFG
+from test_cdc_sqlserver_native_integration import CFG, _sqlserver_native_ready
 
 
+@pytest.mark.skipif(
+    not _sqlserver_native_ready(),
+    reason="SQL Server native CDC (cdc_native_orders) not reachable on localhost:1433",
+)
 def test_native_capture_switch_drains_old_instance_before_new() -> None:
     cfg = {
         **CFG,

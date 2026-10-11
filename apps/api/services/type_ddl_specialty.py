@@ -47,6 +47,39 @@ _VECTOR_DIM_CAPS: Final[dict[str, int]] = {
     "snowflake": 4096,
 }
 
+PGVECTOR_HALFVEC_MAX_DIMENSIONS: Final[int] = 4000
+PGVECTOR_HNSW_MAX_DIMENSIONS: Final[dict[str, int]] = {
+    "vector": 2000,
+    "halfvec": PGVECTOR_HALFVEC_MAX_DIMENSIONS,
+}
+
+
+def pgvector_dimension_limit_error(
+    dimension: int, *, storage: str, index: str
+) -> str | None:
+    """Return a user-facing error when a pgvector dimension exceeds its limit."""
+    cap = _VECTOR_DIM_CAPS["postgresql"]
+    if dimension > cap:
+        return (
+            f"pgvector supports at most {cap} dimensions; this embedding has "
+            f"{dimension}. Use a lower-dimensional model."
+        )
+    if storage == "halfvec" and dimension > PGVECTOR_HALFVEC_MAX_DIMENSIONS:
+        return (
+            f"halfvec supports at most {PGVECTOR_HALFVEC_MAX_DIMENSIONS} "
+            f"dimensions; this embedding has {dimension}. Use vector storage "
+            "or a lower-dimensional model."
+        )
+    if index == "hnsw":
+        limit = PGVECTOR_HNSW_MAX_DIMENSIONS.get(storage)
+        if limit is not None and dimension > limit:
+            return (
+                f"HNSW indexing on {storage} storage supports at most {limit} "
+                f"dimensions; this embedding has {dimension}. Use halfvec storage, "
+                "set vector_index to none, or a lower-dimensional model."
+            )
+    return None
+
 
 def parse_vector_dimension(inferred: str | None) -> int | None:
     """Extract embedding dimension from VECTOR / HALFVEC type strings.
