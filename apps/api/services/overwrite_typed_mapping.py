@@ -19,29 +19,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _has_mixed_temporal_timezone_polarity(values: list[Any]) -> bool:
-    from connectors.sql_temporal import (
-        input_has_timezone,
-        parse_sql_date,
-        parse_sql_datetime,
-    )
-
-    has_aware = False
-    has_zoneless = False
-    for value in values:
-        if value is None or (isinstance(value, str) and not value.strip()):
-            continue
-        if parse_sql_datetime(value) is None and parse_sql_date(value) is None:
-            continue
-        if input_has_timezone(value):
-            has_aware = True
-        else:
-            has_zoneless = True
-        if has_aware and has_zoneless:
-            return True
-    return False
-
-
 def build_overwrite_create_new_mappings(
     *,
     columns: list[str],
@@ -94,13 +71,6 @@ def build_overwrite_create_new_mappings(
         source_samples = {
             c: [cell_to_string(r.get(c, "")) for r in head] for c in columns
         }
-        mixed_temporal_columns = {
-            c
-            for c in columns
-            if _has_mixed_temporal_timezone_polarity(
-                [row.get(c) for row in head if isinstance(row, dict)]
-            )
-        }
         overwrite_result = run_mapping_pipeline(
             source_columns=columns,
             target_columns=[],
@@ -126,73 +96,11 @@ def build_overwrite_create_new_mappings(
             and isinstance(overwrite_auto, list)
             and any(mm.get("source") for mm in overwrite_auto)
         ):
-            for mapping_index, mm in enumerate(overwrite_auto):
+            for mm in overwrite_auto:
                 # Create-new keeps source column names (never canonicalise into a
                 # shape the fresh table does not have).
                 mm["target"] = mm.get("source") or mm.get("target", "")
                 mm["create_new"] = True
-                source = str(mm.get("source") or "")
-                if source in mixed_temporal_columns:
-                    from services.mapping_proof import stamp_mapping_fidelity
-                    from services.type_system import (
-                        create_new_mapping_target_type,
-                        materialize_dest_ddl,
-                    )
-
-                    destination_db = (request.destination.format or "").lower()
-                    text_type = create_new_mapping_target_type(
-                        "VARCHAR",
-                        destination_db,
-                        source_db=(request.source.format or "").lower(),
-                    )
-                    if not text_type:
-                        raise ValueError(
-                            "Create-new VARCHAR carrier unavailable for mixed "
-                            f"temporal field {source}"
-                        )
-                    mm.update(
-                        {
-                            "source_type": "VARCHAR",
-                            "target_type": text_type,
-                            "dest_native_type": materialize_dest_ddl(
-                                destination_db, text_type, "VARCHAR"
-                            ),
-                            "transform": "none",
-                            "reasoning": (
-                                "Mixed zone-bearing and zoneless temporal samples "
-                                "use the existing VARCHAR carrier to preserve "
-                                "their serialized values."
-                            ),
-                        }
-                    )
-                    for key in (
-                        "create_new_risks",
-                        "type_narrowing",
-                        "conversion_class",
-                        "invents_capacity",
-                        "requires_risk_contract",
-                    ):
-                        mm.pop(key, None)
-                    mm = stamp_mapping_fidelity(
-                        [mm],
-                        source_types={source: "VARCHAR"},
-                        target_types={source: text_type},
-                        destination_db_type=destination_db,
-                        dest_table_exists=False,
-                        samples_by_source={source: source_samples.get(source, [])},
-                    )[0]
-                    from services.create_new_risk_stamp import (
-                        apply_create_new_risk_stamps,
-                    )
-
-                    mm = apply_create_new_risk_stamps(
-                        [mm],
-                        destination_db,
-                        source_samples={source: source_samples.get(source, [])},
-                        dest_table_exists=False,
-                        source_db_type=(request.source.format or "").lower(),
-                    )[0]
-                    overwrite_auto[mapping_index] = mm
             mappings = overwrite_auto
     except Exception as exc:
         logger.warning(
