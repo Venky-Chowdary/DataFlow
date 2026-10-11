@@ -297,9 +297,14 @@ def test_live_pg_iceberg_skip_when_dest_count_matches():
             )
         assert dest in str(exc_info.value)
         assert _dest_count(dest) == 800
+        from services.million_row_proof import ensure_memory_job_store_if_mongo_down
+        from services.mongodb_service import get_mongodb_service
         from src.transfer.models import EndpointConfig
         from src.transfer.stream import stream_database_transfer
 
+        ensure_memory_job_store_if_mongo_down()
+        job_id = f"pg-ice-skip-{tag}"
+        get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
         source = EndpointConfig.from_dict(
             "database",
             {
@@ -330,6 +335,7 @@ def test_live_pg_iceberg_skip_when_dest_count_matches():
             ],
             {"id": "BIGINT", "label": "VARCHAR(32)"},
             sync_mode="full_refresh_append",
+            job_id=job_id,
         )
         assert transferred == 800
         assert summary.get("copy_fast_path") == "declined"
