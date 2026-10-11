@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from connectors.oracle_logminer_txn import mining_position
 from connectors.sql_identifiers import quote_sql_identifier
 from connectors.write_resilience import (
     is_connection_lost,
@@ -460,13 +461,18 @@ def logminer_contents_sql(
     """
     xid_cols = ", XIDUSN, XIDSLT, XIDSQN" if include_xid else ""
     return f"""
-        SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER{xid_cols}
+        SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER{xid_cols},
+               SEG_NAME
         FROM (
-          SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER{xid_cols}
+          SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER{xid_cols},
+                 SEG_NAME
           FROM v$logmnr_contents
           WHERE SEG_OWNER = :owner
-            AND {table_predicate}
-            AND OPERATION IN ('INSERT','UPDATE','DELETE')
+            AND ({table_predicate})
+            AND (
+              OPERATION IN ('INSERT','UPDATE','DELETE')
+              OR OPERATION = 'DDL'
+            )
             AND (
                   SCN > :start_scn
                OR (SCN = :start_scn AND RS_ID > :rs_id)
@@ -483,7 +489,7 @@ def logminer_txn_contents_sql(
     table_predicate: str,
     limit_bind: str = ":lim",
 ) -> str:
-    """Contents query for transaction-buffered mining (lifecycle + DML).
+    """Contents query for transaction-buffered mining (lifecycle, DML, and DDL).
 
     Without ``COMMITTED_DATA_ONLY`` the reader must see ``START`` / ``COMMIT``
     / ``ROLLBACK`` records to know a transaction's fate. Those rows carry no
@@ -493,10 +499,10 @@ def logminer_txn_contents_sql(
     """
     return f"""
         SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER,
-               XIDUSN, XIDSLT, XIDSQN, "ROLLBACK", ROW_ID
+               XIDUSN, XIDSLT, XIDSQN, "ROLLBACK", ROW_ID, SEG_NAME
         FROM (
           SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER,
-                 XIDUSN, XIDSLT, XIDSQN, "ROLLBACK", ROW_ID
+                 XIDUSN, XIDSLT, XIDSQN, "ROLLBACK", ROW_ID, SEG_NAME
           FROM v$logmnr_contents
           WHERE (
                   SCN > :start_scn
@@ -506,8 +512,13 @@ def logminer_txn_contents_sql(
             AND (
                   (
                     SEG_OWNER = :owner
-                    AND {table_predicate}
+                    AND ({table_predicate})
                     AND OPERATION IN ('INSERT','UPDATE','DELETE')
+                  )
+               OR (
+                    SEG_OWNER = :owner
+                    AND ({table_predicate})
+                    AND OPERATION = 'DDL'
                   )
                OR (
                     OPERATION IN ('START','COMMIT','ROLLBACK')
@@ -515,7 +526,7 @@ def logminer_txn_contents_sql(
                       SELECT XIDUSN, XIDSLT, XIDSQN
                       FROM v$logmnr_contents
                       WHERE SEG_OWNER = :owner
-                        AND {table_predicate}
+                        AND ({table_predicate})
                         AND OPERATION IN ('INSERT','UPDATE','DELETE')
                     )
                   )
@@ -528,11 +539,26 @@ def logminer_txn_contents_sql(
               WHEN 'DELETE' THEN 1
               WHEN 'COMMIT' THEN 2
               WHEN 'ROLLBACK' THEN 3
+              WHEN 'DDL' THEN 4
               ELSE 4
             END
         )
         WHERE ROWNUM <= {limit_bind}
     """  # nosec B608 — table_predicate / limit_bind are caller-built from safe ids
+
+
+def _ordered_txn_ddl_actions(
+    committed: list[Any],
+    ddl_events: list[tuple[int, str, int, str, str, str]],
+) -> list[tuple[tuple[int, str, int], int, str, Any]]:
+    actions: list[tuple[tuple, int, str, Any]] = [
+        (txn.position, 0, "txn", txn) for txn in committed
+    ]
+    actions.extend(
+        (mining_position(event[0], event[1], event[2]), 1, "ddl", event)
+        for event in ddl_events
+    )
+    return sorted(actions, key=lambda action: (action[0], action[1]))
 
 
 # LogMiner / redo missing-file class errors (Oracle).
@@ -963,6 +989,7 @@ class OracleLogMinerCdc:
         self.snapshot_table = str(state.get("table") or "")
         self.resume_token = resume_token
         self._last_event_at: datetime | None = None
+        self.last_ddl_at: str | None = None
         from services.cdc_schema_history import connection_fingerprint
 
         self.source_key = connection_fingerprint(
@@ -1017,6 +1044,7 @@ class OracleLogMinerCdc:
             "delivery": "at-least-once",
             "tables": list(self.tables),
             "shared_reader": self._shared,
+            "last_ddl_at": self.last_ddl_at,
             **self._lease.theater_fields(),
         }
 
@@ -1112,6 +1140,135 @@ class OracleLogMinerCdc:
             safe = require_safe_identifier(t, preserve_case=True).upper()
             parts.append(f"'{safe}'")
         return ", ".join(parts)
+
+    def _oracle_ddl_schema_snapshot(self, table: str) -> dict[str, Any]:
+        from services.schema_introspect import introspect_schema
+
+        result = introspect_schema(
+            "oracle",
+            **{
+                **self.cfg,
+                "schema": self.schema,
+                "table": table,
+                "ssl": bool(self.cfg.get("ssl", True)),
+            },
+        )
+        if not result.get("ok"):
+            raise RuntimeError(
+                str(result.get("error") or "Oracle schema introspection failed")
+            )
+        columns = result.get("columns")
+        if not isinstance(columns, list) or not columns:
+            raise RuntimeError(
+                f"Oracle schema introspection returned no columns for "
+                f"{self.schema}.{table}"
+            )
+        snapshot_columns = [
+            {
+                "name": str(column.get("name") or ""),
+                "type": str(
+                    column.get("data_type") or column.get("inferred_type") or ""
+                ),
+                "nullable": bool(column.get("nullable", True)),
+                "ordinal": ordinal,
+            }
+            for ordinal, column in enumerate(columns, start=1)
+            if isinstance(column, dict) and column.get("name")
+        ]
+        if not snapshot_columns:
+            raise RuntimeError(
+                f"Oracle schema introspection returned no named columns for "
+                f"{self.schema}.{table}"
+            )
+        return {"columns": snapshot_columns}
+
+    def _record_oracle_ddl(
+        self,
+        *,
+        owner: str,
+        table: str,
+        ddl: str,
+        offset: dict[str, Any],
+    ) -> None:
+        owner_name = str(owner or "").upper()
+        table_name = str(table or "").upper()
+        if owner_name != self.schema or table_name not in self.tables:
+            return
+        qualified = f"{owner_name}.{table_name}"
+        try:
+            from services.cdc_schema_history import (
+                last_ddl_at as get_last_ddl_at,
+                list_history,
+                record_ddl,
+            )
+
+            snapshot = self._oracle_ddl_schema_snapshot(table_name)
+            fingerprint = json.dumps(
+                snapshot.get("columns") or [],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            history = list_history(self.source_key, qualified)
+            if history:
+                previous = history[-1].get("schema_snapshot") or {}
+                previous_fingerprint = json.dumps(
+                    previous.get("columns") or [],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if previous_fingerprint == fingerprint:
+                    self.last_ddl_at = get_last_ddl_at(
+                        self.source_key, qualified
+                    )
+                    logger.info(
+                        "Observed Oracle LogMiner DDL for %s; schema fingerprint is unchanged",
+                        qualified,
+                    )
+                    return
+
+            entry = record_ddl(
+                self.source_key,
+                qualified,
+                ddl=str(ddl or "")[:2000],
+                offset=offset,
+                schema_snapshot=snapshot,
+            )
+            self.last_ddl_at = str(entry.get("recorded_at") or "") or None
+            try:
+                from services.cdc_mapping_review import flag_mapping_review
+
+                flag_mapping_review(
+                    source_key=self.source_key,
+                    table=qualified,
+                    reason="cdc_schema_drift",
+                    schema_version=int(entry.get("version") or 0) or None,
+                    ddl=str(entry.get("ddl") or ""),
+                    column_names=[
+                        str(column.get("name") or "")
+                        for column in snapshot["columns"]
+                    ],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Oracle LogMiner mapping review could not be recorded for "
+                    "%s; operator review is required: %s",
+                    qualified,
+                    exc,
+                    exc_info=True,
+                )
+            logger.info(
+                "Recorded Oracle LogMiner schema change for %s v%s",
+                qualified,
+                entry.get("version"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Oracle LogMiner schema history could not be recorded for %s; "
+                "CDC rows continue, but operator schema review is required: %s",
+                qualified,
+                exc,
+                exc_info=True,
+            )
 
     def _empty_window_retry_sec(self) -> float:
         from services.brand_env import getenv_brand
@@ -1497,7 +1654,9 @@ class OracleLogMinerCdc:
                         cur, start_scn=max(1, self.scn), end_scn=end_scn
                     )
                     cur.execute(
-                        logminer_contents_sql(table_predicate="TABLE_NAME = :tbl"),
+                        logminer_contents_sql(
+                            table_predicate="TABLE_NAME = :tbl OR SEG_NAME = :tbl"
+                        ),
                         {
                             "owner": self.schema,
                             "tbl": self.table,
@@ -1506,8 +1665,19 @@ class OracleLogMinerCdc:
                         },
                     )
                     for row in cur.fetchall() or []:
-                        operation = row[3]
+                        scn = int(row[0] or 0)
+                        rs_id = str(row[1] or "")
+                        ssn = int(row[2] or 0)
+                        operation = str(row[3] or "").upper()
                         sql_redo = row[4]
+                        if operation == "DDL":
+                            self._record_oracle_ddl(
+                                owner=str(row[6] or ""),
+                                table=str(row[5] or row[7] or ""),
+                                ddl=str(sql_redo or ""),
+                                offset={"scn": scn, "rs_id": rs_id, "ssn": ssn},
+                            )
+                            continue
                         op = _OP_MAP.get(str(operation or "").upper())
                         if not op:
                             continue
@@ -1642,7 +1812,7 @@ class OracleLogMinerCdc:
                         cur,
                         start_scn=self.scn,
                         end_scn=end_scn,
-                        table_predicate="TABLE_NAME = :tbl",
+                        table_predicate="TABLE_NAME = :tbl OR SEG_NAME = :tbl",
                         limit=self.batch_size,
                     )
                     fetched = len(rows)
@@ -1650,9 +1820,24 @@ class OracleLogMinerCdc:
                         scn = int(row[0] or 0)
                         rs_id = str(row[1] or "")
                         ssn = int(row[2] or 0)
-                        operation = row[3]
+                        operation = str(row[3] or "").upper()
                         sql_redo = row[4]
+                        table_name = str(row[5] or row[7] or "").upper()
+                        owner = str(row[6] or "").upper()
                         last_scn, last_rs_id, last_ssn = scn, rs_id, ssn
+                        if operation == "DDL":
+                            self._last_event_at = datetime.now(timezone.utc)
+                            self._record_oracle_ddl(
+                                owner=owner,
+                                table=table_name,
+                                ddl=str(sql_redo or ""),
+                                offset={
+                                    "scn": scn,
+                                    "rs_id": rs_id,
+                                    "ssn": ssn,
+                                },
+                            )
+                            continue
                         op = _OP_MAP.get(str(operation or "").upper())
                         if not op:
                             continue
@@ -1771,6 +1956,7 @@ class OracleLogMinerCdc:
         table_by_lower = {t.lower(): t for t in self.tables}
         limit = max(self.batch_size * 10, 1000)
         emitted: list[OracleCommittedTxn] = []
+        ddl_events: list[tuple[int, str, int, str, str, str]] = []
         fetched = 0
         head_scn = self.scn
         try:
@@ -1798,7 +1984,10 @@ class OracleLogMinerCdc:
                         end_scn=max(self.scn, head_scn),
                         committed_only=False,
                     )
-                    table_predicate = f"TABLE_NAME IN ({self._table_in_sql()})"
+                    in_list = self._table_in_sql()
+                    table_predicate = (
+                        f"TABLE_NAME IN ({in_list}) OR SEG_NAME IN ({in_list})"
+                    )
                     cur.execute(
                         logminer_txn_contents_sql(
                             table_predicate=table_predicate,
@@ -1839,6 +2028,22 @@ class OracleLogMinerCdc:
             sql_redo = row[4]
             table_raw = str(row[5] or "").upper()
             row_id = str(row[11] or "") if len(row) > 11 else ""
+            if operation == "DDL":
+                owner = str(row[6] or "").upper()
+                ddl_table = str(row[5] or row[12] or "").upper()
+                mapped_ddl_table = table_by_lower.get(
+                    ddl_table.lower(), ddl_table
+                )
+                if owner == self.schema and mapped_ddl_table in table_set:
+                    ddl_events.append(
+                        (scn, rs_id, ssn, owner, mapped_ddl_table, str(sql_redo or ""))
+                    )
+                self._poll_scn, self._poll_rs_id, self._poll_ssn = (
+                    scn,
+                    rs_id,
+                    ssn,
+                )
+                continue
             xid_parts = tuple(int(value or 0) for value in row[7:10])
             if xid_parts == (0, 0, 0):
                 raise RuntimeError(
@@ -1891,11 +2096,45 @@ class OracleLogMinerCdc:
         elif fetched:
             self.low_scn = self._poll_scn
 
-        emitted.sort(key=lambda txn: txn.position)
+        actions = _ordered_txn_ddl_actions(emitted, ddl_events)
         yielded = False
         working_commit = self._emitted_commit
         working_commit_xid = self._emitted_commit_xid
-        for txn in emitted:
+        for _position, _order, action_type, payload in actions:
+            if action_type == "ddl":
+                scn, rs_id, ssn, owner, table_name, sql_redo = payload
+                self._record_oracle_ddl(
+                    owner=owner,
+                    table=table_name,
+                    ddl=sql_redo,
+                    offset={"scn": scn, "rs_id": rs_id, "ssn": ssn},
+                )
+                replay_boundaries = [
+                    position
+                    for position in (
+                        buffer.low_scn,
+                        *(committed.start_scn for committed in emitted),
+                    )
+                    if position
+                ]
+                token = self._buffered_token(
+                    position_scn=scn,
+                    position_rs_id=rs_id,
+                    position_ssn=ssn,
+                    low_scn=min(replay_boundaries) if replay_boundaries else scn,
+                    commit_cursor=working_commit,
+                    commit_xid=working_commit_xid,
+                    table=self._token_table_label(),
+                )
+                yielded = True
+                yield ChangeBatch(
+                    resume_token=token,
+                    table=table_name,
+                    ack_barrier=True,
+                )
+                continue
+
+            txn: OracleCommittedTxn = payload
             parts = chunk_txn_rows(txn.rows, self.batch_size)
             for chunk_index, chunk in enumerate(parts):
                 final_chunk = chunk_index == len(parts) - 1
@@ -2074,7 +2313,9 @@ class OracleLogMinerCdc:
                     lim = max(self.batch_size + 1, 64) * max(1, len(self.tables))
                     cur.execute(
                         logminer_contents_sql(
-                            table_predicate=f"TABLE_NAME IN ({in_list})",
+                            table_predicate=(
+                                f"TABLE_NAME IN ({in_list}) OR SEG_NAME IN ({in_list})"
+                            ),
                             include_xid=True,
                         ),
                         {
@@ -2088,9 +2329,30 @@ class OracleLogMinerCdc:
                         scn = int(row[0] or 0)
                         rs_id = str(row[1] or "")
                         ssn = int(row[2] or 0)
-                        operation = row[3]
+                        operation = str(row[3] or "").upper()
                         sql_redo = row[4]
-                        tbl_raw = str(row[5] or "").upper()
+                        tbl_raw = str(row[5] or row[10] or "").upper()
+                        owner = str(row[6] or "").upper()
+                        if operation == "DDL":
+                            if owner == self.schema and tbl_raw in table_set:
+                                table_name = table_by_lower.get(
+                                    tbl_raw.lower(), tbl_raw
+                                )
+                                tagged.append(
+                                    (
+                                        f"ddl:{scn}:{rs_id}:{ssn}",
+                                        scn,
+                                        rs_id,
+                                        ssn,
+                                        table_name,
+                                        "ddl",
+                                        {
+                                            "owner": owner,
+                                            "sql_redo": str(sql_redo or ""),
+                                        },
+                                    )
+                                )
+                            continue
                         xid_key = f"{row[7] or 0}.{row[8] or 0}.{row[9] or 0}"
                         if not xid_key or xid_key == "0.0.0":
                             xid_key = f"scn:{scn}"
@@ -2156,6 +2418,24 @@ class OracleLogMinerCdc:
         for xid_key, group_iter in groupby(tagged, key=lambda x: x[0]):
             group = list(group_iter)
             group_scn = max(item[1] for item in group)
+            if len(group) == 1 and group[0][5] == "ddl":
+                _xid, scn, rs_id, ssn, table_name, _op, ddl_row = group[0]
+                last_scn, last_rs_id, last_ssn = scn, rs_id, ssn
+                self.scn, self.rs_id, self.ssn = last_scn, last_rs_id, last_ssn
+                self._record_oracle_ddl(
+                    owner=str(ddl_row.get("owner") or ""),
+                    table=table_name,
+                    ddl=str(ddl_row.get("sql_redo") or ""),
+                    offset={"scn": scn, "rs_id": rs_id, "ssn": ssn},
+                )
+                self._last_event_at = datetime.now(timezone.utc)
+                yield ChangeBatch(
+                    resume_token=self._token(table=self._token_table_label()),
+                    table=table_name,
+                    ack_barrier=True,
+                )
+                emitted = True
+                continue
             buf.begin(xid_key, lsn=str(group_scn))
             for _xid, scn, rs_id, ssn, table_name, op, row in group:
                 last_scn, last_rs_id, last_ssn = scn, rs_id, ssn
