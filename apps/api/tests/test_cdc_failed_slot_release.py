@@ -34,6 +34,7 @@ class _Mongo:
     def __init__(self, job: dict[str, Any]) -> None:
         self.job = dict(job)
         self.updates: list[tuple[str, dict[str, Any]]] = []
+        self.field_updates: list[dict[str, Any]] = []
 
     def get_job(self, job_id: str) -> dict[str, Any]:
         return dict(self.job)
@@ -42,6 +43,11 @@ class _Mongo:
         self.updates.append((status, fields))
         self.job.update(fields)
         self.job["status"] = status
+
+    def update_job_fields(self, job_id: str, fields: dict[str, Any]) -> bool:
+        self.field_updates.append(dict(fields))
+        self.job.update(fields)
+        return True
 
 
 @pytest.fixture
@@ -148,6 +154,29 @@ def test_refused_cdc_batch_releases_through_the_shared_helper(
     assert identity["cdc_slot_name"] == "df_qa_pg_or_cdc_34f9897e"
     assert released[0]["reason"] == "failed"
     assert released[0]["job"]["cdc_slot_name"] == "df_qa_pg_or_cdc_34f9897e"
+
+
+def test_failed_resume_blank_is_persisted_to_job_fields(monkeypatch) -> None:
+    result = {
+        "released": True,
+        "dest_resume_blank_failed": True,
+        "dest_resume_blank_error": "OSError",
+    }
+    monkeypatch.setattr(
+        cdc_catchup, "release_finished_cdc_slot", lambda *_args, **_kwargs: result
+    )
+    mongo = _Mongo({"id": "job-blank-failed"})
+
+    job_failure._release_failed_cdc_slot(
+        mongo, "job-blank-failed", None, job={"cdc_slot_name": "df_slot"}
+    )
+
+    assert mongo.field_updates == [
+        {
+            "dest_resume_blank_failed": True,
+            "dest_resume_blank_error": "OSError",
+        }
+    ]
 
 
 def test_non_cdc_failure_has_no_identity(released: list[dict[str, Any]]) -> None:

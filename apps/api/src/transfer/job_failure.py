@@ -309,7 +309,7 @@ def _release_failed_cdc_slot(
     try:
         from services.cdc_catchup import release_finished_cdc_slot
 
-        release_finished_cdc_slot(
+        release_result = release_finished_cdc_slot(
             loaded,
             reason="failed",
             schedule_id=schedule_id,
@@ -320,6 +320,34 @@ def _release_failed_cdc_slot(
             dest_type=dest_type,
             dest_cfg=dest_cfg,
         )
+        if release_result.get("dest_resume_blank_failed"):
+            fields = {
+                "dest_resume_blank_failed": True,
+                "dest_resume_blank_error": str(
+                    release_result.get("dest_resume_blank_error") or "unknown"
+                ),
+            }
+            update_fields = getattr(mongo, "update_job_fields", None)
+            if not callable(update_fields):
+                logger.error(
+                    "CDC resume blank failure could not be persisted for job %s "
+                    "(update_job_fields unavailable)",
+                    job_id,
+                )
+            else:
+                try:
+                    if not update_fields(job_id, fields):
+                        logger.error(
+                            "CDC resume blank failure could not be persisted for job %s",
+                            job_id,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "CDC resume blank failure could not be persisted for job %s "
+                        "(%s)",
+                        job_id,
+                        type(exc).__name__,
+                    )
     except Exception as exc:
         logger.warning("CDC slot release after failure failed for %s: %s", job_id, exc)
 
