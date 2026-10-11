@@ -188,6 +188,175 @@ def test_iceberg_pg_copy_kill_switch(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    ("has_table_io", "fail_read"),
+    [(True, False), (False, False), (True, True)],
+)
+def test_arrow_s3_snapshot_uses_catalog_fileio_and_redacts_secrets(
+    monkeypatch, caplog, has_table_io, fail_read
+):
+    import io
+
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    import pyiceberg.io
+
+    from connectors.iceberg_catalog import parse_iceberg_catalog_config
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_iceberg_pg import _arrow_from_iceberg_files
+
+    secret = "s3-read-secret-sentinel"
+    endpoint = {
+        "connection_string": REST_URI,
+        "warehouse": "s3://warehouse",
+        "table": "events",
+        "schema": "default",
+        "extra": {
+            "catalog_type": "rest",
+            "s3.endpoint": S3_ENDPOINT,
+            "s3.access-key-id": "read-access",
+            "s3.secret-access-key": secret,
+            "s3.path-style-access": "true",
+            "s3.region": "us-east-1",
+        },
+    }
+    properties = parse_iceberg_catalog_config(endpoint)["properties"]
+    sink = pa.BufferOutputStream()
+    pq.write_table(pa.table({"id": [1, 2]}), sink)
+    parquet_bytes = sink.getvalue().to_pybytes()
+    opened: list[str] = []
+    loaded_properties: list[dict] = []
+
+    class _Input:
+        def open(self):
+            if fail_read:
+                raise RuntimeError(secret)
+            return io.BytesIO(parquet_bytes)
+
+    class _FileIO:
+        def new_input(self, location):
+            opened.append(location)
+            return _Input()
+
+    class _Field:
+        name = "id"
+        field_type = "long"
+
+    class _Schema:
+        fields = [_Field()]
+
+    class _Table:
+        io = _FileIO() if has_table_io else None
+
+        def schema(self):
+            return _Schema()
+
+    class _Catalog:
+        def load_table(self, _identifier):
+            return _Table()
+
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda *_args, **_kwargs: _Catalog(),
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_catalog_snapshot",
+        lambda _endpoint: (["s3://bucket/data.parquet"], None),
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_data_warehouse",
+        lambda *_args, **_kwargs: "s3://bucket/warehouse",
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_local_path",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        pyiceberg.io,
+        "load_file_io",
+        lambda props, **_kwargs: loaded_properties.append(props) or _FileIO(),
+    )
+
+    caplog.set_level("DEBUG")
+    if fail_read:
+        with pytest.raises(FastPathUnavailable) as exc_info:
+            _arrow_from_iceberg_files(endpoint, ["id"])
+        assert secret not in str(exc_info.value)
+    else:
+        result = _arrow_from_iceberg_files(endpoint, ["id"])
+        assert result.to_pydict() == {"id": [1, 2]}
+        assert secret not in repr(result)
+    assert opened == ["s3://bucket/data.parquet"]
+    assert loaded_properties == ([] if has_table_io else [properties])
+    assert secret not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("uri", "message"),
+    [
+        ("gs://bucket/data.parquet", "scheme gs"),
+        ("s3://bucket/data.parquet", "configured catalog S3 properties"),
+    ],
+)
+def test_arrow_refuses_remote_snapshot_without_supported_fileio(
+    monkeypatch, uri, message
+):
+    pytest.importorskip("pyarrow")
+    import pyiceberg.io
+
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_iceberg_pg import _arrow_from_iceberg_files
+
+    class _Field:
+        name = "id"
+        field_type = "long"
+
+    class _Schema:
+        fields = [_Field()]
+
+    class _Table:
+        io = None
+
+        def schema(self):
+            return _Schema()
+
+    class _Catalog:
+        def load_table(self, _identifier):
+            return _Table()
+
+    endpoint = {
+        "connection_string": REST_URI,
+        "warehouse": "s3://warehouse",
+        "table": "events",
+        "schema": "default",
+        "extra": {"catalog_type": "rest"},
+    }
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda *_args, **_kwargs: _Catalog(),
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_catalog_snapshot",
+        lambda _endpoint: ([uri], None),
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_data_warehouse",
+        lambda *_args, **_kwargs: "s3://bucket/warehouse",
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_local_path",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        pyiceberg.io,
+        "load_file_io",
+        lambda *_args, **_kwargs: pytest.fail("unconfigured FileIO was loaded"),
+    )
+
+    with pytest.raises(FastPathUnavailable, match=message):
+        _arrow_from_iceberg_files(endpoint, ["id"])
+
+
 @requires_rest
 def test_live_iceberg_pg_dest_count(monkeypatch):
     pytest.importorskip("pyiceberg")
@@ -225,6 +394,10 @@ def test_live_iceberg_pg_dest_count(monkeypatch):
             row = cur.fetchone()
             assert int(row[0]) == 1
             assert str(row[1]) == "r1"
+            cur.execute(f'SELECT id, label FROM public."{src}" ORDER BY id')
+            source_rows = cur.fetchall()
+            cur.execute(f'SELECT id, label FROM public."{dest}" ORDER BY id')
+            assert cur.fetchall() == source_rows
     finally:
         with pg.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS public."{src}"')

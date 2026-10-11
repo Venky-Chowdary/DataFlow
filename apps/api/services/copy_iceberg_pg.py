@@ -197,14 +197,52 @@ def _arrow_from_iceberg_files(
         raise FastPathUnavailable("Iceberg MoR source stays on the row path")
 
     warehouse = _iceberg_data_warehouse(endpoint, parsed)
+    properties = parsed.get("properties") or {}
+    file_io = getattr(tbl, "io", None)
+    has_s3_properties = any(
+        str(key).startswith("s3.") and value not in (None, "")
+        for key, value in properties.items()
+    )
     parts: list[Any] = []
     for uri in uris:
         local = _iceberg_local_path(str(uri), warehouse=warehouse)
-        if local is None:
+        if local is not None:
+            parts.append(pq.read_table(str(local), columns=selected))
+            continue
+
+        scheme = str(uri).partition(":")[0].lower()
+        if scheme not in {"s3", "s3a", "s3n"}:
             raise FastPathUnavailable(
-                f"Iceberg data file is not a local path: {uri}"
+                f"Iceberg data file scheme {scheme or '<none>'} is not supported; "
+                "expected a local path or s3/s3a/s3n"
             )
-        parts.append(pq.read_table(str(local), columns=selected))
+        if file_io is None:
+            if not has_s3_properties:
+                raise FastPathUnavailable(
+                    "Iceberg S3 snapshot files require configured catalog S3 properties"
+                )
+            try:
+                from pyiceberg.io import load_file_io
+
+                file_io = load_file_io(properties, location=str(uri))
+            except Exception as exc:
+                logger.warning(
+                    "Iceberg S3 FileIO initialization failed (%s)",
+                    type(exc).__name__,
+                )
+                raise FastPathUnavailable(
+                    f"Iceberg S3 FileIO initialization failed ({type(exc).__name__})"
+                ) from None
+        try:
+            with file_io.new_input(str(uri)).open() as source:
+                parts.append(pq.read_table(source, columns=selected))
+        except Exception as exc:
+            logger.warning(
+                "Iceberg S3 snapshot file read failed (%s)", type(exc).__name__
+            )
+            raise FastPathUnavailable(
+                f"Iceberg S3 snapshot file read failed ({type(exc).__name__})"
+            ) from None
     if not parts:
         empty = tbl.schema().as_arrow()
         arrays = [pa.array([], type=empty.field(name).type) for name in selected]
