@@ -29,6 +29,7 @@ const PERMISSION_PHRASE: Record<string, string> = {
   "workspace.manage": "change workspace settings",
   "member.invite": "add or remove workspace members",
   "audit.read": "read the audit log",
+  "iam.manage": "manage service accounts and SCIM provisioning",
 };
 
 /**
@@ -40,6 +41,7 @@ const PERMISSION_ROLE: Record<string, string> = {
   "connector.delete": "admin",
   "schedule.authorize": "admin",
   "workspace.manage": "admin",
+  "iam.manage": "admin",
 };
 
 /** The sentence a refused caller should read. */

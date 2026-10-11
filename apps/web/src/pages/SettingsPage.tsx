@@ -8,7 +8,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole } from "../lib/api";
+import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole } from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -19,6 +19,9 @@ import { useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
 import { useTheme } from "../lib/useTheme";
 import type { ThemePreference } from "../lib/theme";
+import { auditExportFilename, API_KEY_LIFETIME_OPTIONS } from "../lib/iamAdmin";
+import { ServiceAccountsPanel } from "./settings/ServiceAccountsPanel";
+import { ScimSettings } from "./settings/ScimSettings";
 
 const TABS = [
   { id: "general", label: "General", desc: "Workspace defaults", icon: "settings" },
@@ -63,6 +66,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   /** Last chain verification result. Null means nobody has asked yet — which is not "intact". */
   const [chainReport, setChainReport] = useState<AuditChainVerification | null>(null);
   const [chainVerifying, setChainVerifying] = useState(false);
+  const [retentionResult, setRetentionResult] = useState<AuditRetentionPurgeResult | null>(null);
+  const [retentionLoading, setRetentionLoading] = useState(false);
+  const [retentionError, setRetentionError] = useState("");
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilities | null>(null);
   const [modelCapabilitiesLoaded, setModelCapabilitiesLoaded] = useState(false);
   const [modelError, setModelError] = useState("");
@@ -92,6 +98,12 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [posture, setPosture] = useState<SecurityPosture | null>(null);
   const [postureLoading, setPostureLoading] = useState(false);
   const workspaceManage = useWriteGate(PERMISSIONS.workspaceManage);
+  const retentionPurgeDisabled = !workspaceManage.allowed
+    || retentionLoading
+    || !retentionResult?.dry_run
+    || retentionResult.legal_hold
+    || retentionResult.retention_days === null
+    || (retentionResult.would_remove ?? 0) === 0;
   /** Only edit what was actually read: an unread value must not be re-saved. */
   const generalEditable = workspaceManage.allowed && settingsLoaded;
   const activeWorkspace = useActiveWorkspaceId();
@@ -524,13 +536,13 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     }
   };
 
-  const downloadAuditExport = async (format: "csv" | "json") => {
+  const downloadAuditExport = async (format: AuditExportFormat) => {
     try {
       const blob = await exportAuditLog(format);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `datawrap-audit-${new Date().toISOString().slice(0, 10)}.${format}`;
+      a.download = auditExportFilename(format);
       a.click();
       URL.revokeObjectURL(url);
       toast({
@@ -544,6 +556,41 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         message: err instanceof Error ? err.message : "Could not export audit log",
         tone: "error",
       });
+    }
+  };
+
+  const previewAuditRetention = async () => {
+    if (!workspaceManage.allowed) return;
+    setRetentionLoading(true);
+    setRetentionError("");
+    setRetentionResult(null);
+    try {
+      setRetentionResult(await purgeAuditRetention(true));
+    } catch (err) {
+      setRetentionError(err instanceof Error ? err.message : "Could not preview audit retention.");
+    } finally {
+      setRetentionLoading(false);
+    }
+  };
+
+  const purgeAuditRetentionNow = async () => {
+    if (!workspaceManage.allowed) return;
+    if (!await confirm({
+      title: "Purge expired audit events?",
+      message: "This permanently removes events outside the configured retention window. A retention checkpoint will be recorded.",
+      confirmLabel: "Purge events",
+      tone: "danger",
+    })) return;
+    setRetentionLoading(true);
+    setRetentionError("");
+    setRetentionResult(null);
+    try {
+      setRetentionResult(await purgeAuditRetention(false));
+      await runChainVerification();
+    } catch (err) {
+      setRetentionError(err instanceof Error ? err.message : "Could not purge audit retention.");
+    } finally {
+      setRetentionLoading(false);
     }
   };
 
@@ -856,6 +903,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
             )}
 
             {tab === "auth" && (
+              <>
               <section className="df2-settings-section">
                 <div className="df2-settings-section-head">
                   <div>
@@ -911,6 +959,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   </p>
                 </div>
               </section>
+              <ScimSettings />
+              </>
             )}
 
             {tab === "team" && <TeamSettings />}
@@ -1058,6 +1108,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
             )}
 
             {tab === "api" && (
+              <>
               <section className="df2-settings-section">
                 <div className="df2-settings-section-head">
                   <div>
@@ -1120,12 +1171,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         value={newKeyLifetime}
                         onChange={(e) => setNewKeyLifetime(e.target.value as WorkspaceApiKeyLifetime)}
                       >
-                        <option value="7d">7 days</option>
-                        <option value="30d">30 days</option>
-                        <option value="60d">60 days</option>
-                        <option value="90d">90 days</option>
-                        <option value="365d">1 year</option>
-                        <option value="never">No expiration</option>
+                        {API_KEY_LIFETIME_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
                       </select>
                     </div>
                     <button
@@ -1213,6 +1261,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   )}
                 </div>
               </section>
+              <ServiceAccountsPanel />
+              </>
             )}
 
             {tab === "logs" && (
@@ -1238,6 +1288,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <button
                       type="button"
                       className="df2-btn df2-btn-secondary df2-btn-sm"
+                      data-testid="audit-export-csv"
                       onClick={() => void downloadAuditExport("csv")}
                     >
                       <DtIcon name="download" size={14} /> Export CSV
@@ -1245,13 +1296,87 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <button
                       type="button"
                       className="df2-btn df2-btn-ghost df2-btn-sm"
+                      data-testid="audit-export-json"
                       onClick={() => void downloadAuditExport("json")}
                     >
                       Export JSON
                     </button>
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-ghost df2-btn-sm"
+                      data-testid="audit-export-ndjson"
+                      onClick={() => void downloadAuditExport("ndjson")}
+                    >
+                      Export NDJSON
+                    </button>
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-ghost df2-btn-sm"
+                      data-testid="audit-export-cef"
+                      onClick={() => void downloadAuditExport("cef")}
+                    >
+                      Export CEF
+                    </button>
                   </div>
                 </div>
                 <div className="df2-settings-section-body">
+                  <section className="df2-settings-policy-grid" data-testid="audit-retention">
+                    <div>
+                      <h3>Retention</h3>
+                      <p>Preview expired-event removal before purging. Purges record a retention checkpoint.</p>
+                    </div>
+                    <PermissionNotice
+                      allowed={workspaceManage.allowed}
+                      reason={workspaceManage.reason}
+                      what="Audit retention requires workspace.manage."
+                    />
+                    <div className="df2-settings-section-actions">
+                      <Button
+                        variant="secondary"
+                        disabled={!workspaceManage.allowed || retentionLoading}
+                        title={workspaceManage.reason || undefined}
+                        data-testid="audit-retention-preview"
+                        onClick={() => void previewAuditRetention()}
+                      >
+                        {retentionLoading ? "Working…" : "Preview purge"}
+                      </Button>
+                      <Button
+                        variant="danger"
+                        disabled={retentionPurgeDisabled}
+                        title={workspaceManage.reason || undefined}
+                        data-testid="audit-retention-purge"
+                        onClick={() => void purgeAuditRetentionNow()}
+                      >
+                        Purge now
+                      </Button>
+                    </div>
+                    {retentionError && (
+                      <div className="df2-permission-notice" role="alert" data-testid="audit-retention-error">
+                        {retentionError}
+                      </div>
+                    )}
+                    {retentionResult && (
+                      <div className="df2-settings-policy-row" role="status" data-testid="audit-retention-result">
+                        <div>
+                          {retentionResult.dry_run ? (
+                            <p>Would remove: {retentionResult.would_remove ?? "not reported by the API"}</p>
+                          ) : (
+                            <p>Removed: {retentionResult.removed}</p>
+                          )}
+                          <p>Legal hold: {retentionResult.legal_hold ? "Enabled" : "Off"}</p>
+                          <p>
+                            {retentionResult.retention_days === null
+                              ? "Retention is off"
+                              : `Retention window: ${retentionResult.retention_days} days`}
+                          </p>
+                          {retentionResult.legal_hold && <p>Purge is disabled while legal hold is enabled.</p>}
+                          {!retentionResult.legal_hold && retentionResult.retention_days === null && (
+                            <p>Purge is disabled because retention is off.</p>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                  </section>
                   {chainReport && (
                     <div
                       className={`df2-chain-verdict ${chainReport.verified ? "is-ok" : "is-broken"}`}

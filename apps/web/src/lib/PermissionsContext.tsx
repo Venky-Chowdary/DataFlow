@@ -26,6 +26,7 @@ export const PERMISSIONS = {
   scheduleAuthorize: "schedule.authorize",
   workspaceManage: "workspace.manage",
   memberInvite: "member.invite",
+  iamManage: "iam.manage",
 } as const;
 
 export type PermissionName = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
