@@ -15,6 +15,7 @@ from connectors.sqlserver_cdc_native import (
     SqlServerNativeCdc,
     compare_mssql_hex_lsn,
     decode_mssql_cdc_token,
+    encode_mssql_cdc_token,
 )
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.brand_env import getenv_brand
@@ -334,6 +335,16 @@ CHANGE_COLUMNS = [
 ]
 
 
+def _assert_eos_position_not_beyond(token, lsn: str, *, table: str = "orders") -> None:
+    from connectors.lsn_guards import compare_lsn
+    from services.cdc_exactly_once import batch_lsn
+
+    bound = batch_lsn(
+        encode_mssql_cdc_token(lsn, table=table)
+    )
+    assert compare_lsn(batch_lsn(token), bound) <= 0
+
+
 def _unit_reader(*, table="orders", capture_instance="dbo_orders_v1", resume=RESUME_LSN):
     reader = SqlServerNativeCdc(
         CFG,
@@ -431,6 +442,7 @@ def test_null_new_capture_start_drains_old_then_switches_when_ready(
 
     batches = list(reader._poll_once())
     assert batches[0].inserts[0]["id"] == "2"
+    _assert_eos_position_not_beyond(batches[0].resume_token, SWITCH_CEILING_LSN)
     assert any(
         "cdc.fn_dbo_orders_v1" in call.args[0]
         for call in cursor.execute.call_args_list
@@ -555,6 +567,7 @@ def test_missing_old_capture_and_null_new_start_returns_heartbeat(
     assert len(batches) == 1
     assert batches[0].total_changes == 0
     assert reader.start_lsn == RESUME_LSN
+    _assert_eos_position_not_beyond(batches[0].resume_token, RESUME_LSN)
     assert (
         compare_mssql_hex_lsn(
             decode_mssql_cdc_token(batches[0].resume_token)["lsn"], RESUME_LSN
@@ -600,6 +613,9 @@ def test_shared_missing_old_capture_and_null_start_returns_heartbeat(
     assert batches[0].total_changes == 0
     assert batches[0].ack_barrier
     assert reader.start_lsn == RESUME_LSN
+    _assert_eos_position_not_beyond(
+        batches[0].resume_token, RESUME_LSN, table="orders,users"
+    )
     assert (
         compare_mssql_hex_lsn(
             decode_mssql_cdc_token(batches[0].resume_token)["lsn"], RESUME_LSN
