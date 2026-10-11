@@ -1584,27 +1584,37 @@ def stream_file_to_database(
 
     phase_profile = PhaseProfile()
     copy_started = time.perf_counter()
-    csv_fast = try_copy_local_csv(
-        content=content,
-        filename=filename,
-        file_type=file_type,
-        dest_type=dest_type,
-        dest_cfg=dest_cfg,
-        dest_table=dest_table,
-        dest_schema=str(
-            getattr(destination, "schema", "") or dest_cfg.get("schema") or "public"
-        ),
-        mappings=mappings,
-        schema=schema,
-        effective_sync=effective_sync,
-        cursor_column=cursor_source_col if incremental else "",
-        watermark=watermark if incremental else None,
-        pk_column=pk_for_copy if incremental else "",
-        source_filter=source_filter,
-        shape_runner=shape_runner,
-        resumed=resumed,
-        read_options=read_options,
+    from services.copy_fast_path import (
+        begin_copy_decline_capture,
+        reset_copy_decline_capture,
     )
+
+    copy_declines: list[str] = []
+    copy_decline_token, _ = begin_copy_decline_capture(copy_declines)
+    try:
+        csv_fast = try_copy_local_csv(
+            content=content,
+            filename=filename,
+            file_type=file_type,
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            dest_schema=str(
+                getattr(destination, "schema", "") or dest_cfg.get("schema") or "public"
+            ),
+            mappings=mappings,
+            schema=schema,
+            effective_sync=effective_sync,
+            cursor_column=cursor_source_col if incremental else "",
+            watermark=watermark if incremental else None,
+            pk_column=pk_for_copy if incremental else "",
+            source_filter=source_filter,
+            shape_runner=shape_runner,
+            resumed=resumed,
+            read_options=read_options,
+        )
+    finally:
+        reset_copy_decline_capture(copy_decline_token)
     if csv_fast is not None:
         rows_before_copy = dest_summary.get(PRECOUNT_KEY)
         rows_copied, copy_ddl, dest_summary, columns = csv_fast
@@ -2180,6 +2190,10 @@ def stream_file_to_database(
             prior_precount = dest_summary.get(PRECOUNT_KEY)
             prior_key_addressed = dest_summary.get(KEY_ADDRESSED_KEY)
             dest_summary = dict(batch_summary)
+            if copy_declines:
+                dest_summary["copy_fast_path"] = "declined"
+                dest_summary["copy_decline_reason"] = copy_declines[0]
+                dest_summary["copy_decline_reasons"] = copy_declines[:8]
             if prior_precount is not None:
                 dest_summary[PRECOUNT_KEY] = prior_precount
             if prior_key_addressed:
