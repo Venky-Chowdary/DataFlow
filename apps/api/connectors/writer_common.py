@@ -19,6 +19,7 @@ from typing import Any, Final
 from sqlalchemy.engine import CursorResult
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
+from services.rule_compiler.apply import evaluate_contract
 from services.transform_engine import apply_transform
 from services.transform_resolver import LiveDestTypes, resolve_transform
 from services.value_serializer import (
@@ -1690,6 +1691,54 @@ def _target_explicitly_not_null(
     return False
 
 
+def _convert_mapped_cell(
+    val: Any,
+    transform: Any,
+    mapping: Any,
+    *,
+    empty_cells_as_null: bool,
+    dest_nullability: dict[str, bool],
+    target: str,
+) -> tuple[Any, str | None]:
+    """One cell through the full write pipeline: transform → code crosswalk →
+    file blank→NULL rule → execute-enforced business-rule contracts.
+
+    First attempt and RETRY re-attempt both run this — an error may only be
+    cleared by the identical pipeline succeeding, never by skipping stages.
+    """
+    from services.blank_cell_contract import blank_typed_cell_is_sql_null
+    from services.code_crosswalk import apply_code_crosswalk
+
+    converted, err = apply_transform(val, transform)
+    if not err and isinstance(mapping, dict):
+        converted, xwalk_err = apply_code_crosswalk(converted, mapping)
+        if xwalk_err:
+            err = xwalk_err
+    # File/spreadsheet path: blank cell → SQL NULL on nullable typed cols.
+    # Same function Validate and Gate-8 use. Proven NOT NULL stays an error.
+    if blank_typed_cell_is_sql_null(
+        val,
+        err,
+        mapping if isinstance(mapping, dict) else None,
+        empty_cells_as_null=empty_cells_as_null,
+        dest_nullability=dest_nullability,
+        target=target,
+    ):
+        converted, err = None, None
+    if not err and isinstance(mapping, dict):
+        contracts = mapping.get("rule_contracts")
+        if contracts:
+            for contract in contracts:
+                reason = evaluate_contract(converted, contract, missing=False)
+                if reason:
+                    err = (
+                        f"business rule {contract.get('rule_id') or '?'} "
+                        f"failed: {reason}"
+                    )
+                    break
+    return converted, err
+
+
 def build_mapped_rows_with_details(
     *,
     headers: list[str],
@@ -1797,12 +1846,10 @@ def build_mapped_rows_with_details(
     # — billions of them on a large transfer.
     # Risk Contract module is in-tree: hard-require it. Soft-import previously
     # demoted FAIL_JOB / SKIP_ROW / CAST contracts to bare job policy.
-    from services.blank_cell_contract import blank_typed_cell_is_sql_null
     from services.migration_risk_contract import (
         disposition_for_execution_policy,
         resolve_write_action_for_mapping,
     )
-    from services.code_crosswalk import apply_code_crosswalk
 
     mapped: list[tuple] = []
     start_no = max(1, int(row_number_start or 1))
@@ -1828,35 +1875,14 @@ def build_mapped_rows_with_details(
                     if target_idx >= 0:
                         out[target_idx] = DF_MISSING_SENTINEL
                     continue
-                converted, err = apply_transform(val, transform)
-                if not err and isinstance(mapping, dict):
-                    converted, xwalk_err = apply_code_crosswalk(converted, mapping)
-                    if xwalk_err:
-                        err = xwalk_err
-                # File/spreadsheet path: blank cell → SQL NULL on nullable typed cols.
-                # Same function Validate and Gate-8 use. Proven NOT NULL stays an error.
-                if blank_typed_cell_is_sql_null(
+                converted, err = _convert_mapped_cell(
                     val,
-                    err,
-                    mapping if isinstance(mapping, dict) else None,
+                    transform,
+                    mapping,
                     empty_cells_as_null=empty_cells_as_null,
                     dest_nullability=dest_nullability,
                     target=tgt_name,
-                ):
-                    converted, err = None, None
-                if not err and isinstance(mapping, dict):
-                    contracts = mapping.get("rule_contracts")
-                    if contracts:
-                        from services.rule_compiler.apply import evaluate_contract
-
-                        for contract in contracts:
-                            reason = evaluate_contract(converted, contract, missing=False)
-                            if reason:
-                                err = (
-                                    f"business rule {contract.get('rule_id') or '?'} "
-                                    f"failed: {reason}"
-                                )
-                                break
+                )
             cell_policy = policy
             exec_pol: str | None = None
             risk_id: str | None = None
@@ -1868,7 +1894,14 @@ def build_mapped_rows_with_details(
                 # RETRY: exactly one re-attempt of the same transform, then fail.
                 if cell_policy == "retry_then_fail":
                     retry_attempted = True
-                    converted, err = apply_transform(val, transform)
+                    converted, err = _convert_mapped_cell(
+                        val,
+                        transform,
+                        mapping,
+                        empty_cells_as_null=empty_cells_as_null,
+                        dest_nullability=dest_nullability,
+                        target=tgt_name,
+                    )
                     if not err:
                         cell_policy = "ok"
                     else:

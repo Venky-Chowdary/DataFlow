@@ -306,3 +306,57 @@ def test_hostile_or_explosive_expressions_stay_in_review():
     for rule in report["rules"]:
         assert rule["status"] != "executable", rule
         assert not (rule.get("shape_step") or rule.get("shape_steps")), rule
+
+
+def _retry_contract(column: str) -> dict:
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    return create_migration_risk_contract(
+        column=column,
+        source_type="TEXT",
+        destination_type="TEXT",
+        approved_by="qa@dataflow.app",
+        reason="retry reserved",
+        execution_policy="RETRY",
+    ).to_dict()
+
+
+def test_retry_reruns_the_full_cell_pipeline_not_just_the_transform():
+    """RETRY re-attempt must re-run crosswalk + blank rule + contracts.
+
+    Pre-fix the retry branch re-ran only ``apply_transform``: a contract- or
+    crosswalk-failing cell whose transform succeeds was written on retry.
+    """
+    from connectors.writer_common import build_mapped_rows_with_details
+
+    headers = ["email", "code"]
+    data_rows = [["", "Z"]]
+    mappings = [
+        {
+            "source": "email",
+            "target": "email",
+            "transform": "none",
+            "rule_contracts": [{"rule_id": "r1", "type": "not_null"}],
+            "risk_contract": _retry_contract("email"),
+            "risk_acknowledged": True,
+        },
+        {
+            "source": "code",
+            "target": "code",
+            "transform": "none",
+            "code_crosswalk": {"A": "ACTIVE"},
+            "risk_contract": _retry_contract("code"),
+            "risk_acknowledged": True,
+        },
+    ]
+    mapped, _errors, rejected = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=["email", "code"],
+        error_policy="quarantine",
+    )
+    assert mapped == [], (mapped, rejected)
+    reasons = " | ".join(str(d.get("reason") or "") for d in rejected)
+    assert "business rule r1" in reasons, reasons
+    assert "unmapped code" in reasons or "crosswalk" in reasons, reasons
