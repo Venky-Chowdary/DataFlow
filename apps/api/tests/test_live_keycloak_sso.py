@@ -97,12 +97,13 @@ def _saml_signing_certificate(client: httpx.Client) -> str:
     return cert_node.text.strip()
 
 
-@pytest.fixture(scope="session")
-def live_keycloak_setup(tmp_path_factory):
+@pytest.fixture(scope="module")
+def live_keycloak_setup(tmp_path_factory, request):
     from services import integrations_store
     from src.main import app
 
     patch = pytest.MonkeyPatch()
+    request.addfinalizer(patch.undo)
     admin, headers = _keycloak_admin()
     realms = admin.get("/admin/realms", headers=headers)
     realms.raise_for_status()
@@ -261,7 +262,6 @@ def live_keycloak_setup(tmp_path_factory):
         "realm_id": realm_id,
         "realm": REALM,
     }
-    patch.undo()
 
 
 @pytest.fixture
