@@ -21,15 +21,8 @@ import re
 import sys
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
-from typing import Any, Final
+from typing import Any, Final, Mapping
 
-from services.document_instant import (
-    DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
-    INSTANT_DATE_TOKEN_ENGINES as _INSTANT_DATE_TOKEN_ENGINES,
-    document_instant_wire_preserved,
-    instant_date_carrier,
-    is_document_instant_token,
-)
 _ts = sys.modules[__name__]
 from services.dest_dialect_facts import (  # noqa: F401  (re-exported)
     _collation_compatible_with_dest,
@@ -4812,6 +4805,21 @@ def string_width_would_narrow(
         # Unlimited generic TEXT/CLOB → bounded; bare VARCHAR unknown → no invent.
         return is_unlimited_string_carrier(source_type)
     return src_w > tgt_w
+
+
+def blocking_string_width_narrowing(
+    source: str,
+    target: str,
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    proven: Mapping[tuple[str, str], Any] | None = None,
+) -> bool:
+    """Return whether a string-width narrowing lacks exact population proof."""
+    if not string_width_would_narrow(source_type, target_type, dest_db=dest_db):
+        return False
+    return (str(source).casefold(), str(target).casefold()) not in (proven or {})
 
 
 _BINARY_WIDTH_RE = re.compile(

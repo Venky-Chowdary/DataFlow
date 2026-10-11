@@ -591,6 +591,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
 
     try:
         from services.type_system import (
+            blocking_string_width_narrowing,
             decimal_precision_would_truncate,
             decimal_scale_would_truncate,
             is_lossy_coercion,
@@ -602,6 +603,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             vector_dim_unknown_for_native,
         )
     except ImportError:
+        blocking_string_width_narrowing = None
         is_lossy_coercion = None
         is_nested_document_collapse = None
         is_nested_shape_collapse = None
@@ -621,6 +623,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         report = {}
     by_source: dict[str, dict] = report.get("by_source", {}) if isinstance(report, dict) else {}
     value_aware = bool(report.get("sampled_rows")) if isinstance(report, dict) else False
+    proven_width_narrowings = getattr(ctx, "proven_width_narrowings", {}) or {}
+    accepted_width_narrowings: list[dict[str, Any]] = []
+    accepted_width_pairs: set[tuple[str, str]] = set()
 
     warnings: list[str] = []
     issues_detail: list[dict] = []
@@ -682,6 +687,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     source_type_declared,
                     target.inferred_type,
                     dest_db=dest_kind,
+                    source=m.source,
+                    target=m.target,
+                    proven=proven_width_narrowings,
                     dest_table_exists=getattr(
                         ctx.plan.destination, "table_exists", None
                     ),
@@ -753,9 +761,37 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 ),
                 dest_table_exists=_dest_exists,
                 population=_code_page_population,
+                source=m.source,
+                target=m.target,
+                proven=proven_width_narrowings,
             )
         ):
             lossy = True
+        width_proof = proven_width_narrowings.get(
+            (str(m.source).casefold(), str(m.target).casefold())
+        )
+        if (
+            width_proof
+            and blocking_string_width_narrowing
+            and not blocking_string_width_narrowing(
+                m.source,
+                m.target,
+                source_type_declared,
+                target.inferred_type,
+                dest_db=dest_kind,
+                proven=proven_width_narrowings,
+            )
+        ):
+            pair_key = (str(m.source).casefold(), str(m.target).casefold())
+            if pair_key not in accepted_width_pairs:
+                accepted_width_pairs.add(pair_key)
+                accepted_width_narrowings.append(
+                    {
+                        "source": m.source,
+                        "target": m.target,
+                        **dict(width_proof),
+                    }
+                )
         # Nested STRUCT/MAP field contract or nested→document collapse.
         nested_collapse = bool(
             is_nested_shape_collapse
@@ -839,6 +875,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     dest_db=_dest_db,
                     dest_table_exists=_dest_exists,
                     population=_code_page_population,
+                    source=m.source,
+                    target=m.target,
+                    proven=proven_width_narrowings,
                 )
             )
             or platform_decimal_trunc
@@ -898,7 +937,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     from services.type_system import (
                         specialty_carrier_base,
                         specialty_carrier_would_collapse,
-                        string_width_would_narrow,
+                        blocking_string_width_narrowing,
                     )
 
                     if specialty_carrier_would_collapse(
@@ -916,13 +955,20 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                         in {"string", "text"}
                         and normalize_logical_type(target.inferred_type)
                         in {"string", "text"}
-                        and string_width_would_narrow(
-                            source_col.inferred_type, target.inferred_type
+                        and blocking_string_width_narrowing(
+                            m.source,
+                            m.target,
+                            source_type_declared,
+                            target.inferred_type,
+                            dest_db=dest_kind,
+                            proven=proven_width_narrowings,
                         )
                     ):
+                        from services.population_fit_narrowing import unproven_width_message
+
                         label = (
-                            f"{label} — VARCHAR/CHAR width narrowing "
-                            "(declared capacity shrinks; not soft-passed by samples)"
+                            f"{label} — "
+                            f"{unproven_width_message(m.target, getattr(ctx, 'population_fit_report', None))}"
                         )
                 except ImportError:
                     if normalize_logical_type and normalize_logical_type(
@@ -1482,6 +1528,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     "issues": issues,
                     "issues_detail": issues_detail,
                     "warnings": warnings,
+                    "accepted_width_narrowings": accepted_width_narrowings,
                     "rule_id": "g3_schema_contract.lossy_coercion",
                     "remediation_kind": "change_target_type",
                 },
@@ -1501,13 +1548,23 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             GateId.G3_SCHEMA_CONTRACT,
             msg,
             start,
-            _with_scope({"warnings": warnings, "issues_detail": issues_detail}, g3_scope),
+            _with_scope(
+                {
+                    "warnings": warnings,
+                    "issues_detail": issues_detail,
+                    "accepted_width_narrowings": accepted_width_narrowings,
+                },
+                g3_scope,
+            ),
         )
     return _pass(
         GateId.G3_SCHEMA_CONTRACT,
         "Schema contract valid",
         start,
-        _with_scope({}, g3_scope),
+        _with_scope(
+            {"accepted_width_narrowings": accepted_width_narrowings},
+            g3_scope,
+        ),
     )
 
 

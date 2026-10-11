@@ -35,6 +35,7 @@ def validate_mapping_coercions(
     dest_table_exists: bool | None = None,
     sample_rows: list | None = None,
     samples_by_source: dict | None = None,
+    proven_width_narrowings: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Return structured coercion issues for each mapping pair.
 
@@ -67,7 +68,6 @@ def validate_mapping_coercions(
     type_locked = (schema_policy or "").lower() == "type_locked"
     mode = (validation_mode or "strict").strip().lower()
     balanced = mode in {"balanced", "review"}
-    floor = max(0.0, min(1.0, float(confidence_floor)))
     issues: list[dict[str, Any]] = []
     # A declared omission has no destination type to coerce into; reading its
     # empty target as "pending Studio/Map stamp" turned the operator's recorded
@@ -132,6 +132,9 @@ def validate_mapping_coercions(
             dest_db=dest_db_type,
             dest_table_exists=dest_table_exists,
             population=population,
+            source=src,
+            target=tgt,
+            proven=proven_width_narrowings,
         )
         lossy = (
             is_lossy_coercion(
@@ -140,6 +143,9 @@ def validate_mapping_coercions(
                 dest_db=dest_db_type,
                 dest_table_exists=dest_table_exists,
                 population=population,
+                source=src,
+                target=tgt,
+                proven=proven_width_narrowings,
             )
             or precision_collapse
         )

@@ -86,8 +86,9 @@ def test_string_width_narrowing_requires_exact_existing_population_fit() -> None
     from types import SimpleNamespace
 
     from services.population_fit_narrowing import (
-        reconcile_population_proven_string_narrowings,
+        proven_width_narrowings,
     )
+    from services.type_system import blocking_string_width_narrowing, is_lossy_coercion
 
     target = SimpleNamespace(
         source="note",
@@ -103,12 +104,13 @@ def test_string_width_narrowing_requires_exact_existing_population_fit() -> None
         truncated_reason="",
         targets=[target],
         findings=[],
+        max_observed_widths=(("note", 5),),
     )
     mappings = [{"source": "note", "target": "note"}]
     source_types = {"note": "TEXT"}
     dest_types = {"note": "VARCHAR(64)"}
 
-    def reconcile(
+    def prove(
         report,
         *,
         mapping_list=mappings,
@@ -116,18 +118,30 @@ def test_string_width_narrowing_requires_exact_existing_population_fit() -> None
         destination_type_map=dest_types,
         destination_exists=True,
     ):
-        return reconcile_population_proven_string_narrowings(
-            SimpleNamespace(gates=[], blockers=[], passed=True),
+        return proven_width_narrowings(
             report,
-            mappings=mapping_list,
-            source_types=source_type_map,
-            destination_types=destination_type_map,
+            mapping_list,
+            source_type_map,
+            destination_type_map,
             destination_table_exists=destination_exists,
         )
 
-    assert reconcile(
-        report,
-    ) == {("note", "note")}
+    proven = prove(report)
+    assert dict(proven) == {
+        ("note", "note"): {
+            "rows_scanned": 2,
+            "max_observed_width": 5,
+            "target_width": 64,
+        }
+    }
+    assert not blocking_string_width_narrowing(
+        "NOTE",
+        "NOTE",
+        "TEXT",
+        "VARCHAR(64)",
+        dest_db="mysql",
+        proven=proven,
+    )
 
     partial = SimpleNamespace(**{**report.__dict__, "evidence": "partial"})
     truncated = SimpleNamespace(**{**report.__dict__, "truncated_reason": "row"})
@@ -138,12 +152,30 @@ def test_string_width_narrowing_requires_exact_existing_population_fit() -> None
             "findings": [SimpleNamespace(target=target)],
         }
     )
-    assert reconcile(partial) == set()
-    assert reconcile(truncated) == set()
-    assert reconcile(incomplete) == set()
-    assert reconcile(overflow) == set()
-    assert reconcile(report, mapping_list=[{**mappings[0], "create_new": True}]) == set()
-    assert reconcile(report, destination_exists=False) == set()
+    assert not prove(partial)
+    assert not prove(truncated)
+    assert not prove(incomplete)
+    assert not prove(overflow)
+    assert not prove(report, mapping_list=[{**mappings[0], "create_new": True}])
+    assert not prove(report, destination_exists=False)
+    mismatched_fit_target = SimpleNamespace(
+        **{**target.__dict__, "target_type": "VARCHAR(128)"}
+    )
+    assert not prove(
+        SimpleNamespace(**{**report.__dict__, "targets": [mismatched_fit_target]})
+    )
+    assert blocking_string_width_narrowing(
+        "note", "note", "TEXT", "VARCHAR(64)", dest_db="mysql", proven={}
+    )
+    assert is_lossy_coercion(
+        "TEXT",
+        "VARCHAR(64)",
+        dest_db="mysql",
+        dest_table_exists=False,
+        source="note",
+        target="note",
+        proven=prove(report, mapping_list=[{**mappings[0], "create_new": True}]),
+    )
 
     numeric_target = SimpleNamespace(
         source="amount",
@@ -154,7 +186,7 @@ def test_string_width_narrowing_requires_exact_existing_population_fit() -> None
     numeric_report = SimpleNamespace(
         **{**report.__dict__, "targets": [numeric_target]}
     )
-    assert reconcile(
+    assert not prove(
         numeric_report,
         mapping_list=[{"source": "amount", "target": "amount"}],
         source_type_map={"amount": "DECIMAL(10,2)"},
@@ -170,24 +202,28 @@ def test_string_width_narrowing_requires_exact_existing_population_fit() -> None
     temporal_report = SimpleNamespace(
         **{**report.__dict__, "targets": [temporal_target]}
     )
-    assert reconcile(
+    assert not prove(
         temporal_report,
         mapping_list=[{"source": "event_time", "target": "event_time"}],
         source_type_map={"event_time": "TIMESTAMP(9)"},
         destination_type_map={"event_time": "TIMESTAMP(6)"},
     ) == set()
 
-    assert reconcile(
+    assert not prove(
         report,
         source_type_map={"note": "DECIMAL(10,2)"},
-    ) == set()
+    )
+    assert is_lossy_coercion("DECIMAL(10,2)", "DECIMAL(8,2)")
+    assert is_lossy_coercion("BIGINT", "INT4")
+    assert is_lossy_coercion("TIMESTAMP(9)", "TIMESTAMP(6)")
 
 
-def test_file_preflight_reconciles_exact_string_width_blocker() -> None:
+def test_preflight_uses_pre_gate_proof_for_exact_string_width() -> None:
     rows = [{"note": "alice"}, {"note": "bob"}]
     result = _preflight(
         columns=["note"],
         column_types={"note": "TEXT"},
+        source_kind="database",
         row_count=2,
         mappings=[
             {
@@ -212,6 +248,237 @@ def test_file_preflight_reconciles_exact_string_width_blocker() -> None:
     assert schema_gate["status"] == "pass"
     assert not any(
         blocker["id"] == "g3_schema_contract" for blocker in result["blockers"]
+    )
+    accepted = schema_gate["details"]["accepted_width_narrowings"]
+    assert accepted == [
+        {
+            "source": "note",
+            "target": "note",
+            "rows_scanned": 2,
+            "max_observed_width": 5,
+            "target_width": 64,
+        }
+    ]
+    assert result["proof_bundle"]["accepted_width_narrowings"] == {
+        "note→note": {
+            "rows_scanned": 2,
+            "max_observed_width": 5,
+            "target_width": 64,
+        }
+    }
+
+
+def test_incomplete_population_fit_still_blocks_string_width_narrowing() -> None:
+    rows = [{"note": "alice"}, {"note": "bob"}]
+    result = _preflight(
+        columns=["note"],
+        column_types={"note": "TEXT"},
+        source_kind="database",
+        row_count=2,
+        mappings=[
+            {
+                "source": "note",
+                "target": "note",
+                "confidence": 0.99,
+                "target_type": "VARCHAR(64)",
+            }
+        ],
+        sample_rows=rows,
+        population_rows=rows,
+        rows_are_population=True,
+        destination_column_types={"note": "VARCHAR(64)"},
+        destination_db_type="mysql",
+        destination_table_exists=True,
+        validation_mode="balanced",
+        fit_scan_deadline=0,
+    )
+
+    assert result["passed"] is False
+    assert result["population_fit"]["rows_scanned"] == 1
+    assert result["population_fit"]["truncated_reason"] == "time"
+    message = " ".join(
+        str(item.get("message") or "")
+        for item in [*result["blockers"], *result["gates"]]
+    )
+    assert "width narrowing not proven" in message
+    assert "stopped after 1 of 2 rows (time)" in message
+    assert "widen note to fit" in message
+
+
+def test_unmeasured_width_narrowing_uses_declared_capacity_message() -> None:
+    from types import SimpleNamespace
+
+    from services.population_fit_narrowing import unproven_width_message
+
+    expected = "VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)"
+    assert unproven_width_message("note", None) == expected
+    assert (
+        unproven_width_message(
+            "note",
+            SimpleNamespace(
+                evidence="unmeasured",
+                rows_scanned=0,
+                rows_total=0,
+                truncated_reason="",
+            ),
+        )
+        == expected
+    )
+    assert "stopped after 0 of 2 rows (source population walk failed)" in (
+        unproven_width_message(
+            "note",
+            SimpleNamespace(
+                evidence="partial",
+                rows_scanned=0,
+                rows_total=2,
+                truncated_reason="walk",
+            ),
+        )
+    )
+
+
+def test_skip_population_fit_uses_declared_capacity_message() -> None:
+    result = _preflight(
+        columns=["note"],
+        column_types={"note": "TEXT"},
+        source_kind="database",
+        row_count=2,
+        mappings=[
+            {
+                "source": "note",
+                "target": "note",
+                "confidence": 0.99,
+                "target_type": "VARCHAR(64)",
+            }
+        ],
+        destination_column_types={"note": "VARCHAR(64)"},
+        destination_db_type="mysql",
+        destination_table_exists=True,
+        validation_mode="balanced",
+        skip_population_fit=True,
+    )
+    schema_gate = next(
+        gate for gate in result["gates"] if gate["id"] == "g3_schema_contract"
+    )
+    message = " ".join(schema_gate["details"]["issues"])
+
+    assert "VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)" in message
+    assert "stopped after 0 of 0 rows" not in message
+
+
+def test_create_new_width_narrowing_uses_declared_capacity_message() -> None:
+    result = _preflight(
+        columns=["note"],
+        column_types={"note": "TEXT"},
+        source_kind="database",
+        row_count=2,
+        mappings=[
+            {
+                "source": "note",
+                "target": "note",
+                "confidence": 0.99,
+                "target_type": "VARCHAR(64)",
+                "create_new": True,
+            }
+        ],
+        destination_column_types={"note": "VARCHAR(64)"},
+        destination_db_type="mysql",
+        destination_table_exists=False,
+        destination_can_create=True,
+        validation_mode="balanced",
+    )
+    schema_gate = next(
+        gate for gate in result["gates"] if gate["id"] == "g3_schema_contract"
+    )
+    message = " ".join(schema_gate["details"]["issues"])
+
+    assert "VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)" in message
+    assert "stopped after 0 of 0 rows" not in message
+
+
+def test_non_width_blocker_survives_proven_string_width_narrowing() -> None:
+    rows = [{"note": "alice"}, {"note": None}]
+    result = _preflight(
+        columns=["note"],
+        column_types={"note": "TEXT"},
+        source_kind="database",
+        row_count=2,
+        mappings=[
+            {
+                "source": "note",
+                "target": "note",
+                "confidence": 0.99,
+                "target_type": "VARCHAR(64)",
+            }
+        ],
+        sample_rows=rows,
+        population_rows=rows,
+        rows_are_population=True,
+        destination_column_types={"note": "VARCHAR(64)"},
+        destination_column_nullability={"note": False},
+        destination_db_type="mysql",
+        destination_table_exists=True,
+        validation_mode="strict",
+    )
+
+    schema_gate = next(
+        gate for gate in result["gates"] if gate["id"] == "g3_schema_contract"
+    )
+    assert schema_gate["details"]["accepted_width_narrowings"]
+    assert result["passed"] is False
+    assert any(
+        "NOT NULL contract" in issue
+        for issue in schema_gate["details"]["issues"]
+    )
+
+
+def test_width_blocker_does_not_depend_on_issue_wording(monkeypatch) -> None:
+    from services import population_fit_narrowing
+
+    rows = [{"note": "alice"}, {"note": "bob"}]
+    preflight_args = dict(
+        columns=["note"],
+        column_types={"note": "TEXT"},
+        source_kind="database",
+        row_count=2,
+        mappings=[
+            {
+                "source": "note",
+                "target": "note",
+                "confidence": 0.99,
+                "target_type": "VARCHAR(64)",
+            }
+        ],
+        sample_rows=rows,
+        population_rows=rows,
+        rows_are_population=True,
+        destination_column_types={"note": "VARCHAR(64)"},
+        destination_db_type="mysql",
+        destination_table_exists=True,
+        validation_mode="balanced",
+        fit_scan_deadline=0,
+    )
+    baseline = _preflight(**preflight_args)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            population_fit_narrowing,
+            "unproven_width_message",
+            lambda target, report: f"operator message for {target}",
+        )
+        patched = _preflight(**preflight_args)
+
+    assert baseline["passed"] is patched["passed"] is False
+    baseline_g3 = next(
+        gate for gate in baseline["gates"] if gate["id"] == "g3_schema_contract"
+    )
+    patched_g3 = next(
+        gate for gate in patched["gates"] if gate["id"] == "g3_schema_contract"
+    )
+    assert baseline_g3["status"] == patched_g3["status"] == "block"
+    assert any(
+        gate["id"] in {"g3_schema_contract", "g6_target_ddl"}
+        and gate["status"] == "block"
+        for gate in patched["gates"]
     )
 
 

@@ -66,6 +66,7 @@ def _check_coercion_safety(
     validation_mode: str = "strict",
     rows: list[dict[str, Any]] | None = None,
     dest_table_exists: bool | None = None,
+    proven_width_narrowings: dict | None = None,
 ) -> dict[str, Any]:
     from services.coercion_probe import samples_coerce_mapping
     from services.type_coercion_validator import (
@@ -86,6 +87,7 @@ def _check_coercion_safety(
         validation_mode=validation_mode,
         dest_db_type=dest_kind or "",
         dest_table_exists=dest_table_exists,
+        proven_width_narrowings=proven_width_narrowings,
     )
     schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
@@ -157,6 +159,9 @@ def _check_coercion_safety(
             tgt_t,
             dest_db=dest_kind,
             dest_table_exists=dest_table_exists,
+            source=str(mapping.get("source") or src),
+            target=str(mapping.get("target") or ""),
+            proven=proven_width_narrowings,
         ):
             hardened.append(issue)
             continue
@@ -171,6 +176,9 @@ def _check_coercion_safety(
                 tgt_t,
                 dest_db=dest_kind,
                 dest_table_exists=dest_table_exists,
+                source=str(mapping.get("source") or src),
+                target=str(mapping.get("target") or ""),
+                proven=proven_width_narrowings,
             )
             and not risk_cleared
         ):
@@ -1599,6 +1607,7 @@ def run_integrity_audit(
     database_extract: bool = False,
     source_measured_empty: bool = False,
     stream_contracts: list[dict] | None = None,
+    proven_width_narrowings: dict | None = None,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1712,6 +1721,7 @@ def run_integrity_audit(
                 validation_mode=validation_mode,
                 rows=rows,
                 dest_table_exists=dest_table_exists,
+                proven_width_narrowings=proven_width_narrowings,
             )
         )
         checks.append(

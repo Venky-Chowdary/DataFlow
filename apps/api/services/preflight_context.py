@@ -22,8 +22,12 @@ class FilePreflightContext(PreflightContext):
         source_duplicate_probe_message: str = "",
         source_duplicate_probe_expected: bool = False,
         empty_cells_as_null: bool = False,
+        proven_width_narrowings: Any = None,
+        population_fit_report: Any = None,
     ):
         super().__init__(plan=plan, sample_rows=sample_rows or [])
+        self.proven_width_narrowings = proven_width_narrowings or {}
+        self.population_fit_report = population_fit_report
         # Spreadsheet blanks are absence. Only file sources opt in — the same
         # flag the file writer uses. Database extracts keep it off.
         self.empty_cells_as_null = bool(empty_cells_as_null)
@@ -234,6 +238,7 @@ class FilePreflightContext(PreflightContext):
                         getattr(self.plan.source, "kind", "") or ""
                     ).lower()
                     == "database",
+                    proven_width_narrowings=self.proven_width_narrowings,
                 )
             if isinstance(report, dict):
                 from services.validation_coverage import stamp_validation_coverage
@@ -401,6 +406,7 @@ class FilePreflightContext(PreflightContext):
             stream_contracts=list(
                 getattr(self.plan, "stream_contracts", None) or []
             ),
+            proven_width_narrowings=self.proven_width_narrowings,
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
         try:

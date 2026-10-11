@@ -215,6 +215,7 @@ class FitScanReport:
     envelope_rows_scanned: int = 0
     #: True when that cheap continuation exhausted the iterator.
     envelope_complete: bool = False
+    max_observed_widths: tuple[tuple[str, int], ...] = ()
 
     @property
     def scanned_population(self) -> bool:
@@ -248,6 +249,7 @@ class FitScanReport:
             "duration_ms": self.duration_ms,
             "envelope_rows_scanned": self.envelope_rows_scanned,
             "envelope_complete": self.envelope_complete,
+            "max_observed_widths": dict(self.max_observed_widths),
             "note": self.note,
         }
 
@@ -982,6 +984,7 @@ def scan_rows(
     env_int: dict[int, int] = {}
     env_scale: dict[int, int] = {}
     env_str_len: dict[int, int] = {}
+    max_observed_widths: dict[int, int] = {}
     env_int_frac: dict[int, bool] = {}
     witnesses: dict[int, list[Any]] = {}
     scanned = 0
@@ -1078,6 +1081,13 @@ def scan_rows(
                 and not _is_year_carrier(bounded[idx].target_type)
             ):
                 continue
+            if bounded[idx].carrier == CARRIER_STRING:
+                text = present_cell_text(value)
+                if text is None:
+                    text = str(value or "")
+                max_observed_widths[idx] = max(
+                    max_observed_widths.get(idx, 0), len(text)
+                )
             if bounded[idx].carrier in {CARRIER_DECIMAL, CARRIER_INTEGER} or (
                 bounded[idx].carrier == CARRIER_TYPED
                 and bounded[idx].transform
@@ -1509,6 +1519,10 @@ def scan_rows(
         duration_ms=duration_ms,
         envelope_rows_scanned=envelope_rows_scanned,
         envelope_complete=envelope_complete and not envelope_truncated,
+        max_observed_widths=tuple(
+            (bounded[idx].target.casefold(), width)
+            for idx, width in sorted(max_observed_widths.items())
+        ),
     )
 
 

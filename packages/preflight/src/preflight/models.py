@@ -184,6 +184,8 @@ class PreflightContext:
     sample_unavailable_reason: str = ""
     # The source was read and holds no row: Gate-5/8/9 prove 0 = 0, not "no sample".
     source_measured_empty: bool = False
+    proven_width_narrowings: Any = field(default_factory=dict)
+    population_fit_report: Any = None
 
     def probe_unique_constraint(self, columns: list[str]) -> list[dict[str, Any]]:
         return []

@@ -887,6 +887,35 @@ def test_bounded_sink_lob_tier_national_srid_wave13():
     assert is_lossy_coercion("NAME", "VARCHAR(32)") is True
 
 
+def test_bounded_string_sinks_remain_lossy_without_pair_proof():
+    from services.type_system import (
+        is_lossy_coercion,
+        is_precision_collapse_coercion,
+    )
+
+    unproven = {("other_source", "other_target"): {}}
+    for source_type, target_type in (
+        ("INTEGER", "VARCHAR(1)"),
+        ("JSON", "CHAR(10)"),
+    ):
+        for names in (
+            {"source": None, "target": None},
+            {"source": "source_col", "target": "target_col"},
+        ):
+            assert is_lossy_coercion(
+                source_type,
+                target_type,
+                proven=unproven,
+                **names,
+            )
+            assert is_precision_collapse_coercion(
+                source_type,
+                target_type,
+                proven=unproven,
+                **names,
+            )
+
+
 def test_g3_same_logical_and_specialty_invent_wave12():
     from services.type_coercion_validator import (
         validate_mapping_coercions,

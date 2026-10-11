@@ -19,10 +19,10 @@ from services.decision_kernel import (
     normalize_logical_type,
 )
 from services.type_system import (
+    blocking_string_width_narrowing,
     decimal_precision_would_truncate,
     decimal_scale_would_truncate,
     specialty_carrier_would_collapse,
-    string_width_would_narrow,
     vector_dim_mismatch,
     vector_dim_unknown_for_native,
 )
@@ -167,6 +167,8 @@ def evaluate_ddl_compatibility(
     destination_table: str | None = None,
     destination_pk_columns: list[str] | None = None,
     contract_primary_key: str | None = None,
+    proven_width_narrowings: Any = None,
+    population_fit_report: Any = None,
 ) -> tuple[bool, list[str]]:
     """
     Evaluate whether mapped columns can land in the destination DDL.
@@ -320,6 +322,9 @@ def evaluate_ddl_compatibility(
             dest_db=dest_kind,
             dest_table_exists=table_exists,
             population=population,
+            source=src,
+            target=tgt,
+            proven=proven_width_narrowings,
         ):
             # Align with G3: declared lossy never soft-passes on head samples
             # without a clearing Risk Contract.
@@ -361,9 +366,18 @@ def evaluate_ddl_compatibility(
                 elif (
                     src_logical in {"string", "text"}
                     and tgt_logical in {"string", "text"}
-                    and string_width_would_narrow(src_type, tgt_type, dest_db=dest_kind)
+                    and blocking_string_width_narrowing(
+                        src,
+                        tgt,
+                        src_type,
+                        tgt_type,
+                        dest_db=dest_kind,
+                        proven=proven_width_narrowings,
+                    )
                 ):
-                    note = " — VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)"
+                    from services.population_fit_narrowing import unproven_width_message
+
+                    note = " — " + unproven_width_message(tgt, population_fit_report)
                 issues.append(
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}){note}"
                 )
@@ -378,6 +392,9 @@ def evaluate_ddl_compatibility(
                 dest_db=dest_kind,
                 dest_table_exists=table_exists,
                 population=population,
+                source=src,
+                target=tgt,
+                proven=proven_width_narrowings,
             )
             and not risk_cleared
         ):
@@ -390,11 +407,20 @@ def evaluate_ddl_compatibility(
             elif (
                 normalize_logical_type(src_type) in {"string", "text"}
                 and normalize_logical_type(tgt_type) in {"string", "text"}
-                and string_width_would_narrow(src_type, tgt_type, dest_db=dest_kind)
+                and blocking_string_width_narrowing(
+                    src,
+                    tgt,
+                    src_type,
+                    tgt_type,
+                    dest_db=dest_kind,
+                    proven=proven_width_narrowings,
+                )
             ):
+                from services.population_fit_narrowing import unproven_width_message
+
                 msg = (
                     f"Lossy type coercion: {src} ({src_type}) → {tgt} ({tgt_type}) "
-                    "— VARCHAR/CHAR width narrowing (declared capacity; accept risk or remap)"
+                    f"— {unproven_width_message(tgt, population_fit_report)}"
                 )
             else:
                 msg = ""

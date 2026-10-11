@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Any
+from typing import Any, Mapping
 
 from services import type_system as _ts
 from services.document_instant import document_instant_wire_preserved
@@ -30,6 +30,7 @@ from services.type_system import (
     bitstring_opaque_bytes_collapse,
     bitstring_pad_polarity_loss,
     bitstring_width_would_narrow,
+    blocking_string_width_narrowing,
     bounded_string_sink_would_truncate,
     case_fold_polarity_invent,
     code_page_sink_would_collapse,
@@ -97,6 +98,39 @@ from services.type_system import (
 )
 
 
+def _blocking_width(
+    source: str | None,
+    target: str | None,
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str,
+    proven: Mapping[tuple[str, str], Any] | None,
+) -> bool:
+    if source is None or target is None:
+        return string_width_would_narrow(source_type, target_type, dest_db=dest_db)
+    return blocking_string_width_narrowing(
+        source,
+        target,
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        proven=proven,
+    )
+
+
+def _width_proven(
+    source: str | None,
+    target: str | None,
+    proven: Mapping[tuple[str, str], Any] | None,
+) -> bool:
+    return (
+        source is not None
+        and target is not None
+        and (str(source).casefold(), str(target).casefold()) in (proven or {})
+    )
+
+
 def is_precision_collapse_coercion(
     source_type: str,
     target_type: str,
@@ -104,6 +138,9 @@ def is_precision_collapse_coercion(
     dest_db: str = "",
     dest_table_exists: bool | None = None,
     population: Any = None,
+    source: str | None = None,
+    target: str | None = None,
+    proven: Mapping[tuple[str, str], Any] | None = None,
 ) -> bool:
     """True when source→target collapses precision even if samples appear clean.
 
@@ -161,11 +198,18 @@ def is_precision_collapse_coercion(
         return True
     if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
-    if string_width_would_narrow(source_type, target_type, dest_db=dest_db):
+    if _blocking_width(
+        source,
+        target,
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        proven=proven,
+    ):
         return True
     if bounded_string_sink_would_truncate(
         source_type, target_type, dest_db=dest_db
-    ):
+    ) and not _width_proven(source, target, proven):
         return True
     if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
@@ -603,6 +647,9 @@ def is_lossy_coercion(
     dest_db: str = "",
     dest_table_exists: bool | None = None,
     population: Any = None,
+    source: str | None = None,
+    target: str | None = None,
+    proven: Mapping[tuple[str, str], Any] | None = None,
 ) -> bool:
     """True when converting sourceâ†’target may lose precision, fail silently, or
     change the semantic meaning of a value.
@@ -661,11 +708,18 @@ def is_lossy_coercion(
             return True
         if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
-        if string_width_would_narrow(source_type, target_type, dest_db=dest_db):
+        if _blocking_width(
+            source,
+            target,
+            source_type,
+            target_type,
+            dest_db=dest_db,
+            proven=proven,
+        ):
             return True
         if bounded_string_sink_would_truncate(
             source_type, target_type, dest_db=dest_db
-        ):
+        ) and not _width_proven(source, target, proven):
             return True
         if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
@@ -821,6 +875,9 @@ def is_lossy_coercion(
         target_type,
         dest_db=dest_db,
         dest_table_exists=dest_table_exists,
+        source=source,
+        target=target,
+        proven=proven,
     ):
         return True
     # Fielded STRUCT/MAP â†’ opaque JSON/VARIANT is intentional on many warehouses
@@ -862,11 +919,18 @@ def is_lossy_coercion(
         return True
     if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
-    if string_width_would_narrow(source_type, target_type, dest_db=dest_db):
+    if _blocking_width(
+        source,
+        target,
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        proven=proven,
+    ):
         return True
     if bounded_string_sink_would_truncate(
         source_type, target_type, dest_db=dest_db
-    ):
+    ) and not _width_proven(source, target, proven):
         return True
     if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
@@ -1046,7 +1110,7 @@ def is_lossy_coercion(
         # INTEGERâ†’VARCHAR(1) / JSONâ†’CHAR(10) â€” bounded sink truncates.
         if bounded_string_sink_would_truncate(
             source_type, target_type, dest_db=dest_db
-        ):
+        ) and not _width_proven(source, target, proven):
             return True
         return False
     return True

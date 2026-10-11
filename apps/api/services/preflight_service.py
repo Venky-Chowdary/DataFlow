@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -1163,6 +1163,74 @@ def run_file_preflight(
         drift_dest_types = {}
         ddl_dest_types = hinted_dest_types
 
+    read_scope = _resolve_read_scope(
+        sync_mode=sync_mode,
+        stream_contracts=stream_contracts,
+        source_format=source_format,
+        source_config=source_config,
+        source_table=source_table,
+        destination_db_type=destination_db_type,
+        destination_config=destination_config,
+        destination_table=destination_table,
+    )
+    pre_gate_fit_attempted = not skip_population_fit
+    pre_gate_fit_report = None
+    pre_gate_fit_error = ""
+    pre_gate_fit_filter: dict[str, Any] = {}
+    if pre_gate_fit_attempted:
+        try:
+            from services.preflight_population import scan_existing_table_population_fit
+
+            (
+                pre_gate_fit_report,
+                pre_gate_fit_error,
+                population_rows,
+                rows_are_population,
+                pre_gate_fit_filter,
+            ) = scan_existing_table_population_fit(
+                source_kind=source_kind,
+                source_format=source_format,
+                source_connector_id=source_connector_id,
+                source_config=source_config,
+                source_table=source_table,
+                source_file_id=source_file_id,
+                mappings=mappings,
+                column_types=column_types or {},
+                destination_column_types=ddl_dest_types,
+                destination_db_type=destination_db_type,
+                sync_mode=sync_mode,
+                read_scope=read_scope,
+                source_filter=dict(source_filter or {}),
+                population_rows=population_rows,
+                rows_are_population=rows_are_population,
+                sample_rows=sample_rows or [],
+                row_count=row_count,
+                validation_mode=validation_mode,
+                destination_table_exists=dest_table_exists,
+                shape_recipe=dict(shape_recipe or {}),
+                columns=columns,
+                deadline_monotonic=_fit_scan_deadline(
+                    fit_scan_deadline, fit_scan_seconds
+                ),
+                on_progress=on_fit_progress,
+                iter_table_population=_ps._iter_table_population_for_preflight,
+            )
+        except Exception as fit_exc:
+            pre_gate_fit_error = str(fit_exc)[:400]
+            logger.warning("pre-gate population fit scan failed: %s", fit_exc, exc_info=fit_exc)
+    from services.population_fit_narrowing import proven_width_narrowings
+
+    proven_string_narrowings = proven_width_narrowings(
+        pre_gate_fit_report,
+        mappings,
+        column_types or {},
+        ddl_dest_types,
+        destination_table_exists=(
+            dest_table_exists is True and not dest_recreated and not schemaless
+        ),
+        dest_db=dest_kind,
+    )
+
     target_cols = list(drift_dest_types.keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
         mappings=write_maps,
@@ -1179,6 +1247,8 @@ def run_file_preflight(
         destination_table=destination_table,
         destination_pk_columns=destination_pk_columns,
         contract_primary_key=contract_primary_key,
+        proven_width_narrowings=proven_string_narrowings,
+        population_fit_report=pre_gate_fit_report,
     )
 
     # Two questions, two truths, and an approved pre-load transform separates
@@ -1362,16 +1432,6 @@ def run_file_preflight(
     # The rows this run will read. An incremental append past a watermark only
     # writes the delta, so the collision probe must judge the delta — probing
     # the whole table refused every run after the first, on every engine.
-    read_scope = _resolve_read_scope(
-        sync_mode=sync_mode,
-        stream_contracts=stream_contracts,
-        source_format=source_format,
-        source_config=source_config,
-        source_table=source_table,
-        destination_db_type=destination_db_type,
-        destination_config=destination_config,
-        destination_table=destination_table,
-    )
     destination_collision = probe_append_key_collisions(
         mappings=mappings,
         source_columns=columns,
@@ -1405,6 +1465,8 @@ def run_file_preflight(
         source_duplicate_probe_status=source_duplicate_probe_status,
         source_duplicate_probe_message=source_duplicate_probe_message,
         source_duplicate_probe_expected=source_duplicate_probe_expected,
+        proven_width_narrowings=proven_string_narrowings,
+        population_fit_report=pre_gate_fit_report,
     )
     ctx.sample_unavailable_reason = sample_unavailable_reason
     ctx.source_measured_empty = source_measured_empty
@@ -1440,6 +1502,13 @@ def run_file_preflight(
         acknowledgment_actor=acknowledgment_actor,
         acknowledgment_reason=acknowledgment_reason,
     )
+    from services.population_fit_narrowing import proof_details
+
+    proof_bundle["accepted_width_narrowings"] = proof_details(
+        proven_string_narrowings
+    )
+    if pre_gate_fit_report is not None:
+        proof_bundle["population_fit"] = pre_gate_fit_report.to_dict()
 
     # Module 12 + Phase C11 — Conversion Contract, DDL identity, Decision Artifact.
     try:
@@ -1615,7 +1684,6 @@ def run_file_preflight(
     # caller actually holds — the whole batch at Execute preflight, the preview in
     # Studio — and report the evidence for what it is.
     fit_gate: dict[str, Any] | None = None
-    population_walk_error = ""
     fit_report_payload: dict[str, Any] = {}
     fit_blocked = False
     fit_report = None
@@ -1624,25 +1692,36 @@ def run_file_preflight(
         from services.population_fit_scan import (
             GATE_ID as _FIT_GATE_ID,
             build_population_fit_gate,
-            scan_population_fit,
         )
-        from services.row_filter import iter_filtered_rows
-        from services.sync_cursor import incremental_read_narrows, iter_rows_after_watermark
+        from services.sync_cursor import incremental_read_narrows
 
-        cfg_extra = (source_config or {}).get("extra")
-        extra_filter = (
-            cfg_extra.get("source_filter")
-            if isinstance(cfg_extra, dict) and isinstance(cfg_extra.get("source_filter"), dict)
-            else None
-        )
-        cfg_filter = (
-            (source_config or {}).get("source_filter")
-            if isinstance((source_config or {}).get("source_filter"), dict)
-            else None
-        )
-        resolved_filter = dict(source_filter or cfg_filter or extra_filter or {})
+        if pre_gate_fit_attempted:
+            from services.population_fit_scan import EVIDENCE_UNMEASURED, FitScanReport
 
-        if skip_population_fit:
+            fit_report = pre_gate_fit_report or FitScanReport(
+                evidence=EVIDENCE_UNMEASURED,
+                rows_total=int(row_count or 0),
+                truncated_reason="walk" if pre_gate_fit_error else "",
+                note=(
+                    "Pre-gate population scan failed; fit is unproven."
+                    if pre_gate_fit_error
+                    else ""
+                ),
+            )
+            fit_report_payload = fit_report.to_dict()
+            if incremental_read_narrows(sync_mode) and read_scope.bounded:
+                fit_report_payload["delta_scope"] = {
+                    "cursor_column": read_scope.cursor_column,
+                    "watermark": str(read_scope.watermark),
+                }
+            if pre_gate_fit_filter:
+                from services.row_filter import filter_columns
+
+                fit_report_payload["filter_scope"] = {
+                    "columns": filter_columns(pre_gate_fit_filter),
+                }
+            fit_gate = build_population_fit_gate(fit_report)
+        elif skip_population_fit:
             # Execute after a stamped Studio Validate: dest probe + sample
             # gates still run. The 1M walk does not. Write-time fit binds.
             from services.population_fit_scan import (
@@ -1680,249 +1759,6 @@ def run_file_preflight(
             fit_report_payload = fit_report.to_dict()
             fit_report_payload["reused_from_validate"] = True
             fit_gate = build_population_fit_gate(fit_report)
-        if not skip_population_fit:
-          # A caller-supplied population is a one-shot iterable; a stored upload
-          # or a table walk can be produced again. Only the replayable ones may
-          # re-prove a create-new widen, because an exhausted iterator would
-          # "prove" a clean scan over zero rows.
-          replay_source: Callable[[], Iterable[Mapping[str, Any]] | None] | None = None
-          widen = None
-          if population_rows is None and str(source_file_id or "").strip():
-            from services.file_parser import iter_stored_upload_rows
-
-            stored_rows = iter_stored_upload_rows(source_file_id)
-            if stored_rows is not None:
-                population_rows = stored_rows
-                rows_are_population = True
-
-                def replay_source() -> Iterable[Mapping[str, Any]] | None:
-                    return iter_stored_upload_rows(source_file_id)
-          if population_rows is None:
-            try:
-                table_rows = _ps._iter_table_population_for_preflight(
-                    source_kind=source_kind,
-                    source_format=source_format,
-                    source_connector_id=source_connector_id,
-                    source_config=source_config,
-                    source_table=source_table,
-                    mappings=mappings,
-                    column_types=column_types,
-                    dest_types=destination_column_types or {},
-                    dest_db=destination_db_type,
-                    sync_mode=sync_mode,
-                    read_scope=read_scope if incremental_read_narrows(sync_mode) else None,
-                    source_filter=resolved_filter or None,
-                )
-            except Exception as walk_exc:
-                logger.warning(
-                    "table population walk failed for %s; g3f fails closed: %s",
-                    source_table,
-                    walk_exc,
-                )
-                population_walk_error = str(walk_exc)[:400]
-                table_rows = None
-            if table_rows is not None:
-                try:
-                    first = next(table_rows)
-                except StopIteration:
-                    # Honest empty table — not a failed walk.
-                    population_rows = iter(())
-                    rows_are_population = True
-                except Exception as walk_exc:
-                    # Cursor-unreadable / down source must keep the preview,
-                    # never claim an empty population as exact.
-                    logger.warning(
-                        "table population walk failed for %s; g3f fails closed: %s",
-                        source_table,
-                        walk_exc,
-                    )
-                    population_walk_error = str(walk_exc)[:400]
-                else:
-
-                    def _chained():
-                        yield first
-                        yield from table_rows
-
-                    walked: Iterable[Mapping[str, Any]] = _chained()
-                    if shape_recipe:
-                        from services.shape_preflight import shaped_population_rows
-
-                        shaped = shaped_population_rows(
-                            shape_recipe,
-                            walked,
-                            source_columns=columns,
-                        )
-                        if shaped is not None:
-                            walked = shaped
-                    population_rows = walked
-                    rows_are_population = True
-
-                    def replay_source() -> Iterable[Mapping[str, Any]] | None:
-                        again = _ps._iter_table_population_for_preflight(
-                            source_kind=source_kind,
-                            source_format=source_format,
-                            source_connector_id=source_connector_id,
-                            source_config=source_config,
-                            source_table=source_table,
-                            mappings=mappings,
-                            column_types=column_types,
-                            dest_types=destination_column_types or {},
-                            dest_db=destination_db_type,
-                            sync_mode=sync_mode,
-                            read_scope=(
-                                read_scope
-                                if incremental_read_narrows(sync_mode)
-                                else None
-                            ),
-                            source_filter=resolved_filter or None,
-                        )
-                        if again is None or not shape_recipe:
-                            return again
-                        from services.shape_preflight import shaped_population_rows
-
-                        return (
-                            shaped_population_rows(
-                                shape_recipe, again, source_columns=columns
-                            )
-                            or again
-                        )
-
-          def _narrowed(rows_in: Iterable[Mapping[str, Any]]) -> Iterable[Mapping[str, Any]]:
-              """Same scope the first scan measured — filter then watermark."""
-              out_rows = rows_in
-              if resolved_filter:
-                  filtered_again = iter_filtered_rows(out_rows, resolved_filter)
-                  if filtered_again is not None:
-                      out_rows = filtered_again
-              if incremental_read_narrows(sync_mode) and read_scope.bounded:
-                  narrowed_again = iter_rows_after_watermark(
-                      out_rows, read_scope, keep_unreadable=True
-                  )
-                  if narrowed_again is not None:
-                      out_rows = narrowed_again
-              return out_rows
-
-          scan_input = population_rows if population_rows is not None else sample_rows
-          fit_rows_total = int(row_count or 0)
-          if resolved_filter:
-            filtered = iter_filtered_rows(scan_input, resolved_filter)
-            if filtered is not None:
-                scan_input = filtered
-            fit_rows_total = 0
-          if incremental_read_narrows(sync_mode) and read_scope.bounded:
-            narrowed = iter_rows_after_watermark(
-                scan_input, read_scope, keep_unreadable=True
-            )
-            if narrowed is not None:
-                scan_input = narrowed
-            # Table COUNT is not this run's population — the scan's own count is.
-            fit_rows_total = 0
-          fit_report = scan_population_fit(
-            scan_input,
-            mappings,
-            dest_types=destination_column_types or {},
-            source_types=column_types or {},
-            dest_db=destination_db_type,
-            dialect_label=destination_db_type,
-            # Same policy the writer resolves from the same validation mode —
-            # Validate must not forecast a quarantine the writer will abort on.
-            job_error_policy=transform_error_policy_for_validation_mode(validation_mode),
-            rows_total=fit_rows_total,
-            rows_are_population=bool(rows_are_population and population_rows is not None),
-            source_kind=source_kind,
-            source_format=source_format,
-            sync_mode=sync_mode,
-            dest_table_exists=destination_table_exists,
-            deadline_monotonic=_fit_scan_deadline(
-                fit_scan_deadline, fit_scan_seconds
-            ),
-            on_progress=on_fit_progress,
-          )
-          if destination_table_exists is False and replay_source is not None:
-            # We own the CREATE here: no live DDL binds, so a carrier the peek
-            # sized too narrow is our defect, not the operator's. Widen it from
-            # the measured population and re-prove on the same rows — an
-            # unproven widen is dropped and the block stands.
-            from services.population_fit_scan import create_new_population_widen
-
-            replay_scoped = replay_source
-
-            def _replay() -> Iterable[Mapping[str, Any]] | None:
-                again = replay_scoped()
-                return None if again is None else _narrowed(again)
-
-            widen = create_new_population_widen(
-                fit_report,
-                mappings,
-                _replay,
-                scan_kwargs=dict(
-                    dest_types=destination_column_types or {},
-                    source_types=column_types or {},
-                    dest_db=destination_db_type,
-                    dialect_label=destination_db_type,
-                    job_error_policy=transform_error_policy_for_validation_mode(
-                        validation_mode
-                    ),
-                    rows_total=fit_rows_total,
-                    rows_are_population=bool(rows_are_population),
-                    source_kind=source_kind,
-                    source_format=source_format,
-                    sync_mode=sync_mode,
-                    dest_table_exists=destination_table_exists,
-                ),
-            )
-            if widen is not None:
-                fit_report = widen.report
-          fit_report_payload = fit_report.to_dict()
-          if widen is not None:
-            fit_report_payload["create_new_widen"] = list(widen.applied)
-          if incremental_read_narrows(sync_mode) and read_scope.bounded:
-            fit_report_payload["delta_scope"] = {
-                "cursor_column": read_scope.cursor_column,
-                "watermark": str(read_scope.watermark),
-            }
-          if resolved_filter:
-            from services.row_filter import filter_columns
-
-            fit_report_payload["filter_scope"] = {
-                "columns": filter_columns(resolved_filter),
-            }
-          # The gate is always stated, including when nothing needed scanning:
-          # "no bounded carrier can be exceeded" is evidence, and a silently
-          # absent gate reads as an unasked question.
-          fit_gate = build_population_fit_gate(fit_report)
-          if (
-              population_walk_error
-              and fit_report.targets
-              and fit_gate.get("status") != "block"
-          ):
-              # QA MX3-22: a walk that raised left only the preview checked, and
-              # "no unfit value in N scanned row(s)" let Execute approve blind.
-              logger.error(
-                  "g3f population probe failed for %s (%d bounded column(s), "
-                  "%d preview row(s) checked): %s",
-                  source_table,
-                  len(fit_report.targets),
-                  fit_report.rows_scanned,
-                  population_walk_error,
-              )
-              fit_gate = {
-                  "id": _FIT_GATE_ID,
-                  "status": "block",
-                  "message": (
-                      "Population probe failed — the source table walk raised "
-                      f"({population_walk_error}), so only {fit_report.rows_scanned} "
-                      f"preview row(s) were checked against {len(fit_report.targets)} "
-                      "bounded destination column(s). Restore source access and "
-                      "re-run Validate."
-                  ),
-                  "duration_ms": int(fit_report.duration_ms or 0),
-                  "details": {
-                      **fit_report_payload,
-                      "probe_failed": True,
-                      "probe_error": population_walk_error,
-                  },
-              }
         if fit_gate.get("status") == "block":
             fit_blocked = True
             blockers.append(
@@ -1950,16 +1786,6 @@ def run_file_preflight(
             "duration_ms": 0,
             "details": dict(fit_report_payload),
         }
-
-    from services import population_fit_narrowing
-
-    proven_string_narrowings = population_fit_narrowing.reconcile_population_proven_string_narrowings(
-        result, fit_report, mappings, column_types or {},
-        destination_column_types or {}, destination_table_exists,
-        ddl_issues, proof_bundle, blockers,
-    )
-    if proven_string_narrowings:
-        ddl_compatible = not ddl_issues
 
     enriched_blockers = enrich_blockers(
         blockers,
@@ -2092,9 +1918,8 @@ def run_file_preflight(
     # A gate that blocks a declared conversion must show up in the report every
     # other surface reads — otherwise Validate blocks while the panel under it
     # says there are no blocking failures.
-    out["coercion_report"] = population_fit_narrowing.reconcile_population_fit_coercion_report(
-        reconcile_coercion_report(out.get("coercion_report"), out.get("gates")),
-        proven_string_narrowings,
+    out["coercion_report"] = reconcile_coercion_report(
+        out.get("coercion_report"), out.get("gates")
     )
 
     # Stamp Decision Kernel ValidationFindings onto Validate SSOT.
