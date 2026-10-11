@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -360,83 +361,166 @@ def _logminer_options_sql(*, committed_only: bool = True) -> str:
     )
 
 
-def register_logminer_logs(cur: Any, *, start_scn: int, end_scn: int) -> int:
-    """ADD_LOGFILE every online/archived redo covering ``[start_scn, end_scn]``.
+def _logminer_warning(
+    step: str,
+    *,
+    reader_identity: str,
+    start_scn: int,
+    end_scn: int,
+    step_context: str,
+    exc: BaseException,
+) -> None:
+    logger.warning(
+        "Oracle LogMiner failure step=%s reader=%s SCN=[%s,%s] context=%s: %s",
+        step,
+        reader_identity or "<unknown>",
+        start_scn,
+        end_scn,
+        step_context or "<unspecified>",
+        exc,
+        exc_info=exc.__traceback__ is not None,
+    )
 
-    Returns the number of files registered. Zero is a hard failure — mining
-    without files yields an empty contents view and a silent no-op poll.
+
+_CURRENT_INCARNATION_FILTER = """
+              AND RESETLOGS_CHANGE# = (
+                    SELECT RESETLOGS_CHANGE# FROM V$DATABASE
+              )
+"""
+
+
+def register_logminer_logs(
+    cur: Any,
+    *,
+    start_scn: int,
+    end_scn: int,
+    reader_identity: str = "",
+    step_context: str = "",
+) -> int:
+    """Register one redo file per thread/sequence covering the SCN window.
+
+    Available archived copies take precedence over online members. Returns the
+    number of files registered; zero is a hard failure because mining without
+    files yields an empty contents view and a silent no-op poll.
 
     Raises if neither catalog view could be read, so an unreadable catalog is
     never mistaken for "no redo covers this window".
     """
     start = int(start_scn or 0)
     end = int(end_scn or 0)
-    files: list[str] = []
+    online_files: dict[tuple[int, int], str] = {}
+    archived_files: dict[tuple[int, int], tuple[int, str]] = {}
     listing_errors = 0
     try:
         cur.execute(
             """
-            SELECT DISTINCT lf.MEMBER
+            SELECT l.THREAD#, l.SEQUENCE#, lf.MEMBER
             FROM V$LOGFILE lf
             JOIN V$LOG l ON l.GROUP# = lf.GROUP#
-            WHERE l.FIRST_CHANGE# <= :end_scn
+            WHERE l.STATUS <> 'UNUSED'
+              AND l.FIRST_CHANGE# > 0
+              AND l.FIRST_CHANGE# <= :end_scn
               AND (l.NEXT_CHANGE# IS NULL OR l.NEXT_CHANGE# > :start_scn)
+            ORDER BY l.THREAD#, l.SEQUENCE#, lf.MEMBER
             """,
             {"start_scn": start, "end_scn": end},
         )
-        files.extend(str(r[0]) for r in (cur.fetchall() or []) if r and r[0])
+        for row in cur.fetchall() or []:
+            if not row or len(row) < 3 or not row[2]:
+                continue
+            key = (int(row[0]), int(row[1]))
+            path = str(row[2])
+            current = online_files.get(key)
+            if current is None or path < current:
+                online_files[key] = path
     except Exception as exc:
         listing_errors += 1
         logger.debug("Oracle V$LOGFILE listing failed: %s", exc)
     try:
         cur.execute(
             """
-            SELECT NAME
+            SELECT THREAD#, SEQUENCE#, DEST_ID, STATUS, NAME
             FROM V$ARCHIVED_LOG
             WHERE DELETED = 'NO'
+              AND STANDBY_DEST = 'NO'
+              AND STATUS = 'A'
+            """
+            + _CURRENT_INCARNATION_FILTER
+            + """
               AND FIRST_CHANGE# <= :end_scn
               AND (NEXT_CHANGE# IS NULL OR NEXT_CHANGE# > :start_scn)
+            ORDER BY THREAD#, SEQUENCE#, DEST_ID, NAME
             """,
             {"start_scn": start, "end_scn": end},
         )
-        files.extend(str(r[0]) for r in (cur.fetchall() or []) if r and r[0])
+        for row in cur.fetchall() or []:
+            if not row or len(row) < 5 or not row[4]:
+                continue
+            key = (int(row[0]), int(row[1]))
+            candidate = (int(row[2] or 0), str(row[4]))
+            current = archived_files.get(key)
+            if current is None or candidate < current:
+                archived_files[key] = candidate
     except Exception as exc:
         listing_errors += 1
         logger.debug("Oracle V$ARCHIVED_LOG listing failed: %s", exc)
 
-    if not files and listing_errors >= 2:
-        raise RuntimeError(
+    if not online_files and not archived_files and listing_errors >= 2:
+        error = RuntimeError(
             "Oracle LogMiner could not read V$LOGFILE or V$ARCHIVED_LOG; "
             "grant SELECT on the redo catalog views before mining."
         )
-
-    # Deduplicate while preserving order.
-    seen: set[str] = set()
-    unique = []
-    for path in files:
-        if path in seen:
-            continue
-        seen.add(path)
-        unique.append(path)
-
-    for index, path in enumerate(unique):
-        add_option = "DBMS_LOGMNR.NEW" if index == 0 else "DBMS_LOGMNR.ADDFILE"
-        cur.execute(
-            f"""
-            BEGIN
-              DBMS_LOGMNR.ADD_LOGFILE(
-                LOGFILENAME => :fname,
-                OPTIONS => {add_option}
-              );
-            END;
-            """,
-            {"fname": path},
+        _logminer_warning(
+            "add_logfile",
+            reader_identity=reader_identity,
+            start_scn=start,
+            end_scn=end,
+            step_context=step_context,
+            exc=error,
         )
-    return len(unique)
+        raise error
+
+    selected = dict(online_files)
+    selected.update(
+        (key, archive[1]) for key, archive in archived_files.items()
+    )
+    ordered_paths = [selected[key] for key in sorted(selected)]
+
+    for index, path in enumerate(ordered_paths):
+        add_option = "DBMS_LOGMNR.NEW" if index == 0 else "DBMS_LOGMNR.ADDFILE"
+        try:
+            cur.execute(
+                f"""
+                BEGIN
+                  DBMS_LOGMNR.ADD_LOGFILE(
+                    LOGFILENAME => :fname,
+                    OPTIONS => {add_option}
+                  );
+                END;
+                """,
+                {"fname": path},
+            )
+        except Exception as exc:
+            _logminer_warning(
+                "add_logfile",
+                reader_identity=reader_identity,
+                start_scn=start,
+                end_scn=end,
+                step_context=step_context,
+                exc=exc,
+            )
+            raise
+    return len(ordered_paths)
 
 
 def start_logminer_session(
-    cur: Any, *, start_scn: int, end_scn: int, committed_only: bool = True
+    cur: Any,
+    *,
+    start_scn: int,
+    end_scn: int,
+    committed_only: bool = True,
+    reader_identity: str = "",
+    step_context: str = "",
 ) -> None:
     """Start a committed-data-only LogMiner session over the SCN window.
 
@@ -446,29 +530,100 @@ def start_logminer_session(
         cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
     except Exception as exc:
         logger.debug("No prior Oracle LogMiner session to end: %s", exc)
-    registered = register_logminer_logs(cur, start_scn=start_scn, end_scn=end_scn)
+    registered = register_logminer_logs(
+        cur,
+        start_scn=start_scn,
+        end_scn=end_scn,
+        reader_identity=reader_identity,
+        step_context=step_context,
+    )
     if registered <= 0:
         # The catalog was readable but no redo covers the window — the changes
         # we need have aged out. That is a redo gap, so raise the gap error the
         # resume path already knows how to handle (re-snapshot) rather than a
         # generic failure that would retry the same empty window forever.
-        raise CdcScnGapError(
+        error = CdcScnGapError(
             f"Oracle LogMiner found no redo covering SCN [{start_scn}, {end_scn}]; "
             "the required redo has aged out — a fresh snapshot is required."
         )
+        _logminer_warning(
+            "add_logfile",
+            reader_identity=reader_identity,
+            start_scn=int(start_scn),
+            end_scn=int(end_scn),
+            step_context=step_context,
+            exc=error,
+        )
+        raise error
     options = _logminer_options_sql(committed_only=committed_only)
-    cur.execute(
-        f"""
-        BEGIN
-          DBMS_LOGMNR.START_LOGMNR(
-            STARTSCN => :start_scn,
-            ENDSCN => :end_scn,
-            OPTIONS => {options}
-          );
-        END;
-        """,  # nosec B608 — options is a fixed constant from _logminer_options_sql
-        {"start_scn": int(start_scn), "end_scn": int(end_scn)},
-    )
+    try:
+        cur.execute(
+            f"""
+            BEGIN
+              DBMS_LOGMNR.START_LOGMNR(
+                STARTSCN => :start_scn,
+                ENDSCN => :end_scn,
+                OPTIONS => {options}
+              );
+            END;
+            """,  # nosec B608 — options is a fixed constant from _logminer_options_sql
+            {"start_scn": int(start_scn), "end_scn": int(end_scn)},
+        )
+    except Exception as exc:
+        _logminer_warning(
+            "start_logminer",
+            reader_identity=reader_identity,
+            start_scn=int(start_scn),
+            end_scn=int(end_scn),
+            step_context=step_context,
+            exc=exc,
+        )
+        raise
+
+
+@contextmanager
+def _logminer_session(
+    cur: Any,
+    *,
+    start_scn: int,
+    end_scn: int,
+    committed_only: bool = True,
+    reader_identity: str = "",
+    step_context: str = "",
+) -> Iterator[None]:
+    try:
+        start_logminer_session(
+            cur,
+            start_scn=start_scn,
+            end_scn=end_scn,
+            committed_only=committed_only,
+            reader_identity=reader_identity,
+            step_context=step_context,
+        )
+        try:
+            yield
+        except Exception as exc:
+            _logminer_warning(
+                "mine",
+                reader_identity=reader_identity,
+                start_scn=int(start_scn),
+                end_scn=int(end_scn),
+                step_context=step_context,
+                exc=exc,
+            )
+            raise
+    finally:
+        try:
+            cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
+        except Exception as exc:
+            _logminer_warning(
+                "end_logminer",
+                reader_identity=reader_identity,
+                start_scn=int(start_scn),
+                end_scn=int(end_scn),
+                step_context=step_context,
+                exc=exc,
+            )
 
 
 def logminer_contents_sql(
@@ -803,10 +958,8 @@ def fetch_redo_inventory(cur: Any) -> list[tuple[int, int, int, int, str]] | Non
             FROM V$ARCHIVED_LOG
             WHERE DELETED = 'NO'
               AND STANDBY_DEST = 'NO'
-              AND RESETLOGS_CHANGE# = (
-                    SELECT RESETLOGS_CHANGE# FROM V$DATABASE
-              )
             """
+            + _CURRENT_INCARNATION_FILTER
         )
         for row in cur.fetchall() or []:
             thread, sequence, first_change, next_change = row
@@ -1638,6 +1791,12 @@ class OracleLogMinerCdc:
             return ",".join(self.tables)
         return self.table
 
+    def _logminer_reader_identity(self) -> str:
+        return (
+            f"job={self.cfg.get('job_id') or '<unknown>'} "
+            f"slot={self.cursor_key} table={self._token_table_label()}"
+        )
+
     def _table_in_sql(self) -> str:
         """Safe IN-list for LogMiner TABLE_NAME filter (uppercased identifiers)."""
         from connectors.sql_identifiers import require_safe_identifier
@@ -1966,26 +2125,34 @@ class OracleLogMinerCdc:
         An empty first read with ``end_scn > start_scn`` used to advance the
         watermark past not-yet-visible committed DML (silent dest leftover).
         """
-        start_logminer_session(cur, start_scn=max(1, int(start_scn)), end_scn=int(end_scn))
-        rows = self._query_logminer_rows(cur, table_predicate=table_predicate, limit=limit)
+        with _logminer_session(
+            cur,
+            start_scn=max(1, int(start_scn)),
+            end_scn=int(end_scn),
+            reader_identity=self._logminer_reader_identity(),
+            step_context="visibility_initial",
+        ):
+            rows = self._query_logminer_rows(
+                cur, table_predicate=table_predicate, limit=limit
+            )
         if rows or int(end_scn) <= int(start_scn):
             return rows, int(end_scn)
         delay = self._empty_window_retry_sec()
         if delay > 0:
-            try:
-                cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
-            except Exception as exc:
-                logger.debug("Oracle END_LOGMNR before visibility retry: %s", exc)
             time.sleep(delay)
             cur.execute("SELECT current_scn FROM v$database")
             head = cur.fetchone()
             end_scn = max(int(end_scn), int(head[0] or end_scn) if head else int(end_scn))
-            start_logminer_session(
-                cur, start_scn=max(1, int(start_scn)), end_scn=int(end_scn)
-            )
-            rows = self._query_logminer_rows(
-                cur, table_predicate=table_predicate, limit=limit
-            )
+            with _logminer_session(
+                cur,
+                start_scn=max(1, int(start_scn)),
+                end_scn=int(end_scn),
+                reader_identity=self._logminer_reader_identity(),
+                step_context="visibility_retry",
+            ):
+                rows = self._query_logminer_rows(
+                    cur, table_predicate=table_predicate, limit=limit
+                )
         return rows, int(end_scn)
 
     def is_available(self) -> bool:
@@ -2320,14 +2487,18 @@ class OracleLogMinerCdc:
                     # (DDD-3 stream-wins relies on this peek).
                     if end_scn < self.scn or (end_scn == self.scn and not self.rs_id):
                         return events
-                    start_logminer_session(
-                        cur, start_scn=max(1, self.scn), end_scn=end_scn
-                    )
-                    peek_rows = self._query_logminer_rows(
+                    with _logminer_session(
                         cur,
-                        table_predicate="TABLE_NAME = :tbl OR SEG_NAME = :tbl",
-                        limit=peek_limit,
-                    )
+                        start_scn=max(1, self.scn),
+                        end_scn=end_scn,
+                        reader_identity=self._logminer_reader_identity(),
+                        step_context="snapshot_peek",
+                    ):
+                        peek_rows = self._query_logminer_rows(
+                            cur,
+                            table_predicate="TABLE_NAME = :tbl OR SEG_NAME = :tbl",
+                            limit=peek_limit,
+                        )
                     ddl_positions = [
                         (
                             str(candidate[5] or candidate[10] or "").upper(),
@@ -2438,10 +2609,6 @@ class OracleLogMinerCdc:
                                     "row": parsed,
                                 }
                             )
-                    try:
-                        cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
-                    except Exception as exc:
-                        logger.debug("Oracle END_LOGMNR cleanup failed: %s", exc)
         except OracleLogMinerReadError:
             raise
         except Exception as exc:
@@ -2683,10 +2850,6 @@ class OracleLogMinerCdc:
                                     "row": parsed,
                                 }
                             )
-                    try:
-                        cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
-                    except Exception as exc:
-                        logger.debug("Oracle END_LOGMNR cleanup failed: %s", exc)
         except CdcScnGapError:
             raise
         except OracleLogMinerReadError:
@@ -2820,35 +2983,33 @@ class OracleLogMinerCdc:
                     cur.execute("SELECT current_scn FROM v$database")
                     head = cur.fetchone()
                     head_scn = int(head[0] or self.scn) if head else self.scn
-                    start_logminer_session(
-                        cur,
-                        start_scn=max(1, mine_from_scn),
-                        end_scn=max(self.scn, head_scn),
-                        committed_only=False,
-                    )
                     in_list = self._table_in_sql()
                     table_predicate = (
                         f"TABLE_NAME IN ({in_list}) OR SEG_NAME IN ({in_list})"
                     )
-                    raw_rows, _ = _fetch_logminer_csf_window(
+                    with _logminer_session(
                         cur,
-                        sql=logminer_txn_contents_sql(
-                            table_predicate=table_predicate
-                        ),
-                        binds={
-                            "owner": self.schema,
-                            **self._resume_binds(),
-                        },
-                        limit=limit,
-                        csf_index=14,
-                        table=self._token_table_label(),
-                        cursor_key=self.cursor_key,
-                    )
+                        start_scn=max(1, mine_from_scn),
+                        end_scn=max(self.scn, head_scn),
+                        committed_only=False,
+                        reader_identity=self._logminer_reader_identity(),
+                        step_context="transaction_buffer",
+                    ):
+                        raw_rows, _ = _fetch_logminer_csf_window(
+                            cur,
+                            sql=logminer_txn_contents_sql(
+                                table_predicate=table_predicate
+                            ),
+                            binds={
+                                "owner": self.schema,
+                                **self._resume_binds(),
+                            },
+                            limit=limit,
+                            csf_index=14,
+                            table=self._token_table_label(),
+                            cursor_key=self.cursor_key,
+                        )
                     fetched = len(raw_rows)
-                    try:
-                        cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
-                    except Exception as exc:
-                        logger.debug("Oracle END_LOGMNR cleanup failed: %s", exc)
         except (CdcScnGapError, CdcTxnBufferOverflow, OracleLogMinerReadError):
             raise
         except Exception as exc:
@@ -3245,29 +3406,33 @@ class OracleLogMinerCdc:
                             ack_barrier=True,
                         )
                         return
-                    start_logminer_session(
-                        cur, start_scn=max(1, self.scn), end_scn=end_scn
-                    )
                     in_list = self._table_in_sql()  # nosec: B608 — safe identifiers
                     # Look-ahead past batch_size so we can keep complete XID groups.
                     lim = max(self.batch_size + 1, 64) * max(1, len(self.tables))
-                    raw_rows, was_truncated = _fetch_logminer_csf_window(
+                    with _logminer_session(
                         cur,
-                        sql=logminer_contents_sql(
-                            table_predicate=(
-                                f"TABLE_NAME IN ({in_list}) OR SEG_NAME IN ({in_list})"
+                        start_scn=max(1, self.scn),
+                        end_scn=end_scn,
+                        reader_identity=self._logminer_reader_identity(),
+                        step_context="shared_multi",
+                    ):
+                        raw_rows, was_truncated = _fetch_logminer_csf_window(
+                            cur,
+                            sql=logminer_contents_sql(
+                                table_predicate=(
+                                    f"TABLE_NAME IN ({in_list}) OR SEG_NAME IN ({in_list})"
+                                ),
+                                include_xid=True,
                             ),
-                            include_xid=True,
-                        ),
-                        binds={
-                            "owner": self.schema,
-                            **self._resume_binds(),
-                        },
-                        limit=lim,
-                        csf_index=12,
-                        table=self._token_table_label(),
-                        cursor_key=self.cursor_key,
-                    )
+                            binds={
+                                "owner": self.schema,
+                                **self._resume_binds(),
+                            },
+                            limit=lim,
+                            csf_index=12,
+                            table=self._token_table_label(),
+                            cursor_key=self.cursor_key,
+                        )
                     ddl_positions = [
                         (
                             str(candidate[5] or candidate[10] or "").upper(),
@@ -3364,10 +3529,6 @@ class OracleLogMinerCdc:
                         tagged.append(
                             (xid_key, scn, rs_id, ssn, table_name, tagged_op, parsed)
                         )
-                    try:
-                        cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
-                    except Exception as exc:
-                        logger.debug("Oracle END_LOGMNR cleanup failed: %s", exc)
         except CdcScnGapError:
             raise
         except OracleLogMinerReadError:

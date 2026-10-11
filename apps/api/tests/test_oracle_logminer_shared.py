@@ -174,7 +174,7 @@ def test_oracle_shared_poll_demuxes_two_tables() -> None:
         [],  # online redo inventory
         # V$LOGFILE members, then V$ARCHIVED_LOG names: the session now
         # ADD_LOGFILEs an explicit redo set instead of using CONTINUOUS_MINE.
-        [("/redo/redo01.log",)],
+        [(1, 1, "/redo/redo01.log")],
         [],
         [
             # scn, rs_id, ssn, op, sql_redo, table, owner, xidusn, xidslt, xidseq

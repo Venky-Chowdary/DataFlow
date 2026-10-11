@@ -232,8 +232,8 @@ def test_start_logminer_registers_files_and_uses_committed_options():
     cur = MagicMock()
     # V$LOGFILE then V$ARCHIVED_LOG listings.
     cur.fetchall.side_effect = [
-        [("/redo/online1.log",)],
-        [("/redo/arch1.log",)],
+        [(1, 1, "/redo/online1.log")],
+        [(1, 2, 1, "A", "/redo/arch1.log")],
     ]
     start_logminer_session(cur, start_scn=10, end_scn=20)
     executed = " ".join(str(c.args[0]) for c in cur.execute.call_args_list)
@@ -245,8 +245,8 @@ def test_start_logminer_registers_files_and_uses_committed_options():
 def test_start_logminer_ends_a_stale_session_before_registering_files() -> None:
     cur = MagicMock()
     cur.fetchall.side_effect = [
-        [("/redo/online1.log",)],
-        [("/redo/arch1.log",)],
+        [(1, 1, "/redo/online1.log")],
+        [(1, 2, 1, "A", "/redo/arch1.log")],
     ]
 
     start_logminer_session(cur, start_scn=10, end_scn=20)
@@ -287,9 +287,9 @@ def test_start_logminer_resets_registered_files_after_a_failed_start() -> None:
 
         def fetchall(self):
             if "V$LOGFILE" in self.statement:
-                return [("/redo/online1.log",)]
+                return [(1, 1, "/redo/online1.log")]
             if "V$ARCHIVED_LOG" in self.statement:
-                return [("/redo/arch1.log",)]
+                return [(1, 2, 1, "A", "/redo/arch1.log")]
             return []
 
     cur = FakeCursor()
@@ -338,11 +338,11 @@ def test_poll_truncated_window_does_not_skip_past_last_row():
     cur = MagicMock()
     cur.fetchone.side_effect = [(10,), (10,), (99,)] * 3
     cur.fetchall.side_effect = [
-        [], [], [("/redo/online1.log",)], [],
+        [], [], [(1, 1, "/redo/online1.log")], [],
         mined[:2],
-        [], [], [("/redo/online1.log",)], [],
+        [], [], [(1, 1, "/redo/online1.log")], [],
         mined[1:],
-        [], [], [("/redo/online1.log",)], [],
+        [], [], [(1, 1, "/redo/online1.log")], [],
         mined[2:],
     ]
     conn.__enter__ = MagicMock(return_value=conn)
@@ -403,7 +403,7 @@ def test_peek_continues_on_intra_scn_cursor() -> None:
     # at SCN 100 past (rs_id, ssn).
     cur.fetchone.side_effect = [(100,)]
     cur.fetchall.side_effect = [
-        [("/redo/redo01.log",)],
+        [(1, 1, "/redo/redo01.log")],
         [],
         [
             (

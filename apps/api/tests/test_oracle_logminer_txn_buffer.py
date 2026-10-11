@@ -498,7 +498,14 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
     cur.execute.side_effect = execute
     cur.fetchall.side_effect = fetchall
 
-    def start_logminer(_cur, *, start_scn: int, end_scn: int, committed_only: bool):
+    def start_logminer(
+        _cur,
+        *,
+        start_scn: int,
+        end_scn: int,
+        committed_only: bool,
+        **_kwargs,
+    ):
         mining_starts.append(start_scn)
 
     with (
