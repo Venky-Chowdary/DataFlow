@@ -4755,9 +4755,67 @@ def sample_compare_rows(
     mismatches: list[dict[str, str]] = []
     compared = 0
     rows_compared = 0
+    rows_excluded_quarantined = 0
     keyed = bool(sort_key and target_by_key)
     # Only reachable when the caller vouched for pairing; see ``rows_are_paired``.
     target_paired = list(target_dicts) if not keyed else []
+
+    def _row_write_refused(src: Any) -> bool:
+        # Replay the write pipeline on every mapped cell — transform → code
+        # crosswalk → rule contracts, the same order as
+        # writer_common._convert_mapped_cell (mirrored, not imported: that
+        # module imports this one). A row the writer refused is quarantined
+        # at write, so it must not enter the comparison — its absence from
+        # the destination read-back is expected, and a stale row still
+        # holding its key is not corruption evidence.
+        if not isinstance(src, dict):
+            return False
+        for m in mappings:
+            src_col = str(m.get("source") or "")
+            tgt_col = str(m.get("target") or "")
+            if not src_col or not tgt_col:
+                continue
+            if src_col not in src:
+                # The writer refuses silent NULL invent on a missing column.
+                return True
+            raw_src = src.get(src_col)
+            if is_missing_sentinel(raw_src):
+                continue
+            transform = m.get("transform")
+            if not transform or str(transform).strip().lower() in {
+                "",
+                "none",
+                "identity",
+                "passthrough",
+            }:
+                try:
+                    from services.transform_resolver import resolve_transform
+
+                    transform = resolve_transform(
+                        m,
+                        column_types={},
+                        dest_types=dest_types,
+                    )
+                except Exception:
+                    transform = m.get("transform")
+            try:
+                converted, err = apply_transform(raw_src, transform or "none")
+            except Exception:
+                err = "transform_failed"
+            if not err and declared_crosswalk(m) is not None:
+                _xval, xerr = apply_code_crosswalk(converted, m)
+                if xerr:
+                    err = xerr
+            if not err and isinstance(m.get("rule_contracts"), list):
+                from services.rule_compiler.apply import evaluate_contract
+
+                for contract in m["rule_contracts"]:
+                    if evaluate_contract(converted, contract, missing=False):
+                        err = "business rule refused"
+                        break
+            if err:
+                return True
+        return False
 
     def _result(*, passed: bool) -> dict[str, Any]:
         # ``compared`` counts *cells*, and every operator-facing line rendered it
@@ -4769,12 +4827,16 @@ def sample_compare_rows(
             "compared": compared,
             "cells_compared": compared,
             "rows_compared": rows_compared,
+            "rows_excluded_quarantined": rows_excluded_quarantined,
             "mismatches": mismatches,
             "sample_seed": sample_seed,
             "alignment": "keyed" if keyed else "paired_by_caller",
         }
 
     for idx, src in enumerate(source_sorted):
+        if _row_write_refused(src):
+            rows_excluded_quarantined += 1
+            continue
         if keyed:
             key = normalize_cell(src.get(source_sort_key) if source_sort_key else None)
             if not key and sort_key:

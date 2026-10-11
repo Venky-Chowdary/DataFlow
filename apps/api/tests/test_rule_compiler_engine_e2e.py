@@ -445,3 +445,72 @@ def test_gate8_clean_run_passes_reconciliation(tmp_path: Path, engine_env):
     assert int(recon.get("source_rows") or 0) == 5
     assert int(recon.get("rejected_rows") or 0) == 3
     assert int(recon.get("target_rows") or 0) == 2
+
+
+_BR_SAMPLE_MAPPINGS = [
+    {"source": "id", "target": "id", "transform": "none"},
+    {
+        "source": "email",
+        "target": "email",
+        "transform": "none",
+        "rule_contracts": [{"rule_id": "r1", "type": "not_null"}],
+    },
+    {
+        "source": "code",
+        "target": "code",
+        "transform": "none",
+        "code_crosswalk": {"A": "ACTIVE"},
+    },
+]
+
+
+def _sample(src_rows, tgt_rows):
+    from services.reconciliation import sample_compare_rows
+
+    return sample_compare_rows(
+        src_rows,
+        tgt_rows,
+        _BR_SAMPLE_MAPPINGS,
+        sort_key="id",
+        sample_size=50,
+    )
+
+
+def test_sample_compare_excludes_quarantined_row_absent_from_target():
+    res = _sample(
+        [{"id": 1, "email": None, "code": "A"}],
+        [{"id": 2, "email": "b@x", "code": "ACTIVE"}],
+    )
+    assert res["passed"] is True
+    assert res["rows_excluded_quarantined"] == 1
+    assert res["rows_compared"] == 0
+
+
+def test_sample_compare_excludes_quarantined_row_over_stale_target():
+    res = _sample(
+        [{"id": 1, "email": None, "code": "A"}],
+        [{"id": 1, "email": "stale@x", "code": "ACTIVE"}],
+    )
+    assert res["passed"] is True, res
+    assert res["rows_excluded_quarantined"] == 1
+    assert res["mismatches"] == []
+
+
+def test_sample_compare_still_flags_corruption_on_passing_row():
+    res = _sample(
+        [{"id": 1, "email": "a@x", "code": "A"}],
+        [{"id": 1, "email": "CORRUPT", "code": "ACTIVE"}],
+    )
+    assert res["passed"] is False
+    assert res["rows_excluded_quarantined"] == 0
+    assert res["mismatches"][0]["target"] == "email"
+
+
+def test_sample_compare_excludes_crosswalk_refused_row():
+    res = _sample(
+        [{"id": 1, "email": "a@x", "code": "Z"}],
+        [{"id": 1, "email": "a@x", "code": "Z"}],
+    )
+    assert res["passed"] is True, res
+    assert res["rows_excluded_quarantined"] == 1
+    assert res["mismatches"] == []
