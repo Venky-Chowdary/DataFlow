@@ -185,25 +185,27 @@ export async function runPilotConfirm(
 ): Promise<"cleared" | "cancelled" | "unknown"> {
   const { onNavigate, toast, confirm, dispatchStudioAction } = handlers;
 
-  if (
-    action.type === "studio"
-    || (
-      action.kind
-      && action.type !== "start_transfer"
-      && action.type !== "create_connector"
-      && action.type !== "run_schedule"
-      && !isLifecycleOp(action.type)
-    )
-  ) {
+  if (action.type === "studio") {
+    if (action.destructive) {
+      const ok = await confirm({
+        title: "Quarantine bad rows and re-run?",
+        message: "This remediation can quarantine rows and start a new transfer run.",
+        confirmLabel: "Quarantine & re-run",
+        tone: "danger",
+      });
+      if (!ok) return "cancelled";
+    }
+    const res = await confirmPilotPending(action);
+    if (res.kind !== "studio") throw new Error("Unexpected confirm result");
     dispatchStudioAction({
-      kind: (action.kind || String(action.payload?.kind || "")) as string,
-      label: action.label,
-      run_id: action.run_id || (action.payload?.run_id as string | undefined),
+      kind: res.remediation_kind,
+      label: res.label,
+      run_id: res.run_id,
     });
     onNavigate?.("transfer");
     toast({
       title: "Opening Fix bad data",
-      message: action.label || "Confirm opens Transfer Studio — apply the fix there.",
+      message: res.label || "Confirm opens Transfer Studio — apply the fix there.",
       tone: "info",
     });
     return "cleared";

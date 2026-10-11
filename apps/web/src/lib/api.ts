@@ -1023,6 +1023,11 @@ export async function confirmCopilotAction(payload: {
   preflight_run_id?: string;
   /** run_schedule */
   schedule_id?: string;
+  /** studio_remediation */
+  remediation_kind?: "open_bad_data_fix" | "quarantine_and_rerun";
+  run_id?: string;
+  label?: string;
+  destructive?: boolean;
 }> {
   const res = await apiFetch(`${API_BASE}/copilot/confirm`, {
     method: "POST",
@@ -4875,4 +4880,3 @@ export async function exportTransformProjectDbt(projectId: string): Promise<{
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export dbt pack"));
   return res.json();
 }
-

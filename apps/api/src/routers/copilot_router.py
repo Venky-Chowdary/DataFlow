@@ -141,6 +141,8 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         ws = workspace_id_from_request_headers(http_request.headers)
         if ws:
             data_context["workspace_id"] = ws
+        else:
+            data_context.pop("workspace_id", None)
         with bind_request_principal(http_request, role):
             result = agent.chat(request.message, history, data_context=data_context or None)
         return CopilotChatResponse(
@@ -390,8 +392,7 @@ async def copilot_confirm(
     http_request: Request,
     background_tasks: BackgroundTasks,
 ):
-    """Consume a Pilot mutation ack (create_connector / start_transfer / run_schedule /
-    create_schedule).
+    """Consume a Pilot mutation ack.
 
     Secrets and schedule ids stay on the server ledger — the browser only sends ack_id.
 
@@ -435,6 +436,21 @@ async def copilot_confirm(
             status_code=403,
             detail=confirm_denial_message(role, str(peek.get("kind") or "")),
         )
+    kind = str(peek.get("kind") or "")
+    studio_payload: dict | None = None
+    if kind == "studio_remediation":
+        from services.effective_role import workspace_id_from_request_headers
+
+        studio_payload, payload_error = ledger.get_pending_payload(ack_id)
+        if studio_payload is None:
+            raise HTTPException(status_code=404, detail=payload_error or "Approval not found")
+        staged_workspace_id = str(studio_payload.get("workspace_id") or "").strip()
+        caller_workspace_id = workspace_id_from_request_headers(http_request.headers)
+        if staged_workspace_id and staged_workspace_id != caller_workspace_id:
+            raise HTTPException(
+                status_code=403,
+                detail="This Studio approval belongs to a different workspace.",
+            )
     # The audit actor is the authenticated identity when there is one; the
     # client-supplied name is only a fallback for open deployments.
     actor = session_actor or request.actor or "pilot-ui"
@@ -455,6 +471,47 @@ async def copilot_confirm(
         return {"ok": True, "idempotent": True, "kind": peek.get("kind"), **echo}
 
     kind = peek.get("kind") or ""
+    if kind == "studio_remediation":
+        remediation_kind = str(payload.get("remediation_kind") or "").strip()
+        if remediation_kind not in {"open_bad_data_fix", "quarantine_and_rerun"}:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail="Unsupported Studio remediation kind")
+
+        run_id = str(payload.get("run_id") or "").strip()
+        caller_workspace_id = workspace_id_from_request_headers(http_request.headers)
+        if run_id:
+            from services.preflight_run_store import get_preflight_run
+
+            preflight_run = get_preflight_run(run_id)
+            if not preflight_run:
+                ledger.release_claim(ack_id)
+                raise HTTPException(status_code=404, detail="Preflight run not found")
+            if isinstance(preflight_run, dict):
+                run_workspace_id = str(preflight_run.get("workspace_id") or "").strip()
+            else:
+                run_workspace_id = str(getattr(preflight_run, "workspace_id", "") or "").strip()
+            if run_workspace_id and run_workspace_id != caller_workspace_id:
+                ledger.release_claim(ack_id)
+                raise HTTPException(
+                    status_code=403,
+                    detail="This preflight run belongs to a different workspace.",
+                )
+
+        preview = peek.get("preview") if isinstance(peek.get("preview"), dict) else {}
+        result = {
+            "remediation_kind": remediation_kind,
+            "run_id": run_id or None,
+            "label": str(preview.get("label") or ""),
+            "destructive": remediation_kind == "quarantine_and_rerun",
+        }
+        ledger.finalize(
+            ack_id,
+            actor=actor,
+            reason=request.reason or "confirmed",
+            result=result,
+        )
+        return {"ok": True, "idempotent": False, "kind": kind, **result}
+
     if kind == "start_transfer":
         try:
             result = await _start_confirmed_transfer(payload)

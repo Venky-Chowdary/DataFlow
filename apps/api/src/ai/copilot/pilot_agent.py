@@ -1770,7 +1770,11 @@ class DataPilotAgent:
                 "run_id": out.get("run_id"),
                 "risk": "mutate",
                 "destructive": bool(out.get("destructive")),
-                "payload": {"kind": out.get("kind"), "run_id": out.get("run_id")},
+                "payload": {
+                    "ack_id": out.get("ack_id"),
+                    "kind": out.get("kind"),
+                    "run_id": out.get("run_id"),
+                },
             })
             # Ensure Transfer is ready; safe navigate can auto-apply.
             turn.actions.append({
@@ -2452,6 +2456,12 @@ Draft answer:
             ws = str(ctx.get("workspace_id") or "").strip()
             if ws:
                 out.setdefault("workspace_id", ws)
+        if name == "remediate_validation":
+            ws = str(ctx.get("workspace_id") or "").strip()
+            if ws:
+                out["workspace_id"] = ws
+            else:
+                out.pop("workspace_id", None)
         return out
 
     def _openai_agent(

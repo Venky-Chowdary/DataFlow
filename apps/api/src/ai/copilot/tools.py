@@ -1987,7 +1987,12 @@ class DataPilotTools:
             )
         return ToolResult(name="get_preflight_run", success=True, output=record)
 
-    def _remediate_validation(self, kind: str = "", run_id: str = "") -> ToolResult:
+    def _remediate_validation(
+        self,
+        kind: str = "",
+        run_id: str = "",
+        workspace_id: str = "",
+    ) -> ToolResult:
         allowed = {
             "normalize_control_chars",
             "open_bad_data_fix",
@@ -2024,6 +2029,27 @@ class DataPilotTools:
             "rerun_preflight": "Re-run Validate",
         }
         requires_confirm = kind in {"open_bad_data_fix", "quarantine_and_rerun"}
+        ack_id = ""
+        if requires_confirm:
+            from .ack_ledger import get_ack_ledger
+
+            destructive = kind == "quarantine_and_rerun"
+            payload = {
+                "remediation_kind": kind,
+                "run_id": cited or None,
+                "destructive": destructive,
+                "workspace_id": str(workspace_id or "").strip() or None,
+            }
+            ack_id = get_ack_ledger().put(
+                kind="studio_remediation",
+                payload=payload,
+                preview={
+                    "remediation_kind": kind,
+                    "run_id": cited or None,
+                    "label": labels[kind],
+                    "destructive": destructive,
+                },
+            )
         return ToolResult(
             name="remediate_validation",
             success=True,
@@ -2036,6 +2062,7 @@ class DataPilotTools:
                 "requires_confirm": requires_confirm,
                 "destructive": kind == "quarantine_and_rerun",
                 "ui_only": not requires_confirm,
+                **({"ack_id": ack_id} if ack_id else {}),
                 "note": (
                     "This stages a change for confirmation in Transfer Studio. "
                     "Nothing is written from this chat."

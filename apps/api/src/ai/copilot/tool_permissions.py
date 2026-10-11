@@ -127,6 +127,7 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "delete_schedule": Permission.SCHEDULE_MANAGE,
     "update_schedule": Permission.SCHEDULE_MANAGE,
     "prepare_cdc_source": Permission.JOB_RUN,
+    "studio_remediation": Permission.JOB_RUN,
 }
 
 

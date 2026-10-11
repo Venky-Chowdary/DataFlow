@@ -34,6 +34,13 @@ export type PilotConfirmOutcome =
       name: string;
     }
   | {
+      kind: "studio";
+      idempotent: boolean;
+      remediation_kind: "open_bad_data_fix" | "quarantine_and_rerun";
+      run_id?: string;
+      label?: string;
+    }
+  | {
       kind: "lifecycle";
       op: LifecycleOp;
       idempotent: boolean;
@@ -107,6 +114,36 @@ export async function confirmPilotPending(
 ): Promise<PilotConfirmOutcome> {
   const payload = payloadRecord(action);
   const preview = previewRecord(payload);
+
+  if (action.type === "studio") {
+    const ackId = String(payload.ack_id || "");
+    if (!ackId) {
+      throw new Error(
+        "This Studio approval is missing a server ack_id. Ask Pilot to stage the remediation again.",
+      );
+    }
+    const res = await confirmCopilotAction({
+      ack_id: ackId,
+      actor: "pilot-ui",
+      reason: "operator confirmed studio_remediation",
+    });
+    if (
+      res.kind !== "studio_remediation"
+      || (
+        res.remediation_kind !== "open_bad_data_fix"
+        && res.remediation_kind !== "quarantine_and_rerun"
+      )
+    ) {
+      throw new Error("The server returned an unsupported Studio remediation.");
+    }
+    return {
+      kind: "studio",
+      idempotent: Boolean(res.idempotent),
+      remediation_kind: res.remediation_kind,
+      run_id: res.run_id || undefined,
+      label: res.label || undefined,
+    };
+  }
 
   if (action.type === "create_connector") {
     const ackId = String(payload.ack_id || "");
