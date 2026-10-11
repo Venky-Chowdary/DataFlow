@@ -2361,7 +2361,6 @@ def normalize_sql_bind_value(
     ddl_type: str,
     *,
     engine: str = "",
-    source_timezone: str = "",
 ) -> Any:
     """Route value through shared boolean/JSON/binary bind for ``ddl_type``.
 
@@ -2390,7 +2389,6 @@ def normalize_sql_bind_value(
             value,
             ddl_type,
             engine=route.eng,
-            source_timezone=source_timezone,
         )
         if temporal is not value:
             return temporal

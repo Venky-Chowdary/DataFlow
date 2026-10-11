@@ -437,92 +437,6 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _declare_zone_on_schema(
-    src_rows: list[dict],
-    zone: str,
-) -> tuple[list[dict], set[str]]:
-    """Apply an operator-declared zone to the zoneless temporal source columns.
-
-    A declared zone is a fact about the source schema, so it has to be true
-    *before* mapping runs: the mapper, its proof, and every gate read the source
-    type, and a declaration applied afterwards would change the value the writer
-    sends while leaving the run blocked for the zoneless problem the operator
-    just answered.
-
-    Only zoneless columns are touched. A column that already carries an offset
-    has an instant the source was explicit about, and overriding it would move a
-    timestamp on the operator's behalf.
-    """
-    from services.timezone_policy import effective_source_type
-    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
-    from services.type_system import datetime_timezone_polarity
-
-    declared: set[str] = set()
-    out: list[dict] = []
-    transform = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
-    for row in src_rows:
-        entry = dict(row)
-        name = str(entry.get("name") or "")
-        src_type = str(entry.get("inferred_type") or "")
-        polarity = datetime_timezone_polarity(src_type) if src_type else None
-        if polarity == "ntz":
-            entry["inferred_type"] = effective_source_type(src_type, transform)
-            declared.add(name)
-        elif polarity in {"tz", "ltz"} and _samples_are_naive_wall_clock(
-            entry.get("samples") or []
-        ):
-            # MySQL/Maria TIMESTAMP is an instant in the catalog and a naive
-            # wall clock on the wire (session time_zone strips the offset).
-            # The declared zone is that wall clock. Leaving the column out
-            # kept TIMESTAMPTZ blocked on "refuses naive wall-clock".
-            declared.add(name)
-        out.append(entry)
-    return out, declared
-
-
-def _samples_are_naive_wall_clock(samples: Any) -> bool:
-    """True when at least one sample is a datetime with no offset."""
-    from connectors.sql_temporal import parse_sql_datetime
-    from services.type_system import temporal_value_has_timezone
-
-    saw = False
-    for sample in samples or []:
-        if sample is None or not str(sample).strip():
-            continue
-        if temporal_value_has_timezone(sample):
-            continue
-        if parse_sql_datetime(sample) is not None:
-            saw = True
-    return saw
-
-
-def _stamp_zone_transform(
-    mappings: list[dict],
-    zone: str,
-    columns: set[str],
-) -> list[dict]:
-    """Carry the declaration to the writer as the transform that applies it.
-
-    The type says what the column means; the transform is what attaches the zone
-    to each value. Both are required — a declared type with no transform would
-    write the naive wall clock under an instant contract.
-    """
-    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
-
-    out: list[dict] = []
-    for m in mappings:
-        entry = dict(m)
-        existing = str(entry.get("transform") or "").strip().lower()
-        # A plain temporal transform is the mapper parsing the value, not a
-        # decision about its zone — the declaration refines it. Anything else is
-        # an operator choice and is left alone.
-        already_typed = existing not in {"", "none", "identity", "datetime", "date", "timestamp"}
-        if str(entry.get("source") or "") in columns and not already_typed:
-            entry["transform"] = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
-        out.append(entry)
-    return out
-
-
 # risk_acceptance.on_cast_failure → signed contract quarantine_policy.
 _ON_CAST_FAILURE_POLICIES = {
     "quarantine": "holdout_rejected_rows",
@@ -851,7 +765,16 @@ def plan_transfer(
     src_rows = _schema_rows(src_info["columns"], samples)
     zone_columns: set[str] = set()
     if source_timezone:
-        src_rows, zone_columns = _declare_zone_on_schema(src_rows, source_timezone)
+        from services.timezone_policy import (
+            declare_zone_on_schema,
+            stamp_zone_transform,
+            validate_source_timezone,
+        )
+
+        source_timezone, zone_error = validate_source_timezone(source_timezone)
+        if zone_error:
+            return _tool_result(tool, success=False, error=zone_error)
+        src_rows, zone_columns = declare_zone_on_schema(src_rows, source_timezone)
         # The declaration is a fact about the source, so it travels with the
         # schema every gate reads — not just with the mapping.
         src_info["schema"] = {
@@ -883,7 +806,7 @@ def plan_transfer(
     )
     mappings = list(mapping.get("mappings") or [])
     if zone_columns:
-        mappings = _stamp_zone_transform(mappings, source_timezone, zone_columns)
+        mappings = stamp_zone_transform(mappings, source_timezone, zone_columns)
 
     contracts, identity_error = _identity_stream_contract(
         mode=mode,

@@ -378,11 +378,6 @@ def _write_batch(
             skip_session_setup=skip_session_setup,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
-            source_timezone=str(
-                (getattr(dest, "extra", None) or {}).get("source_timezone")
-                or (cfg.get("extra") or {}).get("source_timezone")
-                or ""
-            ),
             **source_handoff,
         )
         if not result.ok:

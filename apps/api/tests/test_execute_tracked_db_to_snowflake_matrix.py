@@ -354,22 +354,21 @@ def test_mongodb_to_snowflake_messy_docs_refuses_zoneless_without_source_timezon
         result = UniversalTransferEngine().execute_tracked(
             request, uuid.uuid4().hex[:24]
         )
-        assert (
-            result.success is False
-            or int(result.reconciliation.get("rejected_rows", 0) or 0) > 0
-        )
-        detail = (result.error or "") + repr(result.reconciliation)
-        assert "created" in detail.lower()
-        assert "row 2" in detail.lower()
-        assert "source_timezone" in detail
+        rejected_details = list(
+            (result.destination_summary or {}).get("rejected_details") or []
+        ) + list((result.reconciliation or {}).get("rejected_details") or [])
+        refusal_detail = (result.error or "") + repr(rejected_details)
+        assert "created" in refusal_detail.lower()
+        assert "row 2" in refusal_detail.lower()
+        assert "source_timezone" in refusal_detail
 
         from connectors.snowflake_conn import get_connection
-        from connectors.sql_temporal import input_has_timezone
 
         conn = get_connection(
             account="localhost", username="t", password="t",
             database="dataflow", schema="public", warehouse="", connection_string="",
         )
+        destination_row = None
         try:
             cur = conn.cursor()
             try:
@@ -381,11 +380,23 @@ def test_mongodb_to_snowflake_messy_docs_refuses_zoneless_without_source_timezon
                 ):
                     raise
             else:
-                row = cur.fetchone()
-                if row and row[0] is not None:
-                    assert not input_has_timezone(row[0]), row[0]
+                destination_row = cur.fetchone()
         finally:
             conn.close()
+
+        row_2_rejected = any(
+            str(item.get("row")) == "2"
+            and str(item.get("column") or item.get("target") or "").lower()
+            == "created"
+            and "source_timezone" in str(item.get("reason") or "")
+            for item in rejected_details
+            if isinstance(item, dict)
+        )
+        if result.success is False:
+            assert destination_row is None, destination_row
+        else:
+            assert row_2_rejected, rejected_details
+            assert destination_row is None, destination_row
     finally:
         cleanup = MongoClient("localhost", 27017, serverSelectionTimeoutMS=5000)
         cleanup["dataflow"][src_collection].drop()

@@ -14,6 +14,11 @@ from src.transfer.engine import (
     resolve_effective_sync_mode,
     schema_registry,
 )
+from services.timezone_policy import (
+    apply_declared_source_timezone,
+    declare_zone_on_schema,
+    validate_source_timezone,
+)
 
 def _auto_map(
     request: TransferRequest,
@@ -30,6 +35,34 @@ def _auto_map(
     the destination can be created from the source shape.
     """
     mappings: list[dict] | None = None
+    source_schemas = [
+        {
+            "name": column,
+            "inferred_type": schema.get(column, "string"),
+            "samples": [
+                cell_to_string(row.get(column, ""), preserve_sql_null=True)
+                for row in (sample_rows or [])[:8]
+            ],
+        }
+        for column in columns
+    ]
+    zone, zone_error = validate_source_timezone(request.source_timezone)
+    if zone_error:
+        raise ValueError(zone_error)
+    if zone:
+        source_schemas, _ = declare_zone_on_schema(source_schemas, zone)
+        schema.update({
+            str(row.get("name") or ""): str(row.get("inferred_type") or "")
+            for row in source_schemas
+            if row.get("name")
+        })
+    source_samples = {
+        column: [
+            cell_to_string(row.get(column, ""), preserve_sql_null=True)
+            for row in (sample_rows or [])[:8]
+        ]
+        for column in columns
+    }
 
     if request.mappings:
         mappings = request.mappings
@@ -94,24 +127,6 @@ def _auto_map(
                 try:
                     from services.mapping_pipeline import run_mapping_pipeline
 
-                    source_schemas = [
-                        {
-                            "name": c,
-                            "inferred_type": schema.get(c, "string"),
-                            "samples": [
-                                cell_to_string(r.get(c, ""), preserve_sql_null=True)
-                                for r in (sample_rows or [])[:8]
-                            ],
-                        }
-                        for c in columns
-                    ]
-                    source_samples = {
-                        c: [
-                            cell_to_string(r.get(c, ""), preserve_sql_null=True)
-                            for r in (sample_rows or [])[:8]
-                        ]
-                        for c in columns
-                    }
                     from services.data_profiler import source_types_are_authoritative
 
                     result = run_mapping_pipeline(
@@ -175,17 +190,6 @@ def _auto_map(
                 try:
                     from services.mapping_pipeline import run_mapping_pipeline
 
-                    source_schemas = [
-                        {
-                            "name": c,
-                            "inferred_type": schema.get(c, "string"),
-                            "samples": [
-                                cell_to_string(r.get(c, ""), preserve_sql_null=True)
-                                for r in (sample_rows or [])[:8]
-                            ],
-                        }
-                        for c in columns
-                    ]
                     target_columns = list(target_schema.keys())
                     target_schemas = [
                         {
@@ -195,13 +199,6 @@ def _auto_map(
                         }
                         for c in target_columns
                     ]
-                    source_samples = {
-                        c: [
-                            cell_to_string(r.get(c, ""), preserve_sql_null=True)
-                            for r in (sample_rows or [])[:8]
-                        ]
-                        for c in columns
-                    }
                     from services.data_profiler import source_types_are_authoritative
 
                     result = run_mapping_pipeline(
@@ -253,6 +250,20 @@ def _auto_map(
     if mappings is None:
         mappings = default_mappings(columns)
 
+    if zone:
+        mappings = apply_declared_source_timezone(
+            source_schemas,
+            mappings,
+            zone,
+            (request.destination.format or "").lower(),
+        )
+        schema.update({
+            str(row.get("name") or ""): str(row.get("inferred_type") or "")
+            for row in source_schemas
+            if row.get("name")
+        })
+        request.column_types = dict(schema)
+        request.mappings = [dict(mapping) for mapping in mappings]
     _record_schema_and_lineage(request, mappings, schema, job_id)
     return mappings
 

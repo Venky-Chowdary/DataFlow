@@ -327,7 +327,6 @@ def coerce_sql_temporal(
     source_type: str,
     *,
     engine: str = "",
-    source_timezone: str = "",
 ) -> Any:
     """Coerce a cell to a Python temporal for the given SQL DDL type, else return value.
 
@@ -392,18 +391,6 @@ def coerce_sql_temporal(
         "TIMESTAMP_LTZ",
     }:
         # Refuse naive wall-clock → UTC invent (parity with BQ TIMESTAMP / TIMETZ).
-        if not input_has_timezone(value) and source_timezone:
-            from services.transform_engine import apply_transform
-
-            raw_value = value.isoformat() if hasattr(value, "isoformat") else str(value)
-            value, transform_error = apply_transform(
-                raw_value, f"assume_timezone:{source_timezone}"
-            )
-            if transform_error:
-                raise ValueError(
-                    f"{base} could not apply source_timezone "
-                    f"{source_timezone!r}: {transform_error}"
-                )
         if not input_has_timezone(value):
             raise ValueError(
                 f"{base} refuses naive wall-clock (would invent UTC). "

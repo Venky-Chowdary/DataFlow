@@ -3989,7 +3989,6 @@ def bind_sql_mapped_rows_with_quarantine(
     dialect_label: str = "SQL",
     mappings: list[dict[str, Any]] | None = None,
     row_numbers: list[int] | None = None,
-    source_timezone: str = "",
 ) -> list[tuple]:
     """Bind cells and quarantine refusals; see :func:`bind_rows_keeping_numbers`.
 
@@ -4006,7 +4005,6 @@ def bind_sql_mapped_rows_with_quarantine(
         dialect_label=dialect_label,
         mappings=mappings,
         row_numbers=row_numbers,
-        source_timezone=source_timezone,
     )
     return bound
 
@@ -4022,7 +4020,6 @@ def bind_rows_keeping_numbers(
     dialect_label: str = "SQL",
     mappings: list[dict[str, Any]] | None = None,
     row_numbers: list[int] | None = None,
-    source_timezone: str = "",
 ) -> tuple[list[tuple], list[int]]:
     """Bind cells via ``normalize_sql_bind_value``; quarantine refusals (no crash invent).
 
@@ -4074,7 +4071,7 @@ def bind_rows_keeping_numbers(
                 continue
             try:
                 bound = normalize_sql_bind_value(
-                    val, ddl, engine=engine, source_timezone=source_timezone
+                    val, ddl, engine=engine
                 )
                 if isinstance(bound, float) and (
                     bound != bound or bound in {float("inf"), float("-inf")}

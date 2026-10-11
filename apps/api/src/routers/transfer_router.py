@@ -22,7 +22,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import cell_to_string
 
@@ -257,6 +257,17 @@ class ExecuteTransferRequest(BaseModel):
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
     source_timezone: str = ""
+
+    @field_validator("source_timezone")
+    @classmethod
+    def _validate_source_timezone(cls, value: str) -> str:
+        from services.timezone_policy import validate_source_timezone
+
+        zone, error = validate_source_timezone(value)
+        if error:
+            raise ValueError(error)
+        return zone
+
     # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''.
     number_locale: str = ""
     # Delivery guarantee — auto selects dest-owned exactly-once on an eligible
