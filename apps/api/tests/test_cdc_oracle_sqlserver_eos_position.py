@@ -95,12 +95,15 @@ def test_composite_position_text_and_ordering() -> None:
     oracle_r2 = encode_logminer_token(
         100, table="T", rs_id="0x1.1.2", ssn=3
     )
-    oracle_complete = encode_logminer_token(100, table="T")
+    oracle_complete = encode_logminer_token(100, table="T", scn_complete=True)
+    oracle_incomplete = encode_logminer_token(100, table="T")
     assert batch_lsn(oracle_legacy) == "scn:100"
     assert batch_lsn(oracle_r1) == "scn:100.p0x1.1.1.0000000003"
     assert batch_lsn(oracle_complete) == "scn:100.c"
+    assert batch_lsn(oracle_incomplete) == "scn:100"
     assert compare_lsn(batch_lsn(oracle_legacy), batch_lsn(oracle_r1)) < 0
     assert compare_lsn(batch_lsn(oracle_r1), batch_lsn(oracle_complete)) < 0
+    assert compare_lsn(batch_lsn(oracle_incomplete), batch_lsn(oracle_r1)) < 0
     assert compare_lsn(batch_lsn(oracle_r1), batch_lsn(oracle_r2)) < 0
     assert compare_lsn("scn:100.c", "scn:101") < 0
     assert len(lsn_sort_key(batch_lsn(oracle_r1))) == 4
@@ -213,7 +216,7 @@ def test_legacy_oracle_watermark_is_refined_from_resume_blob() -> None:
     later = encode_logminer_token(
         100, table="T", rs_id="0x1.1.2", ssn=1
     )
-    no_rs_id = encode_logminer_token(100, table="T")
+    no_rs_id = encode_logminer_token(100, table="T", scn_complete=True)
     dest = DestWmView(
         committed_lsn="scn:100",
         resume_blob=encode_resume_blob(first),

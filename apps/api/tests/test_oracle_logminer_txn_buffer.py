@@ -488,6 +488,101 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
     assert mining_starts == [low_scn]
 
 
+@pytest.mark.parametrize("buffer_mode", [False, True], ids=["buffer-off", "buffer-on"])
+def test_committed_checkpoint_restarts_within_scn_without_duplicate_or_skip(
+    monkeypatch: pytest.MonkeyPatch, buffer_mode: bool
+) -> None:
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1" if buffer_mode else "0")
+    first_rs = "0x000001.0001.0001"
+    remaining_rs = "0x000001.0001.0002"
+    if buffer_mode:
+        prior_xid = (1, 0, 1)
+        remaining_xid = (2, 0, 2)
+        rows = [
+            (100, first_rs, 0, "START", None, None, None, *prior_xid, 0),
+            (100, "0x000001.0001.0002", 1, "INSERT",
+             'INSERT INTO "T"("ID","V") VALUES(\'1\',\'applied\')', "T", "APP",
+             *prior_xid, 0),
+            (100, "0x000001.0001.0003", 2, "COMMIT", None, None, None, *prior_xid, 0),
+            (100, "0x000001.0001.0004", 0, "START", None, None, None, *remaining_xid, 0),
+            (100, remaining_rs, 3, "INSERT",
+             'INSERT INTO "T"("ID","V") VALUES(\'2\',\'remaining\')', "T", "APP",
+             *remaining_xid, 0),
+            (100, "0x000001.0001.0006", 4, "COMMIT", None, None, None, *remaining_xid, 0),
+        ]
+        token = encode_logminer_token(
+            100, table="T", phase="streaming", low_scn=99,
+            commit_scn=100, commit_xid="1.0.1", txn_buffer=True,
+        )
+    else:
+        rows = [
+            (100, first_rs, 1, "INSERT",
+             'INSERT INTO "T"("ID","V") VALUES(\'1\',\'applied\')', "T", "APP"),
+            (100, remaining_rs, 2, "INSERT",
+             'INSERT INTO "T"("ID","V") VALUES(\'2\',\'remaining\')', "T", "APP"),
+        ]
+        token = encode_logminer_token(
+            100, table="T", phase="streaming", rs_id=first_rs, ssn=1,
+        )
+
+    reader = OracleLogMinerCdc(
+        {"host": "localhost", "database": "ORCL", "username": "APP"},
+        table="T", primary_key="ID", schema="APP", resume_token=token,
+    )
+    reader.phase = "streaming"
+    conn = _make_mining_conn(rows, head_scn=120)
+    with (
+        patch.object(reader, "_mining_conn", return_value=conn),
+        patch.object(reader, "_acquire_cdc_lease"),
+        patch("connectors.oracle_logminer.fetch_oldest_available_scn", return_value=None),
+        patch("connectors.oracle_logminer.fetch_redo_inventory", return_value=[]),
+        patch("connectors.oracle_logminer.assert_resume_scn_in_redo"),
+        patch("connectors.oracle_logminer.assert_redo_continuity"),
+        patch("connectors.oracle_logminer.start_logminer_session"),
+        patch(
+            "services.cdc_incremental_runner.interleave_incremental_snapshot",
+            return_value=iter(()),
+        ),
+    ):
+        if buffer_mode:
+            cur = conn.cursor.return_value.__enter__.return_value
+            query: dict[str, object] = {}
+
+            def execute(sql: str, binds: dict[str, object] | None = None) -> None:
+                query["sql"], query["binds"] = sql, binds or {}
+
+            def fetchall() -> list[tuple]:
+                binds = query.get("binds") or {}
+                start_scn = int(binds.get("start_scn") or 0)
+                rs_id = str(binds.get("rs_id") or "")
+                ssn = int(binds.get("ssn") or 0)
+                complete = int(binds.get("scn_complete") or 0)
+                return [
+                    row for row in rows
+                    if int(row[0]) > start_scn
+                    or (int(row[0]) == start_scn and (
+                        (not rs_id and not complete)
+                        or (rs_id and str(row[1]) > rs_id)
+                        or (str(row[1]) == rs_id and int(row[2]) > ssn)
+                    ))
+                ]
+
+            cur.execute.side_effect = execute
+            cur.fetchall.side_effect = fetchall
+            batches = list(reader._poll_txn_buffered())
+        else:
+            def fetch_window(_cur: object, **kwargs: object) -> tuple[list[tuple], int]:
+                assert kwargs["start_scn"] == 100
+                assert reader.rs_id == first_rs
+                return [rows[1]], 120
+
+            with patch.object(reader, "_fetch_logminer_rows_visible", side_effect=fetch_window):
+                batches = list(reader._poll_once())
+
+    applied = [row for batch in batches for row in batch.inserts]
+    assert [row["ID"] for row in applied] == ["2"]
+
+
 def test_oversized_transaction_chunks_have_increasing_same_commit_positions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

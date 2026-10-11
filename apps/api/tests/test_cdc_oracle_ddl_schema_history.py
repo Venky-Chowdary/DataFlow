@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import logging
 import time
 import uuid
+from datetime import datetime
 
 import pytest
 
@@ -409,7 +409,7 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
                 conn.commit()
 
 
-def _unit_reader(*, table: str | list[str] = "T1"):
+def _unit_reader(*, table: str | list[str] = "T1", resume_token=None):
     from connectors.oracle_logminer import OracleLogMinerCdc
 
     tables = [table] if isinstance(table, str) else table
@@ -426,6 +426,7 @@ def _unit_reader(*, table: str | list[str] = "T1"):
         primary_key="ID" if isinstance(table, str) else "",
         primary_keys=None if isinstance(table, str) else {name: "ID" for name in tables},
         schema="DATAFLOW",
+        resume_token=resume_token,
         cursor_key="o6-unit:" + ",".join(tables),
     )
 
@@ -819,39 +820,100 @@ def test_oracle_buffered_poll_emits_commits_around_ddl_barrier(
     assert "DDL" not in repr([batch.inserts for batch in batches])
 
 
-def test_oracle_ddl_history_failure_warns_and_keeps_streaming_dml(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
+def _install_buffered_ddl_window(
+    monkeypatch: pytest.MonkeyPatch,
+    reader,
+    *,
+    additional_ddl: bool = False,
+    ddl_timestamp: datetime | None = None,
+):
     import connectors.oracle_logminer as logminer
-    from services import cdc_schema_history
+    from services import cdc_mapping_review, cdc_schema_history
 
-    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
-    reader = _unit_reader()
-    reader.phase = "streaming"
-    reader.scn = 1
-    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
-    monkeypatch.setattr(reader, "_oracle_ddl_schema_snapshot", lambda _table: {"columns": [{"name": "ID"}]})
-    monkeypatch.setattr(cdc_schema_history, "list_history", lambda *_args: [])
-    monkeypatch.setattr(
-        cdc_schema_history,
-        "record_ddl",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("history unavailable")),
-    )
-    monkeypatch.setattr(
-        logminer,
-        "assert_resume_scn_in_redo",
-        lambda *_args, **_kwargs: None,
-    )
+    monkeypatch.setattr(logminer, "assert_resume_scn_in_redo", lambda *_a, **_k: None)
     monkeypatch.setattr(logminer, "fetch_oldest_available_scn", lambda _cur: 1)
-    monkeypatch.setattr(
-        logminer, "assert_redo_continuity", lambda *_args, **_kwargs: None
-    )
+    monkeypatch.setattr(logminer, "assert_redo_continuity", lambda *_a, **_k: None)
     monkeypatch.setattr(logminer, "fetch_redo_inventory", lambda _cur: [])
+    monkeypatch.setattr(logminer, "start_logminer_session", lambda *_a, **_k: None)
     monkeypatch.setattr(
         logminer,
         "classify_sql_redo",
-        lambda *_args, **_kwargs: ("ok", {"ID": "1", "V": "kept"}),
+        lambda sql, **_kwargs: ("ok", {"ID": sql[-1], "V": sql}),
     )
+    monkeypatch.setattr(
+        reader,
+        "_oracle_ddl_schema_snapshot",
+        lambda _table, **_kwargs: {"columns": [{"name": "ID"}, {"name": "NOTE"}]},
+    )
+
+    history: list[dict] = []
+    reviews: list[dict] = []
+    calls: list[dict] = []
+    monkeypatch.setattr(cdc_schema_history, "list_history", lambda *_a: history)
+    monkeypatch.setattr(
+        cdc_schema_history,
+        "last_ddl_at",
+        lambda *_a: history[-1]["recorded_at"] if history else None,
+    )
+
+    def record(source_key, table, ddl, offset, schema_snapshot):
+        entry = {
+            "source_key": source_key,
+            "table": table,
+            "ddl": ddl,
+            "offset": offset,
+            "schema_snapshot": schema_snapshot,
+            "version": len(history) + 1,
+            "recorded_at": "2026-10-12T00:00:00Z",
+        }
+        calls.append(entry)
+        history.append(entry)
+        return entry
+
+    monkeypatch.setattr(cdc_schema_history, "record_ddl", record)
+    monkeypatch.setattr(
+        cdc_mapping_review,
+        "flag_mapping_review",
+        lambda **signal: reviews.append(signal),
+    )
+
+    def row(scn, position, operation, sql_redo, table, xid, timestamp=None):
+        return (
+            scn,
+            _oracle_test_rs_id(position),
+            0,
+            operation,
+            sql_redo,
+            table,
+            "DATAFLOW" if table else None,
+            *xid,
+            0,
+            f"ROW{position}",
+            table,
+            timestamp,
+        )
+
+    rows = [
+        row(5, 5, "START", None, None, (1, 1, 1)),
+        row(10, 10, "INSERT", "row1", "T1", (1, 1, 1)),
+        row(20, 10, "COMMIT", None, None, (1, 1, 1)),
+        row(
+            20,
+            20,
+            "DDL",
+            "ALTER TABLE T1 ADD NOTE",
+            "T1",
+            (0, 0, 0),
+            ddl_timestamp,
+        ),
+        row(20, 21, "START", None, None, (2, 2, 2)),
+        row(20, 25, "INSERT", "row2", "T1", (2, 2, 2)),
+        row(30, 30, "COMMIT", None, None, (2, 2, 2)),
+    ]
+    if additional_ddl:
+        rows.append(
+            row(20, 22, "DDL", "ALTER TABLE T1 ADD NOTE2", "T1", (0, 0, 0))
+        )
 
     class Cursor:
         def __enter__(self):
@@ -866,6 +928,9 @@ def test_oracle_ddl_history_failure_warns_and_keeps_streaming_dml(
         def fetchone(self):
             return (100,)
 
+        def fetchall(self):
+            return rows
+
     class Connection:
         def __enter__(self):
             return self
@@ -876,44 +941,161 @@ def test_oracle_ddl_history_failure_warns_and_keeps_streaming_dml(
         def cursor(self):
             return Cursor()
 
-    monkeypatch.setattr(reader, "_mining_conn", lambda: Connection())
-    monkeypatch.setattr(
+    connection_factory = lambda: Connection()
+    monkeypatch.setattr(reader, "_mining_conn", connection_factory)
+    return history, reviews, calls, connection_factory
+
+
+@pytest.mark.parametrize("ambiguity", ["later-ddl", "catalog-time"])
+def test_oracle_ambiguous_ddl_fails_closed_without_history(
+    monkeypatch: pytest.MonkeyPatch,
+    ambiguity: str,
+) -> None:
+    from connectors.oracle_logminer import OracleLogMinerReadError
+    from connectors.oracle_logminer_txn import mining_position
+
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    reader = _unit_reader()
+    reader.phase = "streaming"
+    reader.scn = 1
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    history, reviews, _calls, _connection = _install_buffered_ddl_window(
+        monkeypatch,
         reader,
-        "_fetch_logminer_rows_visible",
-        lambda *_args, **_kwargs: (
-            [
-                (
-                    5,
-                    _oracle_test_rs_id(5),
-                    0,
-                    "DDL",
-                    "ALTER TABLE T1 ADD NOTE VARCHAR2(50)",
-                    "T1",
-                    "DATAFLOW",
-                    "T1",
-                ),
-                (
-                    6,
-                    _oracle_test_rs_id(6),
-                    0,
-                    "INSERT",
-                    "INSERT INTO T1 VALUES (1)",
-                    "T1",
-                    "DATAFLOW",
-                    "T1",
-                ),
-            ],
-            100,
+        additional_ddl=ambiguity == "later-ddl",
+        ddl_timestamp=(
+            datetime(2026, 10, 12, 0, 0, 0)
+            if ambiguity == "catalog-time"
+            else None
         ),
     )
-    monkeypatch.setattr(
-        "services.cdc_incremental_runner.interleave_incremental_snapshot",
-        lambda *_args, **_kwargs: iter(()),
+    if ambiguity == "catalog-time":
+        monkeypatch.setattr(
+            reader,
+            "_oracle_ddl_last_ddl_time",
+            lambda *_a: datetime(2026, 10, 12, 0, 0, 2),
+        )
+
+    poll = reader._poll_txn_buffered()
+    before = next(poll)
+    reader.ack(before.resume_token)
+    with pytest.raises(OracleLogMinerReadError, match="ambiguous schema as of DDL SCN"):
+        next(poll)
+
+    assert history == []
+    assert len(reviews) == 1
+    assert reviews[0]["reason"] == "cdc_schema_drift"
+    assert "ambiguous schema as of DDL SCN" in reviews[0]["ddl"]
+    assert mining_position(reader.scn, reader.rs_id, reader.ssn) < mining_position(
+        20, _oracle_test_rs_id(20), 0
     )
 
-    with caplog.at_level(logging.WARNING):
-        batches = list(reader._poll_once())
 
-    assert any(batch.inserts == [{"ID": "1", "V": "kept"}] for batch in batches)
-    assert "schema history could not be recorded" in caplog.text
-    assert "history unavailable" in caplog.text
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_history_count"),
+    [
+        ("introspection", 0),
+        ("history write", 0),
+        ("mapping-review write", 1),
+    ],
+)
+def test_oracle_ddl_failure_stops_at_barrier_and_keeps_retry_position(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+    expected_history_count: int,
+) -> None:
+    from connectors.oracle_logminer import (
+        OracleLogMinerReadError,
+        decode_logminer_token,
+    )
+    from connectors.oracle_logminer_txn import mining_position
+    from services import cdc_mapping_review, cdc_schema_history
+
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    reader = _unit_reader()
+    reader.phase = "streaming"
+    reader.scn = 1
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    history, _reviews, _calls, _connection_factory = _install_buffered_ddl_window(
+        monkeypatch, reader
+    )
+
+    if failure_stage == "introspection":
+        def fail_introspection(_table, **_kwargs):
+            raise OSError("catalog unavailable")
+
+        monkeypatch.setattr(reader, "_oracle_ddl_schema_snapshot", fail_introspection)
+    elif failure_stage == "history write":
+        def fail_history(*_args, **_kwargs):
+            raise OSError("history unavailable")
+
+        monkeypatch.setattr(cdc_schema_history, "record_ddl", fail_history)
+    else:
+        def fail_review(**_signal):
+            raise OSError("mapping review unavailable")
+
+        monkeypatch.setattr(cdc_mapping_review, "flag_mapping_review", fail_review)
+
+    poll = reader._poll_txn_buffered()
+    before = next(poll)
+    assert before.inserts == [{"ID": "1", "V": "row1"}]
+    reader.ack(before.resume_token)
+    token = decode_logminer_token(before.resume_token)
+
+    with pytest.raises(OracleLogMinerReadError) as raised:
+        next(poll)
+
+    message = str(raised.value).lower()
+    assert "dataflow.t1" in message
+    assert "scn 20" in message
+    assert failure_stage in message
+    assert len(history) == expected_history_count
+    assert mining_position(
+        token["poll_scn"], token["poll_rs_id"], token["poll_ssn"]
+    ) < mining_position(20, _oracle_test_rs_id(20), 0)
+    assert mining_position(reader.scn, reader.rs_id, reader.ssn) < mining_position(
+        20, _oracle_test_rs_id(20), 0
+    )
+
+
+def test_oracle_ddl_retry_remines_and_records_history_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from connectors.oracle_logminer import OracleLogMinerReadError
+    from services import cdc_schema_history
+
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    reader = _unit_reader()
+    reader.phase = "streaming"
+    reader.scn = 1
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    history, _reviews, _calls, connection_factory = _install_buffered_ddl_window(
+        monkeypatch, reader
+    )
+    record = cdc_schema_history.record_ddl
+    attempts = 0
+
+    def fail_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("history unavailable")
+        return record(*args, **kwargs)
+
+    monkeypatch.setattr(cdc_schema_history, "record_ddl", fail_once)
+    poll = reader._poll_txn_buffered()
+    before = next(poll)
+    reader.ack(before.resume_token)
+    with pytest.raises(OracleLogMinerReadError):
+        next(poll)
+
+    resumed = _unit_reader(resume_token=before.resume_token)
+    resumed.phase = "streaming"
+    monkeypatch.setattr(resumed, "_acquire_cdc_lease", lambda: None)
+    monkeypatch.setattr(resumed, "_oracle_ddl_schema_snapshot", lambda *_a, **_k: {"columns": [{"name": "ID"}, {"name": "NOTE"}]})
+    monkeypatch.setattr(resumed, "_mining_conn", connection_factory)
+    batches = list(resumed._poll_txn_buffered())
+
+    assert attempts == 2
+    assert len(history) == 1
+    assert [row["ID"] for batch in batches for row in batch.inserts] == ["2"]

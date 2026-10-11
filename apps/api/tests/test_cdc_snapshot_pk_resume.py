@@ -71,6 +71,7 @@ def test_logminer_decoder_accepts_dict_and_wrapped_tokens_but_rejects_wrong_kind
         "commit_ssn": 0,
         "commit_xid": "",
         "txn_buffer": False,
+        "scn_complete": False,
     }
     assert decode_logminer_token(json.dumps(json.dumps(token)))["scn"] == 1234
     assert decode_logminer_token({"kind": "mssql-cdc", "lsn": "0abc"})["scn"] == 0
