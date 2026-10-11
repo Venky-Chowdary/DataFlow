@@ -472,15 +472,16 @@ def logminer_contents_sql(
     ``ROWNUM <= :lim ... ORDER BY SCN`` keeps an arbitrary mining-order subset
     and then sorts it — the retained rows are not the oldest. Pushing the
     order into an inline view and the cap outside is the Debezium-class fix.
-    ``(SCN, RS_ID, SSN)`` is LogMiner's true total order.
+    ``(SCN, RS_ID, SSN, DF_RN)`` preserves LogMiner's natural order when
+    continuation rows share a key.
     """
     xid_cols = ", XIDUSN, XIDSLT, XIDSQN" if include_xid else ""
     return f"""
         SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER{xid_cols},
-               SEG_NAME, TIMESTAMP
+               SEG_NAME, TIMESTAMP, CSF
         FROM (
           SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER{xid_cols},
-                 SEG_NAME, TIMESTAMP
+                 SEG_NAME, TIMESTAMP, CSF, ROWNUM AS DF_RN
           FROM v$logmnr_contents
           WHERE SEG_OWNER = :owner
             AND ({table_predicate})
@@ -494,7 +495,7 @@ def logminer_contents_sql(
                OR (SCN = :start_scn AND RS_ID > :rs_id)
                OR (SCN = :start_scn AND RS_ID = :rs_id AND SSN > :ssn)
             )
-          ORDER BY SCN, RS_ID, SSN
+          ORDER BY SCN, RS_ID, SSN, DF_RN
         )
         WHERE ROWNUM <= {limit_bind}
     """  # nosec B608 — table_predicate / limit_bind are caller-built from safe ids
@@ -515,10 +516,12 @@ def logminer_txn_contents_sql(
     """
     return f"""
         SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER,
-               XIDUSN, XIDSLT, XIDSQN, "ROLLBACK", ROW_ID, SEG_NAME, TIMESTAMP
+               XIDUSN, XIDSLT, XIDSQN, "ROLLBACK", ROW_ID, SEG_NAME, TIMESTAMP,
+               CSF
         FROM (
           SELECT SCN, RS_ID, SSN, OPERATION, SQL_REDO, TABLE_NAME, SEG_OWNER,
-                 XIDUSN, XIDSLT, XIDSQN, "ROLLBACK", ROW_ID, SEG_NAME, TIMESTAMP
+                 XIDUSN, XIDSLT, XIDSQN, "ROLLBACK", ROW_ID, SEG_NAME, TIMESTAMP,
+                 CSF, ROWNUM AS DF_RN
           FROM v$logmnr_contents
           WHERE (
                   SCN > :start_scn
@@ -548,20 +551,143 @@ def logminer_txn_contents_sql(
                     )
                   )
             )
-          ORDER BY SCN, RS_ID, SSN,
-            CASE OPERATION
-              WHEN 'START' THEN 0
-              WHEN 'INSERT' THEN 1
-              WHEN 'UPDATE' THEN 1
-              WHEN 'DELETE' THEN 1
-              WHEN 'COMMIT' THEN 2
-              WHEN 'ROLLBACK' THEN 3
-              WHEN 'DDL' THEN 4
-              ELSE 4
-            END
+          ORDER BY SCN, RS_ID, SSN, DF_RN
         )
         WHERE ROWNUM <= {limit_bind}
     """  # nosec B608 — table_predicate / limit_bind are caller-built from safe ids
+
+
+def _logminer_position_key(row: Any) -> tuple[int, str, int]:
+    return int(row[0] or 0), str(row[1] or "").strip(), int(row[2] or 0)
+
+
+def _logminer_row_has_csf(row: Any, csf_index: int) -> bool:
+    if len(row) <= csf_index:
+        return False
+    try:
+        return int(row[csf_index] or 0) == 1
+    except (TypeError, ValueError):
+        return str(row[csf_index] or "").strip() == "1"
+
+
+def _raise_logminer_window_error(
+    *,
+    table: str,
+    cursor_key: str,
+    key: tuple[int, str, int],
+    reason: str,
+) -> None:
+    scn, rs_id, _ssn = key
+    message = (
+        f"Oracle LogMiner {reason} at SCN {scn}, RS_ID {rs_id!r}."
+    )
+    raise OracleLogMinerReadError(
+        ValueError(message),
+        table=table,
+        cursor_key=cursor_key,
+        message=message,
+    )
+
+
+def _reassemble_logminer_csf_rows(
+    rows: list[Any],
+    *,
+    csf_index: int,
+    table: str,
+    cursor_key: str,
+) -> list[Any]:
+    reassembled: list[Any] = []
+    fragments: list[Any] = []
+    fragment_key: tuple[int, str, int] | None = None
+
+    for row in rows:
+        key = _logminer_position_key(row)
+        if fragments and key != fragment_key:
+            _raise_logminer_window_error(
+                table=table,
+                cursor_key=cursor_key,
+                key=fragment_key or key,
+                reason="returned an incomplete SQL_REDO statement (CSF=1)",
+            )
+        if _logminer_row_has_csf(row, csf_index):
+            if not fragments:
+                fragment_key = key
+            fragments.append(row)
+            continue
+        if fragments:
+            fragments.append(row)
+            joined = list(row)
+            joined[4] = "".join(str(fragment[4] or "") for fragment in fragments)
+            reassembled.append(tuple(joined))
+            fragments.clear()
+            fragment_key = None
+        else:
+            reassembled.append(row)
+
+    if fragments:
+        _raise_logminer_window_error(
+            table=table,
+            cursor_key=cursor_key,
+            key=fragment_key or _logminer_position_key(fragments[-1]),
+            reason="returned an incomplete SQL_REDO statement (CSF=1)",
+        )
+    return reassembled
+
+
+def _fetch_logminer_csf_window(
+    cur: Any,
+    *,
+    sql: str,
+    binds: dict[str, Any],
+    limit: int,
+    csf_index: int,
+    table: str,
+    cursor_key: str,
+) -> tuple[list[Any], bool]:
+    configured_limit = max(1, int(limit))
+    window_limit = configured_limit
+    max_limit = configured_limit * 64
+
+    while True:
+        cur.execute(sql, {**binds, "lim": window_limit})
+        rows = list(cur.fetchall() or [])
+        full = len(rows) == window_limit
+        if full:
+            last_key = _logminer_position_key(rows[-1])
+            first_trailing = len(rows) - 1
+            while (
+                first_trailing > 0
+                and _logminer_position_key(rows[first_trailing - 1]) == last_key
+            ):
+                first_trailing -= 1
+            rows = rows[:first_trailing]
+            if not rows:
+                if window_limit >= max_limit:
+                    _raise_logminer_window_error(
+                        table=table,
+                        cursor_key=cursor_key,
+                        key=last_key,
+                        reason="key group exceeds the 64x window cap",
+                    )
+                window_limit = min(window_limit * 2, max_limit)
+                continue
+        elif rows and _logminer_row_has_csf(rows[-1], csf_index):
+            _raise_logminer_window_error(
+                table=table,
+                cursor_key=cursor_key,
+                key=_logminer_position_key(rows[-1]),
+                reason="returned an incomplete SQL_REDO statement (CSF=1)",
+            )
+
+        return (
+            _reassemble_logminer_csf_rows(
+                rows,
+                csf_index=csf_index,
+                table=table,
+                cursor_key=cursor_key,
+            ),
+            full,
+        )
 
 
 def _ordered_txn_ddl_actions(
@@ -1439,17 +1565,27 @@ class OracleLogMinerCdc:
         except (TypeError, ValueError):
             return 0.25
 
-    def _query_logminer_rows(self, cur: Any, *, table_predicate: str, limit: int) -> list[Any]:
-        cur.execute(
-            logminer_contents_sql(table_predicate=table_predicate),
-            {
+    def _query_logminer_rows(
+        self,
+        cur: Any,
+        *,
+        table_predicate: str,
+        limit: int,
+    ) -> list[Any]:
+        rows, _ = _fetch_logminer_csf_window(
+            cur,
+            sql=logminer_contents_sql(table_predicate=table_predicate),
+            binds={
                 "owner": self.schema,
                 "tbl": self.table,
-                "lim": int(limit),
                 **self._resume_binds(),
             },
+            limit=limit,
+            csf_index=9,
+            table=f"{self.schema}.{self.table}",
+            cursor_key=self.cursor_key,
         )
-        return list(cur.fetchall() or [])
+        return rows
 
     def _fetch_logminer_rows_visible(
         self,
@@ -1822,18 +1958,11 @@ class OracleLogMinerCdc:
                     start_logminer_session(
                         cur, start_scn=max(1, self.scn), end_scn=end_scn
                     )
-                    cur.execute(
-                        logminer_contents_sql(
-                            table_predicate="TABLE_NAME = :tbl OR SEG_NAME = :tbl"
-                        ),
-                        {
-                            "owner": self.schema,
-                            "tbl": self.table,
-                            "lim": peek_limit,
-                            **self._resume_binds(),
-                        },
+                    peek_rows = self._query_logminer_rows(
+                        cur,
+                        table_predicate="TABLE_NAME = :tbl OR SEG_NAME = :tbl",
+                        limit=peek_limit,
                     )
-                    peek_rows = list(cur.fetchall() or [])
                     ddl_positions = [
                         (
                             str(candidate[5] or candidate[7] or "").upper(),
@@ -2198,23 +2327,26 @@ class OracleLogMinerCdc:
                     table_predicate = (
                         f"TABLE_NAME IN ({in_list}) OR SEG_NAME IN ({in_list})"
                     )
-                    cur.execute(
-                        logminer_txn_contents_sql(
-                            table_predicate=table_predicate,
+                    raw_rows, _ = _fetch_logminer_csf_window(
+                        cur,
+                        sql=logminer_txn_contents_sql(
+                            table_predicate=table_predicate
                         ),
-                        {
+                        binds={
                             "owner": self.schema,
-                            "lim": limit,
                             **self._resume_binds(),
                         },
+                        limit=limit,
+                        csf_index=14,
+                        table=self._token_table_label(),
+                        cursor_key=self.cursor_key,
                     )
-                    raw_rows = list(cur.fetchall() or [])
                     fetched = len(raw_rows)
                     try:
                         cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
                     except Exception as exc:
                         logger.debug("Oracle END_LOGMNR cleanup failed: %s", exc)
-        except (CdcScnGapError, CdcTxnBufferOverflow):
+        except (CdcScnGapError, CdcTxnBufferOverflow, OracleLogMinerReadError):
             raise
         except Exception as exc:
             if is_oracle_redo_gap_error(exc):
@@ -2525,6 +2657,7 @@ class OracleLogMinerCdc:
         tagged: list[tuple[str, int, str, int, str, str, dict[str, Any]]] = []
         # (xid_key, scn, rs_id, ssn, table, op, row)
         end_scn = self.scn
+        was_truncated = False
         try:
             with self._mining_conn() as conn:
                 with conn.cursor() as cur:
@@ -2553,20 +2686,23 @@ class OracleLogMinerCdc:
                     in_list = self._table_in_sql()  # nosec: B608 — safe identifiers
                     # Look-ahead past batch_size so we can keep complete XID groups.
                     lim = max(self.batch_size + 1, 64) * max(1, len(self.tables))
-                    cur.execute(
-                        logminer_contents_sql(
+                    raw_rows, was_truncated = _fetch_logminer_csf_window(
+                        cur,
+                        sql=logminer_contents_sql(
                             table_predicate=(
                                 f"TABLE_NAME IN ({in_list}) OR SEG_NAME IN ({in_list})"
                             ),
                             include_xid=True,
                         ),
-                        {
+                        binds={
                             "owner": self.schema,
-                            "lim": lim,
                             **self._resume_binds(),
                         },
+                        limit=lim,
+                        csf_index=12,
+                        table=self._token_table_label(),
+                        cursor_key=self.cursor_key,
                     )
-                    raw_rows = list(cur.fetchall() or [])
                     ddl_positions = [
                         (
                             str(candidate[5] or candidate[10] or "").upper(),
@@ -2668,7 +2804,6 @@ class OracleLogMinerCdc:
         # Truncate was sized against the look-ahead fetch; treat a full look-ahead
         # as truncated so we never jump past unread XIDs.
         look_ahead_lim = max(self.batch_size + 1, 64) * max(1, len(self.tables))
-        was_truncated = len(tagged) >= look_ahead_lim
         tagged = self._truncate_tagged_at_xid_boundary(tagged, self.batch_size)
         buf = MultiTableTransactionBuffer()
         emitted = False

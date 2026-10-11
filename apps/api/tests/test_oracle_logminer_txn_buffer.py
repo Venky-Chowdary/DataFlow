@@ -191,7 +191,7 @@ def test_buffered_query_selects_lifecycle_and_dml_rows() -> None:
     assert "ROW_ID" in sql
     assert "SCN = :start_scn AND :rs_id IS NULL" in sql
     assert "OPERATION IN ('START','COMMIT','ROLLBACK')" in sql
-    assert "CASE OPERATION" in sql
+    assert "ORDER BY SCN, RS_ID, SSN, DF_RN" in sql
 
 
 def test_open_transaction_and_byte_bounds_raise_typed_remedy() -> None:

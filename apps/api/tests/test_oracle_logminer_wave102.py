@@ -306,7 +306,7 @@ def test_start_logminer_fails_closed_with_no_redo_files():
 
 
 def test_poll_truncated_window_does_not_skip_past_last_row():
-    """batch_size+N changes: resume SCN stays at last emitted, not end_scn."""
+    """A full window defers its trailing key group for the next poll."""
     cdc = OracleLogMinerCdc(
         {"host": "localhost", "database": "ORCL", "username": "APP"},
         table="orders",
@@ -317,7 +317,6 @@ def test_poll_truncated_window_does_not_skip_past_last_row():
     )
     cdc.phase = "streaming"
 
-    # Three changes in the window; batch_size=2 must emit two and resume at #2.
     mined = [
         (11, "0xA", 1, "INSERT", 'INSERT INTO "ORDERS"("ID") VALUES(\'1\')', "ORDERS", "APP"),
         (12, "0xB", 1, "INSERT", 'INSERT INTO "ORDERS"("ID") VALUES(\'2\')', "ORDERS", "APP"),
@@ -326,17 +325,14 @@ def test_poll_truncated_window_does_not_skip_past_last_row():
 
     conn = MagicMock()
     cur = MagicMock()
-    cur.fetchone.side_effect = [
-        (10,),  # V$LOG oldest
-        (10,),  # V$ARCHIVED_LOG oldest
-        (99,),  # current_scn = end_scn
-    ]
+    cur.fetchone.side_effect = [(10,), (10,), (99,)] * 3
     cur.fetchall.side_effect = [
-        [],  # archived redo inventory
-        [],  # online redo inventory
-        [("/redo/online1.log",)],  # register logs
-        [],
-        mined[:2],  # ROWNUM-capped result the real DB would return
+        [], [], [("/redo/online1.log",)], [],
+        mined[:2],
+        [], [], [("/redo/online1.log",)], [],
+        mined[1:],
+        [], [], [("/redo/online1.log",)], [],
+        mined[2:],
     ]
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
@@ -349,17 +345,24 @@ def test_poll_truncated_window_does_not_skip_past_last_row():
                 "services.cdc_incremental_runner.interleave_incremental_snapshot",
                 return_value=iter(()),
             ):
-                batches = list(cdc.poll())
+                polls = [list(cdc.poll()) for _ in range(3)]
 
-    assert len(batches) == 1
-    assert len(batches[0].inserts) == 2
-    # Critical: must NOT be end_scn=99 — that permanently skipped row 13.
-    assert cdc.scn == 12
-    assert cdc.rs_id == "0xB"
+    assert all(len(batches) == 1 for batches in polls)
+    assert [
+        row["ID"]
+        for batches in polls
+        for batch in batches
+        for row in batch.inserts
+    ] == ["1", "2", "3"]
+    first_state = decode_logminer_token(polls[0][0].resume_token)
+    assert first_state["scn"] == 11
+    assert first_state["rs_id"] == "0xA"
+    assert cdc.scn == 13
+    assert cdc.rs_id == "0xC"
     assert cdc.ssn == 1
-    state = decode_logminer_token(batches[0].resume_token)
-    assert state["scn"] == 12
-    assert state["rs_id"] == "0xB"
+    last_state = decode_logminer_token(polls[-1][0].resume_token)
+    assert last_state["scn"] == 13
+    assert last_state["rs_id"] == "0xC"
 
 
 def test_peek_continues_on_intra_scn_cursor() -> None:
