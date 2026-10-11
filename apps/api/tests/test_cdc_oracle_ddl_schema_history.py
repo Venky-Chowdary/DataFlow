@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -21,6 +22,45 @@ def _oracle_test_rs_id(position: int) -> str:
     return f"0x000001.{position:08x}.0000"
 
 
+def _use_oracle_mining_timezone_0930(
+    monkeypatch: pytest.MonkeyPatch, cfg: dict
+) -> dict[str, str]:
+    from connectors.generic_sql import get_connection
+    from connectors.oracle_logminer import OracleLogMinerCdc
+
+    with get_connection(
+        host=cfg["host"],
+        port=cfg["port"],
+        database=cfg["database"],
+        username=cfg["username"],
+        password=cfg["password"],
+        connection_string="",
+        ssl=False,
+        db_type="oracle",
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DBTIMEZONE FROM DUAL")
+            db_timezone = str(cur.fetchone()[0])
+    host_offset = time.strftime("%z")
+    assert db_timezone != "+09:30"
+    assert host_offset != "+0930"
+
+    original_mining_conn = OracleLogMinerCdc._mining_conn
+
+    def mining_conn_with_timezone(reader):
+        conn = original_mining_conn(reader)
+        with conn.cursor() as cur:
+            cur.execute("ALTER SESSION SET TIME_ZONE = '+09:30'")
+            cur.execute("SELECT SESSIONTIMEZONE FROM DUAL")
+            assert str(cur.fetchone()[0]) == "+09:30"
+        return conn
+
+    monkeypatch.setattr(
+        OracleLogMinerCdc, "_mining_conn", mining_conn_with_timezone
+    )
+    return {"dbtimezone": db_timezone, "host_offset": host_offset}
+
+
 @pytest.mark.skipif(
     not _oracle_logminer_ready(),
     reason="Oracle LogMiner not reachable — set DATAFLOW_ORACLE_ENABLE=1 on a CDC-ready :1521",
@@ -33,6 +73,9 @@ def test_oracle_logminer_records_live_ddl_without_emitting_it_as_data(
 
     monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     cfg = _oracle_cfg()
+    timezone_probe = _use_oracle_mining_timezone_0930(monkeypatch, cfg)
+    assert timezone_probe["dbtimezone"] != "+09:30"
+    assert timezone_probe["host_offset"] != "+0930"
     schema = str(cfg["schema"])
     table = "CDC_DDL_" + uuid.uuid4().hex[:8].upper()
     table_ref = f'"{schema}"."{table}"'
@@ -179,6 +222,9 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
         "CDC_MAPPING_REVIEW_STORE", str(tmp_path / "cdc_mapping_reviews.jsonl")
     )
     cfg = _oracle_cfg()
+    timezone_probe = _use_oracle_mining_timezone_0930(monkeypatch, cfg)
+    assert timezone_probe["dbtimezone"] != "+09:30"
+    assert timezone_probe["host_offset"] != "+0930"
     pg = _pg_cfg()
     schema = str(cfg["schema"])
     table = "CDC_DDL_EOS_" + uuid.uuid4().hex[:8].upper()
@@ -1069,8 +1115,8 @@ def test_oracle_ambiguous_ddl_fails_closed_without_history(
     if ambiguity == "catalog-time":
         monkeypatch.setattr(
             reader,
-            "_oracle_ddl_last_ddl_time",
-            lambda *_a: datetime(2026, 10, 12, 0, 0, 2),
+            "_oracle_ddl_timing_delta_seconds",
+            lambda *_a: 2.0,
         )
 
     poll = reader._poll_txn_buffered()
@@ -1086,6 +1132,169 @@ def test_oracle_ambiguous_ddl_fails_closed_without_history(
     assert mining_position(reader.scn, reader.rs_id, reader.ssn) < mining_position(
         20, _oracle_test_rs_id(20), 0
     )
+
+
+@pytest.mark.parametrize(
+    ("delta_seconds", "should_pause"),
+    [(0.0, False), (1.0, False), (1.5, True), (None, True)],
+)
+def test_oracle_ddl_database_clock_delta_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    delta_seconds: float | None,
+    should_pause: bool,
+) -> None:
+    from connectors.oracle_logminer import OracleLogMinerReadError
+
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    reader = _unit_reader()
+    reader.phase = "streaming"
+    reader.scn = 1
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    history, reviews, _calls, _connection = _install_buffered_ddl_window(
+        monkeypatch,
+        reader,
+        ddl_timestamp=datetime(2026, 10, 12, 0, 0, 0),
+    )
+    monkeypatch.setattr(
+        reader,
+        "_oracle_ddl_timing_delta_seconds",
+        lambda *_args: delta_seconds,
+    )
+    poll = reader._poll_txn_buffered()
+    before = next(poll)
+    reader.ack(before.resume_token)
+
+    if should_pause:
+        expected = (
+            "DDL timing could not be verified"
+            if delta_seconds is None
+            else "ambiguous schema as of DDL SCN"
+        )
+        with pytest.raises(OracleLogMinerReadError, match=expected):
+            list(poll)
+        assert history == []
+        assert len(reviews) == 1
+    else:
+        batches = list(poll)
+        assert [row["ID"] for batch in batches for row in batch.inserts] == ["2"]
+        assert len(history) == 1
+
+
+@pytest.mark.parametrize(
+    ("delta_seconds", "should_pause"),
+    [(0.0, False), (2.0, True)],
+)
+def test_oracle_ddl_database_clock_delta_ignores_host_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+    delta_seconds: float,
+    should_pause: bool,
+) -> None:
+    from connectors.oracle_logminer import OracleLogMinerReadError
+    from services import cdc_mapping_review, cdc_schema_history
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is unavailable")
+    original_timezone = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        assert time.strftime("%z") != "+0530"
+        reader = _unit_reader()
+        server_utc_timestamp = datetime(
+            2026, 10, 11, 7, 28, 11, tzinfo=timezone.utc
+        )
+        server_redo_date = server_utc_timestamp + timedelta(hours=5, minutes=30)
+        redo_timestamp = server_redo_date.replace(tzinfo=None)
+        catalog_timestamp = redo_timestamp + timedelta(seconds=delta_seconds)
+        assert redo_timestamp.tzinfo is None
+        assert catalog_timestamp.tzinfo is None
+        executed: list[tuple[str, dict]] = []
+        history: list[dict] = []
+        reviews: list[dict] = []
+
+        class Cursor:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def execute(self, statement, binds):
+                sql = " ".join(statement.split())
+                assert (
+                    "SELECT (o.LAST_DDL_TIME - CAST(:redo_ts AS DATE)) * 86400"
+                    in sql
+                )
+                assert binds["redo_ts"] is redo_timestamp
+                executed.append((sql, binds))
+                self.delta = (catalog_timestamp - redo_timestamp).total_seconds()
+
+            def fetchone(self):
+                return (self.delta,)
+
+        class Connection:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def cursor(self):
+                return Cursor()
+
+        monkeypatch.setattr(reader, "_conn", lambda: Connection())
+        monkeypatch.setattr(
+            reader,
+            "_oracle_ddl_schema_snapshot",
+            lambda _table: {"columns": [{"name": "ID"}]},
+        )
+        monkeypatch.setattr(cdc_schema_history, "list_history", lambda *_args: [])
+        monkeypatch.setattr(
+            cdc_schema_history,
+            "record_ddl",
+            lambda source, table, ddl, offset, schema_snapshot: history.append(
+                {"table": table, "ddl": ddl, "offset": offset}
+            )
+            or {"version": 1, "recorded_at": "2026-10-11T13:00:00Z", "ddl": ddl},
+        )
+        monkeypatch.setattr(cdc_mapping_review, "list_reviews", lambda **_args: [])
+        monkeypatch.setattr(
+            cdc_mapping_review,
+            "flag_mapping_review",
+            lambda **review: reviews.append(review),
+        )
+
+        if should_pause:
+            with pytest.raises(
+                OracleLogMinerReadError, match="ambiguous schema as of DDL SCN"
+            ):
+                reader._record_oracle_ddl(
+                    owner="DATAFLOW",
+                    table="T1",
+                    ddl="ALTER TABLE DATAFLOW.T1 ADD NOTE",
+                    offset={"scn": 20, "rs_id": "r2", "ssn": 1},
+                    ddl_timestamp=redo_timestamp,
+                )
+            assert history == []
+            assert len(reviews) == 1
+        else:
+            reader._record_oracle_ddl(
+                owner="DATAFLOW",
+                table="T1",
+                ddl="ALTER TABLE DATAFLOW.T1 ADD NOTE",
+                offset={"scn": 20, "rs_id": "r2", "ssn": 1},
+                ddl_timestamp=redo_timestamp,
+            )
+            assert len(history) == 1
+            assert len(reviews) == 1
+        assert len(executed) == 1
+        assert executed[0][1]["redo_ts"] is redo_timestamp
+    finally:
+        if original_timezone is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", original_timezone)
+        time.tzset()
 
 
 def test_oracle_open_ambiguous_ddl_review_pauses_without_reflagging(

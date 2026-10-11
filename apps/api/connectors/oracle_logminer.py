@@ -1202,21 +1202,27 @@ class OracleLogMinerCdc:
             )
         return {"columns": snapshot_columns}
 
-    def _oracle_ddl_last_ddl_time(self, owner: str, table: str) -> Any:
-        with self._mining_conn() as conn:
+    def _oracle_ddl_timing_delta_seconds(
+        self, owner: str, table: str, redo_timestamp: Any
+    ) -> float | None:
+        with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT LAST_DDL_TIME
-                    FROM ALL_OBJECTS
-                    WHERE OWNER = :owner
-                         AND OBJECT_NAME = :object_name
-                      AND OBJECT_TYPE = 'TABLE'
+                    SELECT (o.LAST_DDL_TIME - CAST(:redo_ts AS DATE)) * 86400
+                    FROM ALL_OBJECTS o
+                    WHERE o.OWNER = :owner
+                      AND o.OBJECT_NAME = :object_name
+                      AND o.OBJECT_TYPE = 'TABLE'
                     """,
-                    {"owner": owner, "object_name": table},
+                    {
+                        "owner": owner,
+                        "object_name": table,
+                        "redo_ts": redo_timestamp,
+                    },
                 )
                 row = cur.fetchone()
-        return row[0] if row else None
+        return float(row[0]) if row and row[0] is not None else None
 
     def _record_oracle_ddl(
         self,
@@ -1235,7 +1241,8 @@ class OracleLogMinerCdc:
         schema version ambiguous; the stream pauses rather than recording a
         potentially incorrect history entry. An operator can acknowledge the
         matching mapping review to record the then-current schema and release
-        only that DDL marker.
+        only that DDL marker. Catalog timing is compared with a database-side
+        DATE difference so host and session timezone settings do not alter it.
         """
         owner_name = str(owner or "").upper()
         table_name = str(table or "").upper()
@@ -1262,25 +1269,16 @@ class OracleLogMinerCdc:
         acknowledged_review = False
         if ddl_timestamp is not None:
             try:
-                catalog_time = self._oracle_ddl_last_ddl_time(owner_name, table_name)
-                if catalog_time is not None:
-                    redo_time = (
-                        ddl_timestamp
-                        if isinstance(ddl_timestamp, datetime)
-                        else datetime.fromisoformat(str(ddl_timestamp))
+                delta_seconds = self._oracle_ddl_timing_delta_seconds(
+                    owner_name, table_name, ddl_timestamp
+                )
+                if delta_seconds is None:
+                    timing_error = LookupError(
+                        "DDL timing could not be verified: "
+                        "ALL_OBJECTS.LAST_DDL_TIME row was not found"
                     )
-                    catalog_time = (
-                        catalog_time
-                        if isinstance(catalog_time, datetime)
-                        else datetime.fromisoformat(str(catalog_time))
-                    )
-                    if redo_time.tzinfo and not catalog_time.tzinfo:
-                        redo_time = redo_time.replace(tzinfo=None)
-                    elif catalog_time.tzinfo and not redo_time.tzinfo:
-                        catalog_time = catalog_time.replace(tzinfo=None)
-                    timing_ambiguity = (
-                        (catalog_time - redo_time).total_seconds() > 1
-                    )
+                else:
+                    timing_ambiguity = delta_seconds > 1
             except Exception as exc:
                 timing_error = exc
         if ambiguous_later_ddl or timing_ambiguity or timing_error is not None:
