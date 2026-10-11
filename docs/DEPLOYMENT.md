@@ -63,6 +63,7 @@ Optional:
 |----------|---------|
 | `DATAFLOW_JOB_STORE` | Use `mongodb` (shared) for multi-replica. `memory` is **single-instance / tests only**. |
 | `DATAFLOW_MULTI_REPLICA` | Set `1` to fail-closed when Mongo leases/locks are unavailable (no in-memory fallback). |
+| `DATAFLOW_CDC_LEASE_REDIS_URL` (or `DATAFLOW_REDIS_URL`) | Required for CDC when `DATAFLOW_MULTI_REPLICA=1`: the file and memory lease backends fail closed. `docker-compose.prod.yml` ships a `redis` service and sets `DATAWRAP_CDC_LEASE_REDIS_URL`; set a URL-safe `REDIS_PASSWORD` in `.env`. Health reports `cdc_lease_backend` / `cdc_lease_distributed`. |
 | `DATAFLOW_WORKER_LEASE_TTL` | Lease TTL seconds (default `60`). Heartbeat loss **cancels** the job. |
 | `DATAFLOW_REQUIRE_WORKSPACE` | `1` denies empty `X-Workspace-Id` (hard tenant isolation). On in production by default. |
 | `DATAFLOW_WORKER_FLEET` | `1` enables Mongo job queue for dedicated worker processes (`services.worker_fleet`). |

@@ -1,4 +1,4 @@
-# Production stack (API + Web + MongoDB)
+# Production stack (API + Web + MongoDB + Redis)
 #   cp .env.production.example .env && ./scripts/generate-production-secrets.sh
 #   docker compose -f docker-compose.prod.yml up -d --build
 
@@ -13,6 +13,20 @@ services:
       - mongodata:/data/db
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -52,6 +66,7 @@ services:
       DATAWRAP_API_CLAIM_LOOP: 0
       DATAWRAP_SCHEDULE_LOOP: 0
       DATAWRAP_ACK_BACKEND: mongo
+      DATAWRAP_CDC_LEASE_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
       DATAWRAP_BLOB_ROOT: /data/blobs
       MONGODB_URI: mongodb://${MONGO_ROOT_USER:-dataflow}:${MONGO_ROOT_PASSWORD}@mongodb:27017/?authSource=admin
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
@@ -65,6 +80,8 @@ services:
       - dataflow_blobs:/data/blobs
     depends_on:
       mongodb:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     ports:
       - "${API_PORT:-8000}:8000"
@@ -117,6 +134,7 @@ services:
       DATAWRAP_API_CLAIM_LOOP: 0
       DATAWRAP_SCHEDULE_LOOP: 0
       DATAWRAP_ACK_BACKEND: mongo
+      DATAWRAP_CDC_LEASE_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
       DATAWRAP_MULTI_REPLICA: 1
       DATAWRAP_TRAINING: off
       DATAWRAP_SEED_DEMO: 0
@@ -132,6 +150,8 @@ services:
       - dataflow_blobs:/data/blobs
     depends_on:
       mongodb:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   cdc-worker:
@@ -149,6 +169,7 @@ services:
       DATAWRAP_API_CLAIM_LOOP: 0
       DATAWRAP_SCHEDULE_LOOP: 0
       DATAWRAP_ACK_BACKEND: mongo
+      DATAWRAP_CDC_LEASE_REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}@redis:6379/0
       DATAWRAP_MULTI_REPLICA: 1
       DATAWRAP_TRAINING: off
       DATAWRAP_SEED_DEMO: 0
@@ -165,6 +186,8 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
+      redis:
+        condition: service_healthy
 
   web:
     build:
@@ -180,6 +203,7 @@ services:
 
 volumes:
   mongodata:
+  redisdata:
   pgdata:
   dataflow_data:
   dataflow_uploads:
