@@ -818,12 +818,13 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
     _save(data)
 
 
-def cursor_keys_for_job(job_id: str) -> list[str]:
+def cursor_keys_for_job(job_id: str, *, strict: bool = False) -> list[str]:
     """Cursor keys whose stored metadata names this job.
 
     ``set_watermark`` records ``metadata.job_id``. Slot release uses that
     when the job document itself has no ``cursor_key``, so dropping the
     slot also drops the watermark the next run would try to resume.
+    Strict callers refuse to proceed when either backing store cannot be read.
     """
     jid = (job_id or "").strip()
     if not jid:
@@ -842,6 +843,8 @@ def cursor_keys_for_job(job_id: str) -> list[str]:
                 _add(doc.get("key"))
         except Exception:
             _logger.exception("Mongo cursor_keys_for_job failed for %s", jid)
+            if strict:
+                raise
     try:
         for entry in _load().get("cursors", []):
             if not isinstance(entry, dict):
@@ -851,6 +854,8 @@ def cursor_keys_for_job(job_id: str) -> list[str]:
                 _add(entry.get("key"))
     except Exception:
         _logger.exception("File cursor_keys_for_job failed for %s", jid)
+        if strict:
+            raise
     return found
 
 

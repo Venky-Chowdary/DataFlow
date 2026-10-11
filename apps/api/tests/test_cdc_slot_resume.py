@@ -549,10 +549,6 @@ def test_destination_lsn_read_failure_refuses_slot_drop(
     assert "do-not-log" not in str(raised.value)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="needs strict cursor_keys_for_job; pending lead approval",
-)
 def test_cursor_key_enumeration_failure_refuses_slot_drop(
     retired_store, monkeypatch
 ) -> None:
@@ -588,6 +584,59 @@ def test_cursor_key_enumeration_failure_refuses_slot_drop(
         )
 
     assert dropped == []
+
+
+def test_cursor_keys_for_job_default_keeps_file_keys_after_mongo_read_error(
+    monkeypatch,
+) -> None:
+    from services import sync_cursor
+
+    class _Mongo:
+        def find(self, *_args, **_kwargs):
+            raise OSError("cursor store unavailable")
+
+    monkeypatch.setattr(sync_cursor, "_mongo_cursors", lambda: _Mongo())
+    monkeypatch.setattr(
+        sync_cursor,
+        "_load",
+        lambda: {
+            "cursors": [
+                {
+                    "key": "pg:qa:partial",
+                    "metadata": {"job_id": "job-partial"},
+                }
+            ]
+        },
+    )
+
+    assert sync_cursor.cursor_keys_for_job("job-partial") == ["pg:qa:partial"]
+
+
+@pytest.mark.parametrize("read_source", ["mongo", "file"])
+def test_cursor_keys_for_job_strict_reraises_read_errors(
+    monkeypatch, read_source
+) -> None:
+    from services import sync_cursor
+
+    if read_source == "mongo":
+        class _Mongo:
+            def find(self, *_args, **_kwargs):
+                raise OSError("cursor store unavailable")
+
+        monkeypatch.setattr(sync_cursor, "_mongo_cursors", lambda: _Mongo())
+        monkeypatch.setattr(sync_cursor, "_load", lambda: {"cursors": []})
+        message = "cursor store unavailable"
+    else:
+        monkeypatch.setattr(sync_cursor, "_mongo_cursors", lambda: None)
+
+        def _read_file():
+            raise OSError("cursor file unavailable")
+
+        monkeypatch.setattr(sync_cursor, "_load", _read_file)
+        message = "cursor file unavailable"
+
+    with pytest.raises(OSError, match=message):
+        sync_cursor.cursor_keys_for_job("job-strict", strict=True)
 
 
 def test_post_drop_retirement_failure_is_reported(retired_store, monkeypatch, caplog) -> None:

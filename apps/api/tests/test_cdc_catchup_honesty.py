@@ -415,7 +415,7 @@ def test_dropped_slot_clears_the_watermark_recorded_for_the_job(monkeypatch) -> 
     )
     monkeypatch.setattr(
         "services.sync_cursor.cursor_keys_for_job",
-        lambda job_id: ["pg:qa:orders→mysql:qa:orders:stream"]
+        lambda job_id, *, strict=False: ["pg:qa:orders→mysql:qa:orders:stream"]
         if job_id == "job-4604"
         else [],
     )

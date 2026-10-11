@@ -222,7 +222,9 @@ def _worker_still_holds_cdc_lease(job_id: str) -> bool:
         return True
 
 
-def _cursor_keys_to_clear(job: dict[str, Any], job_id: str) -> list[str]:
+def _cursor_keys_to_clear(
+    job: dict[str, Any], job_id: str, *, strict: bool = False
+) -> list[str]:
     """Route keys whose watermark must go when this job's slot is dropped.
 
     The job document is the first source. A run that advanced the cursor
@@ -245,7 +247,11 @@ def _cursor_keys_to_clear(job: dict[str, Any], job_id: str) -> list[str]:
     if job_id:
         from services.sync_cursor import cursor_keys_for_job
 
-        for key in cursor_keys_for_job(job_id):
+        if strict:
+            stored_keys = cursor_keys_for_job(job_id, strict=True)
+        else:
+            stored_keys = cursor_keys_for_job(job_id)
+        for key in stored_keys:
             _add(key)
     return keys
 
@@ -392,7 +398,7 @@ def release_finished_cdc_slot(
     )
 
     try:
-        keys = _cursor_keys_to_clear(job, jid)
+        keys = _cursor_keys_to_clear(job, jid, strict=True)
     except Exception as exc:  # noqa: BLE001
         raise CdcSlotRetirementError(slot_name, exc) from exc
     extra = list(extra_lsns or [])
