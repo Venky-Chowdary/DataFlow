@@ -3663,10 +3663,11 @@ def _run_cdc_single_stream(
                         )
                     from services.cdc_catchup import CdcStreamBehind
 
+                    stream_behind = False
                     try:
                         _raise_if_stream_behind(cdc, drain_outcome)
                     except CdcStreamBehind:
-                        pass
+                        stream_behind = True
                     try:
                         reader_position = (
                             reader_position_reader()
@@ -3678,6 +3679,14 @@ def _run_cdc_single_stream(
                     reader_position = (
                         str(reader_position).strip() if reader_position else None
                     )
+                    if stream_behind:
+                        logger.warning(
+                            "CDC drift re-drain ended behind the capture head "
+                            "cursor_key=%s head=%s reader=%s",
+                            cursor_key,
+                            head_position,
+                            reader_position,
+                        )
                     head_reached = bool(
                         head_position
                         and reader_position
@@ -3758,16 +3767,20 @@ def _run_cdc_single_stream(
                             committed_position=post_drain_token,
                             rows=missing_image,
                         )
-                        evidence["capture_pending"] = not head_reached
-                        evidence["capture_pending_reason"] = (
-                            "rescan_incomplete"
-                            if not rescan_complete
-                            else (
-                                "head_unavailable"
-                                if not head_position
-                                else "head_not_reached" if not head_reached else None
-                            )
+                        if not rescan_complete:
+                            capture_pending_reason = "rescan_incomplete"
+                        elif stream_behind:
+                            capture_pending_reason = "stream_behind"
+                        elif not head_position:
+                            capture_pending_reason = "head_unavailable"
+                        elif not head_reached:
+                            capture_pending_reason = "head_not_reached"
+                        else:
+                            capture_pending_reason = None
+                        evidence["capture_pending"] = (
+                            stream_behind or not head_reached
                         )
+                        evidence["capture_pending_reason"] = capture_pending_reason
                         evidence["capture_head_position"] = head_position
                         evidence["reader_position_before"] = reader_position_before
                         evidence["reader_position"] = reader_position

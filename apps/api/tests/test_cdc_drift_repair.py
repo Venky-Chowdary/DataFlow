@@ -893,14 +893,28 @@ def _seed_image_repair_scenario(
     return source, destination, dest_cfg, cursor_key, state
 
 
-def test_eos_redrain_applies_pending_event_without_image_write(tmp_path, monkeypatch):
+def test_eos_redrain_applies_pending_event_without_image_write(
+    tmp_path, monkeypatch, caplog
+):
     import sqlite3
 
     from connectors.cdc_eos_sql import dest_watermark_view
+    from services.cdc_catchup import CdcStreamBehind
     from src.transfer.cdc_transfer import run_cdc_database_transfer
+    import src.transfer.cdc_transfer as transfer
 
     source, destination, dest_cfg, cursor_key, state = _seed_image_repair_scenario(
         tmp_path, monkeypatch, pending_count=1
+    )
+    original_raise_if_stream_behind = transfer._raise_if_stream_behind
+
+    def raise_behind_during_redrain(cdc, outcome):
+        if state["head_read"] and state["repair"]:
+            raise CdcStreamBehind("test re-drain is behind")
+        original_raise_if_stream_behind(cdc, outcome)
+
+    monkeypatch.setattr(
+        transfer, "_raise_if_stream_behind", raise_behind_during_redrain
     )
     state_before = dest_watermark_view(dest_cfg, cursor_key)
     result = run_cdc_database_transfer(
@@ -938,6 +952,109 @@ def test_eos_redrain_applies_pending_event_without_image_write(tmp_path, monkeyp
     assert state_after.committed_lsn == "0/200"
     assert result[2]["cdc_delivery"] == "exactly_once"
     assert "image_repair" not in result[2].get("cdc", {})
+    behind_warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith(
+            "CDC drift re-drain ended behind the capture head"
+        )
+    ]
+    assert behind_warnings == [
+        f"CDC drift re-drain ended behind the capture head cursor_key={cursor_key} "
+        "head=0/200 reader=0/200"
+    ]
+    assert "pk-sentinel" not in behind_warnings[0]
+    assert "payload-sentinel" not in behind_warnings[0]
+
+
+def test_eos_redrain_stream_behind_refuses_without_image_write(
+    tmp_path, monkeypatch, caplog
+):
+    import sqlite3
+
+    from connectors.cdc_eos_sql import dest_watermark_view
+    from services.cdc_catchup import CdcStreamBehind
+    from services.cdc_drift_repair import CdcDriftRequiresFencedRepair
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+    import src.transfer.cdc_transfer as transfer
+
+    source, destination, dest_cfg, cursor_key, state = _seed_image_repair_scenario(
+        tmp_path, monkeypatch
+    )
+    original_raise_if_stream_behind = transfer._raise_if_stream_behind
+
+    def raise_behind_during_redrain(cdc, outcome):
+        if state["head_read"] and state["repair"]:
+            raise CdcStreamBehind("test re-drain is behind")
+        original_raise_if_stream_behind(cdc, outcome)
+
+    monkeypatch.setattr(
+        transfer, "_raise_if_stream_behind", raise_behind_during_redrain
+    )
+
+    with sqlite3.connect(destination.database) as connection:
+        destination_before = connection.execute(
+            "SELECT id, v, _df_lsn FROM orders_copy ORDER BY id"
+        ).fetchall()
+    watermark_before = dest_watermark_view(dest_cfg, cursor_key)
+    apply_calls = []
+    original_apply_change_batch = transfer._apply_change_batch
+
+    def track_apply_change_batch(*args, **kwargs):
+        apply_calls.append(args[4] if len(args) > 4 else kwargs["change"])
+        return original_apply_change_batch(*args, **kwargs)
+
+    monkeypatch.setattr(transfer, "_apply_change_batch", track_apply_change_batch)
+    with pytest.raises(CdcDriftRequiresFencedRepair) as caught:
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 1.0},
+                {"source": "v", "target": "v", "confidence": 1.0},
+            ],
+            schema={"id": "string", "v": "string"},
+            sync_mode="cdc",
+            stream_contracts=[
+                {
+                    "name": "orders",
+                    "selected": True,
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                    "sync_mode": "cdc",
+                }
+            ],
+            delivery_guarantee="exactly_once",
+            delivery_pinned=True,
+        )
+
+    evidence = caught.value.evidence
+    assert evidence["capture_pending"] is True
+    assert evidence["capture_pending_reason"] == "stream_behind"
+    assert evidence["capture_head_position"] == evidence["reader_position"]
+    assert apply_calls == []
+    assert state["event_count"] == 0
+    with sqlite3.connect(destination.database) as connection:
+        destination_after = connection.execute(
+            "SELECT id, v, _df_lsn FROM orders_copy ORDER BY id"
+        ).fetchall()
+    assert destination_after == destination_before
+    watermark_after = dest_watermark_view(dest_cfg, cursor_key)
+    assert watermark_after.apply_seq == watermark_before.apply_seq
+    assert watermark_after.committed_lsn == watermark_before.committed_lsn
+    behind_warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith(
+            "CDC drift re-drain ended behind the capture head"
+        )
+    ]
+    assert behind_warnings == [
+        f"CDC drift re-drain ended behind the capture head cursor_key={cursor_key} "
+        "head=0/200 reader=0/200"
+    ]
+    assert "pk-sentinel" not in behind_warnings[0]
+    assert "payload-sentinel" not in behind_warnings[0]
 
 
 def test_eos_redrain_refuses_only_keys_still_drifting(tmp_path, monkeypatch):
@@ -1030,8 +1147,9 @@ def test_eos_redrain_refusal_uses_post_drain_committed_position(
     assert caught.value.evidence["keys"][0]["key_id"]
 
 
+@pytest.mark.parametrize("stream_behind", [False, True], ids=["caught-up", "behind"])
 def test_eos_redrain_keeps_initial_keys_when_both_rescans_are_incomplete(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, stream_behind
 ):
     import services.cdc_value_digest as value_digest
     from services.cdc_drift_repair import (
@@ -1063,6 +1181,20 @@ def test_eos_redrain_keeps_initial_keys_when_both_rescans_are_incomplete(
     monkeypatch.setattr(
         value_digest, "rows_absent_by_primary_key", incomplete_pk_scan
     )
+    if stream_behind:
+        from services.cdc_catchup import CdcStreamBehind
+        import src.transfer.cdc_transfer as transfer
+
+        original_raise_if_stream_behind = transfer._raise_if_stream_behind
+
+        def raise_behind_during_redrain(cdc, outcome):
+            if state["head_read"] and state["repair"]:
+                raise CdcStreamBehind("test re-drain is behind")
+            original_raise_if_stream_behind(cdc, outcome)
+
+        monkeypatch.setattr(
+            transfer, "_raise_if_stream_behind", raise_behind_during_redrain
+        )
     with pytest.raises(CdcDriftRequiresFencedRepair) as caught:
         run_cdc_database_transfer(
             source,
@@ -1098,6 +1230,7 @@ def test_eos_redrain_keeps_initial_keys_when_both_rescans_are_incomplete(
     assert [item["key_id"] for item in evidence["keys"]] == [
         item["key_id"] for item in expected["keys"]
     ]
+    assert evidence["capture_pending"] is stream_behind
     assert evidence["capture_pending_reason"] == "rescan_incomplete"
 
 
