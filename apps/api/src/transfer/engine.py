@@ -23,10 +23,12 @@ _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
+_engine_module = sys.modules[__name__]
+
 try:
     from services import lineage_telemetry as lineage
     from services.error_handling import (
-        FullRefreshDropFailed,
+        FullRefreshDropFailed,  # noqa: F401
         RetryBudget,
         TransferCancelled,
         with_retry,
@@ -58,8 +60,8 @@ try:
         shaped_schema,
     )
     from services.sync_cursor import (
-        destination_exists_for_shape,
-        is_overwrite_sync,
+        destination_exists_for_shape,  # noqa: F401
+        is_overwrite_sync,  # noqa: F401
         map_source_to_target,
         requires_upsert,
         resolve_effective_sync_mode,
@@ -72,7 +74,6 @@ except (
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import lineage_telemetry as lineage
     from src.services.error_handling import (
-        FullRefreshDropFailed,
         RetryBudget,
         TransferCancelled,
         with_retry,
@@ -104,8 +105,6 @@ except (
         shaped_schema,
     )
     from src.services.sync_cursor import (
-        destination_exists_for_shape,
-        is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
         resolve_effective_sync_mode,
@@ -152,7 +151,6 @@ from .stream import (
     stream_scd2_mirror_transfer,
     supports_streaming,
 )
-from .type_mapper import default_mappings
 
 try:
     from services.data_contract import ContractViolation
@@ -183,11 +181,11 @@ from services.batch_progress import (
 from services.read_options import ReadOptions, ReadOptionsError
 
 try:
-    from services import schema_registry
+    from services import schema_registry  # noqa: F401
 except (
     ImportError
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-    from src.services import schema_registry
+    pass
 from services.checkpoint_service import (
     Checkpoint,
     CheckpointService,
@@ -554,146 +552,6 @@ def _source_nullability_probe(source: EndpointConfig) -> dict[str, bool]:
         return {}
 
 
-def _destination_schema_probe(
-    destination: EndpointConfig,
-    sync_mode: str = "",
-) -> tuple[dict[str, str], bool | None]:
-    """Return (column_types, table_exists).
-
-    ``table_exists`` is independent of whether columns loaded — a listed table
-    with empty column metadata must not be treated as missing / create-new.
-
-    Overwrite sync still needs a proven existence boolean for preflight DDL
-    gates; stale destination *types* are cleared so recreate is not typed
-    against the old table shape.
-    """
-    if destination.kind != "database":
-        return {}, None
-    try:
-        from .endpoint_intelligence import introspect_endpoint
-
-        # Match Studio Destination/Validate: destination probes stay in the
-        # operator-chosen namespace (no cross-DB/schema "heal").
-        destination.extra = {
-            **(destination.extra or {}),
-            "introspect_purpose": "destination",
-        }
-        info = introspect_endpoint(destination)
-        schema = dict(info.get("schema") or {})
-        nullability = {
-            str(k): bool(v)
-            for k, v in dict(info.get("schema_nullability") or {}).items()
-        }
-        if "table_exists" in info:
-            raw = info.get("table_exists")
-            # Preserve explicit None (unknown) — bool(None) is False and would
-            # dishonestly trigger create-new on Execute after a soft-fail probe.
-            exists = None if raw is None else bool(raw)
-        elif schema:
-            exists = True
-        else:
-            exists = None
-        # Stamp probe SSOT for Map/Validate CTAs. Sticky None is an error;
-        # create-new (exists=False) messages are informational, not failures.
-        probe_err = str(info.get("sample_error") or info.get("error") or "").strip()
-        probe_msg = str(info.get("message") or "").strip()
-        extra = dict(destination.extra or {})
-        if exists is None:
-            detail = probe_err or probe_msg or (
-                "Destination schema unknown — existence not proven (fail-closed)"
-            )
-            extra["schema_probe_error"] = detail[:500]
-            extra["schema_probe_message"] = detail[:500]
-        elif probe_err:
-            extra["schema_probe_error"] = probe_err[:500]
-            extra["schema_probe_message"] = (probe_msg or probe_err)[:500]
-        else:
-            extra.pop("schema_probe_error", None)
-            if str(extra.get("schema_probe_message") or "").startswith(
-                "Destination schema unknown"
-            ):
-                extra.pop("schema_probe_message", None)
-            if probe_msg and exists is False:
-                extra["schema_probe_message"] = probe_msg[:500]
-        # Stamp PK/UNIQUE/FK catalog for Execute preflight SSOT with Validate
-        # (preflight_router passes dest_meta.primary_key_columns / unique_keys).
-        extra["primary_key_columns"] = list(info.get("primary_key_columns") or [])
-        extra["dynamo_key_schema"] = [
-            dict(row)
-            for row in (info.get("dynamo_key_schema") or [])
-            if isinstance(row, dict)
-        ]
-        extra["dynamo_index_attributes"] = dict(
-            info.get("dynamo_index_attributes") or {}
-        )
-        extra["unique_keys"] = list(info.get("unique_keys") or [])
-        extra["foreign_keys"] = list(
-            info.get("foreign_keys") or info.get("destination_foreign_keys") or []
-        )
-        # Create-new overwrite has no dest contract — clear stale types.
-        if is_overwrite_sync(sync_mode) and exists is not True:
-            extra["schema_nullability"] = {}
-            extra["schema_defaults"] = {}
-            extra["identity_columns"] = []
-            extra["generated_columns"] = []
-            extra["schema_carrier_authority"] = {}
-            extra.pop("schema_types", None)
-            destination.extra = extra
-            return {}, exists
-        # Dest-exists overwrite on a relational engine empties rows and keeps
-        # the table, so the live types, nullability and constraints are the
-        # contract. Engines that still DROP+CREATE must not bind the doomed
-        # carrier (a stale VARCHAR(64) refused a TEXT source whose CREATE
-        # would have been LONGTEXT).
-        from services.db_type_utils import dest_schema_is_recreated_on_overwrite
-
-        overwrite_recreates_existing = (
-            is_overwrite_sync(sync_mode)
-            and exists is True
-            and dest_schema_is_recreated_on_overwrite(
-                str(getattr(destination, "format", "") or "")
-            )
-        )
-        # G19 reads this only when the run really replaces the declaration.
-        extra["overwrite_replaced_column_types"] = (
-            dict(schema) if overwrite_recreates_existing else {}
-        )
-        extra["schema_nullability"] = nullability
-        # Sampled vs declared — D1: a page-measured DECIMAL(2,2) is a profile,
-        # not a catalog. Writers and Map both read this stamp.
-        extra["schema_carrier_authority"] = dict(info.get("schema_authority") or {})
-        if overwrite_recreates_existing:
-            extra.pop("schema_types", None)
-        else:
-            extra["schema_types"] = dict(schema)
-        # Who fills a required column when the mapping does not (G14).
-        extra["schema_defaults"] = dict(info.get("schema_defaults") or {})
-        extra["identity_columns"] = list(info.get("identity_columns") or [])
-        extra["generated_columns"] = list(info.get("generated_columns") or [])
-        destination.extra = extra
-        return ({} if overwrite_recreates_existing else schema), exists
-    except Exception as exc:
-        logger.warning(
-            "Destination schema probe failed for %s: %s",
-            getattr(destination, "format", ""),
-            exc,
-            exc_info=exc,
-        )
-        destination.extra = {
-            **(destination.extra or {}),
-            "schema_probe_error": str(exc)[:500],
-            "schema_probe_message": str(exc)[:500],
-            "schema_nullability": {},
-            "schema_defaults": {},
-            "identity_columns": [],
-            "generated_columns": [],
-            "primary_key_columns": [],
-            "unique_keys": [],
-            "foreign_keys": [],
-            "schema_carrier_authority": {},
-            "schema_types": {},
-        }
-        return {}, None
 
 
 def _apply_sampled_dest_profile(
@@ -866,170 +724,13 @@ def _table_population_rows(
         logger.warning("population fit scan could not re-read source table: %s", exc)
 
 
-def _execute_preflight_parity_kwargs(
-    request: TransferRequest,
-    *,
-    destination_connected: bool,
-    destination_table_exists_fallback: bool | None = None,
-) -> dict[str, Any]:
-    """Validate≡Execute preflight kwargs — privilege, FK, identity, operator acks.
-
-    Never invent ``can_create``/``can_write`` from connectivity alone when a
-    privilege probe is available. Contract PK prefers the destination stream name
-    (same as ``preflight_router``).
-
-    Owns ``destination_table_exists`` so callers must not also pass that kwarg
-    into ``run_file_preflight`` (duplicate keyword → hard Execute failure).
-    """
-    from services.primary_key import extract_contract_primary_key_columns
-    from services.preflight_service import inspect_destination_for_preflight
-
-    dest = request.destination
-    dest_table = str(dest.table or dest.collection or "")
-    stream_contracts = list(getattr(request, "stream_contracts", None) or [])
-    # Full composite contract PK — Validate≡Execute must not truncate to first col.
-    # Prefer exact stream match; only fall back to first when a single contract is selected.
-    contract_pk_cols = extract_contract_primary_key_columns(
-        stream_contracts, stream_name=dest_table, fallback_first=False
-    )
-    if not contract_pk_cols:
-        selected = [
-            c
-            for c in stream_contracts
-            if isinstance(c, dict) and c.get("selected", True)
-        ]
-        if len(selected) == 1:
-            contract_pk_cols = extract_contract_primary_key_columns(selected)
-    contract_pk = ",".join(contract_pk_cols) if contract_pk_cols else ""
-
-    extra = dict(getattr(dest, "extra", None) or {})
-    dest_meta: dict[str, Any] = {}
-    try:
-        dest_meta = inspect_destination_for_preflight(
-            connector_id=dest.connector_id or None,
-            dest_type=dest.format or "",
-            dest_host=dest.host or None,
-            dest_port=int(dest.port or 0) or None,
-            dest_database=dest.database or None,
-            dest_table=dest.table or None,
-            dest_collection=dest.collection or None,
-            dest_schema=getattr(dest, "schema", None) or None,
-            dest_username=dest.username or None,
-            dest_password=dest.password or None,
-            dest_connection_string=dest.connection_string or None,
-            dest_warehouse=getattr(dest, "warehouse", None) or None,
-            dest_auth_source=getattr(dest, "auth_source", None) or None,
-            dest_auth_mode=getattr(dest, "auth_mode", None) or None,
-            dest_auth_role=getattr(dest, "auth_role", None) or None,
-            dest_api_key=getattr(dest, "api_key", None) or None,
-            dest_service_account=getattr(dest, "service_account", None) or None,
-            dest_kind=dest.kind or "database",
-            dest_extra=dict(getattr(dest, "extra", None) or {}),
-        )
-    except Exception as exc:
-        logger.warning(
-            "Execute destination inspect for preflight parity failed: %s",
-            exc,
-            exc_info=exc,
-        )
-
-    pk_cols = list(
-        dest_meta.get("primary_key_columns")
-        or dest_meta.get("pk_columns")
-        or extra.get("primary_key_columns")
-        or []
-    )
-    unique_keys = list(dest_meta.get("unique_keys") or extra.get("unique_keys") or [])
-    foreign_keys = list(
-        dest_meta.get("foreign_keys")
-        or extra.get("foreign_keys")
-        or []
-    )
-    privilege_probe = dict(
-        dest_meta.get("privilege_probe") or extra.get("privilege_probe") or {}
-    )
-
-    can_create = dest_meta.get("can_create_table")
-    if can_create is None and privilege_probe:
-        if "can_create_table" in privilege_probe:
-            can_create = privilege_probe.get("can_create_table")
-        elif "create" in privilege_probe:
-            can_create = privilege_probe.get("create")
-    if can_create is None:
-        # Fail-closed: unknown privilege must not invent create-new DDL.
-        can_create = False
-
-    can_write = dest_meta.get("can_write")
-    if can_write is None and privilege_probe:
-        if "can_write" in privilege_probe:
-            can_write = privilege_probe.get("can_write")
-        elif "write" in privilege_probe:
-            can_write = privilege_probe.get("write")
-    if can_write is None:
-        # Connectivity ≠ write grant. Unknown → assume writeable only for
-        # append paths that still hit live driver errors; never invent create.
-        can_write = bool(destination_connected)
-
-    table_exists = dest_meta.get("table_exists")
-    if table_exists is None:
-        table_exists = destination_table_exists_fallback
-
-    # Keep destination.extra stamped for later gates / theater honesty.
-    extra["primary_key_columns"] = pk_cols
-    extra["dynamo_key_schema"] = [
-        dict(row)
-        for row in (
-            dest_meta.get("dynamo_key_schema")
-            or extra.get("dynamo_key_schema")
-            or []
-        )
-        if isinstance(row, dict)
-    ]
-    extra["dynamo_index_attributes"] = dict(
-        dest_meta.get("dynamo_index_attributes")
-        or extra.get("dynamo_index_attributes")
-        or {}
-    )
-    extra["unique_keys"] = unique_keys
-    extra["foreign_keys"] = foreign_keys
-    if isinstance(table_exists, bool):
-        extra["table_exists"] = table_exists
-    if privilege_probe:
-        extra["privilege_probe"] = privilege_probe
-    dest.extra = extra
-
-    return {
-        "destination_pk_columns": pk_cols,
-        "destination_unique_keys": unique_keys,
-        "destination_foreign_keys": foreign_keys,
-        "destination_config": dest_meta.get("_probe_cfg") or None,
-        "contract_primary_key": contract_pk,
-        "stream_contracts": stream_contracts,
-        "privilege_probe": privilege_probe or None,
-        "redshift_staging_probe": dest_meta.get("redshift_staging_probe") or None,
-        "destination_can_create": bool(can_create),
-        "destination_can_write": bool(can_write),
-        # Always owned here — never also pass at the call site with **parity.
-        "destination_table_exists": table_exists,
-        "compliance_acknowledged": bool(
-            getattr(request, "compliance_acknowledged", False)
-        ),
-        "schema_drift_acknowledged": bool(
-            getattr(request, "schema_drift_acknowledged", False)
-        ),
-        "fk_risk_acknowledged": bool(getattr(request, "fk_risk_acknowledged", False)),
-        "acknowledgment_actor": str(
-            getattr(request, "acknowledgment_actor", "") or ""
-        ).strip(),
-        "acknowledgment_reason": str(
-            getattr(request, "acknowledgment_reason", "") or ""
-        ).strip(),
-    }
 
 
 # Back-compat alias for tests / callers that imported the identity-only helper.
 def _execute_preflight_identity_kwargs(request: TransferRequest) -> dict[str, Any]:
-    return _execute_preflight_parity_kwargs(request, destination_connected=True)
+    return _engine_module._execute_preflight_parity_kwargs(
+        request, destination_connected=True
+    )
 
 
 def _run_number_locale(request: TransferRequest) -> str:
@@ -1085,96 +786,8 @@ def _settle_locales(
         set_active_number_locale(settled)
 
 
-def _catalog_pk_for_policy(
-    request: TransferRequest,
-    source_table: str,
-) -> list[str] | None:
-    """Catalog key when this mode needs one and the contract did not name it.
-
-    ``None`` means the contract already carries the key, so Validate must not
-    replace it. An empty list means the catalog was read and has no key —
-    the same refusal Execute raises.
-    """
-    from services.preflight_cursor_gate import (
-        MODES_REQUIRING_PRIMARY_KEY,
-        contract_declares_primary_key,
-    )
-    from services.sync_cursor import normalize_sync_mode
-
-    sync = normalize_sync_mode(str(getattr(request, "sync_mode", "") or ""), default="")
-    if sync not in MODES_REQUIRING_PRIMARY_KEY:
-        return None
-    selected = [
-        c
-        for c in (getattr(request, "stream_contracts", None) or [])
-        if isinstance(c, dict) and c.get("selected", True)
-    ]
-    if selected and all(contract_declares_primary_key(c) for c in selected):
-        return None
-    if not source_table:
-        return []
-    from services.source_schema_authority import endpoint_primary_key_columns
-
-    return endpoint_primary_key_columns(getattr(request, "source", None))
 
 
-def _execute_policy_gates_for_request(
-    request: TransferRequest,
-    *,
-    source_columns: list[str] | None = None,
-) -> list[dict[str, Any]]:
-    """Validate≡Execute policy gates — never default source_kind to file.
-
-    Studio Validate passes dest_type / source_type / source_kind / write_via_staging.
-    Execute must match or CDC/SCD2/staging falsely block (or skip) after Approve.
-    """
-    from services.preflight_cursor_gate import read_scope_for_transfer_request
-    from services.preflight_service import run_transfer_policy_gates
-
-    dest = getattr(request, "destination", None)
-    src = getattr(request, "source", None)
-    src_extra = getattr(src, "extra", None) or {}
-    mappings = list(getattr(request, "mappings", None) or [])
-    source_table = str(
-        getattr(src, "table", None) or getattr(src, "collection", None) or ""
-    )
-    catalog_pk = _catalog_pk_for_policy(request, source_table)
-    source_config = None
-    if src is not None:
-        try:
-            from src.transfer.adapters import resolve_connector_config
-
-            source_config = resolve_connector_config(src)
-        except Exception as exc:
-            logger.debug("CDC policy source config unread: %s", exc)
-            source_config = None
-    return run_transfer_policy_gates(
-        sync_mode=str(getattr(request, "sync_mode", "") or ""),
-        schema_policy=str(getattr(request, "schema_policy", "") or "manual_review"),
-        validation_mode=str(getattr(request, "validation_mode", "") or "strict"),
-        stream_contracts=list(getattr(request, "stream_contracts", None) or []),
-        backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
-        source_columns=list(source_columns or []),
-        dest_type=str(getattr(dest, "format", None) or getattr(dest, "kind", None) or ""),
-        source_type=str(getattr(src, "format", None) or getattr(src, "kind", None) or ""),
-        source_kind=str(getattr(src, "kind", None) or "file"),
-        write_via_staging=bool(getattr(request, "write_via_staging", False)),
-        source_read_mode=str(src_extra.get("source_read_mode") or ""),
-        # Best-effort here; the read side refuses authoritatively with the exact
-        # cursor key. Both refuse a watermark measured on another column.
-        read_scope=read_scope_for_transfer_request(request),
-        # Advanced write knobs — Validate already emits g17_row_cap. Execute
-        # must name the same cap/sort or Approve hides a leftover filter.
-        priority_column=str(getattr(request, "priority_column", "") or ""),
-        priority_direction=str(getattr(request, "priority_direction", "") or "desc"),
-        row_limit=max(0, int(getattr(request, "limit", 0) or 0)),
-        source_endpoint=src,
-        destination_endpoint=dest,
-        catalog_primary_key_columns=catalog_pk,
-        mappings=mappings,
-        source_table=source_table,
-        source_config=source_config if isinstance(source_config, dict) else None,
-    )
 
 
 def _destination_schema_types(
@@ -1185,7 +798,9 @@ def _destination_schema_types(
     Relational overwrite keeps an existing table, so its live types stay in
     force. Engines that still drop and recreate return an empty type map.
     """
-    schema, _exists = _destination_schema_probe(destination, sync_mode=sync_mode)
+    schema, _exists = _engine_module._destination_schema_probe(
+        destination, sync_mode=sync_mode
+    )
     return schema
 
 
@@ -1409,50 +1024,6 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
     return written
 
 
-def _pin_overwrite_rows_before(
-    destination: EndpointConfig,
-    checkpoint: Any = None,
-    checkpoint_service: Any = None,
-) -> None:
-    """Count the destination before overwrite removes it.
-
-    The stream measures COUNT after the drop, so a table that held rows
-    looks empty and the failure path deletes the replacement. The count
-    taken here is the one undo and Gate-8 must keep.
-    """
-    extra = dict(getattr(destination, "extra", None) or {})
-    pinned = extra.get("overwrite_rows_before")
-    if isinstance(pinned, int):
-        return
-    if checkpoint is not None and getattr(checkpoint, "target_rows_before", None) is not None:
-        extra["overwrite_rows_before"] = int(checkpoint.target_rows_before)
-        destination.extra = extra
-        return
-    counted: int | None = None
-    try:
-        from services.dest_precount import precount_destination
-
-        from .adapters import resolve_connector_config
-
-        raw = precount_destination(destination, resolve_connector_config(destination))
-        if isinstance(raw, int):
-            counted = int(raw)
-    except Exception as exc:  # noqa: BLE001 - a missed count must not skip the overwrite
-        logger.warning("Overwrite pre-count failed: %s", exc, exc_info=exc)
-        return
-    if counted is None:
-        return
-    extra["overwrite_rows_before"] = counted
-    destination.extra = extra
-    if checkpoint is None:
-        return
-    checkpoint.target_rows_before = counted
-    if checkpoint_service is None:
-        return
-    try:
-        checkpoint_service.require_save(checkpoint)
-    except Exception as exc:  # noqa: BLE001 - the in-memory pin still guards this process
-        logger.warning("Overwrite pre-count was not checkpointed: %s", exc, exc_info=exc)
 
 
 def _apply_post_load_transforms(request: Any, dest_summary: dict[str, Any]) -> None:
@@ -1643,81 +1214,8 @@ def _finish_verified_run(
     )
 
 
-def _note_failed_batch_undo(
-    request: Any,
-    dest_summary: Any,
-    message: str,
-    *,
-    recon: dict[str, Any] | None = None,
-) -> str:
-    """Clear a partial SQL batch when this run found the destination empty.
-
-    A MySQL overwrite renamed the previous table aside. Restoring that
-    backup is the rollback. Deleting the replacement after the rename
-    leaves the live name empty and the pre-run rows only in the backup
-    — or gone, if a second start already dropped the backup.
-
-    When verification could not *read* the destination (transient fault
-    after retries), nothing was proven wrong with the committed rows, so
-    they are kept rather than undone (QA MX2-15).
-    """
-    if not isinstance(dest_summary, dict):
-        return message or "Reconciliation failed"
-    if isinstance(recon, dict) and recon.get("verification_unavailable"):
-        note = (
-            "The committed rows were kept: verification could not read the "
-            "destination, which is not evidence the batch is wrong."
-        )
-        logger.warning(
-            "Skipping failed-batch undo for table=%s: verification unavailable",
-            dest_summary.get("table"),
-        )
-        dest_summary["partial_batch_undo"] = "retained"
-        dest_summary["partial_batch_undo_note"] = note
-        base = message or "Reconciliation failed"
-        return base if note in base else f"{base} {note}"
-    destination = getattr(request, "destination", None)
-    extra = dict(getattr(destination, "extra", None) or {})
-    backup_engine = str(extra.get("overwrite_backup_engine") or "")
-    if extra.get("overwrite_backup") and backup_engine in {"mysql", "mongodb"}:
-        backup_name = str(extra.get("overwrite_backup") or "")
-        restored = _settle_overwrite_backup(destination, restore=True)
-        if restored:
-            note = (
-                "The previous destination table was restored. "
-                "This run's replacement was removed."
-            )
-            dest_summary["partial_batch_undo"] = "restored"
-        else:
-            note = (
-                "The previous destination table could not be restored. "
-                f"The backup {backup_name} was left in place."
-            )
-            dest_summary["partial_batch_undo"] = "restore_failed"
-        dest_summary["partial_batch_undo_note"] = note
-        base = message or "Reconciliation failed"
-        if note not in base:
-            return f"{base} {note}"
-        return base
-    from services.batch_undo import undo_failed_batch_if_dest_was_empty
-
-    note = undo_failed_batch_if_dest_was_empty(
-        destination=getattr(request, "destination", None),
-        dest_summary=dest_summary,
-        sync_mode=str(getattr(request, "sync_mode", "") or ""),
-    )
-    base = message or "Reconciliation failed"
-    if note and note not in base:
-        return f"{base} {note}"
-    return base
 
 
-def _remember_preserved_columns(destination: EndpointConfig, kept: list[dict]) -> None:
-    if not kept:
-        return
-    extra = dict(destination.extra or {})
-    extra["preserve_columns"] = kept
-    destination.extra = extra
 
 
 def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> bool:
@@ -1776,100 +1274,6 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
     return ok
 
 
-def _drop_destination_table(
-    destination: EndpointConfig,
-    *,
-    mappings: list[dict] | None = None,
-    checkpoint: Any = None,
-    checkpoint_service: Any = None,
-    mongo: Any = None,
-    job_id: str = "",
-) -> bool:
-    """Drop the destination object for full-refresh overwrite sync modes.
-
-    Raises :class:`FullRefreshDropFailed` when a drop was attempted and failed.
-    Swallowing it is the difference between an overwrite and an append: the old
-    rows survive, the new rows land on top, and the job reports success with a
-    doubled destination. A ``full_refresh`` that cannot clear the destination
-    must fail loudly instead of quietly changing its own semantics.
-
-    Returns ``False`` only when the driver has no drop support, which is a
-    genuine "nothing to do" and not an error.
-    """
-    if destination.kind != "database":
-        return False
-
-    _raise_if_job_cancelled(mongo, job_id)
-    _pin_overwrite_rows_before(destination, checkpoint, checkpoint_service)
-
-    from connectors.table_manager import TableDropError, drop_table
-
-    from .adapters import (
-        carry_dest_spelling_across_drop,
-        resolve_connector_config,
-        resolve_dest_table,
-    )
-    from .connector_capabilities import resolve_driver_type
-
-    try:
-        db_type = resolve_driver_type(destination.format)
-        cfg = resolve_connector_config(destination)
-        table_name = resolve_dest_table(db_type, destination)
-        schema = cfg.get("schema")
-    except Exception as exc:
-        # Could not even work out what to drop. Treated as fatal for the same
-        # reason: proceeding would append onto an uncleared table.
-        raise FullRefreshDropFailed(
-            "unknown", f"could not resolve destination for drop: {exc}"
-        ) from exc
-
-    carry_dest_spelling_across_drop(destination, db_type, cfg, table_name, schema)
-    from connectors.table_manager import overwrite_clear_kind
-
-    clear_kind = overwrite_clear_kind(db_type)
-    if clear_kind == "rename_collection":
-        from connectors.table_manager import retire_mongodb_overwrite
-
-        try:
-            backup = retire_mongodb_overwrite(cfg, table_name)
-        except TableDropError as exc:
-            logger.error("full_refresh mongo retire failed for %s: %s", table_name, exc)
-            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
-        if backup:
-            extra = dict(destination.extra or {})
-            extra["overwrite_backup"] = backup
-            extra["overwrite_backup_engine"] = "mongodb"
-            destination.extra = extra
-        return True
-    if clear_kind == "empty":
-        from connectors.table_manager import empty_existing_for_overwrite
-
-        try:
-            empty_existing_for_overwrite(db_type, cfg, table_name, schema)
-        except TableDropError as exc:
-            logger.error("full_refresh empty failed for %s: %s", table_name, exc)
-            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
-        return True
-    if db_type in ("postgresql", "redshift"):
-        try:
-            from connectors.table_manager import postgres_columns_to_keep
-
-            kept = postgres_columns_to_keep(cfg, table_name, schema, mappings)
-            _remember_preserved_columns(destination, kept)
-        except Exception as exc:  # noqa: BLE001 - keep-column read must not block the overwrite
-            logger.warning(
-                "Could not read destination columns to keep on %s: %s",
-                table_name,
-                exc,
-            )
-    try:
-        return drop_table(db_type, cfg, table_name, schema)
-    except TableDropError as exc:
-        logger.error("full_refresh drop failed for %s: %s", table_name, exc)
-        raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
-    except Exception as exc:
-        logger.error("full_refresh drop failed for %s: %s", table_name, exc, exc_info=exc)
-        raise FullRefreshDropFailed(table_name, str(exc)) from exc
 
 
 from .mapping_write_stamp import (  # noqa: E402
@@ -1879,327 +1283,8 @@ from .mapping_write_stamp import (  # noqa: E402
 )
 
 
-def _auto_map(
-    request: TransferRequest,
-    columns: list[str],
-    schema: dict[str, str],
-    sample_rows: list[dict] | None = None,
-    job_id: str = "",
-) -> list[dict]:
-    """Generate destination-aware mappings when no mapping contract was supplied.
-
-    For append/upsert/merge into an existing target, the destination schema is
-    introspected and the semantic mapper aligns source columns to target columns.
-    For full-refresh/overwrites into a new target, identity mappings are used so
-    the destination can be created from the source shape.
-    """
-    mappings: list[dict] | None = None
-
-    if request.mappings:
-        mappings = request.mappings
-    elif request.destination.kind != "database":
-        mappings = default_mappings(columns)
-    else:
-        sync_mode = resolve_effective_sync_mode(request.sync_mode)
-        if is_overwrite_sync(sync_mode):
-            from services.overwrite_typed_mapping import (
-                build_overwrite_create_new_mappings,
-            )
-
-            mappings = build_overwrite_create_new_mappings(
-                columns=columns,
-                schema=schema,
-                sample_rows=sample_rows,
-                request=request,
-            )
-            # Dest-exists overwrite must not invent extra dest columns. Extra
-            # source stays unaccounted so G13 blocks instead of silent drop
-            # or ADD COLUMN from source position.
-            target_schema, probe_exists = _destination_schema_probe(
-                request.destination,
-                sync_mode=sync_mode,
-            )
-            dest_exists = destination_exists_for_shape(
-                probe_exists,
-                dest_format=str(getattr(request.destination, "format", "") or ""),
-            )
-            if dest_exists is True:
-                from services.mapping_constraints import (
-                    dest_exists_write_column_names,
-                    retain_dest_exists_write_mappings,
-                )
-
-                # Overwrite dest-exists returns empty types for typing, but
-                # extra source must still stay unaccounted (G13) using the
-                # replaced column names stamped on destination.extra.
-                dest_cols = dest_exists_write_column_names(
-                    target_schema=target_schema,
-                    dest_extra=getattr(request.destination, "extra", None) or {},
-                )
-                if dest_cols:
-                    mappings = retain_dest_exists_write_mappings(
-                        mappings, dest_cols
-                    )
-        else:
-            target_schema, probe_exists = _destination_schema_probe(
-                request.destination,
-                sync_mode=sync_mode,
-            )
-            # Shape/existence is the raw probe. Typing may collapse
-            # exists+empty-catalog to "no types to bind" — that must not
-            # invent create-new on a listed dest table (G15 pending).
-            dest_exists = destination_exists_for_shape(
-                probe_exists,
-                dest_format=str(getattr(request.destination, "format", "") or ""),
-            )
-            if not target_schema:
-                # Empty columns: only invent identity create-new when the object
-                # is confirmed missing. Existing/unknown → pending via mapper.
-                try:
-                    from services.mapping_pipeline import run_mapping_pipeline
-
-                    source_schemas = [
-                        {
-                            "name": c,
-                            "inferred_type": schema.get(c, "string"),
-                            "samples": [
-                                cell_to_string(r.get(c, ""), preserve_sql_null=True)
-                                for r in (sample_rows or [])[:8]
-                            ],
-                        }
-                        for c in columns
-                    ]
-                    source_samples = {
-                        c: [
-                            cell_to_string(r.get(c, ""), preserve_sql_null=True)
-                            for r in (sample_rows or [])[:8]
-                        ]
-                        for c in columns
-                    }
-                    from services.data_profiler import source_types_are_authoritative
-
-                    result = run_mapping_pipeline(
-                        source_columns=columns,
-                        target_columns=[],
-                        source_schemas=source_schemas,
-                        target_schemas=None,
-                        file_format=request.source.format,
-                        confidence_threshold=confidence_threshold_for_mode(
-                            request.validation_mode
-                        ),
-                        source_samples=source_samples,
-                        validation_mode=request.validation_mode,
-                        use_llm=False,
-                        schema_policy=request.schema_policy,
-                        destination_db_type=(request.destination.format or "").lower(),
-                        source_db_type=(request.source.format or "").lower(),
-                        destination_table_exists=dest_exists,
-                        source_types_authoritative=source_types_are_authoritative(
-                            request.source.kind or "",
-                            request.source.format or "",
-                        ),
-                        job_id=job_id,
-                    )
-                    auto = result.get("mappings")
-                    if (
-                        auto
-                        and isinstance(auto, list)
-                        and any(m.get("source") for m in auto)
-                    ):
-                        # New tables should keep source column names; the semantic
-                        # mapper may canonicalize (e.g. birth_date -> date_of_birth)
-                        # which is only safe when the target schema is known.
-                        # Preserve the mapper's inferred target_type.
-                        if dest_exists is False:
-                            for m in auto:
-                                m["target"] = m.get("source") or m.get("target", "")
-                                m["create_new"] = True
-                        mappings = auto
-                    elif dest_exists is False:
-                        mappings = default_mappings(columns)
-                except Exception as exc:
-                    logger.warning(
-                        "Empty-dest schema map failed: %s; fallback identity only if missing",
-                        exc,
-                    )
-                    if dest_exists is False:
-                        mappings = default_mappings(columns)
-            else:
-                # For MongoDB append/upsert, do not let the semantic mapper overwrite _id
-                # unless the source literally contains an _id column or the user supplied a mapping.
-                if (
-                    request.destination.format == "mongodb"
-                    and not is_overwrite_sync(sync_mode)
-                    and "_id" not in columns
-                ):
-                    target_schema = {
-                        k: v for k, v in target_schema.items() if k != "_id"
-                    }
-
-                try:
-                    from services.mapping_pipeline import run_mapping_pipeline
-
-                    source_schemas = [
-                        {
-                            "name": c,
-                            "inferred_type": schema.get(c, "string"),
-                            "samples": [
-                                cell_to_string(r.get(c, ""), preserve_sql_null=True)
-                                for r in (sample_rows or [])[:8]
-                            ],
-                        }
-                        for c in columns
-                    ]
-                    target_columns = list(target_schema.keys())
-                    target_schemas = [
-                        {
-                            "name": c,
-                            "inferred_type": target_schema.get(c, "string"),
-                            "samples": [],
-                        }
-                        for c in target_columns
-                    ]
-                    source_samples = {
-                        c: [
-                            cell_to_string(r.get(c, ""), preserve_sql_null=True)
-                            for r in (sample_rows or [])[:8]
-                        ]
-                        for c in columns
-                    }
-                    from services.data_profiler import source_types_are_authoritative
-
-                    result = run_mapping_pipeline(
-                        source_columns=columns,
-                        target_columns=target_columns,
-                        source_schemas=source_schemas,
-                        target_schemas=target_schemas,
-                        file_format=request.source.format,
-                        confidence_threshold=confidence_threshold_for_mode(
-                            request.validation_mode
-                        ),
-                        source_samples=source_samples,
-                        validation_mode=request.validation_mode,
-                        use_llm=False,
-                        schema_policy=request.schema_policy,
-                        # Without the dialect the fidelity verdict is judged in a
-                        # vacuum: DECIMAL→TEXT reads as loss, when TEXT is the
-                        # exact-digit carrier our own DDL picks on SQLite. Every
-                        # existing-destination route shares this call.
-                        destination_db_type=(request.destination.format or "").lower(),
-                        source_db_type=(request.source.format or "").lower(),
-                        destination_table_exists=dest_exists,
-                        source_types_authoritative=source_types_are_authoritative(
-                            request.source.kind or "",
-                            request.source.format or "",
-                        ),
-                        job_id=job_id,
-                    )
-                    auto = result.get("mappings")
-                    if (
-                        auto
-                        and isinstance(auto, list)
-                        and any(m.get("source") for m in auto)
-                    ):
-                        mapped_sources = {str(m.get("source")) for m in auto}
-                        if request.backfill_new_fields:
-                            for c in columns:
-                                if c not in mapped_sources:
-                                    auto.append(
-                                        {"source": c, "target": c, "confidence": 0.95}
-                                    )
-                        mappings = auto
-                except Exception as exc:
-                    logger.warning(
-                        "Auto-mapping failed: %s; falling back to identity mappings",
-                        exc,
-                    )
-
-    if mappings is None:
-        mappings = default_mappings(columns)
-
-    _record_schema_and_lineage(request, mappings, schema, job_id)
-    return mappings
 
 
-def _record_schema_and_lineage(
-    request: TransferRequest,
-    mappings: list[dict[str, Any]],
-    schema: dict[str, str],
-    job_id: str,
-) -> None:
-    """Register source/target schemas and column-level lineage for this job."""
-    src_id = (
-        request.source.connector_id
-        or request.source.host
-        or (request.source_filename if request.source.kind == "file" else "")
-        or f"{request.source.kind}:{request.source.format}"
-    )
-    src_object = (
-        request.source.table
-        or request.source.collection
-        or (request.source_filename if request.source.kind == "file" else "")
-        or "source"
-    )
-    dst_id = (
-        request.destination.connector_id
-        or request.destination.host
-        or f"{request.destination.kind}:{request.destination.format}"
-    )
-    dst_object = (
-        request.destination.table
-        or request.destination.collection
-        or f"{request.destination.format}_export"
-    )
-
-    source_columns = [
-        {"name": name, "type": (schema.get(name) or "string"), "primary_key": False}
-        for name in schema.keys()
-    ]
-    schema_registry.register_schema(
-        columns=source_columns,
-        connector_type=request.source.format,
-        connector_id=src_id,
-        object_name=src_object,
-        job_id=job_id,
-        source_of_truth=True,
-    )
-
-    # Build a best-effort target schema from the mappings.
-    target_columns = []
-    for m in mappings:
-        src = str(m.get("source", "")).strip()
-        tgt = str(m.get("target", "")).strip()
-        if not src or not tgt:
-            continue
-        target_columns.append(
-            {
-                "name": tgt,
-                "type": schema.get(src, "string"),
-                "primary_key": False,
-            }
-        )
-    if target_columns:
-        schema_registry.register_schema(
-            columns=target_columns,
-            connector_type=request.destination.format,
-            connector_id=dst_id,
-            object_name=dst_object,
-            job_id=job_id,
-        )
-        schema_registry.record_lineage(
-            source={
-                "connector_type": request.source.format,
-                "connector_id": src_id,
-                "object_name": src_object,
-            },
-            target={
-                "connector_type": request.destination.format,
-                "connector_id": dst_id,
-                "object_name": dst_object,
-            },
-            mappings=mappings,
-            job_id=job_id,
-        )
 
 
 #: Placeholder holder id used while claiming a slot before the job document
@@ -2969,12 +2054,12 @@ class UniversalTransferEngine:
                 job_id, "running", total_rows=total_rows, records_processed=0
             )
 
-            dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
+            dest_schema_types, dest_table_exists_flag = _engine_module._destination_schema_probe(
                 request.destination,
                 sync_mode=request.sync_mode,
             )
             mappings = _enrich_mappings_with_types(
-                _auto_map(
+                _engine_module._auto_map(
                     request, columns, schema, sample_rows=records[:100], job_id=job_id
                 ),
                 column_types=schema,
@@ -3102,7 +2187,7 @@ class UniversalTransferEngine:
             # PRODUCTION_SKU and Studio Execute must prove mapping gates first.
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
-                parity = _execute_preflight_parity_kwargs(
+                parity = _engine_module._execute_preflight_parity_kwargs(
                     request,
                     destination_connected=dest_ok,
                     destination_table_exists_fallback=dest_table_exists_flag,
@@ -3167,7 +2252,7 @@ class UniversalTransferEngine:
                 )
                 pf = apply_policy_gates(
                     pf,
-                    _execute_policy_gates_for_request(
+                    _engine_module._execute_policy_gates_for_request(
                         request, source_columns=columns
                     ),
                     validation_mode=request.validation_mode,
@@ -3525,7 +2610,7 @@ class UniversalTransferEngine:
                                 "Preparing destination — clearing table for full refresh…"
                             ),
                         )
-                        _drop_destination_table(
+                        _engine_module._drop_destination_table(
                             request.destination,
                             mappings=mappings,
                             checkpoint=checkpoint,
@@ -3932,7 +3017,7 @@ class UniversalTransferEngine:
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
-                fail_message = _note_failed_batch_undo(
+                fail_message = _engine_module._note_failed_batch_undo(
                     request,
                     dest_summary,
                     recon.get("message", "Reconciliation failed"),
@@ -4333,12 +3418,12 @@ class UniversalTransferEngine:
             mongo.update_job_status(
                 job_id, "running", total_rows=total_rows, records_processed=0
             )
-            dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
+            dest_schema_types, dest_table_exists_flag = _engine_module._destination_schema_probe(
                 request.destination,
                 sync_mode=request.sync_mode,
             )
             mappings = _enrich_mappings_with_types(
-                _auto_map(
+                _engine_module._auto_map(
                     request, columns, schema, sample_rows=sample_rows, job_id=job_id
                 ),
                 column_types=schema,
@@ -4372,7 +3457,7 @@ class UniversalTransferEngine:
             )
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
-                parity = _execute_preflight_parity_kwargs(
+                parity = _engine_module._execute_preflight_parity_kwargs(
                     request,
                     destination_connected=dest_ok,
                     destination_table_exists_fallback=dest_table_exists_flag,
@@ -4447,7 +3532,7 @@ class UniversalTransferEngine:
                 )
                 pf = apply_policy_gates(
                     pf,
-                    _execute_policy_gates_for_request(
+                    _engine_module._execute_policy_gates_for_request(
                         request, source_columns=columns
                     ),
                     validation_mode=request.validation_mode,
@@ -4742,7 +3827,7 @@ class UniversalTransferEngine:
                             "Preparing destination — clearing table for full refresh…"
                         ),
                     )
-                    _drop_destination_table(
+                    _engine_module._drop_destination_table(
                         request.destination,
                         mappings=mappings,
                         checkpoint=checkpoint,
@@ -4912,7 +3997,7 @@ class UniversalTransferEngine:
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
-                fail_message = _note_failed_batch_undo(
+                fail_message = _engine_module._note_failed_batch_undo(
                     request,
                     dest_summary,
                     recon.get("message", "Reconciliation failed"),
@@ -5340,12 +4425,12 @@ class UniversalTransferEngine:
             mongo.update_job_status(
                 job_id, "running", total_rows=total_rows, records_processed=0
             )
-            dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
+            dest_schema_types, dest_table_exists_flag = _engine_module._destination_schema_probe(
                 request.destination,
                 sync_mode=request.sync_mode,
             )
             mappings = _enrich_mappings_with_types(
-                _auto_map(
+                _engine_module._auto_map(
                     request, columns, schema, sample_rows=sample_rows, job_id=job_id
                 ),
                 column_types=schema,
@@ -5379,7 +4464,7 @@ class UniversalTransferEngine:
             )
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
-                parity = _execute_preflight_parity_kwargs(
+                parity = _engine_module._execute_preflight_parity_kwargs(
                     request,
                     destination_connected=dest_ok,
                     destination_table_exists_fallback=dest_table_exists_flag,
@@ -5452,7 +4537,7 @@ class UniversalTransferEngine:
                 )
                 pf = apply_policy_gates(
                     pf,
-                    _execute_policy_gates_for_request(
+                    _engine_module._execute_policy_gates_for_request(
                         request, source_columns=columns
                     ),
                     validation_mode=request.validation_mode,
@@ -5722,7 +4807,7 @@ class UniversalTransferEngine:
                             "Preparing destination — clearing table for full refresh…"
                         ),
                     )
-                    _drop_destination_table(
+                    _engine_module._drop_destination_table(
                         request.destination,
                         mappings=mappings,
                         checkpoint=checkpoint,
@@ -5799,7 +4884,7 @@ class UniversalTransferEngine:
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
-                fail_message = _note_failed_batch_undo(
+                fail_message = _engine_module._note_failed_batch_undo(
                     request,
                     dest_summary,
                     recon.get("message", "Reconciliation failed"),
@@ -6327,3 +5412,28 @@ def get_transfer_engine() -> UniversalTransferEngine:
     if _engine is None:
         _engine = UniversalTransferEngine()
     return _engine
+
+_EXTRACTED_ENGINE_EXPORTS = {
+    "_catalog_pk_for_policy": "engine_preflight",
+    "_execute_policy_gates_for_request": "engine_preflight",
+    "_execute_preflight_parity_kwargs": "engine_preflight",
+    "_destination_schema_probe": "engine_destination",
+    "_drop_destination_table": "engine_destination",
+    "_note_failed_batch_undo": "engine_destination",
+    "_pin_overwrite_rows_before": "engine_destination",
+    "_remember_preserved_columns": "engine_destination",
+    "_auto_map": "engine_automap",
+    "_record_schema_and_lineage": "engine_automap",
+}
+
+
+def __getattr__(name: str):
+    module_name = _EXTRACTED_ENGINE_EXPORTS.get(name)
+    if module_name is not None:
+        from importlib import import_module
+
+        module = import_module(f"src.transfer.{module_name}")
+        value = getattr(module, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
