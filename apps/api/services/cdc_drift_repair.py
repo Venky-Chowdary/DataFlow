@@ -119,6 +119,9 @@ def run_fenced_drift_repair(
     if not selected or not selected.issubset(evidence_keys):
         raise ValueError("Selected CDC drift keys are not present in job evidence.")
 
+    from services.cdc_exactly_once import require_batch_lsn
+
+    lsn = require_batch_lsn(evidence.get("committed_position"))
     request = transfer_request_from_dict(saved)
     from src.transfer.adapters import resolve_connector_config, write_destination_database
     from src.transfer.connector_capabilities import resolve_driver_type
@@ -261,9 +264,6 @@ def run_fenced_drift_repair(
             incoming_fence=int(lease.generation),
         )
         committed = evidence.get("committed_position")
-        from services.cdc_exactly_once import extract_cdc_lsn
-
-        lsn = extract_cdc_lsn(committed) or str(committed or "")
         mappings = list(saved.get("mappings") or [])
         pk_fields = [str(col) for col in evidence.get("pk_fields") or []]
         pk_mapping = {
@@ -402,7 +402,6 @@ def run_fenced_drift_repair(
         resolved = (
             not bool(evidence.get("truncated"))
             and evidence.get("drift_count") == len(evidence_keys)
-            and evidence_keys.issubset(selected)
             and not (evidence_keys & after_ids)
             and not (evidence_keys - source_ids)
             and counts["failed"] == 0

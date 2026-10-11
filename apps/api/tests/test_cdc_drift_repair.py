@@ -371,15 +371,66 @@ def test_repair_refuses_a_live_stream_lease(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("newer_destination", "fail_writer"),
-    [(False, False), (True, False), (False, True)],
+    ("token", "newer_token"),
+    [
+        (
+            {
+                "kind": "oracle-logminer",
+                "phase": "streaming",
+                "scn": 2967674,
+                "rs_id": " 0x0000a5.0000337f.001c ",
+                "ssn": 0,
+            },
+            {
+                "kind": "oracle-logminer",
+                "phase": "streaming",
+                "scn": 2968674,
+                "rs_id": " 0x0000a5.0000337f.001c ",
+                "ssn": 0,
+            },
+        ),
+        (
+            {
+                "kind": "mssql-cdc",
+                "phase": "streaming",
+                "lsn": "0000002e000001d80030",
+                "seqval": "0000000000000001",
+            },
+            {
+                "kind": "mssql-cdc",
+                "phase": "streaming",
+                "lsn": "0000002e000001d80031",
+                "seqval": "0000000000000001",
+            },
+        ),
+    ],
+    ids=["oracle-composite", "sqlserver-composite"],
+)
+@pytest.mark.parametrize(
+    ("newer_destination", "fail_writer", "partial_selection"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (False, False, True),
+    ],
+    ids=["all-keys", "newer-destination", "writer-failure", "partial-selection"],
 )
 def test_confirmed_repair_reconciles_and_refuses_newer_lsn(
-    monkeypatch, newer_destination, fail_writer, tmp_path, caplog
+    monkeypatch,
+    newer_destination,
+    fail_writer,
+    partial_selection,
+    tmp_path,
+    caplog,
+    token,
+    newer_token,
 ):
     from types import SimpleNamespace
 
     from connectors import cdc_eos_sql
+    from connectors.lsn_guards import compare_lsn
+    from services.cdc_exactly_once import batch_lsn
     from services.cdc_drift_repair import _build_drift_evidence, run_fenced_drift_repair
     from services.cdc_lease import CdcLease
     from services.mongodb_service import MemoryMongoDBService
@@ -388,13 +439,18 @@ def test_confirmed_repair_reconciles_and_refuses_newer_lsn(
     source_rows = [
         {"id": "row-1", "value": "source-1"},
         {"id": "row-2", "value": "source-2"},
+        {"id": "row-3", "value": "source-3"},
     ]
+    position = batch_lsn(token)
+    newer_position = batch_lsn(newer_token)
+    assert position and newer_position
+    assert compare_lsn(newer_position, position) > 0
     evidence = _build_drift_evidence(
         cursor_key=EVIDENCE["cursor_key"],
         source_table="orders",
         dest_table="orders_copy",
         pk_fields=["id"],
-        committed_position="0/100",
+        committed_position=token,
         rows=source_rows,
     )
     source = EndpointConfig(
@@ -479,10 +535,11 @@ def test_confirmed_repair_reconciles_and_refuses_newer_lsn(
     monkeypatch.setattr("services.audit_log.append_audit_event", lambda **_kwargs: None)
 
     destination_state = {
-        "row-1": {"value": "damaged-1", "_df_lsn": "0/100"},
-        "row-2": {
-            "value": "damaged-2",
-            "_df_lsn": "0/200" if newer_destination else "0/100",
+        "row-1": {"value": "damaged-1", "_df_lsn": position},
+        "row-2": {"value": "damaged-2", "_df_lsn": position},
+        "row-3": {
+            "value": "damaged-3",
+            "_df_lsn": newer_position if newer_destination else position,
         },
     }
 
@@ -498,7 +555,7 @@ def test_confirmed_repair_reconciles_and_refuses_newer_lsn(
         if fail_writer and row["id"] == "row-1":
             raise RuntimeError("row-value-sentinel-keep-out")
         current = destination_state[row["id"]]
-        if current["_df_lsn"] == "0/200":
+        if current["_df_lsn"] == newer_position:
             return 0, [], {"rows_skipped": 1}
         destination_state[row["id"]] = {
             "value": row["value"],
@@ -511,28 +568,65 @@ def test_confirmed_repair_reconciles_and_refuses_newer_lsn(
 
     monkeypatch.setattr(value_digest, "identity_rows_missing_on_dest", drift_scan)
     monkeypatch.setattr(
-        value_digest, "_scan_table", lambda *a, **k: [{"id": "row-1"}, {"id": "row-2"}]
+        value_digest,
+        "_scan_table",
+        lambda *a, **k: [{"id": row["id"]} for row in source_rows],
     )
     monkeypatch.setattr(adapters, "write_destination_database", fake_write)
 
+    selected_keys = [item["key_id"] for item in evidence["keys"]]
+    if partial_selection:
+        selected_keys = selected_keys[:1]
     summary = run_fenced_drift_repair(
         job_id,
-        [item["key_id"] for item in evidence["keys"]],
+        selected_keys,
         actor="operator",
         workspace_id="workspace-a",
     )
     assert destination_state["row-1"] == (
-        {"value": "damaged-1", "_df_lsn": "0/100"}
+        {"value": "damaged-1", "_df_lsn": position}
         if fail_writer
-        else {"value": "source-1", "_df_lsn": "0/100"}
+        else {"value": "source-1", "_df_lsn": position}
     )
-    assert summary["outcomes"]["repaired"] == (
-        1 if newer_destination or fail_writer else 2
+    if not fail_writer:
+        assert destination_state["row-1"]["_df_lsn"] == position
+    if newer_destination:
+        assert destination_state["row-3"] == {
+            "value": "damaged-3",
+            "_df_lsn": newer_position,
+        }
+    expected_repaired = (
+        1 if partial_selection else 2 if newer_destination or fail_writer else 3
     )
+    assert summary["outcomes"]["repaired"] == expected_repaired
     assert summary["outcomes"]["refused_newer_event"] == int(newer_destination)
     assert summary["outcomes"]["failed"] == int(fail_writer)
-    assert summary["verified"] == (1 if newer_destination or fail_writer else 2)
-    assert summary["resolved"] is not (newer_destination or fail_writer)
+    expected_verified = (
+        1 if partial_selection else 2 if newer_destination or fail_writer else 3
+    )
+    assert summary["verified"] == expected_verified
+    assert summary["resolved"] is not (
+        partial_selection or newer_destination or fail_writer
+    )
+    if partial_selection:
+        assert destination_state["row-2"] == {
+            "value": "damaged-2",
+            "_df_lsn": position,
+        }
+        assert destination_state["row-3"]["value"] == "damaged-3"
+        assert summary["outcomes"]["failed"] == 0
+        assert summary["outcomes"]["refused_newer_event"] == 0
+    if newer_destination:
+        destination_state["row-3"]["_df_lsn"] = position
+        resolved_summary = run_fenced_drift_repair(
+            job_id,
+            [evidence["keys"][2]["key_id"]],
+            actor="operator",
+            workspace_id="workspace-a",
+        )
+        assert resolved_summary["outcomes"]["repaired"] == 1
+        assert resolved_summary["resolved"] is True
+        assert resolved_summary["verified"] == 1
     if fail_writer:
         failed_key = evidence["keys"][0]["key_id"]
         warning_messages = [
@@ -548,6 +642,59 @@ def test_confirmed_repair_reconciles_and_refuses_newer_lsn(
             for message in warning_messages
         )
         assert "row-value-sentinel-keep-out" not in caplog.text
+
+
+def test_repair_refuses_missing_durable_position_before_lease_or_write(monkeypatch):
+    from services.cdc_drift_repair import _build_drift_evidence, run_fenced_drift_repair
+    from services.cdc_exactly_once import ExactlyOnceRouteError
+    from services.mongodb_service import MemoryMongoDBService
+
+    evidence = _build_drift_evidence(
+        cursor_key=EVIDENCE["cursor_key"],
+        source_table="orders",
+        dest_table="orders_copy",
+        pk_fields=["id"],
+        committed_position=None,
+        rows=[{"id": "row-1"}],
+    )
+    store = MemoryMongoDBService()
+    job_id = "job-drift-no-eos-position"
+    store.create_transfer_job(
+        {
+            "_id": job_id,
+            "workspace_id": "workspace-a",
+            "transfer_request": {
+                "source": {"table": "orders"},
+                "destination": {"table": "orders_copy"},
+            },
+            "extras": {"cdc_drift_repair": evidence},
+            "cdc_lease_cursor_key": EVIDENCE["cursor_key"],
+        }
+    )
+    monkeypatch.setattr(
+        "services.mongodb_service.get_mongodb_service", lambda: store
+    )
+    lease_attempts = []
+    write_attempts = []
+    monkeypatch.setattr(
+        "services.cdc_lease.acquire_lease",
+        lambda *a, **k: lease_attempts.append((a, k)),
+    )
+    monkeypatch.setattr(
+        "src.transfer.adapters.write_destination_database",
+        lambda *a, **k: write_attempts.append((a, k)),
+    )
+
+    with pytest.raises(ExactlyOnceRouteError, match="durable LSN"):
+        run_fenced_drift_repair(
+            job_id,
+            [item["key_id"] for item in evidence["keys"]],
+            actor="operator",
+            workspace_id="workspace-a",
+        )
+
+    assert lease_attempts == []
+    assert write_attempts == []
 
 
 def _seed_image_repair_scenario(tmp_path, monkeypatch):
