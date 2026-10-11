@@ -27,6 +27,7 @@ os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 from connectors.sqlserver_cdc_native import (  # noqa: E402
     SqlServerNativeCdc,
     _hex_to_lsn,
+    _lsn_to_hex,
     compare_mssql_hex_lsn,
     decode_mssql_cdc_token,
 )
@@ -119,6 +120,7 @@ def _wait_for_cdc_events(
     resume_lsn: str,
     expected: set[tuple[int, int]],
     *,
+    after_lsn: str | None = None,
     timeout_sec: float = 20.0,
 ) -> None:
     deadline = time.monotonic() + timeout_sec
@@ -151,13 +153,27 @@ def _wait_for_cdc_events(
                     cols = [desc[0] for desc in (cur.description or [])]
                     operation_idx = cols.index("__$operation")
                     id_idx = cols.index("id")
+                    rows = cur.fetchall() or []
                     events = {
                         (int(row[operation_idx]), int(row[id_idx]))
-                        for row in (cur.fetchall() or [])
+                        for row in rows
                     }
                     last_state["events"] = events
                     if expected.issubset(events):
-                        return
+                        if after_lsn is None:
+                            return
+                        start_lsn_idx = cols.index("__$start_lsn")
+                        events_after_lsn = {
+                            (int(row[operation_idx]), int(row[id_idx]))
+                            for row in rows
+                            if compare_mssql_hex_lsn(
+                                _lsn_to_hex(row[start_lsn_idx]),
+                                after_lsn,
+                            )
+                            > 0
+                        }
+                        if expected.issubset(events_after_lsn):
+                            return
         time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
     raise AssertionError(
         f"CDC capture did not expose expected events before transfer: "
