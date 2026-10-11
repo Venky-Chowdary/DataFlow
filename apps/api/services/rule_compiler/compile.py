@@ -12,6 +12,8 @@ artifacts the same way an operator would have typed them.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from collections import defaultdict
 from typing import Any
@@ -40,6 +42,10 @@ from .roles import GROUNDED_METHODS, ground_workbook_rows
 
 _MAX_SHAPE_STEPS = 100
 _MAX_MACRO_DEPTH = 8
+
+RULE_COMPILER_VERSION = "1"
+
+_CONTRACT_EXECUTE_TYPES = frozenset({"not_null", "contains", "in_set", "compare", "pattern"})
 
 _KIND_TO_TRANSFORM = {
     "trim": "trim",
@@ -587,6 +593,10 @@ def compile_rule_workbook(
             dest_table,
         ))
 
+    for item in compiled:
+        item["rule_id"] = _rule_id(item)
+        if item.get("kind") == "contract":
+            item["enforced_at_execute"] = _contract_enforced_at_execute(item)
     buckets = {
         "executable": sum(1 for r in compiled if r["status"] == "executable"),
         "needs_confirmation": sum(1 for r in compiled if r["status"] == "needs_confirmation"),
@@ -618,10 +628,36 @@ def compile_rule_workbook(
             1 for r in compiled
             if r["status"] == "executable" and r.get("kind") == "contract"
         ),
+        "contracts_enforced_at_execute": sum(
+            1 for r in compiled
+            if r.get("kind") == "contract" and r.get("enforced_at_execute")
+        ),
         "percent": int(round(100 * buckets["executable"] / detected)) if detected else 0,
     }
+    input_sha = hashlib.sha256(payload).hexdigest()
+    fingerprint = _report_fingerprint(
+        input_sha,
+        compiled,
+        shape_steps,
+        {
+            "source_columns": src_cols,
+            "dest_columns": dst_cols,
+            "source_table": source_table,
+            "dest_table": dest_table,
+            "source_tables": selected_tables,
+            "source_catalog": catalog,
+            "dest_tables": selected_dest_tables,
+            "dest_catalog": dest_cat,
+            "source_types": src_types,
+            "dest_types": dst_types,
+            "sync_mode": sync,
+        },
+    )
     return {
         "filename": filename,
+        "compiler_version": RULE_COMPILER_VERSION,
+        "input_sha256": input_sha,
+        "report_fingerprint": fingerprint,
         "rule_count": detected,
         "buckets": buckets,
         "coverage": coverage,
@@ -730,6 +766,50 @@ def compile_rule_workbook(
             "as remap-or-omit. Nothing is silently dropped."
         ),
     }
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _rule_id(item: dict[str, Any]) -> str:
+    """Stable per-row identity: provenance + both ends + the spoken rule."""
+    provenance = item.get("provenance") or {}
+    key = {
+        "sheet": provenance.get("sheet") or "",
+        "row": provenance.get("row") or 0,
+        "source_table": item.get("source_table") or "",
+        "source_column": item.get("source_column") or "",
+        "dest_table": item.get("dest_table") or "",
+        "dest_column": item.get("dest_column") or "",
+        "rule_text": item.get("rule_text") or "",
+    }
+    return hashlib.sha256(_canonical_json(key).encode()).hexdigest()[:16]
+
+
+def _contract_enforced_at_execute(item: dict[str, Any]) -> bool:
+    contract = item.get("contract") or {}
+    return str(contract.get("type") or "") in _CONTRACT_EXECUTE_TYPES
+
+
+def _report_fingerprint(
+    input_sha: str,
+    rules: list[dict[str, Any]],
+    shape_steps: list[dict[str, Any]],
+    schema_args: dict[str, Any],
+) -> str:
+    payload = {
+        "compiler_version": RULE_COMPILER_VERSION,
+        "input_sha256": input_sha,
+        "rules": rules,
+        "shape_steps": shape_steps,
+        "contracts": [
+            item for item in rules
+            if item.get("kind") == "contract" and item.get("contract")
+        ],
+        "schema": schema_args,
+    }
+    return hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
 
 
 def _classify_sheets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:

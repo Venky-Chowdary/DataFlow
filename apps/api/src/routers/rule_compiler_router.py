@@ -8,33 +8,45 @@ from typing import Any
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from services.rule_compiler import RuleIngestError, compile_rule_workbook
+from services.rule_compiler.ingest import MAX_FILE_BYTES
 
 router = APIRouter(prefix="/transfer/rules", tags=["Transfer rules"])
 
 
-def _json_object(raw: str) -> dict[str, str]:
+def _form_json(raw: str, field: str) -> Any:
     text = (raw or "").strip()
     if not text:
-        return {}
+        return None
     try:
-        data = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Form field {field!r} is not valid JSON.",
+        ) from None
+
+
+def _json_object(raw: str, field: str = "source_types") -> dict[str, str]:
+    data = _form_json(raw, field)
+    if data is None:
         return {}
     if isinstance(data, dict):
         return {str(k): str(v) for k, v in data.items() if str(k).strip()}
-    return {}
+    raise HTTPException(
+        status_code=400,
+        detail=f"Form field {field!r} must be a JSON object.",
+    )
 
 
-def _json_catalog(raw: str) -> dict[str, list[str]]:
-    text = (raw or "").strip()
-    if not text:
-        return {}
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
+def _json_catalog(raw: str, field: str = "source_catalog") -> dict[str, list[str]]:
+    data = _form_json(raw, field)
+    if data is None:
         return {}
     if not isinstance(data, dict):
-        return {}
+        raise HTTPException(
+            status_code=400,
+            detail=f"Form field {field!r} must be a JSON object.",
+        )
     out: dict[str, list[str]] = {}
     for key, value in data.items():
         name = str(key).strip()
@@ -47,17 +59,16 @@ def _json_catalog(raw: str) -> dict[str, list[str]]:
     return out
 
 
-def _json_list(raw: str) -> list[str]:
-    text = (raw or "").strip()
-    if not text:
+def _json_list(raw: str, field: str = "source_columns") -> list[str]:
+    data = _form_json(raw, field)
+    if data is None:
         return []
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        return [part.strip() for part in text.split(",") if part.strip()]
     if isinstance(data, list):
         return [str(item) for item in data if str(item).strip()]
-    return []
+    raise HTTPException(
+        status_code=400,
+        detail=f"Form field {field!r} must be a JSON array.",
+    )
 
 
 @router.post("/import")
@@ -76,22 +87,27 @@ async def import_rule_workbook(
     sync_mode: str = Form(""),
 ) -> dict[str, Any]:
     """Read Excel / CSV / JSON rules. Does not write a destination."""
-    payload = await file.read()
+    payload = await file.read(MAX_FILE_BYTES + 1)
+    if len(payload) > MAX_FILE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Rule files are limited to {MAX_FILE_BYTES // (1024 * 1024)} MB.",
+        )
     filename = file.filename or "rules"
     try:
         return compile_rule_workbook(
             filename,
             payload,
-            source_columns=_json_list(source_columns),
-            dest_columns=_json_list(dest_columns),
+            source_columns=_json_list(source_columns, "source_columns"),
+            dest_columns=_json_list(dest_columns, "dest_columns"),
             source_table=source_table,
             dest_table=dest_table,
-            source_tables=_json_list(source_tables),
-            source_catalog=_json_catalog(source_catalog),
-            dest_tables=_json_list(dest_tables),
-            dest_catalog=_json_catalog(dest_catalog),
-            source_types=_json_object(source_types),
-            dest_types=_json_object(dest_types),
+            source_tables=_json_list(source_tables, "source_tables"),
+            source_catalog=_json_catalog(source_catalog, "source_catalog"),
+            dest_tables=_json_list(dest_tables, "dest_tables"),
+            dest_catalog=_json_catalog(dest_catalog, "dest_catalog"),
+            source_types=_json_object(source_types, "source_types"),
+            dest_types=_json_object(dest_types, "dest_types"),
             sync_mode=sync_mode,
         )
     except RuleIngestError as exc:
