@@ -19,7 +19,97 @@ from test_cdc_oracle_logminer_txn_live import _pg_cfg, _pg_ready
 
 
 def _oracle_test_rs_id(position: int) -> str:
-    return f"0x000001.{position:08x}.0000"
+    return f" 0x000001.{position:08x}.0000 "
+
+
+@pytest.mark.skipif(
+    not _oracle_logminer_ready(),
+    reason="Oracle LogMiner not reachable — set DATAFLOW_ORACLE_ENABLE=1 on a CDC-ready :1521",
+)
+def test_oracle_numeric_rs_id_order_and_resume_live() -> None:
+    from connectors.generic_sql import get_connection
+    from connectors.oracle_logminer import (
+        OracleLogMinerCdc,
+        _RS_ID_ORDER_BY,
+        _RS_ID_RESUME_PREDICATE,
+        encode_logminer_token,
+    )
+    from connectors.oracle_logminer_txn import mining_position
+
+    cfg = _oracle_cfg()
+    rows_sql = """
+        SELECT 100 AS SCN, ' 0xffffff.00000010.0010 ' AS RS_ID, 16 AS SSN
+        FROM DUAL
+        UNION ALL
+        SELECT 100, ' 0x1000000.00000002.0010 ', 16 FROM DUAL
+        UNION ALL
+        SELECT 100, ' 0x1000000.00000003.0001 ', 16 FROM DUAL
+        UNION ALL
+        SELECT 100, ' 0x1000000.00000003.0002 ', 16 FROM DUAL
+    """
+    sql = f"""
+        SELECT SCN, RS_ID, SSN
+        FROM (
+          SELECT SCN, RS_ID, SSN, ROWNUM AS DF_RN
+          FROM ({rows_sql}) DF_CONTENTS
+          WHERE {_RS_ID_RESUME_PREDICATE}
+          {_RS_ID_ORDER_BY}
+        )
+    """
+
+    def fetch(cursor, binds: dict) -> list[tuple]:
+        cursor.execute(sql, binds)
+        return list(cursor.fetchall() or [])
+
+    reader = OracleLogMinerCdc(
+        cfg,
+        table="M6RSID_DUAL",
+        primary_key="ID",
+        schema=str(cfg["schema"]),
+        resume_token=encode_logminer_token(
+            99, table="M6RSID_DUAL", phase="streaming"
+        ),
+    )
+    reader.scn = 99
+    reader.rs_id = ""
+    reader.ssn = 16
+    reader.scn_complete = 0
+    ordered_binds = reader._resume_binds()
+    reader.scn = 100
+    reader.rs_id = "0xffffff.00000010.0010"
+    resume_binds = reader._resume_binds()
+
+    with get_connection(
+        host=cfg["host"],
+        port=cfg["port"],
+        database=cfg["database"],
+        username=cfg["username"],
+        password=cfg["password"],
+        connection_string="",
+        ssl=False,
+        db_type="oracle",
+    ) as conn:
+        with conn.cursor() as cursor:
+            ordered = fetch(cursor, ordered_binds)
+            resumed = fetch(cursor, resume_binds)
+
+    assert resume_binds["rs_id"] == " 0xffffff.00000010.0010 "
+    assert resume_binds["rs_len"] == len(resume_binds["rs_id"])
+    assert [row[1] for row in ordered] == [
+        " 0xffffff.00000010.0010 ",
+        " 0x1000000.00000002.0010 ",
+        " 0x1000000.00000003.0001 ",
+        " 0x1000000.00000003.0002 ",
+    ]
+    assert [mining_position(row[0], row[1], row[2]) for row in ordered] == sorted(
+        mining_position(row[0], row[1], row[2]) for row in ordered
+    )
+    assert [row[1] for row in resumed] == [
+        " 0x1000000.00000002.0010 ",
+        " 0x1000000.00000003.0001 ",
+        " 0x1000000.00000003.0002 ",
+    ]
+    assert all(row[1] != " 0xffffff.00000010.0010 " for row in resumed)
 
 
 def _use_oracle_mining_timezone_0930(
@@ -454,12 +544,12 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
                     step_context="test_ddl_barrier_scn",
                 ):
                     cur.execute(
-                        """
+                        f"""
                         SELECT SCN, SQL_REDO
                         FROM V$LOGMNR_CONTENTS
                         WHERE OPERATION = 'DDL'
                           AND SCN BETWEEN :start_scn AND :end_scn
-                        ORDER BY SCN, RS_ID, SSN
+                        ORDER BY SCN, LENGTH(RS_ID), RS_ID, SSN
                         """,
                         {
                             "start_scn": first_ddl_start_scn,
@@ -617,6 +707,102 @@ def _unit_reader(*, table: str | list[str] = "T1", resume_token=None):
         resume_token=resume_token,
         cursor_key="o6-unit:" + ",".join(tables),
     )
+
+
+def test_oracle_ddl_ambiguity_uses_numeric_rs_id_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import connectors.oracle_logminer as logminer
+
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
+    reader = _unit_reader()
+    reader.phase = "streaming"
+    reader.scn = 100
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    monkeypatch.setattr(
+        "services.cdc_incremental_runner.interleave_incremental_snapshot",
+        lambda *_args, **_kwargs: iter(()),
+    )
+    monkeypatch.setattr(
+        logminer, "fetch_oldest_available_scn", lambda _cur: 1
+    )
+    monkeypatch.setattr(logminer, "fetch_redo_inventory", lambda _cur: [])
+    monkeypatch.setattr(
+        logminer, "assert_resume_scn_in_redo", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        logminer, "assert_redo_continuity", lambda *_args, **_kwargs: None
+    )
+
+    earlier_rs_id = " 0xffffff.00000010.0010 "
+    later_rs_id = " 0x1000000.00000002.0010 "
+    rows = [
+        (
+            100,
+            earlier_rs_id,
+            16,
+            "DDL",
+            "ALTER TABLE T1 MODIFY A NUMBER",
+            "T1",
+            "DATAFLOW",
+            0,
+            0,
+            0,
+            "T1",
+        ),
+        (
+            100,
+            later_rs_id,
+            16,
+            "DDL",
+            "ALTER TABLE T1 MODIFY B NUMBER",
+            "T1",
+            "DATAFLOW",
+            0,
+            0,
+            0,
+            "T1",
+        ),
+    ]
+    monkeypatch.setattr(
+        reader,
+        "_fetch_logminer_rows_visible",
+        lambda *_args, **_kwargs: (rows, 101),
+    )
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        reader, "_record_oracle_ddl", lambda **kwargs: recorded.append(kwargs)
+    )
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def execute(self, *_args, **_kwargs):
+            return None
+
+        def fetchone(self):
+            return (101,)
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def cursor(self):
+            return Cursor()
+
+    monkeypatch.setattr(reader, "_mining_conn", lambda: Connection())
+    list(reader._poll_once())
+
+    assert len(recorded) == 2
+    assert recorded[0]["offset"]["rs_id"] == earlier_rs_id
+    assert recorded[0]["ambiguous_later_ddl"] is True
 
 
 def test_oracle_ddl_queries_include_only_table_scoped_ddl() -> None:

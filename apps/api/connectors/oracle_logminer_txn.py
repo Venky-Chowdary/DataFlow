@@ -81,8 +81,8 @@ def oracle_txn_max_age_seconds() -> int:
 def rs_id_sort_key(rs_id: str) -> tuple:
     """Numeric ``(seq, blk, off)`` for a LogMiner RS_ID.
 
-    RS_ID components are hex with site-dependent widths, so a string compare
-    mis-orders ``0x9…`` against ``0x10…``.
+    The sequence width grows past ``0xFFFFFF``, so string order can diverge
+    from numeric order.
     """
     raw = str(rs_id or "").strip()
     if not raw:

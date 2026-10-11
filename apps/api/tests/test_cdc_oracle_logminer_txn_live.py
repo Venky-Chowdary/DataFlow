@@ -603,7 +603,7 @@ def test_oracle_single_table_poll_keeps_transactions_whole(
     dml_rows = [
         (
             150,
-            "0x000001.0001.0001",
+            " 0x000001.00000001.0001 ",
             1,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'1\',\'t1-a\')',
@@ -615,7 +615,7 @@ def test_oracle_single_table_poll_keeps_transactions_whole(
         ),
         (
             151,
-            "0x000001.0001.0002",
+            " 0x000001.00000001.0002 ",
             2,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'2\',\'t1-b\')',
@@ -627,7 +627,7 @@ def test_oracle_single_table_poll_keeps_transactions_whole(
         ),
         (
             200,
-            "0x000001.0001.0003",
+            " 0x000001.00000001.0003 ",
             3,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'3\',\'t2-a\')',
@@ -639,7 +639,7 @@ def test_oracle_single_table_poll_keeps_transactions_whole(
         ),
         (
             201,
-            "0x000001.0001.0004",
+            " 0x000001.00000001.0004 ",
             4,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'4\',\'t2-b\')',
@@ -651,7 +651,7 @@ def test_oracle_single_table_poll_keeps_transactions_whole(
         ),
         (
             202,
-            "0x000001.0001.0005",
+            " 0x000001.00000001.0005 ",
             5,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'5\',\'t2-c\')',
@@ -664,12 +664,12 @@ def test_oracle_single_table_poll_keeps_transactions_whole(
     ]
     txn_dml_rows = [(*row, 0) for row in dml_rows]
     lifecycle_rows = [
-        (149, "0x000001.0001.0000", 0, "START", None, None, None, 1, 0, 1, 0),
+        (149, " 0x000001.00000001.0000 ", 0, "START", None, None, None, 1, 0, 1, 0),
         *txn_dml_rows[:2],
-        (152, "0x000001.0001.0006", 6, "COMMIT", "commit", None, None, 1, 0, 1, 0),
-        (199, "0x000001.0001.0007", 7, "START", None, None, None, 1, 0, 2, 0),
+        (152, " 0x000001.00000001.0006 ", 6, "COMMIT", "commit", None, None, 1, 0, 1, 0),
+        (199, " 0x000001.00000001.0007 ", 7, "START", None, None, None, 1, 0, 2, 0),
         *txn_dml_rows[2:],
-        (203, "0x000001.0001.0009", 9, "COMMIT", "commit", None, None, 1, 0, 2, 0),
+        (203, " 0x000001.00000001.0009 ", 9, "COMMIT", "commit", None, None, 1, 0, 2, 0),
     ]
     rows = lifecycle_rows if txn_buffer else dml_rows
     cdc = OracleLogMinerCdc(

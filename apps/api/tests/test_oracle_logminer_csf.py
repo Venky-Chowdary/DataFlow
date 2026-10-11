@@ -13,6 +13,7 @@ from connectors.oracle_logminer import (
     logminer_contents_sql,
     logminer_txn_contents_sql,
 )
+from connectors.oracle_logminer_txn import mining_position
 
 
 def _contents_row(
@@ -95,14 +96,10 @@ class _WindowCursor:
             if key[0] > start_scn:
                 unread.append(row)
             elif key[0] == start_scn:
-                if resume_rs is None and not scn_complete:
+                if not resume_rs and not scn_complete:
                     unread.append(row)
-                elif resume_rs is not None and (
-                    key[1] > str(resume_rs).strip()
-                    or (
-                        key[1] == str(resume_rs).strip()
-                        and key[2] > resume_ssn
-                    )
+                elif resume_rs and mining_position(*key) > mining_position(
+                    start_scn, str(resume_rs), resume_ssn
                 ):
                     unread.append(row)
         return unread[: int(self.binds["lim"])]
@@ -144,7 +141,10 @@ def test_logminer_contents_queries_select_csf_and_order_by_natural_redo_row() ->
         normalized = " ".join(sql.upper().split())
         assert "CSF" in normalized
         assert "ROWNUM AS DF_RN" in normalized
-        assert "ORDER BY SCN, RS_ID, SSN, DF_RN" in normalized
+        assert (
+            "ORDER BY SCN, LENGTH(RS_ID), RS_ID, SSN, DF_RN"
+            in normalized
+        )
         assert "WHERE ROWNUM <= :LIM" in normalized
 
 
@@ -154,22 +154,34 @@ def test_two_fragment_insert_and_update_are_reassembled_and_parsed_once() -> Non
     rows = [
         _contents_row(
             101,
-            "r1",
+            " 0x000001.00000001.0001 ",
             1,
             "INSERT",
             'INSERT INTO "T"("ID","V") VAL',
             1,
         ),
-        _contents_row(101, "r1", 1, "INSERT", "UES('1','inserted')"),
+        _contents_row(
+            101,
+            " 0x000001.00000001.0001 ",
+            1,
+            "INSERT",
+            "UES('1','inserted')",
+        ),
         _contents_row(
             102,
-            "r2",
+            " 0x000001.00000002.0002 ",
             2,
             "UPDATE",
             'UPDATE "T" SET "V"=\'updated',
             1,
         ),
-        _contents_row(102, "r2", 2, "UPDATE", '\' WHERE "ID"=\'1\''),
+        _contents_row(
+            102,
+            " 0x000001.00000002.0002 ",
+            2,
+            "UPDATE",
+            '\' WHERE "ID"=\'1\'',
+        ),
     ]
     reader = _reader()
     cur = _Cursor(rows)
@@ -202,20 +214,26 @@ def test_full_window_rewinds_trailing_group_without_loss_or_duplicate() -> None:
     rows = [
         _contents_row(
             101,
-            "r1",
+            " 0x000001.00000001.0001 ",
             1,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'1\',\'first\')',
         ),
         _contents_row(
             102,
-            "r2",
+            " 0x000001.00000002.0002 ",
             2,
             "UPDATE",
             'UPDATE "T" SET "V"=\'sec',
             1,
         ),
-        _contents_row(102, "r2", 2, "UPDATE", 'ond\' WHERE "ID"=\'1\''),
+        _contents_row(
+            102,
+            " 0x000001.00000002.0002 ",
+            2,
+            "UPDATE",
+            'ond\' WHERE "ID"=\'1\'',
+        ),
     ]
     reader = _reader(batch_size=2)
     cur = _WindowCursor(rows)
@@ -238,20 +256,30 @@ def test_full_window_rewinds_trailing_group_without_loss_or_duplicate() -> None:
     ):
         first = list(reader.poll())
         assert [row["ID"] for batch in first for row in batch.inserts] == ["1"]
-        assert (reader.scn, reader.rs_id, reader.ssn) == (101, "r1", 1)
+        assert (reader.scn, reader.rs_id, reader.ssn) == (
+            101,
+            " 0x000001.00000001.0001 ",
+            1,
+        )
 
         second = list(reader.poll())
 
     assert [row["ID"] for batch in second for row in batch.updates] == ["1"]
-    assert (reader.scn, reader.rs_id, reader.ssn) == (102, "r2", 2)
+    assert (reader.scn, reader.rs_id, reader.ssn) == (
+        102,
+        " 0x000001.00000002.0002 ",
+        2,
+    )
     assert cur.limits == [2, 2, 4]
     assert classify.call_count == 2
 
 
 def test_all_rows_in_one_group_refetches_with_doubled_limit() -> None:
     rows = [
-        _contents_row(101, "large-key", 1, "INSERT", "first", 1),
-        _contents_row(101, "large-key", 1, "INSERT", "second"),
+        _contents_row(
+            101, " 0x000001.00000001.0001 ", 1, "INSERT", "first", 1
+        ),
+        _contents_row(101, " 0x000001.00000001.0001 ", 1, "INSERT", "second"),
     ]
     reader = _reader(batch_size=2)
     cur = _Cursor(rows, honor_limit=True)
@@ -267,16 +295,17 @@ def test_all_rows_in_one_group_refetches_with_doubled_limit() -> None:
 
 def test_key_group_larger_than_64x_limit_raises_typed_error() -> None:
     reader = _reader(batch_size=2)
+    rs_id = " 0x000001.00000001.0007 "
     cur = _Cursor(
         [
-            _contents_row(12345, "large-rs-id", 7, "INSERT", "fragment")
+            _contents_row(12345, rs_id, 7, "INSERT", "fragment")
             for _ in range(128)
         ],
         honor_limit=True,
     )
 
     with pytest.raises(
-        OracleLogMinerReadError, match="12345.*large-rs-id|large-rs-id.*12345"
+        OracleLogMinerReadError, match=f"12345.*{rs_id}|{rs_id}.*12345"
     ):
         reader._query_logminer_rows(
             cur, table_predicate="TABLE_NAME = :tbl", limit=2
@@ -288,12 +317,21 @@ def test_key_group_larger_than_64x_limit_raises_typed_error() -> None:
 def test_short_window_ending_with_csf_continuation_raises_typed_error() -> None:
     reader = _reader(batch_size=10)
     cur = _Cursor(
-        [_contents_row(23456, "incomplete-rs-id", 8, "UPDATE", "partial", 1)]
+        [
+            _contents_row(
+                23456,
+                " 0x000001.00000001.0008 ",
+                8,
+                "UPDATE",
+                "partial",
+                1,
+            )
+        ]
     )
 
     with pytest.raises(
         OracleLogMinerReadError,
-        match="23456.*incomplete-rs-id|incomplete-rs-id.*23456",
+        match="23456.*0x000001.00000001.0008|0x000001.00000001.0008.*23456",
     ):
         reader._query_logminer_rows(
             cur, table_predicate="TABLE_NAME = :tbl", limit=10
@@ -308,7 +346,7 @@ def test_buffered_poll_reassembles_csf_before_classifying(monkeypatch) -> None:
     rows = [
         (
             101,
-            "0x000001.0001.0000",
+            " 0x000001.00000001.0000 ",
             0,
             "START",
             None,
@@ -323,7 +361,7 @@ def test_buffered_poll_reassembles_csf_before_classifying(monkeypatch) -> None:
         ),
         (
             102,
-            "0x000001.0001.0001",
+            " 0x000001.00000001.0001 ",
             1,
             "INSERT",
             'INSERT INTO "T"("ID","V") VAL',
@@ -338,7 +376,7 @@ def test_buffered_poll_reassembles_csf_before_classifying(monkeypatch) -> None:
         ),
         (
             102,
-            "0x000001.0001.0001",
+            " 0x000001.00000001.0001 ",
             1,
             "INSERT",
             "UES('1','buffered')",
@@ -353,7 +391,7 @@ def test_buffered_poll_reassembles_csf_before_classifying(monkeypatch) -> None:
         ),
         (
             103,
-            "0x000001.0001.0002",
+            " 0x000001.00000001.0002 ",
             2,
             "COMMIT",
             "commit",

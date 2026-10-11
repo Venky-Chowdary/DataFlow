@@ -181,7 +181,7 @@ def test_oracle_shared_poll_demuxes_two_tables() -> None:
             # RS_ID/SSN are part of LogMiner's true total order and the resume token.
             (
                 150,
-                "0x000001.0001.0001",
+                " 0x000001.00000001.0001 ",
                 1,
                 "INSERT",
                 'INSERT INTO "ORDERS"("ID","AMOUNT") VALUES(\'1\',\'10\')',
@@ -193,7 +193,7 @@ def test_oracle_shared_poll_demuxes_two_tables() -> None:
             ),
             (
                 150,
-                "0x000001.0001.0002",
+                " 0x000001.00000001.0002 ",
                 2,
                 "INSERT",
                 'INSERT INTO "USERS"("USER_ID","NAME") VALUES(\'9\',\'alice\')',

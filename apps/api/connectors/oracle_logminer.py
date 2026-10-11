@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from connectors.lsn_guards import parse_oracle_rs_id
 from connectors.oracle_logminer_txn import mining_position
 from connectors.sql_identifiers import quote_sql_identifier
 from connectors.write_resilience import (
@@ -626,6 +627,56 @@ def _logminer_session(
             )
 
 
+def _canonical_rs_id(rs_id: str) -> str:
+    raw = str(rs_id or "")
+    if not raw.strip():
+        return ""
+    parts = parse_oracle_rs_id(raw)
+    if parts is None or parts[1] > 0xFFFFFFFF or parts[2] > 0xFFFF:
+        raise OracleLogMinerReadError(
+            ValueError(f"Invalid Oracle RS_ID {raw!r}"),
+            message=(
+                f"Oracle LogMiner RS_ID {raw!r} violates the canonical "
+                "ordering assumption."
+            ),
+        )
+    seq, blk, off = parts
+    return f" 0x{seq:06x}.{blk:08x}.{off:04x} "
+
+
+def _row_rs_id(row_value: Any) -> str:
+    raw = str(row_value or "")
+    if not raw.strip():
+        return ""
+    canonical = _canonical_rs_id(raw)
+    if raw != canonical:
+        raise OracleLogMinerReadError(
+            ValueError(f"Noncanonical Oracle RS_ID {raw!r}"),
+            message=(
+                f"Oracle LogMiner RS_ID {raw!r} violates the canonical "
+                "ordering assumption."
+            ),
+        )
+    return raw
+
+
+_RS_ID_RESUME_PREDICATE = """
+    (
+          SCN > :start_scn
+       OR (SCN = :start_scn AND :rs_id IS NULL AND :scn_complete = 0)
+       OR (
+            SCN = :start_scn
+            AND (
+                 LENGTH(RS_ID) > :rs_len
+              OR (LENGTH(RS_ID) = :rs_len AND RS_ID > :rs_id)
+              OR (RS_ID = :rs_id AND SSN > :ssn)
+            )
+          )
+    )
+"""
+_RS_ID_ORDER_BY = "ORDER BY SCN, LENGTH(RS_ID), RS_ID, SSN, DF_RN"
+
+
 def logminer_contents_sql(
     *,
     table_predicate: str,
@@ -638,8 +689,8 @@ def logminer_contents_sql(
     ``ROWNUM <= :lim ... ORDER BY SCN`` keeps an arbitrary mining-order subset
     and then sorts it — the retained rows are not the oldest. Pushing the
     order into an inline view and the cap outside is the Debezium-class fix.
-    ``(SCN, RS_ID, SSN, DF_RN)`` preserves LogMiner's natural order when
-    continuation rows share a key.
+    Canonical RS_ID values sort numerically by length then text; ``DF_RN``
+    keeps continuation rows sharing a position stable.
     """
     xid_cols = ", XIDUSN, XIDSLT, XIDSQN" if include_xid else ""
     return f"""
@@ -655,13 +706,8 @@ def logminer_contents_sql(
               OPERATION IN ('INSERT','UPDATE','DELETE','SEL_LOB_LOCATOR')
               OR OPERATION = 'DDL'
             )
-            AND (
-                  SCN > :start_scn
-               OR (SCN = :start_scn AND :rs_id IS NULL AND :scn_complete = 0)
-               OR (SCN = :start_scn AND RS_ID > :rs_id)
-               OR (SCN = :start_scn AND RS_ID = :rs_id AND SSN > :ssn)
-            )
-          ORDER BY SCN, RS_ID, SSN, DF_RN
+            AND {_RS_ID_RESUME_PREDICATE}
+          {_RS_ID_ORDER_BY}
         )
         WHERE ROWNUM <= {limit_bind}
     """  # nosec B608 — table_predicate / limit_bind are caller-built from safe ids
@@ -689,12 +735,7 @@ def logminer_txn_contents_sql(
                  XIDUSN, XIDSLT, XIDSQN, "ROLLBACK", ROW_ID, SEG_NAME, TIMESTAMP,
                  CSF, ROWNUM AS DF_RN
           FROM v$logmnr_contents
-          WHERE (
-                  SCN > :start_scn
-               OR (SCN = :start_scn AND :rs_id IS NULL AND :scn_complete = 0)
-               OR (SCN = :start_scn AND RS_ID > :rs_id)
-               OR (SCN = :start_scn AND RS_ID = :rs_id AND SSN > :ssn)
-            )
+          WHERE {_RS_ID_RESUME_PREDICATE}
             AND (
                   (
                     SEG_OWNER = :owner
@@ -717,14 +758,14 @@ def logminer_txn_contents_sql(
                     )
                   )
             )
-          ORDER BY SCN, RS_ID, SSN, DF_RN
+          {_RS_ID_ORDER_BY}
         )
         WHERE ROWNUM <= {limit_bind}
     """  # nosec B608 — table_predicate / limit_bind are caller-built from safe ids
 
 
 def _logminer_position_key(row: Any) -> tuple[int, str, int]:
-    return int(row[0] or 0), str(row[1] or "").strip(), int(row[2] or 0)
+    return int(row[0] or 0), _row_rs_id(row[1]), int(row[2] or 0)
 
 
 def _logminer_row_has_csf(row: Any, csf_index: int) -> bool:
@@ -773,7 +814,7 @@ def _reassemble_logminer_csf_rows(
 
     for row in rows:
         key = _logminer_position_key(row)
-        if fragments and key != fragment_key:
+        if fragments and mining_position(*key) != mining_position(*fragment_key):
             _raise_logminer_window_error(
                 table=table,
                 cursor_key=cursor_key,
@@ -828,7 +869,8 @@ def _fetch_logminer_csf_window(
             first_trailing = len(rows) - 1
             while (
                 first_trailing > 0
-                and _logminer_position_key(rows[first_trailing - 1]) == last_key
+                and mining_position(*_logminer_position_key(rows[first_trailing - 1]))
+                == mining_position(*last_key)
             ):
                 first_trailing -= 1
             rows = rows[:first_trailing]
@@ -2420,12 +2462,15 @@ class OracleLogMinerCdc:
         return records, str(new_last) if new_last is not None else last_pk, done
 
     def _resume_binds(self) -> dict[str, Any]:
+        rs_id = _canonical_rs_id(str(self.rs_id or ""))
+        rs_len = len(rs_id) if rs_id else None
         return {
             "start_scn": int(self.scn or 0),
             # Oracle treats an empty VARCHAR2 bind as NULL; the query's
             # ``:rs_id IS NULL`` branch includes the SCN only for incomplete
             # cursors; a token marked complete remains exclusive.
-            "rs_id": self.rs_id or "",
+            "rs_id": rs_id or None,
+            "rs_len": rs_len,
             "ssn": int(self.ssn or 0),
             "scn_complete": int(self.scn_complete),
         }
@@ -2516,7 +2561,7 @@ class OracleLogMinerCdc:
                     }
                     for row in peek_rows:
                         scn = int(row[0] or 0)
-                        rs_id = str(row[1] or "")
+                        rs_id = _row_rs_id(row[1])
                         ssn = int(row[2] or 0)
                         operation = str(row[3] or "").upper()
                         sql_redo = row[4]
@@ -2529,8 +2574,10 @@ class OracleLogMinerCdc:
                                 ddl_timestamp=row[11] if len(row) > 11 else None,
                                 ambiguous_later_ddl=any(
                                     name == str(row[5] or row[7] or "").upper()
-                                    and (later_scn, later_rs, later_ssn)
-                                    > (scn, rs_id, ssn)
+                                    and mining_position(
+                                        later_scn, later_rs, later_ssn
+                                    )
+                                    > mining_position(scn, rs_id, ssn)
                                     for name, later_scn, later_rs, later_ssn
                                     in ddl_positions
                                 ),
@@ -2743,7 +2790,7 @@ class OracleLogMinerCdc:
                     ]
                     for row in rows:
                         scn = int(row[0] or 0)
-                        rs_id = str(row[1] or "")
+                        rs_id = _row_rs_id(row[1])
                         ssn = int(row[2] or 0)
                         operation = str(row[3] or "").upper()
                         sql_redo = row[4]
@@ -2764,8 +2811,10 @@ class OracleLogMinerCdc:
                                 ddl_timestamp=row[11] if len(row) > 11 else None,
                                 ambiguous_later_ddl=any(
                                     name == table_name
-                                    and (later_scn, later_rs, later_ssn)
-                                    > (scn, rs_id, ssn)
+                                    and mining_position(
+                                        later_scn, later_rs, later_ssn
+                                    )
+                                    > mining_position(scn, rs_id, ssn)
                                     for name, later_scn, later_rs, later_ssn in ddl_positions
                                 ),
                             )
@@ -3028,7 +3077,7 @@ class OracleLogMinerCdc:
 
         for row in raw_rows:
             scn = int(row[0] or 0)
-            rs_id = str(row[1] or "")
+            rs_id = _row_rs_id(row[1])
             ssn = int(row[2] or 0)
             operation = str(row[3] or "").upper()
             sql_redo = row[4]
@@ -3161,7 +3210,8 @@ class OracleLogMinerCdc:
                         ddl_timestamp=ddl_timestamp,
                         ambiguous_later_ddl=any(
                             later[4] == table_name
-                            and (later[0], later[1], later[2]) > (scn, rs_id, ssn)
+                            and mining_position(later[0], later[1], later[2])
+                            > mining_position(scn, rs_id, ssn)
                             for later in ddl_events
                         ),
                     )
@@ -3445,7 +3495,7 @@ class OracleLogMinerCdc:
                     ]
                     for row in raw_rows:
                         scn = int(row[0] or 0)
-                        rs_id = str(row[1] or "")
+                        rs_id = _row_rs_id(row[1])
                         ssn = int(row[2] or 0)
                         operation = str(row[3] or "").upper()
                         sql_redo = row[4]
@@ -3470,8 +3520,10 @@ class OracleLogMinerCdc:
                                             "timestamp": row[11] if len(row) > 11 else None,
                                             "ambiguous_later": any(
                                                 name == table_name
-                                                and (later_scn, later_rs, later_ssn)
-                                                > (scn, rs_id, ssn)
+                                                and mining_position(
+                                                    later_scn, later_rs, later_ssn
+                                                )
+                                                > mining_position(scn, rs_id, ssn)
                                                 for name, later_scn, later_rs, later_ssn
                                                 in ddl_positions
                                             ),

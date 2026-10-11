@@ -14,6 +14,7 @@ from connectors.oracle_logminer import (
     logminer_contents_sql,
     start_logminer_session,
 )
+from connectors.oracle_logminer_txn import mining_position
 
 
 @pytest.fixture(autouse=True)
@@ -34,10 +35,11 @@ def test_logminer_options_are_committed_only_without_continuous_mine():
 def test_contents_sql_orders_inside_rownum_outside():
     sql = logminer_contents_sql(table_predicate="TABLE_NAME = :tbl")
     # Flat ROWNUM-then-ORDER-BY is the silent-loss bug; order must be nested.
-    assert "ORDER BY SCN, RS_ID, SSN" in sql
+    order_clause = "ORDER BY SCN, LENGTH(RS_ID), RS_ID, SSN, DF_RN"
+    assert order_clause in sql
     assert "SCN = :start_scn AND :rs_id IS NULL" in sql
     outer_cap = sql.rfind("ROWNUM")
-    inner_order = sql.find("ORDER BY SCN, RS_ID, SSN")
+    inner_order = sql.find(order_clause)
     assert 0 <= inner_order < outer_cap
 
 
@@ -125,11 +127,11 @@ def test_advance_offset_keeps_mid_scn_cursor_on_idle_empty_poll():
         schema="APP",
         resume_token=encode_logminer_token(
             100, table="ORDERS", phase="streaming",
-            rs_id="0x1", ssn=5,
+            rs_id=" 0x000001.00000001.0001 ", ssn=5,
         ),
     )
     cdc.scn = 100
-    cdc.rs_id = "0x1"
+    cdc.rs_id = " 0x000001.00000001.0001 "
     cdc.ssn = 5
     cdc._advance_offset(
         last_scn=0,
@@ -140,7 +142,7 @@ def test_advance_offset_keeps_mid_scn_cursor_on_idle_empty_poll():
         limit=500,
     )
     assert cdc.scn == 100
-    assert cdc.rs_id == "0x1"
+    assert cdc.rs_id == " 0x000001.00000001.0001 "
     assert cdc.ssn == 5
 
 
@@ -170,7 +172,7 @@ def test_late_redo_at_window_end_is_remined_exactly_once(
     rows = [
         (
             10,
-            "0x000001.00000001.0001",
+            " 0x000001.00000001.0001 ",
             1,
             "INSERT",
             'INSERT INTO "ORDERS"("ID","AMOUNT") VALUES(\'10\',\'10\')',
@@ -179,7 +181,7 @@ def test_late_redo_at_window_end_is_remined_exactly_once(
         ),
         (
             12,
-            "0x000001.00000002.0001",
+            " 0x000001.00000002.0001 ",
             1,
             "INSERT",
             'INSERT INTO "ORDERS"("ID","AMOUNT") VALUES(\'12\',\'12\')',
@@ -199,8 +201,8 @@ def test_late_redo_at_window_end_is_remined_exactly_once(
             late[0] == start_scn
             and bool(reader.rs_id)
             and (
-                late[1] > reader.rs_id
-                or (late[1] == reader.rs_id and late[2] > reader.ssn)
+                mining_position(late[0], late[1], late[2])
+                > mining_position(start_scn, reader.rs_id, reader.ssn)
             )
         )
         return ([late] if visible else []), 12
@@ -329,9 +331,33 @@ def test_poll_truncated_window_does_not_skip_past_last_row():
     cdc.phase = "streaming"
 
     mined = [
-        (11, "0xA", 1, "INSERT", 'INSERT INTO "ORDERS"("ID") VALUES(\'1\')', "ORDERS", "APP"),
-        (12, "0xB", 1, "INSERT", 'INSERT INTO "ORDERS"("ID") VALUES(\'2\')', "ORDERS", "APP"),
-        (13, "0xC", 1, "INSERT", 'INSERT INTO "ORDERS"("ID") VALUES(\'3\')', "ORDERS", "APP"),
+        (
+            11,
+            " 0x000001.00000001.0001 ",
+            1,
+            "INSERT",
+            'INSERT INTO "ORDERS"("ID") VALUES(\'1\')',
+            "ORDERS",
+            "APP",
+        ),
+        (
+            12,
+            " 0x000001.00000001.0002 ",
+            1,
+            "INSERT",
+            'INSERT INTO "ORDERS"("ID") VALUES(\'2\')',
+            "ORDERS",
+            "APP",
+        ),
+        (
+            13,
+            " 0x000001.00000001.0003 ",
+            1,
+            "INSERT",
+            'INSERT INTO "ORDERS"("ID") VALUES(\'3\')',
+            "ORDERS",
+            "APP",
+        ),
     ]
 
     conn = MagicMock()
@@ -367,13 +393,13 @@ def test_poll_truncated_window_does_not_skip_past_last_row():
     ] == ["1", "2", "3"]
     first_state = decode_logminer_token(polls[0][0].resume_token)
     assert first_state["scn"] == 11
-    assert first_state["rs_id"] == "0xA"
+    assert first_state["rs_id"] == " 0x000001.00000001.0001 "
     assert cdc.scn == 13
-    assert cdc.rs_id == "0xC"
+    assert cdc.rs_id == " 0x000001.00000001.0003 "
     assert cdc.ssn == 1
     last_state = decode_logminer_token(polls[-1][0].resume_token)
     assert last_state["scn"] == 13
-    assert last_state["rs_id"] == "0xC"
+    assert last_state["rs_id"] == " 0x000001.00000001.0003 "
 
 
 def test_peek_continues_on_intra_scn_cursor() -> None:
@@ -389,12 +415,12 @@ def test_peek_continues_on_intra_scn_cursor() -> None:
         schema="APP",
         resume_token=encode_logminer_token(
             100, table="ORDERS", phase="streaming",
-            rs_id="0x000001.0001.0001", ssn=1,
+            rs_id=" 0x000001.00000001.0001 ", ssn=1,
         ),
     )
     cdc.phase = "streaming"
     cdc.scn = 100
-    cdc.rs_id = "0x000001.0001.0001"
+    cdc.rs_id = " 0x000001.00000001.0001 "
     cdc.ssn = 1
 
     conn = MagicMock()
@@ -408,7 +434,7 @@ def test_peek_continues_on_intra_scn_cursor() -> None:
         [
             (
                 100,
-                "0x000001.0001.0002",
+                " 0x000001.00000001.0002 ",
                 2,
                 "UPDATE",
                 'UPDATE "ORDERS" SET "AMOUNT" = \'99\' WHERE "ID" = \'1\'',

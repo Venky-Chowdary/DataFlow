@@ -7,7 +7,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from connectors.oracle_logminer import (
+    OracleLogMinerReadError,
     OracleLogMinerCdc,
+    _canonical_rs_id,
+    _row_rs_id,
     decode_logminer_token,
     encode_logminer_token,
 )
@@ -17,7 +20,10 @@ from connectors.oracle_logminer_txn import (
     oracle_txn_buffer_enabled,
     rs_id_sort_key,
 )
-from connectors.oracle_logminer import logminer_txn_contents_sql
+from connectors.oracle_logminer import (
+    logminer_contents_sql,
+    logminer_txn_contents_sql,
+)
 from connectors.lsn_guards import (
     compare_lsn,
     extract_cdc_commit_position,
@@ -82,20 +88,20 @@ def test_interleaved_transactions_emit_in_commit_scn_order() -> None:
     buf = OracleTxnBuffer(max_txns=4, max_bytes=10_000)
     buf.feed(xid="a", scn=10, operation="START")
     buf.feed(xid="b", scn=11, operation="START")
-    _dml(buf, "a", 12, "0x000001.0001.0001", 1, "a")
-    _dml(buf, "b", 13, "0x000001.0001.0002", 2, "b")
+    _dml(buf, "a", 12, " 0x000001.00000001.0001 ", 1, "a")
+    _dml(buf, "b", 13, " 0x000001.00000001.0002 ", 2, "b")
 
     committed_b = buf.feed(
         xid="b",
         scn=20,
-        rs_id="0x000001.0001.0003",
+        rs_id=" 0x000001.00000001.0003 ",
         ssn=3,
         operation="COMMIT",
     )
     committed_a = buf.feed(
         xid="a",
         scn=30,
-        rs_id="0x000001.0001.0004",
+        rs_id=" 0x000001.00000001.0004 ",
         ssn=4,
         operation="COMMIT",
     )
@@ -106,7 +112,7 @@ def test_interleaved_transactions_emit_in_commit_scn_order() -> None:
 
 def test_invalid_rs_id_cannot_enter_commit_position_order() -> None:
     assert mining_position(100, "", 0) < mining_position(
-        100, "0x000001.0001.0001", 1
+        100, " 0x000001.00000001.0001 ", 1
     )
     with pytest.raises(ValueError, match="refusing opaque ordering"):
         mining_position(100, "scn:100.pXYZ", 0)
@@ -125,14 +131,97 @@ def test_rs_id_sort_key_reuses_shared_parser_contract() -> None:
     )
 
 
+def test_oracle_rs_id_ordering_agrees_at_sequence_width_boundary() -> None:
+    earlier = " 0xffffff.00000010.0010 "
+    later = " 0x1000000.00000002.0010 "
+
+    assert mining_position(100, earlier, 16) < mining_position(100, later, 16)
+    assert lsn_sort_key(
+        batch_lsn(encode_logminer_token(100, table="T", rs_id=earlier, ssn=16))
+    ) < lsn_sort_key(
+        batch_lsn(encode_logminer_token(100, table="T", rs_id=later, ssn=16))
+    )
+
+
+def test_resume_binds_use_canonical_rs_id_and_length() -> None:
+    reader = OracleLogMinerCdc(
+        {"host": "localhost", "database": "ORCL", "username": "APP"},
+        table="T",
+        primary_key="ID",
+        schema="APP",
+        resume_token=encode_logminer_token(100, table="T", phase="streaming"),
+    )
+    empty_binds = reader._resume_binds()
+    assert empty_binds["rs_id"] is None
+    assert empty_binds["rs_len"] is None
+
+    reader.rs_id = "0x1000000.00000002.0010"
+    binds = reader._resume_binds()
+    assert binds["rs_id"] == " 0x1000000.00000002.0010 "
+    assert binds["rs_len"] == len(binds["rs_id"])
+
+
+@pytest.mark.parametrize(
+    "rs_id",
+    [
+        " 0x00009A.00000002.0010 ",
+        " 0x000094.0000002.0010 ",
+        " 0x0000094.00000002.0010 ",
+        " 000094.00000002.0010 ",
+    ],
+)
+def test_noncanonical_row_rs_id_fails_closed(rs_id: str) -> None:
+    with pytest.raises(
+        OracleLogMinerReadError,
+        match="RS_ID.*violates the canonical ordering assumption",
+    ):
+        _row_rs_id(rs_id)
+
+
+def test_canonical_rs_id_accepts_sequence_width_growth() -> None:
+    rs_id = " 0x1000000.00000002.0010 "
+    assert _canonical_rs_id(rs_id) == rs_id
+    assert _row_rs_id(rs_id) == rs_id
+
+
+def test_unparseable_cursor_rs_id_fails_closed() -> None:
+    with pytest.raises(
+        OracleLogMinerReadError,
+        match="RS_ID.*violates the canonical ordering assumption",
+    ):
+        _canonical_rs_id("not-an-rs-id")
+
+
+def test_logminer_contents_sql_resumes_and_orders_by_canonical_rs_id() -> None:
+    queries = (
+        logminer_contents_sql(
+            table_predicate="TABLE_NAME = :tbl OR SEG_NAME = :tbl"
+        ),
+        logminer_txn_contents_sql(
+            table_predicate="TABLE_NAME = :tbl OR SEG_NAME = :tbl"
+        ),
+    )
+
+    for query in queries:
+        normalized = " ".join(query.split()).upper()
+        assert "LENGTH(RS_ID) > :RS_LEN" in normalized
+        assert "LENGTH(RS_ID) = :RS_LEN AND RS_ID > :RS_ID" in normalized
+        assert "RS_ID = :RS_ID AND SSN > :SSN" in normalized
+        assert "ORDER BY SCN, LENGTH(RS_ID), RS_ID, SSN, DF_RN" in normalized
+        assert ":RS_ID IS NULL AND :SCN_COMPLETE = 0" in normalized
+        assert "REGEXP_SUBSTR" not in normalized
+        assert "DF_RS_SEQ" not in normalized
+        assert "ORDER BY SCN, RS_ID, SSN, DF_RN" not in normalized
+
+
 def test_full_rollback_discards_transaction() -> None:
     buf = OracleTxnBuffer(max_txns=2, max_bytes=10_000)
     buf.feed(xid="rolled", scn=10, operation="START")
-    _dml(buf, "rolled", 11, "0x000001.0001.0001", 1, "x")
+    _dml(buf, "rolled", 11, " 0x000001.00000001.0001 ", 1, "x")
     assert buf.feed(
         xid="rolled",
         scn=12,
-        rs_id="0x000001.0001.0002",
+        rs_id=" 0x000001.00000001.0002 ",
         ssn=2,
         operation="ROLLBACK",
     ) == []
@@ -145,7 +234,7 @@ def test_savepoint_compensating_redo_is_kept_in_transaction_order() -> None:
     buf.feed(
         xid="partial",
         scn=11,
-        rs_id="0x000001.0001.0001",
+        rs_id=" 0x000001.00000001.0001 ",
         ssn=1,
         operation="INSERT",
         table="T",
@@ -156,7 +245,7 @@ def test_savepoint_compensating_redo_is_kept_in_transaction_order() -> None:
     buf.feed(
         xid="partial",
         scn=12,
-        rs_id="0x000001.0001.0002",
+        rs_id=" 0x000001.00000001.0002 ",
         ssn=2,
         operation="UPDATE",
         table="T",
@@ -167,7 +256,7 @@ def test_savepoint_compensating_redo_is_kept_in_transaction_order() -> None:
     buf.feed(
         xid="partial",
         scn=13,
-        rs_id="0x000001.0001.0003",
+        rs_id=" 0x000001.00000001.0003 ",
         ssn=3,
         operation="UPDATE",
         table="T",
@@ -179,7 +268,7 @@ def test_savepoint_compensating_redo_is_kept_in_transaction_order() -> None:
     committed = buf.feed(
         xid="partial",
         scn=14,
-        rs_id="0x000001.0001.0004",
+        rs_id=" 0x000001.00000001.0004 ",
         ssn=4,
         operation="COMMIT",
     )
@@ -200,7 +289,7 @@ def test_buffered_query_selects_lifecycle_and_dml_rows() -> None:
     assert "ROW_ID" in sql
     assert "SCN = :start_scn AND :rs_id IS NULL" in sql
     assert "OPERATION IN ('START','COMMIT','ROLLBACK')" in sql
-    assert "ORDER BY SCN, RS_ID, SSN, DF_RN" in sql
+    assert "ORDER BY SCN, LENGTH(RS_ID), RS_ID, SSN, DF_RN" in sql
 
 
 def test_open_transaction_and_byte_bounds_raise_typed_remedy() -> None:
@@ -211,7 +300,7 @@ def test_open_transaction_and_byte_bounds_raise_typed_remedy() -> None:
 
     by_bytes = OracleTxnBuffer(max_txns=2, max_bytes=4)
     with pytest.raises(CdcTxnBufferOverflow, match="DATAFLOW_CDC_ORACLE_TXN_MAX_BYTES"):
-        _dml(by_bytes, "large", 1, "0x000001.0001.0001", 1, "payload")
+        _dml(by_bytes, "large", 1, " 0x000001.00000001.0001 ", 1, "payload")
 
 
 def test_configured_transaction_age_bounds_raise_typed_remedy(
@@ -244,14 +333,14 @@ def test_restart_remines_open_transaction_but_dedupes_emitted_commit(
     token = encode_logminer_token(
         150,
         table="T",
-        rs_id="0x000001.0001.0004",
+        rs_id=" 0x000001.00000001.0004 ",
         ssn=4,
         low_scn=100,
         poll_scn=180,
-        poll_rs_id="0x000001.0001.0008",
+        poll_rs_id=" 0x000001.00000001.0008 ",
         poll_ssn=8,
         commit_scn=150,
-        commit_rs_id="0x000001.0001.0004",
+        commit_rs_id=" 0x000001.00000001.0004 ",
         commit_ssn=4,
         commit_xid="already-emitted",
         txn_buffer=True,
@@ -278,22 +367,22 @@ def test_restart_remines_open_transaction_but_dedupes_emitted_commit(
         max_bytes=10_000,
         emitted_commit=(state["commit_scn"], state["commit_xid"]),
     )
-    _dml(buf, "already-emitted", 120, "0x000001.0001.0001", 1, "old")
+    _dml(buf, "already-emitted", 120, " 0x000001.00000001.0001 ", 1, "old")
     replayed = buf.feed(
         xid="already-emitted",
         scn=150,
-        rs_id="0x000001.0001.0004",
+        rs_id=" 0x000001.00000001.0004 ",
         ssn=4,
         operation="COMMIT",
     )
     assert replayed == []
 
-    _dml(buf, "still-open", 130, "0x000001.0001.0005", 5, "new")
+    _dml(buf, "still-open", 130, " 0x000001.00000001.0005 ", 5, "new")
     assert buf.low_scn == 130
     resumed = buf.feed(
         xid="still-open",
         scn=190,
-        rs_id="0x000001.0001.0009",
+        rs_id=" 0x000001.00000001.0009 ",
         ssn=9,
         operation="COMMIT",
     )
@@ -306,12 +395,12 @@ def test_late_distinct_commit_before_emitted_cursor_is_not_deduped() -> None:
         max_bytes=10_000,
         emitted_commit=(150, "already-emitted"),
     )
-    _dml(buf, "late-xid", 110, "0x000001.0001.0001", 1, "late")
+    _dml(buf, "late-xid", 110, " 0x000001.00000001.0001 ", 1, "late")
 
     late = buf.feed(
         xid="late-xid",
         scn=140,
-        rs_id="0x000001.0001.0007",
+        rs_id=" 0x000001.00000001.0007 ",
         ssn=7,
         operation="COMMIT",
     )
@@ -338,10 +427,10 @@ def test_buffered_short_window_keeps_last_mined_cursor(
     monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
     txn_id = (1, 0, 21)
     rows = [
-        (101, "0x000001.0001.0001", 0, "START", None, None, None, *txn_id, 0),
+        (101, " 0x000001.00000001.0001 ", 0, "START", None, None, None, *txn_id, 0),
         (
             102,
-            "0x000001.0001.0002",
+            " 0x000001.00000001.0002 ",
             1,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'1\',\'v1\')',
@@ -350,7 +439,7 @@ def test_buffered_short_window_keeps_last_mined_cursor(
             *txn_id,
             0,
         ),
-        (110, "0x000001.0001.0003", 0, "COMMIT", "commit", None, None, *txn_id, 0),
+        (110, " 0x000001.00000001.0003 ", 0, "COMMIT", "commit", None, None, *txn_id, 0),
     ]
     reader = OracleLogMinerCdc(
         {"host": "localhost", "database": "ORCL", "username": "APP"},
@@ -395,19 +484,19 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
         "ssn": 0,
         "low_scn": low_scn,
         "poll_scn": emitted_commit_scn,
-        "poll_rs_id": "0x000001.0001.0005",
+        "poll_rs_id": " 0x000001.00000001.0005 ",
         "poll_ssn": 0,
         "commit_scn": emitted_commit_scn,
-        "commit_rs_id": "0x000001.0001.0005",
+        "commit_rs_id": " 0x000001.00000001.0005 ",
         "commit_ssn": 0,
         "commit_xid": ".".join(str(value) for value in emitted_xid),
         "txn_buffer": True,
     }
     rows = [
-        (100, "0x000001.0001.0001", 0, "START", None, None, None, *long_xid, 0),
+        (100, " 0x000001.00000001.0001 ", 0, "START", None, None, None, *long_xid, 0),
         (
             100,
-            "0x000001.0001.0002",
+            " 0x000001.00000001.0002 ",
             1,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'1\',\'long\')',
@@ -416,10 +505,10 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
             *long_xid,
             0,
         ),
-        (110, "0x000001.0001.0003", 0, "START", None, None, None, *emitted_xid, 0),
+        (110, " 0x000001.00000001.0003 ", 0, "START", None, None, None, *emitted_xid, 0),
         (
             110,
-            "0x000001.0001.0004",
+            " 0x000001.00000001.0004 ",
             1,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'2\',\'short\')',
@@ -428,8 +517,8 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
             *emitted_xid,
             0,
         ),
-        (111, "0x000001.0001.0005", 0, "COMMIT", "commit", None, None, *emitted_xid, 0),
-        (130, "0x000001.0001.0006", 0, "COMMIT", "commit", None, None, *long_xid, 0),
+        (111, " 0x000001.00000001.0005 ", 0, "COMMIT", "commit", None, None, *emitted_xid, 0),
+        (130, " 0x000001.00000001.0006 ", 0, "COMMIT", "commit", None, None, *long_xid, 0),
     ]
     reader = OracleLogMinerCdc(
         {"host": "localhost", "database": "ORCL", "username": "APP"},
@@ -474,6 +563,7 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
         includes_null_cursor = (
             ":rs_id IS NULL" in sql and not int(binds.get("scn_complete") or 0)
         )
+        cursor_position = mining_position(start_scn, rs_id, ssn)
         visible = []
         for row in rows:
             scn, row_rs_id, row_ssn = (
@@ -487,8 +577,11 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
                 scn == start_scn
                 and (
                     (not rs_id and includes_null_cursor)
-                    or (bool(rs_id) and row_rs_id > rs_id)
-                    or (row_rs_id == rs_id and row_ssn > ssn)
+                    or (
+                        bool(rs_id)
+                        and mining_position(scn, row_rs_id, row_ssn)
+                        > cursor_position
+                    )
                 )
             )
             if after_cursor:
@@ -540,22 +633,22 @@ def test_committed_checkpoint_restarts_within_scn_without_duplicate_or_skip(
     monkeypatch: pytest.MonkeyPatch, buffer_mode: bool
 ) -> None:
     monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1" if buffer_mode else "0")
-    first_rs = "0x000001.0001.0001"
-    remaining_rs = "0x000001.0001.0002"
+    first_rs = " 0x000001.00000001.0001 "
+    remaining_rs = " 0x000001.00000001.0002 "
     if buffer_mode:
         prior_xid = (1, 0, 1)
         remaining_xid = (2, 0, 2)
         rows = [
             (100, first_rs, 0, "START", None, None, None, *prior_xid, 0),
-            (100, "0x000001.0001.0002", 1, "INSERT",
+            (100, " 0x000001.00000001.0002 ", 1, "INSERT",
              'INSERT INTO "T"("ID","V") VALUES(\'1\',\'applied\')', "T", "APP",
              *prior_xid, 0),
-            (100, "0x000001.0001.0003", 2, "COMMIT", None, None, None, *prior_xid, 0),
-            (100, "0x000001.0001.0004", 0, "START", None, None, None, *remaining_xid, 0),
+            (100, " 0x000001.00000001.0003 ", 2, "COMMIT", None, None, None, *prior_xid, 0),
+            (100, " 0x000001.00000001.0004 ", 0, "START", None, None, None, *remaining_xid, 0),
             (100, remaining_rs, 3, "INSERT",
              'INSERT INTO "T"("ID","V") VALUES(\'2\',\'remaining\')', "T", "APP",
              *remaining_xid, 0),
-            (100, "0x000001.0001.0006", 4, "COMMIT", None, None, None, *remaining_xid, 0),
+            (100, " 0x000001.00000001.0006 ", 4, "COMMIT", None, None, None, *remaining_xid, 0),
         ]
         token = encode_logminer_token(
             100, table="T", phase="streaming", low_scn=99,
@@ -604,13 +697,18 @@ def test_committed_checkpoint_restarts_within_scn_without_duplicate_or_skip(
                 rs_id = str(binds.get("rs_id") or "")
                 ssn = int(binds.get("ssn") or 0)
                 complete = int(binds.get("scn_complete") or 0)
+                cursor_position = mining_position(start_scn, rs_id, ssn)
                 return [
                     row for row in rows
                     if int(row[0]) > start_scn
                     or (int(row[0]) == start_scn and (
                         (not rs_id and not complete)
-                        or (rs_id and str(row[1]) > rs_id)
-                        or (str(row[1]) == rs_id and int(row[2]) > ssn)
+                        or (
+                            rs_id
+                            and mining_position(
+                                int(row[0]), str(row[1]), int(row[2])
+                            ) > cursor_position
+                        )
                     ))
                 ]
 
@@ -636,10 +734,10 @@ def test_oversized_transaction_chunks_have_increasing_same_commit_positions(
     monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
     txn_id = (1, 0, 7)
     rows = [
-        (101, "0x000001.0001.0000", 0, "START", None, None, None, *txn_id, 0),
+        (101, " 0x000001.00000001.0000 ", 0, "START", None, None, None, *txn_id, 0),
     ]
     for index in range(5):
-        rs_id = f"0x000001.0001.{index + 1:04x}"
+        rs_id = f" 0x000001.00000001.{index + 1:04x} "
         rows.append(
             (
                 102 + index,
@@ -653,7 +751,7 @@ def test_oversized_transaction_chunks_have_increasing_same_commit_positions(
                 0,
             )
         )
-    rows.append((150, "0x000001.0001.0008", 8, "COMMIT", "commit", None, None, *txn_id, 0))
+    rows.append((150, " 0x000001.00000001.0008 ", 8, "COMMIT", "commit", None, None, *txn_id, 0))
     cdc = OracleLogMinerCdc(
         {"host": "localhost", "database": "ORCL", "username": "APP"},
         table="T",
@@ -691,10 +789,10 @@ def test_multiple_commits_in_one_poll_advance_each_batch_commit_cursor(
 ) -> None:
     monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
     rows = [
-        (101, "0x000001.0001.0001", 0, "START", None, None, None, 1, 0, 11, 0),
+        (101, " 0x000001.00000001.0001 ", 0, "START", None, None, None, 1, 0, 11, 0),
         (
             102,
-            "0x000001.0001.0002",
+            " 0x000001.00000001.0002 ",
             1,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'1\',\'v1\')',
@@ -705,10 +803,10 @@ def test_multiple_commits_in_one_poll_advance_each_batch_commit_cursor(
             11,
             0,
         ),
-        (103, "0x000001.0001.0003", 0, "START", None, None, None, 1, 0, 12, 0),
+        (103, " 0x000001.00000001.0003 ", 0, "START", None, None, None, 1, 0, 12, 0),
         (
             104,
-            "0x000001.0001.0004",
+            " 0x000001.00000001.0004 ",
             1,
             "INSERT",
             'INSERT INTO "T"("ID","V") VALUES(\'2\',\'v2\')',
@@ -719,8 +817,8 @@ def test_multiple_commits_in_one_poll_advance_each_batch_commit_cursor(
             12,
             0,
         ),
-        (110, "0x000001.0001.0005", 2, "COMMIT", None, None, None, 1, 0, 11, 0),
-        (120, "0x000001.0001.0006", 2, "COMMIT", None, None, None, 1, 0, 12, 0),
+        (110, " 0x000001.00000001.0005 ", 2, "COMMIT", None, None, None, 1, 0, 11, 0),
+        (120, " 0x000001.00000001.0006 ", 2, "COMMIT", None, None, None, 1, 0, 12, 0),
     ]
     cdc = OracleLogMinerCdc(
         {"host": "localhost", "database": "ORCL", "username": "APP"},
