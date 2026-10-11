@@ -93,10 +93,14 @@ def test_telemetry_resource_emits_current_and_legacy_environment_keys(monkeypatc
     monkeypatch.setenv("DATAFLOW_SERVICE_NAME", "dataflow-api-production")
     monkeypatch.setenv("DATAFLOW_SERVICE_NAMESPACE", "dataflow")
     monkeypatch.setenv("DATAFLOW_ENVIRONMENT", "production")
+    monkeypatch.setenv("DATAFLOW_SERVICE_INSTANCE_ID", "replica-123")
+    monkeypatch.setenv("DATAFLOW_SERVICE_VERSION", "commit-abc")
 
     attrs = telemetry_resource().attributes
 
     assert attrs["service.name"] == "dataflow-api-production"
     assert attrs["service.namespace"] == "dataflow"
+    assert attrs["service.instance.id"] == "replica-123"
+    assert attrs["service.version"] == "commit-abc"
     assert attrs["deployment.environment.name"] == "production"
     assert attrs["deployment.environment"] == "production"

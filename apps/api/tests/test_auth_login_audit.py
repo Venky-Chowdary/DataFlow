@@ -122,3 +122,28 @@ def test_successful_login_survives_audit_failure_with_typed_warning(
         "Login success audit write failed (OSError)" in record.getMessage()
         for record in caplog.records
     )
+
+
+def test_successful_login_emits_redacted_operational_log(login_app, caplog):
+    caplog.set_level("INFO", logger="src.routers.auth_router")
+    email = "admin@example.test"
+    password = "Strong-admin-password-123"
+
+    response = login_app["client"].post(
+        "/api/v1/auth/login",
+        json={"email": email, "password": password},
+    )
+
+    assert response.status_code == 200
+    success = [
+        record
+        for record in caplog.records
+        if record.getMessage() == "Authentication succeeded"
+    ]
+    assert len(success) == 1
+    assert success[0].event_action == "auth.login"
+    assert success[0].auth_method == "password"
+    assert success[0].auth_outcome == "success"
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert email not in rendered
+    assert password not in rendered

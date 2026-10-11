@@ -919,6 +919,14 @@ async def login(body: LoginRequest, request: Request):
         logger.warning(
             "Login success audit write failed (%s)", type(exc).__name__, exc_info=exc
         )
+    logger.info(
+        "Authentication succeeded",
+        extra={
+            "event_action": "auth.login",
+            "auth_method": "password",
+            "auth_outcome": "success",
+        },
+    )
     account = get_stored_user(user["email"])
     return {
         "token": token,

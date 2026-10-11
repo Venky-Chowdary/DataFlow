@@ -89,10 +89,26 @@ def telemetry_resource() -> Any:
         or os.getenv("RAILWAY_ENVIRONMENT_NAME")
         or "development"
     )
+    instance_id = (
+        getenv_brand("SERVICE_INSTANCE_ID")
+        or os.getenv("OTEL_SERVICE_INSTANCE_ID")
+        or os.getenv("RAILWAY_REPLICA_ID")
+        or os.getenv("RAILWAY_DEPLOYMENT_ID")
+        or os.getenv("HOSTNAME")
+        or "local"
+    )
+    service_version = (
+        getenv_brand("SERVICE_VERSION")
+        or os.getenv("OTEL_SERVICE_VERSION")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or "development"
+    )
     return Resource.create(
         {
             "service.name": getenv_brand("SERVICE_NAME", "dataflow-api"),
             "service.namespace": getenv_brand("SERVICE_NAMESPACE", "dataflow"),
+            "service.instance.id": instance_id,
+            "service.version": service_version,
             "deployment.environment.name": environment,
             # Pre-1.27 semconv key; Grafana Application Observability still filters on it.
             "deployment.environment": environment,
