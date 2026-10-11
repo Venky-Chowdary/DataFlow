@@ -514,3 +514,15 @@ def test_sample_compare_excludes_crosswalk_refused_row():
     assert res["passed"] is True, res
     assert res["rows_excluded_quarantined"] == 1
     assert res["mismatches"] == []
+
+
+def test_sample_compare_missing_column_still_compares_as_null():
+    """A sparse source row lacking a mapped column is not quarantine-excluded:
+    it keeps the old NULL-compare behaviour, so a corrupted target is caught."""
+    res = _sample(
+        [{"id": 1, "code": "A"}],
+        [{"id": 1, "email": "CORRUPT", "code": "ACTIVE"}],
+    )
+    assert res["passed"] is False, res
+    assert res["rows_excluded_quarantined"] == 0
+    assert res["mismatches"][0]["target"] == "email"

@@ -4776,8 +4776,10 @@ def sample_compare_rows(
             if not src_col or not tgt_col:
                 continue
             if src_col not in src:
-                # The writer refuses silent NULL invent on a missing column.
-                return True
+                # Sparse documents may legitimately lack a column — keep the
+                # old behaviour (the cell compares as NULL) rather than
+                # excluding the row and hiding corruption evidence.
+                continue
             raw_src = src.get(src_col)
             if is_missing_sentinel(raw_src):
                 continue
