@@ -99,8 +99,8 @@ class TestInferType:
         assert "1536" not in infer_type(["[0.1,0.2]"], field_name="embedding")
 
 
-def test_mixed_aware_and_zoneless_temporal_samples_infer_varchar() -> None:
-    schema, intel = infer_schema_map(
+def test_mixed_aware_and_zoneless_temporal_samples_infer_timestamptz() -> None:
+    schema, _intel = infer_schema_map(
         {
             "created_at": [
                 "2024-01-01T00:00:00+00:00",
@@ -109,8 +109,7 @@ def test_mixed_aware_and_zoneless_temporal_samples_infer_varchar() -> None:
         }
     )
 
-    assert schema["created_at"] == "VARCHAR"
-    assert intel["created_at"]["semantic_role"] == "text"
+    assert schema["created_at"] == "TIMESTAMPTZ"
 
 
 def test_all_aware_temporal_samples_infer_timestamptz() -> None:
@@ -144,7 +143,7 @@ class TestSchemaTypesFixture:
         # Fixture mixes true/false/1 with informal yes/no — must not invent
         # BOOLEAN dest the write path cannot bind.
         assert types["is_active"] == "VARCHAR"
-        assert types["created_at"] == "VARCHAR"
+        assert types["created_at"] == "TIMESTAMPTZ"
         assert types["birth_date"] == "DATE"
         assert types["txn_yyyymmdd"] == "DATE"
         assert types["record_uuid"] == "UUID"

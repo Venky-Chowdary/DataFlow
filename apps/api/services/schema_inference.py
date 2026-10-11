@@ -961,13 +961,9 @@ def infer_column(
             }
 
     with _column_date_locale(non_empty):
-        classified_samples = [
-            (sample, _classify_value(sample, field_name=field_name))
-            for sample in non_empty
-        ]
-    counts: Counter[str] = Counter(
-        type_name for _sample, type_name in classified_samples
-    )
+        counts: Counter[str] = Counter(
+            _classify_value(sample, field_name=field_name) for sample in non_empty
+        )
     types = set(counts.keys())
 
     if types <= {"INTEGER", "DECIMAL"}:
@@ -988,30 +984,9 @@ def infer_column(
             notes.append("all integral samples")
     elif types <= {"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME"}:
         tz_count = counts.get("TIMESTAMPTZ", 0)
-        temporal_types = {"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME"}
-        has_zone_bearing_temporal = any(
-            type_name in temporal_types and _has_explicit_timezone_suffix(sample)
-            for sample, type_name in classified_samples
-        )
-        has_zoneless_temporal = any(
-            type_name in temporal_types
-            and not _has_explicit_timezone_suffix(sample)
-            and not (
-                type_name == "TIMESTAMP"
-                and re.fullmatch(r"[+-]?\d+(?:\.\d+)?", sample.strip())
-            )
-            for sample, type_name in classified_samples
-        )
-        role = "temporal"
         # Promote to TIMESTAMPTZ only when the column is unanimously TZ-aware,
         # or when a temporal field name has at least one TZ sample.
-        if has_zone_bearing_temporal and has_zoneless_temporal:
-            inferred = "VARCHAR"
-            role = "text"
-            notes.append(
-                "mixed zone-bearing and zoneless temporal samples — widened to lossless text"
-            )
-        elif tz_count > 0 and (tz_count == len(non_empty) or (field_name and _is_timestamp_field_name(field_name))):
+        if tz_count > 0 and (tz_count == len(non_empty) or (field_name and _is_timestamp_field_name(field_name))):
             inferred = "TIMESTAMPTZ"
         elif counts.get("TIMESTAMP", 0) and (
             counts.get("TIMESTAMP", 0) + counts.get("DATE", 0) >= counts.get("TIME", 0)
@@ -1024,6 +999,7 @@ def infer_column(
             inferred = "DATE"
         else:
             inferred = "TIME"
+        role = "temporal"
     elif len(types) == 1:
         inferred = next(iter(types))
         role = {
