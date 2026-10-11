@@ -1764,6 +1764,15 @@ class OracleLogMinerCdc:
             db_type="oracle",
         )
 
+    def capture_head_position(self) -> str | None:
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_scn FROM v$database")
+                row = cur.fetchone()
+        if not row or row[0] is None:
+            return None
+        return f"scn:{int(row[0])}.c"
+
     @staticmethod
     def infer_cdb_service(pdb_service: str) -> str:
         """Map a common XE/Free PDB service to its CDB root service.

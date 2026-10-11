@@ -230,6 +230,7 @@ def test_cdc_drift_repair_live(route: str, tmp_path: Path, monkeypatch, caplog) 
     source_reader = None
     source_table_created = False
     held_lease = None
+    capture_job_may_be_stopped = False
     original_lease_store = cdc_lease_store.get_store()
     redis_url = (
         getenv_brand("CDC_LEASE_REDIS_URL")
@@ -812,6 +813,21 @@ def test_cdc_drift_repair_live(route: str, tmp_path: Path, monkeypatch, caplog) 
                     )
                 conn.commit()
         else:
+            force_scan_calls = []
+            original_force_scan = SqlServerNativeCdc.force_cdc_scan
+
+            def record_force_scan(reader):
+                force_scan_calls.append(reader)
+                return original_force_scan(reader)
+
+            monkeypatch.setattr(
+                SqlServerNativeCdc, "force_cdc_scan", record_force_scan
+            )
+            capture_job_may_be_stopped = True
+            with source_reader._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("EXEC sys.sp_cdc_stop_job 'capture'")
+                conn.commit()
             with source_reader._conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
@@ -819,17 +835,10 @@ def test_cdc_drift_repair_live(route: str, tmp_path: Path, monkeypatch, caplog) 
                         (updated_value, changed_id),
                     )
                 conn.commit()
-            source_reader.force_cdc_scan()
-            source_resume_lsn = str(decode_mssql_cdc_token(token).get("lsn") or "")
-            assert source_resume_lsn
-            _wait_for_cdc_events(
-                source_reader,
-                source_resume_lsn,
-                {(4, changed_id)},
-                after_lsn=source_resume_lsn,
-            )
         result = engine.execute_tracked(request, job_id, resume=True)
         assert result.success, result.error or result.error_details
+        if route == "sqlserver":
+            assert force_scan_calls
         with pg_connection(**pg_cfg) as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -876,6 +885,11 @@ def test_cdc_drift_repair_live(route: str, tmp_path: Path, monkeypatch, caplog) 
             (mongo.get_job(job_id) or {}).get("status") == "completed"
         )
     finally:
+        if route == "sqlserver" and capture_job_may_be_stopped:
+            with source_reader._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("EXEC sys.sp_cdc_start_job 'capture'")
+                conn.commit()
         if held_lease is not None:
             release_lease(
                 cursor_key,

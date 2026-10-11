@@ -414,6 +414,9 @@ def run_fenced_drift_repair(
             "key_count": len(selected),
             "outcomes": counts,
             "verified": counts["verified"],
+            "remaining_keys": len(
+                (evidence_keys & after_ids) | (evidence_keys - source_ids)
+            ),
             "resolved": resolved,
             "fence_generation": int(opened.fence_epoch),
             "semantics": "state convergence / reconciliation, not log replay",

@@ -605,6 +605,9 @@ def test_confirmed_repair_reconciles_and_refuses_newer_lsn(
         1 if partial_selection else 2 if newer_destination or fail_writer else 3
     )
     assert summary["verified"] == expected_verified
+    assert summary["remaining_keys"] == (
+        2 if partial_selection else 1 if newer_destination or fail_writer else 0
+    )
     assert summary["resolved"] is not (
         partial_selection or newer_destination or fail_writer
     )
@@ -627,6 +630,7 @@ def test_confirmed_repair_reconciles_and_refuses_newer_lsn(
         assert resolved_summary["outcomes"]["repaired"] == 1
         assert resolved_summary["resolved"] is True
         assert resolved_summary["verified"] == 1
+        assert resolved_summary["remaining_keys"] == 0
     if fail_writer:
         failed_key = evidence["keys"][0]["key_id"]
         warning_messages = [
@@ -697,7 +701,9 @@ def test_repair_refuses_missing_durable_position_before_lease_or_write(monkeypat
     assert write_attempts == []
 
 
-def _seed_image_repair_scenario(tmp_path, monkeypatch):
+def _seed_image_repair_scenario(
+    tmp_path, monkeypatch, *, row_count=1, pending_count=0
+):
     import os
     from unittest.mock import patch
 
@@ -729,11 +735,34 @@ def _seed_image_repair_scenario(tmp_path, monkeypatch):
         dest_table="orders_copy",
         stream_name="orders",
     )
-    state = {"repair": False}
+    source_rows = [
+        {
+            "id": f"pk-sentinel-{77 + index}",
+            "v": f"payload-sentinel-{88 + index}",
+        }
+        for index in range(row_count)
+    ]
+    state = {
+        "repair": False,
+        "pending_ids": set(),
+        "converged_ids": set(),
+        "event_count": 0,
+        "scan_calls": 0,
+        "head_read": False,
+        "head_position": "0/200",
+    }
 
     class FakeCdc:
         def __init__(self, *args, **kwargs):
             self.sent_position = False
+            self.sent_pending = False
+            self.start_lsn = "0/100"
+            self.start_seqval = ""
+            self._resume_inclusive = False
+
+        def capture_head_position(self):
+            state["head_read"] = True
+            return state["head_position"]
 
         def is_available(self):
             return True
@@ -745,10 +774,26 @@ def _seed_image_repair_scenario(tmp_path, monkeypatch):
             if not state["repair"] and not self.sent_position:
                 self.sent_position = True
                 yield ChangeBatch(
-                    inserts=[{"id": "pk-sentinel-77", "v": "payload-sentinel-88"}],
+                    inserts=source_rows,
                     resume_token="slot=drift|phase=streaming|lsn=0/100",
                     table="orders",
                 )
+            elif state["head_read"] and state["repair"] and not self.sent_pending:
+                self.sent_pending = True
+                pending_rows = [
+                    row for row in source_rows if row["id"] in state["pending_ids"]
+                ]
+                if pending_rows:
+                    state["event_count"] += 1
+                    state["converged_ids"].update(
+                        row["id"] for row in pending_rows
+                    )
+                    self.start_lsn = "0/200"
+                    yield ChangeBatch(
+                        updates=pending_rows,
+                        resume_token="slot=drift|phase=streaming|lsn=0/200",
+                        table="orders",
+                    )
 
         def ack(self, token=None):
             self.acked = token
@@ -769,14 +814,20 @@ def _seed_image_repair_scenario(tmp_path, monkeypatch):
     monkeypatch.setattr(sync_cursor, "_mongo_cursors", lambda: None)
     monkeypatch.setattr(sync_cursor, "_stamp_job_watermark", lambda *a, **k: None)
     monkeypatch.setattr(transfer, "PostgreSqlChangeStreamCdc", FakeCdc)
+    state["fake_cdc_class"] = FakeCdc
+
+    def scan_missing_image(**kwargs):
+        if not state["repair"]:
+            return []
+        state["scan_calls"] += 1
+        return [
+            row for row in source_rows if row["id"] not in state["converged_ids"]
+        ]
+
     monkeypatch.setattr(
         value_digest,
         "identity_rows_missing_on_dest",
-        lambda **kwargs: (
-            [{"id": "pk-sentinel-77", "v": "payload-sentinel-88"}]
-            if state["repair"]
-            else []
-        ),
+        scan_missing_image,
     )
     monkeypatch.setattr(value_digest, "rows_absent_by_primary_key", lambda **kwargs: [])
 
@@ -811,16 +862,201 @@ def _seed_image_repair_scenario(tmp_path, monkeypatch):
             delivery_guarantee="exactly_once",
             delivery_pinned=True,
         )
-    assert initial_result[0] == 1, initial_result
+    assert initial_result[0] == row_count, initial_result
     import sqlite3
 
     with sqlite3.connect(dest_path) as connection:
-        connection.execute(
-            "UPDATE orders_copy SET v = ? WHERE id = ?",
-            ("damaged-sentinel-99", "pk-sentinel-77"),
-        )
+        for row in source_rows:
+            connection.execute(
+                "UPDATE orders_copy SET v = ? WHERE id = ?",
+                (
+                    "damaged-sentinel-99"
+                    if row["id"] == "pk-sentinel-77"
+                    else f"damaged-{row['id']}",
+                    row["id"],
+                ),
+            )
     state["repair"] = True
+    state["pending_ids"] = {
+        row["id"] for row in source_rows[:pending_count]
+    }
+    state["source_rows"] = source_rows
     return source, destination, dest_cfg, cursor_key, state
+
+
+def test_eos_redrain_applies_pending_event_without_image_write(tmp_path, monkeypatch):
+    import sqlite3
+
+    from connectors.cdc_eos_sql import dest_watermark_view
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+
+    source, destination, dest_cfg, cursor_key, state = _seed_image_repair_scenario(
+        tmp_path, monkeypatch, pending_count=1
+    )
+    state_before = dest_watermark_view(dest_cfg, cursor_key)
+    result = run_cdc_database_transfer(
+        source,
+        destination,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ],
+        schema={"id": "string", "v": "string"},
+        sync_mode="cdc",
+        stream_contracts=[
+            {
+                "name": "orders",
+                "selected": True,
+                "primary_key": "id",
+                "cursor_field": "id",
+                "sync_mode": "cdc",
+            }
+        ],
+        delivery_guarantee="exactly_once",
+        delivery_pinned=True,
+    )
+
+    assert state["event_count"] == 1
+    assert state["scan_calls"] == 2
+    with sqlite3.connect(destination.database) as connection:
+        row = connection.execute(
+            "SELECT v, _df_lsn FROM orders_copy WHERE id = ?",
+            ("pk-sentinel-77",),
+        ).fetchone()
+    assert row == ("payload-sentinel-88", "0/200")
+    state_after = dest_watermark_view(dest_cfg, cursor_key)
+    assert state_after.apply_seq == state_before.apply_seq + 1
+    assert state_after.committed_lsn == "0/200"
+    assert result[2]["cdc_delivery"] == "exactly_once"
+    assert "image_repair" not in result[2].get("cdc", {})
+
+
+def test_eos_redrain_refuses_only_keys_still_drifting(tmp_path, monkeypatch):
+    from services.cdc_drift_repair import (
+        CdcDriftRequiresFencedRepair,
+        _build_drift_evidence,
+    )
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+
+    source, destination, _dest_cfg, _cursor_key, state = _seed_image_repair_scenario(
+        tmp_path, monkeypatch, row_count=3, pending_count=2
+    )
+    with pytest.raises(CdcDriftRequiresFencedRepair) as caught:
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 1.0},
+                {"source": "v", "target": "v", "confidence": 1.0},
+            ],
+            schema={"id": "string", "v": "string"},
+            sync_mode="cdc",
+            stream_contracts=[
+                {
+                    "name": "orders",
+                    "selected": True,
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                    "sync_mode": "cdc",
+                }
+            ],
+            delivery_guarantee="exactly_once",
+            delivery_pinned=True,
+        )
+
+    expected = _build_drift_evidence(
+        cursor_key=_cursor_key,
+        source_table="orders",
+        dest_table="orders_copy",
+        pk_fields=["id"],
+        committed_position="0/100",
+        rows=[state["source_rows"][2]],
+    )
+    evidence = caught.value.evidence
+    assert [item["key_id"] for item in evidence["keys"]] == [
+        expected["keys"][0]["key_id"]
+    ]
+    assert evidence["drift_count"] == 1
+    assert evidence["capture_pending"] is False
+
+
+def test_eos_redrain_reports_capture_pending_when_head_is_not_reached(
+    tmp_path, monkeypatch
+):
+    from services.cdc_drift_repair import CdcDriftRequiresFencedRepair
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+    from src.transfer.job_failure import _job_failure_fields
+
+    source, destination, _dest_cfg, _cursor_key, _state = _seed_image_repair_scenario(
+        tmp_path, monkeypatch
+    )
+    with pytest.raises(CdcDriftRequiresFencedRepair) as caught:
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 1.0},
+                {"source": "v", "target": "v", "confidence": 1.0},
+            ],
+            schema={"id": "string", "v": "string"},
+            sync_mode="cdc",
+            stream_contracts=[
+                {
+                    "name": "orders",
+                    "selected": True,
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                    "sync_mode": "cdc",
+                }
+            ],
+            delivery_guarantee="exactly_once",
+            delivery_pinned=True,
+        )
+
+    evidence = caught.value.evidence
+    assert evidence["capture_pending"] is True
+    assert evidence["capture_pending_reason"] == "head_not_reached"
+    assert evidence["capture_head_position"] == "0/200"
+    assert evidence["reader_position"] == "0/100"
+    details, _extras = _job_failure_fields(caught.value)
+    assert "capture is pending" in details["message"].lower()
+
+
+def test_eos_redrain_reports_unavailable_head_without_reader_method(
+    tmp_path, monkeypatch
+):
+    from services.cdc_drift_repair import CdcDriftRequiresFencedRepair
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+
+    source, destination, _dest_cfg, _cursor_key, state = _seed_image_repair_scenario(
+        tmp_path, monkeypatch
+    )
+    monkeypatch.delattr(state["fake_cdc_class"], "capture_head_position")
+    with pytest.raises(CdcDriftRequiresFencedRepair) as caught:
+        run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 1.0},
+                {"source": "v", "target": "v", "confidence": 1.0},
+            ],
+            schema={"id": "string", "v": "string"},
+            sync_mode="cdc",
+            stream_contracts=[
+                {
+                    "name": "orders",
+                    "selected": True,
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                    "sync_mode": "cdc",
+                }
+            ],
+            delivery_guarantee="exactly_once",
+            delivery_pinned=True,
+        )
+
+    assert caught.value.evidence["capture_pending"] is True
+    assert caught.value.evidence["capture_pending_reason"] == "head_unavailable"
 
 
 def test_exactly_once_route_refuses_drift_without_moving_eos_state(

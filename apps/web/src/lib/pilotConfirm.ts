@@ -111,6 +111,12 @@ export function isDestructiveTransfer(action: CopilotPendingAction): boolean {
   );
 }
 
+export function destructiveActionButtonLabel(actionType: string): string {
+  return actionType === "repair_cdc_drift"
+    ? "Repair selected rows"
+    : "Overwrite & run";
+}
+
 export async function confirmPilotPending(
   action: CopilotPendingAction,
 ): Promise<PilotConfirmOutcome> {

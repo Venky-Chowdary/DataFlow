@@ -42,6 +42,7 @@ from connectors.sqlserver_cdc_native import SqlServerNativeCdc
 from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
 from connectors.table_manager import delete_by_primary_keys
 from connectors.writer_common import DF_LSN_COL, extract_cdc_lsn
+from connectors.lsn_guards import compare_lsn, lsn_family
 from services.cdc_capability import (
     LogCaptureRefusal,
     LogCaptureUnavailable,
@@ -250,6 +251,46 @@ def _raise_if_stream_behind(cdc: Any, outcome: str) -> None:
         behind_message(cdc),
         slot_name=str(getattr(cdc, "slot_name", "") or ""),
     )
+
+
+def _capture_reader_position(cdc: Any) -> str | None:
+    start_lsn = str(getattr(cdc, "start_lsn", "") or "").strip()
+    if start_lsn:
+        family = lsn_family(start_lsn)
+        if family != "mssql_lsn":
+            return start_lsn
+        major_lsn = start_lsn.lower().removeprefix("0x").zfill(20)
+        seqval = getattr(cdc, "start_seqval", "") or ""
+        if isinstance(seqval, (bytes, bytearray)):
+            seqval = bytes(seqval).hex()
+        seqval = str(seqval).lower().removeprefix("0x")
+        if seqval:
+            return f"{major_lsn}.p{seqval}"
+        if getattr(cdc, "_resume_inclusive", False):
+            return major_lsn
+        return f"{major_lsn}.c"
+
+    if hasattr(cdc, "scn"):
+        txn_buffered = bool(getattr(cdc, "_txn_buffer_enabled", False))
+        scn = getattr(cdc, "_poll_scn", None) if txn_buffered else getattr(cdc, "scn", None)
+        if not scn:
+            return None
+        rs_id = (
+            str(getattr(cdc, "_poll_rs_id", "") or "")
+            if txn_buffered
+            else str(getattr(cdc, "rs_id", "") or "")
+        )
+        ssn = (
+            int(getattr(cdc, "_poll_ssn", 0) or 0)
+            if txn_buffered
+            else int(getattr(cdc, "ssn", 0) or 0)
+        )
+        if rs_id:
+            return f"scn:{int(scn)}.p{rs_id}.{ssn:010d}"
+        if bool(getattr(cdc, "scn_complete", False)):
+            return f"scn:{int(scn)}.c"
+        return f"scn:{int(scn)}"
+    return None
 
 
 def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
@@ -3606,50 +3647,166 @@ def _run_cdc_single_stream(
                         committed_position=token,
                         rows=missing_image,
                     )
+                    head_position = None
+                    head_reader = getattr(cdc, "capture_head_position", None)
+                    if callable(head_reader):
+                        try:
+                            head_position = head_reader()
+                        except Exception:
+                            head_position = None
+                    head_position = str(head_position).strip() if head_position else None
+                    reader_position_before = _capture_reader_position(cdc)
+                    if head_position:
+                        drain_outcome = _drain_log_reader(
+                            cdc,
+                            _apply_and_checkpoint,
+                            max_idle=max_idle_polls,
+                            max_rounds=max_poll_rounds,
+                            sleep_sec=txn_hold_sleep,
+                            stop_early=lambda: (
+                                (reader_position := _capture_reader_position(cdc))
+                                is not None
+                                and lsn_family(reader_position)
+                                == lsn_family(head_position)
+                                and compare_lsn(reader_position, head_position) >= 0
+                            ),
+                        )
+                    else:
+                        drain_outcome = _drain_log_reader(
+                            cdc,
+                            _apply_and_checkpoint,
+                            max_idle=max_idle_polls,
+                            max_rounds=max_poll_rounds,
+                            sleep_sec=txn_hold_sleep,
+                        )
+                    from services.cdc_catchup import CdcStreamBehind
+
+                    try:
+                        _raise_if_stream_behind(cdc, drain_outcome)
+                    except CdcStreamBehind:
+                        pass
+                    reader_position = _capture_reader_position(cdc)
+                    head_reached = bool(
+                        head_position
+                        and reader_position
+                        and lsn_family(reader_position) == lsn_family(head_position)
+                        and compare_lsn(reader_position, head_position) >= 0
+                    )
+
+                    try:
+                        rescanned_image = identity_rows_missing_on_dest(
+                            source_type=src_type,
+                            source_cfg=src_cfg,
+                            source_table=str(table_name or ""),
+                            dest_type=dest_type,
+                            dest_cfg=dest_cfg,
+                            dest_table=str(dest_table or ""),
+                            mappings=list(mappings or []),
+                            dest_types=column_types if isinstance(column_types, dict) else None,
+                        )
+                    except CdcValueScanIncomplete as exc:
+                        logger.warning("CDC image repair skipped: %s", exc)
+                        rescanned_image = None
+                    if not rescanned_image:
+                        pk = str(primary_key or "")
+                        if pk:
+                            try:
+                                rescanned_image = rows_absent_by_primary_key(
+                                    source_type=src_type,
+                                    source_cfg=src_cfg,
+                                    source_table=str(table_name or ""),
+                                    dest_type=dest_type,
+                                    dest_cfg=dest_cfg,
+                                    dest_table=str(dest_table or ""),
+                                    mappings=list(mappings or []),
+                                    primary_key=pk,
+                                )
+                            except CdcValueScanIncomplete as exc:
+                                logger.warning("CDC key image repair skipped: %s", exc)
+                                rescanned_image = None
+                    flagged_ids = {
+                        item["key_id"] for item in evidence.get("keys", [])
+                    }
+                    still_drifting = []
+                    for row in rescanned_image or []:
+                        row_evidence = _build_drift_evidence(
+                            cursor_key=cursor_key,
+                            source_table=str(table_name or ""),
+                            dest_table=str(dest_table or ""),
+                            pk_fields=pk_fields,
+                            committed_position=token,
+                            rows=[row],
+                        )
+                        if any(
+                            item["key_id"] in flagged_ids
+                            for item in row_evidence.get("keys", [])
+                        ):
+                            still_drifting.append(row)
+                    missing_image = still_drifting
+                    if missing_image:
+                        evidence = _build_drift_evidence(
+                            cursor_key=cursor_key,
+                            source_table=str(table_name or ""),
+                            dest_table=str(dest_table or ""),
+                            pk_fields=pk_fields,
+                            committed_position=token,
+                            rows=missing_image,
+                        )
+                        evidence["capture_pending"] = not head_reached
+                        evidence["capture_pending_reason"] = (
+                            "head_unavailable"
+                            if not head_position
+                            else "head_not_reached" if not head_reached else None
+                        )
+                        evidence["capture_head_position"] = head_position
+                        evidence["reader_position_before"] = reader_position_before
+                        evidence["reader_position"] = reader_position
                     lease_resource = getattr(getattr(cdc, "_lease", None), "resource", "")
                     if lease_resource:
                         evidence["cdc_lease_resource"] = str(lease_resource)
-                    logger.warning(
-                        "CDC image drift requires fenced repair table=%s count=%s key_ids=%s",
-                        str(dest_table or ""),
-                        len(missing_image),
-                        [item["key_id"] for item in evidence["keys"]],
-                    )
-                    raise CdcDriftRequiresFencedRepair(evidence)
-                attempted = len(missing_image)
-                written = 0
-                skipped = 0
-                for start in range(0, len(missing_image), 500):
-                    apply_result: dict[str, int] = {}
-                    _apply_and_checkpoint(
-                        ChangeBatch(
-                            updates=missing_image[start : start + 500],
-                            resume_token=token,
-                        ),
-                        result_out=apply_result,
-                    )
-                    written += apply_result.get("written", 0)
-                    skipped += apply_result.get("skipped", 0)
-                repair_status = "applied" if skipped == 0 else (
-                    "partial" if written else "repair_not_applied"
-                )
-                state.image_repair = {
-                    "attempted": attempted,
-                    "written": written,
-                    "skipped": skipped,
-                    "status": repair_status,
-                }
-                if repair_status == "repair_not_applied":
-                    ddl_log.append(
-                        f"CDC image repair not applied for {attempted} row(s): "
-                        "destination _df_lsn guard (repair_not_applied). "
-                        "state convergence / reconciliation, not log replay"
-                    )
+                    if missing_image:
+                        logger.warning(
+                            "CDC image drift requires fenced repair table=%s count=%s key_ids=%s",
+                            str(dest_table or ""),
+                            len(missing_image),
+                            [item["key_id"] for item in evidence["keys"]],
+                        )
+                        raise CdcDriftRequiresFencedRepair(evidence)
                 else:
-                    ddl_log.append(
-                        f"CDC image repair {repair_status} for {written} of {attempted} row(s); "
-                        f"{skipped} skipped. state convergence / reconciliation, not log replay"
+                    attempted = len(missing_image)
+                    written = 0
+                    skipped = 0
+                    for start in range(0, len(missing_image), 500):
+                        apply_result: dict[str, int] = {}
+                        _apply_and_checkpoint(
+                            ChangeBatch(
+                                updates=missing_image[start : start + 500],
+                                resume_token=token,
+                            ),
+                            result_out=apply_result,
+                        )
+                        written += apply_result.get("written", 0)
+                        skipped += apply_result.get("skipped", 0)
+                    repair_status = "applied" if skipped == 0 else (
+                        "partial" if written else "repair_not_applied"
                     )
+                    state.image_repair = {
+                        "attempted": attempted,
+                        "written": written,
+                        "skipped": skipped,
+                        "status": repair_status,
+                    }
+                    if repair_status == "repair_not_applied":
+                        ddl_log.append(
+                            f"CDC image repair not applied for {attempted} row(s): "
+                            "destination _df_lsn guard (repair_not_applied). "
+                            "state convergence / reconciliation, not log replay"
+                        )
+                    else:
+                        ddl_log.append(
+                            f"CDC image repair {repair_status} for {written} of {attempted} row(s); "
+                            f"{skipped} skipped. state convergence / reconciliation, not log replay"
+                        )
 
         final_watermark = state.running_cursor if state.running_cursor is not None else watermark
         lag_fields = _cdc_lag_fields(cdc)

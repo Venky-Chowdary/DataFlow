@@ -149,8 +149,14 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
     from services.cdc_drift_repair import CdcDriftRequiresFencedRepair
 
     if isinstance(exc, CdcDriftRequiresFencedRepair):
+        capture_pending = exc.evidence.get("capture_pending") is True
         message = (
-            "Re-copy the evidenced keys with the confirmed repair action, then resume. "
+            (
+                "Source capture is pending; "
+                if capture_pending
+                else ""
+            )
+            + "Re-copy the evidenced keys with the confirmed repair action, then resume. "
             "This is state convergence / reconciliation, not log replay."
         )
         details.update(

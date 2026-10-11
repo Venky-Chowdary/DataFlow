@@ -269,7 +269,13 @@ export async function runPilotConfirm(
       window.dispatchEvent(new CustomEvent("df2:connectors-changed"));
     }
     onNavigate?.(res.screen);
-    toast({ ...lifecycleToast(res), tone: "success" });
+    toast({
+      ...lifecycleToast(res),
+      tone:
+        res.op === "repair_cdc_drift" && res.result.resolved !== true
+          ? "warning"
+          : "success",
+    });
     return "cleared";
   }
 
@@ -299,7 +305,7 @@ function lifecycleToast(
     case "repair_cdc_drift":
       return {
         title: `CDC drift repair complete${again}`,
-        message: `Job ${res.job_id}: ${res.result.resolved === true ? "All evidenced keys are reconciled." : "Some evidenced keys remain unresolved; review the repair outcome."} State convergence / reconciliation, not log replay.`,
+        message: `Job ${res.job_id}: ${res.result.resolved === true ? "All evidenced keys are reconciled." : `${Number(res.result.remaining_keys ?? 0)} key(s) remain unresolved.`} State convergence / reconciliation, not log replay.`,
       };
     case "delete_connector":
       return { title: `Connector deleted${again}`, message: `“${res.subject}” was removed from Connectors.` };

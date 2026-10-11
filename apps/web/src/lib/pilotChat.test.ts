@@ -197,3 +197,39 @@ test("unknown action kinds are not dispatched to Studio", async () => {
   assert.deepEqual(dispatched, []);
   assert.equal(toasts[0].title, "Unknown action");
 });
+
+test("partial CDC drift repair warns with the remaining-key count", async () => {
+  await withFetch(
+    () =>
+      new Response(
+        JSON.stringify({
+          kind: "lifecycle",
+          op: "repair_cdc_drift",
+          job_id: "job-drift",
+          screen: "jobs",
+          resolved: false,
+          remaining_keys: 2,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    async () => {
+      const toasts: Array<{ title: string; message: string; tone?: string }> = [];
+      await runPilotConfirm(
+        {
+          id: "repair:job-drift",
+          type: "repair_cdc_drift",
+          destructive: true,
+          payload: { ack_id: "ack-drift", kind: "repair_cdc_drift" },
+        },
+        {
+          confirm: async () => true,
+          toast: (toast) => toasts.push(toast),
+        },
+      );
+
+      assert.equal(toasts[0].tone, "warning");
+      assert.match(toasts[0].message, /2 key\(s\) remain unresolved/);
+      assert.match(toasts[0].message, /state convergence \/ reconciliation, not log replay/i);
+    },
+  );
+});

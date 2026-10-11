@@ -1110,6 +1110,15 @@ class SqlServerNativeCdc:
         except Exception as exc:
             logger.debug("sp_cdc_scan skipped: %s", exc)
 
+    def capture_head_position(self) -> str | None:
+        self.force_cdc_scan()
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                max_lsn = self._max_lsn(cur)
+        if not max_lsn:
+            return None
+        return f"{str(max_lsn).lower().removeprefix('0x').zfill(20)}.c"
+
     def is_available(self) -> bool:
         try:
             with self._conn() as conn:

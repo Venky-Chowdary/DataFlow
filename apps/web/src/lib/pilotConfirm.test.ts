@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { isDestructiveLifecycle, isDestructiveTransfer, isLifecycleOp, lifecycleConfirmPrompt, transferOverwriteMessage } from "./pilotConfirm.js";
+import { destructiveActionButtonLabel, isDestructiveLifecycle, isDestructiveTransfer, isLifecycleOp, lifecycleConfirmPrompt, transferOverwriteMessage } from "./pilotConfirm.js";
 
 function transfer(syncMode: string, destructive = false) {
   return {
@@ -77,6 +77,17 @@ describe("pilotConfirm", () => {
     assert.ok(prompt.message.includes("0/100"));
     assert.ok(prompt.message.includes("state convergence / reconciliation, not log replay"));
     assert.ok(!prompt.title.toLowerCase().includes("retry"));
+  });
+
+  it("labels the destructive CDC drift repair action by its selected rows", () => {
+    assert.equal(
+      destructiveActionButtonLabel("repair_cdc_drift"),
+      "Repair selected rows",
+    );
+    assert.equal(
+      destructiveActionButtonLabel("retry_job"),
+      "Overwrite & run",
+    );
   });
 
   it("names the destination in the overwrite warning", () => {
