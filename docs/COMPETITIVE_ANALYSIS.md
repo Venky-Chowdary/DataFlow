@@ -26,6 +26,7 @@ Move schemas and data across heterogeneous engines **with fail-closed type fidel
 | SaaS API fleet | **2 certified** (SF, HubSpot); rest Planned | Weak | N/A | Broad | Varies |
 | Horizontal scale | Process-local scheduler (Phase F) | Managed | SaaS | Enterprise grid | Kafka / managed fleets |
 | Compliance certs | Docs / posture — **not** SOC2 claim | AWS shared responsibility | SOC2 (vendor) | Enterprise suite | Varies |
+| Enterprise IAM | OIDC + SAML SSO, SCIM subset, deny-by-default RBAC, scoped service accounts, hash-chained audit with SIEM export (Keycloak is the only live-tested IdP; see `DATAFLOW_ROADMAP_STATUS.md` G-IAM) | Not assessed here | Not assessed here | Not assessed here | Not assessed here |
 
 ---
 

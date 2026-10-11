@@ -365,6 +365,31 @@ Add SDK source reread / population reconciliation support before enabling checkp
 
 ---
 
+## G-IAM: Enterprise identity, RBAC and audit
+
+### Status: shipped and tested on this branch; Keycloak is the only live-tested IdP
+
+| Capability | State | Evidence |
+| ---------- | ----- | -------- |
+| OIDC SSO: discovery, PKCE, state, nonce, JWKS rotation, algorithm pinning, clock skew | Shipped. Live-tested against Keycloak only. Okta, Entra ID and Google are configured from discovery and covered by recorded-shape unit tests, not live tests | `tests/test_oidc_client.py`, `tests/test_sso_oidc_router_hardening.py`, `tests/test_sso_state_store.py`, `tests/test_live_keycloak_sso.py` |
+| SAML 2.0 SP (`python3-saml` / `xmlsec`): signed assertions, destination, audience, recipient, expiry, request correlation, replay protection | Shipped. No live SAML IdP test | `tests/test_sso_saml_oidc.py` |
+| SCIM 2.0 users and groups, deprovisioning, IdP group to workspace-role mappings | Shipped for the subset in `docs/SCIM.md`: filters `eq`/`sw`/`co` joined by `and`, page size at most 200. No bulk, sorting, ETags or `/Me` | `tests/test_scim_conformance.py` |
+| RBAC: deny-by-default for unruled routes (`DATAFLOW_RBAC_UNRULED_ROUTES`), checked-in route permission snapshot, least-privilege route permissions | Shipped | `tests/test_rbac_middleware.py`, `tests/test_rbac_unruled_routes.py`, `tests/test_rbac_route_inventory.py` |
+| Service accounts and API keys: scopes, hashed storage, expiry, rotation with overlap, grant bounds | Shipped | `tests/test_iam_grant_bounds.py`, `tests/test_workspace_api_keys.py`, `tests/test_api_key_role.py` |
+| Audit: hash chain and verification; events for logins (including failures), denials, IAM changes and secret reads | Shipped | `tests/test_audit_hash_chain.py`, `tests/test_audit_verify_endpoints.py`, `tests/test_audit_coverage.py`, `tests/test_auth_login_audit.py` |
+| SIEM export (CSV, JSON, NDJSON, CEF, `after_seq` paging), retention, legal hold, purge with dry-run count | Shipped | `tests/test_audit_siem_export.py`, `tests/test_audit_retention.py` |
+| Admin UI: Settings → API Keys (service accounts, rotation), SSO (SCIM token, group mappings), Audit Logs (export formats, retention) | Shipped. Checked in a browser on a local dev stack | `apps/web/src/lib/iamAdmin.test.ts`, `apps/web/src/pages/settings/ServiceAccountsPanel.test.tsx`, `apps/web/src/pages/settings/ScimSettings.test.tsx` |
+
+### Not claimed
+
+- No Okta, Entra ID or Google certification, and no Okta Integration Network listing.
+- No SOC 2 or other certification.
+- Audit tip anchoring uses a local stub provider (`services/audit_anchor.py`), not S3 Object Lock, WORM storage or an RFC 3161 timestamp authority.
+- SCIM is the documented subset above, not full RFC 7643/7644 compliance.
+- Two cross-workspace findings remain open: the fidelity check and GitOps planning (`docs/ENTERPRISE_ARCHITECTURE_AUDIT.md`).
+
+---
+
 ## Competitive maturity score
 
 
@@ -379,7 +404,7 @@ Add SDK source reread / population reconciliation support before enabling checkp
 | Lakehouse / Iceberg         | **6/10**       | 5/10             | small lead; catalog auto-routing uses the existing EOS seam; filesystem remains at-least-once (`tests/test_iceberg_eos_live_pg.py::test_live_pg_cdc_auto_routes_through_transfer_eos`) |
 | Semantic mapping            | 7/10           | 3/10             | lead                                                             |
 | UX (Transfer Studio)        | 7/10           | 6/10             | small lead                                                       |
-| Enterprise SSO/audit/RBAC   | 5/10           | 8/10             | medium                                                           |
+| Enterprise SSO/audit/RBAC   | 6.5/10         | 8/10             | medium (Keycloak is the only live-tested IdP; SCIM subset; audit anchor is a stub) |
 | Overall                     | 6.5–7/10       | 8.5/10           | still ~1.5–2 years of focused work                               |
 
 
