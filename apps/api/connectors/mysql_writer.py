@@ -279,6 +279,7 @@ def _mysql_insert_sql(
     target_cols: list[str],
     write_mode: str,
     conflict_columns: list[str] | None,
+    allow_equal_lsn: bool = False,
 ) -> str:
     """INSERT / ON DUPLICATE KEY SQL for the current mapped column list."""
     placeholders = ", ".join(["%s"] * len(target_cols))
@@ -293,7 +294,11 @@ def _mysql_insert_sql(
                 if DF_LSN_COL in target_cols:
                     from connectors.writer_common import mysql_lsn_values_newer_sql
 
-                    newer = mysql_lsn_values_newer_sql(DF_LSN_COL, quote="`")
+                    newer = mysql_lsn_values_newer_sql(
+                        DF_LSN_COL,
+                        quote="`",
+                        allow_equal_lsn=allow_equal_lsn,
+                    )
                     updates = ", ".join(
                         f"{quote_sql_identifier(c, '`')}=IF({newer}, VALUES({quote_sql_identifier(c, '`')}), {quote_sql_identifier(c, '`')})"
                         for c in update_cols
@@ -851,6 +856,7 @@ def write_mapped_rows(
         target_cols=target_cols,
         write_mode=write_mode,
         conflict_columns=conflict_columns,
+        allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
     )
 
     proxy_dest = is_public_proxy_host(host) or is_public_proxy_host(connection_string)
@@ -972,6 +978,7 @@ def write_mapped_rows(
                         target_cols=target_cols,
                         write_mode=write_mode,
                         conflict_columns=conflict_columns,
+                        allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
                     )
                 col_defs = render_create_column_defs(
                     columns=target_cols,
@@ -1520,6 +1527,7 @@ def write_mapped_rows(
                                 target_cols,
                                 quote="`",
                                 placeholder="%s",
+                                allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
                             )
                             rows_skipped += skipped
                         loaded = False

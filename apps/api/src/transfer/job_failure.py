@@ -146,6 +146,31 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         "error_confidence": human.get("confidence"),
         "operator_error": human.get("message"),
     }
+    from services.cdc_drift_repair import CdcDriftRequiresFencedRepair
+
+    if isinstance(exc, CdcDriftRequiresFencedRepair):
+        message = (
+            "Re-copy the evidenced keys with the confirmed repair action, then resume. "
+            "This is state convergence / reconciliation, not log replay."
+        )
+        details.update(
+            {
+                "code": "cdc_drift_requires_fenced_repair",
+                "retriable": False,
+                "message": message,
+                "evidence": exc.evidence,
+                "raw": message,
+                "title": "CDC destination drift requires confirmed repair",
+            }
+        )
+        extras.update(
+            {
+                "error_code": "cdc_drift_requires_fenced_repair",
+                "operator_error": message,
+                "cdc_drift_repair": exc.evidence,
+                "cdc_lease_cursor_key": str(exc.evidence.get("cursor_key") or ""),
+            }
+        )
     # A destination that is short of the source image still has the rows on
     # the source. Dropping the replication slot here makes the next resume
     # report slot_missing and the unapplied inserts cannot be read back.
@@ -550,6 +575,11 @@ def _fail_runtime_job(
         "error_details": error_details,
         **lease_extras,
     }
+    if lease_extras:
+        status_kwargs["extras"] = {
+            **(prev.get("extras") if isinstance(prev.get("extras"), dict) else {}),
+            **lease_extras,
+        }
     for key, value in capture.items():
         if not str(prev.get(key) or "").strip():
             status_kwargs.setdefault(key, value)

@@ -824,6 +824,7 @@ def filter_stale_lsn_rows(
     *,
     quote: str = '"',
     placeholder: str = "%s",
+    allow_equal_lsn: bool = False,
 ) -> tuple[list[tuple], int]:
     """Return (rows_to_write, rows_skipped) for an LSN-guarded batch.
 
@@ -881,7 +882,13 @@ def filter_stale_lsn_rows(
         prior = existing.get(key)
         # Align with lsn_is_newer: empty/None incoming must not overwrite a
         # stamped destination row (at-least-once redelivery regress).
-        if not lsn_is_newer(incoming, prior):
+        equal = (
+            allow_equal_lsn
+            and incoming not in (None, "")
+            and prior not in (None, "")
+            and str(incoming).strip() == str(prior).strip()
+        )
+        if not equal and not lsn_is_newer(incoming, prior):
             skipped += 1
             continue
         to_write.append(row)

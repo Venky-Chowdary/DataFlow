@@ -122,6 +122,25 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "repair_cdc_drift",
+        "description": (
+            "Stage an operator-confirmed, fenced copy of selected CDC drifted rows. "
+            "This is state convergence / reconciliation, not log replay."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "key_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Key IDs from the job's drift evidence; empty selects all evidenced keys.",
+                },
+            },
+            "required": ["job_id"],
+        },
+    },
+    {
         "name": "test_connector",
         "description": (
             "Probe a saved connector's connectivity now (same as the Test button) and "
@@ -265,6 +284,7 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "retry_job": "retry_job",
     "resume_job": "resume_job",
     "replay_quarantine": "replay_quarantine",
+    "repair_cdc_drift": "repair_cdc_drift",
     "delete_connector": "delete_connector",
     "update_connector": "update_connector",
     "set_schedule_enabled": "set_schedule_enabled",
@@ -388,6 +408,7 @@ def _job_tool(
     selector: str,
     transform_overrides: Any = None,
     rows: Any = None,
+    key_ids: Any = None,
 ) -> ToolResult:
     if not (job_id or "").strip() and not (selector or "").strip():
         # A mutating call with no target must not fall through to the
@@ -411,6 +432,76 @@ def _job_tool(
     status = brief["status"].lower()
     jid = brief["job_id"]
     short = short_job_id(jid)
+    if tool == "repair_cdc_drift":
+        extras = job.get("extras") if isinstance(job.get("extras"), dict) else {}
+        evidence = extras.get("cdc_drift_repair")
+        request = job.get("transfer_request") or {}
+        source = request.get("source") or {}
+        destination = request.get("destination") or {}
+        if not isinstance(evidence, dict) or evidence.get("action") != "operator_fenced_repair_required":
+            return _tool_result(
+                tool,
+                success=False,
+                output=None,
+                error="This job has no operator-fenced CDC drift evidence to repair.",
+            )
+        if (
+            str(evidence.get("source_table") or "") != str(source.get("table") or source.get("collection") or "")
+            or str(evidence.get("dest_table") or "") != str(destination.get("table") or destination.get("collection") or "")
+            or not str(job.get("cdc_lease_cursor_key") or "").strip()
+            or str(job.get("cdc_lease_cursor_key")) != str(evidence.get("cursor_key") or "")
+        ):
+            return _tool_result(
+                tool,
+                success=False,
+                output=None,
+                error="CDC drift evidence does not match this job's table or cursor.",
+            )
+        evidence_keys = evidence.get("keys")
+        if not isinstance(evidence_keys, list):
+            return _tool_result(
+                tool,
+                success=False,
+                output=None,
+                error="CDC drift evidence has no selectable key IDs.",
+            )
+        available = {
+            str(item.get("key_id") or "")
+            for item in evidence_keys
+            if isinstance(item, dict) and item.get("key_id")
+        }
+        if not isinstance(key_ids, list):
+            return _tool_result(
+                tool,
+                success=False,
+                output=None,
+                error="key_ids must be a list of evidenced key IDs.",
+            )
+        selected = [str(item) for item in key_ids] if key_ids else sorted(available)
+        if not selected or not set(selected).issubset(available):
+            return _tool_result(
+                tool,
+                success=False,
+                output=None,
+                error="Select only key IDs present in this job's CDC drift evidence.",
+            )
+        table = str(evidence.get("dest_table") or "")
+        position = evidence.get("committed_position")
+        preview = {
+            "table": table,
+            "key_count": len(selected),
+            "committed_position": position,
+        }
+        return _stage(
+            tool,
+            payload={"job_id": jid, "key_ids": selected},
+            preview=preview,
+            label=(
+                f"Re-copy {len(selected)} drifted row(s) from source "
+                "(state reconciliation, not log replay)"
+            ),
+            destructive=True,
+        )
     if tool == "cancel_job":
         if status in _TERMINAL:
             return _tool_result(tool, success=False, output=None,

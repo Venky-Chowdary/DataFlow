@@ -4,6 +4,7 @@ Datawrap — Copilot API Router
 Customer-facing chat + separate training agent endpoints.
 """
 
+import asyncio
 import logging
 
 from typing import Optional
@@ -299,6 +300,25 @@ async def _run_lifecycle_confirm(
             transform_overrides=overrides,
         )
         return dict(await connectors_router.replay_job_quarantine(job_id, body, http_request))
+    if kind == "repair_cdc_drift":
+        from services.cdc_drift_repair import run_fenced_drift_repair
+        from services.cdc_lease import CdcLeaseConflict
+
+        role, actor = _caller(http_request)
+        try:
+            return await asyncio.to_thread(
+                run_fenced_drift_repair,
+                job_id,
+                list(payload.get("key_ids") or []),
+                actor=actor,
+                workspace_id=workspace_id,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except CdcLeaseConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     if kind == "delete_connector":
         cid = str(payload.get("connector_id") or "").strip()
         out = saved_connectors_router.remove_saved_connector(cid, http_request, workspace_id)

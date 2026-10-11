@@ -590,6 +590,7 @@ def _sqlite_upsert_batch(
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
     row_offset: int = 0,
+    allow_equal_lsn: bool = False,
 ) -> tuple[int, int]:
     """Upsert with optional ``_df_lsn`` monotonic guard (at-least-once CDC).
 
@@ -633,6 +634,7 @@ def _sqlite_upsert_batch(
             target_cols,
             quote='"',
             placeholder="?",
+            allow_equal_lsn=allow_equal_lsn,
         )
     else:
         skipped = 0
@@ -651,7 +653,9 @@ def _sqlite_upsert_batch(
     conflict_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
 
     if lsn_guarded and update_cols:
-        where_sql = sqlite_lsn_update_guard_sql(table_name)
+        where_sql = sqlite_lsn_update_guard_sql(
+            table_name, allow_equal_lsn=allow_equal_lsn
+        )
         set_sql = ", ".join(
             f"{quote_sql_identifier(c)}=excluded.{quote_sql_identifier(c)}"
             for c in update_cols
@@ -1440,6 +1444,7 @@ def write_mapped_rows(
                                     rejected_details=rejected_details,
                                     policy=policy,
                                     row_offset=start,
+                                    allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
                                 )
                                 written += chunk_written
                                 rows_skipped += chunk_skipped

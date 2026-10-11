@@ -1356,6 +1356,7 @@ class DataPilotTools:
             "retry_job": self._retry_job,
             "resume_job": self._resume_job,
             "replay_quarantine": self._replay_quarantine,
+            "repair_cdc_drift": self._repair_cdc_drift,
             "prepare_cdc_source": self._prepare_cdc_source,
             "test_connector": self._test_connector,
             "delete_connector": self._delete_connector,
@@ -3108,6 +3109,21 @@ class DataPilotTools:
             selector,
             transform_overrides=transform_overrides,
             rows=rows,
+        )
+
+    def _repair_cdc_drift(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        key_ids: list[str] | None = None,
+    ) -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool(
+            "repair_cdc_drift",
+            job_id,
+            selector,
+            key_ids=key_ids or [],
         )
 
     def _prepare_cdc_source(

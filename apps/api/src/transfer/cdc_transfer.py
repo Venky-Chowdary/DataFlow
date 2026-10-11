@@ -592,6 +592,7 @@ class CdcState:
     watermark: str | None = None
     running_cursor: str | None = None
     rows_written: int = 0
+    rows_skipped: int = 0
     #: Rows the reader handed to the writer (inserts + updates) across every
     #: batch — the run's source population when no source image COUNT exists.
     source_changes_read: int = 0
@@ -1114,6 +1115,7 @@ def _apply_change_batch(
     mappings_inherited: bool = False,
     pk_source_cols: list[str] | None = None,
     align_lock: dict[str, Any] | None = None,
+    allow_equal_lsn: bool = False,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
     from services.cdc_exactly_once import (
@@ -1197,6 +1199,7 @@ def _apply_change_batch(
     )
     source_headers, target_cols = _source_headers(headers, mappings)
     rows_written = 0
+    rows_skipped = 0
     deleted = 0
     last_checksum = ""
     dest_summary: dict[str, Any] = {}
@@ -1265,6 +1268,7 @@ def _apply_change_batch(
             backfill_new_fields=backfill_new_fields,
             job_id=job_id,
             sync_mode="cdc",
+            allow_equal_lsn=allow_equal_lsn,
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
@@ -1272,6 +1276,7 @@ def _apply_change_batch(
             replay_safety=cdc_replay_safety,
         )
         rows_written += rows
+        rows_skipped += int(dest_summary.get("rows_skipped") or 0)
 
     if change.updates:
         data_rows = _records_to_matrix(change.updates, headers)
@@ -1294,6 +1299,7 @@ def _apply_change_batch(
             backfill_new_fields=backfill_new_fields,
             job_id=job_id,
             sync_mode="cdc",
+            allow_equal_lsn=allow_equal_lsn,
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
@@ -1301,6 +1307,7 @@ def _apply_change_batch(
             replay_safety=cdc_replay_safety,
         )
         rows_written += rows
+        rows_skipped += int(dest_summary.get("rows_skipped") or 0)
 
     if change.deletes:
         if not pk_target_cols:
@@ -1383,6 +1390,7 @@ def _apply_change_batch(
         dest_summary["exactly_once_active"] = False
         dest_summary["exactly_once_downgrade"] = REASON_NO_LSN
         dest_summary["delivery_semantics"] = DELIVERY_SEMANTICS_ALO
+    dest_summary["rows_skipped"] = rows_skipped
     return rows_written, last_checksum, dest_summary, deleted
 
 
@@ -3172,7 +3180,13 @@ def _run_cdc_single_stream(
     max_poll_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
     txn_hold_sleep = float(getenv_brand("CDC_TXN_HOLD_SLEEP_SEC", "0.25"))
 
-    def _apply_and_checkpoint(change: ChangeBatch, *, publish_resume: bool = True) -> bool:
+    def _apply_and_checkpoint(
+        change: ChangeBatch,
+        *,
+        publish_resume: bool = True,
+        allow_equal_lsn: bool = False,
+        result_out: dict[str, int] | None = None,
+    ) -> bool:
         """Apply one batch. A finished page may become the resume cursor.
 
         An offset snapshot page is not a resume position: rows still unread
@@ -3240,11 +3254,13 @@ def _run_cdc_single_stream(
                 mappings_inherited=mappings_inherited,
                 pk_source_cols=pk_source_cols,
                 align_lock=align_lock,
+                allow_equal_lsn=allow_equal_lsn,
                 writer_fence=int(
                     getattr(getattr(cdc, "_lease", None), "generation", 0) or 0
                 ),
             )
         state.rows_written += rows_written
+        state.rows_skipped += int((dest_summary or {}).get("rows_skipped") or 0)
         state.source_changes_read += len(change.inserts) + len(change.updates)
         state.inserts += len(change.inserts)
         state.updates += len(change.updates)
@@ -3256,6 +3272,15 @@ def _run_cdc_single_stream(
                 dest_summary,
                 job_id=str(job_id or ""),
                 destination=destination,
+            )
+        if result_out is not None:
+            result_out.update(
+                {
+                    "written": max(0, int(rows_written or 0)),
+                    "skipped": max(
+                        0, int((dest_summary or {}).get("rows_skipped") or 0)
+                    ),
+                }
             )
         if isinstance(dest_summary, dict) and dest_summary.get("exactly_once_downgrade"):
             eos_active = False
@@ -3562,18 +3587,69 @@ def _run_cdc_single_stream(
                         missing_image = None
             if missing_image:
                 token = unwrap_resume_token(cursor_now)
+                if eos_active:
+                    from services.cdc_drift_repair import (
+                        CdcDriftRequiresFencedRepair,
+                        _build_drift_evidence,
+                    )
+
+                    pk_fields = [
+                        field.strip()
+                        for field in str(primary_key or "").split(",")
+                        if field.strip()
+                    ]
+                    evidence = _build_drift_evidence(
+                        cursor_key=cursor_key,
+                        source_table=str(table_name or ""),
+                        dest_table=str(dest_table or ""),
+                        pk_fields=pk_fields,
+                        committed_position=token,
+                        rows=missing_image,
+                    )
+                    lease_resource = getattr(getattr(cdc, "_lease", None), "resource", "")
+                    if lease_resource:
+                        evidence["cdc_lease_resource"] = str(lease_resource)
+                    logger.warning(
+                        "CDC image drift requires fenced repair table=%s count=%s key_ids=%s",
+                        str(dest_table or ""),
+                        len(missing_image),
+                        [item["key_id"] for item in evidence["keys"]],
+                    )
+                    raise CdcDriftRequiresFencedRepair(evidence)
+                attempted = len(missing_image)
+                written = 0
+                skipped = 0
                 for start in range(0, len(missing_image), 500):
+                    apply_result: dict[str, int] = {}
                     _apply_and_checkpoint(
                         ChangeBatch(
                             updates=missing_image[start : start + 500],
                             resume_token=token,
-                        )
+                        ),
+                        result_out=apply_result,
                     )
-                ddl_log.append(
-                    f"CDC image repair upserted {len(missing_image)} source row(s) "
-                    "whose cells were not on the destination. At-least-once. "
-                    "Not a replay of the missed binlog event."
+                    written += apply_result.get("written", 0)
+                    skipped += apply_result.get("skipped", 0)
+                repair_status = "applied" if skipped == 0 else (
+                    "partial" if written else "repair_not_applied"
                 )
+                state.image_repair = {
+                    "attempted": attempted,
+                    "written": written,
+                    "skipped": skipped,
+                    "status": repair_status,
+                }
+                if repair_status == "repair_not_applied":
+                    ddl_log.append(
+                        f"CDC image repair not applied for {attempted} row(s): "
+                        "destination _df_lsn guard (repair_not_applied). "
+                        "state convergence / reconciliation, not log replay"
+                    )
+                else:
+                    ddl_log.append(
+                        f"CDC image repair {repair_status} for {written} of {attempted} row(s); "
+                        f"{skipped} skipped. state convergence / reconciliation, not log replay"
+                    )
 
         final_watermark = state.running_cursor if state.running_cursor is not None else watermark
         lag_fields = _cdc_lag_fields(cdc)
@@ -3596,6 +3672,8 @@ def _run_cdc_single_stream(
             "poll_rounds": max_poll_rounds,
             **lag_fields,
         }
+        if getattr(state, "image_repair", None):
+            summary["cdc"]["image_repair"] = state.image_repair
         summary["cdc_lag_seconds"] = lag_fields.get("cdc_lag_seconds")
         summary["replication_lag_bytes"] = lag_fields.get("replication_lag_bytes")
         summary["cdc_heartbeat_at"] = lag_fields.get("cdc_heartbeat_at")

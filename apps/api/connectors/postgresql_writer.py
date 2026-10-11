@@ -1816,7 +1816,12 @@ def write_mapped_rows(
                             placeholders,
                             sql.SQL(", ").join(map(sql.Identifier, conflict)),
                             set_clause,
-                            sql.SQL(postgres_lsn_update_guard_sql(table_name)),
+                            sql.SQL(
+                                postgres_lsn_update_guard_sql(
+                                    table_name,
+                                    allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
+                                )
+                            ),
                         )
                     return sql.SQL(
                         "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
@@ -2584,6 +2589,7 @@ def write_mapped_rows(
                                     target_cols,
                                     quote='"',
                                     placeholder="%s",
+                                    allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
                                 )
                                 rows_skipped += skipped
                             if write_batch:

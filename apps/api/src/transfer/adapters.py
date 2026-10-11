@@ -1486,6 +1486,7 @@ def _write_destination_database(
     error_policy: str | None = None,
     sync_mode: str = "",
     source_spool: Any = None,
+    allow_equal_lsn: bool = False,
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
 
@@ -1587,6 +1588,8 @@ def _write_destination_database(
         ),
         "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog"),
     }
+    if allow_equal_lsn:
+        common["allow_equal_lsn"] = True
     from .connector_dispatch import writer_extra_kwargs
 
     common.update(writer_extra_kwargs(db_type, cfg=cfg, dest=endpoint, common=common))

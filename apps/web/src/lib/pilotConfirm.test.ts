@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { isDestructiveLifecycle, isDestructiveTransfer, isLifecycleOp, transferOverwriteMessage } from "./pilotConfirm.js";
+import { isDestructiveLifecycle, isDestructiveTransfer, isLifecycleOp, lifecycleConfirmPrompt, transferOverwriteMessage } from "./pilotConfirm.js";
 
 function transfer(syncMode: string, destructive = false) {
   return {
@@ -46,6 +46,37 @@ describe("pilotConfirm", () => {
       }),
       false,
     );
+  });
+
+  it("treats confirmed CDC drift repair as a lifecycle action", () => {
+    assert.equal(isLifecycleOp("repair_cdc_drift"), true);
+    assert.equal(
+      isDestructiveLifecycle({
+        id: "d1",
+        type: "repair_cdc_drift",
+        destructive: true,
+        payload: { ack_id: "ack_1", preview: { table: "orders_copy" } },
+      }),
+      true,
+    );
+  });
+
+  it("uses a repair-specific confirmation prompt with the agreed semantics", () => {
+    const prompt = lifecycleConfirmPrompt({
+      id: "d1",
+      type: "repair_cdc_drift",
+      destructive: true,
+      payload: {
+        ack_id: "ack_1",
+        preview: { table: "orders_copy", key_count: 2, committed_position: "0/100" },
+      },
+    });
+
+    assert.equal(prompt.confirmLabel, "Re-copy and reconcile");
+    assert.ok(prompt.message.includes("orders_copy"));
+    assert.ok(prompt.message.includes("0/100"));
+    assert.ok(prompt.message.includes("state convergence / reconciliation, not log replay"));
+    assert.ok(!prompt.title.toLowerCase().includes("retry"));
   });
 
   it("names the destination in the overwrite warning", () => {

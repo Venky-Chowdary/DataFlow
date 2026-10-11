@@ -120,6 +120,7 @@ def _write_batch(
     empty_cells_as_null: bool = False,
     records: list[dict[str, Any]] | None = None,
     source_spool: Any = None,
+    allow_equal_lsn: bool = False,
 ) -> tuple[int, str, dict]:
     # Live dest nullability for write-time NOT NULL escalate (G3 / adapters parity).
     dest_nullability = dict(
@@ -141,6 +142,8 @@ def _write_batch(
         source_handoff["source_spool"] = source_spool
     if records is not None:
         source_handoff["records"] = records
+    if allow_equal_lsn:
+        source_handoff["allow_equal_lsn"] = True
     from services.sync_cursor import is_overwrite_sync
 
     # Overwrite rebuilds the table from one source snapshot, so the source key

@@ -57,6 +57,7 @@ export type LifecycleOp =
   | "retry_job"
   | "resume_job"
   | "replay_quarantine"
+  | "repair_cdc_drift"
   | "delete_connector"
   | "set_schedule_enabled"
   | "delete_schedule"
@@ -67,6 +68,7 @@ export const LIFECYCLE_OPS: readonly LifecycleOp[] = [
   "retry_job",
   "resume_job",
   "replay_quarantine",
+  "repair_cdc_drift",
   "delete_connector",
   "set_schedule_enabled",
   "delete_schedule",
@@ -275,6 +277,16 @@ export function lifecycleConfirmPrompt(action: CopilotPendingAction): {
       title: `Delete pipeline “${name}”?`,
       message: "The schedule stops firing and is removed. Its past jobs stay in Jobs.",
       confirmLabel: "Delete pipeline",
+    };
+  }
+  if (action.type === "repair_cdc_drift") {
+    const count = Number(preview.key_count || 0);
+    const table = String(preview.table || "the destination table");
+    const position = String(preview.committed_position || "the committed position");
+    return {
+      title: `Re-copy drifted rows from source?`,
+      message: `Re-copy ${count} drifted row(s) into ${table} at ${position}. This is state convergence / reconciliation, not log replay.`,
+      confirmLabel: "Re-copy and reconcile",
     };
   }
   return {

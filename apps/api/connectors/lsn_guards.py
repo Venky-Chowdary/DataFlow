@@ -584,7 +584,12 @@ def _lsn_same_prefix_sql(
     )
 
 
-def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
+def postgres_lsn_update_guard_sql(
+    table_name: str,
+    lsn_column: str = DF_LSN_COL,
+    *,
+    allow_equal_lsn: bool = False,
+) -> str:
     """WHERE fragment for ON CONFLICT when ``_df_lsn`` is present.
 
     Real PG ``hi/lo`` LSNs use ``::pg_lsn``. Mixed CDC stamps use family-aware
@@ -629,7 +634,7 @@ def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL)
         f"AND {excl} !~ '{num_pat}' AND {dest_c} !~ '{num_pat}' "
         f"AND {_lsn_same_prefix_sql(excl, dest_c, match)})"
     )
-    return (
+    strict_guard = (
         f"( "
         f"({excl} ~ '{pg_pat}' AND {dest_c} ~ '{pg_pat}' "
         f"AND {excl}::pg_lsn > COALESCE(NULLIF({dest}, '')::pg_lsn, '0/0'::pg_lsn)) "
@@ -643,9 +648,20 @@ def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL)
         f")) "
         f")"
     )
+    if not allow_equal_lsn:
+        return strict_guard
+    return (
+        f"({strict_guard} OR "
+        f"({excl} IS NOT NULL AND {excl} <> '' AND {excl} = {dest}))"
+    )
 
 
-def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`") -> str:
+def mysql_lsn_values_newer_sql(
+    lsn_column: str = DF_LSN_COL,
+    *,
+    quote: str = "`",
+    allow_equal_lsn: bool = False,
+) -> str:
     """Boolean SQL: ``VALUES(lsn)`` is strictly newer than the destination cell.
 
     Handles empty dest, PG ``hi/lo`` hex, ``file:pos`` (file then integer pos),
@@ -695,7 +711,7 @@ def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`"
         f"AND {inc} NOT REGEXP '{num_re}' AND {dest} NOT REGEXP '{num_re}' "
         f"AND {_lsn_same_prefix_sql(inc, dest, match)})"
     )
-    return (
+    strict_guard = (
         f"({dest} IS NULL OR {dest} = '' "
         f"OR ({both_filepos} AND {filepos_newer}) "
         f"OR {scn_newer} "
@@ -703,9 +719,17 @@ def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`"
         f"OR ({both_numeric} AND CAST({inc} AS UNSIGNED) > CAST({dest} AS UNSIGNED)) "
         f"OR ({both_opaque} AND {inc} > {dest}))"
     )
+    if not allow_equal_lsn:
+        return strict_guard
+    return f"({strict_guard} OR ({inc} IS NOT NULL AND {inc} <> '' AND {inc} = {dest}))"
 
 
-def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
+def sqlite_lsn_update_guard_sql(
+    table_name: str,
+    lsn_column: str = DF_LSN_COL,
+    *,
+    allow_equal_lsn: bool = False,
+) -> str:
     """WHERE fragment for SQLite ``ON CONFLICT DO UPDATE``.
 
     Family-aware for PG ``hi/lo`` hex, ``file:pos``, numeric, and opaque.
@@ -802,7 +826,7 @@ def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -
         for p in NON_BINLOG_LSN_PREFIXES
     )
     both_opaque = f"({excl_opaque} AND {dest_opaque} AND {same_prefix})"
-    return (
+    strict_guard = (
         f"({dest} IS NULL OR {dest} = '' "
         f"OR ({both_filepos} AND {filepos_newer}) "
         f"OR {scn_newer} "
@@ -810,6 +834,9 @@ def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -
         f"OR ({both_numeric} AND CAST({excl} AS INTEGER) > CAST({dest} AS INTEGER)) "
         f"OR ({both_opaque} AND {excl} > {dest}))"
     )
+    if not allow_equal_lsn:
+        return strict_guard
+    return f"({strict_guard} OR ({excl} IS NOT NULL AND {excl} <> '' AND {excl} = {dest}))"
 
 
 def snowflake_lsn_match_predicate(

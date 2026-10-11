@@ -296,6 +296,11 @@ function lifecycleToast(
         title: `Quarantine replay started${again}`,
         message: `Job ${res.job_id}: ${String(res.result.replayed ?? res.result.rows ?? "open")} rows re-sent.`,
       };
+    case "repair_cdc_drift":
+      return {
+        title: `CDC drift repair complete${again}`,
+        message: `Job ${res.job_id}: ${res.result.resolved === true ? "All evidenced keys are reconciled." : "Some evidenced keys remain unresolved; review the repair outcome."} State convergence / reconciliation, not log replay.`,
+      };
     case "delete_connector":
       return { title: `Connector deleted${again}`, message: `“${res.subject}” was removed from Connectors.` };
     case "set_schedule_enabled":
