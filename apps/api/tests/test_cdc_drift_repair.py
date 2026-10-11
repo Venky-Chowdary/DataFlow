@@ -4,6 +4,11 @@ import sqlite3
 
 import pytest
 
+from src.transfer.cdc_transfer import (
+    _single_stream_cursor_key,
+    run_cdc_database_transfer,
+)
+
 
 EVIDENCE = {
     "action": "operator_fenced_repair_required",
@@ -550,10 +555,6 @@ def _seed_image_repair_scenario(tmp_path, monkeypatch):
     from unittest.mock import patch
 
     from services.cdc_engine import ChangeBatch
-    from src.transfer.cdc_transfer import (
-        _single_stream_cursor_key,
-        run_cdc_database_transfer,
-    )
     from src.transfer.models import EndpointConfig
 
     source = EndpointConfig(
@@ -642,7 +643,7 @@ def _seed_image_repair_scenario(tmp_path, monkeypatch):
             "DATAFLOW_CDC_TXN_HOLD_SLEEP_SEC": "0",
         },
     ):
-        run_cdc_database_transfer(
+        initial_result = run_cdc_database_transfer(
             source,
             destination,
             mappings=[
@@ -663,6 +664,7 @@ def _seed_image_repair_scenario(tmp_path, monkeypatch):
             delivery_guarantee="exactly_once",
             delivery_pinned=True,
         )
+    assert initial_result[0] == 1, initial_result
     import sqlite3
 
     with sqlite3.connect(dest_path) as connection:
