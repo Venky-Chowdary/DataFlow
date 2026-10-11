@@ -3,18 +3,25 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
+import sqlite3
 from typing import Any
 
 import pytest
 
+from connectors.cdc_eos_sql import dest_engine_count
 from connectors.oracle_logminer import (
+    UNPARSED_SQL_REDO_FLAG,
     OracleLogMinerCdc,
     OracleLogMinerReadError,
     classify_sql_redo,
     logminer_contents_sql,
     logminer_txn_contents_sql,
 )
+from services.cdc_engine import ChangeBatch
 from services.value_serializer import SQL_NULL_SENTINEL
+from src.transfer.cdc_transfer import _apply_change_batch, _split_unparsed_sql_redo
+from src.transfer.models import EndpointConfig
 
 
 def _reader() -> OracleLogMinerCdc:
@@ -111,6 +118,45 @@ def _attach_source(
         ("V", "VARCHAR2(40)"),
     )
     return cursor
+
+
+def _apply_eos_through_transfer(
+    db_path: Path,
+    change: ChangeBatch,
+    *,
+    mappings: list[dict[str, Any]],
+    column_types: dict[str, str],
+    headers: list[str],
+    cursor_key: str,
+) -> tuple[int, str, dict[str, Any], int]:
+    dest_cfg = {
+        "type": "sqlite",
+        "database": str(db_path),
+        "table": "rows",
+    }
+    dest = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        database=str(db_path),
+        table="rows",
+    )
+    return _apply_change_batch(
+        "sqlite",
+        dest,
+        dest_cfg,
+        "rows",
+        change,
+        mappings,
+        column_types,
+        headers,
+        ["id"],
+        0,
+        1,
+        delivery_guarantee="exactly_once",
+        delivery_pinned=True,
+        cursor_key=cursor_key,
+        stream_name="rows",
+    )
 
 
 def test_locator_sql_is_selected_by_both_logminer_queries() -> None:
@@ -374,6 +420,186 @@ def test_missing_source_row_drops_lobs_and_increments_reader_metadata() -> None:
 
     assert events[0]["row"] == {"ID": 4}
     assert reader.cdc_metadata()["lob_lookup_missing"] == 1
+
+
+def test_evicted_locator_xid_blank_update_is_held_from_eos_destination(
+    tmp_path: Path,
+) -> None:
+    reader = _reader()
+    target_xid = (1, 2, 3)
+    reader._remember_lob_locator_xid("T", target_xid)
+    for sequence in range(1, 4097):
+        reader._remember_lob_locator_xid("T", (2, 3, sequence))
+    assert len(reader._lob_locator_xids) == 4096
+    assert not reader._has_lob_locator_xid("T", target_xid)
+
+    kind, reject = classify_sql_redo("", op="update", table="T")
+    assert kind == "unparsed"
+    blank_update = reject["values"]
+    assert blank_update[UNPARSED_SQL_REDO_FLAG] == "1"
+    clean, held = _split_unparsed_sql_redo([blank_update])
+    assert clean == []
+    assert len(held) == 1
+
+    db_path = tmp_path / "oracle_lob_eviction.db"
+    mappings = [
+        {"source": source, "target": target}
+        for source, target in (
+            ("ID", "id"),
+            ("C", "c"),
+            ("B", "b"),
+            ("V", "v"),
+        )
+    ]
+    column_types = {name: "string" for name in ("ID", "C", "B", "V")}
+    headers = ["ID", "C", "B", "V"]
+    _apply_eos_through_transfer(
+        db_path,
+        ChangeBatch(
+            inserts=[
+                {"ID": "7", "C": "kept-clob", "B": "kept-blob", "V": "stable"}
+            ],
+            table="T",
+            resume_token={
+                "lsn": "scn:100.p0x000001.00000001.0001.0000000001"
+            },
+        ),
+        mappings=mappings,
+        column_types=column_types,
+        headers=headers,
+        cursor_key="oracle-lob-eviction",
+    )
+    rows, _checksum, summary, deleted = _apply_eos_through_transfer(
+        db_path,
+        ChangeBatch(
+            updates=[blank_update],
+            table="T",
+            resume_token={
+                "lsn": "scn:101.p0x000001.00000001.0001.0000000002"
+            },
+        ),
+        mappings=mappings,
+        column_types=column_types,
+        headers=headers,
+        cursor_key="oracle-lob-eviction",
+    )
+
+    assert rows == 0
+    assert deleted == 0
+    assert summary["cdc_unparsed_sql_redo"] == 1
+    assert summary["rejected_rows"] == 1
+    assert dest_engine_count({"database": str(db_path)}, "rows") == 1
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT id, c, b, v FROM rows").fetchone() == (
+            "7",
+            "kept-clob",
+            "kept-blob",
+            "stable",
+        )
+
+
+def test_deleted_lob_row_before_lookup_applies_then_delete_converges(
+    tmp_path: Path,
+) -> None:
+    reader = _reader()
+    insert = {
+        "op": "insert",
+        "table": "T",
+        "xid": (4, 5, 6),
+        "position": (200, "redo-insert", 1),
+        "row": {
+            "ID": "8",
+            "C": "EMPTY_CLOB()",
+            "N": "",
+            "B": "EMPTY_BLOB()",
+            "V": "before-delete",
+        },
+    }
+    locator = {
+        "op": "update",
+        "table": "T",
+        "xid": (4, 5, 6),
+        "position": (200, "redo-locator", 2),
+        "lob_locator": True,
+        "row": {"ID": "8"},
+    }
+    later_delete = {
+        "op": "delete",
+        "table": "T",
+        "xid": (7, 8, 9),
+        "position": (201, "redo-delete", 1),
+        "row": {"ID": "8"},
+    }
+
+    _attach_source(reader, {})
+    pending = reader._coalesce_lob_locator_events([insert, locator, later_delete])
+    lookup_columns = reader._enrich_lob_lookup_events(pending)
+    assert pending == [insert, later_delete]
+    assert later_delete["position"] > insert["position"]
+    assert set(pending[0]["row"]) == {"ID", "V"}
+    assert "C" not in pending[0]["row"]
+    assert "N" not in pending[0]["row"]
+    assert "B" not in pending[0]["row"]
+    assert reader.cdc_metadata()["lob_lookup_missing"] == 1
+    assert lookup_columns == {"T": ["C", "N", "B"]}
+
+    db_path = tmp_path / "oracle_lob_deleted_before_lookup.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE rows (id TEXT PRIMARY KEY, c TEXT DEFAULT 'kept-c', "
+            "n TEXT DEFAULT 'kept-n', b TEXT DEFAULT 'kept-b', v TEXT)"
+        )
+    mappings = [
+        {"source": source, "target": target}
+        for source, target in (("ID", "id"), ("V", "v"))
+    ]
+    column_types = {"ID": "string", "V": "string"}
+    headers = ["ID", "V"]
+    rows, _checksum, insert_summary, deleted = _apply_eos_through_transfer(
+        db_path,
+        ChangeBatch(
+            inserts=[pending[0]["row"]],
+            table="T",
+            resume_token={
+                "lsn": "scn:200.p0x000001.00000001.0001.0000000001"
+            },
+            lookup_columns=lookup_columns,
+        ),
+        mappings=mappings,
+        column_types=column_types,
+        headers=headers,
+        cursor_key="oracle-lob-deleted-before-lookup",
+    )
+    assert rows == 1
+    assert deleted == 0
+    assert not insert_summary.get("error")
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("SELECT id, c, n, b, v FROM rows").fetchone() == (
+            "8",
+            "kept-c",
+            "kept-n",
+            "kept-b",
+            "before-delete",
+        )
+
+    rows, _checksum, delete_summary, deleted = _apply_eos_through_transfer(
+        db_path,
+        ChangeBatch(
+            deletes=[str(later_delete["row"]["ID"])],
+            table="T",
+            resume_token={
+                "lsn": "scn:201.p0x000001.00000001.0001.0000000002"
+            },
+        ),
+        mappings=mappings,
+        column_types=column_types,
+        headers=headers,
+        cursor_key="oracle-lob-deleted-before-lookup",
+    )
+    assert rows == 0
+    assert deleted == 1
+    assert not delete_summary.get("error")
+    assert dest_engine_count({"database": str(db_path)}, "rows") == 0
 
 
 def test_lob_activity_without_primary_key_fails_with_remedy() -> None:
