@@ -70,6 +70,7 @@ def test_file_time_purge_freezes_cutoff_and_dry_run_does_not_mutate(
     dry = audit.purge_expired_audit_events(now=now, dry_run=True)
     assert dry == {
         "removed": 0,
+        "would_remove": 1,
         "oldest_kept_time": rows[0]["time"],
         "legal_hold": False,
         "retention_days": 30,
@@ -103,6 +104,15 @@ def test_legal_hold_disables_time_purge_and_max_event_trim(file_audit, monkeypat
     rows = _seed_old_and_recent(audit, monkeypatch)
     before = audit.STORE_PATH.read_text(encoding="utf-8")
 
+    preview = audit.purge_expired_audit_events(
+        now=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        dry_run=True,
+    )
+    assert preview["removed"] == 0
+    assert preview["would_remove"] == 0
+    assert preview["legal_hold"] is True
+    assert preview["retention_days"] == 30
+
     result = audit.purge_expired_audit_events(
         now=datetime(2025, 2, 1, tzinfo=timezone.utc)
     )
@@ -110,6 +120,28 @@ def test_legal_hold_disables_time_purge_and_max_event_trim(file_audit, monkeypat
     assert result["removed"] == 0
     assert audit.STORE_PATH.read_text(encoding="utf-8") == before
     assert len(rows) == 3
+
+
+def test_retention_off_dry_run_reports_no_candidates(file_audit, monkeypatch):
+    audit, _chain, _tmp_path = file_audit
+    monkeypatch.setenv("DATAFLOW_AUDIT_RETENTION_DAYS", "off")
+    rows = _seed_old_and_recent(audit, monkeypatch)
+    before = audit.STORE_PATH.read_text(encoding="utf-8")
+
+    result = audit.purge_expired_audit_events(
+        now=datetime(2025, 2, 1, tzinfo=timezone.utc),
+        dry_run=True,
+    )
+
+    assert result == {
+        "removed": 0,
+        "would_remove": 0,
+        "oldest_kept_time": rows[0]["time"],
+        "legal_hold": False,
+        "retention_days": None,
+        "dry_run": True,
+    }
+    assert audit.STORE_PATH.read_text(encoding="utf-8") == before
 
 
 def test_invalid_retention_config_raises_typed_error_and_names_env(
@@ -207,6 +239,39 @@ def test_live_mongo_time_purge_and_checkpoint(file_audit, monkeypatch):
             patcher.setattr(audit_log, "_now", lambda: next(times))
             first = _append(audit_log, "live.old")
             second = _append(audit_log, "live.kept")
+        preview = audit_log.purge_expired_audit_events(
+            now=datetime(2025, 2, 1, tzinfo=timezone.utc),
+            dry_run=True,
+        )
+        assert preview == {
+            "removed": 0,
+            "would_remove": 1,
+            "oldest_kept_time": first["time"],
+            "legal_hold": False,
+            "retention_days": 30,
+            "dry_run": True,
+        }
+        assert collection.count_documents({}) == 2
+        monkeypatch.setenv("DATAFLOW_AUDIT_LEGAL_HOLD", "1")
+        held_preview = audit_log.purge_expired_audit_events(
+            now=datetime(2025, 2, 1, tzinfo=timezone.utc),
+            dry_run=True,
+        )
+        assert held_preview["would_remove"] == 0
+        assert held_preview["legal_hold"] is True
+        assert held_preview["retention_days"] == 30
+
+        monkeypatch.setenv("DATAFLOW_AUDIT_LEGAL_HOLD", "0")
+        monkeypatch.setenv("DATAFLOW_AUDIT_RETENTION_DAYS", "off")
+        disabled_preview = audit_log.purge_expired_audit_events(
+            now=datetime(2025, 2, 1, tzinfo=timezone.utc),
+            dry_run=True,
+        )
+        assert disabled_preview["would_remove"] == 0
+        assert disabled_preview["legal_hold"] is False
+        assert disabled_preview["retention_days"] is None
+        monkeypatch.setenv("DATAFLOW_AUDIT_RETENTION_DAYS", "30")
+
         result = audit_log.purge_expired_audit_events(
             now=datetime(2025, 2, 1, tzinfo=timezone.utc)
         )

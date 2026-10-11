@@ -580,13 +580,16 @@ def _purge_file_events(
     dry_run: bool,
 ) -> dict[str, Any]:
     if not STORE_PATH.exists():
-        return {
+        result = {
             "removed": 0,
             "oldest_kept_time": None,
             "legal_hold": legal_hold,
             "retention_days": retention_days,
             "dry_run": bool(dry_run),
         }
+        if dry_run:
+            result["would_remove"] = 0
+        return result
 
     lines = STORE_PATH.read_text(encoding="utf-8").splitlines()
     kept: list[str] = []
@@ -608,7 +611,8 @@ def _purge_file_events(
             kept.append(line)
             kept_events.append(event)
 
-    removed_count = len(removed_events) if not dry_run else 0
+    would_remove = len(removed_events)
+    removed_count = 0 if dry_run else would_remove
     if removed_events and not dry_run:
         _atomic_write_lines(kept)
         checkpoint = _record_retention_checkpoint(
@@ -638,13 +642,16 @@ def _purge_file_events(
             if (event := _parse_event_line(line)) is not None
         ]
     )
-    return {
+    result = {
         "removed": removed_count,
         "oldest_kept_time": _oldest_time_from_docs(current_events),
         "legal_hold": legal_hold,
         "retention_days": retention_days,
         "dry_run": bool(dry_run),
     }
+    if dry_run:
+        result["would_remove"] = would_remove
+    return result
 
 
 def _parse_event_line(line: str) -> dict[str, Any] | None:
@@ -699,7 +706,7 @@ def _purge_mongo_events(
         first_kept = None
         for event in collection.find({}).sort([("chain_seq", 1)]).limit(1):
             first_kept = {key: value for key, value in event.items() if key != "_id"}
-    return {
+    result = {
         "removed": actually_removed,
         "oldest_kept_time": (
             str(first_kept.get("time")) if first_kept and first_kept.get("time") else None
@@ -708,6 +715,9 @@ def _purge_mongo_events(
         "retention_days": retention_days,
         "dry_run": bool(dry_run),
     }
+    if dry_run:
+        result["would_remove"] = removed_count
+    return result
 
 
 def _maybe_opportunistic_audit_purge() -> None:
