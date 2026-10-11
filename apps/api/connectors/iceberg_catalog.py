@@ -338,6 +338,8 @@ def parse_iceberg_catalog_config(endpoint: Any) -> dict[str, Any]:
     elif catalog_type == "glue":
         properties = _glue_props(warehouse, endpoint, extra)
 
+    _forward_storage_properties(properties, extra, overwrite=False)
+
     if str(properties.get("warehouse", "")).lower().startswith("file:"):
         # A local warehouse is addressed through the URI-aware file IO, which is
         # what makes a Windows drive letter reachable at all.
