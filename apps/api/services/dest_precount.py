@@ -2331,45 +2331,63 @@ def _resolve_iceberg_data_uri(uri: str, warehouse: str) -> str:
 
 def _iceberg_object_store_cfg(
     endpoint: dict[str, Any], location: Any
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Map Iceberg catalog extra (``s3.*`` / ``gcs.*`` / ``adls.*``) onto GET cfg."""
     extra = endpoint.get("extra")
     extra = extra if isinstance(extra, dict) else {}
     cfg = dict(endpoint)
     kind = str(getattr(location, "kind", "") or "")
     if kind == "s3":
-        cfg["username"] = str(
-            extra.get("s3.access-key-id")
-            or extra.get("s3.access-key")
-            or extra.get("client.access-key-id")
-            or cfg.get("username")
-            or ""
-        ).strip()
-        cfg["password"] = str(
-            extra.get("s3.secret-access-key")
-            or extra.get("s3.secret-key")
-            or extra.get("client.secret-access-key")
-            or cfg.get("password")
-            or ""
-        ).strip()
+        from connectors.iceberg_catalog import parse_iceberg_catalog_config
+
+        try:
+            properties = parse_iceberg_catalog_config(endpoint).get("properties")
+            if not isinstance(properties, dict):
+                raise ValueError("Iceberg catalog properties are unavailable")
+        except Exception as exc:
+            logger.warning(
+                "Iceberg S3 COUNT config unavailable (%s)", type(exc).__name__
+            )
+            return None
+
+        username = (
+            properties.get("s3.access-key-id")
+            or properties.get("s3.access-key")
+            or properties.get("client.access-key-id")
+            or properties.get("client.access-key")
+        )
+        password = (
+            properties.get("s3.secret-access-key")
+            or properties.get("s3.secret-key")
+            or properties.get("client.secret-access-key")
+        )
+        endpoint_url = (
+            properties.get("s3.endpoint")
+            or properties.get("s3.endpoint-url")
+            or properties.get("client.endpoint")
+            or properties.get("client.endpoint-url")
+        )
+        if not endpoint_url or not username or not password:
+            logger.warning("Iceberg S3 COUNT config unavailable (ValueError)")
+            return None
+
+        cfg["username"] = str(username).strip()
+        cfg["password"] = str(password).strip()
         cfg["host"] = str(
-            extra.get("s3.region")
-            or extra.get("client.region")
-            or extra.get("region")
+            properties.get("s3.region")
+            or properties.get("client.region")
+            or properties.get("region")
             or cfg.get("host")
             or "us-east-1"
         ).strip()
-        endpoint_url = str(
-            extra.get("s3.endpoint") or extra.get("s3.endpoint-url") or ""
-        ).strip()
+        endpoint_url = str(endpoint_url).strip()
         if endpoint_url.startswith(("http://", "https://")):
             cfg["endpoint_url"] = endpoint_url.rstrip("/")
             cfg["connection_string"] = cfg["endpoint_url"]
         else:
-            cs = str(cfg.get("connection_string") or "")
-            if not cs.startswith(("http://", "https://")):
-                cfg["connection_string"] = ""
-        path_style = extra.get("s3.path-style-access")
+            logger.warning("Iceberg S3 COUNT config unavailable (ValueError)")
+            return None
+        path_style = properties.get("s3.path-style-access")
         if path_style in (True, "true", "True", 1, "1"):
             cfg["path_style"] = True
         return cfg
@@ -2464,6 +2482,8 @@ def _count_iceberg_data_uri(
         logger.info("iceberg catalog data-file not a local path or object URI: %s", uri)
         return None
     store_cfg = _iceberg_object_store_cfg(endpoint, loc)
+    if store_cfg is None:
+        return None
     return _count_object_store_key(
         loc.kind, store_cfg, loc.bucket, loc.key, missing=None
     )
