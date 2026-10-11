@@ -24,6 +24,7 @@ def test_contents_sql_orders_inside_rownum_outside():
     sql = logminer_contents_sql(table_predicate="TABLE_NAME = :tbl")
     # Flat ROWNUM-then-ORDER-BY is the silent-loss bug; order must be nested.
     assert "ORDER BY SCN, RS_ID, SSN" in sql
+    assert "SCN = :start_scn AND :rs_id IS NULL" in sql
     outer_cap = sql.rfind("ROWNUM")
     inner_order = sql.find("ORDER BY SCN, RS_ID, SSN")
     assert 0 <= inner_order < outer_cap

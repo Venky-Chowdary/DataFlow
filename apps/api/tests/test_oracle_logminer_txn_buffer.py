@@ -176,6 +176,7 @@ def test_buffered_query_selects_lifecycle_and_dml_rows() -> None:
     assert "XIDSQN" in sql
     assert '"ROLLBACK"' in sql
     assert "ROW_ID" in sql
+    assert "SCN = :start_scn AND :rs_id IS NULL" in sql
     assert "OPERATION IN ('START','COMMIT','ROLLBACK')" in sql
     assert "CASE OPERATION" in sql
 
@@ -353,6 +354,136 @@ def test_buffered_short_window_keeps_last_mined_cursor(
     assert reader._poll_scn == 110
     assert reader.scn == 110
     assert [row["ID"] for batch in batches for row in batch.inserts] == ["1"]
+
+
+def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1")
+    long_xid = (5, 9, 745)
+    emitted_xid = (3, 0, 734)
+    low_scn = 100
+    emitted_commit_scn = 111
+    token = {
+        "kind": "oracle-logminer",
+        "table": "T",
+        "scn": emitted_commit_scn,
+        "phase": "streaming",
+        "rs_id": "0x000001.0001.0005",
+        "ssn": 0,
+        "low_scn": low_scn,
+        "poll_scn": emitted_commit_scn,
+        "poll_rs_id": "0x000001.0001.0005",
+        "poll_ssn": 0,
+        "commit_scn": emitted_commit_scn,
+        "commit_rs_id": "0x000001.0001.0005",
+        "commit_ssn": 0,
+        "commit_xid": ".".join(str(value) for value in emitted_xid),
+        "txn_buffer": True,
+    }
+    rows = [
+        (100, "0x000001.0001.0001", 0, "START", None, None, None, *long_xid, 0),
+        (
+            100,
+            "0x000001.0001.0002",
+            1,
+            "INSERT",
+            'INSERT INTO "T"("ID","V") VALUES(\'1\',\'long\')',
+            "T",
+            "APP",
+            *long_xid,
+            0,
+        ),
+        (110, "0x000001.0001.0003", 0, "START", None, None, None, *emitted_xid, 0),
+        (
+            110,
+            "0x000001.0001.0004",
+            1,
+            "INSERT",
+            'INSERT INTO "T"("ID","V") VALUES(\'2\',\'short\')',
+            "T",
+            "APP",
+            *emitted_xid,
+            0,
+        ),
+        (111, "0x000001.0001.0005", 0, "COMMIT", "commit", None, None, *emitted_xid, 0),
+        (130, "0x000001.0001.0006", 0, "COMMIT", "commit", None, None, *long_xid, 0),
+    ]
+    reader = OracleLogMinerCdc(
+        {"host": "localhost", "database": "ORCL", "username": "APP"},
+        table="T",
+        primary_key="ID",
+        schema="APP",
+        resume_token=token,
+    )
+    reader.phase = "streaming"
+    assert reader.scn == low_scn
+    assert reader._txn_buffer.emitted_commit == (
+        emitted_commit_scn,
+        ".".join(str(value) for value in emitted_xid),
+    )
+    conn = _make_mining_conn(rows, head_scn=140)
+    cur = conn.cursor.return_value.__enter__.return_value
+    mining_starts: list[int] = []
+    query: dict[str, object] = {}
+
+    def execute(sql: str, binds: dict[str, object] | None = None) -> None:
+        query["sql"] = sql
+        query["binds"] = binds or {}
+
+    def fetchall() -> list[tuple]:
+        sql = str(query.get("sql") or "")
+        binds = query.get("binds") or {}
+        start_scn = int(binds.get("start_scn") or 0)
+        rs_id = str(binds.get("rs_id") or "")
+        ssn = int(binds.get("ssn") or 0)
+        includes_null_cursor = ":rs_id IS NULL" in sql
+        visible = []
+        for row in rows:
+            scn, row_rs_id, row_ssn = (
+                int(row[0] or 0),
+                str(row[1] or ""),
+                int(row[2] or 0),
+            )
+            if scn < mining_starts[-1]:
+                continue
+            after_cursor = scn > start_scn or (
+                scn == start_scn
+                and (
+                    (not rs_id and includes_null_cursor)
+                    or (bool(rs_id) and row_rs_id > rs_id)
+                    or (row_rs_id == rs_id and row_ssn > ssn)
+                )
+            )
+            if after_cursor:
+                visible.append(row)
+        return visible
+
+    cur.execute.side_effect = execute
+    cur.fetchall.side_effect = fetchall
+
+    def start_logminer(_cur, *, start_scn: int, end_scn: int, committed_only: bool):
+        mining_starts.append(start_scn)
+
+    with (
+        patch.object(reader, "_mining_conn", return_value=conn),
+        patch.object(reader, "_acquire_cdc_lease"),
+        patch("connectors.oracle_logminer.fetch_oldest_available_scn", return_value=None),
+        patch("connectors.oracle_logminer.fetch_redo_inventory", return_value=[]),
+        patch("connectors.oracle_logminer.assert_resume_scn_in_redo"),
+        patch("connectors.oracle_logminer.assert_redo_continuity"),
+        patch(
+            "connectors.oracle_logminer.start_logminer_session",
+            side_effect=start_logminer,
+        ),
+    ):
+        batches = list(reader._poll_txn_buffered())
+
+    data_batches = [batch for batch in batches if batch.inserts or batch.updates]
+    assert [row for batch in data_batches for row in batch.inserts] == [
+        {"ID": "1", "V": "long"}
+    ]
+    assert mining_starts == [low_scn]
 
 
 def test_oversized_transaction_chunks_have_increasing_same_commit_positions(

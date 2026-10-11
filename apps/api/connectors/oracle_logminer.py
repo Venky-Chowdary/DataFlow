@@ -475,6 +475,7 @@ def logminer_contents_sql(
             )
             AND (
                   SCN > :start_scn
+               OR (SCN = :start_scn AND :rs_id IS NULL)
                OR (SCN = :start_scn AND RS_ID > :rs_id)
                OR (SCN = :start_scn AND RS_ID = :rs_id AND SSN > :ssn)
             )
@@ -506,6 +507,7 @@ def logminer_txn_contents_sql(
           FROM v$logmnr_contents
           WHERE (
                   SCN > :start_scn
+               OR (SCN = :start_scn AND :rs_id IS NULL)
                OR (SCN = :start_scn AND RS_ID > :rs_id)
                OR (SCN = :start_scn AND RS_ID = :rs_id AND SSN > :ssn)
             )
@@ -1589,8 +1591,8 @@ class OracleLogMinerCdc:
     def _resume_binds(self) -> dict[str, Any]:
         return {
             "start_scn": int(self.scn or 0),
-            # Empty rs_id sorts before any real RS_ID under Oracle string order
-            # when resuming at a fresh SCN (ssn=0, rs_id="").
+            # Oracle treats an empty VARCHAR2 bind as NULL; the query's
+            # ``:rs_id IS NULL`` branch includes the full SCN on fresh cursors.
             "rs_id": self.rs_id or "",
             "ssn": int(self.ssn or 0),
         }
