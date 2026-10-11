@@ -401,10 +401,17 @@ def test_sqlserver_native_keyset_resume_keeps_lsn() -> None:
     cur = MagicMock()
     cur.description = [("id",), ("amount",)]
     cur.fetchone.return_value = ("dbo_orders",)
-    cur.fetchall.side_effect = [
-        [("3", "30")],
-        [],
-    ]
+    snapshot_pages = iter([[("3", "30")], []])
+
+    def fetchall():
+        sql = str(cur.execute.call_args.args[0]).lower()
+        if "from cdc.change_tables ct" in sql:
+            return [("dbo_orders", None)]
+        if "from [dbo].[orders]" in sql:
+            return next(snapshot_pages)
+        return []
+
+    cur.fetchall.side_effect = fetchall
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
     conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
@@ -425,6 +432,7 @@ def test_sqlserver_native_keyset_resume_keeps_lsn() -> None:
     handoff = decode_mssql_cdc_token(batches[-1].resume_token)
     assert handoff["phase"] == "streaming"
     assert handoff["lsn"] == "0abc"
+    assert batches[0].inserts == [{"id": "3", "amount": "30"}]
     assert decode_mssql_cdc_token(batches[0].resume_token)["last_pk"] == "3"
 
 
