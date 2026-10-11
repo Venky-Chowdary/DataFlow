@@ -472,6 +472,8 @@ class SqlServerNativeCdc:
         self._last_event_at: datetime | None = None
         self._last_schema_fingerprint: dict[str, str] = {}
         self._pending_capture_switches: dict[str, tuple[str, str]] = {}
+        self._capture_start_waiting: set[str] = set()
+        self._deferred_capture_switch_logs: set[tuple[str, str]] = set()
         from services.cdc_schema_history import connection_fingerprint
 
         self.source_key = connection_fingerprint(
@@ -898,6 +900,22 @@ class SqlServerNativeCdc:
             self._lease.meta["capture_instance"] = self.capture_instance
         self._lease.meta["captures"] = dict(self._captures)
 
+    def _log_capture_switch_deferred(
+        self, table: str, old_capture: str, new_capture: str
+    ) -> None:
+        key = (table, new_capture)
+        if key in self._deferred_capture_switch_logs:
+            return
+        self._deferred_capture_switch_logs.add(key)
+        logger.info(
+            "SQL Server CDC capture-instance switch deferred until start_lsn is "
+            "populated table=%s.%s old=%s new=%s",
+            self.schema,
+            table,
+            old_capture,
+            new_capture,
+        )
+
     def _switch_capture_instance(
         self,
         cur,
@@ -908,6 +926,7 @@ class SqlServerNativeCdc:
         switch_lsn: str,
     ) -> None:
         self._pending_capture_switches.pop(table, None)
+        self._capture_start_waiting.discard(table)
         previous_capture = self.capture_instance
         self._store_capture_for_table(table, new_capture)
         if self._shared:
@@ -946,24 +965,41 @@ class SqlServerNativeCdc:
         )
         fallback = previous or f"{self.schema}_{table}"
         self._pending_capture_switches.pop(table, None)
+        self._capture_start_waiting.discard(table)
         if not instances:
             self._store_capture_for_table(table, fallback)
             return fallback
 
         newest, newest_start = instances[0]
         resume_lsn = _lsn_to_hex(self.start_lsn)
-        if (
-            resume_lsn
-            and len(instances) > 1
-            and not newest_start
-            and previous != newest
-        ):
-            raise self._missing_capture_error(
-                table,
-                previous or instances[1][0],
-                next_capture_instance=newest,
+        if not resume_lsn:
+            self._store_capture_for_table(table, newest)
+            return newest
+
+        if not newest_start and previous != newest:
+            older = next(
+                (
+                    (capture, start_lsn)
+                    for capture, start_lsn in instances[1:]
+                    if capture == previous
+                ),
+                None,
             )
-        if not resume_lsn or not newest_start:
+            if older is None and len(instances) > 1:
+                older = instances[1]
+            self._log_capture_switch_deferred(
+                table,
+                older[0] if older else previous or fallback,
+                newest,
+            )
+            if older:
+                self._store_capture_for_table(table, older[0])
+                return older[0]
+            self._capture_start_waiting.add(table)
+            self._store_capture_for_table(table, previous or fallback)
+            return previous or fallback
+
+        if not newest_start:
             self._store_capture_for_table(table, newest)
             return newest
 
@@ -1031,15 +1067,6 @@ class SqlServerNativeCdc:
         next_capture_instance: str = "",
         next_start_lsn: str = "",
     ) -> CdcLsnGapError:
-        if next_capture_instance and not next_start_lsn:
-            return CdcLsnGapError(
-                f"SQL Server CDC cannot safely switch from capture instance "
-                f"{capture_instance!r} to {next_capture_instance!r} for table "
-                f"{self.schema}.{table}: the newer capture instance has not "
-                "reported start_lsn yet. Retry after CDC metadata is populated.",
-                resume_lsn=self.start_lsn,
-                cursor_key=self.cursor_key,
-            )
         if next_capture_instance:
             return CdcLsnGapError(
                 f"SQL Server CDC cannot safely drain capture instance "
@@ -1654,6 +1681,16 @@ class SqlServerNativeCdc:
             with self._conn() as conn:
                 with conn.cursor() as cur:
                     capture = self._resolve_capture_instance(cur)
+                    if self.table in self._capture_start_waiting:
+                        yield ChangeBatch(
+                            resume_token=self._token(
+                                lsn=self.start_lsn,
+                                phase="streaming",
+                                seqval=self.start_seqval,
+                            ),
+                            table=self.table,
+                        )
+                        return
                     if not self._capture_instance_exists(cur, capture):
                         pending = self._pending_capture_switches.get(self.table)
                         raise self._missing_capture_error(
@@ -1906,6 +1943,16 @@ class SqlServerNativeCdc:
             with self._conn() as conn:
                 with conn.cursor() as cur:
                     self._resolve_all_captures(cur)
+                    if self._capture_start_waiting:
+                        yield ChangeBatch(
+                            resume_token=self._token(
+                                lsn=self.start_lsn,
+                                phase="streaming",
+                                seqval=self.start_seqval,
+                            ),
+                            ack_barrier=True,
+                        )
+                        return
                     for table_name in self.tables:
                         capture = self._captures.get(table_name) or ""
                         failed_table = table_name

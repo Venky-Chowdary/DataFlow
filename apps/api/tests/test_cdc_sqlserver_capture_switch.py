@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from contextlib import contextmanager
@@ -323,6 +324,14 @@ ORDERS_START_LSN = "00000000000000000020"
 USERS_START_LSN = "00000000000000000030"
 SWITCH_CEILING_LSN = "0000000000000000001f"
 MAX_LSN = "00000000000000000040"
+CHANGE_LSN = "00000000000000000015"
+CHANGE_COLUMNS = [
+    ("__$start_lsn",),
+    ("__$seqval",),
+    ("__$operation",),
+    ("id",),
+    ("amount",),
+]
 
 
 def _unit_reader(*, table="orders", capture_instance="dbo_orders_v1", resume=RESUME_LSN):
@@ -337,6 +346,31 @@ def _unit_reader(*, table="orders", capture_instance="dbo_orders_v1", resume=RES
     reader.phase = "streaming"
     reader.start_lsn = resume
     return reader
+
+
+def _connection_with_cursor(cursor: MagicMock):
+    @contextmanager
+    def connection():
+        conn = MagicMock()
+
+        @contextmanager
+        def cursor_context():
+            yield cursor
+
+        conn.cursor = cursor_context
+        yield conn
+
+    return connection
+
+
+def _change_row(row_id: int) -> tuple:
+    return (
+        bytes.fromhex(CHANGE_LSN),
+        b"\x01",
+        2,
+        str(row_id),
+        str(row_id * 10),
+    )
 
 
 def test_old_capture_missing_before_drain_fails_with_both_instance_names(
@@ -358,19 +392,220 @@ def test_old_capture_missing_before_drain_fails_with_both_instance_names(
     assert "Re-snapshot" in message
 
 
-def test_missing_new_capture_start_lsn_fails_closed(monkeypatch) -> None:
+def test_null_new_capture_start_drains_old_then_switches_when_ready(
+    monkeypatch, caplog
+) -> None:
     reader = _unit_reader()
+    cursor = MagicMock()
+    cursor.description = CHANGE_COLUMNS
+    cursor.fetchall.return_value = [_change_row(2)]
+    capture_catalog = [
+        ("dbo_orders_v2", ""),
+        ("dbo_orders_v1", RESUME_LSN),
+    ]
+    history = MagicMock()
     monkeypatch.setattr(
         reader,
         "_capture_instances_for_table",
-        lambda _cur, _table: [
+        lambda _cur, _table: capture_catalog,
+    )
+    monkeypatch.setattr(reader, "_conn", _connection_with_cursor(cursor))
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    monkeypatch.setattr(reader, "_capture_instance_exists", lambda *_a: True)
+    monkeypatch.setattr(reader, "_min_lsn", lambda _cur: RESUME_LSN)
+    monkeypatch.setattr(reader, "_max_lsn", lambda _cur: MAX_LSN)
+    monkeypatch.setattr(
+        reader, "_changes_tvf", lambda: f"cdc.fn_{reader.capture_instance}"
+    )
+    monkeypatch.setattr(
+        reader,
+        "_decrement_lsn_for",
+        lambda _cur, _lsn: SWITCH_CEILING_LSN,
+    )
+    monkeypatch.setattr(reader, "_maybe_record_capture_schema", history)
+    caplog.set_level(logging.INFO)
+
+    assert reader._resolve_capture_for_table(cursor, "orders") == "dbo_orders_v1"
+    assert reader._resolve_capture_for_table(cursor, "orders") == "dbo_orders_v1"
+    assert not reader._pending_capture_switches
+
+    batches = list(reader._poll_once())
+    assert batches[0].inserts[0]["id"] == "2"
+    assert any(
+        "cdc.fn_dbo_orders_v1" in call.args[0]
+        for call in cursor.execute.call_args_list
+    )
+    assert not any(call.kwargs.get("force") for call in history.call_args_list)
+    assert sum("switch deferred" in record.getMessage() for record in caplog.records) == 1
+
+    reader.ack(batches[0].resume_token)
+    capture_catalog[:] = [
+        ("dbo_orders_v2", ORDERS_START_LSN),
+        ("dbo_orders_v1", RESUME_LSN),
+    ]
+    cursor.fetchall.return_value = []
+    switched_batches = list(reader._poll_once())
+
+    assert reader.capture_instance == "dbo_orders_v2"
+    assert not reader._pending_capture_switches
+    assert any(call.kwargs.get("force") for call in history.call_args_list)
+    assert (
+        decode_mssql_cdc_token(switched_batches[0].resume_token)["capture_instance"]
+        == "dbo_orders_v2"
+    )
+
+
+def test_shared_null_new_capture_start_drains_old_then_switches_when_ready(
+    monkeypatch, caplog
+) -> None:
+    reader = _unit_reader(
+        table=["orders", "users"],
+        capture_instance="dbo_orders_v1",
+    )
+    reader._captures = {"orders": "dbo_orders_v1", "users": "dbo_users_v1"}
+    cursor = MagicMock()
+    cursor.description = CHANGE_COLUMNS
+    cursor.fetchall.side_effect = [[_change_row(2)], []]
+    capture_catalog = {
+        "orders": [
             ("dbo_orders_v2", ""),
             ("dbo_orders_v1", RESUME_LSN),
         ],
+        "users": [("dbo_users_v1", RESUME_LSN)],
+    }
+    history = MagicMock()
+    monkeypatch.setattr(reader, "_conn", _connection_with_cursor(cursor))
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    monkeypatch.setattr(
+        reader,
+        "_capture_instances_for_table",
+        lambda _cur, table: capture_catalog[table],
+    )
+    monkeypatch.setattr(reader, "_capture_instance_exists", lambda *_a: True)
+    monkeypatch.setattr(reader, "_min_lsn_for", lambda *_a: RESUME_LSN)
+    monkeypatch.setattr(reader, "_max_lsn", lambda _cur: MAX_LSN)
+    monkeypatch.setattr(
+        reader,
+        "_decrement_lsn_for",
+        lambda _cur, _lsn: SWITCH_CEILING_LSN,
+    )
+    monkeypatch.setattr(
+        reader, "_changes_tvf_for", lambda capture: f"cdc.fn_{capture}"
+    )
+    monkeypatch.setattr(reader, "_maybe_record_capture_schema", history)
+    caplog.set_level(logging.INFO)
+
+    assert (
+        reader._resolve_capture_for_table(cursor, "orders") == "dbo_orders_v1"
+    )
+    assert (
+        reader._resolve_capture_for_table(cursor, "orders") == "dbo_orders_v1"
+    )
+    assert not reader._pending_capture_switches
+
+    batches = list(reader._poll_shared_multi())
+    assert batches[0].inserts[0]["id"] == "2"
+    assert any(
+        "cdc.fn_dbo_orders_v1" in call.args[0]
+        for call in cursor.execute.call_args_list
+    )
+    assert reader._captures["orders"] == "dbo_orders_v1"
+    assert not reader._pending_capture_switches
+    assert sum("switch deferred" in record.getMessage() for record in caplog.records) == 1
+
+    reader.ack(batches[0].resume_token)
+    capture_catalog["orders"] = [
+        ("dbo_orders_v2", ORDERS_START_LSN),
+        ("dbo_orders_v1", RESUME_LSN),
+    ]
+    cursor.fetchall.side_effect = [[], []]
+    switched_batches = list(reader._poll_shared_multi())
+
+    assert reader._captures["orders"] == "dbo_orders_v2"
+    assert not reader._pending_capture_switches
+    assert any(call.kwargs.get("force") for call in history.call_args_list)
+    assert (
+        decode_mssql_cdc_token(switched_batches[0].resume_token)["capture_instances"][
+            "orders"
+        ]
+        == "dbo_orders_v2"
     )
 
-    with pytest.raises(CdcLsnGapError, match="has not reported start_lsn"):
-        reader._resolve_capture_for_table(MagicMock(), "orders")
+
+def test_missing_old_capture_and_null_new_start_returns_heartbeat(
+    monkeypatch,
+) -> None:
+    reader = _unit_reader()
+    cursor = MagicMock()
+    cursor.description = CHANGE_COLUMNS
+    monkeypatch.setattr(reader, "_conn", _connection_with_cursor(cursor))
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    monkeypatch.setattr(
+        reader,
+        "_capture_instances_for_table",
+        lambda _cur, _table: [("dbo_orders_v2", "")],
+    )
+    monkeypatch.setattr(reader, "_capture_instance_exists", lambda *_a: True)
+    monkeypatch.setattr(reader, "_min_lsn", lambda _cur: ORDERS_START_LSN)
+    monkeypatch.setattr(reader, "_max_lsn", lambda _cur: MAX_LSN)
+    monkeypatch.setattr(reader, "_maybe_record_capture_schema", lambda *_a, **_k: None)
+
+    batches = list(reader._poll_once())
+
+    assert len(batches) == 1
+    assert batches[0].total_changes == 0
+    assert reader.start_lsn == RESUME_LSN
+    assert (
+        compare_mssql_hex_lsn(
+            decode_mssql_cdc_token(batches[0].resume_token)["lsn"], RESUME_LSN
+        )
+        == 0
+    )
+
+
+def test_shared_missing_old_capture_and_null_start_returns_heartbeat(
+    monkeypatch,
+) -> None:
+    reader = _unit_reader(
+        table=["orders", "users"],
+        capture_instance="dbo_orders_v1",
+    )
+    reader._captures = {"orders": "dbo_orders_v1", "users": "dbo_users_v1"}
+    cursor = MagicMock()
+    monkeypatch.setattr(reader, "_conn", _connection_with_cursor(cursor))
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+    monkeypatch.setattr(
+        reader,
+        "_capture_instances_for_table",
+        lambda _cur, table: (
+            [("dbo_orders_v2", "")]
+            if table == "orders"
+            else [("dbo_users_v1", RESUME_LSN)]
+        ),
+    )
+    monkeypatch.setattr(
+        reader,
+        "_capture_instance_exists",
+        lambda *_a: pytest.fail("waiting for start_lsn should skip capture probes"),
+    )
+    monkeypatch.setattr(
+        reader,
+        "_min_lsn_for",
+        lambda *_a: pytest.fail("waiting for start_lsn should skip retention probes"),
+    )
+
+    batches = list(reader._poll_shared_multi())
+
+    assert len(batches) == 1
+    assert batches[0].total_changes == 0
+    assert batches[0].ack_barrier
+    assert reader.start_lsn == RESUME_LSN
+    assert (
+        compare_mssql_hex_lsn(
+            decode_mssql_cdc_token(batches[0].resume_token)["lsn"], RESUME_LSN
+        )
+        == 0
+    )
 
 
 def test_capture_instance_survives_switch_token_round_trip(monkeypatch) -> None:
