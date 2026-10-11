@@ -145,3 +145,7 @@ raised.
 | `src/transfer/stream.py` | Write loop diagnostics → `src/transfer/stream_write.py` | 4337 → 3701 |
 | `src/transfer/adapters.py` | File destination writer → `src/transfer/adapters_file_write.py` | 2551 → 2252 |
 | `services/preflight_service.py` | Context and population gates → `services/preflight_context.py`, `services/preflight_population.py` | 3593 → 2961 |
+
+### Debt: module-object call prefixes
+
+Some moved helpers call back into the original module through a module-object prefix (`_ts.`, `_engine.`, `_si.`, `_x = sys.modules[__name__]`) and the originals keep lazy `__getattr__` / `# noqa: F401` re-exports. This is temporary. It exists only so existing `monkeypatch.setattr(<original module>, ...)` test seams still intercept the moved code. To remove it, migrate those tests to patch the owning module (`type_coercion`, `engine_destination`, `schema_introspect_enterprise`, ...), then drop the prefixes and the re-exports. New code must import from the owning module.
