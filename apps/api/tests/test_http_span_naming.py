@@ -62,6 +62,32 @@ def _http_span(exporter):
     return spans[0]
 
 
+@pytest.mark.parametrize(
+    ("raw_path", "template", "expected"),
+    [
+        (
+            "/api/v1/connectors/jobs/otel-job-id",
+            "/connectors/jobs/{job_id}",
+            "/api/v1/connectors/jobs/{job_id}",
+        ),
+        ("/auth/login", "/auth/login", "/auth/login"),
+        (
+            "/api/v1/files/a/b",
+            "/files/{file_path:path}",
+            "/files/{file_path:path}",
+        ),
+        ("/api/v1", "/", "/api/v1"),
+        ("/", "/", "/"),
+        ("/api/v1/auth/login", None, None),
+        ("/api/v1/auth/login", "", None),
+    ],
+)
+def test_http_route_template(raw_path, template, expected):
+    from src.main import _http_route_template
+
+    assert _http_route_template(raw_path, template) == expected
+
+
 def test_matched_route_uses_template_and_records_status(traced_api):
     client, exporter, _mongo = traced_api
     path = "/api/v1/connectors/jobs/otel-job-id"
@@ -69,9 +95,9 @@ def test_matched_route_uses_template_and_records_status(traced_api):
 
     assert response.status_code == 404
     span = _http_span(exporter)
-    assert span.name == "GET /connectors/jobs/{job_id}"
+    assert span.name == "GET /api/v1/connectors/jobs/{job_id}"
     assert "otel-job-id" not in span.name
-    assert span.attributes["http.route"] == "/connectors/jobs/{job_id}"
+    assert span.attributes["http.route"] == "/api/v1/connectors/jobs/{job_id}"
     assert span.attributes["http.request.method"] == "GET"
     assert span.attributes["http.method"] == "GET"
     assert span.attributes["url.path"] == path

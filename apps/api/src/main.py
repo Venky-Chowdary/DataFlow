@@ -327,6 +327,23 @@ app.add_middleware(
 )
 
 
+def _http_route_template(raw_path: str, template: str | None) -> str | None:
+    if not template:
+        return None
+    if ":path}" in template:
+        return template
+
+    raw_segments = [segment for segment in raw_path.split("/") if segment]
+    template_segments = [segment for segment in template.split("/") if segment]
+    if template == "/":
+        return "/" + "/".join(raw_segments) if raw_segments else "/"
+    if len(template_segments) > len(raw_segments):
+        return template
+
+    prefix_segments = raw_segments[: len(raw_segments) - len(template_segments)]
+    return "/" + "/".join(prefix_segments + template_segments)
+
+
 @app.middleware("http")
 async def add_timing_header(request: Request, call_next):
     start_time = time.time()
@@ -383,7 +400,10 @@ async def add_timing_header(request: Request, call_next):
                         logger.debug("Could not set HTTP span status attributes: %s", span_exc)
                 raise
             finally:
-                route_template = getattr(request.scope.get("route"), "path", None)
+                route_template = _http_route_template(
+                    request.url.path,
+                    getattr(request.scope.get("route"), "path", None),
+                )
                 if route_template and span is not None:
                     try:
                         span.update_name(f"{request.method} {route_template}")
