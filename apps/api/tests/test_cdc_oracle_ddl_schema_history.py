@@ -382,6 +382,8 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
             db_type="oracle",
         ) as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT current_scn FROM V$DATABASE")
+                first_ddl_start_scn = int(cur.fetchone()[0])
                 cur.execute(f"ALTER TABLE {table_ref} ADD (NOTE VARCHAR2(50))")
             conn.commit()
         time.sleep(2.1)
@@ -402,6 +404,9 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
                     "VALUES (2, 'r2', 'after-ddl')"
                 )
             conn.commit()
+            with conn.cursor() as cur:
+                cur.execute("SELECT current_scn FROM V$DATABASE")
+                first_ddl_end_scn = int(cur.fetchone()[0])
 
         with pg_connection(**pg) as conn:
             with conn.cursor() as cur:
@@ -434,6 +439,51 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
         assert len(first_reviews) == 1
         assert first_reviews[0]["status"] == "open"
         assert first_reviews[0]["ddl"].startswith("[oracle-ddl@scn=")
+        first_review_scn = int(
+            first_reviews[0]["ddl"].split("@scn=", 1)[1].split(",", 1)[0]
+        )
+        from connectors.oracle_logminer import _logminer_session
+
+        with reader._mining_conn() as conn:
+            with conn.cursor() as cur:
+                with _logminer_session(
+                    cur,
+                    start_scn=first_ddl_start_scn,
+                    end_scn=first_ddl_end_scn,
+                    reader_identity=f"test table={qualified}",
+                    step_context="test_ddl_barrier_scn",
+                ):
+                    cur.execute(
+                        """
+                        SELECT SCN, SQL_REDO
+                        FROM V$LOGMNR_CONTENTS
+                        WHERE OPERATION = 'DDL'
+                          AND SCN BETWEEN :start_scn AND :end_scn
+                        ORDER BY SCN, RS_ID, SSN
+                        """,
+                        {
+                            "start_scn": first_ddl_start_scn,
+                            "end_scn": first_ddl_end_scn,
+                        },
+                    )
+                    logminer_ddl_rows = cur.fetchall() or []
+        matching_ddl_scns = []
+        for scn, sql_redo in logminer_ddl_rows:
+            if hasattr(sql_redo, "read") and callable(sql_redo.read):
+                sql_redo = sql_redo.read()
+            sql_redo_text = str(sql_redo or "").upper()
+            if (
+                "ALTER TABLE" in sql_redo_text
+                and table.upper() in sql_redo_text
+                and "NOTE" in sql_redo_text
+            ):
+                matching_ddl_scns.append(int(scn))
+        assert first_review_scn in matching_ddl_scns, {
+            "review_scn": first_review_scn,
+            "matching_v_logmnr_ddl_scns": matching_ddl_scns,
+            "logminer_ddl_rows": logminer_ddl_rows,
+        }
+        assert {row[0] for row in source_rows()} == {"1", "2"}
         assert dest_rows() == [("1", "r1", None)]
 
         with pytest.raises(OracleLogMinerReadError, match="ambiguous schema as of DDL SCN"):
