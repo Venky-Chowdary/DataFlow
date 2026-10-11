@@ -638,3 +638,43 @@ def test_unique_contract_passes_on_clean_population(tmp_path: Path, engine_env):
     recon = result.reconciliation or {}
     checks = recon.get("rule_checks") or []
     assert checks and all(c.get("status") == "passed" for c in checks), checks
+
+
+def test_unique_check_runs_on_early_return_paths(tmp_path: Path):
+    """run_reconciliation's unproven early return (a database dest with no
+    source accounting) must still enforce unique contracts — a wrapper runs
+    the check once per call, so no early return can read as verified."""
+    from src.transfer.reconcile_step import run_reconciliation
+
+    dst = tmp_path / "dst.sqlite"
+    conn = sqlite3.connect(str(dst))
+    with conn:
+        conn.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, email TEXT)")
+        conn.executemany(
+            "INSERT INTO customers VALUES (?, ?)",
+            [(1, "a@x.com"), (2, "a@x.com")],
+        )
+    conn.close()
+    endpoint = EndpointConfig(
+        kind="database", format="sqlite", database=str(dst), table="customers"
+    )
+    recon = run_reconciliation(
+        endpoint=endpoint,
+        records=[],
+        columns=[],
+        rows_written=2,
+        writer_checksum="",
+        dest_summary={},
+        mappings=[
+            {
+                "source": "email",
+                "target": "email",
+                "rule_contracts": [{"rule_id": "uniq-email", "type": "unique"}],
+            }
+        ],
+    )
+    assert recon.get("passed") is False, recon
+    checks = recon.get("rule_checks") or []
+    failed = [c for c in checks if c.get("status") == "failed"]
+    assert [c["rule_id"] for c in failed] == ["uniq-email"], checks
+    assert failed[0]["duplicates"] == 1

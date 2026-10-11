@@ -1632,7 +1632,38 @@ def _run_unique_rule_checks(
     return checks
 
 
-def run_reconciliation(
+def _apply_unique_rule_checks(
+    payload: dict[str, Any],
+    mappings: list[dict] | None,
+    *,
+    endpoint: EndpointConfig,
+) -> None:
+    """Apply post-load unique-contract outcomes onto a recon payload."""
+    rule_checks = _run_unique_rule_checks(mappings, endpoint=endpoint)
+    if not rule_checks:
+        return
+    payload["rule_checks"] = rule_checks
+    failed = [c for c in rule_checks if c.get("status") == "failed"]
+    if failed:
+        payload["passed"] = False
+        detail = "; ".join(
+            f"business rule {c['rule_id']} failed: "
+            f"{c['duplicates']} duplicate value(s) in {c['column']} after load"
+            for c in failed
+        )
+        payload["message"] = f"{payload.get('message') or ''} {detail}".strip()
+    unverified = [c for c in rule_checks if c.get("status") == "unverified"]
+    if unverified:
+        # The row proof still stands, but the run must not read as fully
+        # verified — name what could not be checked.
+        note = (
+            f"{len(unverified)} business-rule uniqueness check(s) "
+            "unverified for this destination"
+        )
+        payload["message"] = f"{payload.get('message') or ''} — {note}".strip()
+
+
+def _run_reconciliation_impl(
     *,
     endpoint: EndpointConfig,
     records: list[dict],
@@ -3068,26 +3099,41 @@ def run_reconciliation(
         checksum_scope=keyed_scope,
         keyed_expected_delta=keyed_delta,
     )
-    payload = report.to_dict()
-    rule_checks = _run_unique_rule_checks(mappings, endpoint=endpoint)
-    if rule_checks:
-        payload["rule_checks"] = rule_checks
-        failed = [c for c in rule_checks if c.get("status") == "failed"]
-        if failed:
-            payload["passed"] = False
-            detail = "; ".join(
-                f"business rule {c['rule_id']} failed: "
-                f"{c['duplicates']} duplicate value(s) in {c['column']} after load"
-                for c in failed
-            )
-            payload["message"] = f"{payload.get('message') or ''} {detail}".strip()
-        unverified = [c for c in rule_checks if c.get("status") == "unverified"]
-        if unverified:
-            # The row proof still stands, but the run must not read as fully
-            # verified — name what could not be checked.
-            note = (
-                f"{len(unverified)} business-rule uniqueness check(s) "
-                "unverified for this destination"
-            )
-            payload["message"] = f"{payload.get('message') or ''} — {note}".strip()
-    return _finalize(payload)
+    return _finalize(report.to_dict())
+
+
+def run_reconciliation(
+    *,
+    endpoint: EndpointConfig,
+    records: list[dict],
+    columns: list[str],
+    rows_written: int,
+    writer_checksum: str,
+    dest_summary: dict[str, Any],
+    mappings: list[dict] | None = None,
+    source_schema: dict[str, str] | None = None,
+    validation_mode: str = "strict",
+    source_endpoint: EndpointConfig | None = None,
+    source_spool: Any = None,
+) -> dict[str, Any]:
+    """Verify row counts and checksums against the destination.
+
+    Thin wrapper: unique business-rule contracts are enforced post-load exactly
+    once per call — no early-return path inside the impl may skip them.
+    """
+    recon = _run_reconciliation_impl(
+        endpoint=endpoint,
+        records=records,
+        columns=columns,
+        rows_written=rows_written,
+        writer_checksum=writer_checksum,
+        dest_summary=dest_summary,
+        mappings=mappings,
+        source_schema=source_schema,
+        validation_mode=validation_mode,
+        source_endpoint=source_endpoint,
+        source_spool=source_spool,
+    )
+    if not (recon or {}).get("rule_checks"):
+        _apply_unique_rule_checks(recon, mappings, endpoint=endpoint)
+    return recon
