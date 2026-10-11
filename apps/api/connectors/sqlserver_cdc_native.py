@@ -33,6 +33,7 @@ from connectors.write_resilience import (
 )
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.cdc_engine import ChangeBatch
+from services.value_serializer import cell_to_string
 
 # Re-export for existing ``from connectors.sqlserver_cdc_native import CdcLsnGapError``.
 __all_gap__ = ("CdcLsnGapError",)
@@ -378,7 +379,7 @@ def classify_mssql_cdc_rows(
         except (TypeError, ValueError):
             op_i = -1
         clean = {
-            k: "" if v is None else str(v)
+            k: cell_to_string(v, preserve_sql_null=True)
             for k, v in rec.items()
             if not str(k).startswith("__$")
         }
@@ -1405,7 +1406,7 @@ class SqlServerNativeCdc:
                 break
             records = [
                 {
-                    cols[i]: "" if row[i] is None else str(row[i])
+                    cols[i]: cell_to_string(row[i], preserve_sql_null=True)
                     for i in range(len(cols))
                 }
                 for row in rows
@@ -1471,7 +1472,10 @@ class SqlServerNativeCdc:
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall() or []
         records = [
-            {cols[i]: "" if row[i] is None else str(row[i]) for i in range(len(cols))}
+            {
+                cols[i]: cell_to_string(row[i], preserve_sql_null=True)
+                for i in range(len(cols))
+            }
             for row in rows
         ]
         new_last = last_pk_from_records(records, pk_cols) or last_pk

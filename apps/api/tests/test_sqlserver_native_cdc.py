@@ -200,6 +200,94 @@ def test_normalize_and_classify_before_image_and_net() -> None:
     assert "fn_cdc_get_net_changes_" in cdc._changes_tvf()
 
 
+def test_native_cdc_binary_wire_roundtrips_bytes_empty_and_null() -> None:
+    from connectors.sql_bind import coerce_binary_wire
+    from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
+
+    payload = b"\x00\xffsqlserver-binary\x80"
+    inserts, updates, deletes = classify_mssql_cdc_rows(
+        [
+            {"__$operation": 2, "id": 1, "payload": payload},
+            {"__$operation": 2, "id": 2, "payload": b""},
+            {"__$operation": 2, "id": 3, "payload": None},
+        ],
+        primary_key="id",
+        row_filter="all",
+    )
+
+    assert not updates
+    assert not deletes
+    by_id = {record["id"]: record["payload"] for record in inserts}
+    assert coerce_binary_wire(by_id["1"]) == payload
+    assert coerce_binary_wire(by_id["2"]) == b""
+    assert coerce_binary_wire(by_id["3"]) is None
+
+
+def test_native_snapshot_binary_wire_roundtrips_bytes_empty_and_null() -> None:
+    from connectors.sql_bind import coerce_binary_wire
+    from connectors.sqlserver_cdc_native import SqlServerNativeCdc
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    cdc = SqlServerNativeCdc(
+        {"host": "localhost", "database": "app"},
+        table="orders",
+        primary_key="id",
+        batch_size=10,
+    )
+    cur = MagicMock()
+    cur.description = [
+        ("id",),
+        ("payload",),
+        ("empty_payload",),
+        ("null_payload",),
+    ]
+
+    with patch(
+        "connectors.sql_snapshot_scan.fetch_scan_page",
+        return_value=[(1, b"\x00\xffsnapshot", b"", None)],
+    ):
+        batches = list(
+            cdc._iter_snapshot_table(
+                cur,
+                "orders",
+                handoff="0a",
+                offset=0,
+                last_pk="",
+                ack_barrier=False,
+            )
+        )
+
+    record = batches[0].inserts[0]
+    assert coerce_binary_wire(record["payload"]) == b"\x00\xffsnapshot"
+    assert coerce_binary_wire(record["empty_payload"]) == b""
+    assert record["null_payload"] == SQL_NULL_SENTINEL
+    assert coerce_binary_wire(record["null_payload"]) is None
+
+
+def test_native_cdc_update_old_before_image_nulls_are_not_written() -> None:
+    from connectors.sql_bind import coerce_binary_wire
+    from connectors.sqlserver_cdc_native import classify_mssql_cdc_rows
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    payload = b"\x00\xfeafter-image"
+    inserts, updates, deletes = classify_mssql_cdc_rows(
+        [
+            {"__$operation": 3, "id": 1, "payload": None, "large_value": None},
+            {"__$operation": 4, "id": 1, "payload": payload, "large_value": "new"},
+        ],
+        primary_key="id",
+        row_filter="all update old",
+    )
+
+    assert not inserts
+    assert not deletes
+    assert len(updates) == 1
+    assert coerce_binary_wire(updates[0]["payload"]) == payload
+    assert updates[0]["large_value"] == "new"
+    assert updates[0]["_df_before"]["payload"] == SQL_NULL_SENTINEL
+    assert updates[0]["_df_before"]["large_value"] == SQL_NULL_SENTINEL
+
+
 def test_mssql_shared_reader_init_and_lease() -> None:
     cdc = SqlServerNativeCdc(
         {"host": "localhost", "database": "app", "job_id": "j1"},
