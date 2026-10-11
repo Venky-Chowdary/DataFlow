@@ -219,7 +219,6 @@ class MySqlChangeStreamCdc:
         self._signal_table_ready = False
         self._last_signal_poll_at = 0.0
         try:
-            import os as _os
 
             self._signal_poll_interval_sec = float(
                 getenv_brand(
@@ -1361,6 +1360,8 @@ class MySqlChangeStreamCdc:
         (DBZ-3577 read-only window). Composite primary keys use lexicographic
         ``(c1, c2, …)`` ordering — never invent a single-column ORDER BY.
         """
+        from services.cdc_snapshot_filter import signal_filter_sql
+        from services.cdc_snapshot_resume import snapshot_keyset_sql
         from connectors.sql_identifiers import (
             quote_sql_identifier,
             require_safe_identifier,
@@ -1372,7 +1373,6 @@ class MySqlChangeStreamCdc:
         from services.cdc_snapshot_window import (
             _pk_columns,
             _pk_value,
-            keyset_successor_predicate,
         )
 
         pk_cols = _pk_columns(sig.primary_key or self.primary_key)
@@ -1388,7 +1388,6 @@ class MySqlChangeStreamCdc:
         qualified = f"{db}.{table}" if db else table
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
-        order_sql = ", ".join(pk_quoted)
         conn = self._conn()
         gtid_low = ""
         gtid_high = ""
@@ -1401,18 +1400,19 @@ class MySqlChangeStreamCdc:
                 # events stay in the same LSN family and can update the row.
                 gtid_low = self._current_gtid_executed(cur) or ""
                 binlog_low = self._binlog_file_pos_on(cur) or ""
-                if last_pk:
-                    where, params = keyset_successor_predicate(pk_quoted, last_pk)
-                    cur.execute(
-                        f"SELECT * FROM {qualified} WHERE {where} "  # nosec B608
-                        f"ORDER BY {order_sql} LIMIT %s",
-                        (*params, limit),
-                    )
-                else:
-                    cur.execute(
-                        f"SELECT * FROM {qualified} ORDER BY {order_sql} LIMIT %s",  # nosec B608
-                        (limit,),
-                    )
+                # Optional operator filter (Debezium additional-conditions);
+                # binds only, compiled from the structured spec on the signal.
+                filter_sql, filter_params = signal_filter_sql(sig, dialect="mysql")
+                sql, params = snapshot_keyset_sql(
+                    table_ref=qualified,
+                    quoted_pk_columns=pk_quoted,
+                    last_pk=last_pk,
+                    limit=limit,
+                    dialect="mysql",
+                    filter_sql=filter_sql,
+                    filter_params=filter_params,
+                )
+                cur.execute(sql, params)
                 cols = [d[0] for d in (cur.description or [])]
                 rows = cur.fetchall() or []
                 gtid_high = self._current_gtid_executed(cur) or ""
@@ -1738,6 +1738,15 @@ class MySqlChangeStreamCdc:
                             pos["pos"] = stream.log_pos
                         self._record_schema_change(ddl=query.strip()[:2000], offset=pos)
                         self._last_event_at = datetime.now(timezone.utc)
+                    # DDL commits implicitly and logs no XID. Without this, a
+                    # trailing DDL on any table (our own signal table) kept the
+                    # poll "behind" its head forever (MX3-20).
+                    if buf.open_xid is None and stream.log_pos:
+                        last_position = {
+                            "file": getattr(stream, "log_file", ""),
+                            "pos": stream.log_pos,
+                            "tables": list(self.tables),
+                        }
                     continue
                 if isinstance(binlog_event, XidEvent):
                     if stream.log_pos:

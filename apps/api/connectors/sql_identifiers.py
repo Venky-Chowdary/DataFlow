@@ -229,6 +229,24 @@ def split_qualified_table(
     return sch or fallback, tbl
 
 
+def pg_regclass_literal(schema: str | None, table: str) -> str:
+    """Literal passed to ``to_regclass`` for an existence probe.
+
+    ``to_regclass('public.Mixed_Case')`` folds the unquoted identifier to
+    lowercase and returns NULL for a table stored as ``"Mixed_Case"`` — the
+    caller then concludes the destination is absent, issues CREATE TABLE, and
+    fails ``relation already exists`` (QA MX3-06). Both segments must be
+    double-quoted with embedded quotes escaped.
+    """
+    def _seg(name: str) -> str:
+        return '"' + str(name or "").replace('"', '""') + '"'
+
+    sch, tbl = split_qualified_table(table, schema)
+    if sch:
+        return f"{_seg(sch)}.{_seg(tbl)}"
+    return _seg(tbl)
+
+
 def quote_table_ref(
     table: str,
     schema: str | None = None,

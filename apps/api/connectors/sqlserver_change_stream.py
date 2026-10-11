@@ -27,6 +27,11 @@ from datetime import datetime, timezone
 from typing import Any, Iterator
 
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+from connectors.sqlserver_cdc_native import (
+    SqlServerCdcReadError,
+    _retry_sqlserver_poll,
+)
+from connectors.write_resilience import is_connection_lost
 from services.cdc_cursor_gap import CdcCtGapError, CdcCursorGapError
 from services.cdc_engine import ChangeBatch
 
@@ -83,10 +88,27 @@ def encode_sqlserver_resume_token(
     return json.dumps(payload, separators=(",", ":"))
 
 
-def decode_sqlserver_resume_token(token: str | None) -> dict[str, Any]:
+def decode_sqlserver_resume_token(token: Any) -> dict[str, Any]:
     if not token:
         return {"version": 0, "phase": "initial", "offset": 0, "table": ""}
-    raw = str(token).strip()
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    data = unwrap_resume_token(token)
+    if isinstance(data, dict):
+        if data.get("kind") != "mssql-ct":
+            logger.warning(
+                "Ignoring resume token with unexpected kind=%r",
+                data.get("kind"),
+            )
+            return {"version": 0, "phase": "initial", "offset": 0, "table": ""}
+        return {
+            "version": int(data.get("version") or 0),
+            "phase": str(data.get("phase") or "streaming"),
+            "offset": int(data.get("offset") or 0),
+            "table": str(data.get("table") or ""),
+            "last_pk": str(data.get("last_pk") or ""),
+        }
+    raw = str(data).strip()
     if raw.startswith("mssql-ct:"):
         # Legacy compact form: mssql-ct:{table}:{version}
         try:
@@ -95,8 +117,14 @@ def decode_sqlserver_resume_token(token: str | None) -> dict[str, Any]:
             version = 0
         return {"version": version, "phase": "streaming", "offset": 0, "table": ""}
     try:
-        data = json.loads(raw)
-        if isinstance(data, dict) and data.get("kind") == "mssql-ct":
+        data = unwrap_resume_token(json.loads(raw))
+        if isinstance(data, dict) and data.get("kind") != "mssql-ct":
+            logger.warning(
+                "Ignoring resume token with unexpected kind=%r",
+                data.get("kind"),
+            )
+            return {"version": 0, "phase": "initial", "offset": 0, "table": ""}
+        if isinstance(data, dict):
             return {
                 "version": int(data.get("version") or 0),
                 "phase": str(data.get("phase") or "streaming"),
@@ -174,7 +202,7 @@ class SqlServerChangeTrackingCdc:
         }
 
     def _conn(self):
-        from connectors.generic_sql import get_connection
+        from connectors.generic_sql import connection_options, get_connection
 
         return get_connection(
             host=self.cfg.get("host") or "localhost",
@@ -185,6 +213,7 @@ class SqlServerChangeTrackingCdc:
             connection_string=self.cfg.get("connection_string") or "",
             ssl=bool(self.cfg.get("ssl")),
             db_type="sqlserver",
+            **connection_options(self.cfg),
         )
 
     def _qualified(self) -> str:
@@ -291,12 +320,25 @@ class SqlServerChangeTrackingCdc:
         min_valid, _current, enabled = self._min_valid_and_current(cur)
         if not self._resume_expected:
             return
-        assert_resume_version_in_retention(
-            self.version,
-            min_valid,
-            cursor_key=self.cursor_key,
-            ct_enabled=enabled,
-        )
+        try:
+            assert_resume_version_in_retention(
+                self.version,
+                min_valid,
+                cursor_key=self.cursor_key,
+                ct_enabled=enabled,
+            )
+        except CdcCtGapError as exc:
+            if enabled is not False:
+                raise
+            raise CdcCtGapError(
+                f"SQL Server Change Tracking is disabled for table "
+                f"{self.schema}.{self.table} while resume version {self.version} "
+                "is present. Re-enable Change Tracking on the table and "
+                f"re-snapshot before resuming. {exc}",
+                resume_version=self.version,
+                min_valid_version="ct_disabled",
+                cursor_key=self.cursor_key,
+            ) from exc
 
     def _row_to_record(self, cols: list[str], row: tuple) -> dict[str, str]:
         from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
@@ -398,6 +440,29 @@ class SqlServerChangeTrackingCdc:
         )
 
     def poll(self) -> Iterator[ChangeBatch]:
+        if self.phase == "snapshot" or (self.version <= 0 and self.phase != "streaming"):
+            yield from self._poll_once()
+            return
+        try:
+            yield from _retry_sqlserver_poll(
+                lambda: self._poll_once(),
+                component="SQL Server Change Tracking",
+                cursor_key=self.cursor_key,
+                table=f"{self.schema}.{self.table}",
+            )
+        except SqlServerCdcReadError:
+            raise
+        except Exception as exc:
+            if is_connection_lost(exc):
+                read_error = SqlServerCdcReadError(
+                    exc,
+                    table=f"{self.schema}.{self.table}",
+                    cursor_key=self.cursor_key,
+                )
+                raise read_error from exc
+            raise
+
+    def _poll_once(self) -> Iterator[ChangeBatch]:
         self._acquire_cdc_lease()
         # Resume incomplete snapshot before streaming.
         if self.phase == "snapshot" or (self.version <= 0 and self.phase != "streaming"):
@@ -471,8 +536,13 @@ class SqlServerChangeTrackingCdc:
         except RuntimeError:
             raise
         except Exception as exc:
-            logger.warning("SQL Server CT poll failed for %s: %s", qualified, exc)
-            return
+            read_error = SqlServerCdcReadError(
+                exc,
+                table=f"{self.schema}.{self.table}",
+                cursor_key=self.cursor_key,
+            )
+            logger.error("%s", read_error)
+            raise read_error from exc
 
         self.version = next_version
         self.phase = "streaming"

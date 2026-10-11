@@ -69,6 +69,17 @@ def _enforce_ddl_identity(
     approved_columns: list[dict] = []
     checked = mappings
     if not approved and pf:
+        if preflight_mappings is not None:
+            try:
+                from services.decision_kernel import ddl_identity_report
+
+                proof_stamp = ddl_identity_report(
+                    preflight_mappings, dest_db=dest_db or ""
+                )
+                pf.setdefault("proof_bundle", {})["ddl_identity"] = proof_stamp
+            except Exception as exc:
+                logger.error("Execute DDL identity stamp failed: %s", exc, exc_info=exc)
+                return f"DDL identity stamp failed closed: {exc}"
         stamp = (pf.get("proof_bundle") or {}).get("ddl_identity") or {}
         approved = stamp.get("ddl_identity_hash") or ""
         approved_columns = [
@@ -167,6 +178,40 @@ def _enforce_decision_artifact(
 
     approved = (approved_decision_artifact_hash or "").strip()
     payload = decision_artifact if isinstance(decision_artifact, dict) and decision_artifact else None
+    if pf and not payload and not approved:
+        proof_bundle = pf.get("proof_bundle") or {}
+        stamped = proof_bundle.get("decision_artifact")
+        if isinstance(stamped, dict) and stamped:
+            try:
+                from services.decision_kernel import (
+                    build_artifact_from_mappings,
+                    decision_artifact_from_dict,
+                )
+
+                prior = decision_artifact_from_dict(stamped)
+                refreshed = build_artifact_from_mappings(
+                    list(mappings or []),
+                    dest_db=dest_db or "",
+                    source_db=source_format,
+                    tenant_id=prior.tenant_id,
+                    route_id=prior.route_id,
+                    source_fingerprint=prior.source_fingerprint,
+                    dest_fingerprint=prior.dest_fingerprint,
+                    sync_mode=sync_mode or prior.sync_mode,
+                    error_policy=error_policy or prior.error_policy,
+                    artifact_id=prior.artifact_id,
+                    created_at=prior.created_at,
+                ).to_dict()
+                proof_bundle["decision_artifact"] = refreshed
+                proof_bundle["decision_artifact_hash"] = refreshed.get("content_hash")
+                pf["proof_bundle"] = proof_bundle
+            except Exception as exc:
+                logger.error(
+                    "Execute decision artifact stamp failed: %s",
+                    exc,
+                    exc_info=exc,
+                )
+                return f"Decision Artifact stamp failed closed: {exc}", None
     # Honor the operator Validate stamp. Execute re-preflight after dest exists
     # overlays live dest types and a non-empty dest fingerprint. Adopting that
     # artifact as "supplied" compared dest-exists DDL to the operator Map and

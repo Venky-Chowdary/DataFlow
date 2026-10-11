@@ -368,11 +368,19 @@ def test_orphan_source_rows_are_an_ri_finding_not_a_green_checksum(tmp_path: Pat
         )
     )
     try:
-        # Gate-8 G22 fails closed on destination orphans: rows land, the FK
-        # is not claimed, and the run is not certified.
+        # Gate-8 G22 fails closed on destination orphans: the FK is not
+        # claimed, the run is not certified, the overwrite undo restores the
+        # pre-run (empty) table, and the evidence still names the orphan row.
         assert not result.success, "orphans must not certify a run"
         assert "referential integrity failed" in str(result.error).lower()
         assert "1 orphan row(s)" in str(result.error)
+        assert "11 -> 999" in str(result.error), result.error
+        g22 = (result.reconciliation or {}).get("g22_dest_referential_integrity") or {}
+        assert "11 -> 999" in (g22.get("details") or {}).get("orphan_samples", []), g22
+        dsum = result.destination_summary or {}
+        assert dsum.get("partial_batch_undo") == "cleared", dsum
+        assert dsum.get("partial_batch_undo_note"), dsum
+        assert str(dsum["partial_batch_undo_note"]) in str(result.error)
         summary = _fk_summary(result)
         child_decision = _carried_child(summary, child)
         assert child_decision.get("integrity_violation") is True, child_decision
@@ -391,7 +399,13 @@ def test_orphan_source_rows_are_an_ri_finding_not_a_green_checksum(tmp_path: Pat
                 cur.execute(
                     f'SELECT id, customer_id FROM public."{child}" ORDER BY id'
                 )
-                assert cur.fetchall() == [(10, 1), (11, 999)]
+                assert cur.fetchall() == [], "child must equal its pre-run (empty) state"
+                cur.execute(
+                    f'SELECT COUNT(*) FROM public."{child}" c '
+                    f'LEFT JOIN public."{parent}" p ON c.customer_id = p.id '
+                    "WHERE c.customer_id IS NOT NULL AND p.id IS NULL"
+                )
+                assert cur.fetchone()[0] == 0
                 cur.execute(
                     """
                     SELECT 1 FROM information_schema.table_constraints

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from services.brand_env import getenv_brand
 from services.mapping_proof import mappings_from_request
 from services.shape_preflight import ShapePreflightRefused
@@ -816,7 +815,7 @@ async def execute_transfer_json(
     from services.procedure_source import is_callable_source
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
-    from ..transfer.models import EndpointConfig, TransferRequest
+    from ..transfer.models import EndpointConfig, TransferRequest, endpoint_to_dict
 
     src_preview = EndpointConfig.from_dict(
         body.source.kind, body.source.model_dump(by_alias=True)
@@ -837,6 +836,7 @@ async def execute_transfer_json(
             has_lsn_column=route_declares_log_position(body.stream_contracts),
             allow_append_only=dest_allow_append_only(dst_preview),
             callable_source=is_callable_source(src_preview),
+            dest_cfg=endpoint_to_dict(dst_preview),
         )
     except (DeliveryGuaranteeError, ExactlyOnceRouteError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1802,6 +1802,8 @@ class JobCdcSnapshotBody(BaseModel):
     table: str = ""
     primary_key: str = ""
     chunk_size: int = 1000
+    # Structured filter spec (services/cdc_snapshot_filter.py), never raw SQL.
+    row_filter: dict | list | None = None
 
 
 @router.get("/{job_id}/cdc/snapshots")
@@ -1860,6 +1862,7 @@ async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, reques
             table=body.table,
             primary_key=body.primary_key,
             chunk_size=body.chunk_size,
+            row_filter=body.row_filter,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e

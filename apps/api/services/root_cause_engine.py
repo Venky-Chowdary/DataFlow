@@ -11,9 +11,12 @@ recovery, quarantine, rollback, and documentation — not just an error string.
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 _FIDELITY_RE = re.compile(
     r"fidelity.?collapse|lossy|precision.?loss|scale.?truncat|"
@@ -484,12 +487,47 @@ def _is_duplicate_signal(
         or re.search(r"identity key required", str(message or ""), re.I)
     ):
         return False
+    # g9_sync_contract "Missing primary key / Missing cursor" is an *incomplete
+    # contract*, not a duplicate finding — ``Missing primary key`` matches
+    # ``primary.?key`` in ``_DUP_RE`` and minted a phantom "Duplicate identity
+    # keys" root that hid the real missing-key/cursor message (QA T11/T08).
+    if str(gate_id or "") == "g9_sync_contract":
+        return False
+    if re.search(r"sync mode contract incomplete", str(message or ""), re.I):
+        return False
+    if re.search(r"missing (?:primary key|cursor)", str(message or ""), re.I):
+        return False
     if details.get("duplicate_keys") or details.get("identity_duplicates"):
         return True
     blob = _blob(message, details)
     if _DUP_RE.search(blob):
         return True
     return gate_id in _DUP_GATE_IDS and bool(_DUP_RE.search(blob))
+
+
+def _raw_signal_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Blockers that are evidence, not a previous pass's conclusions.
+
+    Preflight collapses roots twice (file preflight, then policy gates). The
+    second pass sees the first pass's ``rc-*`` blockers and their ``proof_N``
+    echoes; their remediation prose ("needs an identity key") matched the
+    duplicate regex and minted a duplicate_identity root no data produced
+    (QA T1: constant rc-duplicate-identity-87d820160a90 on unique keys).
+    """
+    prior_roots = {
+        str(b.get("message") or "")
+        for b in blockers
+        if (b.get("details") or {}).get("root_cause")
+    }
+    return [
+        b
+        for b in blockers
+        if not (b.get("details") or {}).get("root_cause")
+        and not (
+            str(b.get("id") or "").startswith("proof_")
+            and str(b.get("message") or "") in prior_roots
+        )
+    ]
 
 
 def _source_from_pair_label(label: str) -> str:
@@ -1403,6 +1441,28 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             }
         )
         if absorbed:
+            # Surface the probe's own reason (relation not found, driver error,
+            # wrong object) — the canned "did not address the source table"
+            # erased the real failure and sent operators to re-Validate instead
+            # of fixing the actual addressing bug (QA schema_mismatch extra).
+            probe_detail = ""
+            for g in probe_gates:
+                probe = (g.get("details") or {}).get("source_uniqueness_probe")
+                if isinstance(probe, dict) and probe.get("message"):
+                    probe_detail = str(probe["message"])[:240]
+                    break
+            if not probe_detail:
+                for g in probe_gates:
+                    msg = str(g.get("message") or "").strip()
+                    if msg:
+                        probe_detail = msg[:240]
+                        break
+            if not probe_detail:
+                for b in probe_blockers:
+                    msg = str(b.get("message") or "").strip()
+                    if msg:
+                        probe_detail = msg[:240]
+                        break
             roots.append(
                 MigrationRootCause(
                     root_id=_root_id("uniqueness_probe_unavailable", [], absorbed),
@@ -1411,6 +1471,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     summary=(
                         "Validate could not prove source identity uniqueness — "
                         "the probe did not address the source table"
+                        + (f" ({probe_detail})" if probe_detail else "")
                     ),
                     business_impact=(
                         "A uniqueness-required sync cannot be approved from the sample "
@@ -1456,7 +1517,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
     ]
     dup_blockers = [
         b
-        for b in blockers
+        for b in _raw_signal_blockers(blockers)
         if not _is_destination_collision_signal(b.get("details") or {})
         and not _is_uniqueness_probe_signal(
             str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
@@ -1477,6 +1538,12 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             for b in dup_blockers:
                 cols.extend(_columns_from_details(b.get("details") or {}))
             cols = list(dict.fromkeys(cols))
+            _logger.info(
+                "root_cause: duplicate_identity from gates=%s blockers=%s columns=%s",
+                [g.get("id") for g in dup_gates],
+                [b.get("id") for b in dup_blockers],
+                cols,
+            )
             roots.append(
                 MigrationRootCause(
                     root_id=_root_id("duplicate_identity", cols, absorbed),
@@ -1516,6 +1583,86 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     severity="block",
                 )
             )
+
+    # g9_sync_contract blockers are an *incomplete contract* — missing identity
+    # key / cursor — never a duplicate finding. Until now they produced no root
+    # at all: earlier code minted a phantom "Duplicate identity keys" root that
+    # hid the real message (QA T11/T08); removing that left a bare blocker with
+    # no remediation. Give the operator the contract root with the actual fix.
+    contract_blockers = [
+        b
+        for b in [*blockers, *[g for g in gates if g.get("status") == "block"]]
+        if str(b.get("id") or "") == "g9_sync_contract"
+        and re.search(
+            r"missing (?:primary key|cursor)|sync mode contract incomplete",
+            str(b.get("message") or ""),
+            re.I,
+        )
+    ]
+    if contract_blockers:
+        absorbed = sorted(
+            {str(b.get("id")) for b in contract_blockers if b.get("id")}
+        )
+        # The gate names *which* part of the contract failed (a missing key, an
+        # unknown cursor, a cursor whose meaning cannot capture updates). The
+        # generic "needs an identity key" prose sent operators who had set both
+        # to the wrong control.
+        contract_issues: list[str] = []
+        contract_fixes: list[str] = []
+        for b in contract_blockers:
+            details = b.get("details") or {}
+            for issue in details.get("issues") or []:
+                if str(issue) and str(issue) not in contract_issues:
+                    contract_issues.append(str(issue))
+            for verdict in details.get("cursor_semantics") or []:
+                verdict = verdict if isinstance(verdict, dict) else {}
+                action = str(verdict.get("primary_action") or "").strip()
+                if verdict.get("status") == "block" and action and action not in contract_fixes:
+                    contract_fixes.append(action)
+        contract_summary = (
+            "; ".join(contract_issues[:3]) + " — the run refused before any rows moved."
+            if contract_issues
+            else (
+                "The selected sync mode needs an identity key and/or a "
+                "cursor column that was not provided — the run refused "
+                "before any rows moved."
+            )
+        )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("sync_contract_incomplete", [], absorbed),
+                kind="sync_contract_incomplete",
+                title="Sync contract incomplete",
+                summary=contract_summary,
+                business_impact=(
+                    "Incremental/upsert routes cannot checkpoint or dedupe "
+                    "without the key the contract requires."
+                ),
+                affected_columns=[],
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="medium",
+                recommended_fix=(
+                    contract_fixes[0]
+                    if contract_fixes
+                    else "Open Sync → identity settings → choose the primary key "
+                    "(and cursor column for incremental), then re-Validate."
+                ),
+                alternative_fixes=[
+                    *contract_fixes[1:3],
+                    "Switch to full_refresh_append/overwrite — no key required",
+                    "Re-run with the same upsert key contract as the prior run",
+                ],
+                recovery_strategy="Set the key/cursor and re-Validate; nothing was written.",
+                expected_runtime_impact="Re-Validate only — no destination rewrite",
+                quarantine_policy="n/a — no rows moved",
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_ROLLBACK.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
 
     return roots
 
@@ -1570,6 +1717,17 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
     collapsed = [r.as_operator_blocker() for r in roots] + remaining
     preflight["blockers"] = collapsed
 
+    # The verdict was stamped before roots were injected. A severity=block
+    # blocker must never coexist with decision=approve / passed=true — that
+    # produced the internally contradictory "No blocking issues detected"
+    # next to a block-severity rc-* (QA T04/T12).
+    block_roots = [r for r in roots if (r.severity or "").lower() == "block"]
+    has_blocking = bool(block_roots) or any(
+        str(b.get("severity") or "").lower() == "block" for b in remaining
+    )
+    if has_blocking:
+        preflight["passed"] = False
+
     pb = preflight.get("proof_bundle")
     if isinstance(pb, dict):
         td = pb.get("transfer_decision")
@@ -1583,6 +1741,13 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
                 ],
                 "root_causes": [r.to_dict() for r in roots],
             }
+            if has_blocking:
+                titles = [r.title for r in block_roots] or [
+                    str(b.get("title") or b.get("message") or b.get("id") or "blocking issue")
+                    for b in collapsed[:3]
+                ]
+                td["decision"] = "block"
+                td["reason"] = "Blocking issues detected: " + "; ".join(titles[:3])
             preflight["proof_bundle"] = {**pb, "transfer_decision": td}
 
     return preflight

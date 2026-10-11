@@ -57,7 +57,6 @@ def test_result_store_put_resolve_filter(tmp_path: Path) -> None:
 
     # Point tools at this store via monkeypatch of get_result_store
     import src.ai.copilot.result_store as rs
-    import src.ai.copilot.query_tools as qt
 
     prev = rs._store
     rs._store = store

@@ -9,7 +9,7 @@ import sys
 import tempfile
 import uuid
 from decimal import Decimal
-from datetime import date
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -80,15 +80,17 @@ def test_messy_csv_to_duckdb_preserves_types():
         def _row(r):
             return (r[0], Decimal(str(r[1])), *r[2:])
 
+        # One cell carries 14:30, so the column joins to TIMESTAMP on the
+        # type lattice. A DATE column would silently drop that time of day.
         assert _row(rows[0]) == (
-            1, Decimal("1000.0"), None, date(2024, 1, 15), True,
+            1, Decimal("1000.0"), None, datetime(2024, 1, 15), True,
             '{"k":"v"}', '["a","b"]',
         )
         assert _row(rows[1]) == (
-            2, Decimal("2000.5"), "hello", date(2024, 2, 28), False, None, None,
+            2, Decimal("2000.5"), "hello", datetime(2024, 2, 28, 14, 30), False, None, None,
         )
         assert _row(rows[2]) == (
-            3, Decimal("3.14"), "null", date(2024, 3, 1), True, '{}', '[]',
+            3, Decimal("3.14"), "null", datetime(2024, 3, 1), True, '{}', '[]',
         )
     finally:
         try:

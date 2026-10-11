@@ -69,6 +69,11 @@ def _lead(question: str) -> str:
         ("can I roll back a load", ("does not undo a transfer",), ("pgoutput",)),
         ("can a viewer see secrets", ("cannot see secrets",), ("viewer can do it",)),
         ("do you have a REST API", ("/api/v1",), ("46 of them",)),
+        (
+            "do you support SCIM",
+            ("scim 2.0 subset", "/api/v1/scim/v2"),
+            (),
+        ),
         ("can I call this from GitHub Actions", ("github actions can call",), ("mcp server status",)),
         ("do you support OpenLineage", ("openlineage",), ()),
         ("what is the difference between mirror and upsert", ("mirror is upsert plus deletion",), ("merge into",)),
@@ -130,7 +135,7 @@ def _lead(question: str) -> str:
         ("do you support Apache Hudi", ("not a transfer-ready",), ("37 of them", "destinations a transfer can write")),
         ("can I use Kafka consumer groups", ("group_id",), ("grouped aggregate", "group by")),
         ("can I use AWS Secrets Manager", ("does not read aws secrets manager",), ("privatelink",)),
-        ("do you support Okta", ("saml",), ("we ship scim", "custom_domain")),
+        ("do you support Okta", ("saml",), ("custom_domain",)),
         (
             "what is the difference between jobs and pipelines",
             ("pipelines owns the schedule",),
@@ -152,7 +157,7 @@ def _lead(question: str) -> str:
             ("does not ship snowflake dynamic tables",),
             ("snowflake is a transfer-ready",),
         ),
-        ("can I use Entra ID", ("saml",), ("we ship scim",)),
+        ("can I use Entra ID", ("saml",), ()),
         ("do you support Azure Key Vault", ("does not read", "azure key vault"), ("privatelink",)),
         ("can I pause CDC", ("enabled false", "does not drop"), ("replica identity", "pre-image", "right-side detail")),
         ("how do I pause CDC", ("pause", "does not drop"), ("right-side detail",)),
@@ -489,7 +494,6 @@ def test_off_subject_english_is_refused(question: str) -> None:
         "how much does it cost",
         "how much does datawrap cost",
         "is there an SLA for job runtime",
-        "do you support SCIM",
     ],
 )
 def test_compliance_and_commercial_asks_are_refused_not_invented(

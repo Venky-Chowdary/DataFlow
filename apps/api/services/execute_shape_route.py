@@ -31,7 +31,13 @@ class ExecuteShapePlan:
     failure: TransferResult | None = None
 
 
-def peek_declared_source(source: Any, contracts: list | None) -> tuple[list, dict, int, list]:
+def peek_declared_source(
+    source: Any,
+    contracts: list | None,
+    *,
+    sdk_state: str | None = None,
+    include_batch: bool = False,
+) -> tuple:
     """Read the primary stream's CALL or SELECT, not the table behind it.
 
     When that statement exists, its result set is the schema. Table DDL
@@ -48,11 +54,18 @@ def peek_declared_source(source: Any, contracts: list | None) -> tuple[list, dic
     ]
     patch = design_source_patch(contracts, names)
     with patched_endpoint_extra(source, patch):
-        columns, schema, total_rows, sample_rows = peek_stream_source(source)
+        peeked = peek_stream_source(
+            source,
+            sdk_state=sdk_state,
+            include_batch=include_batch,
+        )
+        columns, schema, total_rows, sample_rows = peeked[:4]
     if patch:
         schema = dict(schema)
     else:
         schema = _authoritative_source_schema(source, schema, columns)
+    if include_batch:
+        return columns, schema, total_rows, sample_rows, peeked[4]
     return columns, schema, total_rows, sample_rows
 
 

@@ -387,6 +387,43 @@ def test_adls_emulator_pins_version_and_real_azure_does_not(monkeypatch) -> None
     assert probes == [None, "2021-12-02"]
 
 
+def test_adls_container_listing_falls_back_to_public_protocol_with_limit() -> None:
+    from connectors.adls_common import list_service_containers
+
+    consumed: list[str] = []
+
+    class _ProtocolClient:
+        def list_containers(self):
+            for name in ("first", "second", "third"):
+                consumed.append(name)
+                yield name
+
+    result = list_service_containers(_ProtocolClient(), maxresults=2)
+
+    assert result == ["first", "second"]
+    assert consumed == ["first", "second"]
+
+
+def test_adls_container_listing_uses_generated_segment_without_include() -> None:
+    from connectors.adls_common import list_service_containers
+
+    calls: list[dict] = []
+
+    class _Service:
+        def list_containers_segment(self, *, include, maxresults):
+            calls.append({"include": include, "maxresults": maxresults})
+            return "page"
+
+    class _InternalClient:
+        service = _Service()
+
+    class _SdkClient:
+        _client = _InternalClient()
+
+    assert list_service_containers(_SdkClient(), maxresults=3) == "page"
+    assert calls == [{"include": None, "maxresults": 3}]
+
+
 def test_object_store_plan_types_are_not_authoritative() -> None:
     from src.ai.copilot.transfer_tools import _plan_source_types_authoritative
 

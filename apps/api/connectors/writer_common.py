@@ -94,16 +94,19 @@ def quarantine_cell_wire(value: Any) -> str:
         DF_MISSING_SENTINEL,
         SQL_NULL_SENTINEL,
         cell_to_string,
+        is_frame_missing,
         is_missing_sentinel,
     )
 
-    if value is None:
+    if value is None or is_frame_missing(value):
+        # Frame NaN / NA / NaT first: cell_to_string spells float NaN ``"NaN"``
+        # and ``pd.NA`` cannot be compared, so replay would write text (or
+        # raise) where the row had NULL.
         return SQL_NULL_SENTINEL
     if is_missing_sentinel(value):
         return DF_MISSING_SENTINEL
     if isinstance(value, str) and value.strip() == SQL_NULL_SENTINEL:
         return SQL_NULL_SENTINEL
-    # cell_to_string(preserve_sql_null=True) maps NA/NaN → SQL_NULL_SENTINEL.
     return cell_to_string(value, preserve_sql_null=True)
 
 
@@ -1899,6 +1902,11 @@ def build_mapped_rows_with_details(
                         detail["quarantine_required"] = False
                     elif exec_pol == "QUARANTINE_ROW":
                         detail["quarantine_required"] = True
+                    if cell_policy == "coerce_null":
+                        # QA MX3-14: the row landed with a NULL cell — an audit
+                        # finding, not a held-out row to count or replay.
+                        detail["disposition"] = "coerced_null"
+                        detail["quarantine_required"] = False
                 if retry_attempted:
                     detail["retry_attempted"] = True
                     detail["retry_count"] = 1
@@ -2874,12 +2882,18 @@ def fits_decimal(
     if _schemaless_decimal_capacity_holds(value, dest_db=dest_db):
         return True
     try:
-        text = str(value).strip()
-        if not text:
-            return True
-        from services.transform_engine import decimal_wire_value
+        if isinstance(value, Decimal):
+            # A typed Decimal is already exact. Round-tripping it through
+            # locale text read ``12.345`` as an ambiguous thousands group and
+            # refused every scale-3 value as overflow.
+            d = value
+        else:
+            text = str(value).strip()
+            if not text:
+                return True
+            from services.transform_engine import decimal_wire_value
 
-        d = decimal_wire_value(text)
+            d = decimal_wire_value(text)
         if d is None:
             return False
         if not d.is_finite():
@@ -3318,6 +3332,23 @@ def _mysql_datetime_utc_normalizes(typ: str, dest_db: str) -> bool:
     return sql_base_type(typ) == "DATETIME"
 
 
+def _dest_is_instant_only(typ: str, dest_db: str) -> bool:
+    """True when the destination's temporal carrier is an instant-only type.
+
+    MongoDB BSON date, Elasticsearch date, and similar carriers store instants
+    by design — they cannot strip an offset because they always store UTC.
+    Quarantining timezone-aware values for these destinations is a false positive.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.type_system import _INSTANT_ONLY_TEMPORAL_ENGINES
+
+    dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    if dest_db in _INSTANT_ONLY_TEMPORAL_ENGINES:
+        # MongoDB BSON date, Elasticsearch date, etc. are always instant carriers
+        return True
+    return False
+
+
 def quarantine_unfit_temporals(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -3358,6 +3389,7 @@ def quarantine_unfit_temporals(
             logical == "datetime"
             and datetime_timezone_polarity(typ, dest_db=dest_db) == "ntz"
             and not _mysql_datetime_utc_normalizes(typ, dest_db)
+            and not _dest_is_instant_only(typ, dest_db)
         )
         # Always include temporal columns so empty refuse runs even without FSP/TZ.
         temporal_cols.append((i, typ, check_fsp, check_tz))

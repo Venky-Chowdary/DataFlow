@@ -760,6 +760,15 @@ def introspect_endpoint(
     if fmt in _SAAS_INTROSPECT_DRIVERS:
         return _saas_introspect(out, endpoint, cfg, fmt)
 
+    if fmt == "rest_api":
+        # Reachability + field names come from the canonical describe; typing
+        # stays with the sampled read Map already uses. Stamping the describe's
+        # carriers here made Validate disagree with Map (NUMERIC(6,2) vs TEXT).
+        described = _saas_introspect(out, endpoint, cfg, fmt)
+        described["schema"] = {}
+        described.pop("column_nullability", None)
+        return described
+
     specialty = _specialty_object_list(fmt, cfg)
     if specialty is not None:
         connected, names, kind, message = specialty
@@ -860,7 +869,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             # once ``10.01`` is text the stored ``double`` is unrecoverable.
             from services.schema_introspect import (
                 mongodb_bson_column_types,
-                prefer_bson_numeric_carrier,
+                prefer_bson_source_carrier,
             )
 
             bson_types = mongodb_bson_column_types(records)
@@ -909,7 +918,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 for col in columns
             }
             schema, intel = infer_schema_map(samples_by_field)
-            schema = prefer_bson_numeric_carrier(schema, bson_types)
+            schema = prefer_bson_source_carrier(schema, bson_types)
             for col in columns:
                 if col not in schema:
                     schema[col] = "VARCHAR"
@@ -1603,7 +1612,9 @@ def _attach_callable_source_sample(
         out["columns"] = out.get("columns") or []
         out["schema"] = out.get("schema") or {}
         out["sample_error"] = str(exc)
-        out["message"] = f"Procedure extract failed: {exc}"
+        from services.procedure_source import _operator_extract_error
+
+        out["message"] = _operator_extract_error(exc)
         logger.warning("callable source peek failed for %s: %s", fmt, exc, exc_info=exc)
 
 

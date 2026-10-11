@@ -165,17 +165,17 @@ CLAIM_REGISTRY: list[dict[str, Any]] = [
     },
     {
         "id": "create_new_type_risk_stamp",
-        "claim": "Create-new precision/width/TZ risks stamped before Validate",
+        "claim": "Create-new precision-collapse risks stamped before Validate",
         "buyer_line": (
-            "TIMESTAMPTZ create-new onto MySQL stamps create_new_risks "
-            "(epoch range ceiling on the TIMESTAMP carrier) visible to Map UI."
+            "For MySQL create-new, DECIMAL(80,40) projects to TEXT and stamps a "
+            "precision_collapse create_new_risk before write."
         ),
         "floors": {
             "create_new_risks_present": 1,
         },
         "honesty": (
-            "Pipeline unit proof. UI consumption is covered by web mapping tests; "
-            "not a customer Map session recording."
+            "Measured through run_mapping_pipeline (MySQL create-new), not a live "
+            "transfer or a Map UI session."
         ),
     },
 ]
@@ -398,7 +398,6 @@ def measure_hungarian_vs_greedy() -> dict[str, Any]:
     from services.semantic_mapper import map_columns
 
     data = json.loads(ENTERPRISE.read_text(encoding="utf-8"))
-    all_cases = [c for d in data["domains"] for c in d["cases"]]
     # Domain-batched (same protocol as enterprise proof) so bipartite stays fair.
     hung_correct = 0
     greed_correct = 0
@@ -585,12 +584,12 @@ def measure_create_new_type_risk() -> dict[str, Any]:
     from services.mapping_pipeline import run_mapping_pipeline
 
     result = run_mapping_pipeline(
-        source_columns=["created_at"],
+        source_columns=["amount"],
         target_columns=[],
         source_schemas=[{
-            "name": "created_at",
-            "inferred_type": "TIMESTAMPTZ",
-            "samples": ["2024-01-01T00:00:00Z"],
+            "name": "amount",
+            "inferred_type": "DECIMAL(80,40)",
+            "samples": ["123.45"],
         }],
         destination_db_type="mysql",
         destination_table_exists=False,
@@ -600,6 +599,7 @@ def measure_create_new_type_risk() -> dict[str, Any]:
     risks = row.get("create_new_risks") or []
     return {
         "create_new_risks_present": int(bool(risks)),
+        "source_type": row.get("source_type"),
         "target_type": row.get("target_type"),
         "risk_kinds": sorted({r.get("kind") for r in risks if r.get("kind")}),
         "requires_review": bool(row.get("requires_review")),

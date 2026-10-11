@@ -80,6 +80,21 @@ PROCEDURE_DIALECTS = frozenset({
 
 QUERY_ONLY_DIALECTS = frozenset({"sqlite", "duckdb"})
 
+# Engines where a staging peek of a procedure is rolled back by the server
+# itself: a CALL inside an explicit transaction block cannot COMMIT
+# (InvalidTransactionTermination). Everything else (MySQL implicit/explicit
+# commits, MyISAM, SQL Server / Oracle autonomous work, Snowflake, PG-wire
+# lookalikes not proven here) is refused before confirm unless the operator
+# declares the result schema.
+PEEK_ROLLBACK_DIALECTS = frozenset({
+    "postgresql",
+    "postgres",
+    "pgvector",
+    "timescaledb",
+    "alloydb",
+    "amazon_rds_postgresql",
+})
+
 _IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 _QUALIFIED = rf"(?:{_IDENT}\.){{0,2}}{_IDENT}"
 
@@ -315,6 +330,7 @@ _CALLABLE_CFG_KEYS = (
     "procedure_call",
     "source_query",
     "procedure_params",
+    "procedure_result_schema",
 )
 
 
@@ -394,6 +410,23 @@ def procedure_params_of(source: Any) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         return {}
     return {str(k): v for k, v in raw.items()}
+
+
+def procedure_result_schema_of(source: Any) -> dict[str, str]:
+    """Operator-declared ``{column: type}`` of a procedure result set."""
+    extra: Mapping[str, Any] = {}
+    if hasattr(source, "extra"):
+        extra = getattr(source, "extra", None) or {}
+    elif isinstance(source, Mapping):
+        nested = source.get("extra") if isinstance(source.get("extra"), Mapping) else {}
+        extra = {**dict(nested or {}), **source}
+    raw = extra.get("procedure_result_schema") or {}
+    if not isinstance(raw, Mapping):
+        raise ProcedureSourceError(
+            "procedure_result_schema must map each result column to its type, "
+            'e.g. {"id": "INTEGER", "name": "VARCHAR(100)"}.'
+        )
+    return {str(k).strip(): str(v).strip() for k, v in raw.items() if str(k).strip()}
 
 
 def dialect_of(source: Any) -> str:
@@ -516,11 +549,90 @@ def compile_callable_sql(spec: CallableSpec) -> tuple[str, dict[str, Any]]:
     return spec.sql, dict(spec.params)
 
 
+def _python_carrier(value: Any) -> str:
+    """Declared-carrier hint from the DBAPI's own Python type.
+
+    Cells are stringified for the wire, so a VARCHAR column of digits is
+    indistinguishable from a NUMERIC column on samples alone — the QA T16
+    text column was auto-retyped NUMERIC(19,5) on exactly that. The Python
+    type the driver materialised is declared evidence: a ``str`` can only
+    come from a text column; a ``Decimal`` only from exact numeric.
+    """
+    import datetime as _dt
+    from decimal import Decimal
+
+    if isinstance(value, bool):
+        return "BOOLEAN"
+    if isinstance(value, int):
+        return "INTEGER"
+    if isinstance(value, Decimal):
+        return "DECIMAL"
+    if isinstance(value, float):
+        return "DOUBLE"
+    if isinstance(value, _dt.datetime):
+        if value.tzinfo is not None and value.utcoffset() is not None:
+            return "TIMESTAMPTZ"
+        return "TIMESTAMP"
+    if isinstance(value, _dt.date):
+        return "DATE"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return "BYTEA"
+    if isinstance(value, (list, tuple, dict)):
+        return "JSON"
+    return "VARCHAR"
+
+
+def python_carriers_of_rows(
+    headers: list[str],
+    rows: Any,
+) -> dict[str, str]:
+    """One driver-materialised carrier per column, from raw DBAPI rows.
+
+    Read before the cells are stringified for the wire: afterwards every
+    value is a ``str`` and the carrier says nothing. A column whose non-null
+    values disagree (``sql_variant``, a UNION of types) gets no carrier.
+    """
+    seen: dict[str, set[str]] = {}
+    for row in rows or []:
+        for i, h in enumerate(headers):
+            if isinstance(row, Mapping):
+                val = row.get(h)
+            elif i < len(row):
+                val = row[i]
+            else:
+                continue
+            if is_null_evidence(val):
+                continue
+            seen.setdefault(h, set()).add(_python_carrier(val))
+    return {h: next(iter(kinds)) for h, kinds in seen.items() if len(kinds) == 1}
+
+
+# Sample-fit types a driver carrier is allowed to keep. Anything else is
+# replaced by the carrier itself: the driver read the column's declared type.
+_CARRIER_KEEPS_SAMPLE: dict[str, tuple[str, ...]] = {
+    "VARCHAR": ("VARCHAR", "TEXT", "JSON", "UNKNOWN"),
+    "INTEGER": ("INTEGER", "BIGINT", "SMALLINT"),
+    "DECIMAL": ("DECIMAL", "NUMERIC"),
+    "DOUBLE": ("DOUBLE", "FLOAT"),
+    "BOOLEAN": ("BOOLEAN",),
+    "TIMESTAMPTZ": ("TIMESTAMPTZ",),
+    "TIMESTAMP": ("TIMESTAMP",),
+    "DATE": ("DATE",),
+    "BYTEA": ("BYTEA", "BINARY"),
+}
+
+
 def peek_callable_schema(
     headers: list[str],
     rows: list[list[Any]] | list[dict[str, Any]],
+    carriers: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
-    """Infer result-set types from peeked rows — same choke point as playground."""
+    """Infer result-set types from peeked rows — same choke point as playground.
+
+    ``carriers`` are the driver's Python types read from the raw rows (see
+    ``python_carriers_of_rows``). Pass them when ``rows`` are already wire
+    strings; without them the carriers are read from ``rows`` themselves.
+    """
     from services.schema_inference import infer_schema_map
 
     samples: dict[str, list[str]] = {h: [] for h in headers}
@@ -534,9 +646,23 @@ def peek_callable_schema(
             for i, h in enumerate(headers):
                 if i < len(row) and not is_null_evidence(row[i]):
                     samples[h].append(_cell(row[i]))
+    py_carriers = (
+        dict(carriers) if carriers is not None else python_carriers_of_rows(headers, rows)
+    )
     schema, intel = infer_schema_map(samples)
     for h in headers:
         schema.setdefault(h, "VARCHAR")
+        carrier = py_carriers.get(h)
+        keeps = _CARRIER_KEEPS_SAMPLE.get(carrier or "")
+        if keeps is None:
+            continue
+        if not str(schema[h]).upper().startswith(keeps):
+            # The driver's own Python type is declared evidence: a ``str``
+            # is a text column (QA T16 digits-in-text), a ``float`` an
+            # approximate column, an aware ``datetime`` an instant. Sample
+            # fit must not retype it (QA MX2-07: pymssql NUMBER/BINARY name
+            # no carrier, so this is the only declared evidence there is).
+            schema[h] = carrier
     return schema, intel
 
 
@@ -626,7 +752,13 @@ def read_callable_batch(
         params=procedure_params_of(cfg),
     )
     if peek:
-        headers, rows, schema = _execute_live(cfg, spec, limit=min(int(limit or PEEK_ROW_LIMIT), PEEK_ROW_LIMIT))
+        declared = _peek_without_executing(cfg, spec)
+        if declared is not None:
+            headers, rows, schema = list(declared), [], declared
+        else:
+            headers, rows, schema = _execute_live(
+                cfg, spec, limit=min(int(limit or PEEK_ROW_LIMIT), PEEK_ROW_LIMIT)
+            )
         if columns:
             headers, rows = _project(headers, rows, columns)
         return ReadBatch(
@@ -1135,6 +1267,69 @@ def _project(
     return keep, projected
 
 
+def _operator_extract_error(exc: BaseException) -> str:
+    """The driver's own sentence for a refused extract, without the trace.
+
+    SQLAlchemy wraps the DBAPI error as ``(psycopg2.errors.X) <sentence>
+    LINE 1: … [SQL: …] (Background on this error at: …)``. The operator needs
+    the sentence; the class, SQL echo, caret and link stay in the server log.
+    """
+    orig = getattr(exc, "orig", None)
+    text = str(orig if orig is not None else exc).strip()
+    if orig is None:
+        text = re.sub(r"^\([\w.]+\)\s*", "", text)
+    text = re.split(r"\n\s*(?:LINE \d+:|\[SQL:|\(Background on this error)", text)[0]
+    sentence = " ".join(text.split()) or type(exc).__name__
+    return f"The source refused the extract: {sentence}"
+
+
+def _peek_without_executing(cfg: Mapping[str, Any], spec: CallableSpec) -> dict[str, str] | None:
+    """Decide how staging may learn a procedure's shape before confirm.
+
+    Returns the declared schema (nothing executes), ``None`` when executing
+    under a guaranteed rollback is safe, or refuses (fail closed).
+    """
+    if spec.mode != MODE_PROCEDURE:
+        return None
+    declared = procedure_result_schema_of(cfg)
+    dialect = (spec.dialect or str(cfg.get("type") or "")).strip().lower()
+    if declared:
+        logger.info(
+            "procedure %s not executed before confirm: using declared result schema (%d column(s))",
+            spec.identifier, len(declared),
+        )
+        return declared
+    if dialect in PEEK_ROLLBACK_DIALECTS:
+        return None
+    logger.warning(
+        "procedure %s not executed before confirm: %s cannot guarantee a rollback of its side effects",
+        spec.identifier, dialect or "this engine",
+    )
+    raise ProcedureSourceError(
+        f"`{spec.identifier}` was not run during staging: on {dialect or 'this engine'} a "
+        "procedure can COMMIT or write non-transactional tables, so a preview could change "
+        "source data before you confirm. Declare its result columns as "
+        'procedure_result_schema (e.g. {"id": "INTEGER", "name": "VARCHAR(100)"}) and '
+        "stage again; the procedure then runs only after you confirm."
+    )
+
+
+def _rollback_peek(conn: Any, spec: CallableSpec) -> None:
+    """A peek never commits. Roll back explicitly; failing to is fatal."""
+    try:
+        conn.rollback()
+    except Exception as exc:
+        logger.error(
+            "staging peek of %s could not be rolled back", spec.identifier, exc_info=True,
+        )
+        raise ProcedureSourceError(
+            f"Staging could not roll back its preview of `{spec.identifier}`. "
+            "Check the source for changes before confirming."
+        ) from exc
+    if spec.mode == MODE_PROCEDURE:
+        logger.info("staging peek of procedure %s rolled back before confirm", spec.identifier)
+
+
 def _open_callable_result(cfg: Mapping[str, Any], spec: CallableSpec, *, peek: bool):
     from connectors.generic_sql import SQLALCHEMY_AVAILABLE, _engine
     from services.engine_pool import release_engine
@@ -1185,6 +1380,7 @@ def _execute_live(
         description = _copy_cursor_description(result)
         cap = int(limit) if limit is not None else None
         fetched = result.fetchmany(cap) if cap is not None else result.fetchall()
+        carriers = python_carriers_of_rows(headers, fetched)
         rows = [[_cell(v) for v in row] for row in fetched]
         # The type lookup is a second statement. Close the extract first, or
         # PostgreSQL rejects it while that cursor is still open.
@@ -1198,15 +1394,28 @@ def _execute_live(
     except ProcedureSourceError:
         raise
     except Exception as exc:
-        raise ProcedureSourceError(f"Procedure extract failed: {exc}") from exc
+        logger.warning(
+            "callable extract failed dialect=%s source=%s peek=%s: %s",
+            spec.dialect or cfg.get("type") or "",
+            spec.identifier,
+            limit is not None,
+            exc,
+            exc_info=True,
+        )
+        raise ProcedureSourceError(_operator_extract_error(exc)) from exc
     finally:
         if conn is not None:
+            if limit is not None:
+                _rollback_peek(conn, spec)
             conn.close()
         if engine is not None:
             release_engine(engine)
 
-    schema, _intel = peek_callable_schema(headers, rows)
-    schema = _overlay_declared_numerics(headers, description, schema)
+    schema, _intel = peek_callable_schema(headers, rows, carriers)
+    schema = _overlay_declared_numerics(
+        headers, description, schema,
+        dialect=spec.dialect or str(cfg.get("type") or ""),
+    )
     return headers, rows, schema
 
 
@@ -1221,6 +1430,7 @@ def _execute_to_jsonl(
     engine = None
     conn = None
     sample: list[list[str]] = []
+    raw_sample: list[Any] = []
     total = 0
     description = None
     try:
@@ -1235,6 +1445,7 @@ def _execute_to_jsonl(
                     cells = [_cell(v) for v in row]
                     if len(sample) < PEEK_ROW_LIMIT:
                         sample.append(cells)
+                        raw_sample.append(tuple(row))
                     fh.write(
                         json.dumps(
                             cells,
@@ -1255,15 +1466,28 @@ def _execute_to_jsonl(
     except ProcedureSourceError:
         raise
     except Exception as exc:
-        raise ProcedureSourceError(f"Procedure extract failed: {exc}") from exc
+        logger.warning(
+            "callable extract failed dialect=%s source=%s peek=%s: %s",
+            spec.dialect or cfg.get("type") or "",
+            spec.identifier,
+            False,
+            exc,
+            exc_info=True,
+        )
+        raise ProcedureSourceError(_operator_extract_error(exc)) from exc
     finally:
         if conn is not None:
             conn.close()
         if engine is not None:
             release_engine(engine)
 
-    schema, _intel = peek_callable_schema(headers, sample)
-    schema = _overlay_declared_numerics(headers, description, schema)
+    schema, _intel = peek_callable_schema(
+        headers, sample, python_carriers_of_rows(headers, raw_sample)
+    )
+    schema = _overlay_declared_numerics(
+        headers, description, schema,
+        dialect=spec.dialect or str(cfg.get("type") or ""),
+    )
     return headers, total, schema
 
 
@@ -1296,6 +1520,7 @@ def _overlay_declared_numerics(
     headers: list[str],
     description: Any,
     schema: dict[str, str],
+    dialect: str = "",
 ) -> dict[str, str]:
     """Driver type and precision win over the sample envelope.
 
@@ -1304,7 +1529,7 @@ def _overlay_declared_numerics(
     """
     from services.decimal_observe import cursor_declared_carriers
 
-    declared = cursor_declared_carriers(headers, description)
+    declared = cursor_declared_carriers(headers, description, dialect=dialect)
     if not declared:
         return schema
     return {**schema, **declared}

@@ -14,9 +14,10 @@ import hashlib
 import json
 import logging
 import os
+import threading
 from services.brand_env import getenv_brand
 from functools import lru_cache
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from services.value_serializer import sanitize_json_value
 
@@ -70,6 +71,8 @@ class _SentenceTransformerEmbedder:
 class _OpenAIEmbedder:
     """Managed OpenAI embedding backend (text-embedding-3-small by default)."""
 
+    backend = "openai"
+
     def __init__(self, model_name: str = "text-embedding-3-small", api_key: str = ""):
         self.model_name = model_name
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
@@ -85,22 +88,13 @@ class _OpenAIEmbedder:
         }.get(self.model_name, 1536)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        if not self.api_key:
-            raise RuntimeError("OpenAI API key is not configured")
-        try:
-            import openai
-        except ImportError as exc:
-            raise RuntimeError("OpenAI package not installed") from exc
+        from services.embedding_providers import EmbeddingRunner, usage_for_provider
+        from services.embedding_providers.config import resolve_provider
 
-        client = openai.OpenAI(api_key=self.api_key)
-        # OpenAI batch limit is 2048; cap locally to avoid large payloads.
-        all_embeddings: list[list[float]] = []
-        batch_size = 128
-        for i in range(0, len(texts), batch_size):
-            batch = texts[i : i + batch_size]
-            response = client.embeddings.create(input=batch, model=self.model_name)
-            all_embeddings.extend([list(e.embedding) for e in response.data])
-        return all_embeddings
+        extra = {"embedding_api_key": self.api_key} if self.api_key else {}
+        provider = resolve_provider(f"openai/{self.model_name}", extra)
+        usage = usage_for_provider(provider)
+        return EmbeddingRunner(provider, usage=usage).embed(texts)
 
 
 class _HashEmbedder:
@@ -192,9 +186,42 @@ def _get_embedder(name: str | None = None) -> Embedder:
         return _HashEmbedder(dimension=dim)
     if model_name.startswith("sentence-transformers/"):
         return _sentence_transformer_or_fallback(model_name)
+    if model_name.startswith(
+        ("azure/", "openai-compatible/", "cohere/", "bedrock/")
+    ):
+        provider = {
+            "azure/": "azure_openai",
+            "openai-compatible/": "openai_compatible",
+            "cohere/": "cohere",
+            "bedrock/": "bedrock",
+        }
+        prefix = next(key for key in provider if model_name.startswith(key))
+        return _ConfiguredProviderEmbedder(model_name, provider[prefix])
     if model_name in {"text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"}:
         return _OpenAIEmbedder(model_name=model_name)
     return _sentence_transformer_or_fallback(model_name)
+
+
+class _ConfiguredProviderEmbedder:
+    def __init__(self, model: str, backend: str) -> None:
+        self.model = model
+        self.backend = backend
+        self._dimension = 0
+
+    @property
+    def dimension(self) -> int:
+        return self._dimension
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        from services.embedding_providers import EmbeddingRunner, usage_for_provider
+        from services.embedding_providers.config import resolve_provider
+
+        provider = resolve_provider(self.model, {})
+        usage = usage_for_provider(provider)
+        vectors = EmbeddingRunner(provider, usage=usage).embed(texts)
+        if vectors:
+            self._dimension = len(vectors[0])
+        return vectors
 
 
 def chunk_text(
@@ -209,62 +236,26 @@ def chunk_text(
     then on whitespace. This respects document structure better than purely
     character-based splitting.
     """
-    if not text or not text.strip():
-        return []
+    from services.chunkers import ChunkerConfig, chunk
 
-    def _paragraphs(t: str) -> list[str]:
-        return [p.strip() for p in t.split("\n\n") if p.strip()]
-
-    def _sentences(t: str) -> list[str]:
-        import re
-
-        parts = re.split(r"(?<=[.!?])\s+", t)
-        return [p.strip() for p in parts if p.strip()]
-
-    def _split(t: str) -> list[str]:
-        if split_on:
-            return [p.strip() for p in split_on(t) if p.strip()]
-        paragraphs = _paragraphs(t)
-        if all(len(p) <= chunk_size for p in paragraphs):
-            return paragraphs
-        out: list[str] = []
-        for p in paragraphs:
-            if len(p) <= chunk_size:
-                out.append(p)
-                continue
-            for s in _sentences(p):
-                if len(s) <= chunk_size:
-                    out.append(s)
-                else:
-                    out.extend(_fixed_chunks(s, chunk_size, chunk_overlap))
-        return out
-
-    def _fixed_chunks(t: str, size: int, overlap: int) -> list[str]:
-        step = max(1, size - overlap)
-        chunks = []
-        start = 0
-        while start < len(t):
-            chunks.append(t[start : start + size].strip())
-            start += step
-        return [c for c in chunks if c]
-
-    chunks = _split(text)
-    merged: list[str] = []
-    current = ""
-    for c in chunks:
-        if len(current) + len(c) + 1 <= chunk_size:
-            current = f"{current}\n\n{c}".strip() if current else c
-        else:
-            if current:
-                merged.append(current)
-            current = c
-    if current:
-        merged.append(current)
-    return merged
+    return [
+        part.text
+        for part in chunk(
+            text,
+            ChunkerConfig(
+                strategy="recursive",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            ),
+            split_on=split_on,
+        )
+    ]
 
 
 # In-process L1 cache for repeated identical content within a process.
 _EMBEDDING_CACHE: dict[str, list[float]] = {}
+_EMBEDDING_DIMENSIONS: dict[tuple[str, str], int] = {}
+_EMBEDDING_DIMENSIONS_LOCK = threading.Lock()
 
 # Set when this task embedded with a fallback instead of the configured model.
 # ``_writer_diagnostics`` copies it onto the job warning list and clears it,
@@ -344,6 +335,8 @@ def embed(
     use_cache: bool = True,
     *,
     durable: bool | None = None,
+    usage: Any = None,
+    embedding_extra: dict[str, Any] | None = None,
 ) -> list[list[float]]:
     """Return embeddings for a list of texts, using the configured model.
 
@@ -361,18 +354,37 @@ def embed(
     )
 
     use_durable = durable_cache_enabled_by_default() if durable is None else bool(durable)
-    embedder = _get_embedder(model)
+    from services.embedding_providers import EmbeddingRunner, usage_for_provider
+    from services.embedding_providers.config import resolve_provider
+    from services.embedding_providers.runtime import provider_rate_limit_kwargs
+
+    resolved_model = model or getenv_brand(
+        "EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
+    )
+    provider = resolve_provider(resolved_model, embedding_extra or {})
+    rate_limit_options = provider_rate_limit_kwargs(embedding_extra or {})
+    if usage is None:
+        usage = usage_for_provider(provider)
+    embedder = _get_embedder(resolved_model)
     _note_cached_fallback(embedder, model)
     if not use_cache:
-        return embedder.embed(texts)
+        usage.cache_misses += len(texts)
+        vectors = EmbeddingRunner(
+            provider, usage=usage, **rate_limit_options
+        ).embed(texts)
+        _validate_provider_dimension(provider, vectors)
+        return vectors
 
     results: list[list[float] | None] = [None] * len(texts)
     missing_l1: list[tuple[int, str, str]] = []  # idx, text, key
     for i, text in enumerate(texts):
-        embedder_backend = str(getattr(embedder, "backend", "") or "")
-        key = _cache_key(text, model, embedder_backend)
+        embedder_backend = str(
+            getattr(embedder, "backend", "") or provider.provider_name
+        )
+        key = _cache_key(text, model or resolved_model, embedder_backend)
         if key in _EMBEDDING_CACHE:
             results[i] = list(_EMBEDDING_CACHE[key])
+            usage.cache_hits += 1
         else:
             missing_l1.append((i, text, key))
 
@@ -384,12 +396,19 @@ def embed(
                 vector = list(durable_hits[key])
                 _EMBEDDING_CACHE[key] = vector
                 results[i] = vector
+                usage.cache_hits += 1
             else:
                 still_missing.append((i, text, key))
         missing_l1 = still_missing
 
     if missing_l1:
-        embedded = embedder.embed([text for _, text, _ in missing_l1])
+        usage.cache_misses += len(missing_l1)
+        embedded = EmbeddingRunner(
+            provider, usage=usage, **rate_limit_options
+        ).embed(
+            [text for _, text, _ in missing_l1]
+        )
+        _validate_provider_dimension(provider, embedded)
         to_persist: list[tuple[str, str, list[float]]] = []
         for (i, text, key), vector in zip(missing_l1, embedded):
             _EMBEDDING_CACHE[key] = vector
@@ -405,6 +424,19 @@ def embed(
             raise RuntimeError("embedding cache produced incomplete results")
         out.append(v)
     return out
+
+
+def _validate_provider_dimension(provider: Any, vectors: list[list[float]]) -> None:
+    if not vectors:
+        return
+    key = (str(provider.provider_name), str(provider.model))
+    dimension = len(vectors[0])
+    with _EMBEDDING_DIMENSIONS_LOCK:
+        prior = _EMBEDDING_DIMENSIONS.setdefault(key, dimension)
+    if prior != dimension:
+        from services.embedding_providers.base import EmbeddingResponseError
+
+        raise EmbeddingResponseError("Embedding response dimension drift detected")
 
 
 CONTENT_STORE_LIMIT = 4000
@@ -461,6 +493,41 @@ def _bounded_vector_content(
     return text[:CONTENT_STORE_LIMIT], meta
 
 
+def vector_identity_columns(
+    pk_cols: list[str] | None,
+    mappings: list[dict] | None,
+    records: list[dict[str, Any]] | None,
+) -> list[str] | None:
+    """One record-field name per destination PK component, or ``None``.
+
+    Document identity must come from the contract PK, not just a column
+    literally named ``id``: an ``employees(employee_id)`` source has no ``id``
+    key, so every row fell back to a content-hash document id and two records
+    with identical embedded text collided inside one upsert batch
+    (``ON CONFLICT ... cannot affect row a second time``, QA MX2-17).
+
+    Records stay source-header keyed with target overlays, so a PK component
+    renamed on Map checks the mapped source spelling.
+    """
+    if not pk_cols:
+        return None
+    record_keys = set(records[0]) if records else set()
+    source_by_target = {
+        str(m.get("target") or "").strip(): str(m.get("source") or "").strip()
+        for m in (mappings or [])
+        if str(m.get("target") or "").strip()
+    }
+    out: list[str] = []
+    for pk in pk_cols:
+        pk_name = str(pk)
+        src_name = source_by_target.get(pk_name)
+        if pk_name in record_keys or not src_name:
+            out.append(pk_name)
+        else:
+            out.append(src_name)
+    return out or None
+
+
 def vectorize_records(
     records: list[dict[str, Any]],
     *,
@@ -472,7 +539,17 @@ def vectorize_records(
     chunk_size: int = 512,
     chunk_overlap: int = 50,
     skip_chunking: bool = False,
+    chunk_strategy: str = "recursive",
+    chunk_unit: str = "chars",
+    chunk_tokenizer: Any = None,
+    text_template: str | None = None,
     durable_embedding_cache: bool | None = None,
+    identity_columns: list[str] | None = None,
+    usage: Any = None,
+    embedding_extra: dict[str, Any] | None = None,
+    existing_vector_docs: Mapping[str, Mapping[str, Any]] | None = None,
+    doc_fingerprint_digest: str | None = None,
+    skip_unchanged: bool = True,
 ) -> list[dict[str, Any]]:
     """Expand records into vector rows: id, content, embedding, metadata, source_id, chunk_index.
 
@@ -488,8 +565,38 @@ def vectorize_records(
     (fail-closed — never embed or store excluded PII in the vector store).
     """
     from services.document_chunking import PRECHUNKED_FLAG
+    from services.chunkers import ChunkerConfig, chunk as chunk_records
+    from services.vector_sync import (
+        vector_document_hash,
+        vector_document_is_unchanged,
+        vector_metadata_hash,
+        vector_record_key,
+    )
+    from services.vector_template import (
+        TemplateConfigError,
+        TemplateFieldMissingError,
+        TemplateFieldRenderError,
+        _parse_template,
+        render_record_template,
+    )
 
     exclude = {str(c) for c in (exclude_pii_columns or []) if c}
+    if text_template is not None:
+        excluded_folded = {field.casefold() for field in exclude}
+        for _, field, _ in _parse_template(text_template):
+            if field in exclude or (
+                field is not None and field.casefold() in excluded_folded
+            ):
+                raise TemplateConfigError(
+                    f"Template field {field!r} is excluded by the PII policy"
+                )
+    chunker_config = ChunkerConfig(
+        strategy=chunk_strategy,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        unit=chunk_unit,
+        tokenizer=chunk_tokenizer if isinstance(chunk_tokenizer, str) else None,
+    )
     if content_column and content_column in exclude:
         raise ValueError(
             f"content_column '{content_column}' is excluded as PII — "
@@ -497,12 +604,29 @@ def vectorize_records(
         )
 
     rows: list[dict[str, Any]] = []
+    prechunked_counts: dict[str, int] = {}
     for record in records:
+        if skip_chunking or str(record.get(PRECHUNKED_FLAG) or "") in {
+            "1",
+            "true",
+            "True",
+        }:
+            key = vector_record_key(record, identity_columns)
+            if key:
+                prechunked_counts[key] = prechunked_counts.get(key, 0) + 1
+    for record in records:
+        row_start = len(rows)
         rec = {k: v for k, v in record.items() if v is not None}
         prechunked = skip_chunking or str(rec.get(PRECHUNKED_FLAG) or "") in {"1", "true", "True"}
 
         content = ""
-        if content_column and content_column in rec:
+        template_error = ""
+        if text_template is not None:
+            try:
+                content = render_record_template(text_template, rec)
+            except (TemplateFieldMissingError, TemplateFieldRenderError) as exc:
+                template_error = str(exc)
+        elif content_column and content_column in rec:
             content = str(rec[content_column])
         else:
             # Prefer columns flagged as text/embedding content by heuristic.
@@ -550,7 +674,25 @@ def vectorize_records(
             else:
                 embedding = bound
 
-        source_id = str(rec.get("id", rec.get("_id", rec.get("source_id", ""))))
+        # Contract identity is the document id's first choice: an employees
+        # table whose PK is ``employee_id`` has no ``id`` key, so every row
+        # used to hash to the *content* — two records with identical embedded
+        # text produced the same vector id and the ON CONFLICT batch failed
+        # "cannot affect row a second time" (QA MX2-17). Composite keys join
+        # with a unit separator so ("ab","c") never equals ("a","bc").
+        identity_values = [
+            rec[identity_col]
+            for identity_col in (identity_columns or [])
+            if rec.get(identity_col) is not None
+            and str(rec[identity_col]).strip()
+        ]
+        from services.vector_sync import vector_doc_key
+
+        source_id = vector_doc_key(identity_values)
+        if not source_id:
+            source_id = str(
+                rec.get("id", rec.get("_id", rec.get("source_id", "")))
+            )
         metadata = rec.copy()
         if content_column and content_column in metadata:
             del metadata[content_column]
@@ -574,7 +716,62 @@ def vectorize_records(
             chunk_index_error = str(exc)
             existing_chunk_index = 0
 
-        if chunk_index_error:
+        prepared_chunks = None
+        if content and not prechunked and not embedding and not template_error:
+            prepared_chunks = chunk_records(
+                content,
+                chunker_config,
+                tokenizer=chunk_tokenizer
+                if not isinstance(chunk_tokenizer, str)
+                else None,
+            )
+            if not prepared_chunks:
+                from services.chunkers import Chunk
+
+                prepared_chunks = [Chunk(content, 0)]
+        doc_chunk_count = (
+            prechunked_counts.get(source_id, 1)
+            if prechunked
+            else len(prepared_chunks)
+            if prepared_chunks is not None
+            else 1
+        )
+        metadata_hash = vector_metadata_hash(metadata)
+        if (
+            not template_error
+            and not chunk_index_error
+            and not embed_column_parse_failed
+            and doc_fingerprint_digest
+            and vector_document_is_unchanged(
+                (existing_vector_docs or {}).get(source_id),
+                doc_hash=vector_document_hash(content, doc_fingerprint_digest),
+                chunk_count=doc_chunk_count,
+                metadata_hash=metadata_hash,
+                enabled=skip_unchanged,
+            )
+        ):
+            rows.append(
+                {
+                    "source_id": source_id,
+                    "_df_unchanged_skipped": True,
+                }
+            )
+            continue
+
+        if template_error:
+            bounded, meta = _bounded_vector_content("", metadata)
+            rows.append({
+                "id": _stable_vector_row_id(
+                    source_id, existing_chunk_index, "template-reject", multi_chunk=False
+                ),
+                "content": bounded,
+                "embedding": None,
+                "metadata": meta,
+                "source_id": source_id,
+                "chunk_index": existing_chunk_index,
+                "_df_embed_error": template_error,
+            })
+        elif chunk_index_error:
             bounded, meta = _bounded_vector_content(content, metadata)
             rows.append({
                 "id": _stable_vector_row_id(
@@ -615,7 +812,10 @@ def vectorize_records(
                 "chunk_index": existing_chunk_index,
             })
         elif content and prechunked:
-            vectors = embed([content], model=model, durable=durable_embedding_cache)
+            vectors = embed(
+                [content], model=model, durable=durable_embedding_cache,
+                usage=usage, embedding_extra=embedding_extra,
+            )
             vector = vectors[0] if vectors else None
             bounded, meta = _bounded_vector_content(content, metadata)
             _annotate_embed_backend(meta, model)
@@ -630,23 +830,27 @@ def vectorize_records(
                 "chunk_index": existing_chunk_index,
             })
         elif content:
-            chunks = chunk_text(content, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-            if not chunks:
-                chunks = [content]
+            chunks = prepared_chunks or []
             multi = len(chunks) > 1
-            embeddings = embed(chunks, model=model, durable=durable_embedding_cache)
-            for idx, (chunk, vector) in enumerate(zip(chunks, embeddings)):
-                bounded, meta = _bounded_vector_content(chunk, metadata)
+            embeddings = embed(
+                [part.text for part in chunks], model=model,
+                durable=durable_embedding_cache,
+                usage=usage, embedding_extra=embedding_extra,
+            )
+            for part, vector in zip(chunks, embeddings):
+                bounded, meta = _bounded_vector_content(part.text, metadata)
+                if part.section is not None:
+                    meta["_df_section"] = part.section
                 _annotate_embed_backend(meta, model)
                 rows.append({
                     "id": _stable_vector_row_id(
-                        source_id, idx, bounded, multi_chunk=multi
+                        source_id, part.index, bounded, multi_chunk=multi
                     ),
                     "content": bounded,
                     "embedding": vector,
                     "metadata": meta,
                     "source_id": source_id,
-                    "chunk_index": idx,
+                    "chunk_index": part.index,
                 })
         else:
             # No content and no embedding: still index metadata as a sparse row.
@@ -669,4 +873,20 @@ def vectorize_records(
                 "source_id": source_id,
                 "chunk_index": 0,
             })
+        for row in rows[row_start:]:
+            if not row.get("_df_embed_error"):
+                row["_df_document_text"] = content
+                row["_df_chunk_count"] = doc_chunk_count
+                row["_df_metadata_hash"] = metadata_hash
+    # Two records can still collapse to the same vector id — identical embedded
+    # content under the no-PK hash path, or two chunks of one record that are
+    # byte-identical. A single INSERT ... ON CONFLICT DO UPDATE refuses to touch
+    # the same row twice ("cannot affect row a second time", QA MX2-17). Last
+    # wins, matching the DO UPDATE semantics the statement encodes anyway.
+    seen_ids: dict[str, int] = {}
+    for idx, row in enumerate(rows):
+        seen_ids[str(row.get("id") or "")] = idx
+    if len(seen_ids) < len(rows):
+        keep = set(seen_ids.values())
+        rows = [row for idx, row in enumerate(rows) if idx in keep]
     return rows

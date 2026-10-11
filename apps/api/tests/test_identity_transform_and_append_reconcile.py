@@ -53,6 +53,46 @@ def test_trim_kept_when_types_differ() -> None:
     )
 
 
+def test_same_name_pair_on_existing_dest_is_not_trimmed() -> None:
+    """QA T10 — run 2 into the table run 1 created is still an identity copy.
+
+    The match-existing strategy (``optimal_bipartite_hungarian``) is not a
+    create-new strategy, so the guard used to let ``trim_id`` through and
+    every re-run flipped Emp_ID/Manager_ID to fidelity ``mutate`` at 0.70 —
+    and the writer would have silently trimmed PK values.
+    """
+    assert (
+        _passthrough_identity_transform(
+            "trim_id",
+            strategy="optimal_bipartite_hungarian",
+            create_new=False,
+            user_override=False,
+            src_type="VARCHAR(20)",
+            tgt_type="VARCHAR(20)",
+            source="Emp_ID",
+            target="Emp_ID",
+        )
+        == "none"
+    )
+
+
+def test_renamed_pair_keeps_name_triggered_transform() -> None:
+    """A genuinely different source→target name is not identity — unchanged."""
+    assert (
+        _passthrough_identity_transform(
+            "trim_id",
+            strategy="optimal_bipartite_hungarian",
+            create_new=False,
+            user_override=False,
+            src_type="VARCHAR(20)",
+            tgt_type="VARCHAR(20)",
+            source="manager_ref",
+            target="Manager_ID",
+        )
+        == "trim_id"
+    )
+
+
 def test_typed_transform_is_never_dropped() -> None:
     assert (
         _passthrough_identity_transform(

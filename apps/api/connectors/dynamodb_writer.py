@@ -161,6 +161,7 @@ def _dynamo_rematerialize_if_physical_differs(
     conflict_columns: list[str] | None = None,
     destination_column_nullability: Any = None,
     force_remap: bool = False,
+    accepted_source_rows: list[int] | None = None,
 ) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
     """Rebuild mapped rows when live Dynamo carriers differ from Map stamps.
 
@@ -192,6 +193,7 @@ def _dynamo_rematerialize_if_physical_differs(
         dest_kind="dynamodb",
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
+        accepted_source_rows=accepted_source_rows,
     )
     return (
         mapped_rows,
@@ -199,6 +201,62 @@ def _dynamo_rematerialize_if_physical_differs(
         rejected_details,
         live_dest_types,
     )
+
+
+def _preserve_numeric_s_key_objects(
+    mapped_rows: list[tuple],
+    *,
+    source_row_numbers: list[int],
+    data_rows: list,
+    headers: list[str],
+    mappings: list[dict],
+    target_cols: list[str],
+    key_schema: Any,
+) -> list[list[Any]]:
+    """Keep direct numeric source objects intact until Dynamo S-key encoding."""
+    from services.mapping_constraints import write_mappings
+
+    active_mappings = write_mappings(mappings)
+    source_indexes = {str(name).casefold(): i for i, name in enumerate(headers)}
+    target_indexes = {str(name).casefold(): i for i, name in enumerate(target_cols)}
+    out = [list(row) for row in mapped_rows]
+    for key in key_schema.keys:
+        if key.attr_type != "S":
+            continue
+        target_index = target_indexes.get(key.name.casefold())
+        if target_index is None:
+            continue
+        key_mappings = [
+            mapping
+            for mapping in active_mappings
+            if str(mapping.get("target") or "").strip().casefold()
+            == key.name.casefold()
+            and str(mapping.get("transform") or "").strip().lower()
+            in {"", "none", "identity"}
+        ]
+        if len(key_mappings) != 1:
+            continue
+        source = str(
+            key_mappings[0].get("source")
+            or key_mappings[0].get("source_column")
+            or ""
+        ).strip()
+        source_index = source_indexes.get(source.casefold())
+        if source_index is None:
+            continue
+        for mapped_index, source_row in enumerate(source_row_numbers):
+            row_index = source_row - 1
+            if (
+                mapped_index >= len(out)
+                or row_index < 0
+                or row_index >= len(data_rows)
+                or source_index >= len(data_rows[row_index])
+            ):
+                continue
+            value = data_rows[row_index][source_index]
+            if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+                out[mapped_index][target_index] = value
+    return out
 
 
 @dataclass
@@ -367,20 +425,67 @@ def _coerce_dynamo_cell(
     logical_type: str,
     key_types: dict[str, str],
 ) -> Any:
-    """Apply Dynamo key-type / binary wire coercion before AttributeValue encode."""
+    """Coerce Dynamo keys, collapsing numeric objects to numeric S-key identity.
+
+    Numeric objects serialize to canonical numeric text so values equal under
+    DynamoDB's N comparison share an S key; source strings retain their existing
+    text identity, including formatting such as ``"1.00"``.
+    """
     attr_type = key_types.get(col)
+    if attr_type in {"S", "N", "B"}:
+        from services.value_serializer import (
+            is_missing_sentinel,
+            is_reader_null_cell,
+        )
+
+        def refuse(reason: str) -> ValueError:
+            return ValueError(
+                f"DynamoDB key type {attr_type} refused {value!r} for {col!r} — {reason}"
+            )
+
+        from decimal import Decimal
+        import math
+
+        if isinstance(value, Decimal) and not value.is_finite():
+            raise refuse("refuse non-finite key identity")
+        if isinstance(value, float) and not math.isfinite(value):
+            raise refuse("refuse non-finite key identity")
+        if isinstance(value, (dict, list, tuple, set, frozenset)):
+            raise refuse("refuse container key identity")
+        if value is None or is_missing_sentinel(value) or is_reader_null_cell(value):
+            reason = (
+                "refuse silent empty-string invent (HASH/RANGE identity)"
+                if attr_type == "S"
+                else "refuse null or missing key identity"
+            )
+            raise refuse(reason)
+        if isinstance(value, str) and "_df_ddb_set" in value:
+            try:
+                envelope = json.loads(value, parse_float=Decimal)
+            except Exception:
+                envelope = None
+            if isinstance(envelope, dict) and envelope.get("_df_ddb_set"):
+                raise refuse("refuse set envelope as scalar key identity")
+
     if attr_type == "S":
-        from services.value_serializer import is_reader_null_cell, present_cell_text
+        from services.value_serializer import (
+            canonical_numeric_key_text,
+            is_reader_null_cell,
+            present_cell_text,
+        )
 
         if is_reader_null_cell(value) or (
             isinstance(value, str) and value.strip() == ""
-        ):
+        ) or isinstance(value, (bytes, bytearray, memoryview)):
             raise ValueError(
                 f"DynamoDB key type S refused {value!r} for {col!r} — "
                 "refuse silent empty-string invent (HASH/RANGE identity)"
             )
-        token = present_cell_text(value)
-        if token is None:
+        if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+            token = canonical_numeric_key_text(value)
+        else:
+            token = present_cell_text(value)
+        if token is None or not str(token).strip():
             raise ValueError(
                 f"DynamoDB key type S refused {value!r} for {col!r} — "
                 "refuse silent empty-string invent (HASH/RANGE identity)"
@@ -389,7 +494,9 @@ def _coerce_dynamo_cell(
     if attr_type == "N":
         from services.value_serializer import is_reader_null_cell
 
-        if is_reader_null_cell(value) or (isinstance(value, str) and value.strip() == ""):
+        if isinstance(value, bool) or is_reader_null_cell(value) or (
+            isinstance(value, str) and value.strip() == ""
+        ):
             raise ValueError(
                 f"DynamoDB key type N refused {value!r} for {col!r} — "
                 "refuse silent null invent (HASH/RANGE identity)"
@@ -403,7 +510,7 @@ def _coerce_dynamo_cell(
                 f"DynamoDB key type N refused {value!r} "
                 "(refuse silent pass-through invent)"
             ) from exc
-        if parsed is None:
+        if not isinstance(parsed, Decimal) or not parsed.is_finite():
             raise ValueError(
                 f"DynamoDB key type N refused {value!r} "
                 "(refuse silent pass-through invent)"
@@ -412,11 +519,34 @@ def _coerce_dynamo_cell(
     if attr_type == "B":
         from connectors.sql_bind import coerce_binary_wire
 
-        if isinstance(value, str):
-            return coerce_binary_wire(value)
-        if value is not None and not isinstance(value, (bytes, bytearray)):
-            return coerce_binary_wire(value)
-        return value
+        if isinstance(value, bool) or (
+            isinstance(value, str) and not value.strip()
+        ):
+            raise ValueError(
+                f"DynamoDB key type B refused {value!r} for {col!r} — "
+                "refuse empty or boolean key identity"
+            )
+        if not isinstance(value, (str, bytes, bytearray, memoryview)):
+            raise ValueError(
+                f"DynamoDB key type B refused {value!r} for {col!r} — "
+                "refuse non-binary key identity"
+            )
+        try:
+            binary = (
+                coerce_binary_wire(value)
+                if not isinstance(value, (bytes, bytearray, memoryview))
+                else bytes(value)
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"DynamoDB key type B refused {value!r} "
+                "(refuse invalid binary key encoding)"
+            ) from exc
+        if not binary:
+            raise ValueError(
+                f"DynamoDB key type B refused {value!r} — refuse empty key identity"
+            )
+        return binary
     return value
 
 
@@ -503,17 +633,7 @@ def write_mapped_rows(
         "endpoint_url": endpoint_url,
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    from connectors.writer_common import resolve_studio_or_map_dest_types
-
     live_dest = _kwargs.get("destination_column_types")
-    dest_types, studio_err = resolve_studio_or_map_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        studio_types=live_dest if isinstance(live_dest, dict) else None,
-        product="DynamoDB",
-    )
 
     # Connect + describe before Map bind — AttributeDefinitions / sample must
     # win over Studio VARCHAR stamps (empty→NULL invent on live N/BOOL attrs).
@@ -529,8 +649,50 @@ def write_mapped_rows(
             conflict_columns=conflict_columns or _kwargs.get("conflict_columns"),
         )
 
-    key_types = _table_key_types(client, table)
-    if not key_types:
+    from connectors.dynamodb_schema import (
+        DynamoTableSchema,
+        key_contract_violations,
+        log_key_refusal,
+        parse_table_description,
+    )
+
+    try:
+        key_types = _table_key_types(client, table)
+    except Exception as exc:
+        logger.warning(
+            "DynamoDB describe_table/key-schema parse failed table=%s error_class=%s",
+            table,
+            type(exc).__name__,
+        )
+        key_types = {}
+
+    table_schema = getattr(key_types, "table_schema", None)
+    if not isinstance(table_schema, DynamoTableSchema):
+        try:
+            description = client.describe_table(TableName=table)["Table"]
+            table_schema = parse_table_description(description)
+        except Exception as exc:
+            logger.warning(
+                "DynamoDB describe_table/key-schema parse failed table=%s error_class=%s",
+                table,
+                type(exc).__name__,
+            )
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=host or "",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"DynamoDB table {table!r} key schema could not be read "
+                    f"({type(exc).__name__}) — refuse PutItem without a canonical "
+                    "HASH/RANGE contract; check table name, region and "
+                    "describe_table permission."
+                ),
+                rejected_details=[],
+            )
+    if not isinstance(table_schema, DynamoTableSchema):
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -539,11 +701,43 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=(
-                f"DynamoDB table {table!r} key schema unavailable — refuse PutItem "
-                "without HASH/RANGE identity (describe_table failed or empty KeySchema). "
-                "Re-check table name/permissions; never soft-skip key preflight."
+                f"DynamoDB table {table!r} key schema could not be read "
+                "(invalid) — refuse PutItem without a canonical HASH/RANGE "
+                "contract; check table name, region and describe_table permission."
             ),
             rejected_details=[],
+        )
+    key_types = table_schema.key_types
+
+    requested_identity = (
+        conflict_columns
+        if conflict_columns is not None
+        else _kwargs.get("conflict_columns")
+    )
+    key_violations = key_contract_violations(
+        table_schema,
+        mappings=mappings,
+        column_types=column_types,
+        conflict_columns=requested_identity,
+    )
+    if key_violations:
+        for violation in key_violations:
+            log_key_refusal(
+                phase="execute",
+                table=table,
+                column=violation.column,
+                key_role=violation.key_role,
+                expected_scalar=violation.expected_scalar,
+                reason=violation.reason,
+            )
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error="; ".join(str(violation) for violation in key_violations),
         )
 
     # Always probe live carriers after KeySchema is confirmed (do not gate on a
@@ -568,6 +762,43 @@ def write_mapped_rows(
     # minutes ago — which forced live-DDL proof on an empty table and rejected a
     # legitimate Map-only first load.
     holds_data = items_seen > 0 or (item_count > 0 and not emptiness_proven)
+
+    from connectors.writer_common import resolve_studio_or_map_dest_types
+
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="DynamoDB",
+    )
+    if studio_err and emptiness_proven and isinstance(live_dest, dict):
+        from connectors.dynamodb_schema import nonkey_attribute_gaps
+
+        gaps = nonkey_attribute_gaps(table_schema, target_cols, live_dest)
+        if gaps and all(table_schema.is_unconstrained(column) for column in gaps):
+            map_types, map_error = resolve_studio_or_map_dest_types(
+                target_cols,
+                mappings,
+                column_types,
+                logical_types=logical_types,
+                studio_types=None,
+                product="DynamoDB",
+            )
+            if not map_error:
+                dest_types = dict(map_types or {})
+                live_by_folded_name = {
+                    str(name).casefold(): carrier
+                    for name, carrier in live_dest.items()
+                    if str(carrier or "").strip()
+                }
+                for column in target_cols:
+                    carrier = live_by_folded_name.get(str(column).casefold())
+                    if carrier:
+                        dest_types[column] = carrier
+                studio_err = None
+
     mapped_data_cols = [c for c in target_cols if c]
     studio_live = isinstance(live_dest, dict) and all(
         str(live_dest.get(c) or "").strip() for c in mapped_data_cols
@@ -647,6 +878,7 @@ def write_mapped_rows(
     errors: list[str] = []
     rejected_details: list[dict] = []
     _force_remap = bool(studio_err)
+    accepted_source_rows: list[int] = []
     remat = _dynamo_rematerialize_if_physical_differs(
         physical=physical,
         dest_types=dest_types,
@@ -660,6 +892,7 @@ def write_mapped_rows(
         conflict_columns=conflict_columns,
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
         force_remap=_force_remap,
+        accepted_source_rows=accepted_source_rows,
     )
     if remat is not None:
         mapped_rows, errors, rejected_details, dest_types = remat
@@ -693,10 +926,20 @@ def write_mapped_rows(
             destination_column_nullability=_kwargs.get(
                 "destination_column_nullability"
             ),
+            accepted_source_rows=accepted_source_rows,
         )
 
     from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
 
+    mapped_rows = _preserve_numeric_s_key_objects(
+        mapped_rows,
+        source_row_numbers=accepted_source_rows,
+        data_rows=data_rows,
+        headers=headers,
+        mappings=mappings,
+        target_cols=target_cols,
+        key_schema=table_schema,
+    )
     # Partial Studio: never soft-fill quarantine carriers from Map logicals
     # (empty→NULL invent on typed key/attr schemas) — ES/Redis parity.
     if studio_err:
@@ -767,6 +1010,17 @@ def write_mapped_rows(
         for key_col, attr_type in key_types.items():
             if key_col not in target_cols:
                 key_ok = False
+                key_role = next(
+                    key.key_type for key in table_schema.keys if key.name == key_col
+                )
+                log_key_refusal(
+                    phase="execute",
+                    table=table,
+                    column=key_col,
+                    key_role=key_role,
+                    expected_scalar=attr_type,
+                    reason="key_not_mapped",
+                )
                 detail = {
                     "row": row_idx + 1,
                     "column": key_col,
@@ -801,6 +1055,18 @@ def write_mapped_rows(
                 attr_type == "S" and isinstance(value, str) and value.strip() == ""
             ):
                 key_ok = False
+                key_role = next(
+                    key.key_type for key in table_schema.keys if key.name == key_col
+                )
+                log_key_refusal(
+                    phase="execute",
+                    table=table,
+                    column=key_col,
+                    key_role=key_role,
+                    expected_scalar=attr_type,
+                    reason="missing_or_empty_key",
+                    value=value,
+                )
                 detail = {
                     "row": row_idx + 1,
                     "column": key_col,
@@ -810,6 +1076,55 @@ def write_mapped_rows(
                         f"DynamoDB key attribute `{key_col}` missing/empty — "
                         "refuse silent empty-string identity collapse"
                     ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "chars": [],
+                }
+                rejected_details.append(detail)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=host or "",
+                        checksum="",
+                        chunks_completed=0,
+                        error=detail["reason"],
+                        rejected_rows=len({d["row"] for d in rejected_details}),
+                        rejected_details=list(rejected_details),
+                    )
+                break
+            wire_type = (
+                tgt_types[i]
+                if i < len(tgt_types) and str(tgt_types[i] or "").strip()
+                else (logical_types[i] if i < len(logical_types) else "")
+            )
+            try:
+                _coerce_dynamo_cell(
+                    value,
+                    col=key_col,
+                    logical_type=wire_type,
+                    key_types=key_types,
+                )
+            except ValueError as exc:
+                key_ok = False
+                key_role = next(
+                    key.key_type for key in table_schema.keys if key.name == key_col
+                )
+                log_key_refusal(
+                    phase="execute",
+                    table=table,
+                    column=key_col,
+                    key_role=key_role,
+                    expected_scalar=attr_type,
+                    reason="key_value_refused",
+                    value=value,
+                )
+                detail = {
+                    "row": row_idx + 1,
+                    "column": key_col,
+                    "target": key_col,
+                    "value": "" if value is None else str(value)[:120],
+                    "reason": str(exc),
                     "policy": "write_fail" if policy == "fail" else "write_quarantine",
                     "chars": [],
                 }
@@ -965,17 +1280,25 @@ def write_mapped_rows(
 def _table_key_types(client, table: str) -> dict[str, str]:
     """Return key attribute names -> DynamoDB type ('S', 'N', 'B') for an existing table."""
     from botocore.exceptions import ClientError
+
     try:
+        from connectors.dynamodb_schema import parse_table_description
+
         info = client.describe_table(TableName=table)["Table"]
-        attrs = {a["AttributeName"]: a["AttributeType"] for a in info.get("AttributeDefinitions", [])}
-        keys = {}
-        for ks in info.get("KeySchema", []):
-            name = ks["AttributeName"]
-            if name in attrs:
-                keys[name] = attrs[name]
-        return keys
-    except ClientError:
+        return _ParsedDynamoKeyTypes(parse_table_description(info))
+    except (ClientError, KeyError, TypeError, ValueError) as exc:
+        logger.warning(
+            "DynamoDB key schema read failed table=%s error_class=%s",
+            table,
+            type(exc).__name__,
+        )
         return {}
+
+
+class _ParsedDynamoKeyTypes(dict[str, str]):
+    def __init__(self, schema: Any) -> None:
+        super().__init__(schema.key_types)
+        self.table_schema = schema
 
 
 def _attr_type_for_logical(logical: str) -> str:

@@ -72,7 +72,7 @@ def transform(text: str) -> str:
 
 
 def main() -> None:
-    files = hits = 0
+    files = 0
     for target in TARGETS:
         paths = [target] if target.is_file() else list(target.rglob("*"))
         for path in paths:

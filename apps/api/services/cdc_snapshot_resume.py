@@ -109,11 +109,15 @@ def snapshot_keyset_sql(
     limit: int,
     dialect: str,
     select_list: str = "*",
+    filter_sql: str = "",
+    filter_params: Sequence[Any] | None = None,
 ) -> tuple[str, list[Any] | dict[str, Any]]:
     """``(sql, params)`` for one PK-seek snapshot page.
 
     Identifiers must already be quoted. ``last_pk`` and ``limit`` are binds
     (except SQL Server ``TOP (n)`` / Oracle ``ROWNUM``, which take ``int(limit)``).
+    An empty ``last_pk`` reads the first page. ``filter_sql`` (``%s`` binds, from
+    :func:`services.cdc_snapshot_filter.compile_snapshot_filter_sql`) is ANDed in.
     """
     cols = list(quoted_pk_columns)
     if not cols:
@@ -121,26 +125,35 @@ def snapshot_keyset_sql(
     n = max(1, int(limit))
     order_sql = ", ".join(cols)
     dialect = (dialect or "").strip().lower()
+    clauses: list[str] = []
+    params: list[Any] = []
+    if last_pk:
+        keyset, keyset_params = keyset_successor_predicate(cols, last_pk, placeholder="%s")
+        clauses.append(f"({keyset})")
+        params.extend(keyset_params)
+    if filter_sql:
+        clauses.append(f"({filter_sql})")
+        params.extend(filter_params or [])
+    where = " AND ".join(clauses)
     if dialect == "oracle":
-        where, params = keyset_successor_predicate(cols, last_pk, placeholder="%s")
         where_sql, binds = _oracle_named_binds(where, params, extra={"lim": n})
+        where_clause = f" WHERE {where_sql}" if where_sql else ""
         sql = (
             f"SELECT * FROM ("  # nosec B608
-            f"SELECT {select_list} FROM {table_ref} WHERE {where_sql} "
+            f"SELECT {select_list} FROM {table_ref}{where_clause} "
             f"ORDER BY {order_sql}"
             f") WHERE ROWNUM <= :lim"
         )
         return sql, binds
+    where_clause = f" WHERE {where}" if where else ""
     if dialect in {"sqlserver", "mssql"}:
-        where, params = keyset_successor_predicate(cols, last_pk, placeholder="%s")
         sql = (
-            f"SELECT TOP ({n}) {select_list} FROM {table_ref} "  # nosec B608
-            f"WHERE {where} ORDER BY {order_sql}"
+            f"SELECT TOP ({n}) {select_list} FROM {table_ref}"  # nosec B608
+            f"{where_clause} ORDER BY {order_sql}"
         )
         return sql, params
-    where, params = keyset_successor_predicate(cols, last_pk, placeholder="%s")
     sql = (
-        f"SELECT {select_list} FROM {table_ref} WHERE {where} "  # nosec B608
+        f"SELECT {select_list} FROM {table_ref}{where_clause} "  # nosec B608
         f"ORDER BY {order_sql} LIMIT %s"
     )
     return sql, [*params, n]

@@ -15,7 +15,6 @@ from preflight.models import (
     PreflightContext,
 )
 from preflight.risk_contract import (
-    is_safe_normalize_mapping,
     mapping_is_lossy,
     mapping_is_structural_review,
     mapping_requires_risk_contract,
@@ -1809,6 +1808,116 @@ def _g6_identity_label(columns: list[str]) -> str | None:
     return ", ".join(columns)
 
 
+def _g6_mysql_key_refusal(ctx: PreflightContext, dest_kind: str) -> str | None:
+    """Operator refusal when a create-new MySQL upsert key would land on a LOB.
+
+    The writer refuses the same key before CREATE (A-1170); asking the same
+    shared rule here moves that refusal to Validate, before the job starts.
+    """
+    if dest_kind not in {"mysql", "mariadb"} or ctx.plan.destination.table_exists is not False:
+        return None
+    try:
+        from services.schema_fidelity import mysql_key_compatible_types
+        from services.sync_cursor import requires_upsert
+        from services.type_system import materialize_dest_ddl
+    except ImportError:
+        return None
+    if not requires_upsert(str(ctx.plan.sync_mode or "")):
+        return None
+    _sources, key_targets = _g6_sample_identity(ctx, dest_kind)
+    if not key_targets:
+        return None
+    declared = {c.name: c.inferred_type for c in ctx.plan.source.columns}
+    target_cols: list[str] = []
+    target_types: list[str] = []
+    mappings: list[dict[str, str]] = []
+    for m in ctx.plan.mappings:
+        if not m.target:
+            continue
+        target_cols.append(m.target)
+        target_types.append(
+            m.target_type or materialize_dest_ddl(dest_kind, declared.get(m.source) or "string")
+        )
+        mappings.append({"source": m.source, "target": m.target})
+    _types, refusal = mysql_key_compatible_types(
+        table_name=str(getattr(ctx.plan, "stream_name", "") or ""),
+        conflict_columns=list(key_targets),
+        target_cols=target_cols,
+        target_types=target_types,
+        mappings=mappings,
+        column_types=declared,
+    )
+    return refusal
+
+
+def _g6_dynamodb_key_refusal(
+    ctx: PreflightContext, dest_kind: str
+) -> str | None:
+    if (
+        dest_kind not in {"dynamodb", "amazon_dynamodb", "dynamo", "dyn"}
+        or ctx.plan.destination.table_exists is not True
+    ):
+        return None
+    try:
+        from connectors.dynamodb_schema import (
+            DynamoTableSchema,
+            key_contract_violations,
+            log_key_refusal,
+        )
+    except ImportError:
+        return None
+
+    rows = list(getattr(ctx.plan, "destination_dynamo_key_schema", []) or [])
+    if not rows:
+        return "DynamoDB existing table key schema is unavailable — refuse Validate without a HASH/RANGE contract"
+    try:
+        schema = DynamoTableSchema.from_key_schema_rows(
+            rows,
+            getattr(ctx.plan, "destination_dynamo_index_attributes", {}) or {},
+        )
+    except (TypeError, ValueError) as exc:
+        return f"DynamoDB existing table key schema is invalid — refuse Validate: {exc}"
+
+    source_types = {
+        str(column.name): str(column.inferred_type or "")
+        for column in (ctx.plan.source.columns or [])
+    }
+    mappings = [
+        {
+            "source": str(getattr(mapping, "source", "") or ""),
+            "target": str(getattr(mapping, "target", "") or ""),
+            "source_type": getattr(mapping, "source_type", None)
+            or source_types.get(str(getattr(mapping, "source", "") or "")),
+            "target_type": getattr(mapping, "target_type", None),
+            "dest_type": getattr(mapping, "dest_type", None),
+            "intentional_omit": bool(
+                getattr(mapping, "intentional_omit", False)
+            ),
+        }
+        for mapping in (ctx.plan.mappings or [])
+    ]
+    violations = key_contract_violations(
+        schema,
+        mappings=mappings,
+        column_types=source_types,
+    )
+    table = str(
+        getattr(ctx.plan, "destination_table", "")
+        or getattr(ctx.plan, "stream_name", "")
+        or ""
+    )
+    for violation in violations:
+        log_key_refusal(
+            phase="validate",
+            table=table,
+            column=violation.column,
+            key_role=violation.key_role,
+            expected_scalar=violation.expected_scalar,
+            reason=violation.reason,
+        )
+    return "; ".join(str(violation) for violation in violations) if violations else None
+
+
 def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
 
@@ -1881,6 +1990,22 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     break
         pk_src = _g6_identity_label(pk_sources)
         pk_tgt = _g6_identity_label(pk_targets)
+        dynamo_refusal = _g6_dynamodb_key_refusal(ctx, dest_kind)
+        if dynamo_refusal:
+            return _block(
+                GateId.G6_TARGET_DDL,
+                dynamo_refusal,
+                start,
+                _scope(
+                    {
+                        "issues": [dynamo_refusal],
+                        "rule_id": "g6_target_ddl.dynamo_key_contract",
+                        "remediation_kind": "fix_key_mapping",
+                    },
+                    coverage="declared_ddl",
+                    note="DynamoDB table and index key contract",
+                ),
+            )
         if pk_targets:
             # Append/overwrite: sample uniqueness is not a DDL contract unless dest has PK.
             try:
@@ -1976,6 +2101,22 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     "scrubbed_drift_issues": scrubbed,
                 },
                 note="Declared DDL compatibility issues",
+            ),
+        )
+
+    key_refusal = _g6_mysql_key_refusal(ctx, dest_kind)
+    if key_refusal:
+        return _block(
+            GateId.G6_TARGET_DDL,
+            key_refusal,
+            start,
+            _scope(
+                {
+                    "issues": [key_refusal],
+                    "rule_id": "g6_target_ddl.mysql_lob_key",
+                    "remediation_kind": "fix_ddl",
+                },
+                note="MySQL upsert key must be an indexable carrier",
             ),
         )
 
@@ -3229,15 +3370,30 @@ def _plan_mapping_dicts(ctx: PreflightContext) -> list[dict[str, Any]]:
 
 
 def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
-    """CDC / SCD2 / mirror + callable extract is refuse-closed. Hosted policy gate may replace this."""
+    """CDC / SCD2 / mirror + callable extract is refuse-closed. Hosted policy gate may replace this.
+
+    Evaluates the plan's own stream contracts: an empty list made every keyed
+    mode report "Missing primary key" here even when the contract carried one,
+    and that stale block outlived the policy gate that replaced it (QA T1).
+    """
     start = time.perf_counter()
     mode = str(getattr(ctx.plan.source, "source_read_mode", "") or "").strip().lower()
     sync = str(ctx.plan.sync_mode or "").strip().lower()
     try:
         from services.preflight_cursor_gate import build_sync_contract_gate
 
+        contracts = [
+            dict(c)
+            for c in (getattr(ctx.plan, "stream_contracts", None) or [])
+            if isinstance(c, dict) and c.get("selected", True)
+        ]
+        contract_pk = [
+            part.strip()
+            for part in str(getattr(ctx.plan, "contract_primary_key", "") or "").split(",")
+            if part.strip()
+        ]
         payload = build_sync_contract_gate(
-            [],
+            contracts,
             sync=sync,
             validation=str(ctx.plan.validation_mode or "strict"),
             dest=str(ctx.plan.destination.db_type or ""),
@@ -3247,6 +3403,9 @@ def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
             pass_status="pass",
             block_status="block",
             source_read_mode=mode,
+            catalog_primary_key_columns=contract_pk or None,
+            mappings=_plan_mapping_dicts(ctx),
+            source_table=str(getattr(ctx.plan, "stream_name", "") or ""),
         )
         return _host_gate_to_result(GateId.G9_SYNC_CONTRACT, payload, start)
     except ImportError:

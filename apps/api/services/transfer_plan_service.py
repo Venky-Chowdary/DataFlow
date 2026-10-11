@@ -244,7 +244,6 @@ def run_plan_preflight(
     )
     if not live_target_schema and table_exists is True:
         live_target_schema = {}
-    live_target_columns = list(live_target_schema.keys()) if live_target_schema else plan.target_columns
 
     ack = acknowledgments or Acknowledgments()
     if ack.any_claimed:
@@ -447,6 +446,8 @@ def run_plan_preflight(
         previous_source_schema=prev_schema or None,
         contract_primary_key=contract_pk,
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
+        destination_dynamo_key_schema=dest_meta.get("dynamo_key_schema") or [],
+        destination_dynamo_index_attributes=dest_meta.get("dynamo_index_attributes") or {},
         destination_unique_keys=dest_meta.get("unique_keys") or [],
         destination_foreign_keys=dest_meta.get("foreign_keys") or [],
         # Without the destination connection the append key-collision probe cannot

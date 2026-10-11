@@ -142,7 +142,7 @@ def test_json_array_is_accepted():
 
 
 def test_xlsx_roundtrip():
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -598,7 +598,7 @@ def test_duplicate_headers_and_notes_sheet_are_not_silent():
     assert "Col" in roles and "Col_2" in roles
     assert report["buckets"]["executable"] == 1
 
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -695,7 +695,7 @@ def test_cleansing_chain_and_lookup_semicolon_are_different():
 
 
 def test_orphan_enumeration_sheet_attaches_to_named_lookup():
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -1758,7 +1758,7 @@ def test_apply_projection_is_table_scoped_and_fail_closed():
 
 def test_sample_workbook_classifies_sheets_and_compiles_closed_forms():
     """The Datawrap sample: identity speech, STATE pairs, dest validation."""
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
     from services.rule_compiler.apply import apply_compiled_projection
 
@@ -1891,7 +1891,7 @@ def test_validation_does_not_hide_unused_dest_or_attach_the_wrong_lookup():
     assert evaluate_contract("", {"type": "not_null"}, missing=False) == "must not be null"
     assert evaluate_contract("NC", {"type": "pattern", "pattern": r"^[A-Za-z]{2}$"}, missing=False) is None
 
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -2016,7 +2016,7 @@ def test_level2_closed_forms_stay_honest_on_join_and_lookup():
         " ".join(r.get("issues") or []) for r in report["rules"] if r.get("kind") == "join"
     ).lower()
 
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -2128,7 +2128,7 @@ def test_direct_map_speech_copy_write_and_maps_to():
 
 
 def test_validation_severity_is_not_a_source_column():
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     assert canonical_header("Severity") == "severity"

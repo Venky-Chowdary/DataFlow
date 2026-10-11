@@ -84,28 +84,49 @@ def install_oracle_exact_fetch() -> None:
 
     Idempotent. Cursor-level handlers replace the connection handler, so both
     the connection generator and the numeric/integer type handlers are patched.
+
+    Version/dialect resilient: the product connects via ``oracle+oracledb``,
+    but the patch used to hardcode ``cx_oracle._OracleNumericCommon`` — a name
+    SQLAlchemy 2.x renamed to ``_OracleNumeric``. The AttributeError then
+    killed the whole Oracle driver on startup (QA C08). Every hook is resolved
+    by presence, patched on each installed dialect module, and a missing
+    internal name degrades to a logged fidelity gap rather than a dead driver.
     """
     global _INSTALLED
     if _INSTALLED:
         return
-    from sqlalchemy.dialects.oracle import cx_oracle as cx
+    import logging
+
+    _log = logging.getLogger(__name__)
+
+    dialect_mods: list[Any] = []
+    for mod_name in ("oracledb", "cx_oracle"):
+        try:
+            dialect_mods.append(
+                __import__(f"sqlalchemy.dialects.oracle.{mod_name}", fromlist=[mod_name])
+            )
+        except ImportError:
+            continue
+    if not dialect_mods:
+        _log.warning("Oracle exact-fetch patch skipped: no oracle dialect module")
+        return
 
     def _numeric_handler(self, dialect):  # noqa: ANN001
-        cx_oracle = dialect.dbapi
-        native = getattr(cx_oracle, "NATIVE_FLOAT", None)
+        dbapi = dialect.dbapi
+        native = getattr(dbapi, "NATIVE_FLOAT", None)
 
         def handler(cursor, _name, default_type, _size, _precision, _scale):  # noqa: ANN001
             # BINARY_FLOAT / BINARY_DOUBLE are IEEE. NUMBER must not take that path.
             if native is not None and default_type is native:
                 return None
-            return _number_string_var(cursor, cx_oracle.STRING, oracle_number_from_driver)
+            return _number_string_var(cursor, dbapi.STRING, oracle_number_from_driver)
 
         return handler
 
     def _integer_var(self, dialect, cursor, arraysize=None):  # noqa: ANN001
-        cx_oracle = dialect.dbapi
+        dbapi = dialect.dbapi
         return cursor.var(
-            cx_oracle.STRING,
+            dbapi.STRING,
             255,
             arraysize=arraysize if arraysize is not None else cursor.arraysize,
             outconverter=oracle_number_from_driver,
@@ -114,32 +135,57 @@ def install_oracle_exact_fetch() -> None:
     def _detect_decimal(self, value):  # noqa: ANN001
         return oracle_number_from_driver(value)
 
-    original_generate = cx.OracleDialect_cx_oracle._generate_connection_outputtype_handler
+    patched: list[str] = []
+    for mod in dialect_mods:
+        dialect_cls = (
+            getattr(mod, "OracleDialect_oracledb", None)
+            or getattr(mod, "OracleDialect_cx_oracle", None)
+            or getattr(mod, "_OracleDialect_cx_oracle", None)
+        )
+        if dialect_cls is None:
+            continue
+        original_generate = dialect_cls._generate_connection_outputtype_handler
 
-    def _generate(self):  # noqa: ANN001
-        base = original_generate(self)
-        cx_oracle = self.dbapi
-        native = getattr(cx_oracle, "NATIVE_FLOAT", None)
-        number = getattr(cx_oracle, "NUMBER", None)
+        def _generate(self, _orig=original_generate):  # noqa: ANN001
+            base = _orig(self)
+            dbapi = self.dbapi
+            native = getattr(dbapi, "NATIVE_FLOAT", None)
+            number = getattr(dbapi, "NUMBER", None)
 
-        def output_type_handler(cursor, name, default_type, size, precision, scale):  # noqa: ANN001
-            if (
-                number is not None
-                and default_type == number
-                and default_type is not native
-            ):
-                return _number_string_var(
-                    cursor, cx_oracle.STRING, oracle_number_from_driver
-                )
-            return base(cursor, name, default_type, size, precision, scale)
+            def output_type_handler(cursor, name, default_type, size, precision, scale):  # noqa: ANN001
+                if (
+                    number is not None
+                    and default_type == number
+                    and default_type is not native
+                ):
+                    return _number_string_var(
+                        cursor, dbapi.STRING, oracle_number_from_driver
+                    )
+                return base(cursor, name, default_type, size, precision, scale)
 
-        return output_type_handler
+            return output_type_handler
 
-    cx._OracleNumericCommon._cx_oracle_outputtypehandler = _numeric_handler
-    cx._OracleInteger._cx_oracle_var = _integer_var
-    cx.OracleDialect_cx_oracle._detect_decimal = _detect_decimal
-    cx.OracleDialect_cx_oracle._generate_connection_outputtype_handler = _generate
+        # The impl-level hook name is _cx_oracle_outputtypehandler on both
+        # dialects; the class that carries it was renamed across releases.
+        numeric_cls = (
+            getattr(mod, "_OracleNumericCommon", None)
+            or getattr(mod, "_OracleNumeric", None)
+            or getattr(mod, "_OracleNUMBER", None)
+        )
+        if numeric_cls is not None:
+            numeric_cls._cx_oracle_outputtypehandler = _numeric_handler
+        else:
+            _log.debug("oracle numeric impl class not found on %s", mod.__name__)
+        integer_cls = getattr(mod, "_OracleInteger", None)
+        if integer_cls is not None:
+            integer_cls._cx_oracle_var = _integer_var
+        dialect_cls._detect_decimal = _detect_decimal
+        dialect_cls._generate_connection_outputtype_handler = _generate
+        patched.append(mod.__name__.rsplit(".", 1)[-1])
+
     _INSTALLED = True
+    if patched:
+        _log.debug("Oracle exact-fetch patched dialects: %s", ", ".join(patched))
 
 
 def attach_oracle_number_output(conn: Any) -> None:

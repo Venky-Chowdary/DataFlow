@@ -460,8 +460,19 @@ export function TransferPage({
   const [vectorEmbeddingColumn, setVectorEmbeddingColumn] = useState("");
   const [vectorMetadataColumns, setVectorMetadataColumns] = useState("");
   const [vectorEmbeddingModel, setVectorEmbeddingModel] = useState("");
+  const [vectorEmbeddingApiKey, setVectorEmbeddingApiKey] = useState("");
+  const [vectorEmbeddingBaseUrl, setVectorEmbeddingBaseUrl] = useState("");
+  const [vectorEmbeddingEndpoint, setVectorEmbeddingEndpoint] = useState("");
   const [vectorChunkSize, setVectorChunkSize] = useState(512);
   const [vectorChunkOverlap, setVectorChunkOverlap] = useState(50);
+  const [vectorChunkStrategy, setVectorChunkStrategy] = useState<
+    "recursive" | "fixed" | "token" | "markdown"
+  >("recursive");
+  const [vectorChunkUnit, setVectorChunkUnit] = useState<"chars" | "tokens">("chars");
+  const [vectorTextTemplate, setVectorTextTemplate] = useState("");
+  const [vectorSkipUnchanged, setVectorSkipUnchanged] = useState(true);
+  const [vectorIndex, setVectorIndex] = useState<"none" | "hnsw">("none");
+  const [vectorStorage, setVectorStorage] = useState<"vector" | "halfvec">("vector");
   const [vectorExcludePiiColumns, setVectorExcludePiiColumns] = useState("");
   const [vectorRoutingFields, setVectorRoutingFields] = useState<VectorFieldRouting[]>([]);
   const [vectorRoutingLoading, setVectorRoutingLoading] = useState(false);
@@ -690,8 +701,17 @@ export function TransferPage({
                   }
                 : {}),
               ...(vectorEmbeddingModel ? { embedding_model: vectorEmbeddingModel } : {}),
+              ...(vectorEmbeddingBaseUrl ? { embedding_base_url: vectorEmbeddingBaseUrl } : {}),
+              ...(vectorEmbeddingEndpoint ? { embedding_endpoint: vectorEmbeddingEndpoint } : {}),
               chunk_size: vectorChunkSize,
               chunk_overlap: vectorChunkOverlap,
+              chunk_strategy: vectorChunkStrategy,
+              chunk_unit: vectorChunkUnit,
+              ...(vectorTextTemplate ? { text_template: vectorTextTemplate } : {}),
+              vector_skip_unchanged: vectorSkipUnchanged,
+              ...(destDriverType === "pgvector"
+                ? { vector_index: vectorIndex, vector_storage: vectorStorage }
+                : {}),
               durable_embedding_cache: vectorDurableCache,
             }
           : {}),
@@ -5301,8 +5321,22 @@ export function TransferPage({
               .filter(Boolean);
             if (excludePii.length) extra.exclude_pii_columns = excludePii;
             if (vectorEmbeddingModel) extra.embedding_model = vectorEmbeddingModel;
+            if (vectorEmbeddingApiKey) {
+              extra.embedding_api_key = vectorEmbeddingApiKey;
+              setVectorEmbeddingApiKey("");
+            }
+            if (vectorEmbeddingBaseUrl) extra.embedding_base_url = vectorEmbeddingBaseUrl;
+            if (vectorEmbeddingEndpoint) extra.embedding_endpoint = vectorEmbeddingEndpoint;
             extra.chunk_size = vectorChunkSize;
             extra.chunk_overlap = vectorChunkOverlap;
+            extra.chunk_strategy = vectorChunkStrategy;
+            extra.chunk_unit = vectorChunkUnit;
+            if (vectorTextTemplate) extra.text_template = vectorTextTemplate;
+            extra.vector_skip_unchanged = vectorSkipUnchanged;
+            if (destDriverType === "pgvector") {
+              extra.vector_index = vectorIndex;
+              extra.vector_storage = vectorStorage;
+            }
             extra.durable_embedding_cache = vectorDurableCache;
           }
           return Object.keys(extra).length ? extra : undefined;
@@ -8327,18 +8361,37 @@ export function TransferPage({
           destDriverType === "pinecone" ||
           destDriverType === "milvus"
         }
+        showPgvectorOptions={destDriverType === "pgvector"}
         vectorContentColumn={vectorContentColumn}
         vectorEmbeddingColumn={vectorEmbeddingColumn}
         vectorMetadataColumns={vectorMetadataColumns}
         vectorEmbeddingModel={vectorEmbeddingModel}
         vectorChunkSize={vectorChunkSize}
         vectorChunkOverlap={vectorChunkOverlap}
+        vectorChunkStrategy={vectorChunkStrategy}
+        vectorChunkUnit={vectorChunkUnit}
+        vectorTextTemplate={vectorTextTemplate}
+        vectorSkipUnchanged={vectorSkipUnchanged}
+        vectorIndex={vectorIndex}
+        vectorStorage={vectorStorage}
+        vectorEmbeddingApiKey={vectorEmbeddingApiKey}
+        vectorEmbeddingBaseUrl={vectorEmbeddingBaseUrl}
+        vectorEmbeddingEndpoint={vectorEmbeddingEndpoint}
         onVectorContentColumnChange={setVectorContentColumn}
         onVectorEmbeddingColumnChange={setVectorEmbeddingColumn}
         onVectorMetadataColumnsChange={setVectorMetadataColumns}
         onVectorEmbeddingModelChange={setVectorEmbeddingModel}
         onVectorChunkSizeChange={setVectorChunkSize}
         onVectorChunkOverlapChange={setVectorChunkOverlap}
+        onVectorChunkStrategyChange={setVectorChunkStrategy}
+        onVectorChunkUnitChange={setVectorChunkUnit}
+        onVectorTextTemplateChange={setVectorTextTemplate}
+        onVectorSkipUnchangedChange={setVectorSkipUnchanged}
+        onVectorIndexChange={setVectorIndex}
+        onVectorStorageChange={setVectorStorage}
+        onVectorEmbeddingApiKeyChange={setVectorEmbeddingApiKey}
+        onVectorEmbeddingBaseUrlChange={setVectorEmbeddingBaseUrl}
+        onVectorEmbeddingEndpointChange={setVectorEmbeddingEndpoint}
         vectorRoutingFields={vectorRoutingFields}
         vectorRoutingLoading={vectorRoutingLoading}
         vectorExcludePiiColumns={vectorExcludePiiColumns}

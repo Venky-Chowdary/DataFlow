@@ -4,12 +4,53 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Iterator
-from urllib.parse import urljoin
 
 import requests
+from collections.abc import Mapping
 
-from connectors.sdk import BaseConnector, RecordBatch, StreamSchema, register_connector
-from services.value_serializer import load_http_json
+from connectors.sdk import (
+    ConnectorDescriptor,
+    RecordBatch,
+    StreamSchema,
+    register_connector,
+)
+from connectors.sdk.declarative.connector import DeclarativeSource
+from connectors.sdk.declarative.errors import PaginationError
+
+__all__ = [
+    "DeclarativeHttpConnector",
+    "DeclarativeHttpSpec",
+    "DeclarativeStream",
+    "parse_declarative_spec",
+    "requests",
+]
+
+
+class _LegacyRequestsSession:
+    def __init__(self) -> None:
+        self.pagination_detected = False
+
+    def request(self, method: str, url: str, **kwargs: Any) -> requests.Response:
+        request = getattr(requests, method.lower(), None)
+        if request is None:
+            response = requests.request(method, url, **kwargs)
+        else:
+            response = request(url, **kwargs)
+        status = getattr(response, "status_code", None)
+        if isinstance(status, int) and not isinstance(status, bool) and status < 400:
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = None
+            paging = payload.get("paging") if isinstance(payload, Mapping) else None
+            if isinstance(payload, Mapping) and (
+                "next" in payload
+                or "next_page" in payload
+                or payload.get("has_more") is True
+                or (isinstance(paging, Mapping) and "next" in paging)
+            ):
+                self.pagination_detected = True
+        return response
 
 
 @dataclass
@@ -76,34 +117,85 @@ def parse_declarative_spec(raw: dict[str, Any]) -> DeclarativeHttpSpec:
 
 
 @register_connector
-class DeclarativeHttpConnector(BaseConnector):
-    """Config-driven HTTP source. Config keys: ``spec`` (dict) + ``api_key``/``access_token``."""
+class DeclarativeHttpConnector(DeclarativeSource):
+    """Backward-compatible single-page adapter; use DeclarativeSource for pagination."""
 
     name = "declarative_http"
     supports_read = True
     supports_write = False
+    descriptor = ConnectorDescriptor(
+        id="declarative_http",
+        display_name="Declarative HTTP (legacy config)",
+        roles=("source",),
+        auth_modes=("api_key",),
+        sync_modes=("full_refresh", "incremental"),
+        form_fields=(
+            {"name": "api_key", "sensitive": True},
+            {"name": "spec", "sensitive": False},
+        ),
+        evidence="synthetic-fixture",
+        certification_skips={
+            "resume_after_failure": (
+                "legacy spec has no pagination keys; single-page source; recovery is a full "
+                "re-read of that page; use a DeclarativeSource manifest for paginated APIs"
+            )
+        },
+    )
 
-    def _spec(self) -> DeclarativeHttpSpec:
-        raw = self.config.get("spec") or self.config.get("declarative_spec") or {}
+    def __init__(self, config: dict[str, Any]) -> None:
+        raw = config.get("spec") or config.get("declarative_spec") or {}
         if not raw:
             raise ValueError("declarative_http requires config.spec")
-        return parse_declarative_spec(raw)
+        legacy_spec = parse_declarative_spec(raw)
+        manifest = {
+            "name": legacy_spec.name,
+            "base_url": legacy_spec.base_url,
+            "auth": {"type": "none"},
+            "streams": [
+                {
+                    "name": stream.name,
+                    "path": stream.path,
+                    "method": "GET",
+                    "records_path": stream.records_path,
+                    "primary_key": list(stream.primary_key),
+                    "paginator": {"type": "none"},
+                    "json_schema": {
+                        "type": "object",
+                        "properties": {
+                            key: {"type": value}
+                            for key, value in (
+                                stream.properties or {"id": "string"}
+                            ).items()
+                        },
+                    },
+                }
+                for stream in legacy_spec.streams
+            ],
+        }
+        super().__init__({**config, "manifest": manifest})
+        self.requester.session = _LegacyRequestsSession()
+        self._legacy_http_spec = legacy_spec
+        self.auth.headers.setdefault("Accept", "application/json")
+        self.auth.headers.update(legacy_spec.extra_headers)
+        token = self._token()
+        if token:
+            self.auth.headers[legacy_spec.auth_header] = f"{legacy_spec.auth_prefix}{token}"
+
+    def _spec(self) -> DeclarativeHttpSpec:
+        return self._legacy_http_spec
 
     def _token(self) -> str:
+        credentials = self.config.get("credentials")
+        credentials = credentials if isinstance(credentials, dict) else {}
         return str(
             self.config.get("access_token")
             or self.config.get("api_key")
-            or (self.config.get("credentials") or {}).get("access_token")
+            or credentials.get("access_token")
             or ""
         )
 
     def _headers(self) -> dict[str, str]:
-        spec = self._spec()
-        headers = {"Accept": "application/json", **spec.extra_headers}
-        token = self._token()
-        if token:
-            headers[spec.auth_header] = f"{spec.auth_prefix}{token}"
-        return headers
+        return dict(self.auth.headers)
 
     def spec(self) -> dict[str, Any]:
         return {
@@ -111,7 +203,11 @@ class DeclarativeHttpConnector(BaseConnector):
                 "type": "object",
                 "required": ["api_key", "spec"],
                 "properties": {
-                    "api_key": {"type": "string", "title": "API token"},
+                    "api_key": {
+                        "type": "string",
+                        "title": "API token",
+                        "airbyte_secret": True,
+                    },
                     "spec": {"type": "object", "title": "Declarative connector spec"},
                 },
             }
@@ -119,13 +215,11 @@ class DeclarativeHttpConnector(BaseConnector):
 
     def check(self) -> tuple[bool, str]:
         try:
-            streams = self.discover()
-            if not streams:
+            if not self._legacy_http_spec.streams:
                 return False, "No streams defined in declarative spec"
-            # Probe first stream with limit=1
-            first = streams[0].name
+            first = self._legacy_http_spec.streams[0].name
             next(self.read(first, state=None, limit=1), None)
-            return True, f"OK — {len(streams)} stream(s)"
+            return True, f"OK — {len(self._legacy_http_spec.streams)} stream(s)"
         except Exception as exc:
             return False, str(exc)
 
@@ -134,24 +228,22 @@ class DeclarativeHttpConnector(BaseConnector):
         return ok
 
     def discover(self) -> list[StreamSchema]:
-        spec = self._spec()
-        out: list[StreamSchema] = []
-        for s in spec.streams:
-            out.append(
-                StreamSchema(
-                    name=s.name,
-                    properties=dict(s.properties) or {"id": "string"},
-                    primary_key=list(s.primary_key),
-                    cursor_field=s.cursor_field,
-                    json_schema={
-                        "type": "object",
-                        "properties": {
-                            k: {"type": v} for k, v in (s.properties or {"id": "string"}).items()
-                        },
-                    },
-                )
+        discovered = super().discover()
+        return [
+            StreamSchema(
+                name=stream.name,
+                properties=dict(stream.properties) or dict(schema.properties),
+                primary_key=list(stream.primary_key),
+                cursor_field=stream.cursor_field,
+                supported_sync_modes=(
+                    ["full_refresh", "incremental"]
+                    if stream.cursor_field and stream.cursor_param
+                    else ["full_refresh"]
+                ),
+                json_schema=schema.json_schema,
             )
-        return out
+            for stream, schema in zip(self._legacy_http_spec.streams, discovered)
+        ]
 
     def read(
         self,
@@ -161,36 +253,66 @@ class DeclarativeHttpConnector(BaseConnector):
         offset: int = 0,
         limit: int = 1000,
     ) -> Iterator[RecordBatch]:
-        spec = self._spec()
-        decl = next((s for s in spec.streams if s.name == stream), None)
+        decl = next((item for item in self._legacy_http_spec.streams if item.name == stream), None)
         if decl is None:
             raise ValueError(f"Unknown stream: {stream}")
-        url = urljoin(spec.base_url, decl.path.lstrip("/"))
-        cursor_val = None
-        if state and decl.cursor_field:
-            cursor_val = (state.get(stream) or state).get(decl.cursor_field)
+        if limit <= 0:
+            return
         params: dict[str, Any] = {decl.page_param: min(decl.page_size, limit)}
+        current_state = state or {}
+        stream_state = current_state.get(stream, current_state)
+        cursor_val = (
+            stream_state.get(decl.cursor_field)
+            if isinstance(stream_state, dict) and decl.cursor_field
+            else None
+        )
         if cursor_val and decl.cursor_param:
             params[decl.cursor_param] = cursor_val
         elif offset and decl.offset_param:
             params[decl.offset_param] = str(offset)
-
-        resp = requests.get(url, headers=self._headers(), params=params, timeout=60)
-        resp.raise_for_status()
-        payload = load_http_json(resp)
-        records_raw = _dig(payload, decl.records_path)
-        if records_raw is None and isinstance(payload, list):
-            records_raw = payload
-        records = [dict(r) for r in (records_raw or []) if isinstance(r, dict)][:limit]
-        schema = StreamSchema(
-            name=decl.name,
-            properties=dict(decl.properties) or {k: "string" for k in (records[0] if records else {"id": ""}).keys()},
-            primary_key=list(decl.primary_key),
-            cursor_field=decl.cursor_field,
-        )
-        new_state = dict(state or {})
-        if records and decl.cursor_field:
-            last = records[-1].get(decl.cursor_field)
-            if last is not None:
-                new_state[stream] = {decl.cursor_field: last}
-        yield RecordBatch(stream=stream, records=records, schema=schema, state=new_state)
+        legacy_session = self.requester.session
+        if isinstance(legacy_session, _LegacyRequestsSession):
+            legacy_session.pagination_detected = False
+        for batch in super().read(
+            stream,
+            state=None,
+            limit=limit,
+            _request_params=params,
+        ):
+            if (
+                isinstance(legacy_session, _LegacyRequestsSession)
+                and legacy_session.pagination_detected
+            ):
+                raise PaginationError(
+                    "legacy declarative spec cannot paginate; migrate to a DeclarativeSource manifest"
+                )
+            next_state = dict(current_state)
+            if batch.records and decl.cursor_field:
+                last = batch.records[-1].get(decl.cursor_field)
+                if last is not None:
+                    next_state[stream] = {decl.cursor_field: last}
+            schema = StreamSchema(
+                name=decl.name,
+                properties=dict(decl.properties) or dict(batch.schema.properties),
+                primary_key=list(decl.primary_key),
+                cursor_field=decl.cursor_field,
+                supported_sync_modes=(
+                    ["full_refresh", "incremental"]
+                    if decl.cursor_field and decl.cursor_param
+                    else ["full_refresh"]
+                ),
+                json_schema=batch.schema.json_schema,
+            )
+            yield RecordBatch(
+                stream=batch.stream,
+                records=batch.records,
+                schema=schema,
+                state=next_state,
+            )
+        if (
+            isinstance(legacy_session, _LegacyRequestsSession)
+            and legacy_session.pagination_detected
+        ):
+            raise PaginationError(
+                "legacy declarative spec cannot paginate; migrate to a DeclarativeSource manifest"
+            )

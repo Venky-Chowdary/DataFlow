@@ -15,13 +15,21 @@ response body fails loudly instead of leaking.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+import re
+from re import sub
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 SECRET_KEYS: frozenset[str] = frozenset(
     {
+        "authorization",
         "password",
         "connection_string",
         "api_key",
+        "x_api_key",
+        "proxy_authorization",
+        "cookie",
+        "set_cookie",
         "service_account",
         "private_key",
         "private_key_passphrase",
@@ -40,6 +48,71 @@ def redact_config(cfg: Mapping[str, Any]) -> dict[str, Any]:
         k: ("***" if k in SECRET_KEYS and v not in (None, "") else v)
         for k, v in cfg.items()
     }
+
+
+def redact_url(url: str) -> str:
+    """Redact secret-named query parameters and URL user information."""
+    parsed = urlsplit(str(url))
+    if not parsed.query and "@" not in parsed.netloc:
+        return str(url)
+
+    secret_keys = {sub(r"[^a-z0-9]", "", key.lower()): key for key in SECRET_KEYS}
+    query: list[tuple[str, str]] = []
+    for name, value in parse_qsl(parsed.query, keep_blank_values=True):
+        secret_key = secret_keys.get(sub(r"[^a-z0-9]", "", name.lower()))
+        if secret_key:
+            value = str(redact_config({secret_key: value})[secret_key])
+        query.append((name, value))
+
+    netloc = parsed.netloc
+    if "@" in netloc:
+        _, host = netloc.rsplit("@", 1)
+        netloc = f"***@{host}"
+    return urlunsplit(
+        (
+            parsed.scheme,
+            netloc,
+            parsed.path,
+            urlencode(query, doseq=True),
+            parsed.fragment,
+        )
+    )
+
+
+def mask_secrets_in_text(text: str) -> str:
+    """Mask URI credentials and secret query values embedded in free text."""
+    masked = re.sub(r":([^:@/]+)@", ":****@", str(text))
+    url_pattern = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"'`]+", re.IGNORECASE)
+
+    def redact(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        trailing = ""
+        while candidate and candidate[-1] in ".,;:!?)]}":
+            trailing = candidate[-1] + trailing
+            candidate = candidate[:-1]
+        if not candidate:
+            return match.group(0)
+
+        parsed = urlsplit(candidate)
+        netloc = parsed.netloc
+        if "@" in netloc:
+            userinfo, host = netloc.rsplit("@", 1)
+            if ":" in userinfo:
+                username, _, _password = userinfo.partition(":")
+                netloc = f"{username}:****@{host}"
+            else:
+                netloc = f"***@{host}"
+
+        query_url = urlunsplit(
+            (parsed.scheme, "mcp-redaction.invalid", parsed.path, parsed.query, parsed.fragment)
+        )
+        redacted_query = urlsplit(redact_url(query_url)).query
+        return (
+            urlunsplit((parsed.scheme, netloc, parsed.path, redacted_query, parsed.fragment))
+            + trailing
+        )
+
+    return url_pattern.sub(redact, masked)
 
 
 class RedactedConfig(Mapping[str, Any]):

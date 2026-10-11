@@ -57,7 +57,7 @@ def _client(rbac_env, user: dict | None = None):
     def run_transfer():
         return {"job_id": "123"}
 
-    @app.post("/api/v1/connectors")
+    @app.post("/api/v1/connectors/")
     def create_connector():
         return {"id": "c1"}
 
@@ -110,7 +110,7 @@ def test_editor_can_write_connector(rbac_env, monkeypatch):
     try:
         client = _client(rbac_env)
         token = _token("admin@example.com")
-        resp = client.post("/api/v1/connectors", headers={"Authorization": f"Bearer {token}"})
+        resp = client.post("/api/v1/connectors/", headers={"Authorization": f"Bearer {token}"})
         assert resp.status_code == 200
     finally:
         rbac_mod.normalize_role = original

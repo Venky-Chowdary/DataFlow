@@ -31,6 +31,7 @@ from datetime import datetime
 from typing import Any
 
 from services.decimal_observe import observe_source_numeric_samples
+from services.type_lattice import join_logical_types
 from services.transform_engine import (
     CANONICAL_BOOLEAN_TOKENS,
     NULL_SENTINELS,
@@ -982,8 +983,13 @@ def infer_column(
         # or when a temporal field name has at least one TZ sample.
         if tz_count > 0 and (tz_count == len(non_empty) or (field_name and _is_timestamp_field_name(field_name))):
             inferred = "TIMESTAMPTZ"
-        elif counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
-            inferred = "TIMESTAMP"
+        elif counts.get("TIMESTAMP", 0) and (
+            counts.get("TIMESTAMP", 0) + counts.get("DATE", 0) >= counts.get("TIME", 0)
+        ):
+            # DATE and TIMESTAMP join on the lattice; they are not a vote.
+            # Midnight cells classify as DATE, so two of them outvoted one
+            # 14:30 stamp and the column landed as DATE with the time dropped.
+            inferred = join_logical_types("DATE" if counts.get("DATE") else None, "TIMESTAMP")
         elif counts.get("DATE", 0) >= counts.get("TIME", 0):
             inferred = "DATE"
         else:

@@ -691,7 +691,7 @@ def plan_create_new_fidelity(
     ]
     if catalog.primary_key and len(pk_dest) == len(catalog.primary_key):
         unindexable = [
-            c for c in pk_dest if dest in {"mysql", "mariadb"} and _mysql_index_requires_prefix(_dest_type(c))
+            c for c in pk_dest if dest in {"mysql", "mariadb"} and mysql_index_requires_prefix(_dest_type(c))
         ]
         if unindexable:
             report.items.append(
@@ -843,7 +843,7 @@ def plan_create_new_fidelity(
         if set(dest_uk_s) == pk_set and pk_set:
             continue  # covered by PRIMARY KEY
         if dest in {"mysql", "mariadb"} and any(
-            _mysql_index_requires_prefix(_dest_type(c)) for c in dest_uk_s
+            mysql_index_requires_prefix(_dest_type(c)) for c in dest_uk_s
         ):
             report.items.append(
                 SchemaFidelityItem(
@@ -2222,7 +2222,7 @@ def empty_unsupported_report(
 # ---------------------------------------------------------------------------
 
 
-def _mysql_index_requires_prefix(typ: str) -> bool:
+def mysql_index_requires_prefix(typ: str) -> bool:
     """True when MySQL/MariaDB would need a prefix length to index this type.
 
     TEXT/BLOB/JSON cannot be a PRIMARY KEY or UNIQUE without a prefix. Inventing
@@ -2233,6 +2233,89 @@ def _mysql_index_requires_prefix(typ: str) -> bool:
     if not u:
         return False
     return bool(re.match(r"^(TINY|MEDIUM|LONG)?(TEXT|BLOB)\b|^JSON\b", u))
+
+
+# InnoDB DYNAMIC/COMPRESSED key limit; utf8mb4 reserves 4 bytes per character.
+_MYSQL_MAX_KEY_BYTES = 3072
+_MYSQL_UTF8MB4_CHAR_BYTES = 4
+
+
+def mysql_key_compatible_types(
+    *,
+    table_name: str,
+    conflict_columns: list[str] | None,
+    target_cols: list[str],
+    target_types: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str] | None,
+) -> tuple[list[str], str | None]:
+    """Key-indexable create-new carriers for an upsert key, or an operator refusal.
+
+    MySQL cannot index TEXT/BLOB/JSON without a prefix length (error 1170), and
+    a prefix would enforce a different uniqueness rule than the source. A key
+    column whose carrier is a LOB becomes ``VARCHAR(n)`` from the width the
+    source declares; with no declared width the run is refused before any DDL.
+    G6 (Validate) and the MySQL writer (defence in depth) share this one rule.
+    """
+    from services.type_system import parse_string_carrier_width
+
+    types = list(target_types)
+    keys = [c for c in (conflict_columns or []) if c in target_cols]
+    source_of = {
+        str(m.get("target") or m.get("source") or ""): str(m.get("source") or "")
+        for m in mappings or []
+        if isinstance(m, dict)
+    }
+    declared_types = column_types or {}
+    widened: dict[str, int] = {}
+    unresolved: list[str] = []
+    for col in keys:
+        idx = target_cols.index(col)
+        if not mysql_index_requires_prefix(types[idx]):
+            continue
+        declared = declared_types.get(source_of.get(col) or col) or declared_types.get(col)
+        width = parse_string_carrier_width(declared)
+        if not width:
+            unresolved.append(f"{col} ({declared or types[idx]})")
+            continue
+        widened[col] = width
+        types[idx] = f"VARCHAR({width})"
+    key_label = ", ".join(keys)
+    where = f"new table {table_name}" if table_name else "the new destination table"
+    if unresolved:
+        logger.error(
+            "MySQL upsert key refused before CREATE: table=%s key=(%s) unindexable=%s",
+            table_name, key_label, unresolved,
+        )
+        return target_types, (
+            f"MySQL cannot enforce the upsert key ({key_label}) on {where}: "
+            f"{', '.join(unresolved)} would be created as a TEXT/BLOB "
+            "column, which MySQL refuses in a key without a prefix length "
+            "(error 1170). The source declares no width for it, and DataFlow "
+            "will not invent a prefix (that enforces a different uniqueness "
+            "rule). Map the column to VARCHAR(n) sized to its longest value, "
+            "or pre-create the destination table with this key."
+        )
+    key_bytes = sum(widened.values()) * _MYSQL_UTF8MB4_CHAR_BYTES
+    if key_bytes > _MYSQL_MAX_KEY_BYTES:
+        logger.error(
+            "MySQL upsert key too wide before CREATE: table=%s key=(%s) widths=%s",
+            table_name, key_label, widened,
+        )
+        return target_types, (
+            f"MySQL cannot enforce the upsert key ({key_label}) on {where}: "
+            f"the declared widths {widened} need {key_bytes} bytes "
+            f"in utf8mb4, above MySQL's {_MYSQL_MAX_KEY_BYTES}-byte key limit "
+            "(error 1071). Narrow the key columns or pre-create the destination "
+            "table with this key."
+        )
+    if widened:
+        logger.info(
+            "MySQL upsert key carriers sized from the source width: table=%s %s",
+            table_name, {c: f"VARCHAR({w})" for c, w in widened.items()},
+        )
+    return types, None
+
 
 
 def _q(ident: str, dialect: str) -> str:

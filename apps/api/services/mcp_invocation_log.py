@@ -30,17 +30,30 @@ def log_mcp_invocation(
     duration_ms: float = 0.0,
     correlation_id: str | None = None,
     actor: str = "mcp-agent",
+    error_kind: str | None = None,
 ) -> dict[str, Any]:
+    if error_kind is None:
+        if status == "ok":
+            error_kind = "ok"
+        else:
+            from src.ai.copilot.tool_permissions import is_permission_denial
+
+            if is_permission_denial(str(error or "")):
+                error_kind = "permission_denied"
+            else:
+                error_kind = "tool_error"
     row = {
         "id": str(uuid.uuid4()),
         "time": _now(),
         "tool": tool,
         "client": client,
+        "actor": actor,
         "status": status,
         "error": error,
         "ms": round(duration_ms, 1),
         "arguments": _redact(arguments or {}),
         "correlation_id": correlation_id,
+        "error_kind": error_kind,
     }
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with STORE_PATH.open("a", encoding="utf-8") as fh:
@@ -107,14 +120,20 @@ class McpInvocationTimer:
     def __exit__(self, exc_type, exc, tb) -> None:
         ms = (time.perf_counter() - self._start) * 1000
         if exc_type is not None:
+            from src.ai.copilot.tool_permissions import is_permission_denial
+
+            error = str(exc)[:500]
             log_mcp_invocation(
                 tool=self.tool,
                 client=self.client,
                 arguments=self.arguments,
                 status="error",
-                error=str(exc)[:500],
+                error=error,
                 duration_ms=ms,
                 correlation_id=self.correlation_id,
+                error_kind=(
+                    "permission_denied" if is_permission_denial(error) else "tool_error"
+                ),
             )
         else:
             log_mcp_invocation(
@@ -124,4 +143,5 @@ class McpInvocationTimer:
                 status="ok",
                 duration_ms=ms,
                 correlation_id=self.correlation_id,
+                error_kind="ok",
             )

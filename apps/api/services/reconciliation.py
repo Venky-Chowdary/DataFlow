@@ -262,6 +262,14 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     tgt = str(out.get("target_checksum") or "").strip()
     msg = str(out.get("message") or "").lower()
     independent_match = bool(src and tgt and src == tgt)
+    if (
+        independent_match
+        and src == EMPTY_POPULATION_DIGEST
+        and str(out.get("checksum_scope") or "") == WRITTEN_BATCH_KEYS
+        and int(out.get("rejected_rows") or 0)
+    ):
+        # QA MX3-12: an empty written set matches itself — not a checksum proof.
+        independent_match = False
     # Module 4: always stamp checksum honesty; never invent population RI proof.
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
@@ -1088,6 +1096,35 @@ def reconcile(
             checksum_match=False,
             population_proof=False,
             assurance_level="none",
+        )
+    if checksum_scope == WRITTEN_BATCH_KEYS and expected_rows == 0 and rejected_rows:
+        # QA MX3-12: two digests of the empty written set always match. That is
+        # no evidence — a replay that re-rejected every row reported
+        # full_checksum while its own L1-L5 ladder failed.
+        logger.warning(
+            "Gate-8: keyed run wrote 0 rows and rejected %d — no fidelity claim",
+            rejected_rows,
+        )
+        return ReconciliationReport(
+            passed=False,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"Nothing was verified: this run wrote 0 row(s) and rejected "
+                f"{rejected_rows}. The destination still holds {target_rows} "
+                "row(s) from earlier runs. Fix the rejected values and replay."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=None,
+            population_proof=False,
+            assurance_level="none",
+            checksum_scope=checksum_scope,
+            target_rows_before=target_rows_before,
         )
     if coerced_null_rows:
         # Row counts and checksums can still match here because the SAME failed

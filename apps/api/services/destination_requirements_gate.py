@@ -194,12 +194,15 @@ def build_mapping_contract_gates(
     generated_columns: list[str] | None,
     dest_columns: list[str] | None = None,
     dest_recreated: bool = False,
+    dest_emptied: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Source coverage (G13), dest requirements (G14), dest-exists shape (G15).
 
     ``dest_recreated`` (overwrite/full-refresh) means the listed table is
     dropped and recreated from the source shape, so G15 reads its columns as a
-    CREATE rather than ADD COLUMN proposals on a live table.
+    CREATE rather than ADD COLUMN proposals on a live table. ``dest_emptied``
+    (overwrite that keeps the table) keeps the existing-table shape but makes
+    G15 say *replace*, not "insert more" (QA T21).
 
     Returns ``(source_coverage, gates, blockers)``. G15 does not add blockers.
     """
@@ -228,6 +231,7 @@ def build_mapping_contract_gates(
         identity_columns=identity_columns,
         generated_columns=generated_columns,
         dest_recreated=dest_recreated,
+        dest_emptied=dest_emptied,
     )
     coverage = {**coverage, "shape_contract": shape}
     shape_gate = build_shape_gate(shape)

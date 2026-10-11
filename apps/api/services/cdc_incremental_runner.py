@@ -31,6 +31,13 @@ RowFetcher = Callable[[SnapshotSignal], tuple[list[dict[str, Any]], Optional[str
 StreamDuringChunk = Callable[[SnapshotSignal], list[dict[str, Any]]]
 
 
+def _is_typed_cdc_read_error(exc: BaseException) -> bool:
+    from connectors.oracle_logminer import OracleLogMinerReadError
+    from connectors.sqlserver_cdc_native import SqlServerCdcReadError
+
+    return isinstance(exc, (OracleLogMinerReadError, SqlServerCdcReadError))
+
+
 def _snapshot_low_watermark(sig: SnapshotSignal) -> dict[str, str]:
     """Resume-token fields that let ``extract_cdc_lsn`` stamp a snapshot chunk.
 
@@ -109,6 +116,10 @@ def interleave_incremental_snapshot(
                 except CdcCursorGapError:
                     raise
                 except Exception as exc:
+                    if getattr(exc, "transient", False) or _is_typed_cdc_read_error(
+                        exc
+                    ):
+                        raise
                     logger.warning(
                         "Stream peek during snapshot window failed for %s.%s: %s",
                         source_key,
@@ -126,6 +137,12 @@ def interleave_incremental_snapshot(
         except Exception as exc:
             logger.warning("Incremental snapshot chunk failed for %s.%s: %s", source_key, table, exc)
             update_signal(sig.id, status="failed", error=str(exc)[:500])
+            if (
+                getattr(exc, "transient", False)
+                or isinstance(exc, CdcCursorGapError)
+                or _is_typed_cdc_read_error(exc)
+            ):
+                raise
             return
         from services.cdc_snapshot_window import _pk_value
 

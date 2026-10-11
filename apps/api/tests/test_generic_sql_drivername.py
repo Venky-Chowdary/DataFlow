@@ -2,6 +2,7 @@
 
 from connectors.generic_sql import (
     _build_url,
+    _connect_args_for,
     _drivername,
     _mssql_drivername,
     _mssql_odbc_driver,
@@ -89,6 +90,41 @@ def test_mssql_drivername_falls_back_to_pymssql_without_odbc_driver(monkeypatch)
 
     monkeypatch.setattr(gs, "_mssql_odbc_driver", lambda: None)
     assert _mssql_drivername() == "mssql+pymssql"
+
+
+def test_connect_timeout_reaches_driver_connect_args():
+    """QA C07 — the probe's handshake bound must reach the DBAPI, not the OS.
+
+    An unbounded connect against a dead host outlives the MCP request
+    timeout, so the operator got no result at all. Each driver takes a
+    differently-named kwarg; SQL_ATTR_LOGIN_TIMEOUT (103) is pyodbc's form —
+    its ``timeout`` kwarg is a query timeout and would leave the handshake
+    unbounded.
+    """
+    import sqlalchemy as sa
+
+    url = sa.URL.create("mssql+pymssql", host="h", database="d")
+    assert _connect_args_for(url, {"connect_timeout": 15}) == {
+        "login_timeout": 15
+    }
+    url = sa.URL.create("mssql+pyodbc", host="h", database="d")
+    assert _connect_args_for(url, {"connect_timeout": 15}) == {
+        "attrs_before": {103: 15}
+    }
+    url = sa.URL.create("mysql+pymysql", host="h", database="d")
+    assert _connect_args_for(url, {"connect_timeout": 15}) == {
+        "connect_timeout": 15
+    }
+    url = sa.URL.create("postgresql+psycopg2", host="h", database="d")
+    assert _connect_args_for(url, {"connect_timeout": 15}) == {
+        "connect_timeout": 15
+    }
+    # Unset / junk / zero never emit args; sqlite ignores silently.
+    assert _connect_args_for(url, {}) == {}
+    assert _connect_args_for(url, {"connect_timeout": "abc"}) == {}
+    assert _connect_args_for(
+        sa.URL.create("sqlite", database=":memory:"), {"connect_timeout": 15}
+    ) == {}
 
 
 def test_mssql_odbc_driver_prefers_installed_microsoft_driver():

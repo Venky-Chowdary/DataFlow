@@ -271,6 +271,8 @@ _DRIVERNAME_MAP: dict[str, str] = {
     "sqlite": "sqlite",
     # PostgreSQL-wire compatible engines
     "greenplum": "postgresql+psycopg2",
+    # pgvector is the PostgreSQL wire protocol plus the vector type.
+    "pgvector": "postgresql+psycopg2",
     "cratedb": "postgresql+psycopg2",
     "yugabytedb": "postgresql+psycopg2",
     "cockroachdb": "postgresql+psycopg2",
@@ -995,6 +997,45 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 
+#: Scheme token → DBAPI kwarg that bounds the TCP/login handshake.
+#: ``connect_timeout`` has long existed as an operator option in
+#: ``CONNECTION_OPTION_KEYS`` but was never forwarded into ``connect_args`` —
+#: a probe against a dead host blocked on the OS TCP timeout (~60s+), past
+#: the MCP request timeout, so the caller got no result at all (QA C07).
+#: SQL_ATTR_LOGIN_TIMEOUT = 103 for pyodbc (its ``timeout`` kwarg is queries).
+_CONNECT_TIMEOUT_KWARGS: tuple[tuple[str, Any], ...] = (
+    ("pymssql", {"login_timeout": 0}),
+    ("pytds", {"login_timeout": 0}),
+    ("pyodbc", {"attrs_before": {103: 0}}),
+    ("pymysql", {"connect_timeout": 0}),
+    ("mysql.connector", {"connection_timeout": 0}),
+    ("psycopg2", {"connect_timeout": 0}),
+    ("psycopg", {"connect_timeout": 0}),
+    ("pg8000", {"timeout": 0}),
+    ("oracledb", {"tcp_connect_timeout": 0}),
+    ("cx_oracle", {"tcp_connect_timeout": 0}),
+)
+
+
+def _connect_args_for(url: Any, cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate ``cfg['connect_timeout']`` seconds into driver connect args."""
+    raw = cfg.get("connect_timeout")
+    try:
+        seconds = int(float(str(raw))) if raw not in (None, "") else 0
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        return {}
+    driver = str(getattr(url, "drivername", "") or "").lower()
+    for token, template in _CONNECT_TIMEOUT_KWARGS:
+        if token in driver:
+            return {
+                key: ({k: seconds for k in value} if isinstance(value, dict) else seconds)
+                for key, value in template.items()
+            }
+    return {}
+
+
 def _build_engine(cfg: dict[str, Any]) -> Any:
     """Construct a brand-new Engine. Called once per distinct target."""
     warehouse = _warehouse_creator(cfg, (cfg.get("type") or "").lower().strip())
@@ -1073,7 +1114,12 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             # Before the first bind, so DATETIME2(6) is not an ODBC millisecond.
             install_sqlserver_datetime2_bind()
 
-        engine = create_engine(url, pool_pre_ping=True, **pool_settings())
+        engine = create_engine(
+            url,
+            pool_pre_ping=True,
+            connect_args=_connect_args_for(url, cfg),
+            **pool_settings(),
+        )
         from sqlalchemy import event
 
         from services.dest_dialect_facts import _normalize_dest_db
@@ -1802,7 +1848,11 @@ def _sub_second_naive_wire(dialect_name: str, db_type: str, logical: str = "") -
     if mssql is not None and (
         (dialect_name or "").lower() == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
     ):
-        return mssql.DATETIME2(precision=7)
+        # Bare DATETIME2 is already SQL Server's seven-digit carrier. Only a
+        # declared ``(n)`` is precision-bearing DDL; inventing ``(7)`` on a
+        # bare logical made the DDL disagree with the family it was mapped to.
+        fsp = _declared_temporal_fsp(logical, 7)
+        return mssql.DATETIME2() if fsp is None else mssql.DATETIME2(precision=fsp)
     if mysql is not None and _MYSQL_WIRES & {
         (dialect_name or "").lower(), (db_type or "").lower()
     }:
@@ -1987,8 +2037,13 @@ def _sa_type_for_logical(
         ):
             # sa.DateTime(timezone=True) compiles to DATETIMEOFFSET with no
             # precision argument. Name the seven digits the column keeps so a
-            # PostgreSQL microsecond cannot land on classic DATETIME.
-            return _maybe_nullable(mssql.DATETIMEOFFSET(precision=7))
+            # PostgreSQL microsecond cannot land on classic DATETIME. The
+            # dialect type defaults to timezone=False, which made the bind
+            # path strip the offset from a column that stores one.
+            fsp = _declared_temporal_fsp(raw, 7)
+            return _maybe_nullable(
+                mssql.DATETIMEOFFSET(precision=7 if fsp is None else fsp, timezone=True)
+            )
         return sa.DateTime(timezone=True)
     if (
         "timestamp_ntz" in raw_lower
@@ -2935,6 +2990,11 @@ def test_generic_sql(**kwargs: Any) -> tuple[bool, str]:
     if not SQLALCHEMY_AVAILABLE:
         return False, "SQLAlchemy is not installed"
     cfg = _cfg_from_params(**kwargs)
+    # A connectivity probe must answer inside the caller's request timeout:
+    # an unconfigured probe gets a 15s handshake bound instead of inheriting
+    # the OS TCP default that outlived the MCP timeout (QA C07).
+    if not cfg.get("connect_timeout"):
+        cfg["connect_timeout"] = 15
     try:
         engine = _engine(cfg)
         with engine.connect() as conn:
@@ -3542,6 +3602,17 @@ def introspect_table_schema(
     try:
         schema = _schema_name(cfg)
         inspector = inspect(engine)
+        if not (table or "").strip():
+            # No object named: this is the catalog list (Pilot "list tables",
+            # Destination pickers). Reflecting columns of "" only ever failed.
+            names = sorted(str(n) for n in inspector.get_table_names(schema=schema))
+            logger.info(
+                "generic_sql listed %d table(s) for %s (schema=%s)",
+                len(names),
+                cfg.get("type") or "generic_sql",
+                schema or "default",
+            )
+            return {"ok": True, "columns": [], "tables": names, "schema": schema or ""}
         try:
             columns = inspector.get_columns(table, schema=schema)
         except Exception:
@@ -3711,9 +3782,16 @@ def introspect_table_schema(
         }
     except Exception as exc:
         logger.warning("generic_sql introspect failed", exc_info=True)
+        # Surface the driver's own reason — an operator cannot fix
+        # "OperationalError" with no message attached (QA sqlserver→* routes
+        # all blocked on a bare type name).
+        detail = str(exc).strip()[:300]
         return {
             "ok": False,
-            "error": f"{type(exc).__name__}: SQL schema introspection failed",
+            "error": (
+                f"{type(exc).__name__}: SQL schema introspection failed"
+                + (f" — {detail}" if detail else "")
+            ),
             "columns": [],
             "tables": [],
         }
@@ -6316,7 +6394,8 @@ def write_mapped_rows(
                         dest_tablespaces=list_destination_tablespaces(
                             _fidelity_dialect(dest_db, dialect_name), conn
                         ),
-                        carry_keys=write_mode != "insert",
+                        carry_keys=write_mode != "insert"
+                        or bool(_kwargs.get("carry_source_keys")),
                     )
                     placement_suffix = fidelity_plan.create_suffix
                     table_obj = _build_table_for_write(

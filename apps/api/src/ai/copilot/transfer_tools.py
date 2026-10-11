@@ -114,7 +114,12 @@ def sync_mode_from_phrase(spoken: str, *, default: str = "full_refresh_append") 
     return default
 
 
-def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") -> str:
+def normalize_sync_mode(
+    spoken: str,
+    *,
+    default: str = "full_refresh_append",
+    strict: bool = False,
+) -> str:
     """Pilot-facing wrapper: phrase → sync-mode token, engine-validated.
 
     The Pilot keeps emitting its historical spellings because every engine path
@@ -122,12 +127,29 @@ def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") ->
     is now *checked* against the one canonical table in ``services.sync_cursor``
     before it is returned, so a phrase can no longer resolve to a token the
     engine would quietly ignore and degrade to full-read + insert.
+
+    ``strict=True`` (used when the operator *explicitly* named a mode) refuses
+    an unresolvable token instead of silently changing load semantics — a typo
+    like ``teleport_mode`` must not quietly become ``full_refresh_append``
+    (QA T06: that silently duplicates rows on every re-run).
     """
     from services.sync_cursor import CANONICAL_SYNC_MODES
     from services.sync_cursor import normalize_sync_mode as _canonical
 
+    if strict and (spoken or "").strip():
+        # Passing default=None distinguishes "unrecognized token" from "the
+        # phrase legitimately resolved to the default mode".
+        recognized = sync_mode_from_phrase(spoken, default=None)  # type: ignore[arg-type]
+        if recognized is None or _canonical(recognized, default="") not in CANONICAL_SYNC_MODES:
+            valid = ", ".join(sorted(SYNC_MODES))
+            raise ValueError(
+                f"Unknown sync_mode {spoken!r} — I will not guess the load semantics. "
+                f"Valid modes: {valid}."
+            )
+
     candidate = sync_mode_from_phrase(spoken, default=default)
-    if _canonical(candidate, default=default) not in CANONICAL_SYNC_MODES:
+    canonical = _canonical(candidate, default=default)
+    if canonical not in CANONICAL_SYNC_MODES:
         _LOG.warning(
             "Pilot phrase %r produced sync_mode %r, which no engine mode "
             "accepts; falling back to the non-destructive default %r.",
@@ -257,11 +279,49 @@ def _transfer_decision(preflight: dict[str, Any]) -> str:
     ).strip().lower()
 
 
+def _pii_acknowledgement(raw: dict[str, Any] | None) -> dict[str, str] | None:
+    """Validate the operator's PII/compliance acknowledgement (or None)."""
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("pii_acknowledgement must be an object with approved_by and reason.")
+    approved_by = str(raw.get("approved_by") or "").strip()
+    reason = str(raw.get("reason") or "").strip()
+    if not approved_by or not reason:
+        raise ValueError(
+            "pii_acknowledgement needs approved_by and reason — an unsigned "
+            "acknowledgement cannot clear a PII/compliance review."
+        )
+    _LOG.info("PII/compliance review acknowledged by %s: %s", approved_by, reason)
+    return {"approved_by": approved_by, "reason": reason}
+
+
 def _is_execute_cleared(preflight: dict[str, Any]) -> bool:
     """Same bar as Studio Execute — passed + approve; never local / review-grade."""
     run_id = str(preflight.get("run_id") or "")
     if run_id.startswith("pf_local_"):
         return False
+    # Defense-in-depth (QA T04/T12): a severity=block blocker must override any
+    # stale approve verdict instead of letting safe_to_start stay true beside it.
+    # Root-cause blockers are block-severity by construction even when the
+    # severity field is only in root_causes[].
+    blocking_root_ids = {
+        str(r.get("root_id") or "")
+        for r in preflight.get("root_causes") or []
+        if isinstance(r, dict) and str(r.get("severity") or "").lower() == "block"
+    }
+    for blocker in preflight.get("blockers") or []:
+        if not isinstance(blocker, dict):
+            continue
+        sev = str(
+            blocker.get("severity")
+            or (blocker.get("details") or {}).get("severity")
+            or ""
+        ).lower()
+        if sev == "block":
+            return False
+        if blocking_root_ids and str(blocker.get("id") or "") in blocking_root_ids:
+            return False
     return bool(preflight.get("passed") and _transfer_decision(preflight) == "approve")
 
 
@@ -274,6 +334,41 @@ def _risky_conversions(conversions: list[dict[str, Any]]) -> list[dict[str, Any]
         c for c in conversions
         if str(c.get("fidelity") or "").strip().lower() in _RISKY_FIDELITY
     ]
+
+
+def _stored_as_text(mappings: list[dict[str, Any]], dest_db: str) -> list[dict[str, Any]]:
+    """Typed columns a schemaless destination can only hold as exact text.
+
+    Redis keeps each row as one JSON document: DECIMAL / DATE / TIMESTAMP have
+    no JSON type, so the destination type map stores them as exact text. The
+    value round-trips, but readers get a string — Confirm names it instead of
+    passing it silently as "preserve".
+    """
+    from services.decision_kernel import InventContext, invent_dest_type, normalize_logical_type
+    from services.dest_schema_authority import destination_schema_is_sampled
+
+    if not dest_db or not destination_schema_is_sampled(dest_db):
+        return []
+    text = {"string", "text", "unknown", ""}
+    out: list[dict[str, Any]] = []
+    for m in mappings:
+        src_type = str(m.get("source_type") or m.get("inferred_type") or "")
+        logical = normalize_logical_type(src_type) if src_type else ""
+        if logical in text:
+            continue
+        carrier = invent_dest_type(src_type, dest_db=dest_db, context=InventContext.CREATE_NEW)
+        if normalize_logical_type(str(carrier or "")) not in text:
+            continue
+        column = str(m.get("target") or m.get("target_column") or m.get("source") or "")
+        out.append({
+            "column": column,
+            "source_type": src_type,
+            "note": (
+                f"{dest_db} has no {logical} type: {column} is stored as exact "
+                "JSON text, so readers get a string, not a typed value."
+            ),
+        })
+    return out
 
 
 def _dest_table_exists_tri_state(dst_info: dict[str, Any]) -> bool | None:
@@ -428,6 +523,13 @@ def _stamp_zone_transform(
     return out
 
 
+# risk_acceptance.on_cast_failure → signed contract quarantine_policy.
+_ON_CAST_FAILURE_POLICIES = {
+    "quarantine": "holdout_rejected_rows",
+    "null": "coerce_null",
+}
+
+
 def _sign_required_risk_contracts(
     mappings: list[dict[str, Any]],
     acceptance: dict[str, Any],
@@ -468,6 +570,20 @@ def _sign_required_risk_contracts(
             "Use QUARANTINE_ROW, CAST_AND_CONTINUE, TRANSFORM_AND_CONTINUE, "
             "SKIP_ROW, or STOP_COLUMN."
         )
+    # QA MX3-14: without this the NULL variant of CAST_AND_CONTINUE was
+    # unreachable and the policy behaved exactly like QUARANTINE_ROW.
+    on_cast_failure = str(acceptance.get("on_cast_failure") or "").strip().lower()
+    if on_cast_failure and on_cast_failure not in _ON_CAST_FAILURE_POLICIES:
+        raise ValueError(
+            f"on_cast_failure {on_cast_failure!r} is not supported. Use "
+            "'quarantine' (hold the row out) or 'null' (write NULL). Nothing was signed."
+        )
+    if on_cast_failure and policy not in {"CAST_AND_CONTINUE", "TRANSFORM_AND_CONTINUE"}:
+        raise ValueError(
+            f"on_cast_failure applies only to CAST_AND_CONTINUE / "
+            f"TRANSFORM_AND_CONTINUE, not {policy}. Nothing was signed."
+        )
+    quarantine_policy = _ON_CAST_FAILURE_POLICIES[on_cast_failure or "quarantine"]
     named = {
         str(c).strip()
         for c in (acceptance.get("columns") or [])
@@ -501,6 +617,8 @@ def _sign_required_risk_contracts(
             table=table,
             fidelity=str(row.get("fidelity") or ""),
             transform=row.get("transform"),
+            quarantine_policy=quarantine_policy,
+            expected_nulls=quarantine_policy == "coerce_null",
         )
         row["risk_contract"] = contract.to_dict()
         signed += 1
@@ -565,6 +683,7 @@ def plan_transfer(
     cadence: str = "",
     all_tables: bool = False,
     risk_acceptance: dict[str, Any] | None = None,
+    pii_acknowledgement: dict[str, Any] | None = None,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -622,8 +741,13 @@ def plan_transfer(
     # An omitted mode plus a key means "dedupe this". A mode the operator
     # actually named must stay that mode — a primary key on overwrite is an
     # identity, not permission to switch the run to incremental upsert.
+    # T06: an *explicitly named* mode that resolves to nothing is refused, not
+    # coerced — silently staging full_refresh_append duplicates rows on re-run.
     requested_sync_mode = bool((sync_mode or "").strip())
-    mode = normalize_sync_mode(sync_mode)
+    try:
+        mode = normalize_sync_mode(sync_mode, strict=requested_sync_mode)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
     if callable_plan:
         from services.procedure_source import assert_callable_sync_allowed
 
@@ -686,7 +810,7 @@ def plan_transfer(
         sample_rows = list(src_info.get("sample_rows") or [])
     else:
         try:
-            src_info = _introspect(src_conn, src_table, purpose="source")
+            src_info = _introspect(src_conn, src_table, purpose="source", execute_shape=True)
         except Exception as exc:
             _LOG.warning("plan_transfer source introspect failed: %s", exc, exc_info=True)
             return _tool_result(tool, success=False, error=f"Could not read the source: {exc}")
@@ -783,6 +907,11 @@ def plan_transfer(
     if contracts and contracts[0].get("cursor_inferred"):
         row_rules["cursor_inferred"] = True
 
+    try:
+        pii_ack = _pii_acknowledgement(pii_acknowledgement)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
+
     if risk_acceptance:
         try:
             mappings = _sign_required_risk_contracts(
@@ -820,7 +949,18 @@ def plan_transfer(
         source_read_mode=str((callable_plan or {}).get("mode") or ""),
         source_filter=row_rules["source_filter"] or None,
         stream_contracts=row_rules["stream_contracts"] or None,
+        pii_ack=pii_ack,
     )
+
+    contract_refusal = _plan_contract_refusal(
+        contract_id,
+        require_signed_contract,
+        source_format=str(src_info.get("db_type") or ""),
+        destination_format=str(dst_info.get("db_type") or ""),
+        column_types={r["name"]: r["inferred_type"] for r in src_rows},
+    )
+    if contract_refusal:
+        preflight = _block_plan_on_contract(preflight, contract_refusal)
 
     conversions = _type_conversions(mappings)
     unmapped = [
@@ -899,6 +1039,7 @@ def plan_transfer(
             # Align with Execute unlock — passed alone must not invent safe_to_start.
             "safe_to_start": _is_execute_cleared(preflight),
             **_preview_bound_contract(contract_id, require_signed_contract),
+            **({"contract_blocker": contract_refusal} if contract_refusal else {}),
         },
     )
 
@@ -1269,6 +1410,7 @@ def _run_preflight(
     stream_contracts: list[dict[str, Any]] | None = None,
     source_kind: str = "database",
     known_row_count: int | None = None,
+    pii_ack: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.preflight_run_store import save_preflight_run
@@ -1360,6 +1502,11 @@ def _run_preflight(
             row_count=row_count,
             mappings=mappings,
             destination_connected=bool(dest_probe.get("connected")),
+            # The probe's own reason (e.g. a TLS handshake against a plaintext
+            # Redis) is the operator's fix; "not reachable" alone is not.
+            destination_error=None
+            if dest_probe.get("connected")
+            else (dest_probe.get("error") or dest_probe.get("message") or None),
             sample_rows=sample_rows,
             sync_mode=mode,
             schema_policy=schema_policy,
@@ -1412,6 +1559,9 @@ def _run_preflight(
             contract_primary_key=source_primary_key or None,
             source_filter=source_filter or None,
             stream_contracts=list(stream_contracts or []),
+            compliance_acknowledged=bool(pii_ack),
+            acknowledgment_actor=(pii_ack or {}).get("approved_by", ""),
+            acknowledgment_reason=(pii_ack or {}).get("reason", ""),
         )
         result = apply_policy_gates(
             result,
@@ -1662,6 +1812,61 @@ def _preview_bound_contract(
     return preview
 
 
+def _plan_contract_refusal(
+    contract_id: str = "",
+    require_signed_contract: Any = None,
+    *,
+    source_format: str = "",
+    destination_format: str = "",
+    column_types: dict[str, str] | None = None,
+) -> str:
+    """Why Confirm would refuse this contract bind; ``""`` when it would not.
+
+    Same bind check as staging (QA MX3-02) plus the contract's route/schema
+    compatibility the engine enforces after Confirm (QA MX3-18).
+    """
+    try:
+        _stage_bound_contract(contract_id, require_signed_contract)
+    except ValueError as exc:
+        _LOG.warning("plan_transfer: contract bind %r refused: %s", contract_id, exc)
+        return str(exc)
+    if not str(contract_id or "").strip():
+        return ""
+    from src.transfer.contract_engine import contract_route_refusal
+
+    return contract_route_refusal(
+        contract_id,
+        source_format=source_format,
+        destination_format=destination_format,
+        column_types=column_types,
+    )
+
+
+def _block_plan_on_contract(preflight: dict[str, Any], refusal: str) -> dict[str, Any]:
+    """Turn the plan's verdict into block for a contract bind Confirm refuses."""
+    out = dict(preflight)
+    bundle = dict(out.get("proof_bundle") or {})
+    bundle["transfer_decision"] = {
+        **dict(bundle.get("transfer_decision") or {}),
+        "decision": "block",
+        "reason": refusal,
+    }
+    out["proof_bundle"] = bundle
+    out["blockers"] = [
+        *(out.get("blockers") or []),
+        {
+            "id": "contract_bind",
+            "severity": "block",
+            "message": refusal,
+            "fix": (
+                "Bind a SIGNED contract that matches this route, re-sign the "
+                "contract, or turn off require_signed_contract."
+            ),
+        },
+    ]
+    return out
+
+
 def _stage_bound_contract(
     contract_id: str = "",
     require_signed_contract: Any = None,
@@ -1711,6 +1916,7 @@ def start_transfer(
     cadence: str = "",
     all_tables: bool = False,
     risk_acceptance: dict[str, Any] | None = None,
+    pii_acknowledgement: dict[str, Any] | None = None,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -1740,6 +1946,10 @@ def start_transfer(
         cadence=cadence,
         all_tables=all_tables,
         risk_acceptance=risk_acceptance,
+        pii_acknowledgement=pii_acknowledgement,
+        # The plan evaluates the bound contract against this route (QA MX3-18).
+        contract_id=contract_id,
+        require_signed_contract=require_signed_contract,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)
@@ -1776,10 +1986,15 @@ def start_transfer(
                 "re-run Validate against the API until decision is approve."
             )
         else:
+            reason = str(
+                ((preflight.get("proof_bundle") or {}).get("transfer_decision") or {}).get("reason")
+                or ""
+            ).strip()
             err = (
                 f"Preflight is {decision}-grade, not approve — Confirm is blocked "
                 "until Studio Execute would unlock "
                 + (f"(run {preflight.get('run_id')})." if preflight.get("run_id") else ".")
+                + (f" Reason: {reason}" if reason else "")
             )
         return _tool_result(
             tool,
@@ -1832,6 +2047,12 @@ def start_transfer(
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
     }
+    pii_ack = _pii_acknowledgement(pii_acknowledgement)
+    if pii_ack:
+        # Execute re-runs Validate: the same ack and its trail ride on the job.
+        payload["compliance_acknowledged"] = True
+        payload["acknowledgment_actor"] = pii_ack["approved_by"]
+        payload["acknowledgment_reason"] = pii_ack["reason"]
     try:
         bound = _stage_bound_contract(contract_id, require_signed_contract)
     except ValueError as exc:
@@ -1855,6 +2076,14 @@ def start_transfer(
         "validation_mode": plan.get("validation_mode"),
         "schema_policy": plan.get("schema_policy"),
     }
+    stored_as_text = _stored_as_text(
+        list(plan.get("engine_mappings") or plan.get("mappings") or []),
+        str(destination.get("type") or ""),
+    )
+    if stored_as_text:
+        preview["stored_as_text"] = stored_as_text
+    if pii_ack:
+        preview["pii_acknowledgement"] = dict(pii_ack)
     rules_preview = plan.get("data_rules") or {}
     if rules_preview.get("row_filter"):
         preview["row_filter"] = rules_preview["row_filter"]

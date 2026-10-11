@@ -75,7 +75,7 @@
             "label": "Service principal JSON",
             "type": "textarea",
             "optional": false,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Azure AD application with Storage Blob Data Contributor role.",
             "placeholder": "{\n  \"tenantId\": \"...\",\n  \"clientId\": \"...\",\n  \"clientSecret\": \"...\"\n}"
           },
@@ -151,7 +151,7 @@
             "label": "Service account JSON or file path",
             "type": "textarea",
             "optional": false,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Paste the JSON contents from Google Cloud, or enter an absolute path to the key file on the server.",
             "placeholder": "{\n  \"type\": \"service_account\",\n  ...\n}"
           },
@@ -767,7 +767,7 @@
             "label": "API key",
             "type": "textarea",
             "optional": false,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Enter id:secret for key pairs, or the full encoded key from Elastic Cloud.",
             "placeholder": "id:api_key or encoded API key"
           },
@@ -1040,7 +1040,7 @@
             "label": "Service account JSON or file path",
             "type": "textarea",
             "optional": false,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Paste the JSON contents from Google Cloud, or enter an absolute path to the key file on the server.",
             "placeholder": "{\n  \"type\": \"service_account\",\n  ...\n}"
           },
@@ -1050,6 +1050,42 @@
             "type": "text",
             "optional": false,
             "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "github": {
+    "label": "GitHub",
+    "default_auth_mode": "pat",
+    "auth_modes": [
+      {
+        "value": "pat",
+        "label": "GitHub personal access token",
+        "description": "Programmatic access token. Snowflake sends it as password=.",
+        "fields": [
+          {
+            "key": "owner",
+            "label": "Repository owner",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "repo",
+            "label": "Repository",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "access_token",
+            "label": "Personal access token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
           }
         ]
       }
@@ -1125,7 +1161,7 @@
             "label": "API token",
             "type": "textarea",
             "optional": false,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Paste the hubspot access token. Default object/table used when none is specified: contacts.",
             "placeholder": "Paste access token"
           }
@@ -1194,6 +1230,65 @@
             "optional": true,
             "sensitive": false,
             "placeholder": "analytics"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "intercom": {
+    "label": "Intercom",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Intercom access token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "access_token",
+            "label": "Access token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": []
+  },
+  "jira": {
+    "label": "Jira Cloud",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Jira Cloud API token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "site",
+            "label": "Jira site URL",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "https://your-domain.atlassian.net"
+          },
+          {
+            "key": "email",
+            "label": "Atlassian account email",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "api_token",
+            "label": "API token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
           }
         ]
       }
@@ -1420,7 +1515,7 @@
             "label": "API key / token",
             "type": "textarea",
             "optional": true,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Milvus REST uses Bearer user:pass or a cloud API key.",
             "placeholder": "root:Milvus or Zilliz Cloud API key"
           },
@@ -1947,7 +2042,7 @@
             "label": "API key",
             "type": "textarea",
             "optional": false,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Required. Namespace defaults to the destination table name.",
             "placeholder": "pcsk_…"
           }
@@ -2308,7 +2403,7 @@
             "label": "API token",
             "type": "textarea",
             "optional": false,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Paste the rest_api access token. Default object/table used when none is specified: .",
             "placeholder": "Paste access token"
           },
@@ -2419,7 +2514,7 @@
             "label": "Access token (Bearer)",
             "type": "textarea",
             "optional": false,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Paste a Bearer access token (not username/password). Default object/table used when none is specified: Account.",
             "placeholder": "00D…!AQEA… (session access token)"
           }
@@ -2744,7 +2839,7 @@
             "label": "PKCS#8 private key",
             "type": "textarea",
             "optional": false,
-            "sensitive": false,
+            "sensitive": true,
             "placeholder": "-----BEGIN PRIVATE KEY-----"
           },
           {
@@ -2939,7 +3034,7 @@
             "label": "Secret key",
             "type": "textarea",
             "optional": false,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Paste the Stripe secret key. Default object/table used when none is specified: customers.",
             "placeholder": "sk_..."
           }
@@ -3325,7 +3420,7 @@
             "label": "API key (optional)",
             "type": "textarea",
             "optional": true,
-            "sensitive": false,
+            "sensitive": true,
             "hint": "Required for Weaviate Cloud; optional for local.",
             "placeholder": "Weaviate API key"
           },

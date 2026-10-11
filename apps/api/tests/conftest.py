@@ -38,6 +38,7 @@ def pytest_configure(config):
         "markers",
         "fake_mongo: leftover MERGE uses an in-memory collection (no live Mongo)",
     )
+    config.addinivalue_line("markers", "live: optional live vendor smoke test")
 
 # fakesnow keeps the emulated warehouse in a DuckDB file, and DuckDB allows a
 # single writer per file. Under `pytest -n` every worker would open the same
@@ -208,6 +209,61 @@ def _isolate_cdc_leases(monkeypatch):
     from services.cdc_lease import configure_store
 
     configure_store(backend="memory")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_file_backed_test_stores(monkeypatch, tmp_path, request):
+    """Keep test persistence out of the developer's default data directory."""
+    from services import audit_log, auth_sessions, mcp_invocation_log
+
+    monkeypatch.setattr(
+        audit_log, "STORE_PATH", tmp_path / "audit_events.jsonl"
+    )
+    monkeypatch.setattr(
+        auth_sessions, "_path", lambda: tmp_path / "auth_sessions.json"
+    )
+    monkeypatch.setenv(
+        "DATAFLOW_AUDIT_ANCHOR_STORE",
+        str(tmp_path / "audit_tip_anchors.jsonl"),
+    )
+    monkeypatch.setattr(
+        mcp_invocation_log, "STORE_PATH", tmp_path / "mcp_invocations.jsonl"
+    )
+
+    test_name = request.node.path.name
+    if test_name.startswith("test_mcp"):
+        from services import contract_store, preflight_run_store, schema_registry
+        from src.ai.copilot import result_store
+
+        monkeypatch.setenv(
+            "DATAFLOW_CONTRACTS_PATH", str(tmp_path / "contracts.json")
+        )
+        monkeypatch.setattr(contract_store, "_store_instance", None)
+        monkeypatch.setenv(
+            "DATAFLOW_PILOT_RESULTS_PATH", str(tmp_path / "pilot_results.json")
+        )
+        monkeypatch.setattr(result_store, "_store", None)
+        monkeypatch.setattr(
+            preflight_run_store, "STORE_PATH", tmp_path / "preflight_runs.jsonl"
+        )
+        monkeypatch.setenv(
+            "DATAFLOW_QUALITY_PROFILES_DIR", str(tmp_path / "quality_profiles")
+        )
+        monkeypatch.setattr(
+            schema_registry,
+            "_SCHEMAS_PATH",
+            tmp_path / "schema_registry_schemas.json",
+        )
+        monkeypatch.setattr(
+            schema_registry,
+            "_LINEAGE_PATH",
+            tmp_path / "schema_registry_lineage.json",
+        )
+
+    if test_name.startswith(("test_mcp", "test_scim")):
+        from services import team_store
+
+        monkeypatch.setattr(team_store, "data_dir", lambda: tmp_path)
 
 
 def _is_mongo_reachable() -> bool:

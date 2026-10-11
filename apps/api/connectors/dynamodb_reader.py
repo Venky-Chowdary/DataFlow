@@ -18,7 +18,7 @@ import logging
 import sys
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 from connectors.aws_common import boto3_client
 from connectors.base import ReadBatch
@@ -225,32 +225,30 @@ def estimate_item_count(cfg: dict[str, Any], table: str) -> int:
 
 
 def describe_key_schema(cfg: dict[str, Any], table: str) -> list[dict[str, str]]:
-    """Return Dynamo HASH/RANGE keys as ``[{name, key_type, attr_type}, ...]``.
+    """Return Dynamo HASH/RANGE keys with logical and native scalar types."""
+    return describe_table_key_contract(cfg, table)[0]
 
-    Map/Validate need the identity contract — without it operators invent a PK
-    and Dynamo create-table / upsert demos fail mid-walkthrough.
-    """
+
+def describe_table_key_contract(
+    cfg: dict[str, Any], table: str
+) -> tuple[list[dict[str, str]], dict[str, str]]:
+    """Return parsed table keys and secondary-index scalar constraints."""
     client = boto3_client("dynamodb", cfg)
     resp = client.describe_table(TableName=table)
     table_info = resp.get("Table") or {}
-    attr_defs = {
-        a.get("AttributeName"): a.get("AttributeType", "S")
-        for a in (table_info.get("AttributeDefinitions") or [])
-        if a.get("AttributeName")
-    }
-    keys: list[dict[str, str]] = []
-    for key in table_info.get("KeySchema") or []:
-        name = str(key.get("AttributeName") or "")
-        if not name:
-            continue
-        keys.append(
-            {
-                "name": name,
-                "key_type": str(key.get("KeyType") or "HASH"),
-                "attr_type": _ddb_attr_type(attr_defs.get(name, "S")),
-            }
-        )
-    return keys
+    from connectors.dynamodb_schema import parse_table_description
+
+    schema = parse_table_description(table_info)
+    keys = [
+        {
+            "name": key.name,
+            "key_type": key.key_type,
+            "attr_type": _ddb_attr_type(key.attr_type),
+            "scalar": key.attr_type,
+        }
+        for key in schema.keys
+    ]
+    return keys, dict(schema.index_attributes)
 
 
 def describe_table_schema(cfg: dict[str, Any], table: str) -> tuple[list[str], dict[str, str]]:

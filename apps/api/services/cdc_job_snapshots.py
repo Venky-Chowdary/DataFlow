@@ -126,6 +126,7 @@ def request_snapshot_for_job(
     table: str = "",
     primary_key: str = "",
     chunk_size: int = 1000,
+    row_filter: Any = None,
 ) -> dict[str, Any]:
     from services.cdc_incremental_snapshot import request_incremental_snapshot
 
@@ -144,6 +145,7 @@ def request_snapshot_for_job(
         tbl,
         primary_key=pk,
         chunk_size=chunk_size,
+        row_filter=row_filter,
     )
     row = sig.to_dict()
     row["resolved_source_key"] = ctx["source_key"]

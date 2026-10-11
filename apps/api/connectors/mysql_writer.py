@@ -947,7 +947,8 @@ def write_mapped_rows(
                     table_already_exists=bool(table_existed),
                     dest_table=table_name,
                     dest_schema="",
-                    carry_keys=write_mode != "insert",
+                    carry_keys=write_mode != "insert"
+                    or bool(_kwargs.get("carry_source_keys")),
                 )
             except Exception as exc:  # noqa: BLE001 — planner failure is types-only + certificate
                 logger.warning(
@@ -1330,6 +1331,29 @@ def write_mapped_rows(
                     rejected_details=rejected_details,
                     warnings=transform_errors,
                 )
+            if not table_existed and create_table and write_mode == "upsert":
+                from services.schema_fidelity import mysql_key_compatible_types
+
+                target_types, key_refusal = mysql_key_compatible_types(
+                    table_name=table_name,
+                    conflict_columns=conflict_columns,
+                    target_cols=target_cols,
+                    target_types=target_types,
+                    mappings=mappings,
+                    column_types=column_types,
+                )
+                if key_refusal:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=database,
+                        checksum="",
+                        chunks_completed=0,
+                        error=key_refusal,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
 
             setup_attempt = 0
             setup_started = time.monotonic()

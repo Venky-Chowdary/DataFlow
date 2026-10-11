@@ -127,6 +127,28 @@ def extract_sql_identifiers(sql: str) -> set[str]:
         m.group(1).lower()
         for m in re.finditer(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", scrubbed, flags=re.I)
     }
+    # Bare (non-AS) aliases are equally not schema identifiers:
+    #   FROM orders o / JOIN order_items oi   — token after a relation name
+    #   FROM (...) q / count(*) n             — token after a closing paren
+    #   WITH cte AS (...)                     — the CTE head name is query-defined
+    # Without these exclusions, standard SQL aliases are refused as invented
+    # identifiers (QA R23).
+    aliases.update(
+        m.group(1).lower()
+        for m in re.finditer(
+            r"\b(?:from|join)\s+[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)?\s+([A-Za-z_][\w]*)",
+            scrubbed,
+            flags=re.I,
+        )
+    )
+    aliases.update(
+        m.group(1).lower()
+        for m in re.finditer(r"\)\s*(?:as\s+)?([A-Za-z_][\w]*)", scrubbed, flags=re.I)
+    )
+    aliases.update(
+        m.group(1).lower()
+        for m in re.finditer(r"\b([A-Za-z_][\w]*)\s+as\s*\(", scrubbed, flags=re.I)
+    )
     # date_trunc( and round( are calls. ::numeric is a cast. Neither is a column
     # the catalog would list. A bare `SELECT round FROM t` is still checked.
     function_calls = {

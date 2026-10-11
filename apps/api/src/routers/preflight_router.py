@@ -430,6 +430,8 @@ async def run_preflight(body: PreflightRequest):
             backfill_new_fields=body.backfill_new_fields,
             contract_primary_key=contract_pk,
             destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
+            destination_dynamo_key_schema=dest_meta.get("dynamo_key_schema") or [],
+            destination_dynamo_index_attributes=dest_meta.get("dynamo_index_attributes") or {},
             destination_unique_keys=dest_meta.get("unique_keys") or [],
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
             destination_config=dest_meta.get("_probe_cfg") or None,

@@ -191,8 +191,12 @@ def scan_orphan_anti_join(
     parent_columns: Sequence[Any],
     max_examples: int = MAX_EXAMPLES,
     match: str = "",
+    child_key_columns: Sequence[Any] = (),
 ) -> dict[str, Any]:
     """Anti-join child against parent. ``child_columns`` / ``parent_columns`` are ColumnElements.
+
+    ``child_key_columns`` (the child's own key) adds ``child_examples`` as
+    ``"<child key> -> <missing parent key>"`` so the evidence names the row.
 
     ``match`` is the catalog fact. Empty scans MATCH SIMPLE and does not
     claim the catalog named that type.
@@ -228,13 +232,26 @@ def scan_orphan_anti_join(
             sa.select(*child_columns).select_from(joined).where(where).limit(max_examples)
         ).fetchall()
     ]
-    return {
+    out = {
         "available": True,
         "orphan_count": count,
         "examples": examples,
         "match": effective,
         "match_reported": kind in {"simple", "full"},
     }
+    keys = [k for k in child_key_columns if k is not None]
+    if count and keys:
+        width = len(keys)
+        out["child_examples"] = [
+            f"{orphan_example_text(row[:width])} -> {orphan_example_text(row[width:])}"
+            for row in conn.execute(
+                sa.select(*keys, *child_columns)
+                .select_from(joined)
+                .where(where)
+                .limit(max_examples)
+            ).fetchall()
+        ]
+    return out
 
 
 def _split_table(qualified: str, default_schema: str | None) -> tuple[str | None, str]:

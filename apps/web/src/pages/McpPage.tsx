@@ -14,6 +14,9 @@ import {
   cursorMcpSnippet,
   customGptMcpSnippet,
   mcpHttpUrl,
+  mcpLogStatusLabel,
+  mcpLogTone,
+  remoteMcpSnippet,
   vscodeMcpSnippet,
 } from "../lib/mcpClientConfig";
 import { API_BASE } from "../lib/types";
@@ -48,6 +51,13 @@ function mcpIntegrations(url: string) {
       desc: "Action pointing at tools/call. Staging returns an ack_id; confirm_action finishes it.",
       snippet: customGptMcpSnippet(url),
     },
+    {
+      id: "remote",
+      label: "Grok and other remote clients",
+      icon: "connectors",
+      desc: "Any client that speaks MCP Streamable HTTP. Same endpoint and key.",
+      snippet: remoteMcpSnippet(url),
+    },
   ];
 }
 
@@ -57,7 +67,10 @@ type McpLog = {
   ts: number;
   tool: string;
   client: string;
+  actor: string | null;
   status: "ok" | "error";
+  errorKind: string | null;
+  error: string | null;
   ms: number;
 };
 
@@ -87,7 +100,10 @@ export function McpPage() {
               ts: new Date(r.time).getTime(),
               tool: r.tool,
               client: r.client,
+              actor: r.actor ?? null,
               status: r.status === "ok" ? "ok" : "error",
+              errorKind: r.error_kind ?? null,
+              error: r.error ?? null,
               ms: r.ms,
             })),
           ),
@@ -136,6 +152,11 @@ export function McpPage() {
                 {online
                   ? "Paste this absolute URL into the client. Add the workspace API key as Authorization: Bearer. create_connector, start_transfer, and create_schedule return an ack_id; confirm_action finishes the change."
                   : "Endpoint not responding. Start the API, then retry setup."}
+              </span>
+              <span className="df2-mcp-endpoint-meta" data-testid="mcp-access-guide">
+                Access follows the key's role and scopes. Viewer: read-only tools. Operator: run and
+                cancel jobs, no new connectors or plans. Editor: every tool except delete_connector.
+                Admin: every tool. Create a key with only the scopes the client needs under Settings → API keys.
               </span>
             </div>
             <div className="df2-mcp-endpoint-actions">
@@ -226,7 +247,7 @@ export function McpPage() {
                       <tr>
                         <th>Time</th>
                         <th>Tool</th>
-                        <th>Client</th>
+                        <th>Client / caller</th>
                         <th>Status</th>
                         <th>Latency</th>
                       </tr>
@@ -258,14 +279,23 @@ export function McpPage() {
                             <td>
                               <code>{log.tool}</code>
                             </td>
-                            <td>{log.client}</td>
+                            <td>
+                              {log.client}
+                              {log.actor && log.actor !== log.client ? (
+                                <span className="df2-mcp-log-actor" title={log.actor}>
+                                  {log.actor}
+                                </span>
+                              ) : null}
+                            </td>
                             <td>
                               <span
-                                className={`df2-mcp-log-status df2-mcp-log-status--${
-                                  log.status === "ok" ? "ok" : "err"
-                                }`}
+                                className={`df2-mcp-log-status df2-mcp-log-status--${mcpLogTone(
+                                  log.status,
+                                  log.errorKind,
+                                )}`}
+                                title={log.error ?? undefined}
                               >
-                                {log.status === "ok" ? "200" : "500"}
+                                {mcpLogStatusLabel(log.status, log.errorKind)}
                               </span>
                             </td>
                             <td>{log.ms} ms</td>

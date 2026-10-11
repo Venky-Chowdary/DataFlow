@@ -45,7 +45,7 @@ Move schemas and data across heterogeneous engines **with fail-closed type fidel
 
 ### Debezium / Estuary / Qlik Replicate / GoldenGate
 - **Strengths:** Streaming CDC transport maturity (replication connections, lag curves).
-- **Gaps vs us:** Not migration-assurance UI + type invent + Map/Validate Decision Artifact. Our CDC is **correct at-least-once semantics** today; transport is still peek-poll (Phase F streaming). Do not claim Debezium parity until F4 exits.
+- **Gaps vs us:** Not migration-assurance UI + type invent + Map/Validate Decision Artifact. Our CDC is **correct at-least-once semantics** today; PostgreSQL transport is `START_REPLICATION` streaming by default with peek fallback (F4, live-proven on PG; see `KEYSET_AND_BULK_IO.md`). Still do not claim Debezium parity: AG/DG dual-node failover and Oracle/SQL Server live matrices remain open.
 
 ### Airbyte / Fivetran (secondary)
 - **Hired for:** Land many SaaS APIs into a warehouse with minimal engineering.
@@ -74,3 +74,46 @@ Move schemas and data across heterogeneous engines **with fail-closed type fidel
 | Catalog honesty | `enrich_catalog_entry` / `catalog_summary.unique_drivers` |
 | Buyer pack | `docs/BUYER_EVIDENCE_PACK.md` |
 | Scope | `docs/PRODUCT_SCOPE.md` |
+
+## G-VEC: Vector / AI-ready
+
+**Parity score:** Datawrap **5/10** vs Airbyte/Fivetran **6/10**.
+
+| Capability | Status | Evidence test file | Verified-live engine |
+| --- | --- | --- | --- |
+| pgvector source-id btree / optional HNSW indexes and vector / halfvec storage | M7 live coverage; default remains `vector` with no HNSW index | `apps/api/tests/test_pgvector_m7_live.py` | pgvector extension 0.8.7 at `:5434` |
+| Stable vector writes, unchanged-document skip, fingerprints, usage, verified delete and stale cleanup | Live writer contracts cover only the named engines; Milvus was not available | `apps/api/tests/test_vector_m6_live.py`, `apps/api/tests/test_vector_document_skip.py`, `apps/api/tests/test_vector_fingerprint_live.py` | Weaviate 1.26.6; Pinecone Local `v1.0.0.rc0`; pgvector and Qdrant have separate live suites |
+| CDC document-key delete, cleanup and redelivery | End-to-end proof is at-least-once and currently limited to pgvector and Qdrant | `apps/api/tests/test_cdc_postgres_vector_live.py` | pgvector `:5434`; Qdrant `:6335` |
+| Embedding provider routing and usage accounting | Paid-provider tests use fake responses; deterministic hash embeddings are used for live writer tests | `apps/api/tests/test_embedding_providers.py` | pgvector, Qdrant, Weaviate, Pinecone Local (hash model only) |
+| Chunking strategies and safe record templates | Unit coverage uses injected tokenizers; real tiktoken has not been tested | `apps/api/tests/test_document_chunking.py`, `apps/api/tests/test_vector_template.py` | No live embedding provider |
+| Run-detail embedding usage estimate | Component-rendered summary with a test for tokens, calls and estimated cost | `apps/web/src/components/transfer/EmbeddingUsageSummary.test.tsx` | No engine required; not an engine-live capability |
+
+Gaps keeping Datawrap below parity:
+- Paid providers are tested only against fake responses.
+- Milvus has not run live; Pinecone evidence is Pinecone Local only.
+- CDC for Weaviate, Pinecone, and Milvus has not run end to end.
+- No managed rerank or hybrid search.
+- The rate limiter is process-local.
+- Token chunking has not been tested with real tiktoken.
+
+CDC is at-least-once; exactly-once is not claimed. No retrieval-quality claim is made.
+
+## G-CONN M5: SDK source breadth and transfer evidence
+
+For this connector slice, Datawrap is **6/10** versus **Airbyte/Fivetran at 9/10**. Named evidence is synthetic: `apps/api/tests/test_gconn_sdk_transfer_routing.py` verifies descriptor-driven routing and source-only catalog enrichment; `apps/api/tests/test_gconn_sdk_transfer_e2e.py` exercises GitHub/Jira full-reread PK upsert and Intercom's fresh-destination paginated read. The SDK matrix does not establish live vendor compatibility, quotas, real-volume throughput, or destination-role readiness.
+
+The increment is three SDK sources (GitHub, Jira, Intercom) plus the existing HubSpot SDK source—not parity with the hundreds of connectors available from Airbyte/Fivetran. Catalog enrichment remains `beta` / `source_only`; transfer capabilities are full-refresh-only. The existing-destination epoch remap is fixed and tested for the SQLite physical-carrier path. SDK `resume=True` is refused before side effects and remains unsupported until whole-population Gate-8 reconciliation is implemented. The named engine E2Es and limits are recorded in `docs/CONNECTOR_CERTIFICATION.md` under **Known engine gaps (G-CONN M5)**.
+
+## G-LAKE: Iceberg / lakehouse (M6)
+
+DataWrap's lakehouse score remains **6/10**. Proposed 7/10 pending runtime exactly-once enablement; not raised.
+
+| System | Iceberg commit/write pattern | DataWrap comparison and test evidence | Sources |
+| --- | --- | --- | --- |
+| Kafka Connect Iceberg sink | Coordinator commits; source offsets are stored in snapshot summaries for exactly-once recovery. | DataWrap mirrors the watermark into the snapshot summary and table properties, fences stale writers, and auto-selects the existing exactly-once seam for catalog-backed Iceberg; filesystem Iceberg remains at-least-once (`tests/test_iceberg_eos.py::test_apply_mirrors_watermark_properties_and_snapshot_summary`, `tests/test_iceberg_eos.py::test_zombie_writer_redecides_after_fence_steal`, `tests/test_iceberg_eos_routing.py::test_catalog_iceberg_auto_route_and_preflight_select_exactly_once`, `tests/test_iceberg_eos_live_pg.py::test_live_pg_cdc_auto_routes_through_transfer_eos`). | [Kafka Connect sink](https://iceberg.apache.org/docs/nightly/kafka-connect/); [Coordinator.java](https://github.com/apache/iceberg/blob/main/kafka-connect/kafka-connect/src/main/java/org/apache/iceberg/connect/channel/Coordinator.java) |
+| Flink Iceberg sink | Checkpoint/job IDs are recorded in snapshot summaries; recovery walks snapshot ancestry. | DataWrap's table-property watermark remains available after snapshot expiry (`tests/test_iceberg_eos.py::test_watermark_survives_snapshot_expiration`, `tests/test_iceberg_maintenance.py::test_m2_watermark_resolves_after_m5_expiration`). | [SinkUtil.java](https://github.com/apache/iceberg/blob/main/flink/v2.0/flink/src/main/java/org/apache/iceberg/flink/sink/SinkUtil.java); [recovery issue #14090](https://github.com/apache/iceberg/issues/14090) |
+| Fivetran Managed Data Lake | Copy-on-write updates with managed snapshot and orphan-file maintenance. | DataWrap's catalog path is copy-on-write and guards snapshot expiry; compaction and orphan removal remain unsupported (`tests/test_iceberg_eos.py::test_registry_describes_filesystem_and_catalog_delete_paths`, `tests/test_iceberg_maintenance.py::test_expiry_preserves_current_tag_and_newest_and_rejects_expired_id`, `tests/test_iceberg_maintenance.py::test_compaction_and_orphan_removal_are_typed_unsupported_operations`). | [Managed Data Lake](https://fivetran.com/docs/managed-data-lake-service); [copy-on-write strategy](https://fivetran.com/docs/managed-data-lake-service/troubleshooting/copy-on-write-update-strategy) |
+| Airbyte S3 Data Lake | Merge-on-read equality deletes avoid rewriting data files. | DataWrap keeps catalog writes copy-on-write; equality-delete behavior is confined to the filesystem path (`tests/test_iceberg_eos.py::test_registry_describes_filesystem_and_catalog_delete_paths`). | [S3 Data Lake docs](https://docs.airbyte.com/integrations/destinations/s3-data-lake); [PR 82749](https://github.com/airbytehq/airbyte/pull/82749) |
+| Snowflake Iceberg tables | Uses position deletes (v2) or deletion vectors (v3), not equality deletes. | DataWrap's catalog writer uses copy-on-write rather than equality-delete merge-on-read; no Snowflake live compatibility claim is made (`tests/test_iceberg_eos.py::test_registry_describes_filesystem_and_catalog_delete_paths`). | [Snowflake Iceberg table management](https://docs.snowflake.com/en/user-guide/tables-iceberg-manage) |
+
+**Scope limits:** DataWrap does not ship a Delta Lake writer; Databricks reads Iceberg through UniForm/federation, which is not native Delta support (`tests/test_first_party_capability_contract.py::test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors`). Glue, Hive, Nessie, and Polaris catalogs, throughput at scale, and live catalog 5xx recovery remain unverified (`tests/test_iceberg_commit.py::test_live_rest_concurrent_upserts_keep_one_row_per_key`, `tests/test_iceberg_commit.py::test_unknown_commit_is_recovered_by_commit_id`).

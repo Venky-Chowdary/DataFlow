@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import ssl
 from typing import Any, Callable
 
 from services.value_serializer import json_default
@@ -23,7 +22,6 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     mapped_row_to_json_record,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -248,16 +246,9 @@ def _producer(cfg: dict[str, Any], *, schema_id: int | None = None):
         "acks": "all",
         "retries": 3,
     }
-    security = str(cfg.get("schema") or cfg.get("security_protocol") or "").upper()
-    username = str(cfg.get("username") or "")
-    password = str(cfg.get("password") or cfg.get("api_key") or "")
-    if username and password:
-        kwargs["security_protocol"] = security if security in {"SASL_SSL", "SASL_PLAINTEXT"} else "SASL_SSL"
-        kwargs["sasl_mechanism"] = str(cfg.get("database") or "PLAIN")  # PLAIN | SCRAM-SHA-256
-        kwargs["sasl_plain_username"] = username
-        kwargs["sasl_plain_password"] = password
-        if kwargs["security_protocol"] == "SASL_SSL":
-            kwargs["ssl_context"] = ssl.create_default_context()
+    from services.copy_kafka_common import kafka_sasl_kwargs
+
+    kwargs.update(kafka_sasl_kwargs(cfg))
     return KafkaProducer(**kwargs)
 
 

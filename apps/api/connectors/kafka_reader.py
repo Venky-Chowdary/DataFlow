@@ -43,7 +43,11 @@ def accepted_kafka_configs(kwargs: dict[str, Any], accepted: set[str] | None) ->
 
 
 def _consumer_configs(cfg: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"bootstrap_servers": _bootstrap(cfg)}
+    # SASL login is mapped once for every kafka-python client; a consumer
+    # without it never authenticates and the broker only "times out" (MX1-03).
+    from services.copy_kafka_common import kafka_client_kwargs
+
+    kwargs: dict[str, Any] = kafka_client_kwargs(cfg)
     kwargs.update(extra)
     try:
         from kafka import KafkaConsumer

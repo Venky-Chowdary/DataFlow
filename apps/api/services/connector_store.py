@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from services.platform_config import data_dir
+from services.secret_config import mask_secrets_in_text
 from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
 
 _CONNECTOR_SECRET_KEYS = (
@@ -38,6 +39,25 @@ STORE_PATH = data_dir() / "connectors.json"
 
 logger = logging.getLogger(__name__)
 
+
+class ConnectorStoreError(RuntimeError):
+    """The configured connector store failed a write; nothing was saved."""
+
+
+def _mongo_write_failed(op: str, connector_id: str, exc: Exception) -> ConnectorStoreError:
+    # Mongo is the system of record once selected: a local-file fallback would
+    # report success, leave Mongo unchanged and put credentials on local disk.
+    # The full driver error stays in the server log; pymongo messages can carry
+    # hosts and URI fragments, so the operator-facing text is credential-masked.
+    logger.error(
+        "MongoDB %s failed for connector %s; refusing file-store fallback",
+        op, connector_id or "<new>", exc_info=exc,
+    )
+    return ConnectorStoreError(
+        f"Connector {op} failed in MongoDB (the configured connector store); "
+        f"nothing was saved: {_mask_conn_str(str(exc))}"
+    )
+
 # Databases / warehouses / object stores that are valid as source *and* destination.
 # Catalog UI may pass role=source|destination from the filter tab — that must not
 # lock the saved profile into a one-sided capability.
@@ -57,6 +77,23 @@ _BIDIRECTIONAL_TYPES = frozenset({
 def normalize_connector_role(connector_type: str, role: str | None) -> str:
     """Return a persisted topology role. Dual-use types always store ``both``."""
     t = (connector_type or "").strip().lower()
+    # The capability registry is the topology authority — a dest-only driver
+    # (pgvector, qdrant, weaviate, pinecone, milvus) must not persist ``both``
+    # however the caller spelled its role (QA C09: test_connector reported
+    # role=both for pgvector while the driver declares read=False).
+    try:
+        from src.transfer.connector_capabilities import (
+            _declared_capabilities,
+            resolve_driver_type,
+        )
+
+        caps = _declared_capabilities(resolve_driver_type(t) or t)
+        if caps.get("dest_only") or caps.get("write") and not caps.get("read"):
+            return "destination"
+        if caps.get("source_only") or caps.get("read") and not caps.get("write"):
+            return "source"
+    except Exception:
+        pass
     if t in _BIDIRECTIONAL_TYPES:
         return "both"
     r = (role or "both").strip().lower()
@@ -540,7 +577,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
             coll.insert_one(_connector_to_doc(conn))
             return conn
         except Exception as exc:
-            logger.warning("MongoDB create_connector failed, falling back to file: %s", exc)
+            raise _mongo_write_failed("create", conn.id, exc) from exc
 
     connectors = _load_all()
     connectors.append(conn)
@@ -593,7 +630,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             coll.replace_one({"_id": connector_id}, _connector_to_doc(updated))
             return updated
         except Exception as exc:
-            logger.warning("MongoDB update_connector failed, falling back to file: %s", exc)
+            raise _mongo_write_failed("update", connector_id, exc) from exc
 
     connectors = _load_all()
     for i, c in enumerate(connectors):
@@ -618,7 +655,7 @@ def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool
             result = coll.delete_one(query)
             return result.deleted_count > 0
         except Exception as exc:
-            logger.warning("MongoDB delete_connector failed, falling back to file: %s", exc)
+            raise _mongo_write_failed("delete", connector_id, exc) from exc
 
     connectors = _load_all()
     before = len(connectors)
@@ -798,6 +835,4 @@ def mask_connector(c: SavedConnector) -> dict[str, Any]:
 
 
 def _mask_conn_str(s: str) -> str:
-    import re
-
-    return re.sub(r":([^:@/]+)@", ":****@", s)
+    return mask_secrets_in_text(s)

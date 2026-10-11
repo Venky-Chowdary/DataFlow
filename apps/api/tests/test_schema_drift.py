@@ -157,7 +157,7 @@ def test_soft_drop_net_additive_under_propagate():
     assert any(s.get("kind") == "drop" for s in evo["soft_net_additive"])
     assert evo["action"] in {"propagate", "continue"}
 
-def test_warns_on_unmapped_destination_columns():
+def test_unmapped_destination_column_without_history_warns_not_review():
     report = detect_schema_drift(
         source_columns=["id"],
         source_schema={"id": "INTEGER"},
@@ -168,6 +168,28 @@ def test_warns_on_unmapped_destination_columns():
     )
     assert report["orphan_targets"] == ["legacy_flag"]
     assert report["severity"] == "warning"
+    assert "1 destination column(s) are unmapped" in report["issues"]
+    assert report["schema_evolution"]["action"] != "review"
+    assert report["schema_evolution"]["should_pause"] is False
+
+
+def test_previously_fed_destination_column_is_drop_review():
+    report = detect_schema_drift(
+        source_columns=["id"],
+        source_schema={"id": "INTEGER"},
+        target_columns=["id", "legacy_flag"],
+        target_schema={"id": "INTEGER", "legacy_flag": "BOOLEAN"},
+        mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
+        table_exists=True,
+        previous_source_columns=["id", "legacy_flag"],
+        previous_source_schema={"id": "INTEGER", "legacy_flag": "BOOLEAN"},
+    )
+    assert report["orphan_targets"] == ["legacy_flag"]
+    assert report["schema_evolution"]["action"] == "review"
+    assert any(
+        change.get("kind") == "drop"
+        for change in report["schema_evolution"]["soft_net_additive"]
+    )
 
 
 def test_ignores_case_only_target_name_differences():
@@ -562,6 +584,34 @@ def test_a_transformed_carrier_is_graded_and_the_declared_one_fingerprinted():
     assert report["schema_evolution"]["hard_breaking"] == []
     assert not report["source_changed"]
     assert not report["drift_detected"]
+
+
+def test_unchanged_saved_contract_does_not_report_type_narrowing_as_drift():
+    from services.schema_fingerprint import fingerprint_schema
+
+    cols = ["note"]
+    source_schema = {"note": "TEXT"}
+    target_schema = {"note": "VARCHAR(64)"}
+    report = detect_schema_drift(
+        source_columns=cols,
+        source_schema=source_schema,
+        declared_source_columns=cols,
+        declared_source_schema=source_schema,
+        target_columns=cols,
+        target_schema=target_schema,
+        mappings=[{"source": "note", "target": "note", "confidence": 1.0}],
+        destination_db_type="mysql",
+        table_exists=True,
+        stored_source_fp=fingerprint_schema(cols, source_schema),
+        stored_target_fp=fingerprint_schema(cols, target_schema),
+    )
+
+    assert report["source_changed"] is False
+    assert report["target_changed"] is False
+    assert not any(
+        item.get("kind") == "narrow_type"
+        for item in report["schema_evolution"]["hard_breaking"]
+    )
 
 
 def test_an_unshaped_narrowing_is_still_blocked():

@@ -69,11 +69,12 @@ def test_native_snapshot_handoff_and_capture_resolve() -> None:
     cur.description = [("id",), ("amount",)]
     # resolve capture, max_lsn, schema columns, page1, page2, empty
     cur.fetchone.side_effect = [
-        ("dbo_orders",),  # resolve
         (bytes.fromhex("0abc"),),  # max lsn
         (bytes.fromhex("0abc"),),  # min lsn (floor)
+        (bytes.fromhex("0abc"),),  # capture start lsn
     ]
     cur.fetchall.side_effect = [
+        [("dbo_orders", bytes.fromhex("0abc"))],  # resolve capture instances
         [],  # captured_columns
         [("1", "10"), ("2", "20")],
         [("3", "30")],
@@ -122,11 +123,12 @@ def test_native_poll_ops_1_2_4() -> None:
     ]
     # resolve capture, min_lsn (arg eval), max_lsn, then change rows
     cur.fetchone.side_effect = [
-        ("dbo_orders",),
+        (1,),  # capture instance exists
         (bytes.fromhex("0a"),),  # min_lsn ≤ resume
         (bytes.fromhex("0c"),),  # max_lsn
     ]
     cur.fetchall.side_effect = [
+        [("dbo_orders", bytes.fromhex("0a"))],  # resolve capture instances
         [],  # captured_columns
         [
             (lsn, bytes.fromhex("01"), 2, "3", "30"),
@@ -283,6 +285,8 @@ def test_mssql_shared_poll_demuxes_two_tables() -> None:
     cur.fetchone.side_effect = [
         ("dbo_orders",),
         ("dbo_users",),
+        (1,),  # orders capture exists
+        (1,),  # users capture exists
         (bytes.fromhex("0a"),),  # min orders
         (bytes.fromhex("0a"),),  # min users
         (bytes.fromhex("0b"),),  # max_lsn
@@ -348,6 +352,7 @@ def test_snapshot_handoff_clamps_to_capture_min_lsn() -> None:
     cur.fetchone.side_effect = [
         (bytes.fromhex("0a"),),  # max_lsn below floor
         (bytes.fromhex("0b"),),  # capture min_lsn
+        (bytes.fromhex("0b"),),  # capture start_lsn
     ]
     assert cdc._snapshot_handoff_lsn(cur, "dbo_orders") == "0b"
 
@@ -371,6 +376,7 @@ def test_poll_fails_closed_when_resume_before_min_lsn() -> None:
     conn = MagicMock()
     cur = MagicMock()
     cur.fetchone.side_effect = [
+        (1,),  # capture instance exists
         (bytes.fromhex("0b"),),  # min_lsn
     ]
     conn.__enter__ = MagicMock(return_value=conn)

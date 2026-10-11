@@ -746,11 +746,11 @@ def read_source_database(
     cursor_column: str = "",
     cursor_after: Any = None,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import resolve_driver_type, source_read_driver
 
     cfg = resolve_connector_config(endpoint)
     # Prefer the saved connector's driver type over any inline format string.
-    db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
+    db_type = source_read_driver(resolve_driver_type(cfg.get("type") or endpoint.format or ""))
 
     from services.procedure_source import is_callable_source, read_callable_batch
 
@@ -765,6 +765,28 @@ def read_source_database(
             schema = {c: "string" for c in batch.headers}
         return _pack_source_read(
             records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
+
+    from connectors.sdk import get_descriptor, sdk_read_as_matrix
+
+    sdk_descriptor = get_descriptor(db_type)
+    if (
+        sdk_descriptor
+        and "source" in sdk_descriptor.roles
+        and sdk_descriptor.catalog_ids
+    ):
+        stream = endpoint.table or endpoint.collection
+        if not stream:
+            raise ValueError(f"Source {db_type} stream name required")
+        headers, rows, schema, _ = sdk_read_as_matrix(
+            db_type,
+            cfg,
+            stream,
+            limit=limit,
+        )
+        records = [dict(zip(headers, row)) for row in rows]
+        return _pack_source_read(
+            records, headers, schema, stamp_total=stamp_total
         )
 
     if db_type == "postgresql" or db_type == "redshift":

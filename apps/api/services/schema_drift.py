@@ -23,6 +23,7 @@ Execute, schedules, and signed contracts must call :func:`resolve_schema_evoluti
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -35,6 +36,8 @@ from services.decision_kernel import (
 )
 
 # Policies that auto-apply additive field evolution (Airbyte propagate_*).
+_logger = logging.getLogger(__name__)
+
 PROPAGATE_POLICIES = frozenset({"propagate_columns", "propagate_all"})
 
 #: Operator caption — same meaning as Studio ``schemaPolicyHonestyLine``.
@@ -559,20 +562,25 @@ def resolve_schema_evolution(
             "hard_breaking:"
             + ",".join(sorted({str(h.get("kind")) for h in hard}))
         )
-    elif policy == "type_locked" and any(
-        str(a.get("kind")) == "widen_type" for a in additive
-    ):
-        action = "pause"
-        reasons.append("type_locked_blocks_widen")
+    elif policy == "type_locked":
+        # type_locked: block widen_type, review new columns, never auto-propagate
+        if any(str(a.get("kind")) == "widen_type" for a in additive):
+            action = "pause"
+            reasons.append("type_locked_blocks_widen")
+        elif unmapped:
+            action = "review"
+            reasons.append("type_locked_new_columns_need_approval")
+        elif additive or soft:
+            # Other additive changes under type_locked: review, don't auto-propagate.
+            # An identical schema is not a change and must not demand review.
+            action = "review"
+            reasons.append("type_locked_review_required")
     elif policy in PROPAGATE_POLICIES and (additive or soft or unmapped):
         action = "propagate"
         reasons.append(f"auto_propagate under {policy}")
     elif policy == "manual_review" and (additive or soft or unmapped or source_changed):
         action = "review"
         reasons.append("manual_review_keep_existing_mappings")
-    elif policy == "type_locked" and unmapped:
-        action = "review"
-        reasons.append("type_locked_new_columns_need_approval")
 
     severity = "none"
     if hard or action == "pause":
@@ -842,6 +850,13 @@ def detect_schema_drift(
         for c in target_columns
         if c.lower() not in mapped_targets and c.lower() not in system_targets
     ]
+    previously_fed_targets = {
+        str(column).lower()
+        for column in [
+            *(previous_source_columns or []),
+            *((previous_source_schema or {}).keys()),
+        ]
+    }
     if not live_ddl_contract:
         orphan_targets = []
 
@@ -1009,25 +1024,41 @@ def detect_schema_drift(
             }
 
     if type_mismatches:
+        from services.type_system import string_width_would_narrow
+
         classification = classification or {
             "additive": [],
             "breaking": [],
             "severity": "breaking",
             "renamed": [],
         }
+        added_type_breaking = False
         for tm in type_mismatches:
+            kind = (
+                "narrow_type"
+                if tm.get("reason") == "precision_collapse"
+                else "type_change"
+            )
+            if (
+                kind == "narrow_type"
+                and string_width_would_narrow(
+                    str(tm.get("source_type") or ""),
+                    str(tm.get("target_type") or ""),
+                )
+                and not source_changed
+                and not target_changed
+            ):
+                continue
             classification["breaking"].append({
-                "kind": (
-                    "narrow_type"
-                    if tm.get("reason") == "precision_collapse"
-                    else "type_change"
-                ),
+                "kind": kind,
                 "column": tm.get("source"),
                 "old_type": tm.get("source_type"),
                 "new_type": tm.get("target_type"),
                 "target": tm.get("target"),
             })
-        classification["severity"] = "breaking"
+            added_type_breaking = True
+        if added_type_breaking:
+            classification["severity"] = "breaking"
 
     # Intentional subset maps (operator omitted columns) are not schema drift.
     # Only columns that appeared since the previous revision drive evolution.
@@ -1038,6 +1069,40 @@ def detect_schema_drift(
         evolution_unmapped = list(unmapped_sources)
     else:
         evolution_unmapped = []
+
+    # QA MX3-17: a live destination column the source no longer feeds is a
+    # drop, not a soft note — the policy decides (review / pause; propagate
+    # keeps destination history).
+    drop_targets = [
+        column for column in orphan_targets if column.lower() in previously_fed_targets
+    ]
+    if live_ddl_contract and drop_targets:
+        if not isinstance(classification, dict):
+            classification = {
+                "additive": [],
+                "breaking": [],
+                "severity": "none",
+                "renamed": [],
+            }
+        breaking = list(classification.get("breaking") or [])
+        named = {str(b.get("column") or "").lower() for b in breaking}
+        target_types = {str(k).lower(): v for k, v in (target_schema or {}).items()}
+        for col in drop_targets:
+            if col.lower() in named:
+                continue
+            breaking.append({
+                "kind": "drop",
+                "column": col,
+                "old_type": str(target_types.get(col.lower()) or "VARCHAR"),
+                "reason": "destination_column_not_in_source",
+            })
+        classification["breaking"] = breaking
+        classification["severity"] = "breaking"
+        _logger.info(
+            "schema drift: destination column(s) %s not in source — drop under policy %s",
+            drop_targets,
+            schema_policy,
+        )
 
     # A mapped target that is not on the live table is an ADD, not a pass.
     # Preflight used to see no unmapped source and no type mismatch, then

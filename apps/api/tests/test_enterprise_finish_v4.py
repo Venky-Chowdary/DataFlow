@@ -234,9 +234,13 @@ def test_vector_destinations_stream_and_neo4j_is_source_only():
     neo = EndpointConfig(kind="database", format="neo4j")
     assert supports_streaming(neo, pg) is True
     assert supports_streaming(pg, neo) is False
-    for dest in ("pgvector", "pinecone", "milvus"):
+    for dest in ("pinecone", "milvus"):
         assert supports_streaming(pg, EndpointConfig(kind="database", format=dest)) is True
         assert supports_streaming(EndpointConfig(kind="database", format=dest), pg) is False
+    # pgvector reads through the PostgreSQL reader (MX2-12), so it streams both ways.
+    pgv = EndpointConfig(kind="database", format="pgvector")
+    assert supports_streaming(pg, pgv) is True
+    assert supports_streaming(pgv, pg) is True
 
 
 def test_buffered_kafka_read_uses_the_topic_reader(monkeypatch):
@@ -308,7 +312,7 @@ def test_concurrent_fleet_loop_opens_the_pool_before_the_first_claim(monkeypatch
     stop = threading.Event()
     seen: dict = {}
 
-    def claim(_store):
+    def claim(_store, ttl_seconds=60):
         seen["cap"] = wf._fleet_pool_cap
         seen["workers"] = None if wf._fleet_pool is None else wf._fleet_pool._max_workers
         stop.set()
@@ -335,7 +339,7 @@ def test_serial_fleet_loop_does_not_open_a_pool(monkeypatch):
 
     stop = threading.Event()
 
-    def claim(_store):
+    def claim(_store, ttl_seconds=60):
         stop.set()
         return None
 

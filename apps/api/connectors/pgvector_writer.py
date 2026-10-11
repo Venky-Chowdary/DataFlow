@@ -9,7 +9,8 @@ field mapping.
 from __future__ import annotations
 
 import importlib.util
-import json
+import hashlib
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -19,6 +20,8 @@ from services.vectorization import vectorize_records
 
 from connectors.postgresql_conn import get_connection
 from connectors.writer_common import WriteResult as _WriteResult
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,8 +48,6 @@ def _pgvector_live_embedding_dim(
     Uses ``format_type`` so we never guess atttypmod encoding across pgvector
     versions. Missing table/column → ``None`` (caller fail-closed).
     """
-    import re
-
     from psycopg2 import sql
 
     cur.execute(
@@ -69,7 +70,7 @@ def _pgvector_live_embedding_dim(
     if not row or not row[0]:
         return None
     formatted = str(row[0]).lower().replace(" ", "")
-    match = re.search(r"vector\((\d+)\)", formatted)
+    match = re.fullmatch(r"(?:vector|halfvec)\((\d+)\)", formatted)
     if not match:
         # Unbounded vector / non-vector type — refuse invent.
         return None
@@ -78,6 +79,155 @@ def _pgvector_live_embedding_dim(
     except (TypeError, ValueError):
         return None
     return dim if dim > 0 else None
+
+
+def _pgvector_live_embedding_storage(
+    cur: Any,
+    schema: str,
+    table_name: str,
+    *,
+    column: str = "embedding",
+) -> str | None:
+    from psycopg2 import sql
+
+    cur.execute(
+        sql.SQL(
+            """
+            SELECT format_type(a.atttypid, a.atttypmod)
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND a.attname = %s
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            """
+        ),
+        (schema, table_name, column),
+    )
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return None
+    match = re.fullmatch(r"(vector|halfvec)\(\d+\)", str(row[0]).lower().replace(" ", ""))
+    return match.group(1) if match else None
+
+
+def _pgvector_extension_version(cur: Any) -> tuple[int, int, int] | None:
+    cur.execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return None
+    match = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", str(row[0]).strip())
+    return (
+        (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
+        if match
+        else None
+    )
+
+
+def _pgvector_storage_version_error(cur: Any, storage: str) -> str | None:
+    if storage != "halfvec":
+        return None
+    version = _pgvector_extension_version(cur)
+    if version is None:
+        return "Could not determine the installed pgvector extension version."
+    if version < (0, 7, 0):
+        return (
+            f"halfvec storage requires pgvector 0.7.0 or newer; found "
+            f"{'.'.join(map(str, version))}. Upgrade pgvector or use vector storage."
+        )
+    return None
+
+
+def _pgvector_integer_option(
+    value: Any,
+    *,
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if value is None:
+        parsed = default
+    elif isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+    elif isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"[0-9]+", value.strip()):
+        parsed = int(value.strip())
+    else:
+        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+    if not minimum <= parsed <= maximum:
+        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+    return parsed
+
+
+def _pgvector_index_name(schema: str, table_name: str, kind: str) -> str:
+    digest = hashlib.sha256(f"{schema}\x1f{table_name}\x1f{kind}".encode()).hexdigest()[:10]
+    prefix = re.sub(r"[^A-Za-z0-9_]", "_", f"dfv_{kind}_{table_name}")[:50]
+    return f"{prefix}_{digest}"
+
+
+def _pgvector_ensure_source_index(cur: Any, schema: str, table_name: str) -> None:
+    from psycopg2 import sql
+
+    schema_id = sql.Identifier(schema)
+    table_id = sql.Identifier(table_name)
+    cur.execute(
+        sql.SQL("ALTER TABLE {}.{} ADD COLUMN IF NOT EXISTS source_id TEXT").format(
+            schema_id, table_id
+        )
+    )
+    cur.execute(
+        sql.SQL("CREATE INDEX IF NOT EXISTS {} ON {}.{} USING btree (source_id)").format(
+            sql.Identifier(_pgvector_index_name(schema, table_name, "source")),
+            schema_id,
+            table_id,
+        )
+    )
+
+
+def _pgvector_ensure_hnsw_index(
+    cur: Any,
+    schema: str,
+    table_name: str,
+    *,
+    storage: str,
+    m: int,
+    ef_construction: int,
+) -> str | None:
+    from psycopg2 import sql
+
+    version = _pgvector_extension_version(cur)
+    if version is None or version < (0, 5, 0):
+        found = ".".join(map(str, version)) if version else "unknown"
+        return (
+            f"HNSW indexing requires pgvector 0.5.0 or newer; found {found}. "
+            "Upgrade pgvector or set vector_index to none."
+        )
+    live_storage = _pgvector_live_embedding_storage(cur, schema, table_name)
+    if live_storage != storage:
+        return (
+            f"pgvector embedding column uses {live_storage or 'an unsupported type'}, "
+            f"but vector_storage is {storage}. Use a new table or restore the "
+            "stored vector_storage setting."
+        )
+    operator_class = "halfvec_cosine_ops" if storage == "halfvec" else "vector_cosine_ops"
+    cur.execute(
+        sql.SQL(
+            "CREATE INDEX IF NOT EXISTS {} ON {}.{} USING hnsw "
+            "(embedding {}) WITH (m = {}, ef_construction = {})"
+        ).format(
+            sql.Identifier(_pgvector_index_name(schema, table_name, "hnsw")),
+            sql.Identifier(schema),
+            sql.Identifier(table_name),
+            sql.SQL(operator_class),
+            sql.Literal(m),
+            sql.Literal(ef_construction),
+        )
+    )
+    return None
 
 
 def pgvector_extension_unavailable_reason(exc: BaseException) -> str | None:
@@ -199,6 +349,8 @@ def _exec_schema_table(
     table_name: str,
     dimension: int,
     extras: list[tuple[str, str]] | None = None,
+    *,
+    vector_storage: str = "vector",
 ) -> None:
     from psycopg2 import sql
 
@@ -211,6 +363,11 @@ def _exec_schema_table(
         if named:
             raise RuntimeError(named) from exc
         raise
+    if vector_storage not in {"vector", "halfvec"}:
+        raise ValueError("vector_storage must be 'vector' or 'halfvec'")
+    storage_error = _pgvector_storage_version_error(cur, vector_storage)
+    if storage_error:
+        raise RuntimeError(storage_error)
     cur.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(schema_id))
     # Literal double braces in SQL so psycopg2.sql does not treat '{}' as a format placeholder.
     cur.execute(
@@ -219,14 +376,14 @@ def _exec_schema_table(
             CREATE TABLE IF NOT EXISTS {}.{} (
                 id TEXT PRIMARY KEY,
                 content TEXT,
-                embedding vector(%s),
+                embedding {}(%s),
                 metadata JSONB DEFAULT '{{}}',
                 source_id TEXT,
                 chunk_index INT DEFAULT 0,
                 created_at TIMESTAMP DEFAULT now()
             )
             """
-        ).format(schema_id, table_id),
+        ).format(schema_id, table_id, sql.SQL(vector_storage)),
         (dimension,),
     )
     for name, ddl in extras or []:
@@ -252,12 +409,13 @@ def _pgvector_gate_existing_physical(
     schema: str,
     table_name: str,
     mapped_targets: list[str],
+    mapped_value_types: dict[str, str] | None,
     studio_live: dict[str, Any] | None,
     studio_typed_all: bool,
 ) -> tuple[bool, dict[str, str] | None, str | None]:
-    """Probe existing pgvector table DDL before Map bind.
+    """Probe the existing table and resolve write-time field types.
 
-    Returns ``(table_existed, destination_column_types|None, error|None)``.
+    Returns ``(table_existed, write_types|None, error|None)``.
     """
     from connectors.postgresql_writer import _fetch_pg_column_types
     from connectors.writer_common import require_physical_types_for_existing_table
@@ -278,7 +436,12 @@ def _pgvector_gate_existing_physical(
     )
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT to_regclass(%s)", (f"{sch}.{table_name}",))
+            from connectors.sql_identifiers import pg_regclass_literal
+
+            cur.execute(
+                "SELECT to_regclass(%s)",
+                (pg_regclass_literal(sch, table_name),),
+            )
             existed = cur.fetchone()[0] is not None
             if not existed:
                 # Create-new: any Studio (incl. partial) → prepare fail-closes;
@@ -336,13 +499,10 @@ def _pgvector_gate_existing_physical(
                 )
                 if phys_err:
                     return True, None, phys_err
-            # Every remaining mapped field is carried by the table's ``metadata``
-            # JSONB column, so name that carrier rather than leaving a gap. The
-            # gap read as "no physical type for this column" to the downstream
-            # coverage check, which refused the whole write — on a table where
-            # those fields were never meant to be columns. JSONB is the true
-            # carrier here and imposes no width or precision limit, so the
-            # per-cell truncation checks it feeds are correctly no-ops.
+            # Remaining mapped fields are JSONB payload members, but the JSONB
+            # carrier type is not the member's logical type. Preserve the Map/
+            # source type so text members stay text instead of being JSON-quoted.
+            mapped_value_types = mapped_value_types or {}
             for col in mapped_targets:
                 if not col or str(col).lower() == "embedding":
                     continue
@@ -352,7 +512,11 @@ def _pgvector_gate_existing_physical(
                     or effective.get(str(col).upper())
                 ):
                     continue
-                effective[col] = "JSONB"
+                effective[col] = str(
+                    mapped_value_types.get(col)
+                    or mapped_value_types.get(str(col).lower())
+                    or "TEXT"
+                )
             return True, effective, None
     finally:
         conn.close()
@@ -384,10 +548,100 @@ def write_mapped_rows(
     chunk_size: int = 512,
     chunk_overlap: int = 50,
     skip_chunking: bool = False,
+    chunk_strategy: str = "recursive",
+    chunk_unit: str = "chars",
+    chunk_tokenizer: Any = None,
+    text_template: str | None = None,
     durable_embedding_cache: bool | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     """Write text rows as embedded chunks into a PostgreSQL pgvector table."""
+    vector_storage = str(_kwargs.get("vector_storage") or "vector").strip().lower()
+    vector_index = str(_kwargs.get("vector_index") or "none").strip().lower()
+    if vector_storage not in {"vector", "halfvec"}:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error="vector_storage must be 'vector' or 'halfvec'.",
+        )
+    if vector_index not in {"none", "hnsw"}:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error="vector_index must be 'none' or 'hnsw'.",
+        )
+    hnsw_m = 16
+    hnsw_ef_construction = 64
+    if vector_index == "hnsw":
+        try:
+            hnsw_m = _pgvector_integer_option(
+                _kwargs.get("vector_hnsw_m"),
+                name="vector_hnsw_m",
+                default=16,
+                minimum=2,
+                maximum=100,
+            )
+            hnsw_ef_construction = _pgvector_integer_option(
+                _kwargs.get("vector_hnsw_ef_construction"),
+                name="vector_hnsw_ef_construction",
+                default=64,
+                minimum=4,
+                maximum=1000,
+            )
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "public",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+            )
+    logger.info(
+        "Vector write target=%s.%s strategy=%s size=%s overlap=%s unit=%s template=%s",
+        schema or "public",
+        table_name,
+        chunk_strategy,
+        chunk_size,
+        chunk_overlap,
+        chunk_unit,
+        "on" if text_template is not None else "off",
+    )
+    if text_template is not None:
+        from services.vector_template import (
+            TemplateConfigError,
+            _mapped_excluded_fields,
+            _mapped_template_fields,
+            validate_template,
+        )
+
+        try:
+            validate_template(
+                text_template,
+                available_fields=_mapped_template_fields(headers, mappings),
+                excluded_fields=_mapped_excluded_fields(
+                    exclude_pii_columns or (), mappings
+                ),
+            )
+        except TemplateConfigError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "public",
+                checksum="",
+                chunks_completed=0,
+                error=f"Invalid vector text template: {exc}",
+            )
     if importlib.util.find_spec("psycopg2") is None:
         return WriteResult(
             ok=False,
@@ -400,6 +654,11 @@ def write_mapped_rows(
             driver="none",
         )
 
+    from services.vector_sync import (
+        log_stale_cleanup_skipped,
+        stale_cleanup_meta,
+        stale_cleanup_skipped_docs,
+    )
     from connectors.writer_common import prepare_records_for_vector_write
 
     pk_cols = list(
@@ -420,6 +679,17 @@ def write_mapped_rows(
         and bool(mapped_targets)
         and all(str(studio_live.get(c) or "").strip() for c in mapped_targets)
     )
+    mapped_value_types = {}
+    for mapping in mappings or []:
+        target = str(mapping.get("target") or mapping.get("source") or "").strip()
+        source = str(mapping.get("source") or "").strip()
+        value_type = (
+            mapping.get("target_type")
+            or column_types.get(source)
+            or column_types.get(target)
+        )
+        if target and value_type:
+            mapped_value_types[target] = str(value_type)
     _existed, gated_types, gate_err = _pgvector_gate_existing_physical(
         host=host,
         port=port,
@@ -431,6 +701,7 @@ def write_mapped_rows(
         schema=schema or "public",
         table_name=table_name,
         mapped_targets=mapped_targets,
+        mapped_value_types=mapped_value_types,
         studio_live=studio_live if isinstance(studio_live, dict) else None,
         studio_typed_all=studio_typed_all,
     )
@@ -459,6 +730,19 @@ def write_mapped_rows(
         destination_column_types=gated_types,
     )
     if map_abort:
+        from services.vector_sync import _rejected_doc_keys
+
+        skipped_docs = stale_cleanup_skipped_docs(
+            _rejected_doc_keys(headers, data_rows, pk_cols, mappings, map_rejected),
+            map_rejected,
+        )
+        if skipped_docs:
+            log_stale_cleanup_skipped(
+                "pgvector",
+                f"{schema or 'public'}.{table_name}",
+                skipped_docs,
+                "row mapping was rejected",
+            )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -469,8 +753,106 @@ def write_mapped_rows(
             error=map_abort,
             rejected_details=map_rejected,
             rejected_rows=len(map_rejected),
+            meta=stale_cleanup_meta(0, skipped_docs),
         )
+    # Document identity must come from the contract PK, not just a column
+    # literally named ``id`` (QA MX2-17 — see vector_identity_columns).
+    from services.vectorization import vector_identity_columns
+
+    identity_columns = vector_identity_columns(pk_cols, mappings, records)
+    from services.vector_sync import (
+        pgvector_read_document_states,
+        vector_dimension_hint,
+        vector_record_key,
+    )
+
+    skip_setting = _kwargs.get("vector_skip_unchanged", True)
+    vector_skip_unchanged = str(skip_setting).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    vector_doc_states: dict[str, dict[str, Any]] = {}
+    skip_fingerprint = None
+    from services.embedding_providers import (
+        EmbeddingProviderError,
+        EmbeddingUsage,
+        create_embedding_usage,
+        provider_extra_from_options,
+    )
+
+    embedding_extra = provider_extra_from_options(_kwargs)
+    usage = EmbeddingUsage(
+        provider=(embedding_model or "unknown").split("/", 1)[0],
+        model=embedding_model or "unknown",
+    )
+    if vector_skip_unchanged:
+        source_ids = sorted(
+            {
+                vector_record_key(record, identity_columns)
+                for record in records
+                if vector_record_key(record, identity_columns)
+            }
+        )
+        try:
+            if source_ids:
+                state_conn = get_connection(
+                    host=host,
+                    port=port,
+                    database=database,
+                    username=username,
+                    password=password,
+                    connection_string=connection_string,
+                    ssl=ssl,
+                )
+                try:
+                    with state_conn.cursor() as state_cur:
+                        vector_doc_states = pgvector_read_document_states(
+                            state_cur, schema or "public", table_name, source_ids
+                        )
+                finally:
+                    state_conn.close()
+            dimension_hint = vector_dimension_hint(
+                embedding_model,
+                embedding_extra,
+                records=records,
+                embedding_column=embedding_column,
+            )
+            if dimension_hint:
+                from services.vector_fingerprint import fingerprint_for_write
+
+                skip_fingerprint = fingerprint_for_write(
+                    model=embedding_model,
+                    dimension=dimension_hint,
+                    distance="cosine",
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    skip_chunking=skip_chunking,
+                    embedding_column=embedding_column,
+                    chunk_strategy=chunk_strategy,
+                    chunk_unit=chunk_unit,
+                    chunk_tokenizer=(
+                        chunk_tokenizer if isinstance(chunk_tokenizer, str) else None
+                    ),
+                    text_template=text_template,
+                    vector_storage=vector_storage,
+                )
+        except Exception as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "public",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "pgvector unchanged-document lookup failed before embedding "
+                    f"({type(exc).__name__})"
+                ),
+                meta={"embedding_usage": usage.to_dict()},
+            )
     try:
+        usage = create_embedding_usage(
+            embedding_model, embedding_extra, embedding_column
+        )
         vector_rows = vectorize_records(
             records,
             content_column=content_column,
@@ -481,7 +863,35 @@ def write_mapped_rows(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             skip_chunking=skip_chunking,
+            chunk_strategy=chunk_strategy,
+            chunk_unit=chunk_unit,
+            chunk_tokenizer=chunk_tokenizer,
+            text_template=text_template,
             durable_embedding_cache=durable_embedding_cache,
+            identity_columns=identity_columns or None,
+            usage=usage,
+            embedding_extra=embedding_extra,
+            existing_vector_docs=vector_doc_states,
+            doc_fingerprint_digest=(
+                skip_fingerprint.digest if skip_fingerprint is not None else None
+            ),
+            skip_unchanged=vector_skip_unchanged,
+        )
+    except EmbeddingProviderError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"Embedding provider {usage.provider} model {usage.model} "
+                f"failed ({type(exc).__name__}): {exc}"
+            ),
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     except Exception as exc:
         return WriteResult(
@@ -491,12 +901,188 @@ def write_mapped_rows(
             target_schema=schema or "public",
             checksum="",
             chunks_completed=0,
-            error=f"Vectorization failed: {exc}",
+            error=f"Vectorization failed ({type(exc).__name__})",
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
+    from services.vector_sync import _rejected_doc_keys
+
+    rejected_source_ids = _rejected_doc_keys(
+        headers, data_rows, pk_cols, mappings, map_rejected
+    )
+    skipped_source_ids = {
+        str(row.get("source_id") or "")
+        for row in vector_rows
+        if row.get("_df_unchanged_skipped") and row.get("source_id")
+    }
+    vector_rows = [
+        row for row in vector_rows if not row.get("_df_unchanged_skipped")
+    ]
+    vector_skip_meta = {
+        "vector_docs_unchanged_skipped": len(skipped_source_ids),
+        "vector_docs_embedded": len(
+            {
+                str(row.get("source_id") or "")
+                for row in vector_rows
+                if row.get("source_id") and row.get("embedding") is not None
+            }
+        ),
+    }
+    if not vector_rows and skipped_source_ids:
+        index_conn = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
+        try:
+            with index_conn.cursor() as index_cur:
+                _pgvector_ensure_source_index(
+                    index_cur, schema or "public", table_name
+                )
+            index_conn.commit()
+        except Exception as exc:
+            index_conn.rollback()
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "public",
+                checksum="",
+                chunks_completed=0,
+                error=f"pgvector source-id index setup failed: {exc}",
+                meta={**vector_skip_meta, "embedding_usage": usage.to_dict()},
+            )
+        finally:
+            index_conn.close()
+        if skip_fingerprint is not None:
+            from services.vector_fingerprint import (
+                VectorFingerprintMismatchError,
+                enforce_fingerprint,
+            )
+
+            verify_conn = get_connection(
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                ssl=ssl,
+            )
+            try:
+                with verify_conn.cursor() as verify_cur:
+                    fingerprint_status = enforce_fingerprint(
+                        "pgvector",
+                        {},
+                        table_name,
+                        skip_fingerprint,
+                        schema=schema or "public",
+                        cursor=verify_cur,
+                    )
+                    if vector_index == "hnsw":
+                        storage_error = _pgvector_storage_version_error(
+                            verify_cur, vector_storage
+                        )
+                        if storage_error:
+                            verify_conn.rollback()
+                            return WriteResult(
+                                ok=False,
+                                rows_written=0,
+                                table_name=table_name,
+                                target_schema=schema or "public",
+                                checksum="",
+                                chunks_completed=0,
+                                error=storage_error,
+                                meta={
+                                    **vector_skip_meta,
+                                    "embedding_usage": usage.to_dict(),
+                                },
+                            )
+                        index_error = _pgvector_ensure_hnsw_index(
+                            verify_cur,
+                            schema or "public",
+                            table_name,
+                            storage=vector_storage,
+                            m=hnsw_m,
+                            ef_construction=hnsw_ef_construction,
+                        )
+                        if index_error:
+                            verify_conn.rollback()
+                            return WriteResult(
+                                ok=False,
+                                rows_written=0,
+                                table_name=table_name,
+                                target_schema=schema or "public",
+                                checksum="",
+                                chunks_completed=0,
+                                error=index_error,
+                                meta={
+                                    **vector_skip_meta,
+                                    "embedding_usage": usage.to_dict(),
+                                },
+                            )
+                verify_conn.commit()
+            except VectorFingerprintMismatchError as exc:
+                verify_conn.rollback()
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=str(exc),
+                    meta={
+                        **vector_skip_meta,
+                        "vector_fingerprint_status": "mismatch",
+                        "vector_fingerprint_digest": skip_fingerprint.digest,
+                        "embedding_usage": usage.to_dict(),
+                    },
+                )
+            finally:
+                verify_conn.close()
+        else:
+            fingerprint_status = "verified"
+        return WriteResult(
+            ok=True,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={
+                **stale_cleanup_meta(0, 0),
+                **vector_skip_meta,
+                **(
+                    {
+                        "vector_fingerprint_status": fingerprint_status,
+                        "vector_fingerprint_digest": skip_fingerprint.digest,
+                    }
+                    if skip_fingerprint is not None
+                    else {}
+                ),
+                "embedding_usage": usage.to_dict(),
+            },
+        )
     if not vector_rows:
+        skipped_docs = stale_cleanup_skipped_docs(
+            rejected_source_ids, map_rejected
+        )
+        if skipped_docs:
+            log_stale_cleanup_skipped(
+                "pgvector",
+                f"{schema or 'public'}.{table_name}",
+                skipped_docs,
+                "row mapping was rejected",
+            )
         return WriteResult(
             ok=True,
             rows_written=0,
@@ -507,6 +1093,10 @@ def write_mapped_rows(
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
             warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
 
     # Determine dimension from valid embeddings only — never invent 384.
@@ -514,6 +1104,26 @@ def write_mapped_rows(
 
     dimension, dim_err = resolve_embedding_dimension(vector_rows, default=None)
     if dimension is None:
+        rejected_source_ids.update(
+            str(row.get("source_id") or "")
+            for row in vector_rows
+            if row.get("source_id")
+            and coerce_embedding(row.get("embedding"))[1]
+        )
+        skipped_docs = stale_cleanup_skipped_docs(
+            rejected_source_ids,
+            (),
+            has_identityless=any(
+                not str(row.get("source_id") or "") for row in vector_rows
+            ),
+        )
+        if skipped_docs:
+            log_stale_cleanup_skipped(
+                "pgvector",
+                f"{schema or 'public'}.{table_name}",
+                skipped_docs,
+                "embeddings were rejected",
+            )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -524,11 +1134,34 @@ def write_mapped_rows(
             error=dim_err or "embedding dimension unknown — refuse fabricated defaults",
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
+        )
+
+    if vector_storage == "halfvec" and dimension > 4000:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"halfvec supports at most 4000 dimensions; this embedding has "
+                f"{dimension}. Use vector storage or a lower-dimensional model."
+            ),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     inserted = 0
     committed = False
     rejected_details: list[dict[str, Any]] = list(map_rejected)
+    fingerprint_meta: dict[str, Any] = {"embedding_usage": usage.to_dict()}
+    from services.vector_sync import pgvector_delete_stale_chunks
+    stale_chunks_deleted = 0
+    skipped_docs = 0
     valid_rows: list[dict[str, Any]] = []
     conn = get_connection(
         host=host,
@@ -553,12 +1186,15 @@ def write_mapped_rows(
                     table_name,
                     dimension,
                     typed_extras,
+                    vector_storage=vector_storage,
                 )
             else:
                 # Respect create_table=False — never contradict preflight deny-create.
+                from connectors.sql_identifiers import pg_regclass_literal
+
                 cur.execute(
                     "SELECT to_regclass(%s)",
-                    (f"{schema or 'public'}.{table_name}",),
+                    (pg_regclass_literal(schema or "public", table_name),),
                 )
                 if cur.fetchone()[0] is None:
                     return WriteResult(
@@ -575,6 +1211,22 @@ def write_mapped_rows(
                         rejected_details=list(map_rejected),
                         rejected_rows=len(map_rejected),
                     )
+
+            storage_error = _pgvector_storage_version_error(cur, vector_storage)
+            if storage_error:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=storage_error,
+                    rejected_details=list(map_rejected),
+                    rejected_rows=len(map_rejected),
+                    meta={"embedding_usage": usage.to_dict()},
+                )
+            _pgvector_ensure_source_index(cur, schema or "public", table_name)
 
             # CREATE TABLE IF NOT EXISTS does not alter an existing vector(n) —
             # always probe live typmod and refuse dim invent / silent truncate.
@@ -648,6 +1300,9 @@ def write_mapped_rows(
                         "reason": embedding_reject_reason(row, err),
                         "policy": "quarantine",
                     })
+                    source_id = str(row.get("source_id") or "")
+                    if source_id:
+                        rejected_source_ids.add(source_id)
                     continue
                 row = dict(row)
                 row["embedding"] = emb
@@ -668,6 +1323,15 @@ def write_mapped_rows(
                     rejected_rows=len(rejected_details),
                 )
             if not valid_rows and rejected_details:
+                skipped_docs = stale_cleanup_skipped_docs(
+                    rejected_source_ids, rejected_details
+                )
+                log_stale_cleanup_skipped(
+                    "pgvector",
+                    f"{schema or 'public'}.{table_name}",
+                    skipped_docs,
+                    "all chunks were rejected",
+                )
                 return WriteResult(
                     ok=False,
                     rows_written=0,
@@ -683,7 +1347,113 @@ def write_mapped_rows(
                     or "all embeddings rejected",
                     rejected_details=rejected_details,
                     rejected_rows=len(rejected_details),
+                    meta=stale_cleanup_meta(0, skipped_docs),
                 )
+            from services.vector_fingerprint import (
+                VectorFingerprintMismatchError,
+                enforce_fingerprint,
+                fingerprint_for_write,
+            )
+
+            incoming_fingerprint = fingerprint_for_write(
+                model=embedding_model,
+                dimension=dimension,
+                distance="cosine",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                skip_chunking=skip_chunking,
+                embedding_column=embedding_column,
+                chunk_strategy=chunk_strategy,
+                chunk_unit=chunk_unit,
+                chunk_tokenizer=(
+                    chunk_tokenizer if isinstance(chunk_tokenizer, str) else None
+                ),
+                text_template=text_template,
+                vector_storage=vector_storage,
+            )
+            try:
+                fingerprint_status = enforce_fingerprint(
+                    "pgvector",
+                    {},
+                    table_name,
+                    incoming_fingerprint,
+                    schema=schema or "public",
+                    cursor=cur,
+                )
+            except VectorFingerprintMismatchError as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=str(exc),
+                    rejected_details=rejected_details,
+                    rejected_rows=len(rejected_details),
+                        meta={
+                            "vector_fingerprint_status": "mismatch",
+                            "vector_fingerprint_digest": incoming_fingerprint.digest,
+                            "embedding_usage": usage.to_dict(),
+                        },
+                )
+            from services.vector_sync import stamp_vector_document_metadata
+
+            live_storage = _pgvector_live_embedding_storage(
+                cur, schema or "public", table_name
+            )
+            if live_storage != vector_storage:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"pgvector embedding column uses "
+                        f"{live_storage or 'an unsupported type'}, but vector_storage "
+                        f"is {vector_storage}. Use a new table or restore the stored "
+                        "vector_storage setting."
+                    ),
+                    rejected_details=rejected_details,
+                    rejected_rows=len(rejected_details),
+                    meta={
+                        **fingerprint_meta,
+                        "vector_fingerprint_status": fingerprint_status,
+                    },
+                )
+            if vector_index == "hnsw":
+                index_error = _pgvector_ensure_hnsw_index(
+                    cur,
+                    schema or "public",
+                    table_name,
+                    storage=vector_storage,
+                    m=hnsw_m,
+                    ef_construction=hnsw_ef_construction,
+                )
+                if index_error:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema or "public",
+                        checksum="",
+                        chunks_completed=0,
+                        error=index_error,
+                        rejected_details=rejected_details,
+                        rejected_rows=len(rejected_details),
+                        meta={
+                            **fingerprint_meta,
+                            "vector_fingerprint_status": fingerprint_status,
+                        },
+                    )
+
+            stamp_vector_document_metadata(valid_rows, incoming_fingerprint.digest)
+            fingerprint_meta.update({
+                "vector_fingerprint_status": fingerprint_status,
+                "vector_fingerprint_digest": incoming_fingerprint.digest,
+            })
             total = len(valid_rows)
             for i in range(0, total, batch_size):
                 batch = valid_rows[i : i + batch_size]
@@ -711,6 +1481,9 @@ def write_mapped_rows(
                             "reason": str(exc),
                             "policy": "write_quarantine",
                         })
+                        source_id = str(row.get("source_id") or "")
+                        if source_id:
+                            rejected_source_ids.add(source_id)
                         continue
                     values.append((
                         row["id"],
@@ -725,9 +1498,11 @@ def write_mapped_rows(
 
                 if not values:
                     continue
-                placeholders = "(%s, %s, %s::vector, %s::jsonb, %s, %s" + (
-                    "".join(", %s" for _ in typed_extras)
-                ) + ")"
+                placeholders = (
+                    f"(%s, %s, %s::{vector_storage}, %s::jsonb, %s, %s"
+                    + "".join(", %s" for _ in typed_extras)
+                    + ")"
+                )
                 args_str = ",".join(
                     cur.mogrify(
                         placeholders,
@@ -788,6 +1563,28 @@ def write_mapped_rows(
                         inserted,
                     )
 
+            cleanup_keep: dict[str, set[str]] = {}
+            for row in written_rows:
+                source_id = str(row.get("source_id") or "")
+                if source_id and source_id not in rejected_source_ids:
+                    cleanup_keep.setdefault(source_id, set()).add(str(row["id"]))
+            skipped_docs = stale_cleanup_skipped_docs(
+                rejected_source_ids,
+                (),
+                has_identityless=any(
+                    not str(row.get("source_id") or "") for row in vector_rows
+                ),
+            )
+            if skipped_docs:
+                log_stale_cleanup_skipped(
+                    "pgvector",
+                    f"{schema or 'public'}.{table_name}",
+                    skipped_docs,
+                    "source identity was absent or a chunk was rejected",
+                )
+            stale_chunks_deleted = pgvector_delete_stale_chunks(
+                cur, schema or "public", table_name, cleanup_keep
+            )
             conn.commit()
             committed = True
     except Exception as exc:
@@ -805,13 +1602,24 @@ def write_mapped_rows(
             target_schema=schema or "public",
             checksum="",
             chunks_completed=(inserted + 999) // 1000 if committed else 0,
-            error=named or str(exc),
+            error=(
+                named
+                or f"pgvector upsert or stale cleanup failed before commit: {exc}"
+            ),
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
+            meta={
+                **stale_cleanup_meta(stale_chunks_deleted, skipped_docs),
+                **fingerprint_meta,
+            },
         )
     finally:
         conn.close()
 
+    meta = _pgvector_gate8_meta(written_rows)
+    meta.update(stale_cleanup_meta(stale_chunks_deleted, skipped_docs))
+    meta.update(vector_skip_meta)
+    meta.update(fingerprint_meta)
     from connectors.writer_common import reject_on_strict_policy as _reject_final
 
     _final_abort = _reject_final(error_policy, rejected_details, "pgvector")
@@ -827,6 +1635,7 @@ def write_mapped_rows(
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
             warnings=[r.get("reason") or "" for r in rejected_details[:10] if r.get("reason")],
+            meta=meta,
         )
 
     return WriteResult(
@@ -839,7 +1648,7 @@ def write_mapped_rows(
         rejected_details=rejected_details,
         rejected_rows=len(rejected_details),
         warnings=[r.get("reason") or "" for r in rejected_details[:10] if r.get("reason")],
-        meta=_pgvector_gate8_meta(written_rows),
+        meta=meta,
     )
 
 

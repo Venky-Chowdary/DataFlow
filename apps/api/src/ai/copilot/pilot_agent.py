@@ -476,6 +476,17 @@ def _render_schedule_detail(s: dict[str, Any]) -> str:
         f"• next `{s.get('next_run_at') or '—'}` · last **{s.get('last_status') or 'never'}**"
         f" ({s.get('run_count', 0)} runs)."
     )
+    if s.get("needs_approval"):
+        park = (
+            f"• Parked on approval `{s.get('approval_id') or '?'}`"
+            + (f" ({s.get('approval_code')})" if s.get("approval_code") else "")
+            + f": {s.get('approval_finding') or 'finding not recorded'}."
+            + " Scheduled runs are skipped until it is "
+            + ("approved or rejected" if s.get("approvable") else "fixed and re-armed")
+            + " in the approvals inbox."
+        )
+        fix = str(s.get("approval_corrective_action") or "").strip()
+        lines.append(park + (f" Fix: {fix}" if fix else ""))
     return "\n".join(lines)
 
 
@@ -932,6 +943,13 @@ def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
         return (
             f"**{p.get('name')}** ({p.get('type') or 'connector'}) will be removed from saved connectors. "
             f"Data at the source is untouched.{warn}\n\nConfirm to proceed: **{label}**."
+        )
+    if name == "update_connector":
+        changed = ", ".join(f"{k} → {v}" for k, v in (p.get("changes") or {}).items())
+        return (
+            f"**{p.get('name')}** ({p.get('type') or 'connector'}) changes: {changed}. "
+            "Its id and bound pipelines stay the same; test it after saving."
+            f"\n\nConfirm to proceed: **{label}**."
         )
     if name == "set_schedule_enabled":
         after = "resume on its cadence" if p.get("enabled_after") else "stop firing until resumed"
@@ -1734,9 +1752,6 @@ class DataPilotAgent:
             return
 
         if tr.name == "remediate_validation":
-            # The tool opens a studio screen. It does not write, so there is
-            # no ack and no Confirm. A caller that still sets requires_confirm
-            # keeps the older staged shape.
             if out.get("ui_only") or out.get("requires_confirm") is False:
                 turn.actions.append({
                     "type": "navigate",
@@ -1754,6 +1769,7 @@ class DataPilotAgent:
                 "label": out.get("label"),
                 "run_id": out.get("run_id"),
                 "risk": "mutate",
+                "destructive": bool(out.get("destructive")),
                 "payload": {"kind": out.get("kind"), "run_id": out.get("run_id")},
             })
             # Ensure Transfer is ready; safe navigate can auto-apply.
@@ -3498,8 +3514,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     f"Ready to save connector **{prev.get('name') or 'connector'}** "
                     f"({prev.get('type')}) → `{prev.get('host')}:{prev.get('port')}` "
                     f"/ `{prev.get('database') or '—'}`.\n"
-                    f"Connection test: {prev.get('test') or 'ok'}.\n\n"
-                    "Confirm below to save it to **Connectors**."
+                    f"Connection test: {prev.get('test') or 'ok'}.\n"
+                    + (
+                        f"Pins SFTP host key {prev.get('host_key')}, confirm you "
+                        "verified it with the server admin.\n"
+                        if prev.get("host_key")
+                        else ""
+                    )
+                    + "\nConfirm below to save it to **Connectors**."
                 )
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])

@@ -37,6 +37,7 @@ from services.cdc_exactly_once import (  # noqa: E402
     REASON_BUNDLE_LSN,
     REASON_CHECKSUM,
     REASON_DEST_NOT_TXN,
+    REASON_DEST_NOT_WIRED,
     REASON_NO_LSN,
     REASON_NOT_CDC,
     REASON_OK,
@@ -532,6 +533,58 @@ def test_decide_idle_heartbeat_at_committed_lsn_is_not_a_conflict() -> None:
     assert action == "already_committed"
 
 
+def test_equal_position_empty_batch_is_already_committed_and_logs_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("DEBUG", logger="services.cdc_exactly_once"):
+        action, _fence = decide_eos_apply(
+            incoming_lsn="0/10",
+            dest_lsn="0/10",
+            incoming_checksum="empty-poll",
+            dest_checksum="committed-update",
+            change=ChangeBatch(),
+        )
+
+    assert action == "already_committed"
+    assert any("empty heartbeat" in record.message for record in caplog.records)
+
+
+def test_equal_position_nonempty_rejected_batch_still_checks_checksum() -> None:
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        decide_eos_apply(
+            incoming_lsn="0/10",
+            dest_lsn="0/10",
+            incoming_checksum="rejected-payload",
+            dest_checksum="committed-payload",
+            change=ChangeBatch(rejected=[{"id": "1", "reason": "invalid"}]),
+        )
+
+    assert exc.value.reason == REASON_CHECKSUM
+
+
+def test_equal_position_nonempty_batch_still_checks_checksum() -> None:
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        decide_eos_apply(
+            incoming_lsn="0/10",
+            dest_lsn="0/10",
+            incoming_checksum="updated-payload",
+            dest_checksum="committed-payload",
+            change=ChangeBatch(updates=[{"id": "1", "value": "changed"}]),
+        )
+
+    assert exc.value.reason == REASON_CHECKSUM
+
+
+def test_newer_position_empty_batch_still_applies() -> None:
+    action, _fence = decide_eos_apply(
+        incoming_lsn="0/20",
+        dest_lsn="0/10",
+        change=ChangeBatch(),
+    )
+
+    assert action == "apply"
+
+
 def test_decide_same_lsn_payload_mismatch_refuses() -> None:
     with pytest.raises(ExactlyOnceRouteError) as exc:
         decide_eos_apply(
@@ -903,6 +956,138 @@ def test_sqlalchemy_eos_partial_update_keeps_dest_column() -> None:
             conn.close()
         assert v == "second"
         assert extra == "keep"
+
+
+@pytest.mark.parametrize("dest_type", ["sqlite", "generic_sql"])
+def test_eos_mixed_case_partial_update_keeps_unmentioned_target(
+    dest_type: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_mixed_partial.db")
+        dest_cfg = (
+            {"database": path}
+            if dest_type == "sqlite"
+            else {"type": "sqlite", "database": path}
+        )
+        mappings = [
+            {"source": "ID", "target": "id", "confidence": 1.0},
+            {"source": "AMOUNT", "target": "amount", "confidence": 1.0},
+            {"source": "note", "target": "note", "confidence": 1.0},
+        ]
+        types = {"ID": "string", "AMOUNT": "string", "note": "string"}
+        stream_key = f"{dest_type}|eos|mixed-partial"
+        apply_change_batch_exactly_once(
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=_batch(
+                "0/10",
+                inserts=[{"ID": "1", "AMOUNT": "10.00", "note": "first"}],
+            ),
+            mappings=mappings,
+            column_types=types,
+            headers=["ID", "AMOUNT", "note"],
+            pk_target_cols=["id"],
+            cursor_key=stream_key,
+        )
+        rows, _ck, _summary, _deleted = apply_change_batch_exactly_once(
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=_batch("0/20", updates=[{"ID": "1", "note": "second"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["ID", "AMOUNT", "note"],
+            pk_target_cols=["id"],
+            cursor_key=stream_key,
+        )
+
+        with sqlite3.connect(path) as conn:
+            amount, note = conn.execute(
+                "SELECT amount, note FROM orders WHERE id = ?", ("1",)
+            ).fetchone()
+
+        assert rows == 1
+        assert amount == "10.00"
+        assert note == "second"
+
+
+@pytest.mark.parametrize("dest_type", ["sqlite", "generic_sql"])
+def test_eos_same_source_and_target_column_still_updates(dest_type: str) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_same_case.db")
+        dest_cfg = (
+            {"database": path}
+            if dest_type == "sqlite"
+            else {"type": "sqlite", "database": path}
+        )
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "amount", "target": "amount", "confidence": 1.0},
+        ]
+        types = {"id": "string", "amount": "string"}
+        stream_key = f"{dest_type}|eos|same-case"
+        for lsn, amount, operation in (
+            ("0/10", "10.00", "inserts"),
+            ("0/20", "99.00", "updates"),
+        ):
+            apply_change_batch_exactly_once(
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                dest_table="orders",
+                change=_batch(
+                    lsn,
+                    **{operation: [{"id": "1", "amount": amount}]},
+                ),
+                mappings=mappings,
+                column_types=types,
+                headers=["id", "amount"],
+                pk_target_cols=["id"],
+                cursor_key=stream_key,
+            )
+
+        with sqlite3.connect(path) as conn:
+            amount = conn.execute(
+                "SELECT amount FROM orders WHERE id = ?", ("1",)
+            ).fetchone()[0]
+
+        assert amount == "99.00"
+
+
+@pytest.mark.parametrize("dest_type", ["sqlite", "generic_sql"])
+def test_eos_case_variant_keys_for_one_target_fail_closed(
+    dest_type: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_ambiguous_case.db")
+        dest_cfg = (
+            {"database": path}
+            if dest_type == "sqlite"
+            else {"type": "sqlite", "database": path}
+        )
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "AMOUNT", "target": "amount", "confidence": 1.0},
+        ]
+        with pytest.raises(ExactlyOnceRouteError) as exc_info:
+            apply_change_batch_exactly_once(
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                dest_table="orders",
+                change=_batch(
+                    "0/10",
+                    inserts=[{"id": "1", "AMOUNT": "99.00", "amount": "10.00"}],
+                ),
+                mappings=mappings,
+                column_types={"id": "string", "AMOUNT": "string"},
+                headers=["id", "AMOUNT"],
+                pk_target_cols=["id"],
+                cursor_key=f"{dest_type}|eos|ambiguous-case",
+            )
+
+        assert "AMOUNT" in str(exc_info.value)
+        assert "amount" in str(exc_info.value)
+        assert exc_info.value.reason == "exactly_once_ambiguous_column_mapping"
 
 
 def test_sqlite_eos_crash_before_watermark_then_retry() -> None:
@@ -1819,7 +2004,7 @@ def test_named_matrix_artifact_matches_measured() -> None:
             "sync_mode": "cdc",
             "has_pk": True,
             "expect_eligible": False,
-            "expect_reason": REASON_DEST_NOT_TXN,
+            "expect_reason": REASON_DEST_NOT_WIRED,
         },
         {
             "id": "kafka_not_txn",

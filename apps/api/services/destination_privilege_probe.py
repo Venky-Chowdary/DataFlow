@@ -2054,15 +2054,18 @@ def _probe_kafka(
         "client_id": "dataflow-privilege-probe",
         "request_timeout_ms": 15000,
     }
-    if username and password:
-        import ssl as ssl_mod
-        sec = (security_protocol or "").upper()
-        kwargs["security_protocol"] = sec if sec in {"SASL_SSL", "SASL_PLAINTEXT"} else "SASL_SSL"
-        kwargs["sasl_mechanism"] = sasl_mechanism or "PLAIN"
-        kwargs["sasl_plain_username"] = username
-        kwargs["sasl_plain_password"] = password
-        if kwargs["security_protocol"] == "SASL_SSL":
-            kwargs["ssl_context"] = ssl_mod.create_default_context()
+    from services.copy_kafka_common import kafka_sasl_kwargs
+
+    kwargs.update(
+        kafka_sasl_kwargs(
+            {
+                "username": username,
+                "password": password,
+                "security_protocol": security_protocol,
+                "sasl_mechanism": sasl_mechanism,
+            }
+        )
+    )
 
     admin = KafkaAdminClient(**kwargs)
     try:

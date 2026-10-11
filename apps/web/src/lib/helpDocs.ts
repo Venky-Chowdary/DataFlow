@@ -495,10 +495,10 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "G3 Schema contract — source and target schemas are compatible",
           "G4 Column mappings — every column maps above the confidence threshold",
           "G5 Sample dry-run — sample rows pass the same transforms writers use",
-          "G9 Data integrity — encoding, required nulls, identity duplicates, precision on the sample",
           "G6 Target DDL — required CREATE / ALTER statements are valid",
           "G7 Staging capacity — destination has headroom for the volume",
           "G8 Sample reconciliation — pre-write sample identity and uniqueness hold (post-load checksum runs after Execute)",
+          "G9 Data integrity — encoding, required nulls, identity duplicates, precision on the sample",
         ],
         figure: {
           src: "/docs/screenshots/app-transfer-validate.png",

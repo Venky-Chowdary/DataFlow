@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+from services.value_serializer import cell_to_string
 
 logger = logging.getLogger(__name__)
 

@@ -106,22 +106,13 @@ def _seed_table() -> None:
 def test_consistent_read_is_the_snapshot_default():
     with moto.mock_aws():
         _seed_table()
-        seen: dict = {}
-
         real_client = boto3.client("dynamodb", region_name="us-east-1")
-        orig = real_client.scan
 
-        def wrap(**kwargs):
-            seen.update(kwargs)
-            return orig(**kwargs)
-
-        # Patch via the same client the reader builds — assert the flag is on.
         batch, _ = read_table_batch(cfg=CFG, table=TABLE, limit=50)
         assert batch.rows
         # Re-scan through the raw client to prove moto accepted ConsistentRead.
         page = real_client.scan(TableName=TABLE, ConsistentRead=True, Limit=50)
         assert len(page.get("Items") or []) == 2
-        del seen
 
 
 def test_dynamodb_types_land_on_openshift_shaped_postgres():

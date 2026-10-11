@@ -527,12 +527,15 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_BINARY: "binary",
     },
     # Schemaless / document / KV — wire as string; no SQL DDL contract.
+    # The Redis writer stores each row as one JSON document. JSON carries
+    # integers and booleans natively, so those keep their type; decimal,
+    # temporal, UUID and binary have no JSON type and are stored as exact text.
     "redis": {
         LOGICAL_STRING: "string",
         LOGICAL_TEXT: "string",
-        LOGICAL_INTEGER: "string",
+        LOGICAL_INTEGER: "integer",
         LOGICAL_DECIMAL: "string",
-        LOGICAL_BOOLEAN: "string",
+        LOGICAL_BOOLEAN: "boolean",
         LOGICAL_DATE: "string",
         LOGICAL_DATETIME: "string",
         LOGICAL_TIME: "string",
@@ -3228,6 +3231,9 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
 # other dialect spells a timestamp this way, which is what makes the default
 # safe to apply without knowing the source engine.
 SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS: Final[int] = 9
+# SQL Server DATETIME2 / DATETIMEOFFSET default. Introspection spells it out
+# on every column, so a ``(7)`` is the dialect default, not declared evidence.
+SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS: Final[int] = 7
 # Microseconds: the best precision mainstream destinations carry, so narrowing
 # an undeclared Snowflake timestamp to it is unavoidable rather than a fault.
 SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR: Final[int] = 6
@@ -3732,6 +3738,10 @@ def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> st
 
             if _normalize_dest_db(dest_db) in INSTANT_TIMESTAMP_DIALECTS:
                 return "ltz"
+            # SQLite TIMESTAMP is purely naive NTZ (no timezone support)
+            # - TIMESTAMP_NTZ source to TIMESTAMP destination is NOT a lossy strip
+            if _normalize_dest_db(dest_db) == "sqlite":
+                return "ntz"
         return "ntz"
     return None
 
@@ -3831,6 +3841,14 @@ def is_timezone_polarity_loss(
     sink engine's bare TIMESTAMP token is an instant.
     """
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
+    # SQLite has no timezone-aware temporal types; TIMESTAMP/DATETIME are purely NTZ.
+    # NTZ → NTZ is not a polarity loss for SQLite (MX3-09 fix).
+    if dest_db == "sqlite":
+        src = datetime_timezone_polarity(source_type)
+        tgt = datetime_timezone_polarity(target_type, dest_db=dest_db)
+        if src == "ntz" and tgt == "ntz":
+            return False
+    
     # A Mongo/Elasticsearch temporal token is an instant even when the catalog
     # spells it ``TIMESTAMP`` / ``date``. Leaving it NTZ made every
     # TIMESTAMP→TIMESTAMP route into MySQL (whose TIMESTAMP is itself an
@@ -4727,7 +4745,7 @@ def bounded_string_sink_would_truncate(
         return False
     src_l = normalize_logical_type(source_type)
     if src_l in {LOGICAL_STRING, LOGICAL_TEXT}:
-        return string_width_would_narrow(source_type, target_type)
+        return string_width_would_narrow(source_type, target_type, dest_db=dest_db)
     # Exact UUID 36-char wire is the industry create-new sink — not truncate.
     if normalize_logical_type(source_type) == LOGICAL_UUID and uuid_exact_wire_carrier(
         target_type
@@ -4752,11 +4770,16 @@ def bounded_string_sink_would_truncate(
     return True
 
 
-def string_width_would_narrow(source_type: str, target_type: str) -> bool:
+def string_width_would_narrow(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
     """True when source string capacity exceeds destination VARCHAR(n)/TEXT tier.
 
     Cases: ``VARCHAR(255)→VARCHAR(50)``, ``TEXT→VARCHAR(10)``,
     ``LONGTEXT→TINYTEXT``. Bare ``VARCHAR`` without a width stays unknown.
+    The 64 KiB ``TEXT`` tier is MySQL's: a SQLite/Postgres/DuckDB ``TEXT`` is
+    that engine's unbounded carrier, so the tier only ranks the destination
+    when it is MySQL-family or unnamed (unnamed keeps the fail-closed read).
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
@@ -4766,7 +4789,8 @@ def string_width_would_narrow(source_type: str, target_type: str) -> bool:
         return False
     # MySQL LOB tier narrow (LONGTEXT→MEDIUMTEXT) before unlimited early-out.
     src_rank = mysql_text_tier_rank(source_type)
-    tgt_rank = mysql_text_tier_rank(target_type)
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    tgt_rank = mysql_text_tier_rank(target_type) if db in {"", "mysql"} else None
     if src_rank is not None and tgt_rank is not None and src_rank > tgt_rank:
         return True
     # Unlimited / LOB-ceiling sinks (TEXT, NVARCHAR(MAX), VARCHAR(65535)) never narrow.
@@ -6798,6 +6822,14 @@ _BARE_TEMPORAL_DIGITS: dict[str, int] = {
     **{e: 0 for e in ("mysql", "mariadb", "maria", "singlestore", "tidb", "vitess")},
     **{e: 7 for e in _MSSQL_TEMPORAL_ENGINES},
     "snowflake": 9,
+    # SQLite has no temporal storage class: the writer binds ``isoformat`` text,
+    # which keeps every microsecond a Python datetime carries. Reading its bare
+    # TIMESTAMP as FSP 0 graded the column DataFlow itself created on run 1 as
+    # a narrowing on run 2 (QA MX3-09).
+    "sqlite": 6,
+    # Redis JSON documents hold temporals as ISO text, which keeps every
+    # microsecond, so run 2's sampled TIMESTAMP is the carrier run 1 wrote.
+    "redis": 6,
     **{
         e: 6
         for e in (
@@ -7425,7 +7457,7 @@ def is_precision_collapse_coercion(
         return True
     if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
-    if string_width_would_narrow(source_type, target_type):
+    if string_width_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if bounded_string_sink_would_truncate(
         source_type, target_type, dest_db=dest_db
@@ -7984,7 +8016,7 @@ def is_lossy_coercion(
             return True
         if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
-        if string_width_would_narrow(source_type, target_type):
+        if string_width_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if bounded_string_sink_would_truncate(
             source_type, target_type, dest_db=dest_db
@@ -8185,7 +8217,7 @@ def is_lossy_coercion(
         return True
     if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
-    if string_width_would_narrow(source_type, target_type):
+    if string_width_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if bounded_string_sink_would_truncate(
         source_type, target_type, dest_db=dest_db

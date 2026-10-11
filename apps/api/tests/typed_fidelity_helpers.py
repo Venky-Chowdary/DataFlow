@@ -294,7 +294,6 @@ def bigquery_endpoint(table: str) -> EndpointConfig:
 
 
 def oracle_endpoint(table: str) -> EndpointConfig:
-    import os
 
     return EndpointConfig(
         kind="database",
@@ -321,7 +320,6 @@ def duckdb_endpoint(db_path: str, table: str) -> EndpointConfig:
 
 
 def require_oracle_env() -> None:
-    import os
 
     import pytest
 

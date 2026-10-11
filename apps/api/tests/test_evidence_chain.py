@@ -236,7 +236,7 @@ def test_run_completion_leaves_a_chained_record_without_a_pack_export(file_chain
 
 def test_workspace_verify_withholds_foreign_event_ids(file_chain):
     """Walk stays global; Settings must not list another workspace's event id."""
-    mine = audit.append_audit_event(
+    audit.append_audit_event(
         action="job.run", resource="/jobs/mine", actor="a@ok.com", workspace_id="ws-a"
     )
     theirs = audit.append_audit_event(

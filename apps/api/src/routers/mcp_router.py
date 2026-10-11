@@ -15,6 +15,19 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 router = APIRouter(prefix="/mcp", tags=["MCP Server"])
+oauth_resource_router = APIRouter(tags=["MCP OAuth"])
+logger = logging.getLogger(__name__)
+
+
+def _mcp_origin_allowed(http_request: Request, origin: str) -> bool:
+    from services.cors_policy import TenantAwareCORSMiddleware
+
+    middleware = http_request.app.middleware_stack
+    while middleware is not None:
+        if isinstance(middleware, TenantAwareCORSMiddleware):
+            return middleware.is_allowed_origin(origin)
+        middleware = getattr(middleware, "app", None)
+    return False
 
 
 class ToolCallRequest(BaseModel):
@@ -22,11 +35,16 @@ class ToolCallRequest(BaseModel):
     arguments: dict = Field(default_factory=dict)
 
 
+class McpPolicyRequest(BaseModel):
+    enabled: bool = True
+    allowed_tools: list[str] | None = None
+
+
 def _mcp_authenticated(http_request: Request) -> bool:
     return bool(getattr(http_request.state, "user", None) or getattr(http_request.state, "api_key_auth", False))
 
 
-def _require_mcp_tool_auth(http_request: Request) -> None:
+def _require_mcp_tool_auth(http_request: Request, tool_name: str | None = None) -> None:
     """Refuse tool execution unless a Bearer JWT / workspace API key is present.
 
     When platform auth is off (local/dev), tools remain callable without a token
@@ -38,12 +56,15 @@ def _require_mcp_tool_auth(http_request: Request) -> None:
         return
     if _mcp_authenticated(http_request):
         return
+    from services.mcp_oauth import bearer_challenge
+
     raise HTTPException(
         status_code=401,
         detail={
             "error": "Authentication required",
             "hint": "Pass Authorization: Bearer <workspace-api-key-or-jwt>",
         },
+        headers={"WWW-Authenticate": bearer_challenge()},
     )
 
 
@@ -51,7 +72,14 @@ def _require_mcp_tool_auth(http_request: Request) -> None:
 @router.api_route("/", methods=["GET", "POST", "DELETE"], include_in_schema=False)
 async def mcp_streamable(http_request: Request):
     """Cursor-native MCP Streamable HTTP endpoint."""
-    from services.mcp_protocol import handle_jsonrpc, new_session_id
+    from services.mcp_protocol import McpCallContext, _jsonrpc_error, handle_jsonrpc, new_session_id
+
+    origin = http_request.headers.get("origin")
+    if origin is not None and not _mcp_origin_allowed(http_request, origin):
+        return JSONResponse(
+            status_code=403,
+            content=_jsonrpc_error(None, -32600, "Origin not allowed"),
+        )
 
     if http_request.method == "DELETE":
         return Response(status_code=204)
@@ -72,17 +100,29 @@ async def mcp_streamable(http_request: Request):
 
     try:
         payload = await http_request.json()
-    except Exception as exc:
+    except Exception:
+        logger.warning("MCP JSON-RPC parse error")
         return JSONResponse(
             status_code=400,
-            content={"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"Parse error: {exc}"}},
+            content={"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
         )
 
     from src.ai.copilot.confirm_ack import reset_mcp_request, set_mcp_request
-    from src.ai.copilot.tool_permissions import caller_role
+    from src.ai.copilot.tool_permissions import bind_request_principal
     from src.services.auth_service import auth_required
 
     authenticated = _mcp_authenticated(http_request)
+    client = http_request.headers.get("X-MCP-Client") or "mcp-streamable"
+    actor = (
+        getattr(http_request.state, "user_email", None)
+        or http_request.headers.get("X-MCP-Client")
+        or "mcp-streamable"
+    )
+    context = McpCallContext(
+        actor=str(actor),
+        client=client,
+        correlation_id=getattr(http_request.state, "correlation_id", None),
+    )
     # When platform auth is off (local/dev), tools are callable without a Bearer token.
     allow_unauth_tools = not auth_required()
     mcp_role = ""
@@ -95,7 +135,7 @@ async def mcp_streamable(http_request: Request):
     results: list[dict] = []
     request_token = set_mcp_request(http_request)
     try:
-        with caller_role(mcp_role):
+        with bind_request_principal(http_request, mcp_role):
             for message in messages:
                 if not isinstance(message, dict):
                     results.append({"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "Invalid Request"}})
@@ -110,6 +150,7 @@ async def mcp_streamable(http_request: Request):
                     message,
                     authenticated=authenticated,
                     allow_unauth_tools=allow_unauth_tools,
+                    context=context,
                 )
                 if out is not None:
                     results.append(out)
@@ -123,6 +164,16 @@ async def mcp_streamable(http_request: Request):
         return Response(status_code=202, headers=headers)
 
     body = results if isinstance(payload, list) else results[0]
+    auth_failed = any(
+        isinstance(result, dict)
+        and isinstance(result.get("error"), dict)
+        and result["error"].get("code") == -32001
+        for result in results
+    )
+    if auth_failed:
+        from services.mcp_oauth import bearer_challenge
+
+        headers["WWW-Authenticate"] = bearer_challenge()
     accept = http_request.headers.get("accept", "")
     if "text/event-stream" in accept and "application/json" not in accept:
         data = json.dumps(body, default=str)
@@ -130,14 +181,69 @@ async def mcp_streamable(http_request: Request):
             iter([f"event: message\ndata: {data}\n\n"]),
             media_type="text/event-stream",
             headers=headers,
+            status_code=401 if auth_failed else 200,
         )
-    return JSONResponse(content=body, headers=headers)
+    return JSONResponse(
+        content=body,
+        headers=headers,
+        status_code=401 if auth_failed else 200,
+    )
+
+
+def _protected_resource_metadata() -> dict[str, object]:
+    from services.mcp_oauth import get_mcp_oauth_config
+    from services.rbac import all_permissions
+
+    config = get_mcp_oauth_config()
+    if not config.enabled:
+        raise HTTPException(status_code=404, detail="MCP OAuth is not configured")
+    return {
+        "resource": config.audience,
+        "authorization_servers": [config.issuer],
+        "bearer_methods_supported": ["header"],
+        "scopes_supported": sorted(all_permissions()),
+    }
+
+
+@oauth_resource_router.get("/.well-known/oauth-protected-resource")
+@oauth_resource_router.get("/.well-known/oauth-protected-resource/api/v1/mcp")
+async def mcp_protected_resource_metadata():
+    return _protected_resource_metadata()
+
+
+@router.get("/policy")
+async def get_mcp_policy_route(http_request: Request):
+    from services.integrations_store import get_mcp_policy
+
+    _require_mcp_tool_auth(http_request)
+    return get_mcp_policy()
+
+
+@router.put("/policy")
+async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request):
+    from services.audit_log import append_audit_event
+    from services.integrations_store import get_mcp_policy, set_mcp_policy
+
+    _require_mcp_tool_auth(http_request)
+    old = get_mcp_policy()
+    try:
+        new = set_mcp_policy(request.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    append_audit_event(
+        action="mcp.policy.updated",
+        resource="/api/v1/mcp/policy",
+        actor=getattr(http_request.state, "user_email", None) or "unknown",
+        details={"old": old, "new": new},
+    )
+    return new
 
 
 @router.get("/manifest")
 async def mcp_manifest(http_request: Request):
     """MCP-compatible manifest for IDE and agent integrations."""
     from ..ai.copilot.tools import TOOL_DEFINITIONS
+    from services.mcp_policy import filter_tools
 
     base = f"{str(http_request.base_url).rstrip('/')}/api/v1/mcp"
     return {
@@ -154,7 +260,7 @@ async def mcp_manifest(http_request: Request):
             "call": f"{base}/tools/call",
             "status": f"{base}/status",
         },
-        "tools": TOOL_DEFINITIONS,
+        "tools": filter_tools(TOOL_DEFINITIONS),
         "integrations": [
             {
                 "id": "cursor",
@@ -183,19 +289,40 @@ async def mcp_manifest(http_request: Request):
 @router.get("/tools")
 async def list_mcp_tools():
     from ..ai.copilot.tools import TOOL_DEFINITIONS
-    return {"tools": TOOL_DEFINITIONS}
+    from services.mcp_policy import filter_tools
+
+    return {"tools": filter_tools(TOOL_DEFINITIONS)}
 
 
 @router.post("/tools/call")
 async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     """Execute a Datawrap Pilot tool — same surface external agents use."""
-    _require_mcp_tool_auth(http_request)
+    _require_mcp_tool_auth(http_request, request.name)
+    from services.mcp_policy import policy_denial
+
+    denial = policy_denial(request.name)
+    if denial:
+        from services.mcp_invocation_log import log_mcp_invocation
+
+        log_mcp_invocation(
+            tool=request.name,
+            client=http_request.headers.get("X-MCP-Client") or "mcp-rest",
+            arguments=request.arguments,
+            status="error",
+            error=denial,
+            actor=getattr(http_request.state, "user_email", None) or "mcp-rest",
+            correlation_id=getattr(http_request.state, "correlation_id", None),
+            error_kind="policy_denied",
+        )
+        raise HTTPException(status_code=403, detail=denial)
     from services.mcp_invocation_log import log_mcp_invocation
     from services.mcp_rate_limit import check_mcp_rate_limit
+    from services.secret_config import mask_secrets_in_text
     from src.services.auth_service import auth_required as mcp_auth_required
+    from src.ai.copilot.tool_permissions import is_permission_denial
 
     from ..ai.copilot.confirm_ack import reset_mcp_request, set_mcp_request
-    from ..ai.copilot.tool_permissions import caller_role
+    from ..ai.copilot.tool_permissions import bind_request_principal
     from ..ai.copilot.tools import get_pilot_tools
 
     client = http_request.headers.get("X-MCP-Client", "unknown")
@@ -211,6 +338,19 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     correlation_id = getattr(http_request.state, "correlation_id", None)
     limit = check_mcp_rate_limit(str(actor or client))
     if not limit.get("allowed"):
+        from services.mcp_invocation_log import log_mcp_invocation
+
+        log_mcp_invocation(
+            tool=request.name,
+            client=client,
+            arguments=request.arguments,
+            status="error",
+            error="MCP rate limit exceeded",
+            duration_ms=0,
+            correlation_id=correlation_id,
+            actor=str(actor or "mcp-agent"),
+            error_kind="rate_limited",
+        )
         raise HTTPException(
             status_code=429,
             detail={
@@ -224,43 +364,51 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     try:
         request_token = set_mcp_request(http_request)
         try:
-            with caller_role(mcp_role):
+            with bind_request_principal(http_request, mcp_role):
                 result = await asyncio.to_thread(
                     get_pilot_tools().execute, request.name, request.arguments
                 )
         finally:
             reset_mcp_request(request_token)
     except Exception as exc:
+        masked = mask_secrets_in_text(str(exc))
         receipt = log_mcp_invocation(
             tool=request.name,
             client=client,
             arguments=request.arguments,
             status="error",
-            error=str(exc),
+            error=masked,
             duration_ms=(time.perf_counter() - start) * 1000,
             correlation_id=correlation_id,
             actor=str(actor or "mcp-agent"),
+            error_kind=(
+                "permission_denied" if is_permission_denial(masked) else "tool_error"
+            ),
         )
         raise HTTPException(
             status_code=500,
-            detail={"error": str(exc), "tool": request.name, "receipt_id": receipt.get("id")},
+            detail={"error": masked, "tool": request.name, "receipt_id": receipt.get("id")},
         ) from exc
 
     ms = (time.perf_counter() - start) * 1000
     if not result.success:
+        error = mask_secrets_in_text(str(result.error or "tool failed"))
         receipt = log_mcp_invocation(
             tool=request.name,
             client=client,
             arguments=request.arguments,
             status="error",
-            error=result.error or "tool failed",
+            error=error,
             duration_ms=ms,
             correlation_id=correlation_id,
             actor=str(actor or "mcp-agent"),
+            error_kind=(
+                "permission_denied" if is_permission_denial(error) else "tool_error"
+            ),
         )
         raise HTTPException(
             status_code=422,
-            detail={"error": result.error, "tool": request.name, "receipt_id": receipt.get("id")},
+            detail={"error": error, "tool": request.name, "receipt_id": receipt.get("id")},
         )
 
     receipt = log_mcp_invocation(
@@ -271,6 +419,7 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
         duration_ms=ms,
         correlation_id=correlation_id,
         actor=str(actor or "mcp-agent"),
+        error_kind="ok",
     )
     return {
         "tool": result.name,

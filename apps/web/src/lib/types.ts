@@ -1751,6 +1751,9 @@ export const CONNECTOR_CATALOG = [
   { id: "hubspot", label: "HubSpot", port: 443 },
   { id: "stripe", label: "Stripe", port: 443 },
   { id: "shopify", label: "Shopify", port: 443 },
+  { id: "github", label: "GitHub", port: 443, sourceOnly: true },
+  { id: "jira", label: "Jira Cloud", port: 443, sourceOnly: true },
+  { id: "intercom", label: "Intercom", port: 443, sourceOnly: true },
   { id: "rest_api", label: "REST / OpenAPI", port: 443 },
   { id: "graphql", label: "GraphQL", port: 443 },
 ] as const;

@@ -27,6 +27,26 @@ LsnMatcher = Callable[[str, str], str]
 # Destination metadata column for CDC monotonic apply (PK + LSN guard).
 DF_LSN_COL = "_df_lsn"
 
+
+def _parse_oracle_rs_id(rs_id: str) -> tuple[int, int, int] | None:
+    parts = [part.strip() for part in str(rs_id or "").strip().split(".")]
+    if len(parts) != 3:
+        return None
+    if parts[0].lower().startswith("0x"):
+        parts[0] = parts[0][2:]
+    if any(not re.fullmatch(r"[0-9a-f]+", part, flags=re.IGNORECASE) for part in parts):
+        return None
+    try:
+        return tuple(int(part, 16) for part in parts)  # type: ignore[return-value]
+    except ValueError:
+        return None
+
+
+def parse_oracle_rs_id(rs_id: str) -> tuple[int, int, int] | None:
+    """Parse an Oracle LogMiner RS_ID into its numeric components."""
+    return _parse_oracle_rs_id(rs_id)
+
+
 def lsn_family(lsn: Any) -> str:
     """Return CDC stamp family for LSN-guard compares (Debezium-class).
 
@@ -45,7 +65,14 @@ def lsn_family(lsn: Any) -> str:
     if lower.startswith("gtid:"):
         return "mysql_gtid"
     if lower.startswith("scn:"):
-        return "oracle_scn"
+        if re.fullmatch(r"scn:\d+(?:\.c)?", text, flags=re.IGNORECASE):
+            return "oracle_scn"
+        partial = re.fullmatch(
+            r"scn:\d+\.p(.+)\.\d{10}", text, flags=re.IGNORECASE
+        )
+        if partial and _parse_oracle_rs_id(partial.group(1)) is not None:
+            return "oracle_scn"
+        return "opaque"
     if lower.startswith("mongo:"):
         return "mongo_resume"
     # Postgres WAL LSN: hex/hex
@@ -58,8 +85,11 @@ def lsn_family(lsn: Any) -> str:
         file_name, _, pos = text.rpartition(":")
         if file_name and pos.isdigit():
             return "mysql_binlog"
+    # SQL Server LSN with an in-position commit coordinate.
+    if re.fullmatch(r"(?:0x)?[0-9a-f]+\.(?:p[0-9a-f]+|c)", lower):
+        return "mssql_lsn"
     # SQL Server binary LSN hex (0x… or long hex)
-    if lower.startswith("0x") and all(c in "0123456789abcdef" for c in lower[2:]):
+    if lower.startswith("0x") and re.fullmatch(r"0x[0-9a-f]+", lower):
         return "mssql_lsn"
     if len(text) >= 10 and all(c in "0123456789abcdefABCDEF" for c in text) and not text.isdigit():
         return "mssql_lsn"
@@ -81,11 +111,28 @@ def lsn_sort_key(lsn: Any) -> tuple:
         return (0, -1, -1, "")
     lower = text.lower()
     if lower.startswith("scn:"):
-        body = text.split(":", 1)[1].strip()
-        try:
-            return (1, int(body), 0, "")
-        except (TypeError, ValueError):
-            return (0, 0, 0, body)
+        legacy = re.fullmatch(r"scn:(\d+)", text, flags=re.IGNORECASE)
+        if legacy:
+            return (1, int(legacy.group(1)), 0, "")
+        partial = re.fullmatch(
+            r"scn:(\d+)\.p(.+)\.(\d{10})",
+            text,
+            flags=re.IGNORECASE,
+        )
+        rs_id = _parse_oracle_rs_id(partial.group(2)) if partial else None
+        if partial and rs_id is not None:
+            rs_seq, rs_blk, rs_off = rs_id
+            ssn = int(partial.group(3))
+            return (
+                1,
+                int(partial.group(1)),
+                1,
+                f"{rs_seq:020d}{rs_blk:020d}{rs_off:010d}{ssn:020d}",
+            )
+        complete = re.fullmatch(r"scn:(\d+)\.c", text, flags=re.IGNORECASE)
+        if complete:
+            return (1, int(complete.group(1)), 2, "")
+        return (0, 0, 0, text)
     if lower.startswith("mongo:"):
         return (0, 0, 0, text.split(":", 1)[1])
     # Postgres WAL LSN: hex/hex (reject paths that look like URLs).
@@ -101,6 +148,29 @@ def lsn_sort_key(lsn: Any) -> tuple:
         file_name, _, pos = text.rpartition(":")
         if file_name and pos.isdigit():
             return (2, file_name, int(pos), "")
+    mssql_composite = re.fullmatch(
+        r"(?:0x)?([0-9a-f]+)\.(?:p([0-9a-f]+)|c)",
+        lower,
+    )
+    if mssql_composite:
+        rank = 1 if mssql_composite.group(2) is not None else 2
+        seqval = mssql_composite.group(2)
+        return (
+            4,
+            int(mssql_composite.group(1), 16),
+            rank,
+            f"{int(seqval, 16):040d}" if seqval is not None else "",
+        )
+    mssql_legacy = lower[2:] if lower.startswith("0x") else lower
+    if (
+        (lower.startswith("0x") and re.fullmatch(r"0x[0-9a-f]+", lower))
+        or (
+            len(text) >= 10
+            and not text.isdigit()
+            and re.fullmatch(r"[0-9a-f]+", mssql_legacy)
+        )
+    ):
+        return (4, int(mssql_legacy, 16), 0, "")
     # Zero-padded / numeric versions (SQL Server CT, etc.).
     if text.isdigit():
         return (1, int(text), 0, "")
@@ -392,6 +462,56 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
             if part.startswith("lsn=") and part[4:].strip():
                 return part[4:].strip()
     return text
+
+
+def extract_cdc_commit_position(resume_token: Any) -> str | None:
+    """Return a composite commit position for streaming Oracle/SQL Server tokens."""
+    if resume_token is None:
+        return None
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    token = unwrap_resume_token(resume_token)
+    if not isinstance(token, dict):
+        return None
+    nested = token.get("token")
+    if isinstance(nested, (dict, str)) and nested:
+        nested_position = extract_cdc_commit_position(nested)
+        if nested_position:
+            return nested_position
+
+    kind = str(token.get("kind") or "")
+    if str(token.get("phase") or "") != "streaming":
+        return None
+    if kind == "oracle-logminer":
+        major_lsn = extract_cdc_lsn(token)
+        if not major_lsn:
+            return None
+        rs_id = str(token.get("rs_id") or "").strip()
+        if not rs_id:
+            return f"{major_lsn}.c"
+        raw_ssn = token.get("ssn")
+        try:
+            ssn = int(raw_ssn or 0)
+        except (TypeError, ValueError):
+            return f"{major_lsn}.p{rs_id}.{str(raw_ssn)}"
+        return f"{major_lsn}.p{rs_id}.{ssn:010d}"
+    if kind == "mssql-cdc":
+        raw_lsn = str(token.get("lsn") or "").strip().lower()
+        if not raw_lsn:
+            return None
+        major_lsn = raw_lsn[2:] if raw_lsn.startswith("0x") else raw_lsn
+        major_lsn = major_lsn.zfill(20)
+        raw_seqval = token.get("seqval")
+        if isinstance(raw_seqval, (bytes, bytearray)):
+            seqval = bytes(raw_seqval).hex()
+        else:
+            seqval = str(raw_seqval or "").strip().lower()
+        if seqval.startswith("0x"):
+            seqval = seqval[2:]
+        if seqval:
+            return f"{major_lsn}.p{seqval}"
+        return f"{major_lsn}.c"
+    return None
 
 
 #: Families that carry a ``prefix:`` yet are **not** MySQL binlog ``file:pos``.

@@ -451,6 +451,9 @@ class IncrementalReadScope:
     cursor_key: str = ""
     #: Column the stored watermark was actually measured on ("" when unrecorded).
     watermark_cursor_column: str = ""
+    #: Tie-break column a composite watermark was written with ("" when the
+    #: watermark is cursor-only or predates the record).
+    watermark_tiebreak_column: str = ""
 
     @property
     def bounded(self) -> bool:
@@ -535,20 +538,56 @@ def resolve_incremental_read_scope(
         else legacy_key
     )
     pk_cols = contract.primary_key_columns() if contract else []
-    tiebreak = incremental_tiebreak_column(source_type, cursor_column, pk_cols)
     if cursor_key != legacy_key:
         watermark, metadata = resolve_owned_watermark(
             cursor_key, legacy_key, owner=owner
         )
     else:
         watermark, metadata = get_watermark_record(cursor_key)
+    metadata = dict(metadata or {})
+    tiebreak = incremental_tiebreak_column(source_type, cursor_column, pk_cols)
+    stored_tiebreak = str(metadata.get("tiebreak_column") or "").strip()
+    # QA ACC-02: a composite watermark is a value of (cursor, tie-break) and can
+    # only be decoded by a read that seeks on the column it was written with.
+    # Run 1's row path took that column from the source catalog PK; run 2's
+    # contract (incremental_append, no PK) named none, so the second read
+    # decoded "cursor␟pk" single-column and refused. The stored column wins.
+    if stored_tiebreak and watermark_is_composite(watermark):
+        tiebreak = stored_tiebreak
     return IncrementalReadScope(
         cursor_column=cursor_column,
         primary_key=tiebreak,
         watermark=watermark,
         cursor_key=cursor_key,
         watermark_cursor_column=str(metadata.get("cursor_column") or ""),
+        watermark_tiebreak_column=stored_tiebreak,
     )
+
+
+def watermark_is_composite(watermark: Any) -> bool:
+    """True when a stored watermark carries a tie-break part."""
+    from services.keyset_pagination import is_cursor_only_bookmark
+
+    if watermark is None or str(watermark) == "":
+        return False
+    return not is_cursor_only_bookmark(str(watermark))
+
+
+def reconcile_cursor_tiebreak(
+    scope: IncrementalReadScope | None, computed: str
+) -> str:
+    """The tie-break this run must seek on, given the stored watermark.
+
+    A composite watermark written with column ``c`` is only decodable on ``c``:
+    the stored column wins over whatever this run derived. A legacy composite
+    watermark with no recorded column keeps the derived one (catalog PK) — the
+    same evidence the run that wrote it used.
+    """
+    if scope is not None and scope.watermark_tiebreak_column and watermark_is_composite(
+        scope.watermark
+    ):
+        return scope.watermark_tiebreak_column
+    return computed
 
 
 def _mongo_cursors():  # type: ignore[no-untyped-def]

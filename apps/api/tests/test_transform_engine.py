@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from services.transform_engine import apply_transform, dry_run_sample, infer_transform, preview_quarantine_cells
+from services.transform_engine import apply_transform, dry_run_sample, preview_quarantine_cells
 
 
 def test_infer_decimal_for_amount():

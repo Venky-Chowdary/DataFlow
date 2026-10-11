@@ -805,6 +805,41 @@ def apply_replay_overlay(
     return out
 
 
+def closure_with_promotion_outcome(
+    compact: dict[str, Any],
+    promote_meta: dict[str, Any] | None,
+    *,
+    job_id: str = "",
+) -> dict[str, Any]:
+    """A destination DLQ stamp that errored cannot leave the ledger ``closed``.
+
+    Gate-8 proves the rows landed; ``_df_promoted_at`` on the destination
+    quarantine table is the other half of the ledger. When that UPDATE failed
+    (missing table, permissions) the two ledgers disagree, so the verdict is
+    ``diverging`` with the error carried for the operator.
+    """
+    meta = promote_meta if isinstance(promote_meta, dict) else {}
+    error = str(meta.get("error") or "").strip()
+    if not error:
+        return compact
+    out = dict(compact)
+    table = str(meta.get("table") or "the destination quarantine table")
+    logger.warning(
+        "Quarantine closure for job %s held at diverging: DLQ promote stamp on %s failed: %s",
+        job_id or "?",
+        table,
+        error,
+    )
+    out["verdict"] = VERDICT_DIVERGING
+    out["promotion_error"] = error[:300]
+    out["next_action"] = (
+        f"Replayed rows landed (child Gate-8 passed) but stamping them promoted in "
+        f"{table} failed: {error[:200]}. The quarantine ledger is not closed — fix "
+        "the destination quarantine table, then re-run Promote."
+    )
+    return out
+
+
 def compact_replay_closure(closure: dict[str, Any] | None) -> dict[str, Any]:
     """Job-document payload — identities stay in the DLQ event, not Mongo bloat."""
     c = dict(closure or {})

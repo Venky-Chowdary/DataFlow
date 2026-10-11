@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from services.column_case import column_type_or_none
@@ -18,6 +19,8 @@ from services.type_system import (
     uuid_capacity_string_carrier,
     uuid_carrier_is_dialect_equivalent,
 )
+
+_logger = logging.getLogger(__name__)
 
 
 def validate_mapping_coercions(
@@ -49,6 +52,18 @@ def validate_mapping_coercions(
     Same-logical pairs still run precision-collapse checks (DECIMAL/VARCHAR/TZ
     narrowing) — an early ``continue`` used to green G9 while G3/G6 blocked.
     """
+    from services.timezone_policy import declared_source_column_types
+
+    # A declared source zone (assume_timezone:X) makes a naive column an
+    # instant. G3 already reads types this way; reading the raw TIMESTAMP here
+    # re-blocked the run the operator just answered (MX2-01).
+    declared = declared_source_column_types(source_types, mappings)
+    reprojected = sorted(c for c, t in declared.items() if t != source_types.get(c))
+    if reprojected:
+        _logger.info(
+            "coercion check reads declared source zone for column(s) %s", reprojected,
+        )
+    source_types = declared
     type_locked = (schema_policy or "").lower() == "type_locked"
     mode = (validation_mode or "strict").strip().lower()
     balanced = mode in {"balanced", "review"}

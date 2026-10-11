@@ -4,6 +4,8 @@ Datawrap — Copilot API Router
 Customer-facing chat + separate training agent endpoints.
 """
 
+import logging
+
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
@@ -11,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from src.services import auth_service
 
+_logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/copilot", tags=["AI Copilot"])
 
 
@@ -127,7 +130,7 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
     try:
         from ..ai.copilot import get_copilot_agent
         from ..ai.copilot.pilot_agent import carries_evidence
-        from ..ai.copilot.tool_permissions import caller_role
+        from ..ai.copilot.tool_permissions import bind_request_principal
 
         from services.effective_role import workspace_id_from_request_headers
 
@@ -138,7 +141,7 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         ws = workspace_id_from_request_headers(http_request.headers)
         if ws:
             data_context["workspace_id"] = ws
-        with caller_role(role):
+        with bind_request_principal(http_request, role):
             result = agent.chat(request.message, history, data_context=data_context or None)
         return CopilotChatResponse(
             answer=result.answer,
@@ -159,6 +162,45 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _stamp_confirmation(job_id: str, *, ack_id: str, actor: str, reason: str) -> None:
+    """Record who confirmed the job and why on the job itself (QA MX3-19).
+
+    The ack ledger kept the actor and reason, but get_job and audit readers
+    only see the job document.
+    """
+    if not job_id:
+        return
+    from datetime import datetime, timezone
+
+    from services.mongodb_service import get_mongodb_service
+
+    confirmation = {
+        "approved_by": actor,
+        "reason": reason,
+        "ack_id": ack_id,
+        "confirmed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    try:
+        stamped = get_mongodb_service().update_job_fields(
+            job_id, {"confirmation": confirmation}
+        )
+    except Exception as exc:  # noqa: BLE001 - the job runs; the audit gap is logged
+        _logger.error(
+            "Job %s: confirmation by %s could not be recorded: %s",
+            job_id,
+            actor,
+            exc,
+            exc_info=exc,
+        )
+        return
+    if not stamped:
+        _logger.error(
+            "Job %s: confirmation by %s was not recorded (job not found)", job_id, actor
+        )
+        return
+    _logger.info("Job %s confirmed by %s (ack %s)", job_id, actor, ack_id)
 
 
 async def _start_confirmed_transfer(payload: dict) -> dict:
@@ -259,6 +301,31 @@ async def _run_lifecycle_confirm(
         cid = str(payload.get("connector_id") or "").strip()
         out = saved_connectors_router.remove_saved_connector(cid, http_request, workspace_id)
         return {**dict(out), "connector_id": cid, "name": payload.get("name") or ""}
+    if kind == "update_connector":
+        cid = str(payload.get("connector_id") or "").strip()
+        existing = saved_connectors_router.get_connector(cid, workspace_id=workspace_id or None)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Connector not found")
+        dto_cls = saved_connectors_router.ConnectorSaveDTO
+        data: dict = {}
+        for field_name, field in dto_cls.model_fields.items():
+            if field_name == "last_test_ok":
+                continue
+            key = field.alias or field_name
+            value = getattr(existing, key, getattr(existing, field_name, None))
+            if value is not None:
+                data[key] = value
+        data.update(dict(payload.get("changes") or {}))
+        out = saved_connectors_router.update_saved_connector(
+            cid, dto_cls(**data), http_request, workspace_id
+        )
+        return {
+            **dict(out),
+            "connector_id": cid,
+            "name": data.get("name") or payload.get("name") or "",
+            "changed_fields": sorted(dict(payload.get("changes") or {})),
+            "next": "Run test_connector to prove the new settings connect.",
+        }
     if kind == "set_schedule_enabled":
         sid = str(payload.get("schedule_id") or "").strip()
         body = schedules_router.ScheduleUpdate(enabled=bool(payload.get("enabled")))
@@ -337,7 +404,11 @@ async def copilot_confirm(
     from services.connector_store import create_connector
 
     from ..ai.copilot.ack_ledger import get_ack_ledger
-    from ..ai.copilot.tool_permissions import can_confirm_kind, confirm_denial_message
+    from ..ai.copilot.tool_permissions import (
+        bind_request_principal,
+        can_confirm_kind,
+        confirm_denial_message,
+    )
 
     ack_id = (request.ack_id or "").strip()
     if not ack_id:
@@ -357,7 +428,9 @@ async def copilot_confirm(
         )
 
     role, session_actor = _caller(http_request)
-    if not can_confirm_kind(role, str(peek.get("kind") or "")):
+    with bind_request_principal(http_request, role):
+        can_confirm = can_confirm_kind(role, str(peek.get("kind") or ""))
+    if not can_confirm:
         raise HTTPException(
             status_code=403,
             detail=confirm_denial_message(role, str(peek.get("kind") or "")),
@@ -391,6 +464,12 @@ async def copilot_confirm(
         except Exception as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=f"Failed to start transfer: {exc}") from exc
+        _stamp_confirmation(
+            str(result.get("job_id") or ""),
+            ack_id=ack_id,
+            actor=actor,
+            reason=request.reason or "confirmed",
+        )
         ledger.finalize(
             ack_id,
             actor=actor,

@@ -6,11 +6,10 @@ import logging
 import os
 from services.brand_env import getenv_brand
 import sys
-import threading
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Iterator, Optional, Sequence
+from typing import Any, Iterator, Optional
 
 try:
     import resource  # Unix-only; unavailable on Windows
@@ -51,13 +50,10 @@ try:
         confidence_threshold_for_mode,
         probe_destination,
         run_file_preflight,
-        run_transfer_policy_gates,
     )
     from services.row_filter import apply_row_filter
     from services.scd2_engine import apply_scd2
     from services.shape_apply import (
-        ShapeError,
-        ShapeRowError,
         ShapeRunner,
         shaped_schema,
     )
@@ -100,13 +96,10 @@ except (
         confidence_threshold_for_mode,
         probe_destination,
         run_file_preflight,
-        run_transfer_policy_gates,
     )
     from src.services.row_filter import apply_row_filter
     from src.services.scd2_engine import apply_scd2
     from src.services.shape_apply import (
-        ShapeError,
-        ShapeRowError,
         ShapeRunner,
         shaped_schema,
     )
@@ -154,7 +147,6 @@ from .models import (
 from .reconcile_step import run_reconciliation
 from .registry import validate_transfer
 from .stream import (
-    peek_stream_source,
     run_non_cdc_multi_stream_sequential,
     stream_database_transfer,
     stream_scd2_mirror_transfer,
@@ -626,6 +618,14 @@ def _destination_schema_probe(
         # Stamp PK/UNIQUE/FK catalog for Execute preflight SSOT with Validate
         # (preflight_router passes dest_meta.primary_key_columns / unique_keys).
         extra["primary_key_columns"] = list(info.get("primary_key_columns") or [])
+        extra["dynamo_key_schema"] = [
+            dict(row)
+            for row in (info.get("dynamo_key_schema") or [])
+            if isinstance(row, dict)
+        ]
+        extra["dynamo_index_attributes"] = dict(
+            info.get("dynamo_index_attributes") or {}
+        )
         extra["unique_keys"] = list(info.get("unique_keys") or [])
         extra["foreign_keys"] = list(
             info.get("foreign_keys") or info.get("destination_foreign_keys") or []
@@ -730,6 +730,14 @@ def _destination_filler_metadata(extra: dict[str, Any] | None) -> dict[str, Any]
         "destination_column_defaults": dict(meta.get("schema_defaults") or {}),
         "destination_identity_columns": list(meta.get("identity_columns") or []),
         "destination_generated_columns": list(meta.get("generated_columns") or []),
+        "destination_dynamo_key_schema": [
+            dict(row)
+            for row in (meta.get("dynamo_key_schema") or [])
+            if isinstance(row, dict)
+        ],
+        "destination_dynamo_index_attributes": dict(
+            meta.get("dynamo_index_attributes") or {}
+        ),
         "destination_live_column_types": dict(
             meta.get("schema_types")
             or meta.get("overwrite_replaced_column_types")
@@ -968,6 +976,20 @@ def _execute_preflight_parity_kwargs(
 
     # Keep destination.extra stamped for later gates / theater honesty.
     extra["primary_key_columns"] = pk_cols
+    extra["dynamo_key_schema"] = [
+        dict(row)
+        for row in (
+            dest_meta.get("dynamo_key_schema")
+            or extra.get("dynamo_key_schema")
+            or []
+        )
+        if isinstance(row, dict)
+    ]
+    extra["dynamo_index_attributes"] = dict(
+        dest_meta.get("dynamo_index_attributes")
+        or extra.get("dynamo_index_attributes")
+        or {}
+    )
     extra["unique_keys"] = unique_keys
     extra["foreign_keys"] = foreign_keys
     if isinstance(table_exists, bool):
@@ -1332,6 +1354,61 @@ def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
         )
 
 
+def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -> Any:
+    """Write the success terminal status, or record the commit on a cancelled job.
+
+    Cancel is sticky, so a success write landing after Cancel is refused —
+    but by then the rows are committed. Leaving the cancelled job at its
+    last heartbeat hid them (QA MXD10).
+    """
+    from services.job_status import cancel_outcome_for
+
+    written = mongo.update_job_status(job_id, status, **fields)
+    if written is not False:
+        return written
+    try:
+        job = mongo.get_job(job_id) or {}
+    except Exception as exc:  # noqa: BLE001 - the refusal itself is returned
+        logger.error(
+            "Job %s: success write refused and the job could not be read: %s",
+            job_id,
+            exc,
+            exc_info=exc,
+        )
+        return written
+    if not (job.get("cancel_requested") or str(job.get("status") or "") == "cancelled"):
+        return written
+    outcome = cancel_outcome_for(fields.get("records_processed"))
+    logger.warning(
+        "Job %s: cancel landed after %s row(s) committed; recording them on the cancelled job",
+        job_id,
+        outcome["rows_committed"],
+    )
+    kept = {
+        key: fields[key]
+        for key in (
+            "records_processed",
+            "rejected_rows",
+            "coerced_null_rows",
+            "rejected_details",
+            "destination_summary",
+            "reconciliation",
+            "destination_database",
+            "destination_collection",
+        )
+        if key in fields
+    }
+    mongo.update_job_status(
+        job_id,
+        "cancelled",
+        phase="cancelled",
+        message=outcome["message"],
+        cancel_outcome=outcome,
+        **kept,
+    )
+    return written
+
+
 def _pin_overwrite_rows_before(
     destination: EndpointConfig,
     checkpoint: Any = None,
@@ -1474,16 +1551,131 @@ from .job_failure import (  # noqa: E402,F401 — re-export
 
 
 
-def _note_failed_batch_undo(request: Any, dest_summary: Any, message: str) -> str:
+#: Terminal-status write attempts after a verified load. The control plane can
+#: be slow under load (QA observed 600s timeouts); the data outcome cannot.
+_TERMINAL_WRITE_ATTEMPTS = 4
+
+
+def _finish_verified_run(
+    mongo: Any,
+    job_id: str,
+    exc: BaseException,
+    *,
+    request: Any,
+    rows_written: int,
+    dest_summary: dict[str, Any] | None,
+    recon: dict[str, Any] | None,
+    total_rows: int | None = None,
+) -> TransferResult:
+    """A step after Gate-8 proved the load raised. The run still succeeded.
+
+    QA MX2-15: 120,000 rows landed with matching checksums and the job read
+    *failed*, because bookkeeping after the proof (status write under a slow
+    control plane, lineage emit, contract finalize, slot release) shared the
+    ``try`` whose handler fails the job — and, for MySQL/Mongo rename-aside
+    overwrite, *restored the previous table* over the verified rows.
+
+    Here the backup is discarded (the new rows are proven), the terminal
+    status is written with bounded retry, and the failing step is recorded as
+    a ``post_commit_warning`` — visible, never a status flip.
+    """
+    import time as _time
+    from datetime import datetime, timezone
+
+    from services.job_status import terminal_status_for
+
+    summary = dict(dest_summary or {})
+    warning = {
+        "step": "post_commit",
+        "error": f"{type(exc).__name__}: {exc}"[:500],
+        "at": datetime.now(timezone.utc).isoformat(),
+    }
+    summary["post_commit_warnings"] = list(summary.get("post_commit_warnings") or []) + [
+        warning
+    ]
+    logger.error(
+        "Job %s: post-commit step failed after Gate-8 passed; the load stands: %s",
+        job_id,
+        exc,
+        exc_info=exc,
+    )
+    _settle_overwrite_backup(request.destination, restore=False)
+    terminal = terminal_status_for(
+        summary.get("rejected_rows", 0), summary.get("coerced_null_rows", 0)
+    )
+    message = (recon or {}).get(
+        "message", f"Transferred {rows_written:,} rows successfully"
+    )
+    for attempt in range(_TERMINAL_WRITE_ATTEMPTS):
+        try:
+            _write_success_status(
+                mongo,
+                job_id,
+                terminal,
+                records_processed=rows_written,
+                progress_pct=100,
+                phase="completed",
+                message=message,
+                rejected_rows=int(summary.get("rejected_rows", 0) or 0),
+                coerced_null_rows=int(summary.get("coerced_null_rows", 0) or 0),
+                destination_summary=summary,
+                reconciliation=recon or {},
+                post_commit_warnings=summary["post_commit_warnings"],
+            )
+            break
+        except Exception as write_exc:  # noqa: BLE001
+            logger.warning(
+                "Job %s terminal status write attempt %s failed: %s",
+                job_id,
+                attempt + 1,
+                write_exc,
+            )
+            if attempt + 1 < _TERMINAL_WRITE_ATTEMPTS:
+                _time.sleep(min(8.0, 0.5 * (2**attempt)))
+    return TransferResult(
+        success=True,
+        job_id=job_id,
+        records_transferred=rows_written,
+        operation=request.operation,
+        source_summary={"rows": total_rows} if total_rows is not None else {},
+        destination_summary=summary,
+        reconciliation=recon or {},
+    )
+
+
+def _note_failed_batch_undo(
+    request: Any,
+    dest_summary: Any,
+    message: str,
+    *,
+    recon: dict[str, Any] | None = None,
+) -> str:
     """Clear a partial SQL batch when this run found the destination empty.
 
     A MySQL overwrite renamed the previous table aside. Restoring that
     backup is the rollback. Deleting the replacement after the rename
     leaves the live name empty and the pre-run rows only in the backup
     — or gone, if a second start already dropped the backup.
+
+    When verification could not *read* the destination (transient fault
+    after retries), nothing was proven wrong with the committed rows, so
+    they are kept rather than undone (QA MX2-15).
     """
     if not isinstance(dest_summary, dict):
         return message or "Reconciliation failed"
+    if isinstance(recon, dict) and recon.get("verification_unavailable"):
+        note = (
+            "The committed rows were kept: verification could not read the "
+            "destination, which is not evidence the batch is wrong."
+        )
+        logger.warning(
+            "Skipping failed-batch undo for table=%s: verification unavailable",
+            dest_summary.get("table"),
+        )
+        dest_summary["partial_batch_undo"] = "retained"
+        dest_summary["partial_batch_undo_note"] = note
+        base = message or "Reconciliation failed"
+        return base if note in base else f"{base} {note}"
     destination = getattr(request, "destination", None)
     extra = dict(getattr(destination, "extra", None) or {})
     backup_engine = str(extra.get("overwrite_backup_engine") or "")
@@ -2036,6 +2228,41 @@ class DuplicateTransferSubmission(Exception):
         )
 
 
+def _job_destination_name(dest_summary: dict[str, Any], destination: Any) -> str:
+    """The object a run wrote, as the job record names it.
+
+    A file export has no table: the writer names the file it produced, and
+    without it ``get_job`` / ``list_jobs`` showed the format (``csv``) and
+    ``dest_table=null``.
+    """
+    return str(
+        dest_summary.get("collection")
+        or dest_summary.get("table")
+        or getattr(destination, "collection", "")
+        or getattr(destination, "table", "")
+        or dest_summary.get("filename")
+        or ""
+    )
+
+
+class SdkResumeNotSupportedError(ValueError):
+    """SDK source resume is not supported by the engine contract."""
+
+
+def _sdk_source_descriptor_for_format(source_format: str) -> Any | None:
+    from connectors.sdk import get_descriptor
+    from .connector_capabilities import resolve_driver_type
+
+    descriptor = get_descriptor(resolve_driver_type(source_format))
+    if (
+        descriptor is None
+        or "source" not in descriptor.roles
+        or not descriptor.catalog_ids
+    ):
+        return None
+    return descriptor
+
+
 class UniversalTransferEngine:
     """
     Orchestrates universal data movement:
@@ -2187,8 +2414,18 @@ class UniversalTransferEngine:
         from services.execution_engine_contract import DeliveryGuaranteeError
         from services.mapping_pipeline import assert_mappings_executable
         from services.procedure_source import is_callable_source
+        from .models import endpoint_to_dict
 
         try:
+            if resume:
+                descriptor = _sdk_source_descriptor_for_format(
+                    request.source.format or ""
+                )
+                if descriptor is not None:
+                    raise SdkResumeNotSupportedError(
+                        f"Resume is not supported for {descriptor.display_name} yet; "
+                        "rerun the job — rows are upserted by primary key."
+                    )
             requested_delivery = getattr(request, "delivery_guarantee", None) or "auto"
             request.delivery_pinned = operator_pinned_delivery(requested_delivery)
             request.delivery_guarantee = select_route_delivery(
@@ -2204,6 +2441,7 @@ class UniversalTransferEngine:
                 ),
                 allow_append_only=dest_allow_append_only(request.destination),
                 callable_source=is_callable_source(request.source),
+                dest_cfg=endpoint_to_dict(request.destination),
             )
             from services.procedure_source import assert_callable_sync_allowed
 
@@ -2298,6 +2536,16 @@ class UniversalTransferEngine:
         locale_token = set_active_date_locale(request.date_locale)
         number_token = set_active_number_locale(
             _run_number_locale(request)
+        )
+        from services.transform_engine import (
+            reset_strict_number_reading,
+            set_strict_number_reading,
+        )
+
+        strict_number_token = set_strict_number_reading(
+            str(getattr(request, "validation_mode", "") or "strict").strip().lower()
+            == "strict"
+            and not str(getattr(request, "number_locale", "") or "").strip()
         )
         try:
             from services.tracing import (
@@ -2445,6 +2693,7 @@ class UniversalTransferEngine:
                 self._notify_job_status(request, result)
                 return result
         finally:
+            reset_strict_number_reading(strict_number_token)
             reset_active_number_locale(number_token)
             reset_active_date_locale(locale_token)
             # The run is over however it ended, so the slot must be freed here.
@@ -2645,6 +2894,9 @@ class UniversalTransferEngine:
 
         pf = None
         contract_id = ""
+        # Set once Gate-8 passed with no silent loss: from there the run's data
+        # outcome is final and no later exception may fail or roll it back.
+        verified = False
         try:
             mongo.update_job_status(
                 job_id,
@@ -3681,7 +3933,10 @@ class UniversalTransferEngine:
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
                 fail_message = _note_failed_batch_undo(
-                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                    request,
+                    dest_summary,
+                    recon.get("message", "Reconciliation failed"),
+                    recon=recon,
                 )
                 mongo.update_job_status(
                     job_id,
@@ -3716,6 +3971,7 @@ class UniversalTransferEngine:
             )
             if lost is not None:
                 return lost
+            verified = True
 
             # Reconciliation passed: the delta is at rest, so the watermark may
             # move. Persisting it earlier would skip these rows after a failed run.
@@ -3748,7 +4004,8 @@ class UniversalTransferEngine:
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
-            mongo.update_job_status(
+            _write_success_status(
+                mongo,
                 job_id,
                 terminal_status,
                 records_processed=rows_written,
@@ -3760,8 +4017,9 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
-                destination_collection=dest_summary.get("collection")
-                or dest_summary.get("table", ""),
+                destination_collection=_job_destination_name(
+                    dest_summary, request.destination
+                ),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
@@ -3921,6 +4179,18 @@ class UniversalTransferEngine:
                 destination_summary=dest_summary,
             )
         except Exception as e:
+            if verified:
+                # QA MX2-15: proven rows must not be failed or rolled back by a
+                # bookkeeping step that raised after Gate-8 passed.
+                return _finish_verified_run(
+                    mongo,
+                    job_id,
+                    e,
+                    request=request,
+                    rows_written=int(rows_written or 0),
+                    dest_summary=dest_summary,
+                    recon=recon,
+                )
             _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
@@ -3950,6 +4220,18 @@ class UniversalTransferEngine:
         pf: dict | None = None
         contract_id = ""
         load_history_report: dict[str, Any] = {}
+        verified = False
+        number_token = set_active_number_locale(_run_number_locale(request))
+        from services.transform_engine import (
+            reset_strict_number_reading,
+            set_strict_number_reading,
+        )
+
+        strict_number_token = set_strict_number_reading(
+            str(getattr(request, "validation_mode", "") or "strict").strip().lower()
+            == "strict"
+            and not str(getattr(request, "number_locale", "") or "").strip()
+        )
         try:
             mongo.update_job_status(
                 job_id,
@@ -3962,11 +4244,23 @@ class UniversalTransferEngine:
             # SELECT when it has one. Peeking the table would map columns the
             # writer never reads.
             from services.execute_shape_route import peek_declared_source
-
-            columns, schema, total_rows, sample_rows = peek_declared_source(
-                request.source, request.stream_contracts
+            sdk_descriptor = _sdk_source_descriptor_for_format(src_fmt)
+            sdk_source = sdk_descriptor is not None
+            sdk_state = (
+                getattr(checkpoint, "cursor_value", None) if sdk_source else None
             )
-            if request.limit > 0:
+            peeked = peek_declared_source(
+                request.source,
+                request.stream_contracts,
+                sdk_state=sdk_state,
+                include_batch=sdk_source,
+            )
+            if sdk_source:
+                columns, schema, total_rows, sample_rows, initial_batch = peeked
+            else:
+                columns, schema, total_rows, sample_rows = peeked
+                initial_batch = None
+            if request.limit > 0 and total_rows is not None:
                 total_rows = min(total_rows, request.limit)
             if total_rows == 0 and not columns:
                 mongo.update_job_status(
@@ -4417,7 +4711,6 @@ class UniversalTransferEngine:
                 message=opening_batch_message(total_rows, request.stream_contracts),
             )
 
-            is_streaming = True
             stream_contract = resolve_sync_contract(request.stream_contracts)
             selected_streams = resolve_selected_sync_contracts(request.stream_contracts)
             multi_non_cdc = len(selected_streams) > 1
@@ -4584,6 +4877,7 @@ class UniversalTransferEngine:
                     limit=request.limit,
                     skip_preflight=request.skip_preflight,
                     shape_runner=shape_runner,
+                    initial_batch=initial_batch,
                 )
 
             with _reconcile_phase_heartbeat(
@@ -4619,7 +4913,10 @@ class UniversalTransferEngine:
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
                 fail_message = _note_failed_batch_undo(
-                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                    request,
+                    dest_summary,
+                    recon.get("message", "Reconciliation failed"),
+                    recon=recon,
                 )
                 mongo.update_job_status(
                     job_id,
@@ -4654,6 +4951,7 @@ class UniversalTransferEngine:
             )
             if lost is not None:
                 return lost
+            verified = True
 
 
             if effective_sync == "cdc" and isinstance(dest_summary, dict):
@@ -4778,7 +5076,8 @@ class UniversalTransferEngine:
             else:
                 release_args = None
             _settle_overwrite_backup(request.destination, restore=False)
-            status_written = mongo.update_job_status(
+            status_written = _write_success_status(
+                mongo,
                 job_id,
                 terminal_status,
                 records_processed=rows_written,
@@ -4790,8 +5089,9 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
-                destination_collection=dest_summary.get("collection")
-                or dest_summary.get("table", ""),
+                destination_collection=_job_destination_name(
+                    dest_summary, request.destination
+                ),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
@@ -4934,6 +5234,18 @@ class UniversalTransferEngine:
                 contract_id=contract_id,
             )
         except Exception as e:
+            if verified:
+                # QA MX2-15: proven rows must not be failed or rolled back by a
+                # bookkeeping step that raised after Gate-8 passed.
+                return _finish_verified_run(
+                    mongo,
+                    job_id,
+                    e,
+                    request=request,
+                    rows_written=int(rows_written or 0),
+                    dest_summary=dest_summary,
+                    recon=recon,
+                )
             _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
@@ -4947,6 +5259,9 @@ class UniversalTransferEngine:
                 operation=request.operation,
                 contract_id=contract_id,
             )
+        finally:
+            reset_strict_number_reading(strict_number_token)
+            reset_active_number_locale(number_token)
 
     def _execute_file_streaming(
         self,
@@ -4963,6 +5278,18 @@ class UniversalTransferEngine:
         pf: dict | None = None
         contract_id = ""
         load_history_report: dict[str, Any] = {}
+        verified = False
+        number_token = set_active_number_locale(_run_number_locale(request))
+        from services.transform_engine import (
+            reset_strict_number_reading,
+            set_strict_number_reading,
+        )
+
+        strict_number_token = set_strict_number_reading(
+            str(getattr(request, "validation_mode", "") or "strict").strip().lower()
+            == "strict"
+            and not str(getattr(request, "number_locale", "") or "").strip()
+        )
         try:
             filename = request.source_filename or "upload.csv"
             content = prepare_stream_content(
@@ -5371,7 +5698,6 @@ class UniversalTransferEngine:
                 message=opening_batch_message(total_rows, request.stream_contracts),
             )
 
-            is_streaming = True
             stream_contract = resolve_sync_contract(request.stream_contracts)
             effective_sync = resolve_effective_sync_mode(
                 request.sync_mode,
@@ -5474,7 +5800,10 @@ class UniversalTransferEngine:
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
                 fail_message = _note_failed_batch_undo(
-                    request, dest_summary, recon.get("message", "Reconciliation failed")
+                    request,
+                    dest_summary,
+                    recon.get("message", "Reconciliation failed"),
+                    recon=recon,
                 )
                 mongo.update_job_status(
                     job_id,
@@ -5509,6 +5838,7 @@ class UniversalTransferEngine:
             )
             if lost is not None:
                 return lost
+            verified = True
             if isinstance(dest_summary, dict) and dest_summary.get("file_digest"):
                 from services.file_load_ledger import record_successful_file_load
 
@@ -5550,7 +5880,8 @@ class UniversalTransferEngine:
             _attach_job_rollback_plan(job_id, dest_summary, request)
             _apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
-            mongo.update_job_status(
+            _write_success_status(
+                mongo,
                 job_id,
                 terminal_status,
                 records_processed=rows_written,
@@ -5562,8 +5893,9 @@ class UniversalTransferEngine:
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
-                destination_collection=dest_summary.get("collection")
-                or dest_summary.get("table", ""),
+                destination_collection=_job_destination_name(
+                    dest_summary, request.destination
+                ),
                 rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
                 rejected_details=(dest_summary.get("rejected_details") or [])[:2000],
@@ -5676,6 +6008,18 @@ class UniversalTransferEngine:
                 contract_id=contract_id,
             )
         except Exception as e:
+            if verified:
+                # QA MX2-15: proven rows must not be failed or rolled back by a
+                # bookkeeping step that raised after Gate-8 passed.
+                return _finish_verified_run(
+                    mongo,
+                    job_id,
+                    e,
+                    request=request,
+                    rows_written=int(rows_written or 0),
+                    dest_summary=dest_summary,
+                    recon=recon,
+                )
             _settle_overwrite_backup(request.destination, restore=True)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
@@ -5689,6 +6033,9 @@ class UniversalTransferEngine:
                 operation=request.operation,
                 contract_id=contract_id,
             )
+        finally:
+            reset_strict_number_reading(strict_number_token)
+            reset_active_number_locale(number_token)
 
     def _create_pending_job(self, request: TransferRequest) -> str:
         self._resolve_saved_connectors(request)

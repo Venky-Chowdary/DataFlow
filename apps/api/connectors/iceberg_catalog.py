@@ -9,6 +9,7 @@ catalog.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,11 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import url2pathname
 
 _WINDOWS = os.name == "nt"
+logger = logging.getLogger(__name__)
+
+
+class IcebergCatalogError(RuntimeError):
+    """Catalog metadata could not be checked safely."""
 
 PY_IO_IMPL = "py-io-impl"
 LOCAL_URI_FILE_IO = "connectors.iceberg_pyarrow_io.LocalUriPyArrowFileIO"
@@ -397,30 +403,33 @@ def _namespace_exists(catalog: Any, namespace: tuple[str, ...]) -> bool:
     from pyiceberg.exceptions import NoSuchNamespaceError
 
     try:
-        catalog.list_namespaces()  # Some catalogs support listing all
-        return namespace in catalog.list_namespaces(namespace[:-1] if len(namespace) > 1 else ())
-    except Exception:
-        try:
-            catalog.load_namespace_properties(namespace)
-            return True
-        except NoSuchNamespaceError:
-            return False
-        except Exception:
-            return False
+        catalog.load_namespace_properties(namespace)
+        return True
+    except NoSuchNamespaceError:
+        return False
+    except Exception as exc:
+        logger.error(
+            "Iceberg namespace check failed namespace=%s error=%s",
+            ".".join(namespace),
+            type(exc).__name__,
+        )
+        raise IcebergCatalogError(
+            f"Unable to check Iceberg namespace {namespace!r}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def ensure_namespace(catalog: Any, namespace: tuple[str, ...]) -> None:
     """Create parent namespaces recursively if they do not exist."""
+    from pyiceberg.exceptions import NamespaceAlreadyExistsError
+
     for i in range(1, len(namespace) + 1):
         ns = namespace[:i]
         if not _namespace_exists(catalog, ns):
             try:
                 catalog.create_namespace(ns)
-            except Exception as exc:
-                if "AlreadyExists" in type(exc).__name__:
-                    pass
-                else:
-                    raise
+            except NamespaceAlreadyExistsError:
+                pass
 
 
 def load_table(

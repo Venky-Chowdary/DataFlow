@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from src.transfer.adapters import write_destination_database
-from src.transfer.models import EndpointConfig, TransferRequest
+from src.transfer.models import EndpointConfig
 from tests.sync_mode_probe import (
     COLUMNS,
     EXPECTED_AFTER_TWO_RUNS,
@@ -30,7 +30,6 @@ from tests.sync_mode_probe import (
     RECORDS,
     SCHEMA,
     run_mode,
-    stream_contract,
 )
 from tests.typed_fidelity_helpers import (
     assert_mysql_typed_fidelity,

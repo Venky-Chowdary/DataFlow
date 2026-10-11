@@ -142,7 +142,9 @@ class TransformProjectStore(ABC):
     def list(self, workspace_id: str = "") -> list[TransformProject]: ...
 
     @abstractmethod
-    def get(self, project_id: str) -> TransformProject | None: ...
+    def get(
+        self, project_id: str, workspace_id: str | None = None
+    ) -> TransformProject | None: ...
 
     @abstractmethod
     def save(self, project: TransformProject) -> TransformProject: ...
@@ -195,14 +197,25 @@ class FileTransformProjectStore(TransformProjectStore):
             raw = self._read()
         projects = [TransformProject.from_dict(v) for v in raw.values()]
         if workspace_id:
-            projects = [p for p in projects if p.workspace_id in ("", workspace_id)]
+            projects = [p for p in projects if p.workspace_id == workspace_id]
         return sorted(projects, key=lambda p: p.updated_at, reverse=True)
 
-    def get(self, project_id: str) -> TransformProject | None:
+    def get(
+        self, project_id: str, workspace_id: str | None = None
+    ) -> TransformProject | None:
         with self._lock:
             raw = self._read()
         entry = raw.get(project_id)
-        return TransformProject.from_dict(entry) if entry else None
+        if not entry:
+            return None
+        project = TransformProject.from_dict(entry)
+        if workspace_id is not None:
+            if workspace_id == "":
+                if project.workspace_id != "":
+                    return None
+            elif project.workspace_id != workspace_id:
+                return None
+        return project
 
     def save(self, project: TransformProject) -> TransformProject:
         project.validate()
@@ -265,7 +278,7 @@ class MongoTransformProjectStore(TransformProjectStore):
         db = self._db()
         if db is not None:
             try:
-                query = {"workspace_id": {"$in": ["", workspace_id]}} if workspace_id else {}
+                query = {"workspace_id": workspace_id} if workspace_id else {}
                 for doc in db[self.COLLECTION].find(query):
                     doc.pop("_id", None)
                     project = TransformProject.from_dict(doc)
@@ -279,12 +292,21 @@ class MongoTransformProjectStore(TransformProjectStore):
                 logger.warning("transform project read from Mongo failed: %s", exc)
         return sorted(merged.values(), key=lambda p: p.updated_at, reverse=True)
 
-    def get(self, project_id: str) -> TransformProject | None:
-        file_copy = self._file.get(project_id)
+    def get(
+        self, project_id: str, workspace_id: str | None = None
+    ) -> TransformProject | None:
+        file_copy = self._file.get(project_id, workspace_id=workspace_id)
         db = self._db()
         if db is not None:
             try:
-                doc = db[self.COLLECTION].find_one({"id": project_id})
+                query = {"id": project_id}
+                if workspace_id is not None:
+                    query["workspace_id"] = (
+                        {"$in": ["", None]}
+                        if workspace_id == ""
+                        else workspace_id
+                    )
+                doc = db[self.COLLECTION].find_one(query)
                 if doc:
                     doc.pop("_id", None)
                     mongo_copy = TransformProject.from_dict(doc)

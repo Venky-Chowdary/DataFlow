@@ -32,6 +32,7 @@ class SnapshotBody(BaseModel):
     table: str
     primary_key: str  # required — refuse inventing default "id"
     chunk_size: int = 1000
+    row_filter: dict | list | None = None
 
 
 @router.post("/repair/propose/preflight")
@@ -99,12 +100,16 @@ async def decide_repair(proposal_id: str, body: DecideBody) -> dict[str, Any]:
 async def request_snapshot(body: SnapshotBody) -> dict[str, Any]:
     from services.cdc_incremental_snapshot import request_incremental_snapshot
 
-    sig = request_incremental_snapshot(
-        body.source_key,
-        body.table,
-        primary_key=body.primary_key,
-        chunk_size=body.chunk_size,
-    )
+    try:
+        sig = request_incremental_snapshot(
+            body.source_key,
+            body.table,
+            primary_key=body.primary_key,
+            chunk_size=body.chunk_size,
+            row_filter=body.row_filter,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return sig.to_dict()
 
 

@@ -1916,7 +1916,8 @@ def write_mapped_rows(
                     dest_tablespaces=list_destination_tablespaces(
                         "postgresql", cursor
                     ),
-                    carry_keys=write_mode != "insert",
+                    carry_keys=write_mode != "insert"
+                    or bool(_kwargs.get("carry_source_keys")),
                 )
                 if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                     target_cols[:] = list(fidelity_plan.dest_columns)

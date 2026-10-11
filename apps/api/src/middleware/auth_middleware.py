@@ -25,6 +25,7 @@ _PUBLIC_PREFIXES = (
     # Marketing / docs / landing need catalog stats without a session.
     "/api/v1/catalog",
     "/catalog",
+    "/.well-known/oauth-protected-resource",
 )
 
 if docs_enabled():
@@ -56,6 +57,11 @@ def _is_public_mcp_path(path: str, method: str) -> bool:
 def _attach_user(request: Request, token: str) -> bool:
     email = verify_token(token)
     if email:
+        from services.user_store import get_user as get_stored_user
+
+        stored = get_stored_user(email)
+        if stored and stored.get("status") == "disabled":
+            return False
         request.state.user_email = email
         user = lookup_user(email)
         if user:
@@ -74,7 +80,11 @@ def _attach_user(request: Request, token: str) -> bool:
             "email": request.state.user_email,
             "role": key_info.get("role") or "viewer",
             "auth_kind": "api_key",
+            "kind": key_info.get("kind") or "api_key",
+            "api_key_id": key_info["id"],
         }
+        if key_info.get("scopes") is not None:
+            user["scopes"] = key_info["scopes"]
         # Workspace API keys may carry tenant binding (same claims as users).
         if key_info.get("tenant_id"):
             user["tenant_id"] = key_info["tenant_id"]
@@ -84,7 +94,17 @@ def _attach_user(request: Request, token: str) -> bool:
         request.state.api_key_id = key_info["id"]
         request.state.api_key_auth = True
         return True
-    return False
+
+    if not request.url.path.startswith("/api/v1/mcp"):
+        return False
+    from services.mcp_oauth import principal_from_access_token
+
+    user = principal_from_access_token(token, user_lookup=lookup_user)
+    if not user:
+        return False
+    request.state.user_email = user["email"]
+    request.state.user = user
+    return True
 
 
 def _tenant_bind_forbidden(request: Request) -> JSONResponse | None:
@@ -148,6 +168,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if not token or not _attach_user(request, token):
+            if path == "/api/v1/mcp/tools/call":
+                from services.mcp_oauth import bearer_challenge
+
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Authentication required"},
+                    headers={"WWW-Authenticate": bearer_challenge()},
+                )
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 
         forbidden = _tenant_bind_forbidden(request)

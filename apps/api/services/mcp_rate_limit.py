@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 
@@ -44,9 +45,10 @@ class _Bucket:
 class TokenBucketStore:
     """Thread-safe in-process token buckets keyed by principal string."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._lock = threading.Lock()
         self._buckets: dict[str, _Bucket] = {}
+        self._clock = clock
 
     def clear(self) -> None:
         with self._lock:
@@ -67,8 +69,8 @@ class TokenBucketStore:
         """
         principal = (key or "anonymous").strip().lower() or "anonymous"
         capacity = max(1.0, float(capacity))
-        refill_per_sec = max(0.05, float(refill_per_sec))
-        now = time.monotonic()
+        refill_per_sec = max(0.000001, float(refill_per_sec))
+        now = self._clock()
 
         with self._lock:
             bucket = self._buckets.get(principal)

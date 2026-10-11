@@ -7,7 +7,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -170,6 +170,7 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
                 f"SQLite {upper} refuses timezone-aware wire (would strip offset). "
                 "Map to TIMESTAMPTZ or provide a naive wall-clock value."
             )
+        tz_carrier = upper in {"TIMESTAMP_TZ", "TIMESTAMPTZ", "TIMESTAMP_LTZ"}
 
         try:
             coerced = coerce_sql_temporal(
@@ -181,6 +182,18 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
         except ValueError:
             # Fail-closed at row bind — never invent NULL from empty temporal.
             raise
+        # A TZ carrier stores RFC 3339 UTC with an explicit "+00:00". The
+        # declared TIMESTAMPTZ token is not read back by any reader, so a bare
+        # UTC clock re-read as naive and our own table failed to load into a
+        # PostgreSQL TIMESTAMPTZ (MXD07). SQLite's date functions accept the
+        # offset; the naive COPY reader declines it to the row path.
+        if (
+            tz_carrier
+            and isinstance(coerced, datetime)
+            and coerced.tzinfo is not None
+            and coerced.utcoffset() is not None
+        ):
+            return coerced.astimezone(timezone.utc).isoformat()
         if wire is not None:
             return wire
         if coerced is None:
@@ -1226,7 +1239,8 @@ def write_mapped_rows(
                             dest_dialect="sqlite",
                             table_already_exists=bool(table_existed),
                             dest_table=table_name,
-                            carry_keys=write_mode != "insert",
+                            carry_keys=write_mode != "insert"
+                            or bool(_kwargs.get("carry_source_keys")),
                         )
                     except Exception as exc:
                         logger.warning(

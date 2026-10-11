@@ -24,6 +24,7 @@ import {
   type TransformRunResult,
 } from "../lib/api";
 import type { Connector, Screen } from "../lib/types";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 
 interface TransformsPageProps {
   connectors: Connector[];
@@ -56,6 +57,7 @@ const EMPTY_DRAFT = (): Omit<TransformProject, "id"> & { id?: string } => ({
 });
 
 export function TransformsPage({ connectors, onNavigate }: TransformsPageProps) {
+  const runGate = useWriteGate(PERMISSIONS.jobRun);
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const [projects, setProjects] = useState<TransformProject[]>([]);
@@ -615,8 +617,20 @@ export function TransformsPage({ connectors, onNavigate }: TransformsPageProps) 
               selectedProject && lastRunProjectId === selectedProject.id ? lastRun : null
             }
             onClose={closeDrawer}
-            onDryRun={() => selectedProject && void handleRun(selectedProject, true)}
-            onRun={() => selectedProject && void handleRun(selectedProject, false)}
+            onDryRun={
+              runGate.allowed
+                ? () => {
+                    if (selectedProject) void handleRun(selectedProject, true);
+                  }
+                : undefined
+            }
+            onRun={
+              runGate.allowed
+                ? () => {
+                    if (selectedProject) void handleRun(selectedProject, false);
+                  }
+                : undefined
+            }
             onExportDbt={() => selectedProject && void handleExportDbt(selectedProject)}
             onEdit={() => {
               if (!selectedProject) return;

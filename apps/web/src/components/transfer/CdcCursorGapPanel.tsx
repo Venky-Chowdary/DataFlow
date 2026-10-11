@@ -6,6 +6,7 @@ import { snapshotModeRecoversGap, isCdcGapErrorCode } from "../../lib/jobTrustSc
 import { JobProgress } from "../../lib/types";
 import { useToast } from "../Toast";
 import { useConfirm } from "../ui/ConfirmDialog";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 
 interface CdcCursorGapPanelProps {
   job: JobProgress;
@@ -25,6 +26,7 @@ interface CdcCursorGapPanelProps {
 export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanelProps) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  const workspaceManageGate = useWriteGate(PERMISSIONS.workspaceManage);
   const cursorKey = job.cdc_lease_cursor_key || "";
   const [busy, setBusy] = useState(false);
   const [cleared, setCleared] = useState(false);
@@ -45,7 +47,7 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
     );
 
   useEffect(() => {
-    if (!cursorKey || !isGap) return;
+    if (!cursorKey || !isGap || !workspaceManageGate.allowed) return;
     let cancelled = false;
     void fetchCdcCursor(cursorKey)
       .then((snap) => {
@@ -59,7 +61,7 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
     return () => {
       cancelled = true;
     };
-  }, [cursorKey, isGap]);
+  }, [cursorKey, isGap, workspaceManageGate.allowed]);
 
   if (!isGap) return null;
 
@@ -122,7 +124,7 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
           }. snapshot_mode=initial will not snapshot again. Reset the watermark or set when_needed.`;
 
   const showResume = Boolean(onResume) && (cleared || engineSnapshots) && !neverMode;
-  const showReset = !cleared && !neverMode;
+  const showReset = !cleared && !neverMode && workspaceManageGate.allowed;
 
   return (
     <div className="df2-theater-v3-next df2-theater-cursor-gap-next" role="region" aria-label="CDC cursor gap next steps">

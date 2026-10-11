@@ -1690,8 +1690,11 @@ def coerce_float_wire(
 
         parsed = decimal_wire_value(token)
         if parsed is None:
+            from services.transform_engine import strict_decimal_comma_reason
+
             raise ValueError(
-                f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
+                strict_decimal_comma_reason(token)
+                or f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
             )
         try:
             num = float_carrier_or_refuse(parsed)

@@ -16,10 +16,14 @@ picked by the shared fuzzy matcher and any tie becomes a question.
 
 from __future__ import annotations
 
+import logging
+
 import re
 from typing import TYPE_CHECKING, Any
 
 from .schema_tools import AmbiguousConnectorError, _connector_dict, _tool_result
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .tools import ToolResult
@@ -142,6 +146,32 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "update_connector",
+        "description": (
+            "Stage a change to one saved connector's connection fields (host, port, "
+            "database, username, password, connection_string, schema, ssl) or its "
+            "name. Pending action until Confirm; the connector id, and every "
+            "pipeline bound to it, stay the same. Secrets are never echoed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string"},
+                "host": {"type": "string"},
+                "port": {"type": "integer"},
+                "database": {"type": "string"},
+                "username": {"type": "string"},
+                "password": {"type": "string"},
+                "connection_string": {"type": "string"},
+                "schema": {"type": "string"},
+                "ssl": {"type": "boolean"},
+                "new_name": {"type": "string"},
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "set_schedule_enabled",
         "description": (
             "Stage pausing (enabled=false) or resuming (enabled=true) a pipeline "
@@ -236,6 +266,7 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "resume_job": "resume_job",
     "replay_quarantine": "replay_quarantine",
     "delete_connector": "delete_connector",
+    "update_connector": "update_connector",
     "set_schedule_enabled": "set_schedule_enabled",
     "delete_schedule": "delete_schedule",
     "update_schedule": "update_schedule",
@@ -341,6 +372,16 @@ def normalize_quarantine_replay_edits(
     return overrides, edited, ""
 
 
+def _job_mapped_sources(job: dict[str, Any]) -> list[str]:
+    """Source columns the job's saved mapping reads (empty when unknown)."""
+    req = job.get("transfer_request") or {}
+    return [
+        str(m.get("source") or m.get("source_column") or "")
+        for m in (req.get("mappings") or [] if isinstance(req, dict) else [])
+        if isinstance(m, dict)
+    ]
+
+
 def _job_tool(
     tool: str,
     job_id: str,
@@ -348,6 +389,21 @@ def _job_tool(
     transform_overrides: Any = None,
     rows: Any = None,
 ) -> ToolResult:
+    if not (job_id or "").strip() and not (selector or "").strip():
+        # A mutating call with no target must not fall through to the
+        # implicit "latest job" — replay_quarantine {} silently aimed at
+        # whatever job happened to be newest (QA Q06). Naming a selector
+        # ("the last job", "the failed job") stays allowed; an empty call
+        # names nothing.
+        return _tool_result(
+            tool,
+            success=False,
+            output=None,
+            error=(
+                "Which job? Give the job_id, or name a selector like "
+                "“the last job” — a mutating call with no target is refused."
+            ),
+        )
     job, clarify = resolve_job(job_id, selector)
     if not job:
         return _tool_result(tool, success=False, output=None, error=clarify)
@@ -381,9 +437,36 @@ def _job_tool(
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} has no quarantined rows to replay.",
             )
+        from services.quarantine_dlq import replay_quarantine_details
+
+        stored = [
+            d for d in (
+                job.get("rejected_details")
+                or (job.get("destination_summary") or {}).get("rejected_details")
+                or []
+            )
+            if isinstance(d, dict)
+        ]
+        if stored and not replay_quarantine_details(stored):
+            return _tool_result(tool, success=False, output=None,
+                error=(
+                    f"Job {short} has only SKIP_ROW (contract skip) rows — they were "
+                    "dropped by the signed Risk Contract and are kept for audit, not "
+                    "quarantined for replay. Re-run the transfer without the SKIP_ROW "
+                    "contract to load them."
+                ),
+            )
         overrides, edited, edit_error = normalize_quarantine_replay_edits(
             transform_overrides, rows
         )
+        if not edit_error and overrides:
+            from services.transform_engine import transform_override_refusal
+
+            edit_error = transform_override_refusal(
+                overrides, _job_mapped_sources(job)
+            )
+            if edit_error:
+                _logger.warning("replay_quarantine %s: override refused: %s", short, edit_error)
         if edit_error:
             return _tool_result(tool, success=False, output=None, error=edit_error)
         payload = {"job_id": jid}
@@ -401,14 +484,47 @@ def _job_tool(
 
 
 def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
-    return {
+    ctype = str(conn.get("type") or conn.get("format") or "")
+    # Role is the driver's declared topology, not a stale stored string —
+    # connectors saved before role normalization (pgvector with role=both)
+    # would keep reporting the wrong side forever (QA C09).
+    from services.connector_store import normalize_connector_role
+
+    host = str(conn.get("host") or "")
+    port = int(conn.get("port") or 0)
+    effective_host, effective_port = host, port
+    # A connection string overrides the stored host field — the probe dials
+    # the URL's authority, so reporting the form's 'localhost' misreports the
+    # real endpoint on failures (QA C04).
+    conn_str = str(conn.get("connection_string") or "")
+    if conn_str:
+        try:
+            from connectors.url_authority import parse_url_authority
+
+            auth = parse_url_authority(conn_str)
+            if auth.host:
+                effective_host, effective_port = (
+                    auth.host,
+                    auth.port or effective_port,
+                )
+        except Exception:
+            pass
+    brief = {
         "connector_id": str(conn.get("id") or conn.get("connector_id") or ""),
         "name": str(conn.get("name") or ""),
-        "type": str(conn.get("type") or conn.get("format") or ""),
-        "host": str(conn.get("host") or ""),
+        "type": ctype,
+        "host": host,
         "database": str(conn.get("database") or ""),
-        "role": str(conn.get("role") or ""),
+        "role": normalize_connector_role(ctype, str(conn.get("role") or "")),
+        "effective_host": effective_host,
+        "effective_port": effective_port,
     }
+    if (effective_host, effective_port) != (host, port):
+        brief["host_note"] = (
+            f"Probe targets {effective_host}:{effective_port} from the "
+            "connection string — the stored host field is not what is dialed."
+        )
+    return brief
 
 
 def _connector(tool: str, connector_id: str, name: str) -> tuple[dict[str, Any] | None, ToolResult | None]:
@@ -572,6 +688,102 @@ def delete_connector(connector_id: str = "", name: str = "") -> ToolResult:
         preview=preview,
         label=f"Delete connector “{brief['name']}”",
         destructive=True,
+    )
+
+
+_CONNECTOR_SECRET_FIELDS = frozenset({"password", "connection_string"})
+
+
+def update_connector(  # nosec B107
+    connector_id: str = "",
+    name: str = "",
+    *,
+    host: str = "",
+    port: int = 0,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    schema: str = "",
+    ssl: bool | None = None,
+    new_name: str = "",
+    host_key: str = "",
+) -> ToolResult:
+    """Stage an in-place connector edit; Confirm applies it via ``PUT /saved-connectors``.
+
+    Empty values mean "unchanged". The payload keeps the new secrets on the
+    server-side ack ledger; the preview only says that a secret changed.
+    An SFTP host-key pin is not editable here: the PUT body
+    (``ConnectorSaveDTO``) has no trust fields, so a staged pin would be
+    dropped on Confirm while the preview claimed it changed.
+    """
+    if (host_key or "").strip():
+        _logger.warning("update_connector refused an SFTP host-key change for %r", connector_id or name)
+        return _tool_result(
+            "update_connector",
+            success=False,
+            output=None,
+            error=(
+                "update_connector cannot change an SFTP host key pin — the saved-connector "
+                "update has no host-key field, so the new pin would not be stored. After "
+                "verifying the new fingerprint with the server admin, save it with "
+                "create_connector(host_key=SHA256:...) as a new connector."
+            ),
+        )
+    conn, err = _connector("update_connector", connector_id, name)
+    if err:
+        return err
+    assert conn is not None
+    brief = _connector_brief(conn)
+    requested: dict[str, Any] = {
+        "host": (host or "").strip(),
+        "port": int(port or 0),
+        "database": (database or "").strip(),
+        "username": (username or "").strip(),
+        "password": password or "",
+        "connection_string": (connection_string or "").strip(),
+        "schema": (schema or "").strip(),
+        "name": (new_name or "").strip(),
+    }
+    changes = {k: v for k, v in requested.items() if v and v != conn.get(k)}
+    if ssl is not None and bool(ssl) != bool(conn.get("ssl")):
+        changes["ssl"] = bool(ssl)
+    if not changes:
+        return _tool_result(
+            "update_connector",
+            success=False,
+            output=None,
+            error=(
+                f"What should change on “{brief['name']}”? Give a host, port, database, "
+                "username, password, connection string, schema, ssl or a new name."
+            ),
+        )
+    if "name" in changes:
+        try:
+            clash = _connector_dict("", changes["name"])
+        except AmbiguousConnectorError:
+            clash = {"id": "<several>"}
+        if clash and str(clash.get("id") or "") != brief["connector_id"]:
+            return _tool_result(
+                "update_connector",
+                success=False,
+                output=None,
+                error=f"A connector named “{changes['name']}” already exists. Pick another name.",
+            )
+    shown = {
+        k: ("(changed — hidden)" if k in _CONNECTOR_SECRET_FIELDS else v)
+        for k, v in changes.items()
+    }
+    _logger.info(
+        "update_connector staged for %s (%s): fields=%s",
+        brief["connector_id"], brief["type"], sorted(changes),
+    )
+    return _stage(
+        "update_connector",
+        payload={"connector_id": brief["connector_id"], "name": brief["name"], "changes": changes},
+        preview={**brief, "changes": shown, "bound_schedules": _schedules_bound_to(brief["connector_id"])},
+        label=f"Update connector “{brief['name']}”",
+        destructive=False,
     )
 
 

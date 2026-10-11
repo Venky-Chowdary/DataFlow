@@ -40,6 +40,67 @@ def test_create_and_list(temp_store):
     assert len(store.list_schedules()) == 1
 
 
+def test_list_reports_overdue_without_dropping_the_catch_up(temp_store):
+    """QA D11 — a ``next_run_at`` frozen in the past is reported as overdue.
+
+    The read must not rewrite it: pushing it to the next boundary hid the
+    stuck claim behind it (MX3-24) and silently skipped the catch-up run the
+    beat owes for the missed slot, without counting the miss.
+    """
+    sched = store.create_schedule({
+        "name": "Stuck beat",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+    past = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    loaded = store._load_all()
+    loaded[0].next_run_at = past
+    store._save_all(loaded)
+
+    listed = store.list_schedules()
+    assert listed[0].next_run_at == past
+    assert store.get_schedule(sched.id).next_run_at == past
+    assert store.schedule_overdue_seconds(listed[0]) >= 2 * 86400 - 5
+    # Still due, so the beat runs the one catch-up and counts the missed window.
+    assert [s.id for s in store.due_schedules()] == [sched.id]
+
+
+def test_list_leaves_disabled_and_running_schedules_alone(temp_store):
+    store.create_schedule({
+        "name": "Paused",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}],
+        "enabled": False,
+    })
+    past = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    loaded = store._load_all()
+    loaded[0].next_run_at = past
+    store._save_all(loaded)
+    assert store.list_schedules()[0].next_run_at == past
+
+
+def test_interval_cron_requires_an_expression(temp_store):
+    with pytest.raises(ValueError, match="cron"):
+        store.create_schedule({
+            "name": "Bad pair",
+            "source_connector_id": "src-1",
+            "source_table": "orders",
+            "dest_connector_id": "dst-1",
+            "dest_table": "orders_wh",
+            "interval": "cron",
+            "cron": "",
+            "mappings": [{"source": "id", "target": "id"}],
+        })
+
+
 def test_assert_signed_contract_fail_closed(temp_store, monkeypatch):
     from services import contract_store as cstore
     from services.data_contract import ContractStatus, DataContract

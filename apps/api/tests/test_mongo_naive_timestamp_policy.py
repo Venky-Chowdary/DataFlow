@@ -166,6 +166,45 @@ def test_schema_timestamptz_without_a_mapping_stamp_keeps_the_clock(monkeypatch)
     assert utc.hour == 12
 
 
+def test_declared_target_date_is_calendar_day_for_text_source(monkeypatch):
+    from datetime import datetime, timezone
+
+    from connectors.mongodb_writer import write_mapped_rows
+
+    captured: dict = {}
+    monkeypatch.setattr(
+        "connectors.mongodb_common._mongo_client",
+        lambda *_args, **_kwargs: _capturing_client(captured),
+    )
+    result = write_mapped_rows(
+        host="localhost",
+        port=27017,
+        database="dataflow_test",
+        username="",
+        password="",
+        connection_string="",
+        ssl=False,
+        schema="dataflow_test",
+        table_name="date_target",
+        headers=["dob"],
+        data_rows=[["03/15/1985"]],
+        mappings=[
+            {
+                "source": "dob",
+                "target": "date_of_birth",
+                "target_type": "DATE",
+            }
+        ],
+        column_types={"dob": "VARCHAR"},
+        error_policy="fail",
+    )
+
+    assert result.ok is True, result.error
+    assert captured["docs"][0]["date_of_birth"] == datetime(
+        1985, 3, 15, tzinfo=timezone.utc
+    )
+
+
 def test_timestamp_ntz_naive_wire_still_needs_a_contract(monkeypatch):
     result, captured = _write_one_temporal(monkeypatch, source_type="TIMESTAMP_NTZ")
     assert result.ok is False
@@ -178,6 +217,14 @@ def test_sql_date_target_is_untouched_by_the_document_rule():
     assert document_instant_wire_preserved(
         "TIMESTAMP", "DATE", dest_db="postgresql"
     ) is False
+
+
+def test_mongodb_bson_date_reader_serializes_naive_driver_value_as_utc():
+    from datetime import datetime
+
+    from connectors.mongodb_reader import _serialize
+
+    assert _serialize(datetime(2025, 1, 1, 0, 0)) == "2025-01-01T00:00:00+00:00"
     assert is_lossy_coercion("TIMESTAMP", "DATE", dest_db="postgresql") is True
 
 

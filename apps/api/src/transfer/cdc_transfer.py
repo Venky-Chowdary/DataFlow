@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 from services.brand_env import getenv_brand
 import time
@@ -907,14 +906,9 @@ def _stamp_cdc_lsn(
 
 
 def _truthy_cfg(cfg: dict[str, Any] | None, *keys: str) -> bool:
-    raw = cfg or {}
-    for key in keys:
-        val = raw.get(key)
-        if val is True:
-            return True
-        if isinstance(val, str) and val.strip().lower() in {"1", "true", "yes", "on"}:
-            return True
-    return False
+    from services.cdc_exactly_once import cfg_truthy
+
+    return cfg_truthy(cfg, *keys)
 
 
 def _gate_cdc_sink(
@@ -923,7 +917,11 @@ def _gate_cdc_sink(
     dest_cfg: dict[str, Any] | None,
     has_primary_key: bool,
 ) -> dict[str, Any]:
-    """Fail-fast append-only CDC sinks unless operator opts in."""
+    """Fail-fast append-only CDC sinks unless operator opts in.
+
+    ``require_exactly_once`` on the destination config fails closed unless the
+    sink can commit apply + dest offset in one transaction.
+    """
     return gate_cdc_destination(
         dest_type=dest_type,
         has_primary_key=has_primary_key,
@@ -933,9 +931,13 @@ def _gate_cdc_sink(
         allow_append_only=_truthy_cfg(
             dest_cfg, "allow_append_only", "cdc_allow_append_only"
         ),
+        require_exactly_once=_truthy_cfg(
+            dest_cfg, "require_exactly_once", "cdc_require_exactly_once"
+        ),
         require_effectively_once=_truthy_cfg(
             dest_cfg, "require_effectively_once", "cdc_require_effectively_once"
         ),
+        dest_cfg=dest_cfg,
     )
 
 
@@ -1334,6 +1336,10 @@ def _apply_change_batch(
                 "azure_synapse_serverless",
                 "iceberg",
                 "apache_iceberg",
+                "pgvector",
+                "qdrant",
+                "weaviate",
+                "pinecone",
             }
             if not supported:
                 raise UnsupportedCdcDeleteError(
@@ -1387,6 +1393,125 @@ def _stamp_cdc_poll(
         schedule_id=str(schedule_id or ""),
         **kwargs,
     )
+
+
+def cdc_source_type(source: Any) -> str:
+    """CDC source kind — the catalog format, so sqlserver/oracle are not
+    collapsed to generic_sql by driver resolution."""
+    src_driver = resolve_driver_type(getattr(source, "format", "") or "")
+    src_format = (
+        (getattr(source, "format", "") or src_driver or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+    if src_format in {"mssql", "sql_server"}:
+        src_format = "sqlserver"
+    src_type = src_format if src_format in {
+        "mongodb",
+        "mysql",
+        "postgresql",
+        "postgres",
+        "sqlserver",
+        "oracle",
+    } else src_driver
+    return "postgresql" if src_type == "postgres" else src_type
+
+
+def _single_stream_cursor_key(
+    *,
+    src_type: str,
+    src_cfg: dict[str, Any],
+    table_name: str,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    stream_name: str,
+) -> str:
+    return build_cursor_key(
+        source_type=src_type,
+        source_database=src_cfg.get("database", ""),
+        source_object=table_name,
+        dest_type=dest_type,
+        dest_database=dest_cfg.get("database", ""),
+        dest_object=dest_table,
+        stream_name=stream_name or "stream",
+    )
+
+
+def cdc_route_cursor_keys(
+    source: Any,
+    destination: Any,
+    stream_contracts: list[dict] | None,
+) -> list[dict[str, Any]]:
+    """Every cursor key a CDC run of this route can have opened capture under.
+
+    Owner of route → slot identity for anything that must *find* the capture
+    later (schedule delete releasing a PostgreSQL slot, QA S14). It derives the
+    keys exactly as the run paths do, so release never depends on the last
+    job document carrying ``cursor_key`` — a failed last attempt does not.
+
+    Multi-table routes return the shared-reader key *and* each per-table key:
+    the shared reader falls back to N sequential readers, each with its own
+    slot. Each entry is ``{"cursor_key", "tables"}`` (tables = the slot's
+    table scope, a string or list, as the reader names it).
+    """
+    import copy
+
+    selected = resolve_selected_sync_contracts(stream_contracts)
+    dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
+    src_cfg = resolve_connector_config(source)
+    dest_cfg = resolve_connector_config(destination)
+    out: list[dict[str, Any]] = []
+
+    def _single(src: Any, dst: Any, contract: Any) -> None:
+        table_name = getattr(src, "table", None) or getattr(src, "collection", None) or ""
+        out.append({
+            "cursor_key": _single_stream_cursor_key(
+                src_type=cdc_source_type(src),
+                src_cfg=src_cfg,
+                table_name=table_name,
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                dest_table=resolve_dest_table(dest_type, dst, table_name),
+                stream_name=(contract.name if contract else "") or "stream",
+            ),
+            "tables": table_name,
+        })
+
+    if len(selected) <= 1:
+        _single(source, destination, selected[0] if selected else None)
+        return out
+    from services.cdc_multi_table import shared_route_cursor_key
+
+    tables = [(c.name or "").strip() for c in selected if (c.name or "").strip()]
+    out.append({
+        "cursor_key": shared_route_cursor_key(
+            engine=resolve_driver_type(getattr(source, "format", "") or ""),
+            database=str(src_cfg.get("database") or ""),
+            tables=tables,
+            dest_type=dest_type,
+            dest_database=str(dest_cfg.get("database") or ""),
+        ),
+        "tables": tables,
+    })
+    for contract in selected:
+        name = (contract.name or "").strip()
+        if not name:
+            continue
+        src = copy.copy(source)
+        dst = copy.copy(destination)
+        if getattr(src, "format", "") == "mongodb" or getattr(source, "collection", None):
+            src.collection = name
+        else:
+            src.table = name
+        if getattr(destination, "table", None) is not None or getattr(destination, "collection", None) is not None:
+            if getattr(dst, "format", "") == "mongodb" or getattr(destination, "collection", None):
+                dst.collection = name
+            else:
+                dst.table = name
+        _single(src, dst, contract)
+    return out
 
 
 def run_cdc_database_transfer(
@@ -1520,6 +1645,7 @@ def _run_cdc_multi_stream(
                 validation_mode=validation_mode,
                 limit=limit,
                 delivery_guarantee=delivery_guarantee,
+                delivery_pinned=delivery_pinned,
             )
         except Exception as exc:
             from services.cdc_lease import CdcLeaseConflict
@@ -1571,6 +1697,7 @@ def _run_cdc_shared_multi_table(
     validation_mode: str,
     limit: int,
     delivery_guarantee: str = "at_least_once",
+    delivery_pinned: bool = False,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """One log consumer for N tables (Debezium-class); demux apply per stream.
 
@@ -1594,12 +1721,22 @@ def _run_cdc_shared_multi_table(
     )
     from services.cdc_snapshot_mode import snapshot_dump_open
 
-    from services.cdc_exactly_once import PROTOCOL, normalize_delivery_guarantee
+    from services.cdc_exactly_once import (
+        PROTOCOL,
+        apply_require_exactly_once,
+        dest_require_exactly_once,
+        normalize_delivery_guarantee,
+    )
 
     src_type = resolve_driver_type(getattr(source, "format", "") or "")
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
+    delivery_guarantee = apply_require_exactly_once(
+        delivery_guarantee,
+        required=dest_require_exactly_once(destination, dest_cfg),
+        pinned=delivery_pinned,
+    )
     eos_active = normalize_delivery_guarantee(delivery_guarantee) == "exactly_once"
 
     tables = [(c.name or "").strip() for c in selected if (c.name or "").strip()]
@@ -2486,20 +2623,11 @@ def _run_cdc_single_stream(
     # Driver type is used for generic read/write; CDC source kind uses the
     # catalog format so sqlserver/oracle are not collapsed to generic_sql.
     src_driver = resolve_driver_type(source.format)
-    dest_type = resolve_driver_type(destination.format)
     src_format = (source.format or src_driver or "").strip().lower().replace("-", "_")
     if src_format in {"mssql", "sql_server"}:
         src_format = "sqlserver"
-    src_type = src_format if src_format in {
-        "mongodb",
-        "mysql",
-        "postgresql",
-        "postgres",
-        "sqlserver",
-        "oracle",
-    } else src_driver
-    if src_type == "postgres":
-        src_type = "postgresql"
+    src_type = cdc_source_type(source)
+    dest_type = resolve_driver_type(destination.format)
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
     table_name = source.table or source.collection or ""
@@ -2539,11 +2667,33 @@ def _run_cdc_single_stream(
         DELIVERY_SEMANTICS_ALO,
         DELIVERY_SEMANTICS_EOS,
         PROTOCOL,
+        apply_require_exactly_once,
         assert_requested_cdc_delivery,
         dest_allow_append_only,
+        dest_require_exactly_once,
+        select_route_delivery,
     )
     from services.procedure_source import is_callable_source
 
+    delivery_guarantee = apply_require_exactly_once(
+        delivery_guarantee,
+        required=dest_require_exactly_once(destination, dest_cfg),
+        pinned=delivery_pinned,
+    )
+    if str(delivery_guarantee or "").strip().lower() in {"", "auto", "default"}:
+        delivery_guarantee = select_route_delivery(
+            delivery_guarantee,
+            sync_mode=sync_mode or "cdc",
+            dest_type=dest_type,
+            source_type=src_type,
+            has_primary_key=True,
+            write_mode="upsert",
+            allow_append_only=dest_allow_append_only(destination)
+            or _truthy_cfg(dest_cfg, "allow_append_only", "cdc_allow_append_only"),
+            callable_source=is_callable_source(source),
+            has_lsn_column=True,
+            dest_cfg=dest_cfg,
+        )
     eos_guarantee = assert_requested_cdc_delivery(
         delivery_guarantee,
         sync_mode=sync_mode or "cdc",
@@ -2554,6 +2704,7 @@ def _run_cdc_single_stream(
         allow_append_only=dest_allow_append_only(destination)
         or _truthy_cfg(dest_cfg, "allow_append_only", "cdc_allow_append_only"),
         callable_source=is_callable_source(source),
+        dest_cfg=dest_cfg,
     )
     eos_active = eos_guarantee == "exactly_once"
     if src_type in {"mongodb", "mysql", "postgresql", "sqlserver", "oracle"}:
@@ -2575,13 +2726,13 @@ def _run_cdc_single_stream(
     # Single-column shorthand kept for call sites that still take a string
     # (readers, cursor defaults). Composite deletes/upserts use the list.
     pk_target_col = pk_target_cols[0] if len(pk_target_cols) == 1 else ",".join(pk_target_cols)
-    cursor_key = build_cursor_key(
-        source_type=src_type,
-        source_database=src_cfg.get("database", ""),
-        source_object=table_name,
+    cursor_key = _single_stream_cursor_key(
+        src_type=src_type,
+        src_cfg=src_cfg,
+        table_name=table_name,
         dest_type=dest_type,
-        dest_database=dest_cfg.get("database", ""),
-        dest_object=dest_table,
+        dest_cfg=dest_cfg,
+        dest_table=dest_table,
         stream_name=contract.name if contract else "stream",
     )
     watermark = get_watermark(cursor_key)
@@ -2611,6 +2762,12 @@ def _run_cdc_single_stream(
         stream=table_name,
         allow_unnamed=not checkpoint_bound_to_stream,
     )
+    if (
+        eos_active
+        and isinstance(opened.resume, dict)
+        and watermark == str(opened.resume)
+    ):
+        watermark = opened.resume
 
     from services.multi_stream_plan import reader_columns_for_stream
 
@@ -2993,8 +3150,6 @@ def _run_cdc_single_stream(
             cp_dict = checkpoint.to_dict()  # type: ignore[assignment]
     total_chunks = max(1, int(cp_dict.get("chunk_index") or 0) + 1) if cp_dict else 1
     chunk_idx = int(cp_dict.get("chunk_index") or 0) if cp_dict else 0
-
-    import os
 
     # Continuous CDC: drain snapshot, then poll until idle or budget exhausted.
     max_idle_polls = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))

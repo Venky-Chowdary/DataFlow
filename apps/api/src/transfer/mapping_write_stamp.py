@@ -71,7 +71,7 @@ def stamp_additive_mappings_for_write(
     try:
         from services.batch_progress import effective_backfill_new_fields
         from services.decision_kernel import stamp_additive_mapping_types
-        from services.sync_cursor import is_overwrite_sync, resolve_effective_sync_mode
+        from services.sync_cursor import resolve_effective_sync_mode
     except Exception as exc:
         # Fail-closed: never Execute create/backfill without Kernel invent surface.
         raise ValueError(

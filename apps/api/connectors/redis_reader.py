@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from services.value_serializer import cell_to_string, json_default, json_loads_exact
+from services.value_serializer import json_default, json_loads_exact
 
 from connectors.base import ReadBatch
 
@@ -84,8 +84,23 @@ def redis_dial_endpoint(host: str, port: int | None) -> tuple[str, int]:
     return text or "localhost", fallback
 
 
-def _redis_client(cfg: dict[str, Any]):
+# A TLS handshake against a plaintext server never completes. redis-py 8
+# retries a timed-out connect ten times with backoff, so one PING held a
+# staging call for ~90 s (MX2-09). Connect is bounded and retried once.
+REDIS_CONNECT_TIMEOUT_SEC = 5.0
+REDIS_CONNECT_RETRIES = 1
+
+
+def _redis_client(cfg: dict[str, Any], *, socket_timeout: float = 30):
     import redis
+    from redis.backoff import NoBackoff
+    from redis.retry import Retry
+
+    bounded = {
+        "socket_timeout": socket_timeout,
+        "socket_connect_timeout": min(REDIS_CONNECT_TIMEOUT_SEC, float(socket_timeout)),
+        "retry": Retry(NoBackoff(), REDIS_CONNECT_RETRIES),
+    }
 
     if cfg.get("connection_string"):
         from connectors.url_authority import parse_url_authority, rebuild_url
@@ -98,7 +113,7 @@ def _redis_client(cfg: dict[str, Any]):
                 user=str(cfg.get("username") or parsed.user),
                 password=str(cfg.get("password") or parsed.password),
             )
-        return redis.from_url(raw, socket_timeout=30)
+        return redis.from_url(raw, **bounded)
     host, port = redis_dial_endpoint(
         str(cfg.get("host") or ""),
         int(cfg.get("port") or 6379),
@@ -110,7 +125,7 @@ def _redis_client(cfg: dict[str, Any]):
         username=cfg.get("username") or None,
         password=cfg.get("password") or None,
         ssl=bool(cfg.get("ssl")),
-        socket_timeout=30,
+        **bounded,
     )
 
 
@@ -200,6 +215,11 @@ def _decode(value: Any) -> str:
 
 # Cap large Redis collections — overflow fails closed (never silent truncate).
 _REDIS_COLLECTION_CAP = 10_000
+
+
+#: Fields the reader adds around every key. They describe the key, not the
+#: stored document, so nothing a write maps is ever expected to fill them.
+REDIS_ENVELOPE_COLUMNS: tuple[str, ...] = ("redis_key", "redis_value", "redis_type")
 
 
 def redis_key_for(prefix: str, identity: Any) -> str:
@@ -371,7 +391,7 @@ def read_keys_batch(
     first_page = not state.keys_seen and not state.cursor and not state.pending_keys
     client = _redis_client(cfg)
     try:
-        identity_headers = ["redis_key", "redis_value", "redis_type"]
+        identity_headers = list(REDIS_ENVELOPE_COLUMNS)
         rows: list[list[str]] = []
 
         while len(rows) < limit and not state.exhausted:

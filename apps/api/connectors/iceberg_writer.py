@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -29,6 +30,11 @@ from typing import Any, Callable, Sequence
 
 from services.value_serializer import json_default, json_loads_exact
 
+from connectors.iceberg_commit import (
+    CommitRetryPolicy,
+    IcebergCommitStateUnknownError,
+    commit_with_retry,
+)
 from connectors.writer_common import (
     WriteResult,
     _rejected_row_count,
@@ -39,6 +45,13 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy,
 )
+
+logger = logging.getLogger(__name__)
+
+
+class _IcebergNoCommit(Exception):
+    """Signal an empty delete plan without invoking transaction commit."""
+
 
 try:
     import pyarrow as pa
@@ -1001,6 +1014,17 @@ def _checksum_arrow_table(pa_table: Any) -> str:
     return hashlib.sha256(out.getvalue().to_pybytes()).hexdigest()[:32]
 
 
+def _prepare_pyiceberg_write(
+    rows: list[dict[str, Any]], schema: Any, pa_mod: Any
+) -> tuple[Any, str]:
+    arrays = []
+    for field in schema:
+        cells = [_coerce_arrow_cell(row.get(field.name), field.type, pa_mod) for row in rows]
+        arrays.append(pa_mod.array(cells, type=field.type))
+    pa_table = pa_mod.Table.from_arrays(arrays, schema=schema)
+    return pa_table, _checksum_arrow_table(pa_table)
+
+
 def _pyiceberg_should_use(endpoint: dict[str, Any]) -> bool:
     """Compatibility shim — prefer :func:`resolve_iceberg_write_path`."""
     return resolve_iceberg_write_path(endpoint) == "catalog"
@@ -1226,6 +1250,17 @@ def _write_mapped_rows_pyiceberg(
             load_catalog,
             parse_iceberg_catalog_config,
         )
+        from connectors.iceberg_schema_evolution import (
+            IcebergSchemaEvolutionError,
+            apply_schema_plan,
+            plan_schema_change,
+        )
+        from connectors.iceberg_partitioning import (
+            IcebergPartitionSpecError,
+            parse_partition_spec,
+            partition_spec_for_schema,
+            partition_spec_matches,
+        )
         from pyiceberg.exceptions import NoSuchTableError
     except Exception as exc:
         return WriteResult(
@@ -1239,6 +1274,55 @@ def _write_mapped_rows_pyiceberg(
             driver="iceberg",
         )
 
+    extra = endpoint.get("extra")
+    extra = extra if isinstance(extra, dict) else {}
+    rename_columns = endpoint.get("rename_columns")
+    if rename_columns is None:
+        rename_columns = extra.get("rename_columns")
+    if rename_columns is not None and (
+        not isinstance(rename_columns, dict)
+        or any(
+            not isinstance(source, str) or not isinstance(target, str)
+            for source, target in rename_columns.items()
+        )
+    ):
+        raise ValueError("rename_columns must be a dict of strings to strings")
+    schema_evolution = endpoint.get("schema_evolution")
+    if schema_evolution is None:
+        schema_evolution = extra.get("schema_evolution")
+    strict_schema_evolution = (
+        str(schema_evolution or "").strip().lower() == "strict"
+    )
+    unset = object()
+    partition_spec_value = endpoint.get("partition_spec", unset)
+    if partition_spec_value is unset:
+        partition_spec_value = extra.get("partition_spec", unset)
+    partition_spec_declared = partition_spec_value is not unset
+    partition_spec = (
+        parse_partition_spec(partition_spec_value)
+        if partition_spec_declared
+        else ()
+    )
+    allow_partition_evolution_value = endpoint.get(
+        "allow_partition_evolution", unset
+    )
+    if allow_partition_evolution_value is unset:
+        allow_partition_evolution_value = extra.get(
+            "allow_partition_evolution", False
+        )
+    if allow_partition_evolution_value is None:
+        allow_partition_evolution = False
+    elif isinstance(allow_partition_evolution_value, bool):
+        allow_partition_evolution = allow_partition_evolution_value
+    elif isinstance(allow_partition_evolution_value, str) and (
+        allow_partition_evolution_value.strip().lower() in {"true", "false"}
+    ):
+        allow_partition_evolution = (
+            allow_partition_evolution_value.strip().lower() == "true"
+        )
+    else:
+        raise ValueError("allow_partition_evolution must be a boolean")
+
     config = parse_iceberg_catalog_config(endpoint)
     table = config["table_name"]
     namespace = config["namespace"]
@@ -1246,6 +1330,31 @@ def _write_mapped_rows_pyiceberg(
     # so a schema that already carries the table name resolves to ``ns.tbl.tbl``.
     target_schema = ".".join(namespace)
     table_identifier = ".".join(namespace + (table,))
+
+    def partition_core_available() -> bool:
+        try:
+            __import__("pyiceberg_core")
+        except ImportError:
+            return False
+        return True
+
+    def missing_partition_core_result() -> WriteResult:
+        partition_error = IcebergPartitionSpecError(
+            "partitioned Iceberg writes require the missing pyiceberg-core "
+            "package (import pyiceberg_core)"
+        )
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=target_schema,
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"{type(partition_error).__name__}: {partition_error}"
+            ),
+            driver="iceberg",
+        )
 
     target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     if conflict_columns:
@@ -1296,6 +1405,35 @@ def _write_mapped_rows_pyiceberg(
         tbl = catalog.load_table(identifier)
         table_existed = True
     except NoSuchTableError:
+        if partition_spec_declared:
+            missing_partition_columns = [
+                column
+                for column, _ in partition_spec
+                if column not in target_cols
+            ]
+            if missing_partition_columns:
+                raise ValueError(
+                    "partition_spec column does not exist: "
+                    + ", ".join(repr(column) for column in missing_partition_columns)
+                )
+            if not partition_core_available():
+                return missing_partition_core_result()
+        if strict_schema_evolution and rename_columns:
+            evolution_error = IcebergSchemaEvolutionError(
+                "rename source does not exist because the table is not present"
+            )
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"{type(evolution_error).__name__}: {evolution_error}"
+                ),
+                driver="iceberg",
+            )
         if not create_table:
             return WriteResult(
                 ok=False,
@@ -1325,7 +1463,22 @@ def _write_mapped_rows_pyiceberg(
         ensure_namespace(catalog, namespace)
         arrow_types = [_logical_to_arrow_type(dest_types.get(c, "string"), pa) for c in target_cols]
         arrow_schema = pa.schema([(c, t) for c, t in zip(target_cols, arrow_types)])
-        tbl = catalog.create_table(identifier, schema=arrow_schema)
+        create_options: dict[str, Any] = {}
+        create_schema: Any = arrow_schema
+        if partition_spec_declared:
+            from pyiceberg.catalog import Catalog
+            from pyiceberg.schema import assign_fresh_schema_ids
+
+            iceberg_schema = assign_fresh_schema_ids(
+                Catalog._convert_schema_if_needed(arrow_schema)
+            )
+            create_schema = iceberg_schema
+            create_options["partition_spec"] = partition_spec_for_schema(
+                iceberg_schema, partition_spec
+            )
+        tbl = catalog.create_table(
+            identifier, schema=create_schema, **create_options
+        )
         table_existed = False
     except Exception as exc:
         return WriteResult(
@@ -1339,6 +1492,39 @@ def _write_mapped_rows_pyiceberg(
             driver="iceberg",
         )
 
+    if table_existed and partition_spec_declared:
+        partition_spec_for_schema(
+            tbl.schema(), partition_spec, rename_columns=rename_columns
+        )
+    if table_existed and (
+        partition_spec_declared or not tbl.spec().is_unpartitioned()
+    ):
+        if not partition_core_available():
+            return missing_partition_core_result()
+    if table_existed and partition_spec_declared:
+        if not partition_spec_matches(
+            tbl.schema(),
+            tbl.spec(),
+            partition_spec,
+            rename_columns=rename_columns,
+        ) and not allow_partition_evolution:
+            partition_error = IcebergPartitionSpecError(
+                "declared partition_spec differs from the existing table; "
+                "set allow_partition_evolution=true to apply it"
+            )
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"{type(partition_error).__name__}: {partition_error}"
+                ),
+                driver="iceberg",
+            )
+
     mode = _iceberg_effective_write_mode(
         write_mode, sync_mode=sync_mode, file_batch_idx=file_batch_idx
     )
@@ -1346,6 +1532,62 @@ def _write_mapped_rows_pyiceberg(
 
     try:
         existing_arrow = tbl.schema().as_arrow()
+        schema_plan = None
+        planned_arrow_schema = None
+        requested_dest_types = dict(dest_types)
+        if table_existed:
+            candidate_fields: list[Any] = []
+            candidate_complete = True
+            rename_sources_by_target = {
+                target: source for source, target in (rename_columns or {}).items()
+            }
+            for column in target_cols:
+                carrier = str(requested_dest_types.get(column) or "").strip()
+                if not carrier:
+                    if studio_err:
+                        candidate_complete = False
+                        break
+                    carrier = "string"
+                existing_field = (
+                    existing_arrow.field(column)
+                    if column in existing_arrow.names
+                    else None
+                )
+                rename_source = rename_sources_by_target.get(column)
+                if existing_field is None and rename_source in existing_arrow.names:
+                    existing_field = existing_arrow.field(rename_source)
+                nullable = existing_field.nullable if existing_field else True
+                candidate_fields.append(
+                    pa.field(
+                        column,
+                        _logical_to_arrow_type(carrier, pa),
+                        nullable=nullable,
+                    )
+                )
+            if candidate_complete:
+                planned_arrow_schema = pa.schema(candidate_fields)
+                schema_plan = plan_schema_change(
+                    tbl.schema(),
+                    planned_arrow_schema,
+                    rename_columns=rename_columns,
+                )
+                if strict_schema_evolution and schema_plan.refused:
+                    evolution_error = IcebergSchemaEvolutionError(
+                        "; ".join(schema_plan.refused)
+                    )
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"{type(evolution_error).__name__}: "
+                            f"{evolution_error}"
+                        ),
+                        driver="iceberg",
+                    )
         # Rematerialize from source when committed Arrow carriers ≠ Map stamps
         # (VARCHAR→int/date/decimal invent cliff — same class as PG/Snowflake).
         if table_existed:
@@ -1393,9 +1635,19 @@ def _write_mapped_rows_pyiceberg(
                         driver="iceberg",
                     )
                 physical = effective
+            rematerialize_physical = dict(physical)
+            if schema_plan is not None and not schema_plan.refused:
+                for change in schema_plan.changes:
+                    if change.kind != "widen":
+                        continue
+                    carrier = str(
+                        requested_dest_types.get(change.column) or ""
+                    ).strip()
+                    if carrier:
+                        rematerialize_physical[change.column] = carrier
             _force_remap = bool(studio_err)
             remat = _iceberg_rematerialize_if_physical_differs(
-                physical=physical,
+                physical=rematerialize_physical,
                 dest_types=dest_types,
                 target_cols=target_cols,
                 headers=headers,
@@ -1426,6 +1678,10 @@ def _write_mapped_rows_pyiceberg(
                     rejected_details=rejected_details,
                     driver="iceberg",
                 )
+            if schema_plan is not None and not schema_plan.refused:
+                for change in schema_plan.changes:
+                    if change.kind == "widen" and change.column in requested_dest_types:
+                        dest_types[change.column] = requested_dest_types[change.column]
 
         if not mapped_rows:
             mapped_rows, transform_errors, rejected_details = _iceberg_map_rows(
@@ -1509,25 +1765,167 @@ def _write_mapped_rows_pyiceberg(
                     )
                 carrier = "string"
             arrow_types.append(_logical_to_arrow_type(carrier, pa))
+        if table_existed and schema_plan is None:
+            fallback_fields: list[Any] = []
+            rename_sources_by_target = {
+                target: source for source, target in (rename_columns or {}).items()
+            }
+            for column, arrow_type in zip(target_cols, arrow_types):
+                existing_field = (
+                    existing_arrow.field(column)
+                    if column in existing_arrow.names
+                    else None
+                )
+                rename_source = rename_sources_by_target.get(column)
+                if existing_field is None and rename_source in existing_arrow.names:
+                    existing_field = existing_arrow.field(rename_source)
+                nullable = existing_field.nullable if existing_field else True
+                fallback_fields.append(
+                    pa.field(column, arrow_type, nullable=nullable)
+                )
+            planned_arrow_schema = pa.schema(fallback_fields)
+            schema_plan = plan_schema_change(
+                tbl.schema(),
+                planned_arrow_schema,
+                rename_columns=rename_columns,
+            )
+            if strict_schema_evolution and schema_plan.refused:
+                evolution_error = IcebergSchemaEvolutionError(
+                    "; ".join(schema_plan.refused)
+                )
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"{type(evolution_error).__name__}: "
+                        f"{evolution_error}"
+                    ),
+                    driver="iceberg",
+                )
         type_locked_warnings: list[str] = []
-        new_fields: list[tuple[str, Any]] = []
-        for c, at in zip(target_cols, arrow_types):
-            if c not in existing_arrow.names:
-                new_fields.append((c, at))
-            else:
-                existing_type = existing_arrow.field(c).type
-                if not existing_type.equals(at):
+        if schema_plan is not None and not schema_plan.refused:
+            if planned_arrow_schema is not None:
+                arrow_types = [
+                    planned_arrow_schema.field(column).type
+                    for column in target_cols
+                ]
+            if schema_plan.changes:
+                with tbl.update_schema() as update:
+                    apply_schema_plan(update, schema_plan)
+                tbl = catalog.load_table(identifier)
+                existing_arrow = tbl.schema().as_arrow()
+        else:
+            new_fields: list[tuple[str, Any]] = []
+            for c, at in zip(target_cols, arrow_types):
+                if c not in existing_arrow.names:
+                    new_fields.append((c, at))
+                else:
+                    existing_type = existing_arrow.field(c).type
+                    if not existing_type.equals(at):
+                        type_locked_warnings.append(
+                            f"type_locked: keep {c}:{existing_type} (incoming {at})"
+                        )
+            if schema_plan is not None:
+                for refusal in schema_plan.refused:
+                    if not refusal.startswith("type_locked: keep "):
+                        continue
+                    column = refusal[len("type_locked: keep ") :].split(":", 1)[0]
+                    if not any(
+                        warning.startswith(f"type_locked: keep {column}:")
+                        for warning in type_locked_warnings
+                    ):
+                        type_locked_warnings.append(refusal)
+                if schema_plan.refused and not type_locked_warnings:
                     type_locked_warnings.append(
-                        f"type_locked: keep {c}:{existing_type} (incoming {at})"
+                        "type_locked: schema evolution refused: "
+                        + "; ".join(schema_plan.refused)
                     )
 
-        if new_fields:
-            new_schema = pa.schema(new_fields)
-            with tbl.update_schema() as update:
-                update.union_by_name(new_schema)
-            # Refresh the table so the final schema includes the new columns.
-            tbl = catalog.load_table(identifier)
-            existing_arrow = tbl.schema().as_arrow()
+            if new_fields:
+                new_schema = pa.schema(new_fields)
+                with tbl.update_schema() as update:
+                    update.union_by_name(new_schema)
+                tbl = catalog.load_table(identifier)
+                existing_arrow = tbl.schema().as_arrow()
+
+        if (
+            table_existed
+            and partition_spec_declared
+            and allow_partition_evolution
+        ):
+            fresh_tbl = catalog.load_table(identifier)
+            partition_spec_for_schema(
+                fresh_tbl.schema(),
+                partition_spec,
+                rename_columns=rename_columns,
+            )
+            if not partition_spec_matches(
+                fresh_tbl.schema(),
+                fresh_tbl.spec(),
+                partition_spec,
+                rename_columns=rename_columns,
+            ):
+                desired_fields = {
+                    (column, repr(transform))
+                    for column, transform in partition_spec
+                }
+                current_fields: set[tuple[str, str]] = set()
+                for field in fresh_tbl.spec().fields:
+                    column = fresh_tbl.schema().find_column_name(
+                        field.source_id
+                    )
+                    if column is None:
+                        continue
+                    current_fields.add(
+                        (
+                            (rename_columns or {}).get(column, column),
+                            repr(field.transform),
+                        )
+                    )
+                with fresh_tbl.update_spec() as update:
+                    for field in fresh_tbl.spec().fields:
+                        column = fresh_tbl.schema().find_column_name(
+                            field.source_id
+                        )
+                        signature = (
+                            (rename_columns or {}).get(column, column)
+                            if column is not None
+                            else None,
+                            repr(field.transform),
+                        )
+                        if signature not in desired_fields:
+                            update.remove_field(field.name)
+                    for column, transform in partition_spec:
+                        if (column, repr(transform)) not in current_fields:
+                            source_column = column
+                            try:
+                                fresh_tbl.schema().find_field(source_column)
+                            except ValueError:
+                                source_column = next(
+                                    (
+                                        source
+                                        for source, target in (
+                                            rename_columns or {}
+                                        ).items()
+                                        if target == column
+                                    ),
+                                    column,
+                                )
+                            update.add_field(source_column, transform)
+                tbl = catalog.load_table(identifier)
+                if not partition_spec_matches(
+                    tbl.schema(),
+                    tbl.spec(),
+                    partition_spec,
+                    rename_columns=rename_columns,
+                ):
+                    raise IcebergPartitionSpecError(
+                        "partition spec did not match after evolution"
+                    )
 
         final_arrow = existing_arrow
         schema_extra_cols = [n for n in final_arrow.names if n not in set(target_cols)]
@@ -1863,25 +2261,45 @@ def _write_mapped_rows_pyiceberg(
                 ),
                 driver="iceberg",
             )
-        arrays = []
-        for field in final_arrow:
-            at = field.type
-            cells = [_coerce_arrow_cell(r.get(field.name), at, pa) for r in dict_rows]
-            arrays.append(pa.array(cells, type=at))
-        pa_table = pa.Table.from_arrays(arrays, schema=final_arrow)
-        checksum = _checksum_arrow_table(pa_table)
+        pa_table, checksum = _prepare_pyiceberg_write(dict_rows, final_arrow, pa)
 
         if mode in upsert_modes:
             pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
-            upsert_result = tbl.upsert(pa_table, join_cols=pk_cols)
-            rows_written = upsert_result.rows_updated + upsert_result.rows_inserted
+
+            def stage(_fresh_tbl: Any, txn: Any, props: dict[str, str]) -> int:
+                upsert_result = txn.upsert(
+                    pa_table,
+                    join_cols=pk_cols,
+                    snapshot_properties=props,
+                )
+                return upsert_result.rows_updated + upsert_result.rows_inserted
+
         elif mode in {"overwrite", "replace"}:
-            tbl.overwrite(pa_table)
-            rows_written = len(pa_table)
+
+            def stage(_fresh_tbl: Any, txn: Any, props: dict[str, str]) -> int:
+                txn.overwrite(pa_table, snapshot_properties=props)
+                return len(pa_table)
+
         else:
-            tbl.append(pa_table)
-            rows_written = len(pa_table)
-    except Exception as exc:
+
+            def stage(_fresh_tbl: Any, txn: Any, props: dict[str, str]) -> int:
+                txn.append(pa_table, snapshot_properties=props)
+                return len(pa_table)
+
+        outcome = commit_with_retry(
+            lambda: catalog.load_table(identifier),
+            stage,
+            operation=mode,
+            policy=CommitRetryPolicy.from_endpoint(endpoint),
+        )
+        rows_written = outcome.value
+    except IcebergCommitStateUnknownError as exc:
+        logger.error(
+            "Iceberg %s commit outcome unknown table=%s commit_id=%s",
+            mode,
+            table_identifier,
+            exc.commit_id,
+        )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -1889,7 +2307,27 @@ def _write_mapped_rows_pyiceberg(
             target_schema=target_schema,
             checksum="",
             chunks_completed=0,
-            error=f"Iceberg {mode} failed: {exc}",
+            error=(
+                f"Iceberg {mode} commit outcome unknown "
+                f"(commit-id {exc.commit_id}): {exc}"
+            ),
+            driver="iceberg",
+        )
+    except Exception as exc:
+        logger.error(
+            "Iceberg %s failed table=%s error=%s",
+            mode,
+            table_identifier,
+            type(exc).__name__,
+        )
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=target_schema,
+            checksum="",
+            chunks_completed=0,
+            error=f"Iceberg {mode} failed: {type(exc).__name__}: {exc}",
             driver="iceberg",
         )
 
@@ -3116,52 +3554,97 @@ def _delete_pyiceberg(
     lsn_column: str,
 ) -> int:
     from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
+    from pyiceberg.exceptions import (
+        CommitFailedException,
+        CommitStateUnknownException,
+        ValidationException,
+    )
 
     config = parse_iceberg_catalog_config(endpoint)
     catalog = load_catalog(endpoint)
     identifier = config["namespace"] + (config["table_name"],)
-    tbl = catalog.load_table(identifier)
-    work_keys = {str(k) for k in key_set}
-    if incoming_lsn:
-        # CDC LSN guard projects pk (+ lsn) only. Overwrite leftover MERGE
-        # has no LSN and must not materialize scan().to_arrow() of the table.
-        select_cols = list(dict.fromkeys([*pk_cols, lsn_column]))
-        scanned = tbl.scan().select(*select_cols).to_arrow()
-        rows: list[dict[str, Any]] = []
-        for i in range(scanned.num_rows):
-            rows.append(
-                {
-                    name: scanned.column(name)[i].as_py()
-                    for name in scanned.column_names
-                }
-            )
-        work_keys = _filter_delete_keys_by_lsn(
-            rows,
-            pk_cols,
-            work_keys,
-            incoming_lsn=incoming_lsn,
-            lsn_column=lsn_column,
-        )
-        work_keys = {
-            pk
-            for row in rows
-            if (pk := _iceberg_row_pk(row, pk_cols)) is not None and pk in work_keys
-        }
-    if not work_keys:
-        return 0
-    try:
-        tbl.delete(delete_filter=_iceberg_delete_predicate(tbl, pk_cols, work_keys))
-    except Exception:
-        if len(pk_cols) != 1:
-            raise
-        from pyiceberg.types import StringType
 
-        field = tbl.schema().find_field(pk_cols[0], case_sensitive=False)
-        ftype = getattr(field, "field_type", None)
-        # Quoted-string IN is only valid for string PKs. A numeric In()
-        # failure falling through to strings would no-op leftover MERGE.
-        if not isinstance(ftype, StringType):
+    def stage(fresh_tbl: Any, txn: Any, props: dict[str, str]) -> int:
+        work_keys = {str(k) for k in key_set}
+        if incoming_lsn:
+            # CDC LSN guard reads only the keys this delete can affect.
+            select_cols = list(dict.fromkeys([*pk_cols, lsn_column]))
+            rows: list[dict[str, Any]] = []
+            ordered_work_keys = sorted(work_keys)
+            for start in range(0, len(ordered_work_keys), _PK_SCAN_SLICE):
+                chunk = set(
+                    ordered_work_keys[start : start + _PK_SCAN_SLICE]
+                )
+                scanned = (
+                    fresh_tbl.scan(
+                        row_filter=_iceberg_delete_predicate(
+                            fresh_tbl, pk_cols, chunk
+                        )
+                    )
+                    .select(*select_cols)
+                    .to_arrow()
+                )
+                for i in range(scanned.num_rows):
+                    rows.append(
+                        {
+                            name: scanned.column(name)[i].as_py()
+                            for name in scanned.column_names
+                        }
+                    )
+            work_keys = _filter_delete_keys_by_lsn(
+                rows,
+                pk_cols,
+                work_keys,
+                incoming_lsn=incoming_lsn,
+                lsn_column=lsn_column,
+            )
+            work_keys = {
+                pk
+                for row in rows
+                if (pk := _iceberg_row_pk(row, pk_cols)) is not None and pk in work_keys
+            }
+        if not work_keys:
+            raise _IcebergNoCommit
+        try:
+            txn.delete(
+                delete_filter=_iceberg_delete_predicate(
+                    fresh_tbl, pk_cols, work_keys
+                ),
+                snapshot_properties=props,
+            )
+        except (
+            CommitFailedException,
+            CommitStateUnknownException,
+            ValidationException,
+        ):
             raise
-        quoted = ", ".join("'" + str(k).replace("'", "''") + "'" for k in work_keys)
-        tbl.delete(delete_filter=f"{pk_cols[0]} IN ({quoted})")
-    return len(work_keys)
+        except Exception:
+            if len(pk_cols) != 1:
+                raise
+            from pyiceberg.types import StringType
+
+            field = fresh_tbl.schema().find_field(pk_cols[0], case_sensitive=False)
+            ftype = getattr(field, "field_type", None)
+            # Quoted-string IN is only valid for string PKs. A numeric In()
+            # failure falling through to strings would no-op leftover MERGE.
+            if not isinstance(ftype, StringType):
+                raise
+            quoted = ", ".join(
+                "'" + str(k).replace("'", "''") + "'" for k in work_keys
+            )
+            txn.delete(
+                delete_filter=f"{pk_cols[0]} IN ({quoted})",
+                snapshot_properties=props,
+            )
+        return len(work_keys)
+
+    try:
+        outcome = commit_with_retry(
+            lambda: catalog.load_table(identifier),
+            stage,
+            operation="delete",
+            policy=CommitRetryPolicy.from_endpoint(endpoint),
+        )
+    except _IcebergNoCommit:
+        return 0
+    return outcome.value

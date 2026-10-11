@@ -309,9 +309,16 @@ def _introspect_schema(
     auth_role: str = "",
     private_key: str = "",
     strict_namespace: bool = False,
+    reader_cfg: dict[str, Any] | None = None,
     **options: Any,
 ) -> dict[str, Any]:
     """Load tables/columns for ``table`` in the requested database/schema.
+
+    ``reader_cfg`` asks a document store for the shape its Execute reader will
+    emit (the connector config the reader is built from). Without it MongoDB
+    reports raw top-level keys, which is right for ``$group`` pipelines but not
+    for a transfer plan: the reader expands nested objects into ``parent_child``
+    columns, and a plan built from the raw keys never maps them.
 
     ``options`` carries the connection-affecting extras from the connector
     config (``connectors.generic_sql.connection_options``): TLS material,
@@ -452,6 +459,7 @@ def _introspect_schema(
             connection_string=connection_string,
             auth_source=auth_source,
             table=table,
+            reader_cfg=reader_cfg,
         )
     if db_type == "dynamodb":
         return _introspect_dynamodb(
@@ -3706,6 +3714,22 @@ def prefer_bson_numeric_carrier(
     return merged
 
 
+def prefer_bson_source_carrier(
+    schema: dict[str, str] | None,
+    bson_types: dict[str, str] | None,
+) -> dict[str, str]:
+    """Preserve BSON-declared carriers lost when samples are stringified."""
+    merged = prefer_bson_numeric_carrier(schema, bson_types)
+    schema_names = {str(name).casefold(): str(name) for name in merged}
+    for col, bson_type in (bson_types or {}).items():
+        if str(bson_type).strip().upper() != "TIMESTAMPTZ":
+            continue
+        name = schema_names.get(str(col).casefold())
+        if name is not None:
+            merged[name] = "TIMESTAMPTZ"
+    return merged
+
+
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     try:
@@ -3731,6 +3755,24 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         # Sample BSON types BEFORE stringifying _id — otherwise ObjectId is
         # erased to TEXT and create-new never stamps VARCHAR(24).
         docs = list(db[target].find().limit(100)) if target else []
+        reader_cfg = kwargs.get("reader_cfg")
+        if reader_cfg is not None and docs:
+            # Same expansion as connectors.mongodb_reader._page_docs_to_batch, on
+            # the BSON values (ObjectId / Decimal128 carriers survive it).
+            from services.json_intelligence import expand_mongo_documents
+
+            raw_keys = {k for doc in docs for k in doc}
+            docs = expand_mongo_documents(docs, cfg=reader_cfg)
+            expanded = sorted({k for doc in docs for k in doc} - raw_keys)
+            if expanded:
+                logger.info(
+                    "mongodb introspect %s.%s: %d nested column(s) from the reader's "
+                    "expansion: %s",
+                    db_name,
+                    target,
+                    len(expanded),
+                    ", ".join(expanded[:12]),
+                )
         resolved, mix_notes = _mongodb_types_with_notes(docs)
         for doc in docs:
             for key, val in list(doc.items()):
@@ -3790,7 +3832,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
     try:
         from connectors.dynamodb_reader import (
             DDB_NULL_SENTINEL,
-            describe_key_schema,
+            describe_table_key_contract,
             describe_table_schema,
             estimate_item_count,
             list_tables,
@@ -3808,8 +3850,9 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
         }
         names, types = describe_table_schema(cfg, table)
         key_schema = []
+        index_attributes = {}
         try:
-            key_schema = describe_key_schema(cfg, table)
+            key_schema, index_attributes = describe_table_key_contract(cfg, table)
         except Exception:
             logger.debug("DynamoDB key schema describe failed for %s", table, exc_info=True)
         # Sample real items — union every attribute (sparse keys) + native types.
@@ -3874,6 +3917,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "row_estimate": row_estimate,
             "primary_key_columns": pk_names,
             "dynamo_key_schema": key_schema,
+            "dynamo_index_attributes": index_attributes,
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
@@ -4314,9 +4358,13 @@ def _introspect_sqlite(
                 prow = pragma_by_name.get(name)
                 notnull = int(prow[3] or 0) if prow is not None else 0
                 dflt = prow[4] if prow is not None else None
+                native_type = str(prow[2] or "").strip() if prow is not None else ""
                 col_out: dict[str, Any] = {
                     "name": name,
                     "inferred_type": inferred,
+                    "declared_type": native_type,
+                    "native_type": native_type,
+                    "sample_refined": any(bool(value) for value in values),
                     # Property 6 — never invent nullable=True when PRAGMA says NOT NULL.
                     "nullable": notnull == 0,
                 }

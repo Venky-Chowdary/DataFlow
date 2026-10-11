@@ -108,7 +108,7 @@ def carrier_would_truncate(
         mysql_text_tier_rank(source_type) is not None
         and mysql_text_tier_rank(live_type) is not None
     )
-    if string_declared and string_width_would_narrow(source_type, live_type):
+    if string_declared and string_width_would_narrow(source_type, live_type, dest_db=dest_db):
         return True
     binary_declared = parse_binary_carrier_width(source_type) is not None or (
         mysql_blob_tier_rank(source_type) is not None

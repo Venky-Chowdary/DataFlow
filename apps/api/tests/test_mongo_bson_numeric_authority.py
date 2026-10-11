@@ -71,3 +71,25 @@ def test_profiling_still_upgrades_an_untyped_carrier_to_decimal():
 def test_text_sentinel_among_doubles_keeps_typed_majority():
     docs = [{"amount": float(i)} for i in range(50)] + [{"amount": "N/A"}]
     assert mongodb_bson_column_types(docs)["amount"] == "FLOAT"
+
+
+def test_bson_date_keeps_instant_carrier_after_sample_stringification():
+    from datetime import datetime
+
+    from services.schema_introspect import prefer_bson_source_carrier
+
+    bson_types = mongodb_bson_column_types(
+        [{"ts_utc": datetime(2025, 1, 1, 0, 0)}]
+    )
+    assert bson_types["ts_utc"] == "TIMESTAMPTZ"
+    assert prefer_bson_source_carrier(
+        {"ts_utc": "TIMESTAMP"}, bson_types
+    ) == {"ts_utc": "TIMESTAMPTZ"}
+
+
+def test_non_bson_date_text_is_not_promoted_to_an_instant():
+    from services.schema_introspect import prefer_bson_source_carrier
+
+    assert prefer_bson_source_carrier(
+        {"ts_utc": "TIMESTAMP"}, {"ts_utc": "TEXT"}
+    ) == {"ts_utc": "TIMESTAMP"}

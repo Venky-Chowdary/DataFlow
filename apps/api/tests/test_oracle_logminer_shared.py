@@ -4,13 +4,115 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from connectors.oracle_logminer import OracleLogMinerCdc, encode_logminer_token
+import pytest
+
+from connectors.oracle_logminer import (
+    OracleLogMinerCdc,
+    CdcScnGapError,
+    assert_redo_continuity,
+    encode_logminer_token,
+    fetch_redo_inventory,
+    logminer_contents_sql,
+)
 from services.cdc_multi_table import can_share_log_reader
 
 
 def test_oracle_can_share_log_reader() -> None:
     assert can_share_log_reader("oracle", 2) is True
     assert can_share_log_reader("oracle", 1) is False
+
+
+def test_logminer_contents_selects_documented_xidsqn_column() -> None:
+    sql = logminer_contents_sql(
+        table_predicate="TABLE_NAME IN ('ORDERS','USERS')",
+        include_xid=True,
+    )
+
+    assert ", XIDUSN, XIDSLT, XIDSQN" in sql
+    assert "XIDSEQ" not in sql
+
+
+def test_redo_continuity_skips_invalid_rows_and_still_detects_holes(caplog) -> None:
+    inventory = [
+        (1, 1, 100, 200, "archived"),
+        (1, 0, 0, 0, "online"),
+        (1, 3, 300, 400, "archived"),
+    ]
+
+    with pytest.raises(CdcScnGapError, match="thread 1: missing sequence range 2-2"):
+        assert_redo_continuity(150, inventory, cursor_key="invalid-row-hole")
+    assert "invalid" in caplog.text.lower()
+
+
+def test_redo_continuity_warning_is_deduplicated_per_cursor_key(caplog) -> None:
+    cursor_key = f"warning-dedupe-{id(caplog)}"
+
+    assert_redo_continuity(150, None, cursor_key=cursor_key) is None
+    assert_redo_continuity(150, None, cursor_key=cursor_key) is None
+
+    assert caplog.text.count("continuity is unverified") == 1
+
+
+class _RedoInventoryCursor:
+    def __init__(self, archived_rows, online_rows) -> None:
+        self.archived_rows = archived_rows
+        self.online_rows = online_rows
+        self.statement = ""
+        self.executed = []
+
+    def execute(self, statement: str) -> None:
+        self.statement = statement
+        self.executed.append(statement)
+
+    def fetchall(self):
+        if "V$ARCHIVED_LOG" in self.statement:
+            if "RESETLOGS_CHANGE#" in self.statement:
+                return self.archived_rows
+            return self.archived_rows + self.prior_incarnation_rows
+        return self.online_rows
+
+
+def test_prior_incarnation_logs_do_not_create_a_false_sequence_gap() -> None:
+    cur = _RedoInventoryCursor(
+        archived_rows=[(1, 1, 100, 200)],
+        online_rows=[(1, 2, 200, 300), (1, 3, 300, 400)],
+    )
+    cur.prior_incarnation_rows = [(1, 5, 10, 20)]
+
+    inventory = fetch_redo_inventory(cur)
+
+    assert inventory is not None
+    assert [entry[1] for entry in inventory] == [1, 2, 3]
+    assert_redo_continuity(150, inventory, cursor_key="current-chain")
+
+
+def test_prior_incarnation_logs_do_not_mask_a_current_sequence_hole() -> None:
+    cur = _RedoInventoryCursor(
+        archived_rows=[(1, 1, 100, 200), (1, 3, 300, 400)],
+        online_rows=[(1, 4, 400, 500)],
+    )
+    cur.prior_incarnation_rows = [(1, 2, 10, 20)]
+
+    inventory = fetch_redo_inventory(cur)
+
+    assert inventory is not None
+    with pytest.raises(CdcScnGapError, match="thread 1: missing sequence range 2-2"):
+        assert_redo_continuity(150, inventory, cursor_key="current-hole")
+
+
+def test_redo_inventory_sql_filters_unused_online_and_old_incarnation_rows() -> None:
+    cur = _RedoInventoryCursor(archived_rows=[], online_rows=[])
+    cur.prior_incarnation_rows = []
+
+    fetch_redo_inventory(cur)
+    archive_query, online_query = cur.executed
+    archive_query = " ".join(archive_query.split())
+    online_query = " ".join(online_query.split())
+
+    assert "RESETLOGS_CHANGE# = (" in archive_query
+    assert "SELECT RESETLOGS_CHANGE# FROM V$DATABASE" in archive_query
+    assert "STATUS <> 'UNUSED'" in online_query
+    assert "FIRST_CHANGE# > 0" in online_query
 
 
 def test_oracle_shared_reader_init_and_lease() -> None:
@@ -59,6 +161,8 @@ def test_oracle_shared_poll_demuxes_two_tables() -> None:
     # current_scn, then logminer rows
     cur.fetchone.side_effect = [(200,)]
     cur.fetchall.side_effect = [
+        [],  # archived redo inventory
+        [],  # online redo inventory
         # V$LOGFILE members, then V$ARCHIVED_LOG names: the session now
         # ADD_LOGFILEs an explicit redo set instead of using CONTINUOUS_MINE.
         [("/redo/redo01.log",)],

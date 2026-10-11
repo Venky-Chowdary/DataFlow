@@ -123,7 +123,7 @@ def dest_table_ref(engine: str) -> str:
 def dest_count(engine: str) -> int:
     try:
         return int(dest_query(engine, f"SELECT COUNT(*) FROM {dest_table_ref(engine)}")[0][0])
-    except Exception as exc:
+    except Exception:
         return -1
 
 
@@ -180,7 +180,6 @@ def m(source: str, target: str, src_t: str, dst_t: str, **extra: Any) -> dict[st
 def wide_source_narrow_dest(engine: str, *, omit_marked: bool) -> dict[str, Any]:
     """30 source columns into an existing 20-column destination."""
     src_cols = [f"c{i} VARCHAR(64)" for i in range(1, 31)]
-    dst_cols = [f"c{i} VARCHAR(64)" for i in range(1, 21)]
     pg_exec([f"DROP TABLE IF EXISTS {SRC}",
              f"CREATE TABLE {SRC} (id BIGINT PRIMARY KEY, {', '.join(src_cols)})"])
     pg_exec([f"INSERT INTO {SRC} VALUES ({i}, "

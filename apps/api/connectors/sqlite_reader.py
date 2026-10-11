@@ -155,9 +155,16 @@ def read_table_scan_batch(
     where_sql = ""
     params: tuple[Any, ...] = ()
     if filter_value is not None:
-        filter_q = quote_sql_identifier(filter_column)
+        from services.copy_incremental import (
+            sqlite_cursor_operand,
+            sqlite_normalize_cursor_watermark,
+        )
+
+        filter_q = sqlite_cursor_operand(
+            quote_sql_identifier(filter_column), str(filter_value)
+        )
         where_sql = f" WHERE {filter_q} > ?"
-        params = (filter_value,)
+        params = (sqlite_normalize_cursor_watermark(str(filter_value)),)
     if not scan_state.get("started"):
         shared = conn if conn is not None else get_source_snapshot_conn()
         close_conn = shared is None and conn is None

@@ -111,6 +111,21 @@ def test_transfer_live_driver_count_excludes_email_and_matches_fe_constant():
     assert int(match.group(1)) == len(TRANSFER_LIVE_WHEN_PACKAGES_PRESENT)
 
 
+def test_synthetic_sdk_descriptors_are_not_transfer_live():
+    from connectors.sdk import list_descriptors
+
+    synthetic_sources = [
+        descriptor
+        for descriptor in list_descriptors()
+        if "source" in descriptor.roles
+        and descriptor.catalog_ids
+        and descriptor.evidence == "synthetic-fixture"
+    ]
+    assert synthetic_sources
+    live = set(transfer_live_driver_types())
+    assert not {descriptor.id for descriptor in synthetic_sources} & live
+
+
 def test_mongodb_registry_does_not_claim_sql_merge():
     from services.connector_capability_registry import get_connector_capability
 

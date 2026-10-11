@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 from connectors.mongodb_common import (
@@ -115,6 +116,8 @@ def drop_table(
     dt = (db_type or "").lower().strip()
     if dt in ("postgresql", "redshift"):
         return _drop_postgresql(cfg, table_name, schema)
+    if dt == "pgvector":
+        return _drop_pgvector(cfg, table_name, schema)
     if dt == "mysql":
         return _drop_mysql(cfg, table_name, schema)
     if dt == "sqlite":
@@ -440,7 +443,13 @@ def postgres_columns_to_keep(
         conn.close()
 
 
-def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
+def _drop_postgresql(
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None,
+    *,
+    after_drop: Callable[[Any], None] | None = None,
+) -> bool:
     from psycopg2 import sql
 
     from connectors.postgresql_conn import get_connection
@@ -462,10 +471,28 @@ def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -
             cur.execute(
                 sql.SQL("DROP TABLE IF EXISTS {}.{} CASCADE").format(schema_id, table_id)
             )
+            if after_drop is not None:
+                after_drop(cur)
         conn.close()
         return True
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc
+
+
+def _drop_pgvector(
+    cfg: dict[str, Any], table_name: str, schema: str | None
+) -> bool:
+    from services.vector_fingerprint import delete_pgvector_fingerprint
+
+    schema_name = schema or str(cfg.get("schema") or "public")
+    return _drop_postgresql(
+        cfg,
+        table_name,
+        schema_name,
+        after_drop=lambda cursor: delete_pgvector_fingerprint(
+            cursor, schema_name, table_name
+        ),
+    )
 
 
 def _drop_bigquery(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
@@ -874,7 +901,6 @@ def retire_mongodb_overwrite(cfg: dict[str, Any], table_name: str) -> str | None
             db[backup].rename(table_name)
             names.add(table_name)
         options = _collection_create_options(db, table_name)
-        indexes_from = db[table_name]
         db[table_name].rename(backup)
         db.create_collection(table_name, **options)
         _copy_collection_indexes(db[backup], db[table_name])
@@ -937,12 +963,16 @@ def _drop_qdrant(cfg: dict[str, Any], table_name: str) -> bool:
     """Delete the destination collection so overwrite cannot append points."""
     from connectors.qdrant_writer import qdrant_rest
 
+    session = None
     try:
         session, base_url, headers = qdrant_rest(cfg)
         resp = session.delete(
             f"{base_url}/collections/{table_name}", headers=headers, timeout=10
         )
         if resp.status_code in {200, 201, 404}:
+            from services.vector_fingerprint import delete_qdrant_fingerprint
+
+            delete_qdrant_fingerprint(session, base_url, headers, table_name)
             return True
         raise RuntimeError(
             f"Qdrant drop failed: {resp.status_code} {resp.text[:300]}"
@@ -951,6 +981,12 @@ def _drop_qdrant(cfg: dict[str, Any], table_name: str) -> bool:
         raise
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception as exc:
+                logger.warning("Failed to close Qdrant drop session: %s", exc)
 
 
 def delete_by_primary_keys(
@@ -989,8 +1025,6 @@ def delete_by_primary_keys(
     from services.cdc_snapshot_window import _pk_columns
 
     pk_cols = _pk_columns(primary_key_column)
-    # Single-column shorthand keeps the existing IN (...) fast path.
-    pk_col = pk_cols[0] if len(pk_cols) == 1 else pk_cols
     dt = (db_type or "").lower().strip()
     from services.dest_precount import _object_store_kind
 
@@ -1047,6 +1081,28 @@ def delete_by_primary_keys(
             incoming_lsn=incoming_lsn,
             lsn_column=lsn_column,
         )
+    if dt in {"pgvector", "qdrant", "weaviate", "pinecone"}:
+        # Vector stores have no _df_lsn; deletes remain honest at-least-once.
+        if incoming_lsn:
+            logger.debug("Ignoring incoming_lsn for vector destination %s", dt)
+        from services.row_conservation import parse_delete_keys
+        from services.vector_sync import (
+            pgvector_delete_doc_keys,
+            qdrant_delete_doc_keys,
+            vector_doc_key,
+            vector_engine_delete_doc_keys,
+        )
+
+        doc_keys = [
+            vector_doc_key(values)
+            for values in parse_delete_keys(list(keys), len(pk_cols))
+        ]
+        if dt == "pgvector":
+            return pgvector_delete_doc_keys(cfg, table_name, schema, doc_keys)
+        if dt == "qdrant":
+            return qdrant_delete_doc_keys(cfg, table_name, doc_keys)
+        return vector_engine_delete_doc_keys(dt, cfg, table_name, doc_keys)
+
     work_keys = list(keys)
     if incoming_lsn:
         try:
@@ -1087,12 +1143,6 @@ def delete_by_primary_keys(
 
         return _elasticsearch_delete_keys(
             cfg, index=table_name, cols=pk_cols, keys=work_keys
-        )
-    if dt == "qdrant":
-        from services.dest_precount import _qdrant_delete_keys
-
-        return _qdrant_delete_keys(
-            cfg, collection=table_name, cols=pk_cols, keys=work_keys
         )
     if dt == "dynamodb":
         from services.dest_precount import _dynamodb_delete_keys
@@ -1143,7 +1193,7 @@ def _fetch_pk_lsn_map(
     Composite keys are addressed with the same unit-separator join the CDC
     readers emit, so the LSN guard and the delete path share one key space.
     """
-    from services.cdc_snapshot_window import _pk_columns, _pk_value
+    from services.cdc_snapshot_window import _pk_columns
 
     pk_cols = _pk_columns(primary_key_column)
     existing: dict[str, Any] = {str(k): None for k in keys}

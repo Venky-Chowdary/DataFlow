@@ -78,9 +78,20 @@ def _with_date_locale(fn):
     def wrapper(*args, **kwargs):
         date_token = set_active_date_locale(kwargs.get("date_locale", ""))
         number_token = set_active_number_locale(kwargs.get("number_locale", ""))
+        from services.transform_engine import (
+            reset_strict_number_reading,
+            set_strict_number_reading,
+        )
+
+        # Same rule as Execute (engine): strict + no declared locale.
+        strict_token = set_strict_number_reading(
+            str(kwargs.get("validation_mode") or "strict").strip().lower() == "strict"
+            and not str(kwargs.get("number_locale") or "").strip()
+        )
         try:
             return fn(*args, **kwargs)
         finally:
+            reset_strict_number_reading(strict_token)
             reset_active_number_locale(number_token)
             reset_active_date_locale(date_token)
 
@@ -512,6 +523,9 @@ class FilePreflightContext(PreflightContext):
             database_extract=str(getattr(self.plan.source, "kind", "") or "").lower()
             == "database",
             source_measured_empty=bool(getattr(self, "source_measured_empty", False)),
+            stream_contracts=list(
+                getattr(self.plan, "stream_contracts", None) or []
+            ),
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
         try:
@@ -585,6 +599,44 @@ def apply_readiness_honesty_caps(out: dict[str, Any]) -> dict[str, Any]:
             payload["population_uniqueness_proven"] = False
         payload["readiness_cap_reason"] = "+".join(dict.fromkeys(reasons))
     return payload
+
+
+def _block_decision_on_hard_gate(out: dict[str, Any]) -> dict[str, Any]:
+    """A block-status gate can never sit beside ``decision=approve``.
+
+    The proof bundle is stamped before the hosted gates (g3f population fit,
+    additive stamp) run; without this a g3f block left "No blocking issues
+    detected" on the verdict that Execute and Pilot read (QA MX3-22).
+    """
+    pb = out.get("proof_bundle")
+    td = (pb or {}).get("transfer_decision") if isinstance(pb, dict) else None
+    if out.get("passed") is not False or not isinstance(td, dict):
+        return out
+    if str(td.get("decision") or "").lower() != "approve":
+        return out
+    blocking = [
+        g for g in out.get("gates") or []
+        if isinstance(g, dict) and g.get("status") == "block"
+    ]
+    if not blocking:
+        return out
+    messages = [str(g.get("message") or g.get("id") or "") for g in blocking]
+    logger.warning(
+        "preflight verdict demoted approve->block: gate(s) %s blocked after the "
+        "proof bundle was stamped",
+        [g.get("id") for g in blocking],
+    )
+    out["proof_bundle"] = {
+        **pb,
+        "passed": False,
+        "transfer_decision": {
+            **td,
+            "decision": "block",
+            "blockers": list(dict.fromkeys([*(td.get("blockers") or []), *messages])),
+            "reason": "Blocking issues detected: " + "; ".join(messages[:3]),
+        },
+    }
+    return out
 
 
 def confidence_threshold_for_mode(validation_mode: str | None) -> float:
@@ -744,15 +796,34 @@ def run_transfer_policy_gates(
             }
         )
 
+    from services.validation_mode_contract import (
+        VALIDATION_MODE_ALIASES,
+        normalize_validation_mode,
+    )
+
+    effective_mode = normalize_validation_mode(validation)
+    threshold = confidence_threshold_for_mode(effective_mode)
+    posture = f"Validation posture {effective_mode} uses confidence threshold {threshold:.2f}"
+    if validation != effective_mode:
+        if VALIDATION_MODE_ALIASES.get(validation) == effective_mode:
+            posture += f" (requested {validation!r} runs as {effective_mode})"
+        else:
+            posture += f" (requested {validation!r} is not a validation mode — applied strict)"
+            logger.warning(
+                "Validate: unknown validation_mode %r, applying strict (floor %.2f)",
+                validation,
+                threshold,
+            )
     gates.append(
         {
             "id": "g11_validation_posture",
             "status": GateStatus.PASS.value,
-            "message": f"Validation posture {validation} uses confidence threshold {confidence_threshold_for_mode(validation):.2f}",
+            "message": posture,
             "duration_ms": 0,
             "details": {
-                "validation_mode": validation,
-                "confidence_threshold": confidence_threshold_for_mode(validation),
+                "validation_mode": effective_mode,
+                "requested_validation_mode": validation,
+                "confidence_threshold": threshold,
             },
         }
     )
@@ -869,7 +940,7 @@ def run_transfer_policy_gates(
                 "status": GateStatus.PASS.value,
                 "severity": "warn",
                 "message": (
-                    f"Execute writes"
+                    "Execute writes"
                     + (f" at most {cap} rows" if cap > 0 else " the full mapped population")
                     + (f" after sorting by {priority} {direction}" if priority else "")
                     + ". Validate type-fit still walks the uncapped source (stricter). "
@@ -1061,13 +1132,13 @@ def _fit_scan_deadline(
 
 
 # F8: policy-gate merge lives in preflight_policy_gates (single authority).
-from services.preflight_policy_gates import (  # noqa: E402
+from services.preflight_policy_gates import (  # noqa: E402, F401
     apply_policy_gates,
     is_compliance_only_block,
 )
 
 
-from services.preflight_source_kind import resolve_preflight_source_kind  # noqa: E402
+from services.preflight_source_kind import resolve_preflight_source_kind  # noqa: E402, F401
 
 
 def _apply_overwrite_emptied_gate(
@@ -1103,6 +1174,12 @@ def _apply_overwrite_emptied_gate(
     ):
         return
     skip = {str(c).casefold() for c in regenerated}
+    if normalize_dest_kind(dest_kind) == "redis":
+        from connectors.redis_reader import REDIS_ENVELOPE_COLUMNS
+
+        # The reader's key/type envelope is not stored data: an overwrite
+        # rebuilds every key under the prefix, so there is no value to lose.
+        skip |= set(REDIS_ENVELOPE_COLUMNS)
     emptied = [
         c for c in overwrite_emptied_columns(live_dest_columns, mappings)
         if c.casefold() not in skip
@@ -1206,6 +1283,8 @@ def run_file_preflight(
     previous_source_schema: dict[str, str] | None = None,
     contract_primary_key: str | None = None,
     destination_pk_columns: list[str] | None = None,
+    destination_dynamo_key_schema: list[dict[str, Any]] | None = None,
+    destination_dynamo_index_attributes: dict[str, str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
     destination_config: Mapping[str, Any] | None = None,
@@ -1258,6 +1337,15 @@ def run_file_preflight(
     dest_recreated = is_overwrite_sync(sync_mode) and dest_schema_is_recreated_on_overwrite(
         destination_db_type
     )
+    # Relational overwrite keeps the table but replaces every row — G15 must
+    # say "replace", not "insert more" (QA T21).
+    from services.db_type_utils import overwrite_replaces_rows
+
+    dest_emptied = (
+        is_overwrite_sync(sync_mode)
+        and not dest_recreated
+        and overwrite_replaces_rows(destination_db_type)
+    )
     if (
         destination_table_exists is True
         and not dest_recreated
@@ -1308,6 +1396,15 @@ def run_file_preflight(
                     "SELECT was denied on this table. Columns visible in the catalog "
                     "are not a readable source. Grant SELECT to the connector role, "
                     f"then re-validate. ({sample_unavailable_reason})"
+                )
+            elif engine_sample.read_failed:
+                # QA MX3-22: G1 said "Source readable — N columns" beside a
+                # reader that had just raised. Catalog metadata is not a
+                # readable source; the probe failure is the G1 finding.
+                source_error = (
+                    "The source catalog lists this table but Execute's reader "
+                    "could not read rows from it. Fix the source read (connection, "
+                    f"table name, timeout), then re-validate. ({sample_unavailable_reason})"
                 )
     if (
         not sample_rows
@@ -1828,9 +1925,19 @@ def run_file_preflight(
         sync_mode=sync_mode,
         contract_primary_key=str(contract_primary_key or "").strip(),
         destination_pk_columns=list(destination_pk_columns or []),
+        destination_table=str(destination_table or ""),
+        destination_dynamo_key_schema=[
+            dict(row)
+            for row in (destination_dynamo_key_schema or [])
+            if isinstance(row, dict)
+        ],
+        destination_dynamo_index_attributes=dict(
+            destination_dynamo_index_attributes or {}
+        ),
         destination_unique_keys=list(destination_unique_keys or []),
         destination_foreign_keys=list(destination_foreign_keys or []),
         fk_risk_acknowledged=bool(fk_risk_acknowledged),
+        stream_contracts=list(stream_contracts or []),
     )
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
@@ -2155,8 +2262,10 @@ def run_file_preflight(
     # caller actually holds — the whole batch at Execute preflight, the preview in
     # Studio — and report the evidence for what it is.
     fit_gate: dict[str, Any] | None = None
+    population_walk_error = ""
     fit_report_payload: dict[str, Any] = {}
     fit_blocked = False
+    fit_report = None
     try:
         from connectors.writer_common import transform_error_policy_for_validation_mode
         from services.population_fit_scan import (
@@ -2253,9 +2362,11 @@ def run_file_preflight(
                 )
             except Exception as walk_exc:
                 logger.warning(
-                    "table population walk failed; Validate will use the preview: %s",
+                    "table population walk failed for %s; g3f fails closed: %s",
+                    source_table,
                     walk_exc,
                 )
+                population_walk_error = str(walk_exc)[:400]
                 table_rows = None
             if table_rows is not None:
                 try:
@@ -2268,9 +2379,11 @@ def run_file_preflight(
                     # Cursor-unreadable / down source must keep the preview,
                     # never claim an empty population as exact.
                     logger.warning(
-                        "table population walk failed; Validate will use the preview: %s",
+                        "table population walk failed for %s; g3f fails closed: %s",
+                        source_table,
                         walk_exc,
                     )
+                    population_walk_error = str(walk_exc)[:400]
                 else:
 
                     def _chained():
@@ -2425,6 +2538,38 @@ def run_file_preflight(
           # "no bounded carrier can be exceeded" is evidence, and a silently
           # absent gate reads as an unasked question.
           fit_gate = build_population_fit_gate(fit_report)
+          if (
+              population_walk_error
+              and fit_report.targets
+              and fit_gate.get("status") != "block"
+          ):
+              # QA MX3-22: a walk that raised left only the preview checked, and
+              # "no unfit value in N scanned row(s)" let Execute approve blind.
+              logger.error(
+                  "g3f population probe failed for %s (%d bounded column(s), "
+                  "%d preview row(s) checked): %s",
+                  source_table,
+                  len(fit_report.targets),
+                  fit_report.rows_scanned,
+                  population_walk_error,
+              )
+              fit_gate = {
+                  "id": _FIT_GATE_ID,
+                  "status": "block",
+                  "message": (
+                      "Population probe failed — the source table walk raised "
+                      f"({population_walk_error}), so only {fit_report.rows_scanned} "
+                      f"preview row(s) were checked against {len(fit_report.targets)} "
+                      "bounded destination column(s). Restore source access and "
+                      "re-run Validate."
+                  ),
+                  "duration_ms": int(fit_report.duration_ms or 0),
+                  "details": {
+                      **fit_report_payload,
+                      "probe_failed": True,
+                      "probe_error": population_walk_error,
+                  },
+              }
         if fit_gate.get("status") == "block":
             fit_blocked = True
             blockers.append(
@@ -2452,6 +2597,16 @@ def run_file_preflight(
             "duration_ms": 0,
             "details": dict(fit_report_payload),
         }
+
+    from services import population_fit_narrowing
+
+    proven_string_narrowings = population_fit_narrowing.reconcile_population_proven_string_narrowings(
+        result, fit_report, mappings, column_types or {},
+        destination_column_types or {}, destination_table_exists,
+        ddl_issues, proof_bundle, blockers,
+    )
+    if proven_string_narrowings:
+        ddl_compatible = not ddl_issues
 
     enriched_blockers = enrich_blockers(
         blockers,
@@ -2584,8 +2739,9 @@ def run_file_preflight(
     # A gate that blocks a declared conversion must show up in the report every
     # other surface reads — otherwise Validate blocks while the panel under it
     # says there are no blocking failures.
-    out["coercion_report"] = reconcile_coercion_report(
-        out.get("coercion_report"), out.get("gates")
+    out["coercion_report"] = population_fit_narrowing.reconcile_population_fit_coercion_report(
+        reconcile_coercion_report(out.get("coercion_report"), out.get("gates")),
+        proven_string_narrowings,
     )
 
     # Stamp Decision Kernel ValidationFindings onto Validate SSOT.
@@ -2633,6 +2789,7 @@ def run_file_preflight(
         # tautology for the partial-catalog check — do not substitute them.
         dest_columns=list((destination_column_types or {}).keys()),
         dest_recreated=dest_recreated,
+        dest_emptied=dest_emptied,
     )
     out["source_coverage"] = src_coverage
 
@@ -3431,7 +3588,9 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
-    return apply_root_causes_to_preflight(apply_readiness_honesty_caps(out))
+    return apply_root_causes_to_preflight(
+        _block_decision_on_hard_gate(apply_readiness_honesty_caps(out))
+    )
 
 
 # --------------------------------------------------------------------------- #

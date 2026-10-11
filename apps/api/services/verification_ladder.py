@@ -19,7 +19,7 @@ import hashlib
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)

@@ -1258,8 +1258,48 @@ def _unsigned_polarity_only_collapse(src: str, dest: str, db: str) -> bool:
         or integer_width_would_narrow(src, dest, dest_db=db)
         or decimal_params_would_narrow(src, dest, dest_db=db)
         or float_mantissa_would_narrow(src, dest, dest_db=db)
-        or string_width_would_narrow(src, dest)
+        or string_width_would_narrow(src, dest, dest_db=db)
     )
+
+
+def _open_domain_decimal_stamp(
+    src_type: str,
+    dest_db_type: str,
+    *,
+    samples: list | None,
+    source_db: str,
+) -> str:
+    """Create-new stamp for a decimal inferred from an untyped source's sample.
+
+    ``""`` when the rule does not apply (declared source domain, not a decimal,
+    IEEE residue that must stay FLOAT, or unknown scale on a bounded engine).
+    """
+    from services.decimal_observe import (
+        observe_numeric_samples,
+        open_domain_decimal_carrier,
+        sampled_numeric_is_not_a_domain,
+    )
+
+    if normalize_logical_type(src_type) != LOGICAL_DECIMAL:
+        return ""
+    if not sampled_numeric_is_not_a_domain(source_db):
+        return ""
+    scale: int | None = None
+    if samples:
+        obs = observe_numeric_samples(samples)
+        kind = obs.get("kind")
+        if kind == "ieee_float":
+            return ""
+        if kind in {"fixed_decimal", "integer"}:
+            scale = int(obs.get("scale") or 0)
+    if scale is None:
+        _p, declared_scale = parse_numeric_precision_scale(src_type)
+        scale = declared_scale
+    carrier = open_domain_decimal_carrier(scale, dest_db=dest_db_type)
+    if not carrier:
+        return ""
+    db = (dest_db_type or "").strip()
+    return ddl_type(db, carrier) if db else carrier
 
 
 def _create_new_mapping_target_type(
@@ -1280,6 +1320,14 @@ def _create_new_mapping_target_type(
     invent observed ``DECIMAL(p,s)`` or ``FLOAT`` (IEEE residue) — never silent
     platform floor ``DECIMAL(38,15)`` from an empty typmod.
     """
+    # Sample-inferred decimals (files, object stores, document scrolls) are not
+    # a domain: size the integer part to the destination, keep observed scale
+    # (QA MX2-10 — a 50-row DECIMAL(4,2) quarantined 99% of the file).
+    open_stamp = _open_domain_decimal_stamp(
+        src_type, dest_db_type, samples=samples, source_db=source_db
+    )
+    if open_stamp:
+        return open_stamp
     # Bare DECIMAL/NUMERIC invent from samples before specialty / UUID paths.
     # Declared DECIMAL(p,s) wins; empty samples fall through (no fake (38,15)).
     # Declared FLOAT/DOUBLE/REAL must never invent DECIMAL from samples — that
@@ -2321,6 +2369,7 @@ def temporal_precision_would_narrow(
         DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
         SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS,
         SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR,
+        SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS,
         _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS,
         destination_temporal_fractional_digits,
         is_document_instant_token,
@@ -2357,7 +2406,7 @@ def temporal_precision_would_narrow(
         # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
         bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
         if bare_src in {"DATETIME2", "DATETIMEOFFSET"}:
-            src_p = 7
+            src_p = SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
         elif bare_src in _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS:
             if bare_src == re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip():
                 # Both sides carry the same unparameterized declaration, so the
@@ -2392,11 +2441,17 @@ def temporal_precision_would_narrow(
     # already at its documented maximum (PostgreSQL microseconds) cannot be
     # widened. Blocking that pair made every MSSQL→Postgres timestamp route
     # unrunnable. A destination below its own cap (TIMESTAMP(3) on Postgres)
-    # still blocks so the operator can widen it.
+    # still blocks so the operator can widen it. The exemption covers only that
+    # dialect-default tick: a declared ``(8)``/``(9)`` is nanosecond evidence,
+    # and dropping it needs the Risk Contract.
     from services.dest_dialect_facts import _normalize_dest_db
     from services.type_system import _TEMPORAL_FSP_CAPS
 
     cap = _TEMPORAL_FSP_CAPS.get(_normalize_dest_db(dest_db) if dest_db else "")
-    if cap is not None and tgt_p >= cap and src_p > cap:
+    if (
+        cap is not None
+        and tgt_p >= cap
+        and cap < src_p <= SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
+    ):
         return False
     return src_p > tgt_p

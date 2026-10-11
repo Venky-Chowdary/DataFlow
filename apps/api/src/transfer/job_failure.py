@@ -453,7 +453,7 @@ def _fail_runtime_job(
     job_id: str,
     exc: Exception,
     *,
-    lineage: Any = None,
+    lineage: Any = None,  # noqa: F811  # preserve public parameter name
     request: Any = None,
     already_persisted: list[int] | None = None,
 ) -> tuple[str, dict[str, Any]]:
@@ -546,6 +546,20 @@ def _fail_runtime_job(
         status_kwargs["records_processed"] = _records_after_failure(
             prev.get("records_processed"), getattr(exc, "rows_written")
         )
+    if cancelled:
+        from services.job_status import cancel_outcome_for
+
+        outcome = cancel_outcome_for(
+            status_kwargs.get("records_processed", prev.get("records_processed"))
+        )
+        status_kwargs["cancel_outcome"] = outcome
+        if outcome["partial_write"]:
+            logger.warning(
+                "Job %s cancelled after %s row(s) committed; nothing was rolled back",
+                job_id,
+                outcome["rows_committed"],
+            )
+            status_kwargs["message"] = outcome["message"]
     mongo.update_job_status(
         job_id,
         status,
@@ -631,7 +645,7 @@ def _fail_job_preflight(
     job_id: str,
     pf: dict,
     *,
-    lineage,
+    lineage,  # noqa: F811  # preserve public parameter name
     rows_read: int | None = None,
     sync_mode: str = "",
 ) -> tuple[str, dict]:

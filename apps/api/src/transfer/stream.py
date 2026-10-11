@@ -152,7 +152,44 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     meta = getattr(result, "meta", None) or {}
     if isinstance(meta, dict) and meta.get("schema_fidelity"):
         out["schema_fidelity"] = meta["schema_fidelity"]
+    if isinstance(meta, dict):
+        for key in ("vector_docs_unchanged_skipped", "vector_docs_embedded"):
+            if isinstance(meta.get(key), (int, float)):
+                out[key] = int(meta[key])
+    if isinstance(meta, dict) and isinstance(meta.get("embedding_usage"), dict):
+        out["embedding_usage"] = dict(meta["embedding_usage"])
     return out
+
+
+def _merge_embedding_usage(previous: Any, incoming: Any) -> dict[str, Any] | None:
+    if not isinstance(incoming, dict):
+        return None
+    if not isinstance(previous, dict) or not previous:
+        return dict(incoming)
+    return {
+        "provider": incoming.get("provider") or previous.get("provider"),
+        "model": incoming.get("model") or previous.get("model"),
+        "calls": int(previous.get("calls") or 0) + int(incoming.get("calls") or 0),
+        "retries": int(previous.get("retries") or 0)
+        + int(incoming.get("retries") or 0),
+        "input_tokens": int(previous.get("input_tokens") or 0)
+        + int(incoming.get("input_tokens") or 0),
+        "token_count_estimated": bool(
+            previous.get("token_count_estimated")
+            or incoming.get("token_count_estimated")
+        ),
+        "cache_hits": int(previous.get("cache_hits") or 0)
+        + int(incoming.get("cache_hits") or 0),
+        "cache_misses": int(previous.get("cache_misses") or 0)
+        + int(incoming.get("cache_misses") or 0),
+        "estimated_cost_usd": (
+            None
+            if previous.get("estimated_cost_usd") is None
+            or incoming.get("estimated_cost_usd") is None
+            else float(previous.get("estimated_cost_usd") or 0)
+            + float(incoming.get("estimated_cost_usd") or 0)
+        ),
+    }
 
 
 _STREAMING_TYPES = frozenset({
@@ -315,6 +352,14 @@ def _write_batch(
         source_handoff["source_spool"] = source_spool
     if records is not None:
         source_handoff["records"] = records
+    from services.sync_cursor import is_overwrite_sync
+
+    # Overwrite rebuilds the table from one source snapshot, so the source key
+    # holds on the copy. Only append create-new withholds it (write_mode alone
+    # cannot tell them apart: both are "insert").
+    key_carry: dict[str, Any] = (
+        {"carry_source_keys": True} if create_table and is_overwrite_sync(sync_mode) else {}
+    )
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
         from connectors.write_resilience import build_write_batch_key
@@ -358,6 +403,7 @@ def _write_batch(
                 (getattr(dest, "extra", None) or {}).get("preserve_columns") or []
             ),
             **source_handoff,
+            **key_carry,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -409,6 +455,7 @@ def _write_batch(
                 (getattr(dest, "extra", None) or {}).get("preserve_columns") or []
             ),
             **source_handoff,
+            **key_carry,
         )
         if not result.ok:
             _raise_write_failure(result, "MySQL batch write failed")
@@ -497,6 +544,7 @@ def _write_batch(
             source_schema_catalog=source_schema_catalog,
             empty_cells_as_null=empty_cells_as_null,
             **source_handoff,
+            **key_carry,
         )
         if not result.ok:
             _raise_write_failure(result, "SQLite batch write failed")
@@ -654,6 +702,9 @@ def _write_batch(
             kwargs["job_id"] = job_id or ""
             kwargs.update(source_handoff)
         if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
+            kwargs["conflict_columns"] = conflict_columns
+            kwargs["write_mode"] = write_mode
+            kwargs["sync_mode"] = sync_mode
             extra = getattr(dest, "extra", {}) or {}
             kwargs["content_column"] = extra.get("content_column")
             kwargs["embedding_column"] = extra.get("embedding_column")
@@ -663,10 +714,35 @@ def _write_batch(
             kwargs["chunk_size"] = int(extra.get("chunk_size", 512)) if extra.get("chunk_size") else 512
             kwargs["chunk_overlap"] = int(extra.get("chunk_overlap", 50)) if extra.get("chunk_overlap") else 50
             kwargs["skip_chunking"] = bool(extra.get("skip_chunking"))
+            kwargs["chunk_strategy"] = extra.get("chunk_strategy", "recursive")
+            kwargs["chunk_unit"] = extra.get("chunk_unit", "chars")
+            kwargs["chunk_tokenizer"] = extra.get("chunk_tokenizer")
+            kwargs["text_template"] = extra.get("text_template")
+            kwargs["vector_skip_unchanged"] = extra.get(
+                "vector_skip_unchanged", True
+            )
+            for option in (
+                "embedding_api_key",
+                "embedding_base_url",
+                "embedding_endpoint",
+                "embedding_api_version",
+                "embedding_base_model",
+                "embedding_region",
+                "embedding_dimensions",
+                "embedding_requests_per_minute",
+                "embedding_tokens_per_minute",
+            ):
+                if option in extra:
+                    kwargs[option] = extra[option]
         result = mod.write_mapped_rows(**kwargs)
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
-        summary = {"type": dest_type, "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
+        # Name what was written like the batch writers do: job records and
+        # reconcile read ``table``. An object-store writer's name is this
+        # chunk's part key, not the logical object, so it stays ``key``.
+        name_field = "key" if dest_type in ("s3", "gcs", "adls") else "table"
+        summary = {"type": dest_type, name_field: result.table_name, "checksum": result.checksum,
+                   "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
     if resolve_driver_type(dest_type) == "generic_sql":
@@ -711,6 +787,7 @@ def _write_batch(
             destination_column_types=dest_column_types,
             **_writer_extra("generic_sql", cfg=cfg, dest=dest),
             **source_handoff,
+            **key_carry,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -796,6 +873,20 @@ from .stream_catalog import (  # noqa: E402
 )
 
 
+def _fk_orphans_fail_closed(validation_mode: str) -> bool:
+    return str(validation_mode or "").strip().lower() in {"strict", "maximum"}
+
+
+def _fk_orphan_violation_message(details: list[dict[str, Any]]) -> str:
+    samples = "; ".join(str(d.get("reason") or "") for d in details[:3])
+    return (
+        f"Referential integrity failed before write: {len(details)} orphan "
+        f"child row(s) in this page reference a parent absent at the destination "
+        f"({samples}). Strict validation refuses to commit an orphan row — load "
+        "the parent rows first or run in balanced mode to quarantine them."
+    )
+
+
 def stream_database_transfer(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -817,6 +908,7 @@ def stream_database_transfer(
     shape_runner: ShapeRunner | None = None,
     shape_steps: list[dict] | None = None,
     mappings_inherited: bool = False,
+    initial_batch: Any = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -858,6 +950,7 @@ def stream_database_transfer(
             shape_runner=shape_runner,
             shape_steps=shape_steps,
             mappings_inherited=mappings_inherited,
+            initial_batch=initial_batch,
         )
         ok = True
         return result
@@ -920,6 +1013,7 @@ def _stream_database_transfer_impl(
     shape_runner: ShapeRunner | None = None,
     shape_steps: list[dict] | None = None,
     mappings_inherited: bool = False,
+    initial_batch: Any = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -932,6 +1026,17 @@ def _stream_database_transfer_impl(
     from .connector_capabilities import resolve_bind_dialect, resolve_driver_type
     src_type = resolve_driver_type(source.format)
     dest_type = resolve_driver_type(destination.format)
+    from connectors.sdk import get_descriptor
+
+    sdk_descriptor = get_descriptor(src_type)
+    sdk_source = bool(
+        sdk_descriptor
+        and "source" in sdk_descriptor.roles
+        and sdk_descriptor.catalog_ids
+    )
+    initial_sdk_state = (
+        getattr(checkpoint, "cursor_value", None) if sdk_source else None
+    )
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
     # Gate-8 fingerprints must name the dialect the writer binds against, not
@@ -1032,6 +1137,22 @@ def _stream_database_transfer_impl(
             )
         except Exception as exc:
             logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
+    if incremental and cursor_source_col and not cursor_pk_source:
+        # One tie-break for every read path of this run (QA ACC-02). The COPY
+        # fast path and the pre-copy watermark scope run before the row path,
+        # so deriving the catalog tie-break only there let run 1 write a
+        # composite watermark that run 2's COPY then decoded single-column.
+        from services.keyset_pagination import catalog_incremental_tiebreak
+
+        _tb_types, _tb_nulls, _tb_keys = _src_rich_catalog
+        cursor_pk_source = catalog_incremental_tiebreak(
+            src_type,
+            cursor_source_col,
+            contract_pk=pk_source_cols,
+            catalog_pk=list(_tb_keys.get("primary_key_columns") or []),
+            unique_keys=list(_tb_keys.get("unique_keys") or []),
+            nullable=_tb_nulls,
+        )
     if requires_upsert(effective_sync) and not pk_target_cols:
         from services.primary_key import mapped_catalog_upsert_key
 
@@ -1079,6 +1200,9 @@ def _stream_database_transfer_impl(
             )
             pre_copy_cursor_key = _scope.cursor_key
             pre_copy_watermark = _scope.watermark
+            from services.sync_cursor import reconcile_cursor_tiebreak
+
+            cursor_pk_source = reconcile_cursor_tiebreak(_scope, cursor_pk_source)
             refuse_unusable_cursor_state(
                 _scope, dest_type, dest_cfg, _dest_obj
             )
@@ -1115,6 +1239,52 @@ def _stream_database_transfer_impl(
             "destination — schema evolution runs on the writer path",
             dest_type,
         )
+    # Write-path referential-integrity guard (QA fk__pg-maria / fk__pg-pg):
+    # child rows whose destination parent does not exist are quarantined, not
+    # committed. Built before the COPY decision: a server-to-server copy never
+    # brings a row into this process, so it cannot hold an orphan back — a
+    # guarded route takes the row path instead of landing orphans unchecked.
+    # Strict/maximum fail the run on the first orphan before it is committed;
+    # balanced/warn quarantine it and Gate-8 G22 reports the count as a warn.
+    fk_orphan_guard = None
+    try:
+        from .stream_foreign_keys import build_fk_orphan_guard
+
+        fk_orphan_guard = build_fk_orphan_guard(
+            source,
+            destination,
+            _source_name(source),
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+        )
+    except Exception as exc:
+        logger.debug("FK orphan guard not built for %s: %s", _source_name(source), exc)
+    if fk_orphan_guard is not None:
+        copy_decline.append(
+            "COPY fast path declined: source foreign keys need a per-row "
+            "destination parent check (orphans are quarantined on the row path)"
+        )
+    # Signed Risk Contracts (QUARANTINE_ROW / SKIP_ROW / CAST_AND_CONTINUE)
+    # are per-row dispositions. A server-to-server copy never sees a row, so a
+    # value the narrower destination cannot hold aborted the whole COPY instead
+    # of being held out as the contract instructs — those routes stream rows.
+    risk_contract_columns = [
+        str(m.get("source") or m.get("target") or "")
+        for m in (mappings or [])
+        if isinstance(m, dict) and m.get("risk_contract")
+    ]
+    if risk_contract_columns:
+        logger.info(
+            "COPY fast path declined for %s: Risk Contract on %s needs per-row "
+            "disposition on the writer path",
+            _source_name(source),
+            ", ".join(risk_contract_columns),
+        )
+        copy_decline.append(
+            "COPY fast path declined: signed Risk Contract columns ("
+            + ", ".join(risk_contract_columns)
+            + ") need per-row quarantine/skip on the row path"
+        )
     _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
     try:
@@ -1122,7 +1292,11 @@ def _stream_database_transfer_impl(
 
         decline_copy_for_destination_sql(dest_proc_plan)
         fast = None if (
-            pending_shape or writer_owns_evolution or dest_proc_plan is not None
+            pending_shape
+            or writer_owns_evolution
+            or dest_proc_plan is not None
+            or fk_orphan_guard is not None
+            or bool(risk_contract_columns)
         ) else _try_copy_fast_path(
             source=source,
             destination=destination,
@@ -1189,6 +1363,8 @@ def _stream_database_transfer_impl(
                         "job_id": job_id,
                         "sync_mode": effective_sync,
                         "cursor_column": cursor_source_col,
+                        # The column a composite watermark is decodable on (QA ACC-02).
+                        "tiebreak_column": cursor_pk_source,
                     },
                 )
                 dest_summary["watermark"] = wm
@@ -1228,7 +1404,7 @@ def _stream_database_transfer_impl(
         job_id=job_id,
         has_primary_key=bool(pk_target_cols),
     )
-    if src_type not in _STREAMING_SOURCES:
+    if src_type not in _STREAMING_SOURCES and not sdk_source:
         raise ValueError(f"Streaming source '{src_type}' not supported")
     if dest_type not in _STREAMING_DESTINATIONS:
         raise ValueError(f"Streaming destination '{dest_type}' not supported")
@@ -1287,6 +1463,9 @@ def _stream_database_transfer_impl(
         cursor_key = scope.cursor_key
         watermark = scope.watermark
         from services.preflight_cursor_gate import refuse_unusable_cursor_state
+        from services.sync_cursor import reconcile_cursor_tiebreak
+
+        cursor_pk_source = reconcile_cursor_tiebreak(scope, cursor_pk_source)
 
         refuse_unusable_cursor_state(
             scope, dest_type, dest_cfg, resolve_dest_table(dest_type, destination, table)
@@ -1519,7 +1698,7 @@ def _stream_database_transfer_impl(
     # Snowflake snapshot scan opens one warehouse session on the first write
     # page. A separate OFFSET sizing login resumes the warehouse twice — that
     # is how a 150k TPC-H extract spent minutes before the first real page.
-    skip_sf_sizing_probe = src_type == "snowflake" and not incremental
+    skip_sf_sizing_probe = (src_type == "snowflake" and not incremental) or sdk_source
     if skip_sf_sizing_probe:
         sample_probe = type("SizingSkip", (), {"rows": [], "headers": [], "total_rows": None})()
         sample_rows = []
@@ -1648,13 +1827,21 @@ def _stream_database_transfer_impl(
         _probe_cursor_kw: dict[str, Any] = {}
     else:
         _probe_cursor_kw = _cursor_read_args(watermark)
-    probe, ddb_cursor = _unwrap_read(
-        _read_batch(
-            src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
-            **_probe_cursor_kw,
-            **_scan_kw,
+    if sdk_source and initial_batch is not None:
+        probe, ddb_cursor = initial_batch, None
+    else:
+        probe, ddb_cursor = _unwrap_read(
+            _read_batch(
+                src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
+                **_probe_cursor_kw,
+                **_scan_kw,
+                **(
+                    {"sdk_state": initial_sdk_state}
+                    if sdk_source and initial_sdk_state
+                    else {}
+                ),
+            )
         )
-    )
     # This page is not thrown away — it becomes the first written batch.
     phase_profile.add(
         PHASE_READ, time.perf_counter() - _probe_started, rows=len(probe.rows or [])
@@ -2074,7 +2261,7 @@ def _stream_database_transfer_impl(
             c for c in keyset_order_cols if c != cursor_source_col
         ]
     keyset_tiebreak = next((c for c in keyset_order_cols if c != keyset_col), "")
-    keyset_after = checkpoint.cursor_value
+    keyset_after = None if sdk_source else checkpoint.cursor_value
     if keyset_after in (None, "") and incremental and keyset_col == cursor_source_col:
         keyset_after = watermark
     decision = decide_keyset_pagination(
@@ -2088,6 +2275,7 @@ def _stream_database_transfer_impl(
         cursor_after=keyset_after,
         snapshot_scan=bool(src_scan),
         cursor_is_unique=_cursor_is_unique,
+        callable_source=bool(is_callable_source(source) or is_callable_source(src_cfg)),
     )
     use_keyset = decision.use_keyset
     if _filtered_scan_reason and use_keyset:
@@ -2292,8 +2480,37 @@ def _stream_database_transfer_impl(
                 return None
         if limit > 0 and fetch_offset >= limit:
             return None
-        if total_rows is not None and fetch_offset >= total_rows and src_type != "dynamodb":
+        if (
+            total_rows is not None
+            and fetch_offset >= total_rows
+            and src_type != "dynamodb"
+            and not sdk_source
+        ):
             return None
+        if sdk_source:
+            last_meta = (
+                last_batch.meta
+                if last_batch is not None and isinstance(last_batch.meta, dict)
+                else {}
+            )
+            if last_batch is not None and last_meta.get("sdk_done"):
+                return None
+            sdk_state_for_read = (
+                last_meta.get("sdk_state") if last_batch is not None else initial_sdk_state
+            )
+            batch, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    fetch_offset,
+                    _batch_limit(fetch_offset),
+                    database=src_db,
+                    sdk_state=sdk_state_for_read or None,
+                )
+            )
+            return batch
         # A zero-row page is drained. Short *non-empty* pages may be driver
         # vectors (DuckDB 2048) and must continue — that is ``page_may_be_partial``
         # below. An empty fetchmany after ``close_table_scan`` used to fall
@@ -2524,7 +2741,7 @@ def _stream_database_transfer_impl(
                 )
             )
             return batch
-        elif total_rows is not None and fetch_offset >= total_rows:
+        elif total_rows is not None and fetch_offset >= total_rows and not sdk_source:
             return None
         elif _filtered_scan_reason:
             # One held scan bound to the *run* watermark; the page max never
@@ -2611,6 +2828,9 @@ def _stream_database_transfer_impl(
                 kept.append(row)
         return kept, unbounded
 
+    # ``fk_orphan_guard`` was built ahead of the COPY decision (one guard per
+    # stream); the row path below applies it to every page.
+
     def _filter_batch(batch):
         """Source filter, then the approved recipe — once per page.
 
@@ -2631,7 +2851,12 @@ def _stream_database_transfer_impl(
         if _raw_page_marked(batch):
             return batch
         raw_rows = len(batch.rows or [])
-        if raw_rows and (source_filter or shape_runner is not None or client_cursor_bound):
+        if raw_rows and (
+            source_filter
+            or shape_runner is not None
+            or client_cursor_bound
+            or fk_orphan_guard is not None
+        ):
             # Pagination bookmarks belong to the rows the source handed over. A
             # recipe that drops the page's highest key would otherwise bookmark a
             # lower one and the next read would hand those rows over again.
@@ -2710,6 +2935,25 @@ def _stream_database_transfer_impl(
                     "the filter or the transform recipe removed a row — refusing "
                     "rather than attributing it to the wrong authority"
                 ) from exc
+        if fk_orphan_guard is not None and batch.rows:
+            # fk__pg-maria/fk__pg-pg: a child row whose parent is absent at the
+            # destination must quarantine, never land. The guard anti-joins
+            # this page's FK tuples against the destination parent table.
+            kept_rows, orphan_details = fk_orphan_guard.partition(
+                list(batch.headers or []), list(batch.rows)
+            )
+            if orphan_details and _fk_orphans_fail_closed(validation_mode):
+                raise ValueError(_fk_orphan_violation_message(orphan_details))
+            if orphan_details:
+                batch.rows = kept_rows
+                try:
+                    batch.fk_orphan_details = orphan_details
+                except AttributeError as exc:
+                    raise ValueError(
+                        "this source's read page cannot carry quarantined "
+                        "orphan-FK details, so the run cannot prove the rows "
+                        "were held out — refusing rather than dropping them"
+                    ) from exc
         if shape_runner is not None and batch.rows is not None:
             headers = list(batch.headers or [])
             unknown = [h for h in headers if h and h not in shape_inputs]
@@ -2781,6 +3025,11 @@ def _stream_database_transfer_impl(
     if batch and getattr(batch, "headers", None) and pk_source_col:
         lower = {h.lower(): h for h in batch.headers}
         pk_source_col = lower.get(pk_source_col.lower(), pk_source_col)
+    # Full composite identity for the batch audit (QA ACC-03). Auditing the
+    # first component alone hard-blocked every (region, id) upsert at Execute.
+    from services.primary_key import identity_source_columns
+
+    pk_audit_cols = identity_source_columns(pk_target_cols, mappings)
 
     # Phase F6 — default per-transfer parallelism raised from 2 → min(4, CPUs).
     max_workers = int(
@@ -2892,16 +3141,33 @@ def _stream_database_transfer_impl(
                 PHASE_TRANSFORM_WRITE, time.perf_counter() - started, rows=rows
             )
 
+    def _fk_held_out(batch: Any) -> list[dict[str, Any]]:
+        return list(getattr(batch, "fk_orphan_details", None) or [])
+
     def _process_db_chunk_inner(idx: int, batch: Any) -> dict[str, Any]:
+        batch_sdk_state = None
+        if sdk_source and isinstance(getattr(batch, "meta", None), dict):
+            batch_sdk_state = batch.meta.get("sdk_state", "")
         if not batch or not getattr(batch, "rows", None):
             # A page a filter or a recipe emptied still consumed source rows, so
             # the offset, the watermark and the keyset bookmark advance past it.
             # Reporting zero here would re-read that page on resume for ever.
+            # A page the FK orphan guard emptied is *quarantine*, not removal:
+            # its rows must reach the DLQ and the ledger as rejects.
+            orphans = _fk_held_out(batch)
             return {
                 "batch_written": 0,
                 "last_checksum": "",
-                "dest_summary": {},
-                "rejected": 0,
+                "dest_summary": (
+                    {
+                        "rejected_details": orphans,
+                        "rejected_rows": len(orphans),
+                        "orphan_fk_rows": len(orphans),
+                    }
+                    if orphans
+                    else {}
+                ),
+                "rejected": len(orphans),
                 "coerced_null": 0,
                 "warnings": [],
                 "batch_max": _raw_page_cursor(batch) or None,
@@ -2913,10 +3179,12 @@ def _stream_database_transfer_impl(
                     0,
                     _raw_page_rows(batch)
                     - _raw_page_filtered(batch)
-                    - _raw_page_cursor_bounded(batch),
+                    - _raw_page_cursor_bounded(batch)
+                    - len(orphans),
                 ),
                 "reconcile_sample_rows": [],
                 "fingerprints": [],
+                "sdk_state_after": batch_sdk_state,
             }
         # Absorb sparse schemaless attributes discovered on this page.
         _absorb_schemaless_discovered_attrs(batch)
@@ -2939,6 +3207,7 @@ def _stream_database_transfer_impl(
                 mappings=mappings,
                 required_targets=pk_target_cols or [],
                 primary_key=pk_source_col if pk_source_col in batch.headers else None,
+                primary_key_columns=pk_audit_cols,
                 validation_mode=validation_mode,
                 dest_kind=dest_type,
                 # Validate↔Run parity: Full append must not invent a uniqueness
@@ -3097,6 +3366,20 @@ def _stream_database_transfer_impl(
                 ),
                 replay_safety=replay_safety,
             )
+            # Fold orphan-FK holdouts into the batch's own rejected ledger so
+            # they persist to the quarantine DLQ and balance Gate-8
+            # conservation (read = written + rejected + filtered).
+            fk_orphans = getattr(batch, "fk_orphan_details", None) or []
+            if fk_orphans:
+                det = list(dest_summary.get("rejected_details") or [])
+                det.extend(fk_orphans)
+                dest_summary["rejected_details"] = det
+                dest_summary["rejected_rows"] = int(
+                    dest_summary.get("rejected_rows") or 0
+                ) + len(fk_orphans)
+                dest_summary["orphan_fk_rows"] = int(
+                    dest_summary.get("orphan_fk_rows") or 0
+                ) + len(fk_orphans)
         except WriteBatchBlocked as blocked:
             if keyed_census_acc is not None:
                 keyed_census_acc.reverse_last_live_batch()
@@ -3147,7 +3430,10 @@ def _stream_database_transfer_impl(
                 _raw_page_rows(batch)
                 - _raw_page_filtered(batch)
                 - _raw_page_cursor_bounded(batch)
-                - len(batch.rows),
+                - len(batch.rows)
+                # FK orphans are rejects (already in this batch's ledger), not
+                # recipe removals — counting both made a correct run look lossy.
+                - len(_fk_held_out(batch)),
             ),
             "reconcile_sample_rows": sample_rows,
             "fingerprints": inline_fps,
@@ -3158,6 +3444,7 @@ def _stream_database_transfer_impl(
                 if overwrite_keys_acc is not None
                 else None
             ),
+            "sdk_state_after": batch_sdk_state,
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
@@ -3195,6 +3482,8 @@ def _stream_database_transfer_impl(
         # the furthest safe keyset bookmark.
         if result.get("batch_keyset"):
             committed_keyset = result["batch_keyset"]
+        if sdk_source and "sdk_state_after" in result:
+            running_cursor = result["sdk_state_after"]
         # Absolute source-row offset for this batch (0-based start before commit).
         batch_start = int(committed_offset or 0)
         committed_offset += result["batch_rows"]
@@ -3208,6 +3497,9 @@ def _stream_database_transfer_impl(
             append_procedure_warnings(ddl_log, incoming)
             # Merge quarantine findings across batches — never replace with last batch only.
             prev = dest_summary if isinstance(dest_summary, dict) else {}
+            merged_usage = _merge_embedding_usage(
+                prev.get("embedding_usage"), incoming.get("embedding_usage")
+            )
             prev_details = list(prev.get("rejected_details") or [])
             new_details: list[dict[str, Any]] = []
             for raw in incoming.get("rejected_details") or []:
@@ -3241,6 +3533,8 @@ def _stream_database_transfer_impl(
                 "rejected_rows": rejected_total,
                 "coerced_null_rows": coerced_null_total,
             }
+            if merged_usage is not None:
+                dest_summary["embedding_usage"] = merged_usage
             # Property 6 — keep first-batch fidelity certificate across chunks.
             fid = incoming.get("schema_fidelity") or prev.get("schema_fidelity")
             if fid:
@@ -3286,7 +3580,9 @@ def _stream_database_transfer_impl(
         checkpoint.rows_removed_on_read = removed_on_read_total
         checkpoint.rows_source_filtered = filtered_on_read_total
         checkpoint.rows_cursor_bounded = cursor_bounded_total
-        checkpoint.cursor_value = running_cursor or committed_keyset or ""
+        checkpoint.cursor_value = (
+            running_cursor if sdk_source else running_cursor or committed_keyset or ""
+        )
         checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
         checkpoint.es_search_after = es_search_after
         checkpoint.redis_scan_state = redis_scan_state
@@ -3300,6 +3596,35 @@ def _stream_database_transfer_impl(
             checkpoint.target_rows_before = int(dest_summary[PRECOUNT_KEY])
         checkpoint.chunk_total = chunks
         checkpoint.status = "running"
+        # ACC-05 — advance the *route* watermark with every committed batch.
+        # These rows are durable at the destination the moment the batch
+        # returns; a cancelled run's next job_id has no access to this
+        # job-scoped checkpoint, so without a per-chunk watermark the next
+        # run re-reads from the beginning and re-writes committed rows
+        # (observed: 40 duplicate documents on PG→Mongo incremental_append).
+        # Ordering: watermark first — if the checkpoint save below fails the
+        # route watermark still reflects committed rows, never behind them.
+        if incremental and running_cursor and cursor_key:
+            try:
+                set_watermark(
+                    cursor_key,
+                    running_cursor,
+                    metadata={
+                        "job_id": job_id,
+                        "sync_mode": effective_sync,
+                        # A watermark is a value of one column; record which one
+                        # so a later run on a different cursor cannot inherit it.
+                        "cursor_column": cursor_source_col,
+                        # The column a composite watermark is decodable on (QA ACC-02).
+                        "tiebreak_column": cursor_pk_source,
+                    },
+                )
+            except Exception as wm_exc:
+                raise RuntimeError(
+                    "Cursor watermark persist failed after committed batch — "
+                    "refuse to continue (next run would re-read and re-write "
+                    f"committed rows): {wm_exc}"
+                ) from wm_exc
         # Fail-closed: no durable resume point ⇒ abort (do not keep writing).
         checkpoint_service.require_save(checkpoint)
         if src_type == "kafka" and kafka_cursor and src_cfg:
@@ -3408,6 +3733,9 @@ def _stream_database_transfer_impl(
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
         dest_summary["sync_mode"] = effective_sync
+        # No batch ran, so no writer summary named the table; the job record
+        # read an empty destination and fell back to the database (QA MX3-01).
+        dest_summary.setdefault("table", dest_table)
         stamp_incremental_no_op(dest_summary)
         if resume_key_resolved:
             # Honest delivery label: the read side re-delivers the interrupted
@@ -3493,6 +3821,8 @@ def _stream_database_transfer_impl(
                 # A watermark is a value of one column; record which one so a
                 # later run on a different cursor cannot inherit it.
                 "cursor_column": cursor_source_col,
+                # The column a composite watermark is decodable on (QA ACC-02).
+                "tiebreak_column": cursor_pk_source,
             },
         )
 
@@ -3551,7 +3881,11 @@ def _stream_database_transfer_impl(
 
         checksum_started = time.perf_counter()
         fp_accumulator = FingerprintAccumulator()
-        reread_plan = reread_pagination_plan(src_type=src_type, incremental=incremental)
+        reread_plan = reread_pagination_plan(
+            src_type=src_type,
+            incremental=incremental,
+            callable_source=bool(is_callable_source(source) or is_callable_source(src_cfg)),
+        )
         reread_scan = reread_plan.get("scan_state")
         use_reread_offset = bool(reread_plan.get("use_offset"))
         cursor_type_for_read: str | None = None
@@ -3621,6 +3955,13 @@ def _stream_database_transfer_impl(
                     # it removed would fail Gate-8 on a correct run.
                     digest_rows = apply_row_filter_to_matrix(
                         batch.headers, digest_rows, source_filter
+                    )
+                if fk_orphan_guard is not None and digest_rows:
+                    # Orphans were quarantined, not written: the digest covers
+                    # the rows the write pass let through, in the same order of
+                    # owners (filter → FK guard → recipe).
+                    digest_rows, _orphans_now = fk_orphan_guard.partition(
+                        list(digest_headers or []), list(digest_rows)
                     )
                 if reread_shaper is not None:
                     # Shaped for the digest only: pagination and the keyset
@@ -3956,9 +4297,18 @@ class _NoOpCheckpointService:
 def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> bool:
     if source.kind != "database" or destination.kind != "database":
         return False
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import resolve_driver_type, source_read_driver
+    from connectors.sdk import get_descriptor
+
+    source_driver = source_read_driver(resolve_driver_type(source.format))
+    descriptor = get_descriptor(source_driver)
+    sdk_source = bool(
+        descriptor
+        and "source" in descriptor.roles
+        and descriptor.catalog_ids
+    )
     return (
-        resolve_driver_type(source.format) in _STREAMING_SOURCES
+        (source_driver in _STREAMING_SOURCES or sdk_source)
         and resolve_driver_type(destination.format) in _STREAMING_DESTINATIONS
     )
 

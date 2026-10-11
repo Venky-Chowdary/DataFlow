@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import secrets
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -35,6 +36,7 @@ _SSO_TYPES = ("saml", "oidc", "azure_ad")
 _CLOUD_PROVIDERS = ("openai", "anthropic")
 _MASK = "••••••••"
 _PILOT_ENGINES = ("auto", "local", "hybrid", "cloud")
+_API_KEY_ROTATION_LOCK = threading.Lock()
 
 
 def _now() -> str:
@@ -85,6 +87,7 @@ def _empty_store() -> dict[str, Any]:
         "sso": _default_sso(),
         "ai_providers": _default_ai(),
         "pilot": _default_pilot(),
+        "mcp_policy": {"enabled": True, "allowed_tools": None},
         "api_keys": [],
     }
 
@@ -119,7 +122,19 @@ def _load_raw() -> dict[str, Any]:
     if str(pilot.get("engine", "auto")).strip().lower() not in _PILOT_ENGINES:
         pilot["engine"] = "auto"
 
-    return {"sso": sso, "ai_providers": ai, "pilot": pilot, "api_keys": api_keys}
+    policy = raw.get("mcp_policy")
+    if not isinstance(policy, dict):
+        policy = {"enabled": True, "allowed_tools": None}
+    allowed = policy.get("allowed_tools")
+    if allowed is not None and not isinstance(allowed, list):
+        allowed = None
+    return {
+        "sso": sso,
+        "ai_providers": ai,
+        "pilot": pilot,
+        "mcp_policy": {"enabled": bool(policy.get("enabled", True)), "allowed_tools": allowed},
+        "api_keys": api_keys,
+    }
 
 
 def _save(data: dict[str, Any]) -> None:
@@ -174,6 +189,40 @@ def apply_integrations_to_env() -> None:
 
 
 # ── SSO ──────────────────────────────────────────────────────────────────────
+
+
+def get_mcp_policy() -> dict[str, Any]:
+    """Return the organization-level MCP execution policy."""
+    policy = _load_raw()["mcp_policy"]
+    allowed = policy.get("allowed_tools")
+    return {
+        "enabled": bool(policy.get("enabled", True)),
+        "allowed_tools": (
+            sorted({name for name in allowed if isinstance(name, str)})
+            if isinstance(allowed, list)
+            else None
+        ),
+    }
+
+
+def set_mcp_policy(policy: dict[str, Any]) -> dict[str, Any]:
+    """Persist MCP policy, rejecting unknown registered tools."""
+    from src.ai.copilot.tool_permissions import TOOL_PERMISSIONS
+
+    enabled = bool(policy.get("enabled", True))
+    allowed = policy.get("allowed_tools")
+    if allowed is not None:
+        if not isinstance(allowed, list) or any(not isinstance(name, str) for name in allowed):
+            raise ValueError("allowed_tools must be a list of tool names or null")
+        unknown = sorted(set(allowed) - set(TOOL_PERMISSIONS))
+        if unknown:
+            raise ValueError(f"Unknown MCP tools: {', '.join(unknown)}")
+        allowed = sorted(set(allowed))
+    data = _load_raw()
+    data["mcp_policy"] = {"enabled": enabled, "allowed_tools": allowed}
+    data["updated_at"] = _now()
+    _save(data)
+    return get_mcp_policy()
 
 
 def get_sso_configs() -> dict[str, dict[str, Any]]:
@@ -629,6 +678,17 @@ def _upsert_api_key_record(record: dict[str, Any]) -> None:
         logger.warning("workspace API key Mongo write failed; file copy kept", exc_info=True)
 
 
+def _save_file_api_key_record(record: dict[str, Any]) -> None:
+    stored = _record_for_store(record)
+    file_keys = [item for item in _file_key_records() if str(item.get("id")) != str(stored["id"])]
+    file_keys.append(stored)
+    _save_file_keys(file_keys)
+
+
+class ApiKeyNotFound(LookupError):
+    """A requested workspace API key does not exist."""
+
+
 def _public_api_key(item: dict[str, Any], *, secret: str | None = None) -> dict[str, Any]:
     expires_at = item.get("expires_at")
     row: dict[str, Any] = {
@@ -642,6 +702,10 @@ def _public_api_key(item: dict[str, Any], *, secret: str | None = None) -> dict[
         "expires_at": expires_at or None,
         "lifetime": item.get("lifetime") or ("never" if not expires_at else ""),
         "expired": _key_expired(item),
+        "scopes": item.get("scopes"),
+        "kind": item.get("kind") or "api_key",
+        "rotated_from": item.get("rotated_from"),
+        "rotated_to": item.get("rotated_to"),
     }
     if secret is not None:
         row["key"] = secret
@@ -663,9 +727,35 @@ def create_api_key(
     actor: str,
     role: str = "editor",
     expires_in: str = DEFAULT_API_KEY_LIFETIME,
+    *,
+    scopes: list[str] | None = None,
+    kind: str = "api_key",
 ) -> dict[str, Any]:
     stored_role = parse_requested_api_key_role(role)
     lifetime = parse_api_key_lifetime(expires_in)
+    if kind not in {"api_key", "service_account", "scim"}:
+        raise ValueError("kind must be api_key, service_account, or scim")
+    if scopes is None:
+        stored_scopes = None
+    else:
+        if not isinstance(scopes, list) or any(
+            not isinstance(scope, str) for scope in scopes
+        ):
+            raise ValueError("scopes must be a list of permission names")
+        stored_scopes = sorted(set(scopes))
+        if not stored_scopes:
+            raise ValueError("a token with no scopes can do nothing; omit scopes for full role")
+        from services.rbac import all_permissions, role_permissions
+
+        unknown_scopes = set(stored_scopes) - set(all_permissions())
+        if unknown_scopes:
+            raise ValueError(f"unknown scope: {sorted(unknown_scopes)[0]}")
+        role_scopes = role_permissions(stored_role)
+        disallowed_scopes = set(stored_scopes) - role_scopes
+        if disallowed_scopes:
+            raise ValueError(
+                f"scope is outside the {stored_role} role: {sorted(disallowed_scopes)[0]}"
+            )
     raw = f"dfk_{secrets.token_urlsafe(32)}"
     prefix = raw[:12]
     record = {
@@ -679,9 +769,92 @@ def create_api_key(
         "last_used_at": None,
         "lifetime": lifetime,
         "expires_at": _expires_at(lifetime),
+        "scopes": stored_scopes,
+        "kind": kind,
     }
     _upsert_api_key_record(record)
     return _public_api_key(record, secret=raw)
+
+
+def rotate_api_key(
+    key_id: str,
+    *,
+    actor: str,
+    overlap_seconds: int = 86400,
+) -> dict[str, Any]:
+    if not isinstance(overlap_seconds, int) or not 0 <= overlap_seconds <= 604800:
+        raise ValueError("overlap_seconds must be between 0 and 604800")
+    with _API_KEY_ROTATION_LOCK:
+        source = next(
+            (item for item in load_api_key_records() if str(item.get("id")) == key_id),
+            None,
+        )
+        if source is None:
+            raise ApiKeyNotFound(key_id)
+        if _is_revoked(source):
+            raise ValueError("revoked API keys cannot be rotated")
+        now = datetime.now(timezone.utc)
+        if _key_expired(source, now=now):
+            raise ValueError("expired API keys cannot be rotated")
+        if source.get("rotated_to"):
+            raise ValueError("already been rotated")
+
+        lifetime = source.get("lifetime") or (
+            "never" if not source.get("expires_at") else DEFAULT_API_KEY_LIFETIME
+        )
+        lifetime = parse_api_key_lifetime(lifetime)
+        kind = source.get("kind") or "api_key"
+        if kind not in {"api_key", "service_account", "scim"}:
+            raise ValueError("API key kind is invalid")
+        scopes = source.get("scopes")
+        if scopes is not None and (
+            not isinstance(scopes, list)
+            or any(not isinstance(scope, str) for scope in scopes)
+            or not scopes
+        ):
+            raise ValueError("API key scopes are invalid")
+        stored_scopes = sorted(set(scopes)) if scopes is not None else None
+
+        raw = f"dfk_{secrets.token_urlsafe(32)}"
+        new_id = str(uuid.uuid4())
+        new_record = {
+            "id": new_id,
+            "name": source.get("name", "API key"),
+            "prefix": raw[:12],
+            "role": resolve_stored_api_key_role(source.get("role")),
+            "key_hash": _hash_api_key(raw),
+            "created_at": now.isoformat(),
+            "created_by": actor,
+            "last_used_at": None,
+            "lifetime": lifetime,
+            "expires_at": _expires_at(lifetime, now=now),
+            "scopes": stored_scopes,
+            "kind": kind,
+            "rotated_from": key_id,
+        }
+
+        overlap_expiry = now + timedelta(seconds=overlap_seconds)
+        source_expiry = _parse_expires_at(source.get("expires_at"))
+        if source_expiry:
+            source["expires_at"] = min(source_expiry, overlap_expiry).isoformat()
+        else:
+            source["expires_at"] = overlap_expiry.isoformat()
+        source["rotated_to"] = new_id
+
+        _upsert_api_key_record(new_record)
+        coll = _keys_collection()
+        if coll is None:
+            _save_file_api_key_record(source)
+        else:
+            result = coll.update_one(
+                {"id": key_id, "rotated_to": {"$exists": False}},
+                {"$set": _record_for_store(source)},
+            )
+            if result.matched_count == 0:
+                revoke_api_key(new_id)
+                raise ValueError("already been rotated")
+            _save_file_api_key_record(source)
+        return _public_api_key(new_record, secret=raw)
 
 
 def revoke_api_key(key_id: str) -> bool:
@@ -719,5 +892,7 @@ def verify_workspace_api_key(raw: str) -> dict[str, Any] | None:
             "name": item.get("name"),
             "created_by": item.get("created_by"),
             "role": resolve_stored_api_key_role(item.get("role")),
+            "scopes": item.get("scopes"),
+            "kind": item.get("kind") or "api_key",
         }
     return None

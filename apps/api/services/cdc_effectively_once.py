@@ -358,13 +358,33 @@ def gate_cdc_destination(
     allow_append_only: bool = False,
     require_effectively_once: bool = False,
     has_lsn_column: bool | None = None,
+    require_exactly_once: bool = False,
+    sync_mode: str = "cdc",
+    dest_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Fail-fast when CDC would write append-only without an explicit allow.
 
     Default: block CDC → non-upsert sinks so operators do not silently get
     duplicate rows on redelivery while thinking they have LSN-guarded idempotency.
     Pass ``allow_append_only=True`` to opt into honest at-least-once append.
+
+    ``require_exactly_once=True`` fails closed unless the sink can commit the
+    apply and the dest-owned offset in one transaction
+    (``services.cdc_exactly_once.classify_sink_exactly_once``). The returned
+    posture then carries ``delivery_class == "exactly_once"`` for that sink only.
     """
+    if require_exactly_once:
+        from services.cdc_exactly_once import require_exactly_once_sink
+
+        return require_exactly_once_sink(
+            dest_type=dest_type,
+            has_primary_key=has_primary_key,
+            write_mode=write_mode,
+            allow_append_only=allow_append_only,
+            has_lsn_column=has_lsn_column,
+            sync_mode=sync_mode,
+            dest_cfg=dest_cfg,
+        )
     posture = classify_sink_delivery(
         dest_type=dest_type,
         has_primary_key=has_primary_key,
@@ -454,4 +474,11 @@ def honesty_dict() -> dict[str, Any]:
         ],
         "exactly_once_route_opt_in": True,
         "exactly_once_algorithm": "dest_owned_watermark_txn",
+        **_exactly_once_scope(),
     }
+
+
+def _exactly_once_scope() -> dict[str, Any]:
+    from services.cdc_exactly_once import exactly_once_sink_scope
+
+    return exactly_once_sink_scope()

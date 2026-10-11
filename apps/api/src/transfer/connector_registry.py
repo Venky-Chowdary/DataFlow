@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from connectors.sdk import list_descriptors
+
 from .connector_capabilities import _DRIVER_CAPS, default_port, file_source_types
 
 
@@ -218,8 +220,8 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
     ),
     "pgvector": ConnectorModules(
         probe=("connectors.postgresql", "test_postgresql"),
-        reader=None,
-        reader_fn="",
+        reader="connectors.postgresql_reader",
+        reader_fn="read_table_batch",
         writer="connectors.pgvector_writer",
     ),
     "qdrant": ConnectorModules(
@@ -256,6 +258,17 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
         writer_fn="write_not_supported",
     ),
 }
+
+for _sdk_descriptor in list_descriptors():
+    if "source" not in _sdk_descriptor.roles or not _sdk_descriptor.catalog_ids:
+        continue
+    CONNECTOR_MODULES[_sdk_descriptor.id] = ConnectorModules(
+        probe=("connectors.sdk.transfer_bridge", "test_sdk_connector"),
+        reader="connectors.sdk.transfer_bridge",
+        reader_fn="read_object",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    )
 
 
 def registered_driver_types() -> list[str]:
@@ -735,7 +748,11 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         return False, humanize_connection_error(engine_type, raw)
 
     if not spec:
-        return False, f"No connectivity probe for {db_type}"
+        return False, (
+            f"Unsupported connector type '{db_type}' — no connectivity probe or "
+            "transfer driver is registered for it. The type name itself is "
+            "unsupported; host/port/user/password changes will not help."
+        )
 
     if not spec.probe:
         return False, f"No probe configured for {db_type}"

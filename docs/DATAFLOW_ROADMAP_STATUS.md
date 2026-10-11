@@ -13,7 +13,7 @@ Backend batch reliability is **beta / early production** for batch transfers on 
 - Test counts on this branch are reported by CI/pytest artifacts on each push — do not rely on stale marketing numbers.
 - `pytest` full-suite status and pass/fail/skip counts are captured in the current PR verification section, not in this static doc.
 - CDC is **at-least-once upsert** by default. PG/MySQL/Mongo shared-reader paths have live integration coverage; SQL Server/Oracle need cred-gated live matrices before they can be called certified.
-- Lakehouse Iceberg is now a real catalog path (REST/Glue/Nessie/SQL) with `append`/`overwrite`/`upsert` MERGE and additive schema evolution; the legacy filesystem CoW writer remains for bare local paths.
+- Lakehouse Iceberg has tested catalog commits, schema/partition evolution, time travel, and guarded snapshot expiry; catalog-backed auto routing now selects the existing exactly-once seam, while filesystem Iceberg remains at-least-once. REST is the only live catalog exercised (`tests/test_iceberg_eos_routing.py::test_catalog_iceberg_auto_route_and_preflight_select_exactly_once`, `tests/test_iceberg_eos_live_pg.py::test_live_pg_cdc_auto_routes_through_transfer_eos`, `tests/test_iceberg_commit.py::test_live_rest_concurrent_upserts_keep_one_row_per_key`, `tests/test_iceberg_schema_evolution.py::test_sql_catalog_rename_preserves_field_id_and_old_values`, `tests/test_iceberg_partitioning.py::test_live_rest_partition_create_evolve_and_duckdb_readback`, `tests/test_iceberg_time_travel.py::test_read_by_snapshot_id_timestamp_ms_and_iso_as_of`, `tests/test_iceberg_maintenance.py::test_live_rest_expiry_retains_snapshot_for_time_travel`).
 - SaaS reverse-ETL is transfer-ready for **Stripe, Airtable, and Shopify**; Zendesk and Notion remain source-only until write paths are added.
 - The product is **not** “100% CDC” and **not** platform-wide better than Airbyte/Debezium — integrity (mapping/preflight/quarantine/reconcile) can win *trust*; Airbyte/Debezium still win *CDC fleet coverage, edge-case years, and Connect-scale ops*.
 
@@ -23,7 +23,7 @@ Backend batch reliability is **beta / early production** for batch transfers on 
 
 **Target:** Debezium-style log-based capture from Postgres, MySQL, MongoDB, SQL Server, Oracle.
 
-### Status: strong partial (at-least-once) — load-hardened July 2026
+### Status: strong partial — at-least-once by default; exactly-once **per destination** for transactional SQL sinks only
 
 
 | What is implemented                                                                  | Where                                                                                                                                              |
@@ -41,12 +41,18 @@ Backend batch reliability is **beta / early production** for batch transfers on 
 | Mixed `_df_lsn` upsert guard + effectively-once PK sink contract                     | `connectors/writer_common.py`, `services/cdc_effectively_once.py`                                                                                  |
 | PG TOAST-aware update merge + typed txn buffer overflow                              | `services/cdc_toast.py`, `services/cdc_transaction_buffer.py`, `connectors/pgoutput_decoder.py`                                                    |
 | `ChangeBatch` with `resume_token`                                                    | `services/cdc_engine.py`                                                                                                                           |
+| Dest-owned transactional offset (`_df_cdc_eos_watermarks`, same txn as apply, CAS write) | `services/cdc_exactly_once.py`, `connectors/cdc_eos_sa.py`, `connectors/cdc_eos_sql.py`                                                          |
 | Watermark persistence                                                                | `services/sync_cursor.py`, `services/atomic_file.py`                                                                                               |
 
 
 ### Delivery honesty
 
-- Default apply is **at-least-once upsert** (not exactly-once).
+- Default apply is **at-least-once upsert** (not exactly-once). `EXACTLY_ONCE_CLAIMED` / `PLATFORM_EXACTLY_ONCE_CLAIMED` stay **False**.
+- **Exactly-once per destination** (`delivery_guarantee=exactly_once`, or dest config `require_exactly_once=true`) only for transactional SQL sinks with a PK: PostgreSQL, MySQL/MariaDB, SQL Server, Oracle, Snowflake, DuckDB, SQLite, generic SQLAlchemy SQL. The batch rows and its resume LSN are committed in **one dest transaction** into `_df_cdc_eos_watermarks`; the dest offset is the resume source of truth and the control-plane cursor / source ack advance only after the dest COMMIT is verified.
+  - Redelivery at or below the dest offset (family-aware `compare_lsn`) is a no-op; **cross-family LSNs fail closed** (never treated as equal).
+  - Offset write is compare-and-set (INSERT for first commit, `UPDATE … WHERE epoch AND fence_epoch` with rowcount=1) on top of the lease `writer_fence`, so two workers cannot both commit a batch.
+  - `require_exactly_once=true` **fails closed** with a reason on ClickHouse, Athena/Hive/Impala, BigQuery/Redshift/Databricks routes, object stores, files, Kafka/streams, document/NoSQL sinks, append-only mode, or no PK — these stay **at-least-once**.
+  - Named live matrix: `tests/test_cdc_exactly_once_postgres_restart_live.py` (real PG logical slot through `run_cdc_database_transfer`: crash before dest COMMIT → no partial apply; crash after COMMIT before watermark/ack → redelivery no-op; final dest = source rows exactly once; two writers racing the first offset commit → one wins), `tests/test_cdc_exactly_once_live_engines.py` (PG, MySQL; Oracle/SQL Server when reachable), `tests/test_mysql_cdc_postgres_eos_crash_replay.py`, unit `tests/test_cdc_exactly_once.py` + `tests/test_cdc_exactly_once_txn_offset.py`.
 - Live IT green locally for PG (`wal_level=logical`), MySQL ROW+GTID, Mongo single-node `rs0`.
 - Multi-worker **leases** via `CdcLeaseGuard` + pluggable store:
   - **Redis** (`DATAFLOW_CDC_LEASE_BACKEND=redis` / `auto` + URL) — multi-node, Lua-atomic acquire, fencing `generation`, fail-closed if Redis down.
@@ -62,7 +68,7 @@ Backend batch reliability is **beta / early production** for batch transfers on 
 
 ### What is still missing
 
-- **Exactly-once pipeline delivery** — only PK-sink effectively-once via `_df_lsn`; append-only sinks are **fail-gated** unless `allow_append_only`.
+- **Platform-wide exactly-once** — not claimed. Exactly-once is per destination for transactional SQL sinks; non-transactional / append-only sinks remain at-least-once (append-only is **fail-gated** unless `allow_append_only`). Oracle / SQL Server / Snowflake EOS live proofs run only when those engines are reachable (skipped by default in CI).
 - **Oracle always-on CI** (image/license); optional gated job exists, default forks skip.
 - SQL Server **LSN-gap fail-closed** shipped (unit); Oracle **SCN/redo-gap fail-closed** shipped (unit); source HA role probe shipped; dual-node AG failover IT still thinner.
 - Lease **Redis HA runbook** shipped (`docs/ops/CDC_LEASE_REDIS.md`); freshness SLO alerts on Overview + Pipelines.
@@ -77,7 +83,7 @@ Backend batch reliability is **beta / early production** for batch transfers on 
 - **SQL Server / Oracle shared multi-table CDC** readers + Pipelines contract breaker UX.
 - **CDC lease force-release** (`POST /ops/cdc-leases/force-release`) + Theater/Jobs Next-step CTAs (fencing-aware).
 - **Freshness SLO alerts** (`GET /ops/freshness` → `alerts` / `slo_status`) + Overview Open pipeline/job CTAs.
-- **Incremental snapshot operator UI** — job-scoped `GET/POST /transfer/{job_id}/cdc/snapshots` (+ cancel) resolves `source_key` from the job fingerprint; Theater + Jobs `CdcIncrementalSnapshotPanel` request/cancel/monitor. Still at-least-once upsert; not destination undo.
+- **Incremental snapshot operator UI** — job-scoped `GET/POST /transfer/{job_id}/cdc/snapshots` (+ cancel) resolves `source_key` from the job fingerprint; Theater + Jobs `CdcIncrementalSnapshotPanel` request/cancel/monitor. Still at-least-once upsert; not destination undo. **Filtered incremental snapshots** (Debezium `additional-conditions` equivalent): signals carry a structured `row_filter` (never raw SQL; `services/cdc_snapshot_filter.py`) compiled to bound predicates for PostgreSQL, MySQL, SQL Server, Oracle and a `$match` for MongoDB; invalid/`regex` filters are a 400 at request time. The filter bounds only the snapshot read — stream events for all rows keep flowing, and rows outside the filter are not deleted. Live proof: `tests/test_cdc_postgres_filtered_incremental_snapshot_live.py` (PG); other engines are unit-proven only (`tests/test_cdc_snapshot_filter.py`).
 
 ### Why it matters
 
@@ -96,7 +102,9 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 | Claim                                                                                                | Status                                                                                                    |
 | ---------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
 | Better than Airbyte/Debezium **platform-wide**                                                       | **No**                                                                                                    |
-| “100% CDC” / exactly-once                                                                            | **No** — default is at-least-once upsert. Named dest-owned MySQL CDC → Postgres crash-replay exists; `PLATFORM_EXACTLY_ONCE_CLAIMED` stays False. |
+| “100% CDC” / platform-wide exactly-once                                                              | **No** — default is at-least-once upsert; `PLATFORM_EXACTLY_ONCE_CLAIMED` stays False. |
+| Exactly-once for **transactional SQL sinks** (PG, MySQL, SQL Server, Oracle, Snowflake, DuckDB, SQLite) | **Shipped, per destination** — dest-owned offset in the apply txn + CAS + lease fence. Live: PG forced mid-batch restart (`test_cdc_exactly_once_postgres_restart_live.py`), PG/MySQL engine matrix, MySQL CDC → PG crash-replay. Oracle/SQL Server/Snowflake live only when reachable. |
+| Exactly-once for ClickHouse, Athena/Hive/Impala, object stores, files, streams, NoSQL, append-only | **No** — at-least-once; `require_exactly_once=true` fails closed |
 | Better on **integrity wedge** (mapping · preflight · quarantine · reconcile · contracts on CDC path) | **Yes — defensible lead**                                                                                 |
 | PG/MySQL shared multi-table reader                                                                   | **Shipped** — unit chaos + live concurrent-write IT                                                       |
 | SQL Server / Oracle shared multi-table reader                                                        | **Shipped** — unit proofs; SQL Server LSN-gap + Oracle SCN/redo-gap fail-closed                           |
@@ -131,28 +139,28 @@ This is the #1 disqualifier in 2026 evaluations. Batch-only or cursor-polling is
 
 **Target:** Move data into vector DBs so it is AI-ready.
 
-### Status: shipped (five vector dests + Studio wiring + OCR + durable cache)
+### G-VEC status: partially verified
 
+| Capability | Status | Evidence test file | Verified-live engine |
+| --- | --- | --- | --- |
+| pgvector source-id btree / optional HNSW indexes and vector / halfvec storage | M7 live coverage; default remains `vector` with no HNSW index | `apps/api/tests/test_pgvector_m7_live.py` | pgvector extension 0.8.7 at `:5434` |
+| Stable vector writes, unchanged-document skip, fingerprints, usage, verified delete and stale cleanup | Live writer contracts cover only the named engines; Milvus was not available | `apps/api/tests/test_vector_m6_live.py`, `apps/api/tests/test_vector_document_skip.py`, `apps/api/tests/test_vector_fingerprint_live.py` | Weaviate 1.26.6; Pinecone Local `v1.0.0.rc0`; pgvector and Qdrant have separate live suites |
+| CDC document-key delete, cleanup and redelivery | End-to-end proof is at-least-once and currently limited to pgvector and Qdrant | `apps/api/tests/test_cdc_postgres_vector_live.py` | pgvector `:5434`; Qdrant `:6335` |
+| Embedding provider routing and usage accounting | Paid-provider tests use fake responses; deterministic hash embeddings are used for live writer tests | `apps/api/tests/test_embedding_providers.py` | pgvector, Qdrant, Weaviate, Pinecone Local (hash model only) |
+| Chunking strategies and safe record templates | Unit coverage uses injected tokenizers; real tiktoken has not been tested | `apps/api/tests/test_document_chunking.py`, `apps/api/tests/test_vector_template.py` | No live embedding provider |
+| Run-detail embedding usage estimate | Component-rendered summary with a test for tokens, calls and estimated cost | `apps/web/src/components/transfer/EmbeddingUsageSummary.test.tsx` | No engine required; not an engine-live capability |
 
-| What exists today                                          | Where                                         |
-| ---------------------------------------------------------- | --------------------------------------------- |
-| Internal ChromaDB RAG store for mapping suggestions        | `packages/ml` / `services`                    |
-| Sentence-transformers / OpenAI embed + L1/L2 cache         | `services/vectorization.py` + `embedding_cache.py` |
-| pgvector + Qdrant + Weaviate + Pinecone + Milvus writers   | `connectors/*_writer.py` (REST; no fake SDKs) |
-| Studio catalog + Advanced vector fields → `endpoint.extra` | Transfer Studio / Destination Advanced        |
-| Opt-in OCR for scanned PDFs                                | `services/pdf_ocr.py` + Studio upload toggle  |
-| Semantic vector field routing                              | `services/semantic_vector_routing.py` + Studio Apply |
-| Durable embedding cache (SQLite)                           | `services/embedding_cache.py` + Studio Advanced |
+**Parity score:** Datawrap **5/10** vs Airbyte/Fivetran **6/10**.
 
+Gaps keeping Datawrap below parity:
+- Paid providers are tested only against fake responses.
+- Milvus has not run live; Pinecone evidence is Pinecone Local only.
+- CDC for Weaviate, Pinecone, and Milvus has not run end to end.
+- No managed rerank or hybrid search.
+- The rate limiter is process-local.
+- Token chunking has not been tested with real tiktoken.
 
-### What is missing
-
-- Dual-node AG / Data Guard failover IT against a real secondary (probe + gap class are shipped; topology failover reconnect not claimed).
-- Cross-node shared embedding cache (Redis/shared volume) — not claimed; SQLite is per volume.
-
-### Why it matters
-
-Airbyte ships five vector destinations and an official RAG pipeline guide. Datawrap now matches that destination set with Studio-wired writers and can beat them on semantic mapping + integrity.
+CDC is at-least-once; exactly-once is not claimed. No retrieval-quality claim is made.
 
 ### Recommended next step
 
@@ -290,21 +298,32 @@ Ship undo/rollback (staging swap or Iceberg branch) — do not claim rollback un
 
 ## G8: Iceberg / lakehouse destination
 
-**Target:** Apache Iceberg writer with schema evolution, CoW upsert, and (later) REST/Glue catalog + time travel.
+**Target:** Catalog-backed Iceberg writes with conflict-safe commits, controlled schema/partition evolution, destination-owned CDC watermarks, time travel, and guarded maintenance.
 
-### Status: filesystem writer live — catalog committers open
+### Status: catalog capabilities implemented; catalog-backed exactly-once is auto route-selected
 
-- **Shipped:** `connectors/iceberg_writer.py` — filesystem / mounted warehouse, Iceberg V2 metadata + Parquet/JSONL, additive schema evolution, CoW upsert with `_df_lsn` guard. Transfer-live type `iceberg` (+ aliases `apache_iceberg` / `iceberg_rest` / `nessie` → driver). Studio Destination form: warehouse path, namespace, table. Connector form: warehouse auth mode.
-- **Proof:** `tests/test_iceberg_upsert.py`.
-- **Not yet:** REST / Glue / Nessie catalog committers, Iceberg v3, multi-engine time-travel UI, branch-based undo. Do not claim “Snowflake/Databricks/Athena catalog-compatible writer” until a catalog committer is proven.
+- **Commit layer:** Conflicts reload the table and re-decide before retry; unknown commit state is resolved by commit ID; PyIceberg's automatic retry is disabled for this path. Evidence: `tests/test_iceberg_commit.py::test_conflict_retries_reload_the_table_and_back_off`, `tests/test_iceberg_commit.py::test_unknown_commit_is_recovered_by_commit_id`, `tests/test_iceberg_commit.py::test_builtin_pyiceberg_retry_is_disabled`, `tests/test_iceberg_commit.py::test_live_rest_concurrent_upserts_keep_one_row_per_key`.
+- **Namespace check:** Namespace existence errors other than a confirmed missing namespace fail closed, while a namespace-creation race is tolerated. Evidence: `tests/test_iceberg_catalog_namespace.py::test_namespace_exists_only_swallows_no_such_namespace`, `tests/test_iceberg_catalog_namespace.py::test_ensure_namespace_tolerates_a_creation_race`.
+- **Exactly-once adapter (catalog path only):** One CDC batch stages data and the table-property watermark in one commit; the watermark is mirrored in the snapshot summary and writer fences are enforced. Evidence: `tests/test_iceberg_eos.py::test_apply_mirrors_watermark_properties_and_snapshot_summary`, `tests/test_iceberg_eos.py::test_stale_writer_fence_is_refused`, `tests/test_iceberg_eos.py::test_zombie_writer_redecides_after_fence_steal`, `tests/test_iceberg_eos.py::test_crash_hooks_leave_table_unchanged[after_apply_before_watermark]`, `tests/test_iceberg_eos.py::test_crash_hooks_leave_table_unchanged[after_watermark_before_commit]`.
+- **Live exactly-once proof:** Repository-owned pytest coverage exercises auto-selected PG CDC through `run_cdc_database_transfer` into REST + MinIO, both crash points, post-commit redelivery without a second snapshot, fresh-process resume from table properties with no job cursor, stale-fence refusal, source/Iceberg/DuckDB value equality, and one data-bearing commit ID per LSN. The snapshot-to-streaming handoff may create a separate metadata-only snapshot at the same LSN. Evidence: `tests/test_iceberg_eos_live_pg.py::test_live_pg_cdc_auto_routes_through_transfer_eos`; adapter-level restart and DuckDB tests remain `tests/test_iceberg_eos_live_pg.py::test_live_pg_cdc_to_iceberg_eos_survives_restarts` and `tests/test_iceberg_eos_live_pg.py::test_live_pg_cdc_to_iceberg_eos_duckdb_readback`.
+- **Runtime routing:** `auto` selects the existing exactly-once seam for catalog-backed Iceberg; filesystem Iceberg and callers without `dest_cfg` stay at-least-once / fail closed. `cdc_named_eos` remains config-less. The engine passes its resolved endpoint; router validation passes only request-derived preview config, so a saved Iceberg ref without inline catalog settings stays at-least-once for auto validation and an explicit exactly-once pin returns 400 with the catalog requirement note. Evidence: `tests/test_iceberg_eos_routing.py::test_catalog_iceberg_auto_route_and_preflight_select_exactly_once`, `tests/test_iceberg_eos_routing.py::test_catalog_iceberg_aliases_select_exactly_once`, `tests/test_iceberg_eos_routing.py::test_filesystem_and_missing_config_remain_at_least_once`, `tests/test_iceberg_eos_routing.py::test_explicit_exactly_once_filesystem_refuses_with_catalog_note`, `tests/test_iceberg_eos_routing.py::test_engine_uses_resolved_catalog_connector_for_auto_route`, `tests/test_iceberg_eos_routing.py::test_router_auto_saved_iceberg_ref_is_not_rejected`, `tests/test_iceberg_eos_routing.py::test_router_exactly_once_saved_iceberg_ref_has_readable_refusal`, `tests/test_iceberg_eos_routing.py::test_gate_cdc_destination_refuses_filesystem_before_write`, `tests/test_iceberg_eos_routing.py::test_cdc_transfer_required_filesystem_refuses_before_write`, `tests/test_iceberg_eos_routing.py::test_claimed_flags_remain_false`.
+- **Multi-table bundles:** Unsupported; the adapter refuses them rather than claiming an atomic multi-table commit. Evidence: `tests/test_iceberg_eos.py::test_iceberg_bundle_dispatch_refuses_multi_table_commit`.
+- **Schema evolution:** Optional adds, spec-legal widening, explicit rename by field ID, and strict refusal are covered; nested-type evolution is not covered. Evidence: `tests/test_iceberg_schema_evolution.py::test_plan_adds_new_column_as_optional`, `tests/test_iceberg_schema_evolution.py::test_sql_catalog_widens_int_to_long_and_keeps_values`, `tests/test_iceberg_schema_evolution.py::test_sql_catalog_rename_preserves_field_id_and_old_values`, `tests/test_iceberg_schema_evolution.py::test_sql_catalog_strict_refusal_does_not_mutate_table`.
+- **Partition specs and key lookup:** Create/evolution are guarded, primary-key destination lookups use sliced predicates, and partitioned writes require `pyiceberg-core`; unpartitioned writes are unaffected when it is absent. Evidence: `tests/test_iceberg_partitioning.py::test_sql_catalog_creates_bucket_and_day_partition_spec`, `tests/test_iceberg_partitioning.py::test_sql_catalog_refuses_partition_drift_without_mutating_table`, `tests/test_iceberg_partitioning.py::test_sql_catalog_evolves_partition_spec_and_keeps_old_data`, `tests/test_iceberg_partitioning.py::test_eos_and_delete_pk_lookups_use_sliced_row_filters`, `tests/test_iceberg_partitioning.py::test_partitioned_table_fails_closed_when_partition_core_is_missing`, `tests/test_iceberg_partitioning.py::test_unpartitioned_writer_is_unaffected_when_partition_core_is_missing`.
+- **Time travel and snapshot expiry:** Reads support snapshot IDs and timestamps; expiry protects the current, referenced, and newest retained snapshots. The M2 table-property watermark still resolves after snapshot expiry. Evidence: `tests/test_iceberg_time_travel.py::test_read_by_snapshot_id_timestamp_ms_and_iso_as_of`, `tests/test_iceberg_maintenance.py::test_expiry_preserves_current_tag_and_newest_and_rejects_expired_id`, `tests/test_iceberg_maintenance.py::test_m2_watermark_resolves_after_m5_expiration`.
+- **Unsupported:** Compaction/rewrite-data-files and orphan-file removal raise typed unsupported errors; do not hand-roll deletion. Evidence: `tests/test_iceberg_maintenance.py::test_compaction_and_orphan_removal_are_typed_unsupported_operations`. Catalog writes use copy-on-write rather than equality-delete merge-on-read; filesystem equality-delete behavior is distinct. Evidence: `tests/test_iceberg_eos.py::test_registry_describes_filesystem_and_catalog_delete_paths`. Delta Lake has no Datawrap writer; Databricks Iceberg UniForm/federation is not a claim of native Delta support. Evidence for the product boundary: `tests/test_first_party_capability_contract.py::test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors`.
+- **Not verified live:** Glue, Hive, Nessie, and Polaris catalogs; throughput at scale; and a real catalog 5xx during commit-state-unknown recovery. The live catalog tests exercise REST (`tests/test_iceberg_commit.py::test_live_rest_concurrent_upserts_keep_one_row_per_key`, `tests/test_iceberg_partitioning.py::test_live_rest_partition_create_evolve_and_duckdb_readback`); unknown-state recovery is injected, not a live 5xx (`tests/test_iceberg_commit.py::test_unknown_commit_is_recovered_by_commit_id`).
+- **Known pre-existing MinIO-auth failures:** These 14 PG-backed live copy tests fail on the M4 parent too: `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_dest_count`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_empty_string_and_null_preserved`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_skip_when_dest_count_matches`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_occupied_mismatch_declines`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_overwrite_replaces_dest`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_source_count_is_not_scan`, `tests/test_iceberg_pg_copy.py::test_live_iceberg_pg_stream_load_method`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_dest_count`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_empty_string_and_null_preserved`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_skip_when_dest_count_matches`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_occupied_mismatch_declines`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_overwrite_replaces_snapshot`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_dest_count_is_not_scan_count`, `tests/test_pg_iceberg_copy.py::test_live_pg_iceberg_stream_load_method`.
+
+Lakehouse score remains **6/10**. Proposed 7/10 pending runtime exactly-once enablement; not raised.
 
 ### Why it matters
 
-Iceberg is the de-facto table-format standard; closing the catalog gap makes Datawrap compatible with Snowflake, Databricks, Athena, DuckDB, Trino without a second copy path.
+The live cross-engine readback evidence is limited to DuckDB on the REST path (`tests/test_iceberg_partitioning.py::test_live_rest_partition_create_evolve_and_duckdb_readback`, `tests/test_iceberg_maintenance.py::test_live_rest_expiry_retains_snapshot_for_time_travel`); it does not establish compatibility with every Iceberg engine.
 
 ### Recommended next step
 
-Spike `pyiceberg` REST catalog committer against a real warehouse + assert schema evolution from the pivot schema; keep filesystem CoW as the default offline path.
+Expand route-selected live proof across catalog implementations and operational error recovery before reconsidering the lakehouse score (`tests/test_iceberg_eos_live_pg.py::test_live_pg_cdc_auto_routes_through_transfer_eos`, `tests/test_iceberg_commit.py::test_unknown_commit_is_recovered_by_commit_id`).
 
 ---
 
@@ -327,15 +346,21 @@ Implement usage metering in `services/usage_metering.py` and expose a pricing ca
 
 **Target:** 131 → 300+ connectors, prioritized by Airbyte/Fivetran gap analysis.
 
-### Status: in progress
+### Status: in progress — G-CONN M5
 
 - ~15 native drivers proven locally.
 - 734 catalog entries; most are stubs or generic SQL.
 - Connector capability registry marks `transfer_ready` truthfully.
+- GitHub, Jira Cloud, and Intercom are descriptor-backed SDK sources routed through the transfer engine. Synthetic catalog enrichment reports `beta` / `source_only`, `source_ready=true`, and destination/transfer readiness false.
+- Transfer capabilities are full-refresh-only; SDK descriptors preserve manifest-declared sync modes. Evidence: `apps/api/tests/test_gconn_sdk_transfer_routing.py`.
+- Synthetic engine evidence: `apps/api/tests/test_gconn_sdk_transfer_e2e.py` covers GitHub/Jira full-reread PK-upsert recovery, Intercom fresh-destination pagination and fault-then-full-reread retry, and GitHub SDK resume refusal before side effects. The verified SQLite existing-destination epoch remap is fixed; SDK checkpoint resume remains unsupported and is refused, with the strict Gate-8 path unchanged. See `docs/CONNECTOR_CERTIFICATION.md` for tests and details.
+- The added breadth is three sources plus the existing HubSpot SDK connector, still far short of the hundreds of sources offered by Airbyte/Fivetran.
+
+Live vendor compatibility, quota behavior, real-volume performance, and destination-role readiness remain unverified. The existing-destination epoch remap fix is proven for the SQLite physical-carrier path; other dialect introspection paths were not changed. SDK `resume=True` is fail-closed and remains unsupported until the engine can reconcile the resumed population at Gate-8. Keep catalog readiness and roadmap claims source-only until that evidence exists.
 
 ### Recommended next step
 
-Ship a generic Singer tap/target bridge and a connector SDK so the community can add sources the same way Airbyte's CDK does.
+Add SDK source reread / population reconciliation support before enabling checkpoint resume, and expand live-vendor proof before broadening the certified surface.
 
 ---
 
@@ -347,10 +372,10 @@ Ship a generic Singer tap/target bridge and a connector SDK so the community can
 | Batch reliability           | 8/10           | 9/10             | small                                                            |
 | Connector depth             | 5/10           | 9/10             | large (3 transfer-ready SaaS writers added; still far behind)    |
 | CDC / real-time             | **7.2/10**     | 8/10             | large (incremental snapshot UI + row_filter evidence; AG dual-node gated) |
-| Vector / AI-ready           | 2/10           | 6/10             | large                                                            |
+| Vector / AI-ready           | **5/10**       | **6/10**         | large                                                            |
 | Data contracts / governance | 6/10           | 5/10             | small lead                                                       |
 | GitOps / as-code            | **7/10**       | 5/10             | lead (CLI+HTTP+UI+CI+signed CD gate)                             |
-| Lakehouse / Iceberg         | **6/10**       | 5/10             | small lead (pyiceberg REST/Glue/Nessie/SQL + filesystem CoW)     |
+| Lakehouse / Iceberg         | **6/10**       | 5/10             | small lead; catalog auto-routing uses the existing EOS seam; filesystem remains at-least-once (`tests/test_iceberg_eos_live_pg.py::test_live_pg_cdc_auto_routes_through_transfer_eos`) |
 | Semantic mapping            | 7/10           | 3/10             | lead                                                             |
 | UX (Transfer Studio)        | 7/10           | 6/10             | small lead                                                       |
 | Enterprise SSO/audit/RBAC   | 5/10           | 8/10             | medium                                                           |
@@ -388,4 +413,3 @@ Do not trust stale counts — the authoritative pass/fail/skip artifacts are in 
 - `pytest --collect-only` — 10,533 tests, 0 collection errors
 - `ruff check --select F`, `bandit -r`, `pip-audit --local`, `npm audit` — clean
 - CI: `api-and-web` on PR #28 — re-running on each push
-

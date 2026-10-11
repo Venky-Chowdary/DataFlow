@@ -155,6 +155,7 @@ class TransferPlan:
     contract_primary_key: str = ""
     # Introspected destination PK column names (when table exists).
     destination_pk_columns: list[str] = field(default_factory=list)
+    destination_table: str = ""
     # Introspected UNIQUE indexes/constraints (columns + optional expression CI flags).
     destination_unique_keys: list[dict[str, Any]] = field(default_factory=list)
     # Optional FK metadata for constraint findings (not a GateId).
@@ -164,6 +165,12 @@ class TransferPlan:
     destination_foreign_keys: list[dict[str, Any]] = field(default_factory=list)
     # Operator acknowledged destination FK mapping risk for this Validate run.
     fk_risk_acknowledged: bool = False
+    # Studio stream contracts carried into G9 so composite identity keys
+    # (``primary_key: [region, id]``) dedupe on the whole tuple — ACC-03.
+    stream_contracts: list[dict[str, Any]] = field(default_factory=list)
+    # Native DynamoDB HASH/RANGE and secondary-index scalar constraints.
+    destination_dynamo_key_schema: list[dict[str, Any]] = field(default_factory=list)
+    destination_dynamo_index_attributes: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

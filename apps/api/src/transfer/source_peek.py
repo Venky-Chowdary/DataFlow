@@ -27,7 +27,12 @@ _OFFSET_PAGEABLE = frozenset({
 })
 
 
-def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str], int, list[dict]]:
+def peek_stream_source(
+    source: EndpointConfig,
+    *,
+    sdk_state: str | None = None,
+    include_batch: bool = False,
+) -> tuple:
     """Return columns, schema, row count, and sample rows for preflight."""
     from .adapters import _introspect_table_schema, resolve_connector_config
     from .connector_capabilities import resolve_driver_type
@@ -41,7 +46,18 @@ def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str
 
     src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
 
-    probe, _ = _unwrap_read(_read_batch(src_type, src_cfg, table, None, 0, CHUNK_SIZE, database=src_db))
+    probe, _ = _unwrap_read(
+        _read_batch(
+            src_type,
+            src_cfg,
+            table,
+            None,
+            0,
+            CHUNK_SIZE,
+            database=src_db,
+            sdk_state=sdk_state,
+        )
+    )
     columns = probe.headers
     if not columns and probe.total_rows == 0:
         raise ValueError(f"Source `{table}` has no columns or is empty")
@@ -77,7 +93,8 @@ def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str
             if not schema:
                 schema = {c: "string" for c in columns}
     sample_rows = [dict(zip(probe.headers, row)) for row in probe.rows[:100]]
-    return columns, schema, probe.total_rows, sample_rows
+    result = (columns, schema, probe.total_rows, sample_rows)
+    return (*result, probe) if include_batch else result
 
 
 def iter_stream_source_column_rows(

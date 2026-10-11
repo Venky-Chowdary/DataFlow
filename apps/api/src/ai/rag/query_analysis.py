@@ -645,6 +645,7 @@ _PHRASE_EXPANSIONS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         re.I,
     ),
      ("external_vault",)),
+    (re.compile(r"\bscim\b", re.I), ("scim", "provisioning", "groups", "users")),
     (re.compile(r"\bokta\b(?!\s+scim)", re.I), ("sso", "saml", "oidc")),
     (re.compile(
         r"\bazure\s+key\s+vault\b",

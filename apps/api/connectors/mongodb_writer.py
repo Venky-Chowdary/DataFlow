@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import InvalidOperation
@@ -100,13 +99,21 @@ def _target_is_temporal(target_type: str) -> bool:
 
 
 def _declares_calendar_day(mapping: Mapping[str, Any]) -> bool:
-    """True when the source column is a calendar day, not an instant."""
+    """True when either declared side represents a calendar day."""
     from services.type_system import LOGICAL_DATE, normalize_logical_type
 
-    declared = mapping.get("source_type") or mapping.get("sourceType") or ""
-    if not isinstance(declared, str) or not declared.strip():
-        return False
-    return normalize_logical_type(declared) == LOGICAL_DATE
+    declared_types = (
+        mapping.get("source_type"),
+        mapping.get("sourceType"),
+        mapping.get("target_type"),
+        mapping.get("targetType"),
+    )
+    return any(
+        isinstance(declared, str)
+        and declared.strip()
+        and normalize_logical_type(declared) == LOGICAL_DATE
+        for declared in declared_types
+    )
 
 
 def declared_source_is_instant(source_type: str) -> bool:
@@ -618,9 +625,7 @@ def write_mapped_rows(
 
         from datetime import date as _date
         from datetime import datetime as _datetime
-        from datetime import time as _time
 
-        from bson.binary import Binary
         from bson.decimal128 import Decimal128
 
         transform_by_col = {

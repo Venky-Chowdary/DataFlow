@@ -8,6 +8,7 @@ LSN, SCN, CT version) must survive the seek and must not be recaptured.
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 from connectors.mysql_change_stream import MySqlChangeStreamCdc
@@ -37,6 +38,101 @@ from services.cdc_snapshot_resume import (
     last_pk_from_records,
     snapshot_keyset_sql,
 )
+
+
+def test_logminer_decoder_accepts_dict_and_wrapped_tokens_but_rejects_wrong_kind(
+    caplog,
+) -> None:
+    from connectors.oracle_logminer import decode_logminer_token
+
+    token = {
+        "kind": "oracle-logminer",
+        "scn": 1234,
+        "phase": "streaming",
+        "rs_id": " 0xabc ",
+        "ssn": 7,
+        "low_scn": 1200,
+    }
+
+    assert decode_logminer_token(token) == {
+        "scn": 1234,
+        "phase": "streaming",
+        "table": "",
+        "rs_id": " 0xabc ",
+        "ssn": 7,
+        "offset": 0,
+        "last_pk": "",
+        "low_scn": 1200,
+        "poll_scn": 0,
+        "poll_rs_id": "",
+        "poll_ssn": 0,
+        "commit_scn": 0,
+        "commit_rs_id": "",
+        "commit_ssn": 0,
+        "commit_xid": "",
+        "txn_buffer": False,
+    }
+    assert decode_logminer_token(json.dumps(json.dumps(token)))["scn"] == 1234
+    assert decode_logminer_token({"kind": "mssql-cdc", "lsn": "0abc"})["scn"] == 0
+    assert "unexpected kind" in caplog.text
+
+
+def test_mssql_decoder_accepts_dict_and_wrapped_tokens_but_rejects_wrong_kind(
+    caplog,
+) -> None:
+    from connectors.sqlserver_cdc_native import decode_mssql_cdc_token
+
+    token = {
+        "kind": "mssql-cdc",
+        "lsn": "0abc",
+        "phase": "streaming",
+        "table": "orders",
+        "offset": 3,
+        "seqval": "00ff",
+        "capture_instance": "dbo_orders",
+        "last_pk": "7",
+    }
+
+    assert decode_mssql_cdc_token(token) == {
+        "lsn": "0abc",
+        "phase": "streaming",
+        "table": "orders",
+        "offset": 3,
+        "seqval": "00ff",
+        "capture_instance": "dbo_orders",
+        "last_pk": "7",
+    }
+    assert decode_mssql_cdc_token(json.dumps(json.dumps(token)))["lsn"] == "0abc"
+    assert decode_mssql_cdc_token({"kind": "oracle-logminer", "scn": 1234})["lsn"] == ""
+    assert "unexpected kind" in caplog.text
+
+
+def test_mssql_ct_decoder_accepts_dict_and_wrapped_tokens_but_rejects_wrong_kind(
+    caplog,
+) -> None:
+    from connectors.sqlserver_change_stream import decode_sqlserver_resume_token
+
+    token = {
+        "kind": "mssql-ct",
+        "version": 42,
+        "phase": "streaming",
+        "table": "orders",
+        "offset": 3,
+        "last_pk": "7",
+    }
+
+    assert decode_sqlserver_resume_token(token) == {
+        "version": 42,
+        "phase": "streaming",
+        "offset": 3,
+        "table": "orders",
+        "last_pk": "7",
+    }
+    assert decode_sqlserver_resume_token(json.dumps(json.dumps(token)))["version"] == 42
+    assert decode_sqlserver_resume_token({"kind": "mssql-cdc", "lsn": "0abc"})[
+        "version"
+    ] == 0
+    assert "unexpected kind" in caplog.text
 
 
 def test_classify_snapshot_resume_prefers_last_pk() -> None:
@@ -305,10 +401,17 @@ def test_sqlserver_native_keyset_resume_keeps_lsn() -> None:
     cur = MagicMock()
     cur.description = [("id",), ("amount",)]
     cur.fetchone.return_value = ("dbo_orders",)
-    cur.fetchall.side_effect = [
-        [("3", "30")],
-        [],
-    ]
+    snapshot_pages = iter([[("3", "30")], []])
+
+    def fetchall():
+        sql = str(cur.execute.call_args.args[0]).lower()
+        if "from cdc.change_tables ct" in sql:
+            return [("dbo_orders", None)]
+        if "from [dbo].[orders]" in sql:
+            return next(snapshot_pages)
+        return []
+
+    cur.fetchall.side_effect = fetchall
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
     conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
@@ -329,6 +432,7 @@ def test_sqlserver_native_keyset_resume_keeps_lsn() -> None:
     handoff = decode_mssql_cdc_token(batches[-1].resume_token)
     assert handoff["phase"] == "streaming"
     assert handoff["lsn"] == "0abc"
+    assert batches[0].inserts == [{"id": "3", "amount": "30"}]
     assert decode_mssql_cdc_token(batches[0].resume_token)["last_pk"] == "3"
 
 
@@ -497,7 +601,8 @@ def test_logminer_fresh_snapshot_is_held_scan_not_row_number() -> None:
     conn = MagicMock()
     cur = MagicMock()
     cur.description = [("ID",), ("AMOUNT",)]
-    cur.fetchone.side_effect = [(9000,)]
+    handoff_scn = 9000
+    cur.fetchone.side_effect = [(handoff_scn,)]
     cur.fetchall.side_effect = [[("1", "10"), ("2", "20")], []]
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)
@@ -514,7 +619,7 @@ def test_logminer_fresh_snapshot_is_held_scan_not_row_number() -> None:
     assert all("OFFSET" not in s.upper() for s in dump)
     assert decode_logminer_token(batches[0].resume_token)["last_pk"] == "2"
     assert decode_logminer_token(batches[-1].resume_token)["phase"] == "streaming"
-    assert decode_logminer_token(batches[-1].resume_token)["scn"] == 9000
+    assert decode_logminer_token(batches[-1].resume_token)["scn"] == handoff_scn - 1
     assert "last_pk" not in decode_logminer_token(batches[-1].resume_token) or not decode_logminer_token(
         batches[-1].resume_token
     ).get("last_pk")
@@ -527,8 +632,9 @@ def test_logminer_keyset_resume_keeps_scn() -> None:
         encode_logminer_token,
     )
 
+    handoff_scn = 1000
     token = encode_logminer_token(
-        1000, table="ORDERS", phase="snapshot", offset=2, last_pk="2"
+        handoff_scn, table="ORDERS", phase="snapshot", offset=2, last_pk="2"
     )
     assert decode_logminer_token(token)["last_pk"] == "2"
     cdc = OracleLogMinerCdc(
@@ -556,7 +662,7 @@ def test_logminer_keyset_resume_keeps_scn() -> None:
     assert dump
     assert all("ROW_NUMBER" not in s.upper() for s in dump)
     assert any("ROWNUM" in s.upper() and ">" in s for s in dump)
-    assert decode_logminer_token(batches[-1].resume_token)["scn"] == 1000
+    assert decode_logminer_token(batches[-1].resume_token)["scn"] == handoff_scn - 1
     assert decode_logminer_token(batches[0].resume_token)["last_pk"] == "3"
 
 

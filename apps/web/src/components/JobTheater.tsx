@@ -15,6 +15,7 @@ import {
   type RepairMapping,
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
@@ -45,6 +46,7 @@ import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
 import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
+import { EmbeddingUsageSummary } from "./transfer/EmbeddingUsageSummary";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -510,6 +512,7 @@ export function JobTheaterView({
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
   const [resettingBreaker, setResettingBreaker] = useState(false);
   const [rollbackBusy, setRollbackBusy] = useState(false);
+  const rollbackGate = useWriteGate(PERMISSIONS.jobManage);
   const [resolvedProof, setResolvedProof] = useState<MappingProof | null>(() => asMappingProof(job.mapping_proof));
 
   useEffect(() => {
@@ -952,6 +955,7 @@ export function JobTheaterView({
             job={job}
             onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
           />
+          <EmbeddingUsageSummary destinationSummary={destinationSummary} />
           <JobTrustScoreCard
             job={job}
             onOpenQuarantine={rejectedRows > 0 ? () => {
@@ -1741,7 +1745,7 @@ export function JobTheaterView({
         />
       )}
 
-      {canDiscardStaging && (
+      {canDiscardStaging && rollbackGate.allowed && (
         <section className="df2-theater-rollback" aria-label="Staging rollback">
           <div>
             <strong>Discard staging table</strong>

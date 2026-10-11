@@ -112,6 +112,7 @@ def _orphan_scan(
         p_cols = [_table_col(parent, name) for name in parent_columns]
     except KeyError:
         return {"available": False, "reason": "join column missing from catalog"}
+    child_keys = list(getattr(getattr(child, "primary_key", None), "columns", None) or [])
     return scan_orphan_anti_join(
         conn,
         child=child,
@@ -119,6 +120,7 @@ def _orphan_scan(
         parent=parent,
         parent_columns=p_cols,
         match=match,
+        child_key_columns=child_keys,
     )
 
 
@@ -411,6 +413,18 @@ def build_dest_ri_validate_gate(*, has_relationships: bool) -> dict[str, Any]:
     }
 
 
+_ANOMALY_ORIGIN_NOTE = {
+    "source": (
+        " Source anomaly: the source rows already reference parents the source"
+        " does not hold — the copy is faithful, the data is not."
+    ),
+    "destination": (
+        " Destination anomaly: the source holds every referenced parent, so the"
+        " destination parent table is incomplete."
+    ),
+}
+
+
 def build_dest_ri_gate(
     evidence: Mapping[str, Any] | None,
     *,
@@ -427,6 +441,8 @@ def build_dest_ri_gate(
             r for r in list(evidence.get("relations") or []) if isinstance(r, dict)
         ]
     asked = bool(has_relationships) or bool(relations)
+    if isinstance(evidence, Mapping):
+        asked = asked or bool(evidence.get("asked") or evidence.get("probe_error"))
     if not asked:
         return {
             "id": GATE_ID,
@@ -459,6 +475,24 @@ def build_dest_ri_gate(
                 "rule_id": f"{GATE_ID}.unproven",
             },
         }
+    if evidence.get("probe_error"):
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": (
+                "Destination referential integrity probe failed ("
+                + str(evidence.get("reason") or "error")
+                + ") — orphan rows cannot be ruled out, so the run is not certified."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "reason": str(evidence.get("reason") or ""),
+                "relations": relations,
+                "rule_id": f"{GATE_ID}.probe_error",
+            },
+        }
     if referential_integrity_proven(evidence):
         n = len(relations)
         return {
@@ -481,12 +515,21 @@ def build_dest_ri_gate(
     unavailable = list(evidence.get("unavailable_relations") or [])
     if orphan_rows > 0 or orphan_rels:
         named = ", ".join(str(r) for r in orphan_rels[:4]) or "relationship"
+        origin = str(evidence.get("anomaly_origin") or "undetermined")
+        samples = [
+            str(x)
+            for r in relations
+            for x in (r.get("child_examples") or r.get("examples") or [])
+        ][:5]
         return {
             "id": GATE_ID,
             "status": "block",
             "message": (
                 f"Destination referential integrity failed: {orphan_rows} orphan "
-                f"row(s) on {named}. A matching row count does not prove parents exist."
+                f"row(s) on {named}"
+                + (f" (sample: {', '.join(samples)})" if samples else "")
+                + ". A matching row count does not prove parents exist."
+                + _ANOMALY_ORIGIN_NOTE.get(origin, "")
             ),
             "duration_ms": 0,
             "details": {
@@ -494,7 +537,10 @@ def build_dest_ri_gate(
                 "declared": True,
                 "orphan_rows": orphan_rows,
                 "orphan_relations": orphan_rels,
+                "orphan_samples": samples,
                 "relations": relations,
+                "anomaly_origin": origin,
+                "source_orphan_rows": evidence.get("source_orphan_rows"),
                 "rule_id": f"{GATE_ID}.orphans",
             },
         }
@@ -526,8 +572,14 @@ def apply_dest_ri_to_reconcile(
     *,
     evidence: Mapping[str, Any] | None = None,
     has_relationships: bool | None = None,
+    quarantined_orphans: int = 0,
 ) -> dict[str, Any]:
-    """Stamp G22 onto a Gate-8 report and fail the job on measured orphans."""
+    """Stamp G22 onto a Gate-8 report and fail the job on measured orphans.
+
+    Orphans the write-path guard quarantined never reach the destination scan,
+    so the survivors' checksum cannot certify the relationship: G22 warns with
+    the quarantined count and the run is not marked proven.
+    """
     phys = stamped.get("physical_state") if isinstance(stamped.get("physical_state"), dict) else {}
     ri = evidence
     if not isinstance(ri, Mapping):
@@ -536,8 +588,32 @@ def apply_dest_ri_to_reconcile(
         ri if isinstance(ri, Mapping) else None,
         has_relationships=has_relationships,
     )
+    quarantined = max(int(quarantined_orphans or 0), 0)
+    if quarantined and str(gate.get("status") or "") in {"pass", "skip", "warn"}:
+        prior_msg = str(gate.get("message") or "") if gate.get("status") == "warn" else ""
+        gate = {
+            "id": GATE_ID,
+            "status": "warn",
+            "message": (
+                f"{quarantined} orphan child row(s) were quarantined before write — "
+                "their parent is absent at the destination. The loaded rows' checksum "
+                "covers the survivors only and does not certify referential integrity."
+                + (f" {prior_msg}" if prior_msg else "")
+            ),
+            "duration_ms": 0,
+            "details": {
+                **dict(gate.get("details") or {}),
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "quarantined_orphan_rows": quarantined,
+                "rule_id": f"{GATE_ID}.quarantined",
+            },
+        }
     out = dict(stamped)
     out["g22_dest_referential_integrity"] = gate
+    if quarantined:
+        out["fk_orphans_quarantined"] = quarantined
+        out["migration_proven"] = False
     status = str(gate.get("status") or "")
     if status in {"block", "warn"}:
         if status == "block":

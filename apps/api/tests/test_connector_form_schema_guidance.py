@@ -52,6 +52,30 @@ def test_export_holds_metadata_only() -> None:
 
 
 @pytest.mark.parametrize(
+    "connector,expected_fields",
+    [
+        ("github", {"owner", "repo", "access_token"}),
+        ("jira", {"site", "email", "api_token"}),
+        ("intercom", {"access_token"}),
+    ],
+)
+def test_sdk_source_forms_export_required_sensitive_auth_fields(
+    connector: str, expected_fields: set[str]
+) -> None:
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    form = schema[connector]
+    assert form["default_auth_mode"] in {"pat", "api_key", "user_pass"}
+    fields = {
+        field["key"]: field
+        for mode in form["auth_modes"]
+        for field in mode["fields"]
+    }
+    assert expected_fields <= fields.keys()
+    secret_keys = {"access_token", "api_token"} & expected_fields
+    assert all(fields[key]["sensitive"] for key in secret_keys)
+
+
+@pytest.mark.parametrize(
     "engine,expected",
     [
         ("Snowflake", ("account host", "warehouse", "schema", "role", "programmatic access token", "key-pair")),

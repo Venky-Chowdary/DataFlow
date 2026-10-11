@@ -14,8 +14,10 @@ from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
+from services.audit_coverage import AuditAccessMiddleware
 from services.platform_config import (
     apply_railway_defaults,
     cors_origins,
@@ -32,6 +34,8 @@ from .middleware.tenant_middleware import TenantMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
 from .routers.auth_router import router as auth_router
+from .routers.iam_router import router as iam_router
+from .routers.scim_router import router as scim_router
 from .routers.automation_router import router as automation_router
 from .routers.catalog_router import router as catalog_router
 from .routers.connectors_router import router as connectors_router
@@ -41,7 +45,7 @@ from .routers.resource_acl_router import router as resource_acl_router
 from .routers.cdc_mapping_review_router import router as cdc_mapping_review_router
 from .routers.transforms_router import router as transforms_router
 from .routers.copilot_router import router as copilot_router
-from .routers.mcp_router import router as mcp_router
+from .routers.mcp_router import oauth_resource_router, router as mcp_router
 from .routers.ops_router import router as ops_router
 from .routers.preflight_router import router as preflight_router
 from .routers.query_router import router as query_router
@@ -89,6 +93,9 @@ async def lifespan(app: FastAPI):
         configure_logging()
     except Exception as le:  # pragma: no cover - logging must never block boot
         print(f"[!] Logging bootstrap warning: {le}")
+    from services.rbac import record_unruled_routes_allowed_startup
+
+    record_unruled_routes_allowed_startup()
     os.environ.setdefault("DATAFLOW_VECTOR_STORE_DIR", str(vector_store_dir()))
     try:
         from services.integrations_store import apply_integrations_to_env
@@ -276,6 +283,7 @@ _cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 if not _cors_origin_regex and is_railway():
     _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
 
+app.add_middleware(AuditAccessMiddleware)
 app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(TenantMiddleware)
@@ -418,6 +426,7 @@ app.include_router(copilot_router, prefix="/api/v1")
 app.include_router(training_agent_router, prefix="/api/v1")
 app.include_router(transfer_router, prefix="/api/v1")
 app.include_router(mcp_router, prefix="/api/v1")
+app.include_router(oauth_resource_router)
 app.include_router(automation_router, prefix="/api/v1")
 app.include_router(catalog_router, prefix="/api/v1")
 app.include_router(schedules_router, prefix="/api/v1")
@@ -425,6 +434,8 @@ app.include_router(auth_router, prefix="/api/v1")
 # Compatibility mount when VITE_API_BASE omits /api/v1 (hits /auth/login).
 app.include_router(auth_router)
 app.include_router(audit_router, prefix="/api/v1")
+app.include_router(iam_router, prefix="/api/v1")
+app.include_router(scim_router, prefix="/api/v1")
 app.include_router(cdc_mapping_review_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
 app.include_router(team_router, prefix="/api/v1")
@@ -548,6 +559,16 @@ async def duplicate_transfer_handler(
             "existing_status": exc.existing_status,
             "job_id": exc.existing_job_id,
         },
+    )
+
+
+@app.exception_handler(ConnectorStoreError)
+async def connector_store_error_handler(request: Request, exc: ConnectorStoreError):
+    """A connector write the configured store refused: say so, never a generic 500."""
+    logger.error("Connector store write refused on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"error": "connector_store_unavailable", "detail": str(exc)},
     )
 
 

@@ -16,7 +16,9 @@ from services.mapping_quality import (
 )
 
 
-def _classify(source_type: str, target_type: str) -> str:
+def _classify(
+    source_type: str, target_type: str, destination_db_type: str = "mongodb"
+) -> str:
     mapping = {
         "source": "hire_date",
         "target": "hire_date",
@@ -28,7 +30,7 @@ def _classify(source_type: str, target_type: str) -> str:
     result = classify_mapping_confidence(
         mapping,
         source_profile={"samples": ["2020-01-05", "2021-06-30", "2022-03-09"]},
-        destination_db_type="mongodb",
+        destination_db_type=destination_db_type,
     )
     return str(result["confidence_class"])
 
@@ -44,9 +46,15 @@ def test_date_widened_to_timestamp_is_a_promotion_not_a_conflict() -> None:
     assert _classify("DATE", "TIMESTAMP") == "safe_type_promotion"
 
 
-def test_timestamp_narrowed_to_date_stays_conflicted() -> None:
+@pytest.mark.parametrize(
+    "destination_db_type", ["postgresql", "mysql", "sqlite", "redis", "mongodb"]
+)
+def test_timestamp_narrowed_to_date_stays_conflicted(destination_db_type: str) -> None:
     """The reverse direction drops time of day — it must keep demanding review."""
-    assert _classify("TIMESTAMP", "DATE") == "weak_or_conflicted"
+    assert (
+        _classify("TIMESTAMP", "DATE", destination_db_type)
+        == "weak_or_conflicted"
+    )
 
 
 @pytest.mark.parametrize(

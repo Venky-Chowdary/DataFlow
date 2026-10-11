@@ -55,7 +55,7 @@ def approval_restage_message(kind: str | None, *, expired: bool) -> str:
         action = "set the schedule again"
     elif token == "create_connector":
         action = "create the connector again"
-    elif token in {"delete_connector", "test_connector"}:
+    elif token in {"delete_connector", "update_connector", "test_connector"}:
         action = "repeat that connector action"
     else:
         action = "stage the action again"

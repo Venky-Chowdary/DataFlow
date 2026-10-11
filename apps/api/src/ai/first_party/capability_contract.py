@@ -803,6 +803,23 @@ def rest_api_card() -> CapabilityCard:
     )
 
 
+def scim_provisioning_card() -> CapabilityCard:
+    return CapabilityCard(
+        title="Do you support SCIM",
+        text=(
+            "Datawrap supports a SCIM 2.0 subset for Users and Groups at "
+            "/api/v1/scim/v2. Create a provisioning token with "
+            "POST /api/v1/iam/scim-token. SCIM groups can map to workspace "
+            "roles, and deactivating a user revokes their sessions and personal "
+            "API keys. Filters support eq, sw, and co joined by and. Bulk "
+            "operations, sorting, ETags, and password changes are not supported; "
+            "userName is immutable."
+        ),
+        source_module="docs/SCIM.md · services/scim_service.py",
+        category="identity",
+    )
+
+
 def github_actions_card() -> CapabilityCard:
     return CapabilityCard(
         title="Can I call Datawrap from GitHub Actions",
@@ -1763,11 +1780,14 @@ def pause_cdc_card() -> CapabilityCard | None:
             "Yes — Pause on Operations → Pipelines sets enabled false and "
             "stops the cadence; pausing CDC does not drop the replication "
             "slot or the resume token (pause_cdc). "
-            "Run now still works. A one-shot CDC job drops its Postgres slot "
-            "when that job completes, or when a cancel closes the replication "
-            "connection, unless a CDC schedule still owns the route. A cancel "
-            "request leaves the slot while the worker still holds the CDC "
-            "lease. Deleting the CDC schedule also runs "
+            "Run now still works. A one-shot CDC job keeps its Postgres slot "
+            "when it completes or is cancelled, so the next start of the same "
+            "route resumes from the log and applies deletes made while it was "
+            "stopped; the cancel response names the slot "
+            "(cdc_slot_release.reason=resume_keeps_slot). An abandoned route "
+            "holds WAL until an operator runs "
+            "SELECT pg_drop_replication_slot('<name>') on the source. "
+            "Deleting the CDC schedule also runs "
             "pg_drop_replication_slot. A failed one-shot CDC job drops the "
             "slot when the failure is not retriable and the worker has "
             "closed the replication connection. A retriable failure keeps "
@@ -6714,6 +6734,7 @@ def capability_cards() -> tuple[CapabilityCard, ...]:
         transfer_undo_card,
         viewer_secrets_card,
         rest_api_card,
+        scim_provisioning_card,
         github_actions_card,
         openlineage_card,
         mirror_versus_upsert_card,
