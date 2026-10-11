@@ -159,14 +159,17 @@ def boto3_client(service: str, cfg: dict[str, Any]):
     from botocore.config import Config
 
     region = resolve_region(cfg)
-    access_key = (cfg.get("username") or "").strip() or "local"
-    secret_key = (cfg.get("password") or "").strip() or "local"
     endpoint_url = resolve_endpoint_url(cfg)
     kwargs: dict[str, Any] = {
         "region_name": region,
-        "aws_access_key_id": access_key,
-        "aws_secret_access_key": secret_key,
     }
+    if not cfg.get("use_default_aws_credentials"):
+        kwargs["aws_access_key_id"] = (
+            (cfg.get("username") or "").strip() or "local"
+        )
+        kwargs["aws_secret_access_key"] = (
+            (cfg.get("password") or "").strip() or "local"
+        )
     if endpoint_url:
         kwargs["endpoint_url"] = endpoint_url
     # MinIO and other custom endpoints require path-style addressing.

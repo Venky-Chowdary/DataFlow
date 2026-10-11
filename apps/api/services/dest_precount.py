@@ -2346,7 +2346,8 @@ def _iceberg_object_store_cfg(
                 raise ValueError("Iceberg catalog properties are unavailable")
         except Exception as exc:
             logger.warning(
-                "Iceberg S3 COUNT config unavailable (%s)", type(exc).__name__
+                "Iceberg S3 COUNT config unavailable (parse_error:%s)",
+                type(exc).__name__,
             )
             return None
 
@@ -2367,26 +2368,40 @@ def _iceberg_object_store_cfg(
             or properties.get("client.endpoint")
             or properties.get("client.endpoint-url")
         )
-        if not endpoint_url or not username or not password:
-            logger.warning("Iceberg S3 COUNT config unavailable (ValueError)")
-            return None
+        endpoint_url = str(endpoint_url or "").strip()
+        if endpoint_url:
+            if not endpoint_url.startswith(("http://", "https://")):
+                logger.warning(
+                    "Iceberg S3 COUNT config unavailable (non_http_endpoint)"
+                )
+                return None
+            cfg["endpoint_url"] = endpoint_url.rstrip("/")
+            cfg["connection_string"] = cfg["endpoint_url"]
+        else:
+            cfg.pop("endpoint_url", None)
+            cfg["connection_string"] = ""
+            logger.warning(
+                "Iceberg S3 COUNT using AWS default endpoint (missing_endpoint)"
+            )
 
-        cfg["username"] = str(username).strip()
-        cfg["password"] = str(password).strip()
+        if username and password:
+            cfg["username"] = str(username).strip()
+            cfg["password"] = str(password).strip()
+            cfg.pop("use_default_aws_credentials", None)
+        else:
+            cfg.pop("username", None)
+            cfg.pop("password", None)
+            cfg["use_default_aws_credentials"] = True
+            logger.warning(
+                "Iceberg S3 COUNT using default credential chain (missing_credentials)"
+            )
+
         cfg["host"] = str(
             properties.get("s3.region")
             or properties.get("client.region")
             or properties.get("region")
-            or cfg.get("host")
             or "us-east-1"
         ).strip()
-        endpoint_url = str(endpoint_url).strip()
-        if endpoint_url.startswith(("http://", "https://")):
-            cfg["endpoint_url"] = endpoint_url.rstrip("/")
-            cfg["connection_string"] = cfg["endpoint_url"]
-        else:
-            logger.warning("Iceberg S3 COUNT config unavailable (ValueError)")
-            return None
         path_style = properties.get("s3.path-style-access")
         if path_style in (True, "true", "True", 1, "1"):
             cfg["path_style"] = True
