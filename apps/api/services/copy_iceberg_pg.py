@@ -325,8 +325,10 @@ def copy_iceberg_to_postgres(
             dest_occupied = dest_count_before > 0
             if dest_occupied:
                 raise FastPathUnavailable(
-                    "append into occupied PostgreSQL dest stays on the row path "
-                    "(Iceberg source has no PK-range skip on this path)"
+                    f"append into occupied PostgreSQL table "
+                    f"{dest_schema_n}.{dest_table} is refused: equal row counts "
+                    "are not identity proof and this path has no PK-range check; "
+                    "use overwrite, a keyed upsert, or an empty target"
                 )
         else:
             dst_cur.execute(

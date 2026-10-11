@@ -497,19 +497,19 @@ def test_live_iceberg_pg_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_iceberg_to_postgres(
-            source_cfg=_iceberg_cfg(ice),
-            source_schema="default",
-            source_table=ice,
-            dest_cfg=_pg_cfg(),
-            dest_schema="public",
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            pg_ddls=["BIGINT", "VARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        with pytest.raises(FastPathUnavailable) as exc_info:
+            copy_iceberg_to_postgres(
+                source_cfg=_iceberg_cfg(ice),
+                source_schema="default",
+                source_table=ice,
+                dest_cfg=_pg_cfg(),
+                dest_schema="public",
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                pg_ddls=["BIGINT", "VARCHAR(32)"],
+                replace_destination=False,
+            )
+        assert dest in str(exc_info.value)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
             assert int(cur.fetchone()[0]) == 800
