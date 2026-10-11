@@ -437,7 +437,9 @@ def test_buffered_restart_remines_open_xid_at_low_scn_from_destination_token(
         start_scn = int(binds.get("start_scn") or 0)
         rs_id = str(binds.get("rs_id") or "")
         ssn = int(binds.get("ssn") or 0)
-        includes_null_cursor = ":rs_id IS NULL" in sql
+        includes_null_cursor = (
+            ":rs_id IS NULL" in sql and not int(binds.get("scn_complete") or 0)
+        )
         visible = []
         for row in rows:
             scn, row_rs_id, row_ssn = (
