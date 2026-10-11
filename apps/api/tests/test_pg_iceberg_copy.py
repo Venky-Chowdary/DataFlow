@@ -337,7 +337,7 @@ def test_live_pg_iceberg_occupied_mismatch_declines():
         )
         assert written.ok, written.error
         assert _dest_count(dest) == 2
-        with pytest.raises(FastPathUnavailable, match="occupied Iceberg dest"):
+        with pytest.raises(FastPathUnavailable) as exc_info:
             copy_postgres_to_iceberg(
                 source_cfg=_pg_cfg(),
                 source_schema="public",
@@ -348,6 +348,7 @@ def test_live_pg_iceberg_occupied_mismatch_declines():
                 iceberg_ddls=["long", "string"],
                 replace_destination=False,
             )
+        assert dest in str(exc_info.value)
         assert _dest_count(dest) == 2
     finally:
         with pg.cursor() as cur:

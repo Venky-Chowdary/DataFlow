@@ -543,7 +543,7 @@ def test_live_iceberg_pg_occupied_mismatch_declines():
                 f'INSERT INTO public."{dest}" (id, label) VALUES (1, \'ghost\')'
             )
         pg.commit()
-        with pytest.raises(FastPathUnavailable, match="occupied PostgreSQL dest"):
+        with pytest.raises(FastPathUnavailable) as exc_info:
             copy_iceberg_to_postgres(
                 source_cfg=_iceberg_cfg(ice),
                 source_schema="default",
@@ -555,6 +555,7 @@ def test_live_iceberg_pg_occupied_mismatch_declines():
                 pg_ddls=["BIGINT", "VARCHAR(32)"],
                 replace_destination=False,
             )
+        assert dest in str(exc_info.value)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
             assert int(cur.fetchone()[0]) == 1
