@@ -232,6 +232,15 @@ def _drain_log_reader(
     return "unknown"
 
 
+def _seed_cdc_lease_from_dest_fence(cdc: Any, fence_epoch: Any) -> None:
+    lease = getattr(cdc, "_lease", None)
+    if lease is not None and hasattr(lease, "min_generation"):
+        lease.min_generation = max(
+            int(getattr(lease, "min_generation", 0) or 0),
+            int(fence_epoch or 0),
+        )
+
+
 def _raise_if_stream_behind(cdc: Any, outcome: str) -> None:
     if outcome != "behind":
         return
@@ -1907,6 +1916,9 @@ def _run_cdc_shared_multi_table(
     else:
         raise RuntimeError(f"shared multi-table CDC unsupported for {src_type}")
 
+    if eos_active:
+        _seed_cdc_lease_from_dest_fence(cdc, opened.fence_epoch)
+
     try:
         from services.source_ha_probe import attach_source_ha
 
@@ -3088,6 +3100,9 @@ def _run_cdc_single_stream(
             f"CDC {src_type}.{table_name} → {dest_type}.{dest_table} "
             f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
         ]
+
+    if eos_active:
+        _seed_cdc_lease_from_dest_fence(cdc, opened.fence_epoch)
 
     try:
         from services.source_ha_probe import attach_source_ha

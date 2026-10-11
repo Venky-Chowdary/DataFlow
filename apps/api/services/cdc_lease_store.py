@@ -27,6 +27,27 @@ LEASE_KEY_PREFIX = "df:cdc:lease:"
 RESOURCE_KEY_PREFIX = "df:cdc:res:"
 GENERATION_KEY_PREFIX = "df:cdc:gen:"
 
+
+def _warn_generation_seed(
+    *,
+    cursor_key: str,
+    resource: str,
+    store_generation: int,
+    min_generation: int,
+    backend: str,
+) -> None:
+    if int(min_generation) <= int(store_generation):
+        return
+    logger.warning(
+        "CDC lease generation seeded cursor_key=%s resource=%s "
+        "store_generation=%s dest_fence=%s backend=%s",
+        cursor_key,
+        resource,
+        int(store_generation),
+        int(min_generation),
+        backend,
+    )
+
 # Atomic acquire: resource cross-index + fencing generation + stale steal.
 _REDIS_ACQUIRE_SCRIPT = """
 local lease_key = KEYS[1]
@@ -41,6 +62,7 @@ local resource = ARGV[5]
 local meta_json = ARGV[6]
 local stale_floor = tonumber(ARGV[7])
 local gc_ttl = tonumber(ARGV[8])
+local min_generation = tonumber(ARGV[9]) or 0
 
 local function is_stale(lease)
   if not lease then return true end
@@ -79,20 +101,26 @@ end
 local existing_raw = redis.call("GET", lease_key)
 local generation = 1
 local acquired_at = now
+local existing_generation = 0
 if existing_raw then
   local existing = cjson.decode(existing_raw)
   if existing["holder_id"] ~= holder and not is_stale(existing) then
     return {"err", "conflict", "holder", existing["holder_id"], "cursor", existing["cursor_key"] or cursor_key, "resource", existing["resource"] or resource}
   end
   if existing["holder_id"] == holder then
-    generation = tonumber(existing["generation"] or 1)
+    existing_generation = tonumber(existing["generation"] or 1)
+    generation = existing_generation
     acquired_at = tonumber(existing["acquired_at"] or now)
   else
-    local existing_generation = tonumber(existing["generation"] or 0)
-    generation = math.max(cursor_generation, resource_generation, prior_generation, existing_generation) + 1
+    existing_generation = tonumber(existing["generation"] or 0)
+    generation = math.max(cursor_generation, resource_generation, prior_generation, existing_generation, min_generation) + 1
   end
 else
-  generation = math.max(cursor_generation, resource_generation, prior_generation) + 1
+  generation = math.max(cursor_generation, resource_generation, prior_generation, min_generation) + 1
+end
+local pre_seed_floor = math.max(cursor_generation, resource_generation, prior_generation, existing_generation)
+if existing_raw and existing_generation <= min_generation then
+  generation = math.max(pre_seed_floor, min_generation) + 1
 end
 
 local lease = {
@@ -110,7 +138,7 @@ redis.call("SET", cursor_generation_key, math.max(cursor_generation, generation)
 redis.call("SET", resource_generation_key, math.max(resource_generation, generation))
 redis.call("SET", lease_key, payload, "EX", gc_ttl)
 redis.call("SET", res_key, cursor_key, "EX", gc_ttl)
-return {"status", "ok", "payload", payload}
+return {"status", "ok", "payload", payload, "floor", tostring(pre_seed_floor)}
 """
 
 _REDIS_RENEW_SCRIPT = """
@@ -202,6 +230,7 @@ class LeaseStore(ABC):
         ttl_sec: float,
         meta: dict[str, Any],
         now: float | None = None,
+        min_generation: int = 0,
     ) -> dict[str, Any]:
         """Return lease dict or raise CdcLeaseConflict / LeaseStoreError."""
 
@@ -272,6 +301,7 @@ class MemoryLeaseStore(LeaseStore):
         ttl_sec: float,
         meta: dict[str, Any],
         now: float | None = None,
+        min_generation: int = 0,
     ) -> dict[str, Any]:
         from services.cdc_lease import CdcLease, CdcLeaseConflict
 
@@ -321,13 +351,20 @@ class MemoryLeaseStore(LeaseStore):
                         resource=ex.resource or resource,
                         cursor_key=cursor_key,
                     )
-                if ex.holder_id == holder_id:
+                if ex.holder_id == holder_id and int(ex.generation or 1) > int(min_generation):
                     generation = int(ex.generation or 1)
                     acquired_at = float(ex.acquired_at or ts)
                 else:
-                    generation = generation_floor + 1
+                    generation = max(generation_floor, int(min_generation)) + 1
             else:
-                generation = generation_floor + 1
+                generation = max(generation_floor, int(min_generation)) + 1
+            _warn_generation_seed(
+                cursor_key=cursor_key,
+                resource=resource,
+                store_generation=generation_floor,
+                min_generation=int(min_generation),
+                backend=self.name,
+            )
 
             lease = {
                 "cursor_key": cursor_key,
@@ -441,6 +478,10 @@ class FileLeaseStore(LeaseStore):
 
     def __init__(self, path: str | None = None, data_dir: str | None = None) -> None:
         default_dir = os.path.join(os.path.dirname(__file__), "..", "data")
+        if path is None and data_dir is None:
+            from services.platform_config import data_dir as platform_data_dir
+
+            default_dir = str(platform_data_dir())
         self.data_dir = data_dir or default_dir
         self.path = path or os.path.join(self.data_dir, "cdc_leases.json")
         self._thread = threading.RLock()
@@ -524,6 +565,7 @@ class FileLeaseStore(LeaseStore):
         ttl_sec: float,
         meta: dict[str, Any],
         now: float | None = None,
+        min_generation: int = 0,
     ) -> dict[str, Any]:
         from services.cdc_lease import CdcLease, CdcLeaseConflict
 
@@ -584,13 +626,20 @@ class FileLeaseStore(LeaseStore):
                         resource=existing.resource or resource,
                         cursor_key=cursor_key,
                     )
-                if existing.holder_id == holder_id:
+                if existing.holder_id == holder_id and int(existing.generation or 1) > int(min_generation):
                     generation = int(existing.generation or 1)
                     acquired_at = float(existing.acquired_at or ts)
                 else:
-                    generation = generation_floor + 1
+                    generation = max(generation_floor, int(min_generation)) + 1
             else:
-                generation = generation_floor + 1
+                generation = max(generation_floor, int(min_generation)) + 1
+            _warn_generation_seed(
+                cursor_key=cursor_key,
+                resource=resource,
+                store_generation=generation_floor,
+                min_generation=int(min_generation),
+                backend=self.name,
+            )
 
             lease = {
                 "cursor_key": cursor_key,
@@ -792,6 +841,7 @@ class RedisLeaseStore(LeaseStore):
         ttl_sec: float,
         meta: dict[str, Any],
         now: float | None = None,
+        min_generation: int = 0,
     ) -> dict[str, Any]:
         from services.cdc_lease import CdcLeaseConflict
 
@@ -814,6 +864,7 @@ class RedisLeaseStore(LeaseStore):
                 json.dumps(meta or {}),
                 1.0,
                 gc_ttl,
+                int(min_generation),
             ],
         )
         if not isinstance(result, (list, tuple)) or len(result) < 1:
@@ -834,6 +885,13 @@ class RedisLeaseStore(LeaseStore):
         # field as ResponseError (so err="ok" previously raised "ok").
         if status != "ok" and err != "ok":
             raise LeaseStoreError(f"Redis acquire failed: {parsed}")
+        _warn_generation_seed(
+            cursor_key=cursor_key,
+            resource=resource,
+            store_generation=int(parsed.get("floor") or 0),
+            min_generation=int(min_generation),
+            backend=self.name,
+        )
         payload = parsed.get("payload")
         if isinstance(payload, str):
             return json.loads(payload)
@@ -968,6 +1026,7 @@ def _lua_table_to_dict(result: Any) -> dict[str, Any]:
 
 _STORE: LeaseStore | None = None
 _STORE_LOCK = threading.RLock()
+_SINGLE_HOST_WARNING_EMITTED = False
 
 
 def redis_url_from_env() -> str:
@@ -996,6 +1055,16 @@ def resolve_backend_name() -> str:
 
 def build_store(backend: str | None = None) -> LeaseStore:
     name = (backend or resolve_backend_name()).strip().lower()
+    if name in {"file", "memory"} and (
+        (getenv_brand("MULTI_REPLICA", "") or "").strip().lower()
+        in {"1", "true", "yes"}
+    ):
+        raise LeaseStoreError(
+            f"CDC lease backend={name} cannot coordinate multiple instances "
+            "(DATAFLOW_MULTI_REPLICA is set); set "
+            "DATAFLOW_CDC_LEASE_REDIS_URL (or DATAFLOW_REDIS_URL) or "
+            "DATAFLOW_CDC_LEASE_BACKEND=redis"
+        )
     if name == "memory":
         return MemoryLeaseStore()
     if name == "redis":
@@ -1015,11 +1084,18 @@ def build_store(backend: str | None = None) -> LeaseStore:
 
 
 def get_store() -> LeaseStore:
-    global _STORE
+    global _STORE, _SINGLE_HOST_WARNING_EMITTED
     with _STORE_LOCK:
         if _STORE is None:
             _STORE = build_store()
             logger.info("CDC lease backend=%s", _STORE.name)
+            if _STORE.name in {"file", "memory"} and not _SINGLE_HOST_WARNING_EMITTED:
+                logger.warning(
+                    "CDC lease backend=%s is single-host; "
+                    "set DATAFLOW_CDC_LEASE_REDIS_URL for multi-instance",
+                    _STORE.name,
+                )
+                _SINGLE_HOST_WARNING_EMITTED = True
         return _STORE
 
 
