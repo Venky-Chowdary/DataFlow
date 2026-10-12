@@ -1,0 +1,70 @@
+"""Canonical safe error details for public API boundaries."""
+
+from __future__ import annotations
+
+import logging
+import os
+import uuid
+from typing import Any
+
+from fastapi import HTTPException
+from services import tracing
+from services.log_redaction import redact_log_text
+from services.ops_events import emit_event
+
+_LOG = logging.getLogger("dataflow.errors")
+EXPOSE_ENV = "DATAFLOW_EXPOSE_ERROR_DETAIL"
+
+
+def expose_error_detail() -> bool:
+    return os.getenv(EXPOSE_ENV, "").strip() == "1"
+
+
+def public_error(
+    exc: BaseException,
+    *,
+    event: str,
+    public_message: str,
+    status_code: int = 500,
+    logger: logging.Logger | None = None,
+    **safe_fields: Any,
+) -> tuple[str, str]:
+    cid = tracing.get_correlation_id() or uuid.uuid4().hex
+    emit_event(
+        logger or _LOG,
+        event,
+        outcome="errored",
+        level=logging.ERROR if status_code >= 500 else logging.WARNING,
+        error=exc,
+        correlation_id=cid,
+        http_status=status_code,
+        **safe_fields,
+    )
+    detail = f"{public_message} Reference: {cid}"
+    if expose_error_detail():
+        detail += f" Detail: {redact_log_text(str(exc))[:500]}"
+    return detail, cid
+
+
+def safe_http_exception(
+    exc: BaseException,
+    *,
+    event: str,
+    public_message: str,
+    status_code: int = 500,
+    logger: logging.Logger | None = None,
+    **safe_fields: Any,
+) -> HTTPException:
+    detail, cid = public_error(
+        exc,
+        event=event,
+        public_message=public_message,
+        status_code=status_code,
+        logger=logger,
+        **safe_fields,
+    )
+    return HTTPException(
+        status_code=status_code,
+        detail=detail,
+        headers={"X-Correlation-ID": cid},
+    )
