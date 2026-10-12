@@ -602,7 +602,7 @@ export function TransferTransformStep({
               that are not a closed form or did not bind. A leftover bound
               rename can be accepted as Direct on Map, or remapped there.
               {sourceTables.length > 1
-                ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins stay in review — this compiler will not invent a grain.`
+                ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins need you to choose how rows match; they stay in review.`
                 : ""}
             </p>
           </details>

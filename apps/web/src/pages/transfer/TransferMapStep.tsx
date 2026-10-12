@@ -377,7 +377,7 @@ export function TransferMapStep({
                 Transform kept the pre-load image. Validate contracts never write
                 a column — row-level ones quarantine failing rows at Run, and
                 population ones (unique) are checked after load.
-                Click a rule for provenance — customer document → compiled IR → dest.
+                Click a rule to see where it came from: workbook row → compiled rule → destination column.
               </p>
               {ruleReport.honesty ? (
                 <details className="df2-rule-honesty">

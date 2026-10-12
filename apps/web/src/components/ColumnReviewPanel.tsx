@@ -1,5 +1,6 @@
 import { DtIcon } from "./DtIcon";
 import { FilterTabs } from "./ui/FilterTabs";
+import { ReasonDisclosure } from "./transfer/ReasonDisclosure";
 import { StructurePreview } from "./ui/StructurePreview";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -1315,21 +1316,29 @@ export function ColumnReviewPanel({
                       </div>
                     </td>
                   )}
-                  <td className="df2-column-reason" title={m.businessRule ? `${m.businessRule.kindLabel} — ${m.businessRule.text || m.reason}` : m.reason}>
-                    {m.businessRule ? (
-                      <div className="df2-column-rule-why">
-                        <span className="df2-column-rule-kind">{m.businessRule.kindLabel}</span>
-                        <span>{m.businessRule.text || m.reason || "Direct"}</span>
-                        {m.businessRule.row != null ? (
-                          <span className="df2-column-rule-prov">
-                            {m.businessRule.sheet ? `${m.businessRule.sheet} · ` : ""}
-                            row {m.businessRule.row}
-                          </span>
-                        ) : null}
-                      </div>
-                    ) : (
-                      m.reason || "Semantic match"
-                    )}
+                  <td className="df2-column-reason">
+                    <ReasonDisclosure
+                      id={`reason-${index}-${m.source}`}
+                      label={m.target || m.source}
+                      fullText={m.businessRule
+                        ? `${m.businessRule.kindLabel} — ${m.businessRule.text || m.reason}`
+                        : (m.reason || "Semantic match")}
+                    >
+                      {m.businessRule ? (
+                        <div className="df2-column-rule-why">
+                          <span className="df2-column-rule-kind">{m.businessRule.kindLabel}</span>
+                          <span>{m.businessRule.text || m.reason || "Direct"}</span>
+                          {m.businessRule.row != null ? (
+                            <span className="df2-column-rule-prov">
+                              {m.businessRule.sheet ? `${m.businessRule.sheet} · ` : ""}
+                              row {m.businessRule.row}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : (
+                        m.reason || "Semantic match"
+                      )}
+                    </ReasonDisclosure>
                   </td>
                   <td className="df2-column-confidence">
                     <span className={`df2-column-conf ${tier}`}>{omitted ? "—" : `${(m.confidence * 100).toFixed(0)}%`}</span>

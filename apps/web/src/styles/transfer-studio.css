@@ -140,12 +140,40 @@
   color: #64748b;
   white-space: normal;
   word-break: break-word;
+}
+
+.df2-page-transfer-studio .df2-column-reason-text {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 3;
   line-clamp: 3;
   overflow: hidden;
   max-height: calc(1.35em * 3);
+}
+
+.df2-page-transfer-studio .df2-column-reason-text.is-open {
+  -webkit-line-clamp: unset;
+  line-clamp: none;
+  max-height: none;
+}
+
+/* Link-style disclosure toggle — the reason cell's accessible More/Less. */
+.df2-page-transfer-studio .df2-column-reason-toggle,
+.df2-link-btn {
+  border: 0;
+  background: none;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--df-brand, #0f766e);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.df2-link-btn:focus-visible {
+  outline: 2px solid var(--df-brand, #0f766e);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .df2-page-transfer-studio .df2-column-review-table th {

@@ -573,13 +573,13 @@ export function ruleEdgeLabel(rule: CompiledRule): string {
 
 export function ruleReviewHint(rule: CompiledRule, canAcceptHere: boolean): string {
   if (rule.kind === "contract" && rule.status === "executable") {
-    return "Destination validation — compiled IR, not a Transform write.";
+    return "Checked on the destination during the write; not a Transform step.";
   }
   if (rule.kind === "contract") {
     return "Validate contract — confirm the column binding. This is not a Transform write.";
   }
   if (rule.kind === "join") {
-    return "Joins stay in review — this compiler will not invent a grain.";
+    return "Joins need you to choose how rows match; they stay in review.";
   }
   if (canAcceptAsDirect(rule)) {
     if (!canAcceptHere) {
