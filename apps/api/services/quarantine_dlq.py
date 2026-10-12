@@ -35,6 +35,12 @@ from services.value_serializer import json_default, json_loads_exact
 
 logger = logging.getLogger(__name__)
 
+
+def _quarantine_event(event: str, **fields: Any) -> None:
+    from services.ops_events import emit_event
+
+    emit_event(logger, event, outcome="succeeded", level=logging.INFO, **fields)
+
 DLQ_PATH = data_dir() / "quarantine_dlq.jsonl"
 _MONGO_COLL = "quarantine_dlq"
 # Rotate JSONL before unbounded growth fills the disk (and then silently fails).
@@ -269,6 +275,11 @@ def persist_rejected_rows(
             skip_chunks_written += 1
 
     if not replay:
+        _quarantine_event(
+            "quarantine.rows.persisted", job_id=jid, workspace_id=workspace_id or None,
+            source=source, rows=0, chunks=0, skipped_contract=skip_n,
+            skip_audit_chunks=skip_chunks_written,
+        )
         return {
             "rows": 0,
             "chunks": 0,
@@ -326,6 +337,11 @@ def persist_rejected_rows(
         persist_event_on_job(jid, event)
     except Exception:
         logger.debug("quarantine lineage emit skipped", exc_info=True)
+    _quarantine_event(
+        "quarantine.rows.persisted", job_id=jid, workspace_id=workspace_id or None,
+        source=source, rows=len(rows), chunks=len(chunks), skipped_contract=skip_n,
+        skip_audit_chunks=skip_chunks_written,
+    )
     return out
 
 
@@ -744,6 +760,17 @@ def record_replay(
     })
     history = history[-_REPLAY_HISTORY_KEEP:]
     state = evaluate_replay_closure(stamped, last_replay=compact)
+    _quarantine_event(
+        "quarantine.replay.recorded",
+        child_job_id=child_job_id or None,
+        gate8_passed=bool(gate8_passed),
+        rows_written=compact["rows_written"],
+        rejected=compact["rejected"],
+        promoted_count=len(compact["promoted_identities"]),
+        failed_count=len(compact["failed_identities"]),
+        closure_verdict=str(state.get("verdict") or "") or None,
+        open_count=state.get("open_count"),
+    )
     return {
         **state,
         "history": history,

@@ -49,6 +49,7 @@ from services.cdc_capability import (
     classify_log_capture_failure,
 )
 from services.cdc_catchup import stamp_capture_identity
+from services.ops_events import emit_event
 from services.cdc_effectively_once import gate_cdc_destination
 from services.dest_precount import DestBeforeCensus
 from services.tombstone import (
@@ -250,6 +251,45 @@ def _raise_if_stream_behind(cdc: Any, outcome: str) -> None:
     raise CdcStreamBehind(
         behind_message(cdc),
         slot_name=str(getattr(cdc, "slot_name", "") or ""),
+    )
+
+
+_CDC_POSITION_KIND = {
+    "postgresql": "lsn",
+    "mysql": "binlog",
+    "mariadb": "binlog",
+    "sqlserver": "lsn",
+    "oracle": "scn",
+    "mongodb": "resume_token",
+}
+
+
+def _emit_cdc_cycle(
+    *,
+    job_id: str,
+    workspace_id: str,
+    src_type: str,
+    dest_type: str,
+    inserts: int,
+    updates: int,
+    deletes: int,
+    lag_fields: dict[str, Any],
+    delivery: str,
+    has_position: bool,
+) -> None:
+    """One ``cdc.cycle.completed`` per stream run: counts, lag and the *kind*
+    of position — never the LSN/binlog/token value or any slot/table name."""
+    emit_event(
+        logger, "cdc.cycle.completed", outcome="succeeded",
+        job_id=job_id or None, workspace_id=workspace_id or None,
+        source_type=src_type or None, destination_type=dest_type or None,
+        inserts=int(inserts or 0), updates=int(updates or 0), deletes=int(deletes or 0),
+        lag_seconds=lag_fields.get("cdc_lag_seconds"),
+        lag_bytes=lag_fields.get("replication_lag_bytes"),
+        lag_basis=lag_fields.get("cdc_lag_basis"),
+        position_kind=(_CDC_POSITION_KIND.get(str(src_type or "").lower(), "cursor")
+                       if has_position else "none"),
+        delivery=delivery,
     )
 
 
@@ -3861,6 +3901,15 @@ def _run_cdc_single_stream(
         summary["cdc_plugin"] = lag_fields.get("cdc_plugin")
         summary["cdc_slot_name"] = lag_fields.get("cdc_slot_name")
         summary["cdc_publication_name"] = lag_fields.get("cdc_publication_name")
+        _emit_cdc_cycle(
+            job_id=job_id, workspace_id=workspace_id, src_type=src_type,
+            dest_type=dest_type, inserts=state.inserts, updates=state.updates,
+            deletes=state.deletes, lag_fields=lag_fields,
+            delivery="exactly_once" if eos_active else (
+                lag_fields.get("cdc_delivery") or "at-least-once"
+            ),
+            has_position=final_watermark is not None,
+        )
         if eos_active:
             summary["cdc_delivery"] = "exactly_once"
             summary["delivery_semantics"] = DELIVERY_SEMANTICS_EOS

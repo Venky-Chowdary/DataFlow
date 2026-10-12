@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 from connectors.writer_common import (
@@ -11,6 +12,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy_for_validation_mode,
 )
+from services.ops_events import emit_event
 from services.dest_precount import (
     OVERWRITE_SOURCE_KEYS_KEY,
     PRECOUNT_KEY,
@@ -3133,6 +3135,89 @@ def run_reconciliation(
     Thin wrapper: unique business-rule contracts are enforced post-load exactly
     once per call — no early-return path inside the impl may skip them.
     """
+    started = time.monotonic()
+    try:
+        recon = _run_reconciliation_with_rules(
+            endpoint=endpoint,
+            records=records,
+            columns=columns,
+            rows_written=rows_written,
+            writer_checksum=writer_checksum,
+            dest_summary=dest_summary,
+            mappings=mappings,
+            source_schema=source_schema,
+            validation_mode=validation_mode,
+            source_endpoint=source_endpoint,
+            source_spool=source_spool,
+        )
+    except BaseException as exc:
+        emit_event(
+            _logger, "gate8.verify.completed", outcome="errored",
+            duration_ms=(time.monotonic() - started) * 1000.0, error=exc,
+            destination_type=_endpoint_type(endpoint), validation_mode=validation_mode,
+        )
+        raise
+    _emit_gate8_verdict(
+        recon, endpoint=endpoint, validation_mode=validation_mode,
+        rows_written=rows_written, duration_ms=(time.monotonic() - started) * 1000.0,
+    )
+    return recon
+
+
+def _endpoint_type(endpoint: Any) -> str | None:
+    return str(getattr(endpoint, "format", "") or "") or None
+
+
+def _gate8_verdict(recon: dict[str, Any]) -> tuple[str, str]:
+    """(verdict, outcome): failed fails the job; unproven/unavailable is a hold."""
+    if not recon.get("passed"):
+        return "failed", "failed"
+    if recon.get("verification_unavailable") or recon.get("unproven"):
+        return "unproven", "held"
+    return "passed", "succeeded"
+
+
+def _emit_gate8_verdict(
+    recon: dict[str, Any] | None,
+    *,
+    endpoint: Any,
+    validation_mode: str,
+    rows_written: int,
+    duration_ms: float,
+) -> None:
+    recon = recon if isinstance(recon, dict) else {}
+    verdict, outcome = _gate8_verdict(recon)
+    rule_checks = [c for c in recon.get("rule_checks") or [] if isinstance(c, dict)]
+    emit_event(
+        _logger, "gate8.verify.completed", outcome=outcome, duration_ms=duration_ms,
+        verdict=verdict,
+        destination_type=_endpoint_type(endpoint),
+        validation_mode=validation_mode,
+        rows_written=rows_written,
+        source_rows=recon.get("source_rows"),
+        target_rows=recon.get("target_rows"),
+        rejected_rows=recon.get("rejected_rows"),
+        checksum_match=recon.get("checksum_match"),
+        verification_unavailable=bool(recon.get("verification_unavailable")),
+        skipped_readback=bool(recon.get("skipped_readback")),
+        rule_checks_failed=sum(1 for c in rule_checks if c.get("status") == "failed"),
+    )
+
+
+def _run_reconciliation_with_rules(
+    *,
+    endpoint: EndpointConfig,
+    records: list[dict],
+    columns: list[str],
+    rows_written: int,
+    writer_checksum: str,
+    dest_summary: dict[str, Any],
+    mappings: list[dict] | None,
+    source_schema: dict[str, str] | None,
+    validation_mode: str,
+    source_endpoint: EndpointConfig | None,
+    source_spool: Any,
+) -> dict[str, Any]:
     recon = _run_reconciliation_impl(
         endpoint=endpoint,
         records=records,
