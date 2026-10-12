@@ -92,6 +92,7 @@ from services.phase_profile import (  # noqa: E402
     PHASE_TRANSFORM_WRITE,
     PhaseProfile,
 )
+from services.connector_telemetry import log_retry
 
 logger = logging.getLogger(__name__)
 
@@ -203,14 +204,21 @@ from .batch_readers import _read_batch_impl  # noqa: E402
 
 def _read_batch(*args, **kwargs):
     """Retry transient source-read errors without leaking partial state."""
+    budget = RetryBudget(
+        max_attempts=3,
+        base_delay_seconds=0.5,
+        max_delay_seconds=5.0,
+        exponential_base=2.0,
+        jitter=True,
+    )
+    source_type = args[0] if args else kwargs.get("src_type", "")
     return with_retry(
         lambda: _read_batch_impl(*args, **kwargs),
-        budget=RetryBudget(
-            max_attempts=3,
-            base_delay_seconds=0.5,
-            max_delay_seconds=5.0,
-            exponential_base=2.0,
-            jitter=True,
+        budget=budget,
+        on_transient=log_retry(
+            "read_batch",
+            driver_family=str(source_type or ""),
+            budget=budget,
         ),
     )
 

@@ -27,6 +27,7 @@ _engine_module = sys.modules[__name__]
 
 try:
     from services import lineage_telemetry as lineage
+    from services.connector_telemetry import log_retry
     from services.error_handling import (
         FullRefreshDropFailed,  # noqa: F401
         RetryBudget,
@@ -2109,10 +2110,18 @@ class UniversalTransferEngine:
                 progress_pct=5,
                 message="Reading source data…",
             )
+            read_budget = RetryBudget(
+                max_attempts=3,
+                base_delay_seconds=0.5,
+                max_delay_seconds=5.0,
+            )
             records, columns, schema = with_retry(
                 lambda: self._read_source(request),
-                budget=RetryBudget(
-                    max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0
+                budget=read_budget,
+                on_transient=log_retry(
+                    "source_read",
+                    driver_family=request.source.format or request.source.kind,
+                    budget=read_budget,
                 ),
             )
             schema = _authoritative_source_schema(request.source, schema, columns)

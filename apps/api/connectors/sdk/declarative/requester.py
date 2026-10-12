@@ -19,6 +19,7 @@ from connectors.sdk.declarative.errors import (
     safe_exception_context,
 )
 from services.error_handling import RetryBudget, with_retry
+from services.connector_telemetry import log_retry
 from services.mcp_rate_limit import TokenBucketStore
 from services.secret_config import redact_config, redact_url
 from services.value_serializer import load_http_json
@@ -220,13 +221,20 @@ class HttpRequester:
                 return response
 
             try:
+                budget = RetryBudget(
+                    max_attempts=self.max_attempts,
+                    base_delay_seconds=self.base_delay_seconds,
+                    max_delay_seconds=self.max_delay_seconds,
+                    jitter=self.jitter,
+                )
                 response = with_retry(
                     perform_request,
-                    budget=RetryBudget(
-                        max_attempts=self.max_attempts,
-                        base_delay_seconds=self.base_delay_seconds,
-                        max_delay_seconds=self.max_delay_seconds,
-                        jitter=self.jitter,
+                    budget=budget,
+                    on_transient=log_retry(
+                        "sdk_request",
+                        driver_family="sdk_declarative",
+                        budget=budget,
+                        request_id=request_id,
                     ),
                     sleep=self.sleep,
                 )

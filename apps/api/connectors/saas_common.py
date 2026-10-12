@@ -8,6 +8,7 @@ from typing import Any, Callable, NoReturn
 
 import requests
 from services.error_handling import RetryBudget, with_retry
+from services.connector_telemetry import log_retry
 from services.value_serializer import cell_to_string, sanitize_json_value
 
 from connectors.base import ReadBatch
@@ -293,9 +294,15 @@ def request(
     retry_options: dict[str, Any] = {}
     if sleep is not None:
         retry_options["sleep"] = sleep
+    budget = retry_budget or RetryBudget()
     return with_retry(
         _call,
-        budget=retry_budget or RetryBudget(),
+        budget=budget,
+        on_transient=log_retry(
+            "http_request",
+            driver_family="http",
+            budget=budget,
+        ),
         **retry_options,
     )
 
