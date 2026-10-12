@@ -189,8 +189,14 @@ def _persist_job_quarantine(
     request: Any = None,
     *,
     already_persisted: list[int] | None = None,
+    canonical_details: list[dict[str, Any]] | None = None,
 ) -> None:
     """Durable DLQ write for rejected rows — fail closed if control-plane persist fails.
+
+    ``canonical_details`` is the pre-redaction payload. The job document keeps
+    masked previews for operators; the DLQ must keep the cells replay will
+    write. Persisting the masked copy wrote ``j***@***.com`` and the mangled
+    null sentinel into destination columns.
 
     Writes control-plane JSONL/Mongo **and** (when supported) a destination
     ``{table}_df_quarantine`` table so operators can query/promote with SQL.
@@ -203,7 +209,15 @@ def _persist_job_quarantine(
     Destination quarantine table is still written once here (not mid-stream).
     """
     align_reported_rejects(dest_summary)
+    # Operator preview stays on the summary. Locals below are the unmasked
+    # cells captured before redact_destination_summary; the DLQ and the
+    # destination quarantine table must not store the mask.
+    display_details = dest_summary.get("rejected_details")
+    if canonical_details is not None:
+        dest_summary["rejected_details"] = list(canonical_details)
     details = list(dest_summary.get("rejected_details") or [])
+    if canonical_details is not None:
+        dest_summary["rejected_details"] = display_details
     if not details:
         rejected = int(dest_summary.get("rejected_rows") or 0)
         if rejected:

@@ -1448,7 +1448,12 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         VERDICT_CLOSED,
     )
 
-    hydrated = merge_job_quarantine(job)
+    from services.quarantine_dlq import MaskedQuarantineReplayError, canonical_replay_details
+
+    try:
+        hydrated = canonical_replay_details(job)
+    except MaskedQuarantineReplayError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     durable = hydrated or list(stored_details)
     incomplete = quarantine_sample_incomplete(job, durable)
     if incomplete:

@@ -912,6 +912,71 @@ def compact_replay_closure(closure: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+class MaskedQuarantineReplayError(ValueError):
+    """Replay refused because the only stored cells are operator masks."""
+
+
+def looks_like_stored_mask(value: Any) -> bool:
+    """True for ``mask()`` output, which must never be written as a cell.
+
+    Long tokens become ``head…tail`` (U+2026). Emails and short tokens gain a
+    run of ``*``. A real source value is not rewritten into either shape.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    if "\u2026" in value:
+        return True
+    return "***" in value
+
+
+def _detail_cells(detail: dict[str, Any]) -> list[Any]:
+    cells: list[Any] = [detail.get("value")]
+    for key in ("values", "source_values", "target_values"):
+        blob = detail.get(key)
+        if isinstance(blob, dict):
+            cells.extend(blob.values())
+    return cells
+
+
+def detail_has_masked_cell(detail: dict[str, Any]) -> bool:
+    return any(looks_like_stored_mask(cell) for cell in _detail_cells(detail))
+
+
+def canonical_replay_details(job: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Cells replay may write. The DLQ is canonical; the job document is masked.
+
+    ``redact_destination_summary`` runs before the job is saved, so
+    ``rejected_details`` on the job holds ``j***@***.com`` and ``__DF_S…LL__``.
+    Writing those is silent corruption. The control-plane DLQ is persisted
+    from the writer payload. When that copy is also masked, replay stops.
+    """
+    if not isinstance(job, dict):
+        return []
+    job_id = str(job.get("id") or job.get("job_id") or job.get("_id") or "").strip()
+    dlq_rows = quarantine_details_from_dlq(job_id, include_skip_audit=False) if job_id else []
+    closure = job_quarantine_closure(job)
+    if dlq_rows and not any(detail_has_masked_cell(d) for d in dlq_rows):
+        return apply_replay_overlay(dlq_rows, job_id=job_id, closure=closure)
+
+    from services.quarantine_from_preflight import merge_job_quarantine
+
+    job_rows = [
+        d
+        for d in merge_job_quarantine(job, hydrate_dlq=False)
+        if isinstance(d, dict)
+    ]
+    if job_rows and not any(detail_has_masked_cell(d) for d in job_rows):
+        return apply_replay_overlay(job_rows, job_id=job_id, closure=closure)
+    if dlq_rows or job_rows:
+        raise MaskedQuarantineReplayError(
+            "Quarantine replay refused: the stored cells are masked previews "
+            "(for example j***@***.com or __DF_S…LL__), not source values. "
+            "Writing them would corrupt the destination. Re-run the transfer "
+            "so the ledger keeps the original cells, then replay."
+        )
+    return []
+
+
 def job_quarantine_closure(job: dict[str, Any] | None) -> dict[str, Any] | None:
     """Read the compact closure from the job document."""
     if not isinstance(job, dict):

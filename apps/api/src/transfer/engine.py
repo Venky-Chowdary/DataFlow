@@ -342,6 +342,22 @@ def _apply_priority_and_limit(
     return sorted_records
 
 
+def _snapshot_rejected_details(dest_summary: Any) -> list[dict[str, Any]] | None:
+    """Unmasked quarantine cells, captured before operator redaction.
+
+    Replay writes whatever the DLQ stored. Redaction runs first today, so the
+    durable copy has to be taken from the writer payload, not the preview.
+    """
+    if not isinstance(dest_summary, dict):
+        return None
+    details = dest_summary.get("rejected_details")
+    if not isinstance(details, list) or not details:
+        return None
+    import copy
+
+    return copy.deepcopy(details)
+
+
 def _redacted_endpoint(ep: EndpointConfig) -> dict[str, Any]:
     """Return endpoint metadata without credentials for lineage and logging."""
     d = {
@@ -3058,6 +3074,7 @@ class UniversalTransferEngine:
                 finally:
                     if spill_holder is not None:
                         spill_holder.close()
+            canonical_rejected_details = _snapshot_rejected_details(dest_summary)
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
@@ -3129,6 +3146,7 @@ class UniversalTransferEngine:
                 dest_summary,
                 request,
                 already_persisted=_quarantine_persisted,
+                canonical_details=canonical_rejected_details,
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
@@ -4038,6 +4056,7 @@ class UniversalTransferEngine:
                     validation_mode=request.validation_mode,
                     source_endpoint=request.source,
                 )
+            canonical_rejected_details = _snapshot_rejected_details(dest_summary)
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
@@ -4140,6 +4159,7 @@ class UniversalTransferEngine:
                 dest_summary,
                 request,
                 already_persisted=_quarantine_persisted,
+                canonical_details=canonical_rejected_details,
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
@@ -4925,6 +4945,7 @@ class UniversalTransferEngine:
                     validation_mode=request.validation_mode,
                     source_endpoint=request.source,
                 )
+            canonical_rejected_details = _snapshot_rejected_details(dest_summary)
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
@@ -5005,6 +5026,7 @@ class UniversalTransferEngine:
                 dest_summary,
                 request,
                 already_persisted=_quarantine_persisted,
+                canonical_details=canonical_rejected_details,
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
