@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import uuid
 from typing import Any
 
@@ -93,7 +94,14 @@ def user_query_error(
         correlation_id=cid,
         http_status=status_code,
     )
-    detail = f"{public_message}: {redact_log_text(str(exc))[:500]} Reference: {cid}"
+    # SQLAlchemy appends the statement, the caret, and a documentation link.
+    # The operator needs the driver's sentence (QA: raw errors echo the SQL).
+    sentence = re.split(
+        r"(?:\n\s*)?(?:LINE \d+:|\[SQL:|\(Background on this error)",
+        str(exc),
+        maxsplit=1,
+    )[0]
+    detail = f"{public_message}: {redact_log_text(sentence)[:500]} Reference: {cid}"
     return HTTPException(
         status_code=status_code,
         detail=detail,

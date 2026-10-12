@@ -513,11 +513,13 @@ def parse_callable_source(
     definition = definition_pasted_refusal(stripped, dialect_n, mode_n)
     if definition:
         raise ProcedureSourceError(definition)
-    if ";" in stripped.rstrip().rstrip(";"):
+    # Semicolons and DDL words inside a string are data (QA R2-001, R2-002).
+    code = _sql_outside_literals(stripped)
+    if ";" in code.rstrip().rstrip(";"):
         raise ProcedureSourceError(
             "Only one statement is allowed — remove extra semicolons."
         )
-    if _DENIED_TOKENS.search(stripped):
+    if _DENIED_TOKENS.search(code):
         raise ProcedureSourceError(
             "This statement is not an extract — DDL, DML, and admin calls are blocked."
         )
@@ -834,11 +836,25 @@ def callable_sync_gate(
 # ---------------------------------------------------------------------------
 
 
+def _sql_outside_literals(text: str) -> str:
+    from services.sql_literals import sql_outside_literals
+
+    return sql_outside_literals(text)
+
+
 def _strip_comments(text: str) -> str:
-    raw = str(text or "")
-    raw = _COMMENT_BLOCK.sub(" ", raw)
-    raw = _COMMENT_LINE.sub(" ", raw)
-    return " ".join(raw.split()).strip()
+    """Drop comments and squeeze whitespace outside string literals.
+
+    A ``--`` or a run of spaces inside quotes is data. Collapsing it rewrote
+    ``'O''Brien'`` and ``'  pad  '`` before the engine ever ran the extract.
+    """
+    from services.sql_literals import mask_sql_string_literals, restore_sql_string_literals
+
+    masked, literals = mask_sql_string_literals(str(text or ""))
+    masked = _COMMENT_BLOCK.sub(" ", masked)
+    masked = _COMMENT_LINE.sub(" ", masked)
+    collapsed = " ".join(masked.split()).strip()
+    return restore_sql_string_literals(collapsed, literals)
 
 
 def _wrap_bare_identifier(text: str, dialect: str) -> str:
@@ -867,18 +883,20 @@ def _query_is_safe(text: str) -> bool:
 
     Imported ``query_router._is_safe_sql`` pulls FastAPI via ``src.routers``
     package init; keep the extract path import-light and fail closed.
+    Keywords are judged on the code outside string literals.
     """
+    code = _sql_outside_literals(text)
     if not re.match(
         r"^\s*(SELECT|WITH|EXPLAIN|SHOW|DESCRIBE|DESC|ANALYZE|PRAGMA|VALUES)\b",
-        text,
+        code,
         re.IGNORECASE,
     ):
         return False
-    if _DENIED_TOKENS.search(text):
+    if _DENIED_TOKENS.search(code):
         return False
-    if re.search(r"\bINTO\s+(OUTFILE|DUMPFILE)\b", text, re.IGNORECASE):
+    if re.search(r"\bINTO\s+(OUTFILE|DUMPFILE)\b", code, re.IGNORECASE):
         return False
-    if re.search(r"\bSELECT\b[\s\S]*\bINTO\b", text, re.IGNORECASE):
+    if re.search(r"\bSELECT\b[\s\S]*\bINTO\b", code, re.IGNORECASE):
         return False
     return True
 
@@ -1346,7 +1364,12 @@ def _open_callable_result(cfg: Mapping[str, Any], spec: CallableSpec, *, peek: b
     conn = engine.connect()
     try:
         _apply_timeout(conn, spec.dialect or str(cfg.get("type") or ""), timeout)
-        result = conn.execute(sa.text(spec.sql), spec.params)
+        from services.sql_literals import escape_sqlalchemy_literal_colons
+
+        # ``:1`` inside a JSON or time literal is not a bind (QA R2-004).
+        result = conn.execute(
+            sa.text(escape_sqlalchemy_literal_colons(spec.sql)), spec.params
+        )
         if result.returns_rows is False:
             raise ProcedureSourceError(
                 f"`{spec.identifier}` did not return a result set — "
