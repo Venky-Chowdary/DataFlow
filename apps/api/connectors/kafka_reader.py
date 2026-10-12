@@ -150,13 +150,20 @@ def commit_kafka_offsets(cfg: dict[str, Any], cursor: dict[str, Any] | None) -> 
         tps_meta[tp] = OffsetAndMetadata(int(item["offset"]), None, -1)
     if not tps_meta:
         return
-    consumer = KafkaConsumer(
-        bootstrap_servers=_bootstrap(cfg),
-        group_id=group_id,
-        enable_auto_commit=False,
-        consumer_timeout_ms=2000,
-        request_timeout_ms=8000,
-    )
+    from services.copy_kafka_common import kafka_classified_bootstrap
+
+    # Same SASL mapping as every other client: a consumer without it never
+    # authenticates and the fail-closed commit fails the job (MX1-03).
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                group_id=group_id,
+                enable_auto_commit=False,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+            )
+        )
     try:
         consumer.assign(tps)
         consumer.commit(tps_meta)
