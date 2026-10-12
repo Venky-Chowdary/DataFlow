@@ -267,3 +267,136 @@ def test_shared_multi_table_reader_emits_one_cycle_event_without_table_names(
     _clean(capture.records)
     for record in capture.records:
         assert "users" not in JsonFormatter().format(record)
+
+
+# --- cdc.cycle.completed on the failure paths -------------------------------
+
+_SECRET_ERR = "boom at lsn=0/DEADBEEF in zz_secret_table"
+
+
+def _failure_cases():
+    from services.error_handling import TransferCancelled
+
+    return [
+        pytest.param(RuntimeError(_SECRET_ERR), "errored", logging.ERROR, id="error"),
+        pytest.param(KeyboardInterrupt(), "cancelled", logging.INFO, id="interrupt"),
+        pytest.param(TransferCancelled(_SECRET_ERR), "cancelled", logging.INFO, id="job-cancel"),
+    ]
+
+
+def _raising_reader(token, error, *, table):
+    """Stub log reader: snapshot applies, the stream applies one batch, then raises."""
+    from services.cdc_engine import ChangeBatch
+
+    class FakeCdc:
+        def __init__(self, *a, **k):
+            pass
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            yield ChangeBatch(inserts=[{"id": VALUE}, {"id": "2"}], resume_token=token, table=table)
+            yield ChangeBatch(resume_token=token, ack_barrier=True)
+
+        def poll(self):
+            yield ChangeBatch(
+                updates=[{"id": VALUE, "v": VALUE}], deletes=[{"id": "2"}],
+                resume_token=token, table=table, ack_barrier=True,
+            )
+            raise error
+
+        def ack(self, token=None):
+            pass
+
+        def close(self):
+            pass
+
+    return FakeCdc
+
+
+def _fake_apply(*args, **kwargs):
+    change = args[4]
+    return (len(change.inserts) + len(change.updates), "ck", {}, len(change.deletes))
+
+
+def _assert_failure_event(capture, error, outcome, level):
+    (event,) = capture.named("cdc.cycle.completed")
+    assert (event.outcome, event.levelno) == (outcome, level)
+    assert event.error_type == type(error).__name__
+    _clean(capture.records)
+    for record in capture.records:
+        for fmt in (JsonFormatter(), TextFormatter()):
+            out = fmt.format(record)
+            assert "DEADBEEF" not in out and "zz_secret_table" not in out
+    return event
+
+
+@pytest.mark.parametrize(("error", "outcome", "level"), _failure_cases())
+def test_shared_reader_raising_mid_cycle_emits_counts_so_far_and_reraises(
+    tmp_path, monkeypatch, capture, error, outcome, level
+):
+    from unittest.mock import patch
+
+    from services.sync_cursor import SyncContract
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+    token = f"slot={TABLE}_slot|phase=streaming|lsn={LSN}"
+    source = EndpointConfig(kind="database", format="postgresql", database="app", table=TABLE)
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(tmp_path / "d.db"), table=TABLE
+    )
+    with patch.object(cdc_transfer, "PostgreSqlChangeStreamCdc", _raising_reader(token, error, table=TABLE)), \
+         patch.object(cdc_transfer, "_apply_change_batch", side_effect=_fake_apply), \
+         patch.object(cdc_transfer, "resolve_dest_table", side_effect=lambda *_a, **_k: "t"), \
+         patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "2"}), \
+         pytest.raises(BaseException) as raised:
+        cdc_transfer._run_cdc_shared_multi_table(
+            source, destination, [{"source": "id", "target": "id"}], {"id": "string"}, None,
+            sync_mode="cdc",
+            stream_contracts=[
+                {"name": TABLE, "selected": True, "primary_key": "id"},
+                {"name": "users", "selected": True, "primary_key": "id"},
+            ],
+            selected=[
+                SyncContract(name=TABLE, primary_key="id", sync_mode="cdc"),
+                SyncContract(name="users", primary_key="id", sync_mode="cdc"),
+            ],
+            job_id="job-shared", checkpoint=None, checkpoint_service=None,
+            backfill_new_fields=False, validation_mode="strict", limit=0,
+            workspace_id="ws-shared",
+        )
+    assert raised.value is error
+    event = _assert_failure_event(capture, error, outcome, level)
+    assert (event.job_id, event.workspace_id, event.table_count) == ("job-shared", "ws-shared", 2)
+    assert (event.upserts, event.deletes) == (3, 1)
+
+
+@pytest.mark.parametrize(("error", "outcome", "level"), _failure_cases())
+def test_single_stream_raising_mid_cycle_emits_counts_so_far_and_reraises(
+    tmp_path, monkeypatch, capture, error, outcome, level
+):
+    from unittest.mock import patch
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+    token = f"slot={TABLE}_slot|phase=streaming|lsn={LSN}"
+    source = EndpointConfig(kind="database", format="postgresql", database="app", table=TABLE)
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(tmp_path / "d.db"), table=TABLE
+    )
+    with patch.object(cdc_transfer, "PostgreSqlChangeStreamCdc", _raising_reader(token, error, table=None)), \
+         patch.object(cdc_transfer, "_apply_change_batch", side_effect=_fake_apply), \
+         patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "2"}), \
+         pytest.raises(BaseException) as raised:
+        cdc_transfer._run_cdc_single_stream(
+            source, destination, [{"source": "id", "target": "id"}], {"id": "string"}, None,
+            sync_mode="cdc",
+            stream_contracts=[{"name": TABLE, "selected": True, "primary_key": "id", "sync_mode": "cdc"}],
+            job_id="job-single", workspace_id="ws-single", validation_mode="strict",
+        )
+    assert raised.value is error
+    event = _assert_failure_event(capture, error, outcome, level)
+    assert (event.job_id, event.workspace_id) == ("job-single", "ws-single")
+    assert (event.inserts, event.updates, event.deletes) == (2, 1, 1)

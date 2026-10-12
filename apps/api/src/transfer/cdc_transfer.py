@@ -278,15 +278,28 @@ def _emit_cdc_cycle(
     has_position: bool,
     upserts: int | None = None,
     table_count: int | None = None,
+    error: BaseException | None = None,
 ) -> None:
     """One ``cdc.cycle.completed`` per reader run: counts, lag and the *kind*
     of position — never the LSN/binlog/token value or any slot/table name.
 
     The shared multi-table reader has one log position and one lag for all
     its tables, so it emits once with ``table_count`` and combined
-    ``upserts`` (its apply step does not split inserts from updates)."""
+    ``upserts`` (its apply step does not split inserts from updates).
+
+    A run that raises still emits, with the counts applied so far:
+    ``cancelled`` for a job cancel or interruption, ``errored`` otherwise."""
+    from services.error_handling import TransferCancelled
+    from services.ops_events import CANCELLATION_ERRORS
+
+    if error is None:
+        outcome = "succeeded"
+    elif isinstance(error, (*CANCELLATION_ERRORS, TransferCancelled)):
+        outcome = "cancelled"
+    else:
+        outcome = "errored"
     emit_event(
-        logger, "cdc.cycle.completed", outcome="succeeded",
+        logger, "cdc.cycle.completed", outcome=outcome, error=error,
         job_id=job_id or None, workspace_id=workspace_id or None,
         source_type=src_type or None, destination_type=dest_type or None,
         inserts=None if inserts is None else int(inserts),
@@ -300,6 +313,14 @@ def _emit_cdc_cycle(
                        if has_position else "none"),
         delivery=delivery,
     )
+
+
+def _cdc_lag_fields_or_empty(cdc: Any) -> dict[str, Any]:
+    """Lag fields for an event on a failure path, where the reader may be broken."""
+    try:
+        return _cdc_lag_fields(cdc)
+    except Exception:
+        return {}
 
 
 def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
@@ -2393,6 +2414,17 @@ def _run_cdc_shared_multi_table(
                         stop_early=lambda: bool(limit and total_rows >= limit),
                     )
                     _raise_if_stream_behind(cdc, outcome)
+    except BaseException as exc:
+        _emit_cdc_cycle(
+            job_id=job_id, workspace_id=workspace_id, src_type=src_type,
+            dest_type=dest_type, inserts=None, updates=None,
+            upserts=cycle_counts["upserts"], deletes=cycle_counts["deletes"],
+            lag_fields=_cdc_lag_fields_or_empty(cdc),
+            delivery="exactly_once" if eos_active else "at-least-once",
+            has_position=get_watermark(shared_key) is not None, table_count=len(tables),
+            error=exc,
+        )
+        raise
     finally:
         stamp_capture_identity(sys.exc_info()[1], cdc)
         if original_dest_table is not None:
@@ -3924,15 +3956,6 @@ def _run_cdc_single_stream(
         summary["cdc_plugin"] = lag_fields.get("cdc_plugin")
         summary["cdc_slot_name"] = lag_fields.get("cdc_slot_name")
         summary["cdc_publication_name"] = lag_fields.get("cdc_publication_name")
-        _emit_cdc_cycle(
-            job_id=job_id, workspace_id=workspace_id, src_type=src_type,
-            dest_type=dest_type, inserts=state.inserts, updates=state.updates,
-            deletes=state.deletes, lag_fields=lag_fields,
-            delivery="exactly_once" if eos_active else (
-                lag_fields.get("cdc_delivery") or "at-least-once"
-            ),
-            has_position=final_watermark is not None,
-        )
         if eos_active:
             summary["cdc_delivery"] = "exactly_once"
             summary["delivery_semantics"] = DELIVERY_SEMANTICS_EOS
@@ -4022,7 +4045,25 @@ def _run_cdc_single_stream(
                 _raise_if_stream_behind(cdc, "behind")
         if capture_downgrade:
             summary.update(capture_downgrade)
+        _emit_cdc_cycle(
+            job_id=job_id, workspace_id=workspace_id, src_type=src_type,
+            dest_type=dest_type, inserts=state.inserts, updates=state.updates,
+            deletes=state.deletes, lag_fields=lag_fields,
+            delivery="exactly_once" if eos_active else (
+                lag_fields.get("cdc_delivery") or "at-least-once"
+            ),
+            has_position=final_watermark is not None,
+        )
         return state.rows_written, ddl_log, summary, headers
+    except BaseException as exc:
+        _emit_cdc_cycle(
+            job_id=job_id, workspace_id=workspace_id, src_type=src_type,
+            dest_type=dest_type, inserts=state.inserts, updates=state.updates,
+            deletes=state.deletes, lag_fields=_cdc_lag_fields_or_empty(cdc),
+            delivery="exactly_once" if eos_active else "at-least-once",
+            has_position=state.running_cursor is not None, error=exc,
+        )
+        raise
     finally:
         stamp_capture_identity(sys.exc_info()[1], cdc)
         if hasattr(cdc, "close"):
