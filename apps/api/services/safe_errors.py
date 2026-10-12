@@ -68,3 +68,34 @@ def safe_http_exception(
         detail=detail,
         headers={"X-Correlation-ID": cid},
     )
+
+
+def user_query_error(
+    exc: BaseException,
+    *,
+    public_message: str,
+    status_code: int = 400,
+    event: str = "query.user_query.failed",
+    logger: logging.Logger | None = None,
+) -> HTTPException:
+    """Expose errors from the caller's own query text after canonical redaction.
+
+    Use only when the caller already has query permission on the connector.
+    Never use this for connection or configuration errors.
+    """
+    cid = tracing.get_correlation_id() or uuid.uuid4().hex
+    emit_event(
+        logger or _LOG,
+        event,
+        outcome="failed",
+        level=logging.WARNING,
+        error=exc,
+        correlation_id=cid,
+        http_status=status_code,
+    )
+    detail = f"{public_message}: {redact_log_text(str(exc))[:500]} Reference: {cid}"
+    return HTTPException(
+        status_code=status_code,
+        detail=detail,
+        headers={"X-Correlation-ID": cid},
+    )

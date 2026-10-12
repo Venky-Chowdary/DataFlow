@@ -19,8 +19,9 @@ from pydantic import BaseModel, Field
 from services import connector_store
 from services.connector_telemetry import connector_operation, driver_family
 from services.log_redaction import redact_log_text
-from services.safe_errors import public_error, safe_http_exception
+from services.safe_errors import public_error, safe_http_exception, user_query_error
 from services.value_serializer import sanitize_json_value
+from src.transfer.connector_registry import humanize_connection_error
 
 router = APIRouter(prefix="/query", tags=["query"])
 
@@ -473,9 +474,10 @@ async def query_schema(
         logging.getLogger(__name__).warning(
             "Query schema introspection failed for %s: %s", body.connector_id, exc
         )
+        driver = getattr(endpoint, "format", "") or ""
         raise HTTPException(
             status_code=400,
-            detail=f"Schema introspection failed: {redact_log_text(str(exc))}",
+            detail=f"Schema introspection failed: {humanize_connection_error(driver, exc)}",
         ) from exc
 
     col_types: dict[str, str] = dict(info.get("schema") or {})
@@ -722,9 +724,10 @@ def _run_mongodb_query(connector, body):
                 rows = list(cursor)
                 return _normalize_rows(rows)
         except json.JSONDecodeError as exc:
-            raise HTTPException(
+            raise user_query_error(
+                exc,
+                public_message="Invalid MongoDB filter JSON",
                 status_code=400,
-                detail=f"Invalid MongoDB filter JSON: {redact_log_text(str(exc))}",
             ) from exc
 
     cursor = coll.find(query_filter).limit(body.limit)
@@ -757,9 +760,10 @@ def _parse_mongodb_json(raw: str) -> Any:
     except json.JSONDecodeError:
         raise
     except Exception as exc:
-        raise HTTPException(
+        raise user_query_error(
+            exc,
+            public_message="Invalid MongoDB query",
             status_code=400,
-            detail=f"Invalid MongoDB query: {redact_log_text(str(exc))}",
         ) from exc
     return demote_exact_json(parsed)
 
@@ -911,7 +915,7 @@ def _run_sql_query(connector, body):
     except Exception as exc:
         raise HTTPException(
             status_code=400,
-            detail=f"Could not create database engine: {redact_log_text(str(exc))}",
+            detail=humanize_connection_error(connector.type or "", exc),
         ) from exc
 
     from services.dialect_profiles import append_result_limit
@@ -960,9 +964,10 @@ def _run_sql_query(connector, body):
             schema = {**schema, **declared}
         return rows, columns, schema, False
     except Exception as exc:
-        raise HTTPException(
+        raise user_query_error(
+            exc,
+            public_message="Query failed",
             status_code=400,
-            detail=f"Query failed: {redact_log_text(str(exc))}",
         ) from exc
 
 
@@ -1004,9 +1009,10 @@ def _run_snowflake_query(connector, body):
         )
     except Exception as exc:
         classified = classify_snowflake_connect_error(redact_log_text(str(exc)))
+        connection_detail = humanize_connection_error("snowflake", classified or exc)
         raise HTTPException(
             status_code=400,
-            detail=f"Could not connect to Snowflake: {classified or exc}",
+            detail=f"Could not connect to Snowflake: {connection_detail}",
         ) from exc
 
     try:
@@ -1037,9 +1043,10 @@ def _run_snowflake_query(connector, body):
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
         return rows, columns, _column_schema(columns, rows), False
     except Exception as exc:
-        raise HTTPException(
+        raise user_query_error(
+            exc,
+            public_message="Query failed",
             status_code=400,
-            detail=f"Query failed: {redact_log_text(str(exc))}",
         ) from exc
     finally:
         if conn is not None:
