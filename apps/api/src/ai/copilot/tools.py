@@ -3015,22 +3015,23 @@ class DataPilotTools:
         needle = (name or "").strip().lower()
         if not needle:
             return None, None
-        exact = []
-        fuzzy = []
-        for s in list_schedules():
-            label = (s.name or "").strip().lower()
-            if label == needle:
-                exact.append(s)
-            elif needle in label or label in needle:
-                fuzzy.append(s)
-        if exact:
+        # Full name only. A substring used to run or delete a different
+        # pipeline, and two schedules were allowed to share a name.
+        exact = [
+            s for s in list_schedules()
+            if (s.name or "").strip().lower() == needle
+        ]
+        if len(exact) == 1:
             return exact[0], None
-        if len(fuzzy) == 1:
-            return fuzzy[0], None
-        if len(fuzzy) > 1:
-            names = [s.name for s in fuzzy[:5] if s.name]
-            listed = ", ".join(f"**{n}**" for n in names)
-            return None, f"Which pipeline did you mean? {listed}"
+        if len(exact) > 1:
+            shown = [
+                f"**{s.name}** ({s.id})" for s in exact[:5] if s.name
+            ]
+            listed = ", ".join(shown)
+            return None, (
+                f"“{name.strip()}” matches {len(exact)} pipelines. "
+                f"Pass the schedule id. {listed}"
+            )
         return None, None
 
     def _schedule_summary(self, s) -> dict:

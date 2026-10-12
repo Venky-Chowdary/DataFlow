@@ -1049,6 +1049,33 @@ def find_studio_replay_target(
     return candidate
 
 
+def assert_unique_schedule_name(name: str, *, exclude_id: str = "") -> None:
+    """Refuse a second pipeline with the same name.
+
+    Name lookup is exact. Two rows named ``Nightly`` used to let pause, run,
+    and delete pick one of them with no question. Comparison is
+    case-insensitive; the stored spelling is unchanged. Blank names are
+    drafts and are not part of this contract.
+    """
+    needle = (name or "").strip().lower()
+    if not needle:
+        return
+    exclude = (exclude_id or "").strip()
+    clashes = [
+        s
+        for s in _load_all()
+        if (s.name or "").strip().lower() == needle and s.id != exclude
+    ]
+    if not clashes:
+        return
+    shown = ", ".join(f"{s.name} ({s.id})" for s in clashes[:5])
+    raise ValueError(
+        f"A pipeline named “{name.strip()}” already exists ({shown}). "
+        "Choose a different name or pass that schedule id — "
+        "duplicate names make run, pause, and delete ambiguous."
+    )
+
+
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     payload = dict(data)
     replay_id = str(payload.pop("replay_schedule_id", "") or "").strip()
@@ -1091,6 +1118,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     if enabled and not rows:
         # Draft is allowed. Enabling an empty-mapping schedule invents _auto_map.
         enabled = False
+    assert_unique_schedule_name(str(payload.get("name") or ""))
     schedules = _load_all()
     sched = PipelineSchedule.from_dict({
         **payload,
@@ -1231,6 +1259,9 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
 
         if enabling and not persisted_mapping_rows(merged.get("mappings")):
             raise ValueError(EMPTY_MAPPING_REFUSAL)
+        new_name = str(merged.get("name") or "")
+        if new_name.strip().lower() != (s.name or "").strip().lower():
+            assert_unique_schedule_name(new_name, exclude_id=schedule_id)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
         # A stamp names one route. Carrying it onto an edited destination made

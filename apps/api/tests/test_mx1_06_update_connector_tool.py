@@ -35,7 +35,11 @@ def staged(monkeypatch):
     import src.ai.copilot.ack_ledger as ledger_mod
 
     monkeypatch.setattr(ledger_mod, "get_ack_ledger", lambda: Ledger())
-    monkeypatch.setattr(lt, "_connector_dict", lambda cid="", name="": dict(_EXISTING) if (name or cid) in {"Warehouse", "c-wh"} else None)
+    monkeypatch.setattr(
+        lt,
+        "_connector_dict",
+        lambda cid="", name="", **_kw: dict(_EXISTING) if (name or cid) in {"Warehouse", "c-wh"} else None,
+    )
     return acks
 
 

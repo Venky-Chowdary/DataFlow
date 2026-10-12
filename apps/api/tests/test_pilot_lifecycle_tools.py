@@ -223,7 +223,7 @@ def test_resolve_job_ambiguity_becomes_question(monkeypatch):
 
 
 def test_delete_connector_never_guesses(monkeypatch, staged):
-    monkeypatch.setattr(lt, "_connector_dict", lambda connector_id="", name="": None)
+    monkeypatch.setattr(lt, "_connector_dict", lambda connector_id="", name="", **_kw: None)
     tr = lt.delete_connector(name="postgres")
     assert not tr.success and "No connector matched" in tr.error
     assert lt.delete_connector().error.startswith("Which connector")
@@ -232,7 +232,7 @@ def test_delete_connector_never_guesses(monkeypatch, staged):
 
 def test_delete_connector_stages_with_bound_schedules(monkeypatch, staged):
     monkeypatch.setattr(
-        lt, "_connector_dict", lambda connector_id="", name="": {"id": "c1", "name": "Warehouse", "type": "postgresql"}
+        lt, "_connector_dict", lambda connector_id="", name="", **_kw: {"id": "c1", "name": "Warehouse", "type": "postgresql"}
     )
     monkeypatch.setattr(lt, "_schedules_bound_to", lambda cid: ["Nightly Orders"])
     tr = lt.delete_connector(name="Warehouse")

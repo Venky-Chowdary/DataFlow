@@ -10,8 +10,9 @@ implementation with its own rules.
 
 Resolution is deliberately conservative. A job is picked by id, or by a
 status word ("the failed job", "the running transfer") only when exactly one
-job carries that status in the recent window; a connector or schedule is
-picked by the shared fuzzy matcher and any tie becomes a question.
+job carries that status in the recent window. A connector or schedule name
+matches in full (case-insensitive). Delete, update, and CDC prepare also
+refuse a dialect word. Two objects with the same name are an error.
 """
 
 from __future__ import annotations
@@ -618,12 +619,28 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
     return brief
 
 
-def _connector(tool: str, connector_id: str, name: str) -> tuple[dict[str, Any] | None, ToolResult | None]:
+# Delete, in-place edit, and CDC prepare write or destroy an instance.
+# A dialect word or a shared token is not enough to choose which one.
+_EXACT_NAME_TOOLS = frozenset({
+    "delete_connector",
+    "update_connector",
+    "prepare_cdc_source",
+})
+
+
+def _connector(
+    tool: str,
+    connector_id: str,
+    name: str,
+    *,
+    exact_name: bool | None = None,
+) -> tuple[dict[str, Any] | None, ToolResult | None]:
     if not (connector_id or "").strip() and not (name or "").strip():
         return None, _tool_result(tool, success=False, output=None,
                                 error="Which connector? Name a saved connector from Connectors.")
+    strict = tool in _EXACT_NAME_TOOLS if exact_name is None else exact_name
     try:
-        conn = _connector_dict(connector_id, name)
+        conn = _connector_dict(connector_id, name, exact_name=strict)
     except AmbiguousConnectorError as exc:
         return None, _tool_result(tool, success=False, output=None, error=exc.message)
     if not conn:
