@@ -18,7 +18,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from services import connector_store
 from services.connector_telemetry import connector_operation, driver_family
-from services.tracing import get_correlation_id
+from services.log_redaction import redact_log_text
+from services.safe_errors import public_error, safe_http_exception
 from services.value_serializer import sanitize_json_value
 
 router = APIRouter(prefix="/query", tags=["query"])
@@ -323,13 +324,18 @@ async def query_execute(
         )
     except HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
         # Defensive: prevent an unhandled ExceptionGroup from crashing the worker.
-        cid = get_correlation_id()
+        detail, cid = public_error(
+            exc,
+            event="query.execute.errored",
+            public_message="Query execution failed.",
+            status_code=500,
+        )
         return JSONResponse(
             status_code=500,
             content={
-                "detail": f"Query execution failed. Reference: {cid}",
+                "detail": detail,
                 "correlation_id": cid,
             },
         )
@@ -356,11 +362,15 @@ async def query_export(
         )
     except HTTPException:
         raise
-    except Exception:
-        cid = get_correlation_id()
+    except Exception as exc:
+        detail, _cid = public_error(
+            exc,
+            event="query.export.errored",
+            public_message="Query execution failed.",
+        )
         return QueryExportResult(
             success=False,
-            error=f"Query execution failed. Reference: {cid}",
+            error=detail,
             format=body.format,
         )
     if not rows:
@@ -408,11 +418,15 @@ async def query_export(
             row_count=len(rows),
             format=body.format,
         )
-    except Exception:
-        cid = get_correlation_id()
+    except Exception as exc:
+        detail, _cid = public_error(
+            exc,
+            event="query.export.errored",
+            public_message="Export failed.",
+        )
         return QueryExportResult(
             success=False,
-            error=f"Export failed. Reference: {cid}",
+            error=detail,
             format=body.format,
         )
 
@@ -460,7 +474,8 @@ async def query_schema(
             "Query schema introspection failed for %s: %s", body.connector_id, exc
         )
         raise HTTPException(
-            status_code=400, detail=f"Schema introspection failed: {exc}"
+            status_code=400,
+            detail=f"Schema introspection failed: {redact_log_text(str(exc))}",
         ) from exc
 
     col_types: dict[str, str] = dict(info.get("schema") or {})
@@ -633,11 +648,15 @@ def _export_to_connector(
             filename=body.destination or "",
             download_url=dest_summary.get("download_url", ""),
         )
-    except Exception:
-        cid = get_correlation_id()
+    except Exception as exc:
+        detail, _cid = public_error(
+            exc,
+            event="query.export.errored",
+            public_message="Export failed.",
+        )
         return QueryExportResult(
             success=False,
-            error=f"Export failed. Reference: {cid}",
+            error=detail,
             format=dest_connector.type,
         )
 
@@ -677,7 +696,12 @@ def _run_mongodb_query(connector, body):
     try:
         import pymongo  # noqa: F401
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"MongoDB driver unavailable: {exc}") from exc
+        raise safe_http_exception(
+            exc,
+            event="query.mongodb_driver.unavailable",
+            public_message="MongoDB driver unavailable.",
+            status_code=500,
+        ) from exc
 
     conn_str = connector.connection_string or _build_mongodb_connection_string(connector)
     client = _mongo_client(conn_str)
@@ -698,7 +722,10 @@ def _run_mongodb_query(connector, body):
                 rows = list(cursor)
                 return _normalize_rows(rows)
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid MongoDB filter JSON: {exc}") from exc
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid MongoDB filter JSON: {redact_log_text(str(exc))}",
+            ) from exc
 
     cursor = coll.find(query_filter).limit(body.limit)
     rows = list(cursor)
@@ -731,7 +758,8 @@ def _parse_mongodb_json(raw: str) -> Any:
         raise
     except Exception as exc:
         raise HTTPException(
-            status_code=400, detail=f"Invalid MongoDB query: {exc}"
+            status_code=400,
+            detail=f"Invalid MongoDB query: {redact_log_text(str(exc))}",
         ) from exc
     return demote_exact_json(parsed)
 
@@ -877,9 +905,14 @@ def _run_sql_query(connector, body):
     try:
         engine = get_sqlalchemy_engine(cfg)
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not create database engine: {exc}") from exc
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not create database engine: {redact_log_text(str(exc))}",
+        ) from exc
 
     from services.dialect_profiles import append_result_limit
 
@@ -927,7 +960,10 @@ def _run_sql_query(connector, body):
             schema = {**schema, **declared}
         return rows, columns, schema, False
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
+        raise HTTPException(
+            status_code=400,
+            detail=f"Query failed: {redact_log_text(str(exc))}",
+        ) from exc
 
 
 def _run_snowflake_query(connector, body):
@@ -967,7 +1003,7 @@ def _run_snowflake_query(connector, body):
             private_key_passphrase=connector.password or "",
         )
     except Exception as exc:
-        classified = classify_snowflake_connect_error(str(exc))
+        classified = classify_snowflake_connect_error(redact_log_text(str(exc)))
         raise HTTPException(
             status_code=400,
             detail=f"Could not connect to Snowflake: {classified or exc}",
@@ -1001,7 +1037,10 @@ def _run_snowflake_query(connector, body):
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
         return rows, columns, _column_schema(columns, rows), False
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
+        raise HTTPException(
+            status_code=400,
+            detail=f"Query failed: {redact_log_text(str(exc))}",
+        ) from exc
     finally:
         if conn is not None:
             try:

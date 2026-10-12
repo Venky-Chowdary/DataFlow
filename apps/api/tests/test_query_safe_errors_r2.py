@@ -11,10 +11,10 @@ from services.logging_config import ContextFilter, JsonFormatter, TextFormatter
 from src.routers import query_router
 
 _ERROR = (
-    "password=S3NT1NEL-pw postgresql://u:S3NT1NEL@h/db "
-    "row S3NT1NEL-row-value"
+    "password=S3NT1NEL-pw postgresql://u:S3NT1NEL-dsn@h/db "
+    "row=S3NT1NEL-row SELECT * FROM S3NT1NEL_tbl"
 )
-_SENTINELS = ("S3NT1NEL-pw", "S3NT1NEL", "S3NT1NEL-row-value")
+_SENTINELS = ("S3NT1NEL-pw", "S3NT1NEL-dsn", "S3NT1NEL-row", "S3NT1NEL_tbl")
 
 
 class _Capture(logging.Handler):
@@ -70,19 +70,23 @@ def safe_query_client(monkeypatch):
 
 @pytest.fixture
 def connector_logs():
-    logger = logging.getLogger("dataflow.connector")
-    old_level = logger.level
-    old_propagate = logger.propagate
+    loggers = [
+        logging.getLogger("dataflow.connector"),
+        logging.getLogger("dataflow.errors"),
+    ]
+    old_levels = [(logger, logger.level, logger.propagate) for logger in loggers]
     capture = _Capture()
-    logger.setLevel(logging.DEBUG)
-    logger.propagate = False
-    logger.addHandler(capture)
+    for logger in loggers:
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        logger.addHandler(capture)
     try:
         yield capture
     finally:
-        logger.removeHandler(capture)
-        logger.setLevel(old_level)
-        logger.propagate = old_propagate
+        for logger, old_level, old_propagate in old_levels:
+            logger.removeHandler(capture)
+            logger.setLevel(old_level)
+            logger.propagate = old_propagate
 
 
 def _assert_safe(response, capture: _Capture, cid: str) -> dict:
@@ -91,6 +95,18 @@ def _assert_safe(response, capture: _Capture, cid: str) -> dict:
     assert response.headers["X-Correlation-ID"] == cid
     assert all(sentinel not in rendered for sentinel in _SENTINELS)
     return body
+
+
+def _assert_error_event(capture: _Capture, *, event: str, cid: str) -> None:
+    records = [
+        record
+        for record in capture.records
+        if getattr(record, "event", None) == event
+        and getattr(record, "correlation_id", None) == cid
+    ]
+    assert records, f"missing {event} error event"
+    assert records[-1].outcome == "errored"
+    assert records[-1].error_type == "RuntimeError"
 
 
 def test_query_execute_uses_safe_error_and_correlation_id(
@@ -114,6 +130,7 @@ def test_query_execute_uses_safe_error_and_correlation_id(
         "detail": f"Query execution failed. Reference: {cid}",
         "correlation_id": cid,
     }
+    _assert_error_event(connector_logs, event="query.execute.errored", cid=cid)
 
 
 def test_query_export_query_failure_uses_safe_reference(
@@ -134,6 +151,7 @@ def test_query_export_query_failure_uses_safe_reference(
     assert response.status_code == 200
     body = _assert_safe(response, connector_logs, cid)
     assert body["error"] == f"Query execution failed. Reference: {cid}"
+    _assert_error_event(connector_logs, event="query.export.errored", cid=cid)
 
 
 def test_query_export_file_failure_uses_safe_reference(
@@ -161,6 +179,7 @@ def test_query_export_file_failure_uses_safe_reference(
     assert response.status_code == 200
     body = _assert_safe(response, connector_logs, cid)
     assert body["error"] == f"Export failed. Reference: {cid}"
+    _assert_error_event(connector_logs, event="query.export.errored", cid=cid)
 
 
 def test_query_export_connector_failure_uses_safe_reference(
@@ -195,3 +214,4 @@ def test_query_export_connector_failure_uses_safe_reference(
     assert response.status_code == 200
     body = _assert_safe(response, connector_logs, cid)
     assert body["error"] == f"Export failed. Reference: {cid}"
+    _assert_error_event(connector_logs, event="query.export.errored", cid=cid)
