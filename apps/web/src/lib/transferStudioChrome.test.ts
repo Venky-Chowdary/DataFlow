@@ -605,6 +605,9 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(xform, /Back to Destination/);
     const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
     assert.match(shape, /Continue without transforming/);
+    // Rules loaded but no shape steps → CTA is "Continue to Map".
+    assert.match(shape, /Continue to Map/);
+    assert.match(xform, /ruleCount: ruleReport\?\.rule_count/);
     assert.match(shape, /Continue with this transform/);
     assert.match(xform, /continueState\.label/);
     assert.match(mapStep, /Continue to Validate →/);

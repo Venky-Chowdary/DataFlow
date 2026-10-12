@@ -519,7 +519,7 @@ export function mergeCompiledShapeSteps(
 }
 
 export function ruleStatusLabel(status: string): string {
-  if (status === "executable") return "Applied";
+  if (status === "executable") return "Ready";
   if (status === "conflict") return "Conflict";
   return "Needs review";
 }
@@ -540,21 +540,57 @@ export function ruleConfidenceLabel(confidence: number): string {
 
 const VALIDATION_DEST = /^v\d+$/i;
 const SOURCE_MISSING = /source column .+ is not on the selected source/i;
+const DIRECT_KINDS = new Set(["direct", "rename", "passthrough"]);
+const IDENTITY_TRANSFORMS = new Set(["", "none", "identity"]);
+const REVIEW_CONFIDENCE = /confidence|low[- ]confidence|fuzzy/i;
 
 /**
- * A review row the operator may accept as Direct: both columns bound, the
- * dest is not a validation id, and the compiler did not refuse the source.
- * Contracts and joins stay review — accepting them would invent a write.
+ * A review row the operator may accept as Direct — only when the compiled
+ * meaning really is a rename/passthrough: a direct-ish kind, an identity
+ * transform, both columns bound, and no issue beyond review confidence.
+ * Anything the compiler could not parse (unknown, contract, lookup, …)
+ * stays review — accepting it would invent a write.
  */
 export function canAcceptAsDirect(rule: CompiledRule): boolean {
   if (rule.status !== "needs_confirmation") return false;
-  if (rule.kind === "contract" || rule.kind === "join") return false;
+  if (!DIRECT_KINDS.has((rule.kind || "").toLowerCase())) return false;
+  if (!IDENTITY_TRANSFORMS.has((rule.transform || "").toLowerCase())) return false;
   const source = (rule.source_column || "").trim();
   const dest = (rule.dest_column || "").trim();
   if (!source || !dest) return false;
   if (VALIDATION_DEST.test(dest)) return false;
   if ((rule.issues || []).some((issue) => SOURCE_MISSING.test(issue))) return false;
+  if ((rule.issues || []).some((issue) => !REVIEW_CONFIDENCE.test(issue))) return false;
   return true;
+}
+
+export function ruleEdgeLabel(rule: CompiledRule): string {
+  if (rule.kind === "contract") {
+    return rule.dest_column || rule.source_column || "—";
+  }
+  return `${rule.source_column || "—"} → ${rule.dest_column || "—"}`;
+}
+
+export function ruleReviewHint(rule: CompiledRule, canAcceptHere: boolean): string {
+  if (rule.kind === "contract" && rule.status === "executable") {
+    return "Destination validation — compiled IR, not a Transform write.";
+  }
+  if (rule.kind === "contract") {
+    return "Validate contract — confirm the column binding. This is not a Transform write.";
+  }
+  if (rule.kind === "join") {
+    return "Joins stay in review — this compiler will not invent a grain.";
+  }
+  if (canAcceptAsDirect(rule)) {
+    if (!canAcceptHere) {
+      return "Clear rename / passthrough the compiler left for you. Accept it as Direct on Map, or remap there.";
+    }
+    return "Clear rename / passthrough the compiler left for you. Accept as Direct to put it on Map, or leave it and remap there.";
+  }
+  if (rule.status !== "executable") {
+    return "Not compiled — rewrite this rule in a supported form, or add an explicit Transform step, then re-upload.";
+  }
+  return "The compiler will not invent an algorithm from this sentence. Confirm or remap on Map.";
 }
 
 /** Operator accept: the pair is a rename / passthrough. No invented transform. */

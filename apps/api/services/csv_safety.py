@@ -5,6 +5,11 @@ a CR is executed as a formula when the file is opened in Excel/Sheets.
 Neutralize by prefixing a single quote — the cell then renders as text.
 Mirrors ``classify.formula_prefix`` (minus the bullet exception: on export
 we cannot tell prose from injection, so ``-``-leading text is quoted too).
+
+Scope: operator-facing reports only — redacted samples and quarantine
+reports. Never apply this to customer data-plane output (CSV/TSV/XLSX
+destination writes, file-export landings): a ``'`` prefix silently mutates
+values like ``-5`` or ``=A1`` in the delivered data.
 """
 
 from __future__ import annotations

@@ -369,6 +369,7 @@ export function TransferTransformStep({
     busy,
     previewMatchesSteps: previewedStepsKey === stepsKey && preview !== null,
     syncMode,
+    ruleCount: ruleReport?.rule_count ?? 0,
   });
   const preloadRefused = preloadTransformRefused(syncMode);
   const catalogColumns = showAllColumns || attention === 0
@@ -583,8 +584,9 @@ export function TransferTransformStep({
         <div className="df2-rule-import-copy">
           <strong>Business rules</strong>
           <p>
-            Upload the mapping workbook (Excel, CSV, TSV or JSON). Closed-form
-            rows land on this recipe. Anything else stays in review.
+            Upload the mapping workbook (Excel, CSV, TSV or JSON). Rules that
+            can run exactly are compiled into steps here; everything else waits
+            for your review.
           </p>
           <details className="df2-rule-import-detail">
             <summary>What this upload does</summary>
@@ -611,7 +613,7 @@ export function TransferTransformStep({
           <input
             ref={fileInputRef}
             type="file"
-            accept=".xlsx,.xlsm,.csv,.tsv,.txt,.json,.ndjson,application/json,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            accept=".xlsx,.xlsm,.xls,.csv,.tsv,.txt,.json,.ndjson,application/json,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
             hidden
             onChange={(event) => void onPickRules(event.target.files?.[0])}
           />

@@ -12,7 +12,10 @@ import {
   namedRuleDisplay,
   proofRuleClaim,
   ruleCensus,
+  ruleEdgeLabel,
   ruleReportSummary,
+  ruleReviewHint,
+  ruleStatusLabel,
   ruleToEvidence,
   type CompiledRule,
   type RuleCompileReport,
@@ -58,12 +61,13 @@ const report: RuleCompileReport = {
       source_column: "mystery",
       dest_column: "segment",
       rule_text: "use the legacy id unless migrated",
-      kind: "unknown",
-      kind_label: "Needs review",
+      kind: "direct",
+      kind_label: "Direct map",
       plane: "review",
-      confidence: 0.35,
+      confidence: 0.62,
+      transform: "none",
       status: "needs_confirmation",
-      issues: ["rule text is not a closed form this compiler can execute"],
+      issues: ["low-confidence binding — confirm the rename"],
       provenance: { sheet: "Rules", row: 4 },
     },
   ],
@@ -416,6 +420,39 @@ describe("operator accept of a review rule", () => {
       issues: ['Source column "annual_salary" is not on the selected source.'],
     };
     assert.equal(canAcceptAsDirect(missing), false);
+  });
+
+  it("refuses Accept-as-Direct for an unknown rule with bound columns", () => {
+    const v007: CompiledRule = {
+      ...report.rules[2],
+      kind: "unknown",
+      kind_label: "Needs review",
+      status: "needs_confirmation",
+      issues: ["rule text is not a closed form this compiler can execute"],
+    };
+    assert.equal(canAcceptAsDirect(v007), false);
+    // The hint tells the operator to rewrite or add an explicit step.
+    assert.match(
+      ruleReviewHint(v007, true),
+      /Not compiled — rewrite this rule in a supported form, or add an explicit Transform step/,
+    );
+    // A bound rename still passes.
+    assert.equal(canAcceptAsDirect(report.rules[2]), true);
+    assert.match(ruleReviewHint(report.rules[2], true), /Accept as Direct/);
+  });
+
+  it("labels pre-run executable rules Ready and shows the rule id once", () => {
+    assert.equal(ruleStatusLabel("executable"), "Ready");
+    assert.equal(ruleStatusLabel("conflict"), "Conflict");
+    assert.equal(ruleStatusLabel("needs_confirmation"), "Needs review");
+    const contract: CompiledRule = {
+      ...report.rules[0],
+      kind: "contract",
+      named_rule: "V001",
+      dest_column: "email",
+    };
+    // The df2-rule-id chip already renders the id — the edge must not repeat it.
+    assert.equal(ruleEdgeLabel(contract), "email");
   });
 
   it("does not merge destination contracts onto Map writes", () => {

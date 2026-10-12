@@ -1315,7 +1315,7 @@ export function ColumnReviewPanel({
                       </div>
                     </td>
                   )}
-                  <td className="df2-column-reason" title={m.businessRule?.text || m.reason}>
+                  <td className="df2-column-reason" title={m.businessRule ? `${m.businessRule.kindLabel} — ${m.businessRule.text || m.reason}` : m.reason}>
                     {m.businessRule ? (
                       <div className="df2-column-rule-why">
                         <span className="df2-column-rule-kind">{m.businessRule.kindLabel}</span>

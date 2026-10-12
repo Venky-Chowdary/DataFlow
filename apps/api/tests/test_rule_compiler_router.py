@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -66,6 +67,21 @@ def test_valid_and_empty_form_fields_still_compile():
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["buckets"]["executable"] == 1
+
+
+def test_xls_workbook_imports_via_biff_branch():
+    from pathlib import Path
+
+    fixture = Path(__file__).parent / "fixtures" / "legacy_events.xls"
+    if not fixture.exists():
+        pytest.skip("legacy_events.xls fixture not present")
+    client = _client()
+    response = client.post(
+        "/api/v1/transfer/rules/import",
+        files={"file": ("legacy_events.xls", fixture.read_bytes(), "application/vnd.ms-excel")},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["rule_count"] >= 1
 
 
 def test_bad_extension_is_400():

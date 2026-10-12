@@ -142,9 +142,10 @@
   word-break: break-word;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
   overflow: hidden;
-  max-height: calc(1.35em * 2);
+  max-height: calc(1.35em * 3);
 }
 
 .df2-page-transfer-studio .df2-column-review-table th {
@@ -2285,9 +2286,15 @@ th.df2-type-string .df2-type-badge {
 
 .df2-column-dest-type-select {
   max-width: 148px;
+  min-width: 96px;
   font-size: 11px !important;
   padding: 3px 6px !important;
   font-weight: 600;
+  line-height: 1.4;
+  height: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .df2-structure-preview-dialog .df2-modal-body {

@@ -9,7 +9,9 @@ import {
   ruleActionLabel,
   ruleCensus,
   ruleConfidenceLabel,
+  ruleEdgeLabel,
   ruleReportSummary,
+  ruleReviewHint,
   ruleStatusLabel,
 } from "../../lib/businessRules";
 
@@ -45,33 +47,6 @@ function planeLabel(plane?: string): string {
   return "Review";
 }
 
-function edgeLabel(rule: CompiledRule): string {
-  if (rule.kind === "contract") {
-    const col = rule.dest_column || rule.source_column || "—";
-    const name = rule.named_rule ? ` · ${rule.named_rule}` : "";
-    return `${col}${name}`;
-  }
-  return `${rule.source_column || "—"} → ${rule.dest_column || "—"}`;
-}
-
-function reviewHint(rule: CompiledRule, canAcceptHere: boolean): string {
-  if (rule.kind === "contract" && rule.status === "executable") {
-    return "Destination validation — compiled IR, not a Transform write.";
-  }
-  if (rule.kind === "contract") {
-    return "Validate contract — confirm the column binding. This is not a Transform write.";
-  }
-  if (rule.kind === "join") {
-    return "Joins stay in review — this compiler will not invent a grain.";
-  }
-  if (canAcceptAsDirect(rule)) {
-    if (!canAcceptHere) {
-      return "Clear rename / passthrough the compiler left for you. Accept it as Direct on Map, or remap there.";
-    }
-    return "Clear rename / passthrough the compiler left for you. Accept as Direct to put it on Map, or leave it and remap there.";
-  }
-  return "The compiler will not invent an algorithm from this sentence. Confirm or remap on Map.";
-}
 
 function ruleKey(rule: CompiledRule, index: number): string {
   return `${rule.provenance?.sheet || "sheet"}-${rule.provenance?.row || index}-${rule.source_column}-${rule.dest_column}`;
@@ -187,7 +162,7 @@ export function BusinessRuleLedger({
                 <span className="df2-rule-line-meta">{provenance(rule) || `line ${index + 1}`}</span>
                 <span className="df2-rule-line-edge" title={rule.resolved_rule || namedRuleDisplay(rule)}>
                   {rule.named_rule ? <span className="df2-rule-id">{rule.named_rule}</span> : null}
-                  {edgeLabel(rule)}
+                  {ruleEdgeLabel(rule)}
                 </span>
                 <span className="df2-rule-line-read">
                   {rule.interpretation || rule.kind_label}
@@ -206,10 +181,10 @@ export function BusinessRuleLedger({
                   <div><dt>Row</dt><dd>{rule.provenance?.row || "—"}</dd></div>
                   <div><dt>Original instruction</dt><dd>{rule.rule_text || "(direct)"}</dd></div>
                   <div><dt>Compiled operation</dt><dd>{(rule.kind || "unknown").toUpperCase()}</dd></div>
-                  <div><dt>Expression</dt><dd>{compiledExpression(rule) || "—"}</dd></div>
+                  <div><dt>Expression</dt><dd>{rule.status === "executable" ? (compiledExpression(rule) || "—") : "Not compiled"}</dd></div>
                   <div><dt>Output</dt><dd>{rule.dest_column || rule.map_source || "—"}</dd></div>
                   <div><dt>Action</dt><dd>{ruleActionLabel(rule.action, rule.status)}</dd></div>
-                  <div><dt>On fail</dt><dd>{rule.on_fail || "quarantine"}</dd></div>
+                  <div><dt>On fail</dt><dd>{rule.status === "executable" ? (rule.on_fail || "quarantine") : "Not enforced"}</dd></div>
                   <div>
                     <dt>Execution</dt>
                     <dd>Land on Proof after the run — compile does not invent row counts.</dd>
@@ -228,7 +203,7 @@ export function BusinessRuleLedger({
               ) : null}
               {rule.status === "needs_confirmation" ? (
                 <span className="df2-rule-line-next">
-                  <span>{reviewHint(rule, Boolean(onAcceptDirect))}</span>
+                  <span>{ruleReviewHint(rule, Boolean(onAcceptDirect))}</span>
                   {onAcceptDirect && canAcceptAsDirect(rule) ? (
                     <Button
                       type="button"

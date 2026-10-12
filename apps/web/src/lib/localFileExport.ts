@@ -1,5 +1,4 @@
 import type { EditableMapping } from "./mapping";
-import { neutralizeFormulaCell } from "./csvSafety";
 import { applyLocalTransform } from "./localTransform";
 import type { NumberLocale } from "./numberLocale";
 import type { TransferResult } from "./types";
@@ -18,7 +17,7 @@ function mapRow(
   return out;
 }
 
-function serializeRows(rows: Record<string, unknown>[], format: string): { blob: Blob; mime: string; ext: string } {
+export function serializeRows(rows: Record<string, unknown>[], format: string): { blob: Blob; mime: string; ext: string } {
   const fmt = format.toLowerCase();
   if (fmt === "json") {
     return {
@@ -34,7 +33,7 @@ function serializeRows(rows: Record<string, unknown>[], format: string): { blob:
   const delimiter = fmt === "tsv" ? "\t" : ",";
   const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
   const escape = (v: unknown) => {
-    const s = neutralizeFormulaCell(v);
+    const s = v == null ? "" : String(v);
     if (s.includes(delimiter) || s.includes('"') || s.includes("\n")) {
       return `"${s.replace(/"/g, '""')}"`;
     }
