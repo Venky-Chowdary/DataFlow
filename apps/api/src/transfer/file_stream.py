@@ -81,6 +81,7 @@ from connectors.writer_common import (
     row_fingerprints,
     transform_error_policy_for_validation_mode,
 )
+
 from services.dest_precount import (
     PRECOUNT_KEY,
     begin_overwrite_source_keys,
@@ -130,6 +131,35 @@ from .adapters import (
     resolve_dest_table,
 )
 from .stream import _declared_destination_key_columns, _write_batch
+
+_EMPTY_INPUT_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def _checksum_without_fingerprints(
+    *,
+    source_rows: int,
+    fingerprint_rows: int,
+    writer_checksum: str,
+) -> tuple[str, str]:
+    if fingerprint_rows:
+        return str(writer_checksum or ""), "inline_write_pass"
+    if source_rows > 0 or writer_checksum == _EMPTY_INPUT_SHA256:
+        return "", "source_reread_unavailable"
+    if writer_checksum:
+        return str(writer_checksum), "writer_last_batch"
+    return "", "source_reread_unavailable"
+
+
+def _resolve_file_stream_target_columns(
+    dest_type: str, mappings: list[dict[str, Any]], column_types: dict[str, str]
+) -> tuple[list[str], list[str]]:
+    return resolve_target_columns(
+        mappings,
+        column_types,
+        preserve_case=True,
+        table_exists=False if dest_type in ("s3", "gcs", "adls") else None,
+    )
+
 
 STREAMABLE_TYPES = {
     "csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc", "xml",
@@ -1321,8 +1351,8 @@ def stream_file_to_database(
     )
 
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
-    target_cols, logical_types = resolve_target_columns(
-        mappings, column_types, preserve_case=True
+    target_cols, logical_types = _resolve_file_stream_target_columns(
+        dest_type, mappings, column_types
     )
     fingerprint_dest_types = {
         target_cols[i]: logical_types[i] for i in range(len(target_cols))
@@ -2408,6 +2438,21 @@ def stream_file_to_database(
         dest_summary["identity_hash_aligned"] = False
         if final_checksum:
             dest_summary["checksum_mode"] = "inline_write_pass"
+    if not fp_accumulator.total and (
+        not final_checksum
+        or final_checksum == _EMPTY_INPUT_SHA256
+        or (
+            source_rows_seen > 0
+            and dest_summary.get("checksum_mode") != "source_reread"
+        )
+    ):
+        final_checksum, fallback_mode = _checksum_without_fingerprints(
+            source_rows=source_rows_seen,
+            fingerprint_rows=0,
+            writer_checksum=last_checksum,
+        )
+        last_checksum = final_checksum
+        dest_summary["checksum_mode"] = fallback_mode
     phase_profile.add(
         PHASE_CHECKSUM,
         time.perf_counter() - checksum_started,
