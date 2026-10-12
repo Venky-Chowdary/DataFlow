@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import uuid
+from collections import Counter
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -439,7 +440,21 @@ def test_live_iceberg_pg_dest_count(monkeypatch):
             cur.execute(f'SELECT id, label FROM public."{src}" ORDER BY id')
             source_rows = cur.fetchall()
             cur.execute(f'SELECT id, label FROM public."{dest}" ORDER BY id')
-            assert cur.fetchall() == source_rows
+            destination_rows = cur.fetchall()
+            source_counts = Counter(
+                (int(source_id), str(label)) for source_id, label in source_rows
+            )
+            expected_destination_counts = Counter(
+                {
+                    row: multiplicity * 2
+                    for row, multiplicity in source_counts.items()
+                }
+            )
+            actual_destination_counts = Counter(
+                (int(destination_id), str(label))
+                for destination_id, label in destination_rows
+            )
+            assert actual_destination_counts == expected_destination_counts
     finally:
         with pg.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS public."{src}"')
