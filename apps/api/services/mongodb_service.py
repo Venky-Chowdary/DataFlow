@@ -55,7 +55,12 @@ def emit_job_status_changed(
     status: str,
     workspace_id: str | None = None,
 ) -> None:
-    """Emit ``job.status.changed`` for a persisted transition (not progress ticks)."""
+    """Emit ``job.status.changed`` for a persisted transition (not progress ticks).
+
+    ``from_status`` comes from the read taken before the write, so two racing
+    writers can both report the same prior status; ``from_status_source`` says
+    so rather than paying for a compare-and-swap on every status write.
+    """
     if str(previous_status or "") == str(status or ""):
         return
     outcome, level = _job_status_outcome(status)
@@ -67,6 +72,7 @@ def emit_job_status_changed(
         job_id=str(job_id),
         workspace_id=str(workspace_id) if workspace_id else None,
         from_status=str(previous_status) if previous_status else None,
+        from_status_source="prior_read",
         to_status=str(status),
     )
 

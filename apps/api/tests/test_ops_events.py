@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -216,6 +217,25 @@ def test_operation_reraises_identical_exception(cap):
     assert record.error_type == "KeyError"
     assert record.duration_ms >= 0
     assert SENTINEL not in _rendered(record)
+
+
+@pytest.mark.parametrize(
+    "interrupt", [asyncio.CancelledError(), KeyboardInterrupt(), GeneratorExit()]
+)
+def test_operation_cancellation_emits_cancelled_info_and_reraises_same(cap, interrupt):
+    logger, handler = cap
+    with pytest.raises(type(interrupt)) as info:
+        with operation(logger, "transfer.run", object_kind="table") as res:
+            res["rows_written"] = 7
+            raise interrupt
+    assert info.value is interrupt
+    (record,) = handler.records
+    assert record.getMessage() == "transfer.run.cancelled"
+    assert record.outcome == "cancelled"
+    assert record.levelno == logging.INFO
+    assert record.error_type == type(interrupt).__name__
+    assert record.rows_written == 7
+    assert record.duration_ms >= 0
 
 
 def test_log_context_stamps_and_restores(cap):

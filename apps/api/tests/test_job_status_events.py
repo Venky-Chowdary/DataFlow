@@ -79,6 +79,7 @@ def test_memory_backend_emits_one_event_per_transition(capture):
         assert record.getMessage() == "job.status.changed"
         assert record.job_id == job_id
         assert record.workspace_id == "ws-42"
+        assert record.from_status_source == "prior_read"
     _assert_no_sentinel(capture.records)
 
 

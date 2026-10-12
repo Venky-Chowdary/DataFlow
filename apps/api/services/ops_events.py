@@ -25,6 +25,7 @@ WARNING and a failure inside the helper degrades to a minimal fallback line.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -67,6 +68,9 @@ _RECORD_ATTRS = frozenset(
 ) | {"message", "asctime"}
 
 _SCALARS = (str, int, float, bool)
+
+#: Interruptions, not defects: a cancelled task, Ctrl-C, or a closed generator.
+_CANCELLATIONS = (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit)
 
 
 def validate_event(event: str, outcome: str) -> None:
@@ -178,10 +182,11 @@ def operation(
     emit_start: bool = False,
     **fields: Any,
 ) -> Iterator[dict[str, Any]]:
-    """Time a block and emit ``{prefix}.succeeded`` or ``{prefix}.failed``.
+    """Time a block and emit ``{prefix}.succeeded``, ``.failed`` or ``.cancelled``.
 
-    Yields a dict the block fills with result fields (counts, verdicts). The
-    original exception instance is re-raised untouched.
+    Yields a dict the block fills with result fields (counts, verdicts). Task
+    cancellation, KeyboardInterrupt and GeneratorExit emit ``.cancelled`` at
+    INFO. The original exception instance is always re-raised untouched.
     """
     result: dict[str, Any] = {}
     if emit_start:
@@ -189,6 +194,16 @@ def operation(
     started = time.monotonic()
     try:
         yield result
+    except _CANCELLATIONS as exc:
+        emit_event(
+            logger,
+            f"{prefix}.cancelled",
+            outcome="cancelled",
+            duration_ms=(time.monotonic() - started) * 1000.0,
+            error=exc,
+            **{**fields, **result},
+        )
+        raise
     except BaseException as exc:
         emit_event(
             logger,
