@@ -137,6 +137,9 @@ def test_assert_redo_continuity_undetermined_inventory_warns(
 
 
 def _oracle_admin_sql(sql: str) -> str:
+    statement = sql.rstrip()
+    if statement and not statement.endswith(";"):
+        statement += ";"
     proc = subprocess.run(
         [
             "docker",
@@ -149,7 +152,7 @@ def _oracle_admin_sql(sql: str) -> str:
             "-lc",
             "sqlplus -s / as sysdba",
         ],
-        input=f"WHENEVER SQLERROR EXIT SQL.SQLCODE\n{sql}\nEXIT\n",
+        input=f"WHENEVER SQLERROR EXIT SQL.SQLCODE\n{statement}\nEXIT\n",
         capture_output=True,
         text=True,
         check=False,

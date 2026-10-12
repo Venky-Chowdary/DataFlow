@@ -40,6 +40,63 @@ def pytest_configure(config):
     )
     config.addinivalue_line("markers", "live: optional live vendor smoke test")
 
+
+@pytest.fixture(autouse=True)
+def _oracle_transaction_detection_grant_for_opt_out_live_tests(request):
+    module_name = Path(str(request.node.path)).stem
+    supported_modules = {
+        "test_cdc_oracle_ddl_schema_history",
+        "test_cdc_oracle_logminer_lob_live",
+        "test_cdc_oracle_logminer_transfer_e2e",
+        "test_cdc_poll_reconnects_live",
+        "test_oracle_logminer_log_files",
+    }
+    if module_name not in supported_modules:
+        yield
+        return
+
+    callspec = getattr(request.node, "callspec", None)
+    params = getattr(callspec, "params", {})
+    always_opt_out = (
+        module_name == "test_cdc_oracle_ddl_schema_history"
+        and request.node.name == "test_oracle_logminer_records_live_ddl_without_emitting_it_as_data"
+    ) or (
+        module_name == "test_oracle_logminer_log_files"
+        and request.node.name.startswith(
+            (
+                "test_live_mid_mine_failure_ends_session_and_retry_has_no_loss_or_duplicates",
+                "test_live_archived_online_sequence_registers_without_ora_01289",
+            )
+        )
+    )
+    if params.get("txn_buffer") is not False and not always_opt_out:
+        yield
+        return
+
+    from test_cdc_oracle_logminer_transfer_e2e import (
+        _oracle_cfg,
+        _oracle_logminer_ready,
+    )
+    from test_cdc_oracle_logminer_txn_live import (
+        _oracle_v_transaction_grant_count,
+        _oracle_v_transaction_grant_user,
+        _set_oracle_v_transaction_grant,
+    )
+
+    if not _oracle_logminer_ready():
+        yield
+        return
+
+    user = _oracle_v_transaction_grant_user(_oracle_cfg())
+    already_granted = _oracle_v_transaction_grant_count(user) > 0
+    if not already_granted:
+        _set_oracle_v_transaction_grant(user, enabled=True)
+    try:
+        yield
+    finally:
+        if not already_granted:
+            _set_oracle_v_transaction_grant(user, enabled=False)
+
 # fakesnow keeps the emulated warehouse in a DuckDB file, and DuckDB allows a
 # single writer per file. Under `pytest -n` every worker would open the same
 # default path and all but one would die on "Conflicting lock is held", so the

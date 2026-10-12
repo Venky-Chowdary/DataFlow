@@ -216,8 +216,33 @@ def probe_log_capture(
     from connectors.oracle_change_stream import OracleFlashbackCdc
     from connectors.oracle_logminer import OracleLogMinerCdc
 
-    logminer, _ = _try_reader(OracleLogMinerCdc, cfg, schema=schema, **common)
+    logminer, reader = _try_reader(OracleLogMinerCdc, cfg, schema=schema, **common)
     if logminer:
+        from connectors.oracle_logminer_txn import oracle_txn_buffer_enabled
+
+        if not oracle_txn_buffer_enabled():
+            try:
+                reader._probe_oldest_open_txn()
+            except Exception as exc:  # noqa: BLE001 — unsafe opt-out must block preflight
+                message = str(exc)
+                classification_text = message
+                if "ORA-00942" in message.upper() or "ORA-01031" in message.upper():
+                    classification_text = (
+                        f"insufficient privilege to inspect V$TRANSACTION: {message}"
+                    )
+                refusal = classify_log_capture_failure("oracle", classification_text)
+                detail = (
+                    f"{refusal.detail}. DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires "
+                    "SELECT ON V_$TRANSACTION (for example, GRANT SELECT ON "
+                    "V_$TRANSACTION TO <cdc user>)."
+                )
+                return LogCaptureProbe(
+                    dialect,
+                    False,
+                    "logminer",
+                    refusal.cause,
+                    detail,
+                )
         return LogCaptureProbe(dialect, True, "logminer")
     flashback, _ = _try_reader(OracleFlashbackCdc, cfg, schema=schema, **common)
     if flashback:

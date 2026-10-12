@@ -151,7 +151,7 @@ def test_late_redo_at_window_end_is_remined_exactly_once(
 ) -> None:
     from services.cdc_exactly_once import batch_lsn, compare_lsn
 
-    monkeypatch.delenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", raising=False)
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     reader = OracleLogMinerCdc(
         {"host": "localhost", "database": "ORCL", "username": "APP"},
         table="ORDERS",
@@ -162,6 +162,7 @@ def test_late_redo_at_window_end_is_remined_exactly_once(
         ),
     )
     reader.phase = "streaming"
+    reader._probe_oldest_open_txn = lambda _cur=None: None
     cursor = MagicMock()
     cursor.fetchone.return_value = (12,)
     conn = MagicMock()
@@ -318,8 +319,9 @@ def test_start_logminer_fails_closed_with_no_redo_files():
         assert "no redo" in str(exc).lower()
 
 
-def test_poll_truncated_window_does_not_skip_past_last_row():
+def test_poll_truncated_window_does_not_skip_past_last_row(monkeypatch):
     """A full window defers its trailing key group for the next poll."""
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     cdc = OracleLogMinerCdc(
         {"host": "localhost", "database": "ORCL", "username": "APP"},
         table="orders",
@@ -329,6 +331,7 @@ def test_poll_truncated_window_does_not_skip_past_last_row():
         resume_token=encode_logminer_token(10, table="ORDERS", phase="streaming"),
     )
     cdc.phase = "streaming"
+    monkeypatch.setattr(cdc, "_probe_oldest_open_txn", lambda _cur=None: None)
 
     mined = [
         (

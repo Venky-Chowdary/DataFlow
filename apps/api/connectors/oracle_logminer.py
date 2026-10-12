@@ -127,6 +127,32 @@ class OracleLogMinerReadError(RuntimeError):
         )
 
 
+class OracleOpenTxnDetectionUnavailable(OracleLogMinerReadError):
+    code = "oracle_open_txn_detection_unavailable"
+
+    def __init__(
+        self,
+        exc: BaseException,
+        *,
+        table: str = "",
+        cursor_key: str = "",
+    ) -> None:
+        self.code = "oracle_open_txn_detection_unavailable"
+        message = (
+            "Oracle LogMiner buffer-off requires open-transaction detection, but "
+            f"the V$TRANSACTION probe failed ({exc}). Grant SELECT ON "
+            "V_$TRANSACTION (for example, GRANT SELECT ON V_$TRANSACTION TO "
+            "<cdc user>) or re-enable the Oracle transaction buffer (unset "
+            "DATAFLOW_CDC_ORACLE_TXN_BUFFER)."
+        )
+        super().__init__(
+            exc,
+            table=table,
+            cursor_key=cursor_key,
+            message=message,
+        )
+
+
 _OP_MAP = {
     "INSERT": "insert",
     "UPDATE": "update",
@@ -1313,6 +1339,8 @@ class OracleLogMinerCdc:
         from connectors.oracle_logminer_txn import oracle_txn_buffer_enabled
 
         self._txn_buffer_enabled = oracle_txn_buffer_enabled()
+        self._open_txn_detection_checked = False
+        self._open_txn_hold_warnings: dict[tuple[int, int, int], float] = {}
         self._poll_scn = int(state.get("poll_scn") or self.scn)
         self._poll_rs_id = str(state.get("poll_rs_id") or self.rs_id)
         self._poll_ssn = int(state.get("poll_ssn") or self.ssn)
@@ -2201,6 +2229,11 @@ class OracleLogMinerCdc:
             cur.execute("SELECT current_scn FROM v$database")
             head = cur.fetchone()
             end_scn = max(int(end_scn), int(head[0] or end_scn) if head else int(end_scn))
+            if not self._txn_buffer_enabled:
+                raw_end_scn = end_scn
+                end_scn = self._hold_at_oldest_open_txn(end_scn)
+                if end_scn < raw_end_scn and end_scn <= self.scn:
+                    return [], int(end_scn)
             with _logminer_session(
                 cur,
                 start_scn=max(1, int(start_scn)),
@@ -2212,6 +2245,75 @@ class OracleLogMinerCdc:
                     cur, table_predicate=table_predicate, limit=limit
                 )
         return rows, int(end_scn)
+
+    def _probe_oldest_open_txn(self) -> tuple[int, int, int, int, float] | None:
+        sql = """
+            SELECT START_SCN, XIDUSN, XIDSLOT, XIDSQN, (SYSDATE - START_DATE) * 86400
+              FROM V$TRANSACTION ORDER BY START_SCN FETCH FIRST 1 ROWS ONLY
+        """
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql)
+                    row = cur.fetchone()
+            if not row:
+                return None
+            if len(row) < 5:
+                raise ValueError("V$TRANSACTION probe returned fewer than five columns")
+            return (
+                int(row[0]),
+                int(row[1]),
+                int(row[2]),
+                int(row[3]),
+                float(row[4] or 0),
+            )
+        except OracleOpenTxnDetectionUnavailable:
+            raise
+        except Exception as exc:
+            raise OracleOpenTxnDetectionUnavailable(
+                exc,
+                table=f"{self.schema}.{self.table}",
+                cursor_key=self.cursor_key,
+            ) from exc
+
+    def _ensure_open_txn_detection(self) -> None:
+        if self._txn_buffer_enabled or self._open_txn_detection_checked:
+            return
+        self._probe_oldest_open_txn()
+        self._open_txn_detection_checked = True
+
+    def _hold_at_oldest_open_txn(self, end_scn: int) -> int:
+        if self._txn_buffer_enabled:
+            return int(end_scn)
+        oldest = self._probe_oldest_open_txn()
+        if oldest is None:
+            return int(end_scn)
+        start_scn, xid_usn, xid_slot, xid_seq, age_seconds = oldest
+        held_end_scn = min(int(end_scn), start_scn - 1)
+        if held_end_scn >= int(end_scn):
+            return held_end_scn
+
+        xid = (xid_usn, xid_slot, xid_seq)
+        now = time.monotonic()
+        # Expire old entries so each XID can be throttled without an unbounded cache.
+        for prior_xid, last_warning in tuple(self._open_txn_hold_warnings.items()):
+            if now - last_warning >= 60:
+                self._open_txn_hold_warnings.pop(prior_xid, None)
+        if xid not in self._open_txn_hold_warnings:
+            logger.warning(
+                "Oracle LogMiner holding window at oldest open transaction "
+                "cursor_key=%s xid=%s.%s.%s start_scn=%s age_seconds=%s "
+                "held_end_scn=%s",
+                self.cursor_key,
+                xid_usn,
+                xid_slot,
+                xid_seq,
+                start_scn,
+                age_seconds,
+                held_end_scn,
+            )
+            self._open_txn_hold_warnings[xid] = now
+        return held_end_scn
 
     def is_available(self) -> bool:
         try:
@@ -2542,6 +2644,11 @@ class OracleLogMinerCdc:
                     cur.execute("SELECT current_scn FROM v$database")
                     head = cur.fetchone()
                     end_scn = int(head[0] or self.scn) if head else self.scn
+                    if not self._txn_buffer_enabled:
+                        raw_end_scn = end_scn
+                        end_scn = self._hold_at_oldest_open_txn(end_scn)
+                        if end_scn < raw_end_scn and end_scn <= self.scn:
+                            return events
                     # An intra-SCN (rs_id, ssn) cursor still has unread changes
                     # at self.scn even when current_scn has not advanced. Bailing
                     # out here lets a mid-chunk UPDATE lose to the snapshot row
@@ -2743,6 +2850,8 @@ class OracleLogMinerCdc:
             yield from self._poll_txn_buffered()
             return
 
+        self._ensure_open_txn_detection()
+
         if self._shared:
             yield from self._poll_shared_multi()
             return
@@ -2780,6 +2889,15 @@ class OracleLogMinerCdc:
                     cur.execute("SELECT current_scn FROM v$database")
                     head = cur.fetchone()
                     end_scn = int(head[0] or self.scn) if head else self.scn
+                    if not self._txn_buffer_enabled:
+                        raw_end_scn = end_scn
+                        end_scn = self._hold_at_oldest_open_txn(end_scn)
+                        if end_scn < raw_end_scn and end_scn <= self.scn:
+                            yield ChangeBatch(
+                                resume_token=self._token(),
+                                table=self.table,
+                            )
+                            return
                     if end_scn <= self.scn and not self.rs_id:
                         yield ChangeBatch(
                             resume_token=self._token(),
@@ -3476,6 +3594,15 @@ class OracleLogMinerCdc:
                     cur.execute("SELECT current_scn FROM v$database")
                     head = cur.fetchone()
                     end_scn = int(head[0] or self.scn) if head else self.scn
+                    if not self._txn_buffer_enabled:
+                        raw_end_scn = end_scn
+                        end_scn = self._hold_at_oldest_open_txn(end_scn)
+                        if end_scn < raw_end_scn and end_scn <= self.scn:
+                            yield ChangeBatch(
+                                resume_token=self._token(table=self._token_table_label()),
+                                ack_barrier=True,
+                            )
+                            return
                     if end_scn <= self.scn and not self.rs_id:
                         yield ChangeBatch(
                             resume_token=self._token(table=self._token_table_label()),

@@ -151,7 +151,8 @@ def test_truncate_tagged_at_xid_boundary() -> None:
     assert keep[0][0] == "1.0.1"
 
 
-def test_oracle_shared_poll_demuxes_two_tables() -> None:
+def test_oracle_shared_poll_demuxes_two_tables(monkeypatch) -> None:
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     token = encode_logminer_token(100, table="ORDERS,USERS", phase="streaming")
     cdc = OracleLogMinerCdc(
         {"host": "localhost", "database": "ORCL", "username": "APP"},
@@ -163,6 +164,7 @@ def test_oracle_shared_poll_demuxes_two_tables() -> None:
         batch_size=50,
     )
     cdc.phase = "streaming"
+    monkeypatch.setattr(cdc, "_probe_oldest_open_txn", lambda _cur=None: None)
     cdc.scn = 100
 
     conn = MagicMock()

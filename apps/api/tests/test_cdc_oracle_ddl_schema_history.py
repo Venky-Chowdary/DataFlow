@@ -691,7 +691,7 @@ def _unit_reader(*, table: str | list[str] = "T1", resume_token=None):
     from connectors.oracle_logminer import OracleLogMinerCdc
 
     tables = [table] if isinstance(table, str) else table
-    return OracleLogMinerCdc(
+    reader = OracleLogMinerCdc(
         {
             "host": "localhost",
             "port": 1521,
@@ -707,6 +707,8 @@ def _unit_reader(*, table: str | list[str] = "T1", resume_token=None):
         resume_token=resume_token,
         cursor_key="o6-unit:" + ",".join(tables),
     )
+    reader._probe_oldest_open_txn = lambda _cur=None: None
+    return reader
 
 
 def test_oracle_ddl_ambiguity_uses_numeric_rs_id_order(

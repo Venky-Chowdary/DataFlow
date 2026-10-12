@@ -208,9 +208,10 @@ def test_two_fragment_insert_and_update_are_reassembled_and_parsed_once() -> Non
     assert classify.call_count == 2
 
 
-def test_full_window_rewinds_trailing_group_without_loss_or_duplicate() -> None:
+def test_full_window_rewinds_trailing_group_without_loss_or_duplicate(monkeypatch) -> None:
     from connectors.oracle_logminer import classify_sql_redo
 
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     rows = [
         _contents_row(
             101,
@@ -236,6 +237,7 @@ def test_full_window_rewinds_trailing_group_without_loss_or_duplicate() -> None:
         ),
     ]
     reader = _reader(batch_size=2)
+    monkeypatch.setattr(reader, "_probe_oldest_open_txn", lambda _cur=None: None)
     cur = _WindowCursor(rows)
     conn = _MiningConnection(cur)
 

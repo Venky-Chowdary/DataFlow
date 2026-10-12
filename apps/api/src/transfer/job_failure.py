@@ -189,8 +189,26 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         from services.cdc_lease import CdcLeaseConflict, LeaseStoreError
         from services.cdc_toast import CdcToastIncompleteError
         from services.cdc_transaction_buffer import CdcTxnBufferOverflow
+        from connectors.oracle_logminer import OracleOpenTxnDetectionUnavailable
 
-        if isinstance(exc, CdcStreamBehind):
+        if isinstance(exc, OracleOpenTxnDetectionUnavailable):
+            code = exc.code
+            details.update(
+                {
+                    "code": code,
+                    "retriable": False,
+                    "raw": str(exc),
+                    "message": str(exc),
+                }
+            )
+            extras.update(
+                {
+                    "error_code": code,
+                    "operator_error": str(exc),
+                    "oracle_open_txn_detection_unavailable": True,
+                }
+            )
+        elif isinstance(exc, CdcStreamBehind):
             details["code"] = "cdc_stream_behind"
             details["retriable"] = True
             extras["cdc_stream_behind"] = True

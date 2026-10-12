@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+from contextlib import nullcontext
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import connectors.oracle_logminer as oracle_logminer
 from connectors.oracle_logminer import (
     OracleLogMinerReadError,
     OracleLogMinerCdc,
@@ -67,12 +70,316 @@ def _dml(
     )
 
 
-def test_oracle_txn_buffer_is_opt_in_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_oracle_txn_buffer_is_on_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", raising=False)
     monkeypatch.delenv("DATAWRAP_CDC_ORACLE_TXN_BUFFER", raising=False)
-    assert oracle_txn_buffer_enabled() is False
+    assert oracle_txn_buffer_enabled() is True
     monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "true")
     assert oracle_txn_buffer_enabled() is True
+
+
+@pytest.mark.parametrize(
+    ("raw", "enabled", "warns"),
+    [
+        (None, True, False),
+        ("", True, False),
+        ("0", False, False),
+        ("false", False, False),
+        ("OFF", False, False),
+        ("no", False, False),
+        ("1", True, False),
+        ("true", True, False),
+        ("garbage", True, True),
+    ],
+)
+def test_oracle_txn_buffer_env_defaults_safely(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    raw: str | None,
+    enabled: bool,
+    warns: bool,
+) -> None:
+    monkeypatch.delenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", raising=False)
+    monkeypatch.delenv("DATAWRAP_CDC_ORACLE_TXN_BUFFER", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", raw)
+
+    with caplog.at_level(logging.WARNING):
+        assert oracle_txn_buffer_enabled() is enabled
+
+    if warns:
+        assert raw in caplog.text
+    else:
+        assert "Unknown DATAFLOW_CDC_ORACLE_TXN_BUFFER" not in caplog.text
+
+
+def _make_open_txn_reader(
+    monkeypatch: pytest.MonkeyPatch, *, table: str = "T", shared: bool = False
+) -> OracleLogMinerCdc:
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
+    tables = ["T", "U"] if shared else table
+    reader = OracleLogMinerCdc(
+        {"host": "localhost", "database": "ORCL", "username": "APP"},
+        table=tables,
+        primary_key="ID",
+        primary_keys={"T": "ID", "U": "ID"} if shared else None,
+        schema="APP",
+        resume_token=encode_logminer_token(100, table="T", phase="streaming"),
+        cursor_key="open-txn-hold-test",
+    )
+    reader.phase = "streaming"
+    reader.scn = 100
+    reader._open_txn_detection_checked = True
+    return reader
+
+
+def _open_txn_connection(*, head_scn: int = 200):
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchone.return_value = (head_scn,)
+    conn.__enter__.return_value = conn
+    conn.__exit__.return_value = False
+    conn.cursor.return_value.__enter__.return_value = cur
+    conn.cursor.return_value.__exit__.return_value = False
+    return conn, cur
+
+
+def test_open_txn_detection_refuses_before_logminer_on_missing_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch)
+    reader._open_txn_detection_checked = False
+    conn, cur = _open_txn_connection()
+    cur.execute.side_effect = RuntimeError(
+        'ORA-00942: table or view "SYS"."V_$TRANSACTION" does not exist'
+    )
+    source_conn = MagicMock(return_value=conn)
+    mining_conn = MagicMock(
+        side_effect=AssertionError("LogMiner query must not run")
+    )
+    monkeypatch.setattr(reader, "_conn", source_conn)
+    monkeypatch.setattr(reader, "_mining_conn", mining_conn)
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+
+    with pytest.raises(OracleLogMinerReadError) as raised:
+        list(reader._poll_once())
+
+    assert getattr(raised.value, "code", None) == (
+        "oracle_open_txn_detection_unavailable"
+    )
+    assert "SELECT ON V_$TRANSACTION" in str(raised.value)
+    assert "unset DATAFLOW_CDC_ORACLE_TXN_BUFFER" in str(raised.value)
+    assert source_conn.call_count == 1
+    assert mining_conn.call_count == 0
+    assert len(cur.execute.call_args_list) == 1
+    assert "V$TRANSACTION" in cur.execute.call_args.args[0]
+
+
+def test_oldest_open_transaction_holds_window_and_logs_no_row_values(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch, table="ROW_SENTINEL")
+    probe = MagicMock(return_value=(150, 1, 2, 3, 12.5))
+    monkeypatch.setattr(reader, "_probe_oldest_open_txn", probe)
+
+    with caplog.at_level(logging.WARNING, logger="connectors.oracle_logminer"):
+        end_scn = reader._hold_at_oldest_open_txn(200)
+
+    assert probe.call_args.args == ()
+    assert end_scn == 149
+    assert "cursor_key=open-txn-hold-test" in caplog.text
+    assert "xid=1.2.3" in caplog.text
+    assert "start_scn=150" in caplog.text
+    assert "age_seconds=12.5" in caplog.text
+    assert "held_end_scn=149" in caplog.text
+    assert "ROW_SENTINEL" not in caplog.text
+    reader._advance_offset(
+        last_scn=0,
+        last_rs_id="",
+        last_ssn=0,
+        end_scn=end_scn,
+        fetched=0,
+        limit=500,
+    )
+    assert reader.scn == 100
+    assert reader.scn <= 149
+
+
+def test_no_open_transaction_does_not_cap_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch)
+    monkeypatch.setattr(reader, "_probe_oldest_open_txn", lambda: None)
+
+    assert reader._hold_at_oldest_open_txn(200) == 200
+
+
+def test_midstream_open_transaction_probe_failure_uses_typed_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch)
+    conn, cur = _open_txn_connection()
+    cur.execute.side_effect = RuntimeError("ORA-01031: insufficient privileges")
+    monkeypatch.setattr(reader, "_conn", lambda: conn)
+
+    with pytest.raises(OracleLogMinerReadError) as raised:
+        reader._hold_at_oldest_open_txn(200)
+
+    assert getattr(raised.value, "code", None) == (
+        "oracle_open_txn_detection_unavailable"
+    )
+    assert "SELECT ON V_$TRANSACTION" in str(raised.value)
+    assert "unset DATAFLOW_CDC_ORACLE_TXN_BUFFER" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("cursor_scn", "expected_scn", "expected_fetches"),
+    [(100, 100, 1), (150, 150, 0)],
+)
+def test_single_table_poll_applies_oldest_transaction_hold(
+    monkeypatch: pytest.MonkeyPatch,
+    cursor_scn: int,
+    expected_scn: int,
+    expected_fetches: int,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch)
+    reader.scn = cursor_scn
+    conn, cur = _open_txn_connection()
+    calls: list[int] = []
+    fetches: list[int] = []
+
+    def hold(end_scn):
+        calls.append(end_scn)
+        return min(end_scn, 149)
+
+    monkeypatch.setattr(reader, "_hold_at_oldest_open_txn", hold, raising=False)
+    monkeypatch.setattr(reader, "_mining_conn", lambda: conn)
+    monkeypatch.setattr(oracle_logminer, "fetch_oldest_available_scn", lambda _cur: 1)
+    monkeypatch.setattr(oracle_logminer, "fetch_redo_inventory", lambda _cur: [])
+    monkeypatch.setattr(oracle_logminer, "assert_resume_scn_in_redo", lambda *_a, **_k: None)
+    monkeypatch.setattr(oracle_logminer, "assert_redo_continuity", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        oracle_logminer,
+        "_logminer_session",
+        lambda *_a, **_k: nullcontext(),
+    )
+    monkeypatch.setattr(
+        reader,
+        "_fetch_logminer_rows_visible",
+        lambda _cur, **kwargs: fetches.append(kwargs["end_scn"])
+        or ([], kwargs["end_scn"]),
+    )
+    monkeypatch.setattr(
+        "services.cdc_incremental_runner.interleave_incremental_snapshot",
+        lambda *_a, **_k: iter(()),
+    )
+    monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
+
+    list(reader._poll_once())
+
+    assert len(calls) == 1
+    assert calls[0] == 200
+    assert reader.scn == expected_scn
+    assert len(fetches) == expected_fetches
+
+
+def test_shared_poll_applies_oldest_transaction_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch, shared=True)
+    conn, cur = _open_txn_connection()
+    calls: list[int] = []
+
+    def hold(end_scn):
+        calls.append(end_scn)
+        return min(end_scn, 149)
+
+    monkeypatch.setattr(reader, "_hold_at_oldest_open_txn", hold, raising=False)
+    monkeypatch.setattr(reader, "_mining_conn", lambda: conn)
+    monkeypatch.setattr(oracle_logminer, "fetch_oldest_available_scn", lambda _cur: 1)
+    monkeypatch.setattr(oracle_logminer, "fetch_redo_inventory", lambda _cur: [])
+    monkeypatch.setattr(oracle_logminer, "assert_resume_scn_in_redo", lambda *_a, **_k: None)
+    monkeypatch.setattr(oracle_logminer, "assert_redo_continuity", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        oracle_logminer,
+        "_logminer_session",
+        lambda *_a, **_k: nullcontext(),
+    )
+    monkeypatch.setattr(
+        oracle_logminer,
+        "_fetch_logminer_csf_window",
+        lambda *_a, **_k: ([], False),
+    )
+
+    list(reader._poll_shared_multi())
+
+    assert len(calls) == 1
+    assert calls[0] == 200
+    assert reader.scn <= 149
+
+
+def test_peek_applies_oldest_transaction_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch)
+    conn, cur = _open_txn_connection()
+    calls: list[int] = []
+
+    def hold(end_scn):
+        calls.append(end_scn)
+        return min(end_scn, 149)
+
+    monkeypatch.setattr(reader, "_hold_at_oldest_open_txn", hold, raising=False)
+    monkeypatch.setattr(reader, "_mining_conn", lambda: conn)
+    monkeypatch.setattr(
+        oracle_logminer,
+        "_logminer_session",
+        lambda *_a, **_k: nullcontext(),
+    )
+    monkeypatch.setattr(reader, "_query_logminer_rows", lambda *_a, **_k: [])
+    monkeypatch.setattr(reader, "_enrich_lob_lookup_events", lambda _events: None)
+    monkeypatch.setattr(reader, "_coalesce_lob_locator_events", lambda events: events)
+
+    assert reader._peek_stream_events_during_chunk(
+        MagicMock(chunk_size=10)
+    ) == []
+    assert len(calls) == 1
+    assert calls[0] == 200
+
+
+def test_empty_window_retry_reapplies_oldest_transaction_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch)
+    _conn, cur = _open_txn_connection()
+    calls: list[int] = []
+
+    def hold(end_scn):
+        calls.append(end_scn)
+        return min(end_scn, 149)
+
+    monkeypatch.setattr(reader, "_hold_at_oldest_open_txn", hold, raising=False)
+    monkeypatch.setattr(reader, "_empty_window_retry_sec", lambda: 1)
+    monkeypatch.setattr(oracle_logminer.time, "sleep", lambda _delay: None)
+    monkeypatch.setattr(
+        oracle_logminer,
+        "_logminer_session",
+        lambda *_a, **_k: nullcontext(),
+    )
+    monkeypatch.setattr(reader, "_query_logminer_rows", lambda *_a, **_k: [])
+
+    rows, end_scn = reader._fetch_logminer_rows_visible(
+        cur,
+        start_scn=100,
+        end_scn=150,
+        table_predicate="TABLE_NAME = :tbl",
+        limit=10,
+    )
+
+    assert rows == []
+    assert calls == [200]
+    assert end_scn == 149
 
 
 def test_legacy_token_shape_and_low_scn_fallback_remain_compatible() -> None:
@@ -717,6 +1024,10 @@ def test_committed_checkpoint_restarts_within_scn_without_duplicate_or_skip(
             cur.fetchall.side_effect = fetchall
             batches = list(reader._poll_txn_buffered())
         else:
+            monkeypatch.setattr(
+                reader, "_probe_oldest_open_txn", lambda _cur=None: None
+            )
+
             def fetch_window(_cur: object, **kwargs: object) -> tuple[list[tuple], int]:
                 assert kwargs["start_scn"] == 100
                 assert reader.rs_id == first_rs

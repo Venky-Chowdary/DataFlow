@@ -75,6 +75,25 @@ def test_txn_buffer_overflow_typed_no_silent_drop() -> None:
     assert buf.open_xid == "42"
 
 
+def test_open_txn_detection_error_has_stable_job_failure_code() -> None:
+    import connectors.oracle_logminer as oracle_logminer
+    from src.transfer.job_failure import _job_failure_fields
+
+    error_type = getattr(
+        oracle_logminer, "OracleOpenTxnDetectionUnavailable"
+    )
+    error = error_type(
+        RuntimeError("ORA-00942: V_$TRANSACTION is not visible"),
+        cursor_key="oracle-test",
+    )
+
+    details, extras = _job_failure_fields(error)
+
+    assert details["code"] == "oracle_open_txn_detection_unavailable"
+    assert details["retriable"] is False
+    assert extras["oracle_open_txn_detection_unavailable"] is True
+
+
 def test_txn_buffer_spills_to_disk_then_commits(tmp_path: Path) -> None:
     """Large open txns spill to disk so RAM stays bounded; COMMIT reconstitutes all events."""
     buf = TransactionBuffer(max_events=100, spill_after=3, spill_dir=tmp_path)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from contextlib import ExitStack
@@ -40,6 +41,50 @@ def _pg_ready() -> bool:
         return False
 
 
+def _oracle_v_transaction_grant_user(cfg: dict) -> str:
+    return str(cfg["username"]).upper()
+
+
+def _oracle_admin_pdb() -> str:
+    service = str(_oracle_cfg()["database"]).upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9_$#]*", service):
+        raise ValueError(f"Unexpected Oracle PDB service: {service!r}")
+    return service
+
+
+def _oracle_v_transaction_grant_count(user: str) -> int:
+    from test_oracle_redo_inventory import _oracle_admin_sql
+
+    cdc_user = user.upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9_$#]*", cdc_user):
+        raise ValueError(f"Unexpected Oracle CDC username: {user!r}")
+    output = _oracle_admin_sql(
+        f"ALTER SESSION SET CONTAINER = {_oracle_admin_pdb()};\n"
+        "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\n"
+        "SELECT COUNT(*) FROM DBA_TAB_PRIVS "
+        "WHERE TABLE_NAME = 'V_$TRANSACTION' "
+        f"AND GRANTEE = '{cdc_user}' AND PRIVILEGE = 'SELECT';"
+    )
+    values = re.findall(r"\d+", output)
+    return int(values[-1]) if values else 0
+
+
+def _set_oracle_v_transaction_grant(user: str, *, enabled: bool) -> None:
+    from test_oracle_redo_inventory import _oracle_admin_sql
+
+    cdc_user = user.upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9_$#]*", cdc_user):
+        raise ValueError(f"Unexpected Oracle CDC username: {user!r}")
+    command = (
+        f"GRANT SELECT ON V_$TRANSACTION TO {cdc_user};"
+        if enabled
+        else f"REVOKE SELECT ON V_$TRANSACTION FROM {cdc_user};"
+    )
+    _oracle_admin_sql(
+        f"ALTER SESSION SET CONTAINER = {_oracle_admin_pdb()};\n{command}"
+    )
+
+
 @pytest.mark.skipif(
     not _oracle_logminer_ready(),
     reason="Oracle LogMiner not reachable — set DATAFLOW_ORACLE_ENABLE=1 on a CDC-ready :1521",
@@ -47,14 +92,7 @@ def _pg_ready() -> bool:
 @pytest.mark.parametrize(
     "txn_buffer",
     [
-        pytest.param(
-            False,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="G-CDC M1 legacy: long transaction is skipped after another poll advances its SCN",
-            ),
-            id="legacy-buffer-off",
-        ),
+        pytest.param(False, id="legacy-buffer-off"),
         pytest.param(True, id="transaction-buffer-on"),
     ],
 )
@@ -77,6 +115,7 @@ def test_oracle_logminer_delivers_long_transaction_after_later_commit(
         cursor_key=f"gcdc-r1:{table}",
     )
     table_created = False
+    transaction_probe_granted = False
 
     with ExitStack() as stack:
         session_a = stack.enter_context(
@@ -104,6 +143,13 @@ def test_oracle_logminer_delivers_long_transaction_after_later_commit(
             )
         )
         try:
+            if not txn_buffer:
+                cdc_user = _oracle_v_transaction_grant_user(cfg)
+                transaction_probe_granted = (
+                    _oracle_v_transaction_grant_count(cdc_user) == 0
+                )
+                if transaction_probe_granted:
+                    _set_oracle_v_transaction_grant(cdc_user, enabled=True)
             with session_b.cursor() as cur:
                 cur.execute(
                     f"CREATE TABLE {table_ref} (ID NUMBER PRIMARY KEY, V VARCHAR2(32))"
@@ -133,28 +179,83 @@ def test_oracle_logminer_delivers_long_transaction_after_later_commit(
                     break
                 time.sleep(0.25)
 
-            assert "2" in delivered, f"later committed row was not delivered: {delivered}"
-            assert reader.scn >= long_dml_scn, (
-                f"cursor did not pass the long transaction SCN: "
-                f"cursor={reader.scn}, long_dml_scn={long_dml_scn}"
-            )
+            if txn_buffer:
+                assert "2" in delivered, f"later committed row was not delivered: {delivered}"
+                assert reader.scn >= long_dml_scn, (
+                    f"cursor did not pass the long transaction SCN: "
+                    f"cursor={reader.scn}, long_dml_scn={long_dml_scn}"
+                )
+            else:
+                assert not delivered, f"oldest-open hold should stop the poll: {delivered}"
+                assert reader.scn < long_dml_scn, (
+                    f"cursor passed the open transaction: "
+                    f"cursor={reader.scn}, long_dml_scn={long_dml_scn}"
+                )
 
             session_a.commit()
             for _ in range(8):
                 for batch in reader.poll():
                     delivered.update(str(row.get("ID")) for row in batch.inserts)
-                if "1" in delivered:
+                if {"1", "2"}.issubset(delivered):
                     break
                 time.sleep(0.25)
 
             assert "1" in delivered, f"long-transaction row was not delivered: {delivered}"
+            assert "2" in delivered, f"later committed row was not delivered: {delivered}"
         finally:
-            session_a.rollback()
+            try:
+                if transaction_probe_granted:
+                    _set_oracle_v_transaction_grant(
+                        _oracle_v_transaction_grant_user(cfg), enabled=False
+                    )
+            finally:
+                session_a.rollback()
+                reader.close()
+                if table_created:
+                    with session_b.cursor() as cur:
+                        cur.execute(f"DROP TABLE {table_ref} PURGE")
+                    session_b.commit()
+
+
+@pytest.mark.skipif(
+    not _oracle_logminer_ready(),
+    reason="Oracle LogMiner not reachable — set DATAFLOW_ORACLE_ENABLE=1 on a CDC-ready :1521",
+)
+def test_oracle_buffer_off_without_transaction_grant_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from connectors.oracle_logminer import (
+        OracleLogMinerCdc,
+        OracleLogMinerReadError,
+        encode_logminer_token,
+    )
+
+    cfg = _oracle_cfg()
+    cdc_user = _oracle_v_transaction_grant_user(cfg)
+    had_grant = _oracle_v_transaction_grant_count(cdc_user) > 0
+    if had_grant:
+        _set_oracle_v_transaction_grant(cdc_user, enabled=False)
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
+    reader = None
+    try:
+        reader = OracleLogMinerCdc(
+            cfg,
+            table="CDC_TXN_GRANT_PROBE",
+            primary_key="ID",
+            schema=str(cfg["schema"]),
+            resume_token=encode_logminer_token(
+                100, table="CDC_TXN_GRANT_PROBE", phase="streaming"
+            ),
+        )
+        with pytest.raises(OracleLogMinerReadError) as exc:
+            reader._ensure_open_txn_detection()
+        assert exc.value.code == "oracle_open_txn_detection_unavailable"
+        assert "SELECT ON V_$TRANSACTION" in str(exc.value)
+    finally:
+        if reader is not None:
             reader.close()
-            if table_created:
-                with session_b.cursor() as cur:
-                    cur.execute(f"DROP TABLE {table_ref} PURGE")
-                session_b.commit()
+        if had_grant:
+            _set_oracle_v_transaction_grant(cdc_user, enabled=True)
 
 
 @pytest.mark.skipif(
@@ -589,7 +690,11 @@ def test_oracle_transaction_buffer_eos_restart_to_postgres(
             False,
             marks=pytest.mark.xfail(
                 strict=True,
-                reason="G-CDC M1 legacy: single-table polling splits committed transactions across batches",
+                reason=(
+                    "Buffer-off CSF continuation rows are not reassembled into "
+                    "transaction groups; this test isolates grouping from the "
+                    "oldest-open SCN hold"
+                ),
             ),
             id="legacy-buffer-off",
         ),
@@ -682,14 +787,18 @@ def test_oracle_single_table_poll_keeps_transactions_whole(
     )
     cdc.phase = "streaming"
     cdc.scn = 100
+    monkeypatch.setattr(cdc, "_probe_oldest_open_txn", lambda _cur=None: None)
     cdc._lob_column_cache["T"] = ()
 
     conn = MagicMock()
     cur = MagicMock()
     result_rows = []
+    last_sql = ""
 
     def execute(sql, params=None):
-        if "V$LOGMNR_CONTENTS" in sql.upper():
+        nonlocal last_sql
+        last_sql = sql.upper()
+        if "V$LOGMNR_CONTENTS" in last_sql:
             columns = [
                 "SCN",
                 "RS_ID",
@@ -723,8 +832,15 @@ def test_oracle_single_table_poll_keeps_transactions_whole(
     def fetchall():
         return list(result_rows)
 
+    def fetchone():
+        if "V$TRANSACTION" in last_sql:
+            return None
+        if "V$DATABASE" in last_sql:
+            return (300,)
+        return None
+
     cur.execute.side_effect = execute
-    cur.fetchone.side_effect = [(300,), (300,)]
+    cur.fetchone.side_effect = fetchone
     cur.fetchall.side_effect = fetchall
     conn.__enter__ = MagicMock(return_value=conn)
     conn.__exit__ = MagicMock(return_value=False)

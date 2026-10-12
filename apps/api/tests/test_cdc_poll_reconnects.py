@@ -176,7 +176,7 @@ def test_change_tracking_poll_retries_transient_connection_loss() -> None:
 def test_oracle_poll_retries_transient_connection_loss(
     monkeypatch,
 ) -> None:
-    monkeypatch.delenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", raising=False)
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     reader = OracleLogMinerCdc(
         CFG,
         table="orders",
@@ -186,6 +186,7 @@ def test_oracle_poll_retries_transient_connection_loss(
     )
     reader.phase = "streaming"
     reader.scn = 100
+    reader._probe_oldest_open_txn = lambda _cur=None: None
     cursor = MagicMock()
     cursor.fetchone.return_value = (100,)
     conn = _connection(cursor)
@@ -232,7 +233,7 @@ def test_oracle_poll_retries_transient_connection_loss(
 def test_oracle_shared_poll_retries_transient_connection_loss(
     monkeypatch,
 ) -> None:
-    monkeypatch.delenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", raising=False)
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     tables = ["orders", "customers"]
     reader = OracleLogMinerCdc(
         CFG,
@@ -243,6 +244,7 @@ def test_oracle_shared_poll_retries_transient_connection_loss(
     )
     reader.phase = "streaming"
     reader.scn = 100
+    reader._probe_oldest_open_txn = lambda _cur=None: None
     cursor = MagicMock()
     cursor.fetchone.return_value = (100,)
     conn = _connection(cursor)
@@ -388,7 +390,7 @@ def test_native_poll_does_not_retry_nontransient_read_error() -> None:
 def test_oracle_poll_exhaustion_raises_transient_read_error(
     monkeypatch, caplog
 ) -> None:
-    monkeypatch.delenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", raising=False)
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     reader = OracleLogMinerCdc(
         CFG,
         table="orders",
@@ -398,6 +400,7 @@ def test_oracle_poll_exhaustion_raises_transient_read_error(
     )
     reader.phase = "streaming"
     reader.scn = 100
+    reader._probe_oldest_open_txn = lambda _cur=None: None
     attempts = 0
 
     def connection_lost():
@@ -457,7 +460,7 @@ def test_oracle_poll_does_not_retry_after_yielding_a_batch() -> None:
 
 
 def test_oracle_poll_does_not_retry_nontransient_read_error(monkeypatch) -> None:
-    monkeypatch.delenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", raising=False)
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     reader = OracleLogMinerCdc(
         CFG,
         table="orders",
@@ -467,6 +470,7 @@ def test_oracle_poll_does_not_retry_nontransient_read_error(monkeypatch) -> None
     )
     reader.phase = "streaming"
     reader.scn = 100
+    reader._probe_oldest_open_txn = lambda _cur=None: None
     attempts = 0
 
     def invalid_query():

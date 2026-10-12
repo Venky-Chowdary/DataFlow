@@ -1,11 +1,11 @@
-"""Oracle LogMiner transaction buffer — commit-ordered emission (opt-in).
+"""Oracle LogMiner transaction buffer — commit-ordered emission.
 
 ``COMMITTED_DATA_ONLY`` mining only shows a transaction once it commits, and
 LogMiner reports those rows at their original DML SCNs. A reader whose cursor
 has already passed those SCNs (because a *later* transaction committed first)
 never sees them again — the long-transaction data-loss risk.
 
-With ``DATAFLOW_CDC_ORACLE_TXN_BUFFER`` on, the reader mines uncommitted redo
+With ``DATAFLOW_CDC_ORACLE_TXN_BUFFER`` enabled, the reader mines uncommitted redo
 (``DICT_FROM_ONLINE_CATALOG`` only), buffers DML per transaction id (XID) and
 emits a transaction **only on COMMIT**, in commit order. Open transactions are
 never persisted: the resume token carries ``low_scn`` (the oldest open start
@@ -21,6 +21,7 @@ and never drops an event.
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -30,6 +31,8 @@ from services.brand_env import getenv_brand
 from services.cdc_transaction_buffer import CdcTxnBufferOverflow
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSEY = frozenset({"0", "false", "off", "no"})
+logger = logging.getLogger(__name__)
 
 #: Operations that delimit a transaction in ``V$LOGMNR_CONTENTS``.
 TXN_START_OPS = frozenset({"START"})
@@ -41,12 +44,22 @@ DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 
 
 def oracle_txn_buffer_enabled() -> bool:
-    """True when the opt-in Oracle transaction buffer is switched on.
+    """Return whether Oracle transaction buffering is enabled.
 
-    Default OFF — the legacy committed-data-only path stays byte-identical.
+    Unset, empty, and unrecognized values safely enable buffering. Explicit
+    false-like values are the guarded legacy opt-out.
     """
     raw = getenv_brand("CDC_ORACLE_TXN_BUFFER", "")
-    return str(raw or "").strip().lower() in _TRUTHY
+    value = str(raw or "").strip().lower()
+    if value in _FALSEY:
+        return False
+    if not value or value in _TRUTHY:
+        return True
+    logger.warning(
+        "Unknown DATAFLOW_CDC_ORACLE_TXN_BUFFER value %r; enabling the Oracle transaction buffer",
+        raw,
+    )
+    return True
 
 
 def _env_int(name: str, default: int) -> int:
