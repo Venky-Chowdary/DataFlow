@@ -640,6 +640,40 @@ def assess_create_new_type_risk(
     return risks
 
 
+def _offset_text_preserves_instant(
+    source_type: str,
+    target_type: str,
+    population: Any,
+) -> bool:
+    """Text whose every sample already carries an offset is an instant.
+
+    SQLite stores ``2024-01-01T05:00:00+05:30`` in TEXT. Mapping that column
+    onto TIMESTAMPTZ parses the instant; it does not invent one (QA R2-014).
+    A naive string still needs ``source_timezone`` and stays lossy.
+    """
+    src = normalize_logical_type(source_type)
+    tgt = normalize_logical_type(target_type)
+    if src not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt != LOGICAL_DATETIME:
+        return False
+    if _ts.datetime_timezone_polarity(target_type) not in {"tz", "ltz"}:
+        return False
+    if not isinstance(population, (list, tuple)) or not population:
+        return False
+    from services.schema_inference import classify_value
+
+    saw = False
+    for raw in population:
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text:
+            continue
+        saw = True
+        if classify_value(text) != "TIMESTAMPTZ":
+            return False
+    return saw
+
+
 def is_lossy_coercion(
     source_type: str,
     target_type: str,
@@ -867,6 +901,8 @@ def is_lossy_coercion(
         and tgt == LOGICAL_JSON
         and is_dialect_native_document_wire(target_type, dest_db=dest_db)
     ):
+        return False
+    if _offset_text_preserves_instant(source_type, target_type, population):
         return False
     # Dialect-aware collapse SSOT â€” same rules as G3/probe (never MySQL-default FSP
     # when dest_db is postgresql/redshift, never false-collapse JSONâ†’JSONB).

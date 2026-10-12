@@ -302,6 +302,7 @@ def _write_batch(
     if dest_type == "sqlite":
         from connectors.sqlite_writer import write_mapped_rows
         from connectors.write_resilience import build_write_batch_key
+        from services.sync_cursor import is_overwrite_sync
 
         # Property 4 — arm the same-txn write ledger (parity with PG/MySQL).
         # Without job_id + write_batch_key, insert retries silently duplicate.
@@ -335,6 +336,8 @@ def _write_batch(
             destination_column_types=dest_column_types,
             source_schema_catalog=source_schema_catalog,
             empty_cells_as_null=empty_cells_as_null,
+            total_chunks=total_chunks,
+            atomic_overwrite=is_overwrite_sync(sync_mode),
             **source_handoff,
             **key_carry,
         )

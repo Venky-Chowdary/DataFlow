@@ -765,6 +765,69 @@ def _sqlite_update_insert_upsert(
     return len(rows)
 
 
+def _sqlite_duplicate_key_message(
+    exc: BaseException,
+    conflict_cols: list[str],
+    target_cols: list[str],
+    batch: list[Any],
+) -> str:
+    """Name the key columns and the first row's key values (QA R2-071)."""
+    names = [c for c in conflict_cols if c in target_cols]
+    sample = ""
+    if names and batch:
+        row = batch[0]
+        parts = []
+        for name in names:
+            idx = target_cols.index(name)
+            value = row[idx] if isinstance(row, (list, tuple)) and idx < len(row) else "?"
+            parts.append(f"{name}={value!r}")
+        sample = ", ".join(parts)
+    key = ", ".join(names) or "PRIMARY KEY"
+    detail = f" — first row {sample}" if sample else ""
+    return f"duplicate key ({key}){detail}: {exc}"
+
+
+def _publish_sqlite_stage(
+    conn: Any,
+    *,
+    stage_quoted: str,
+    stage_name: str,
+    live_name: str,
+    columns: list[str],
+) -> None:
+    """Swap the staged load onto the live name in one transaction.
+
+    A reader sees the previous snapshot until this commits, then the full new
+    snapshot. A failure leaves the live table untouched.
+    """
+    live_quoted = quote_sql_identifier(live_name)
+    with conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (live_name,),
+        )
+        live_exists = cur.fetchone() is not None
+        if not live_exists:
+            cur.execute(f"ALTER TABLE {stage_quoted} RENAME TO {live_quoted}")
+            return
+        col_sql = ", ".join(quote_sql_identifier(c) for c in columns)
+        try:
+            cur.execute("SAVEPOINT df_stage_pub")
+            cur.execute(f"DELETE FROM {live_quoted}")
+            cur.execute(
+                f"INSERT INTO {live_quoted} ({col_sql}) "
+                f"SELECT {col_sql} FROM {stage_quoted}"
+            )
+            cur.execute(f"DROP TABLE {stage_quoted}")
+            cur.execute("RELEASE df_stage_pub")
+        except sqlite3.Error:
+            cur.execute("ROLLBACK TO df_stage_pub")
+            cur.execute(f"DROP TABLE {live_quoted}")
+            cur.execute(f"ALTER TABLE {stage_quoted} RENAME TO {live_quoted}")
+    del stage_name
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -850,6 +913,18 @@ def write_mapped_rows(
             )
 
     table_name = sanitize_identifier(table_name, preserve_case=True)
+    live_table_name = table_name
+    atomic_overwrite = bool(_kwargs.get("atomic_overwrite"))
+    stage_batch_idx = int(_kwargs.get("file_batch_idx") or 0)
+    stage_total = max(1, int(_kwargs.get("total_chunks") or 1))
+    publish_stage = False
+    if atomic_overwrite:
+        # Readers keep the previous snapshot until the last chunk swaps the
+        # stage table in one transaction (QA R2-035).
+        table_name = sanitize_identifier(
+            f"{live_table_name}__df_stage", preserve_case=True
+        )
+        publish_stage = stage_batch_idx + 1 >= stage_total
     table_quoted = quote_sql_identifier(table_name)
     # Prefer Studio-probed live DDL over Map stamps (BOOLEAN→TEXT invent cliff).
     from connectors.writer_common import resolve_studio_or_map_dest_types
@@ -1235,16 +1310,20 @@ def write_mapped_rows(
                     )
 
                     try:
+                        recreate_stage = atomic_overwrite and stage_batch_idx == 0
+                        if recreate_stage:
+                            cur.execute(f"DROP TABLE IF EXISTS {table_quoted}")
                         fidelity_plan = resolve_create_fidelity_plan(
                             source_schema_catalog=_kwargs.get("source_schema_catalog"),
                             mappings=mappings,
                             target_columns=target_cols,
                             target_types=target_types,
                             dest_dialect="sqlite",
-                            table_already_exists=bool(table_existed),
-                            dest_table=table_name,
+                            table_already_exists=bool(table_existed) and not recreate_stage,
+                            dest_table=live_table_name,
                             carry_keys=write_mode != "insert"
                             or bool(_kwargs.get("carry_source_keys")),
+                            operator_key_columns=list(conflict_cols),
                         )
                     except Exception as exc:
                         logger.warning(
@@ -1449,7 +1528,14 @@ def write_mapped_rows(
                                 written += chunk_written
                                 rows_skipped += chunk_skipped
                             else:
-                                cur.executemany(insert, batch)
+                                try:
+                                    cur.executemany(insert, batch)
+                                except sqlite3.IntegrityError as exc:
+                                    raise sqlite3.IntegrityError(
+                                        _sqlite_duplicate_key_message(
+                                            exc, conflict_cols, target_cols, batch
+                                        )
+                                    ) from exc
                                 written += len(batch)
                                 if use_ledger:
                                     mark_raw_chunk_committed(
@@ -1508,6 +1594,15 @@ def write_mapped_rows(
                     warnings=transform_errors,
                 )
 
+            if publish_stage:
+                _publish_sqlite_stage(
+                    conn,
+                    stage_quoted=table_quoted,
+                    stage_name=table_name,
+                    live_name=live_table_name,
+                    columns=target_cols,
+                )
+                table_name = live_table_name
             meta_out = write_acc.gate8_meta(conflict_columns=conflict_cols or None)
             fid_report = _kwargs.get("_schema_fidelity_report")
             if isinstance(fid_report, dict):

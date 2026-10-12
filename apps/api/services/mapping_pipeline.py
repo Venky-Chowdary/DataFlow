@@ -659,6 +659,22 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
         )
 
 
+def _sqlite_affinity_text(source_db: str, declared: str) -> bool:
+    """Bare SQLite TEXT is affinity, not a domain the catalog declared.
+
+    Postgres TEXT is unbounded text and stays text. SQLite ``TEXT`` / bare
+    ``VARCHAR`` is where an offset timestamp is stored (QA R2-014). A length
+    such as ``VARCHAR(64)`` is a real width and is not promoted.
+    """
+    db = (source_db or "").strip().lower()
+    if db != "sqlite":
+        return False
+    token = (declared or "").strip().upper()
+    if not token or "(" in token:
+        return False
+    return token in {"TEXT", "VARCHAR", "STRING", "CHAR", "CLOB"}
+
+
 def _offset_aware_profile(upgraded: str) -> bool:
     """True when a profiled carrier carries an offset the text did not drop."""
     from services.type_system import (
@@ -869,8 +885,29 @@ def run_mapping_pipeline(
             # the fidelity verdict must judge that same type. Otherwise Map
             # invents NUMBER from the profile and then calls its own invent a
             # lossy VARCHAR→NUMBER cast, blocking every file→warehouse route.
-            for name, upgraded in merged_schema.items():
+            profiled_schema = {
+                str(name): str(token or "")
+                for name, token in (profiled.get("schema") or {}).items()
+            }
+            for name, upgraded in list(merged_schema.items()):
                 declared = declared_source_types.get(name, "")
+                profiled_type = profiled_schema.get(name, "")
+                # Authoritative SQLite keeps TEXT even when every sample is an
+                # offset instant, and Map then blocks its own VARCHAR→TIMESTAMPTZ
+                # invent (QA R2-014). Promote only that affinity, and only when
+                # the destination is not already an open text column.
+                if (
+                    _sqlite_affinity_text(source_db_type, declared)
+                    and _offset_aware_profile(profiled_type)
+                    and not _existing_open_text_column(
+                        name,
+                        declared_target_types,
+                        destination_table_exists,
+                    )
+                ):
+                    merged_schema[name] = profiled_type
+                    declared_source_types[name] = profiled_type
+                    continue
                 if not upgraded or not declared:
                     continue
                 if normalize_logical_type(declared) in _UNTYPED_TEXT_LOGICALS and (

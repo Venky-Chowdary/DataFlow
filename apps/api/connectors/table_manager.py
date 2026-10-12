@@ -343,27 +343,33 @@ def _empty_mysql(cfg: dict[str, Any], table_name: str) -> str:
 
 
 def _empty_sqlite(cfg: dict[str, Any], table_name: str) -> str:
-    import sqlite3
+    """Do not delete the live rows.
 
-    from connectors.sql_identifiers import quote_table_ref
+    SQLite overwrite writes a stage table and publishes it in one transaction
+    (``atomic_overwrite`` on the sqlite writer). A DELETE here is what made
+    readers see a partial table mid-load (QA R2-035). ``deferred`` means the
+    previous snapshot stays until that publish.
+    """
+    import sqlite3
 
     database = _sqlite_path_from_cfg(cfg)
     if not database:
         return "absent"
-    quoted = quote_table_ref(table_name, dialect="sqlite")
     conn = sqlite3.connect(database)
     try:
-        def _run(sql: str) -> None:
-            conn.execute(sql)
-            conn.commit()
-
-        return _execute_empty_statements(_run, "sqlite", quoted)
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table_name,),
+        ).fetchone()
     except Exception as exc:
         if _missing_table_error(exc):
             return "absent"
         raise TableDropError(table_name, exc) from exc
     finally:
         conn.close()
+    if row is None:
+        return "absent"
+    return "deferred"
 
 
 def _empty_generic_sql(

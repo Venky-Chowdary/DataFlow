@@ -1716,6 +1716,17 @@ def _convert_mapped_cell(
     operator_boolean = bool(
         isinstance(mapping, dict) and mapping.get("transform_override")
     )
+    # A name-triggered trim/trim_id rewrites internal whitespace on a normal
+    # load. Apply it only when the operator asked (user_override or
+    # transform_override). collapse_whitespace remains the explicit op.
+    if (
+        isinstance(mapping, dict)
+        and str(transform or "").strip().lower() in {"trim", "trim_id"}
+        and not mapping.get("user_override")
+        and not mapping.get("userOverride")
+        and not mapping.get("transform_override")
+    ):
+        transform = None
     converted, err = apply_transform(
         val, transform, accept_informal_boolean=operator_boolean
     )
