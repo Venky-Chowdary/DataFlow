@@ -189,9 +189,18 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         from services.cdc_lease import CdcLeaseConflict, LeaseStoreError
         from services.cdc_toast import CdcToastIncompleteError
         from services.cdc_transaction_buffer import CdcTxnBufferOverflow
-        from connectors.oracle_logminer import OracleOpenTxnDetectionUnavailable
+        from connectors.oracle_logminer import (
+            OracleBufferOffRacUnsupported,
+            OracleInstanceDetectionUnavailable,
+            OracleOpenTxnDetectionUnavailable,
+        )
 
-        if isinstance(exc, OracleOpenTxnDetectionUnavailable):
+        oracle_buffer_off_errors = (
+            OracleOpenTxnDetectionUnavailable,
+            OracleInstanceDetectionUnavailable,
+            OracleBufferOffRacUnsupported,
+        )
+        if isinstance(exc, oracle_buffer_off_errors):
             code = exc.code
             details.update(
                 {
@@ -205,9 +214,14 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
                 {
                     "error_code": code,
                     "operator_error": str(exc),
-                    "oracle_open_txn_detection_unavailable": True,
                 }
             )
+            if isinstance(exc, OracleOpenTxnDetectionUnavailable):
+                extras["oracle_open_txn_detection_unavailable"] = True
+            elif isinstance(exc, OracleInstanceDetectionUnavailable):
+                extras["oracle_instance_detection_unavailable"] = True
+            elif isinstance(exc, OracleBufferOffRacUnsupported):
+                extras["oracle_buffer_off_rac_unsupported"] = True
         elif isinstance(exc, CdcStreamBehind):
             details["code"] = "cdc_stream_behind"
             details["retriable"] = True

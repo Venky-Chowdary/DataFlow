@@ -164,7 +164,9 @@ def test_oracle_shared_poll_demuxes_two_tables(monkeypatch) -> None:
         batch_size=50,
     )
     cdc.phase = "streaming"
+    cdc._open_txn_detection_checked = True
     monkeypatch.setattr(cdc, "_probe_oldest_open_txn", lambda _cur=None: None)
+    monkeypatch.setattr(cdc, "_buffer_off_window_end", lambda: (200, False))
     cdc.scn = 100
 
     conn = MagicMock()

@@ -150,9 +150,16 @@ def test_open_txn_detection_refuses_before_logminer_on_missing_grant(
     reader = _make_open_txn_reader(monkeypatch)
     reader._open_txn_detection_checked = False
     conn, cur = _open_txn_connection()
-    cur.execute.side_effect = RuntimeError(
-        'ORA-00942: table or view "SYS"."V_$TRANSACTION" does not exist'
-    )
+
+    def execute(sql: str) -> None:
+        if "GV$INSTANCE" in sql.upper():
+            cur.fetchone.return_value = (1,)
+            return
+        raise RuntimeError(
+            'ORA-00942: table or view "SYS"."V_$TRANSACTION" does not exist'
+        )
+
+    cur.execute.side_effect = execute
     source_conn = MagicMock(return_value=conn)
     mining_conn = MagicMock(
         side_effect=AssertionError("LogMiner query must not run")
@@ -169,10 +176,11 @@ def test_open_txn_detection_refuses_before_logminer_on_missing_grant(
     )
     assert "SELECT ON V_$TRANSACTION" in str(raised.value)
     assert "unset DATAFLOW_CDC_ORACLE_TXN_BUFFER" in str(raised.value)
-    assert source_conn.call_count == 1
+    assert source_conn.call_count == 2
     assert mining_conn.call_count == 0
-    assert len(cur.execute.call_args_list) == 1
-    assert "V$TRANSACTION" in cur.execute.call_args.args[0]
+    assert len(cur.execute.call_args_list) == 2
+    assert "GV$INSTANCE" in cur.execute.call_args_list[0].args[0]
+    assert "V$TRANSACTION" in cur.execute.call_args_list[1].args[0]
 
 
 def test_oldest_open_transaction_holds_window_and_logs_no_row_values(
@@ -180,14 +188,20 @@ def test_oldest_open_transaction_holds_window_and_logs_no_row_values(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     reader = _make_open_txn_reader(monkeypatch, table="ROW_SENTINEL")
-    probe = MagicMock(return_value=(150, 1, 2, 3, 12.5))
-    monkeypatch.setattr(reader, "_probe_oldest_open_txn", probe)
+    conn, cur = _open_txn_connection()
+    cur.fetchone.return_value = (200, 150, 1, 2, 3, 12.5)
+    monkeypatch.setattr(reader, "_conn", lambda: conn)
 
     with caplog.at_level(logging.WARNING, logger="connectors.oracle_logminer"):
-        end_scn = reader._hold_at_oldest_open_txn(200)
+        end_scn, held = reader._buffer_off_window_end()
 
-    assert probe.call_args.args == ()
     assert end_scn == 149
+    assert held is True
+    assert cur.execute.call_count == 1
+    sql = cur.execute.call_args.args[0].upper()
+    assert "SELECT D.CURRENT_SCN" in sql
+    assert "FROM V$DATABASE D" in sql
+    assert "V$TRANSACTION" in sql
     assert "cursor_key=open-txn-hold-test" in caplog.text
     assert "xid=1.2.3" in caplog.text
     assert "start_scn=150" in caplog.text
@@ -210,12 +224,14 @@ def test_no_open_transaction_does_not_cap_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reader = _make_open_txn_reader(monkeypatch)
-    monkeypatch.setattr(reader, "_probe_oldest_open_txn", lambda: None)
+    conn, cur = _open_txn_connection()
+    cur.fetchone.return_value = (200, None, None, None, None, None)
+    monkeypatch.setattr(reader, "_conn", lambda: conn)
 
-    assert reader._hold_at_oldest_open_txn(200) == 200
+    assert reader._buffer_off_window_end() == (200, False)
 
 
-def test_midstream_open_transaction_probe_failure_uses_typed_refusal(
+def test_atomic_window_probe_failure_uses_typed_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reader = _make_open_txn_reader(monkeypatch)
@@ -224,13 +240,103 @@ def test_midstream_open_transaction_probe_failure_uses_typed_refusal(
     monkeypatch.setattr(reader, "_conn", lambda: conn)
 
     with pytest.raises(OracleLogMinerReadError) as raised:
-        reader._hold_at_oldest_open_txn(200)
+        reader._buffer_off_window_end()
 
     assert getattr(raised.value, "code", None) == (
         "oracle_open_txn_detection_unavailable"
     )
     assert "SELECT ON V_$TRANSACTION" in str(raised.value)
     assert "unset DATAFLOW_CDC_ORACLE_TXN_BUFFER" in str(raised.value)
+
+
+def test_buffer_off_window_uses_atomic_head_and_oldest_txn_sample(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch)
+    conn, cur = _open_txn_connection()
+    # The transaction is open at CURRENT_SCN=200 and commits before a later
+    # V$TRANSACTION-only probe could observe it.
+    cur.fetchone.return_value = (200, 150, 4, 5, 6, 20.0)
+    monkeypatch.setattr(reader, "_conn", lambda: conn)
+    monkeypatch.setattr(
+        reader,
+        "_probe_oldest_open_txn",
+        lambda: pytest.fail("window sampling must not use a later probe"),
+    )
+
+    window_end = getattr(reader, "_buffer_off_window_end", None)
+    assert callable(window_end)
+    assert window_end() == (149, True)
+
+    assert cur.execute.call_count == 1
+    sql = cur.execute.call_args.args[0].upper()
+    assert "SELECT D.CURRENT_SCN" in sql
+    assert "LEFT JOIN" in sql
+    assert "V$TRANSACTION" in sql
+
+
+def test_buffer_off_startup_refuses_on_multiple_rac_instances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch)
+    reader._open_txn_detection_checked = False
+    conn, cur = _open_txn_connection()
+    cur.fetchone.return_value = (2,)
+    monkeypatch.setattr(reader, "_conn", lambda: conn)
+    monkeypatch.setattr(
+        reader,
+        "_probe_oldest_open_txn",
+        lambda: pytest.fail("RAC must be refused before probing V$TRANSACTION"),
+    )
+
+    with pytest.raises(OracleLogMinerReadError) as raised:
+        reader._ensure_open_txn_detection()
+
+    assert getattr(raised.value, "code", None) == "oracle_buffer_off_rac_unsupported"
+    assert "Oracle RAC" in str(raised.value)
+    assert "V$TRANSACTION is instance-local" in str(raised.value)
+    assert "unset DATAFLOW_CDC_ORACLE_TXN_BUFFER" in str(raised.value)
+    assert cur.execute.call_count == 1
+    assert "SELECT COUNT(*) FROM GV$INSTANCE" in cur.execute.call_args.args[0].upper()
+
+
+def test_buffer_off_startup_accepts_single_rac_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch)
+    reader._open_txn_detection_checked = False
+    conn, cur = _open_txn_connection()
+    cur.fetchone.return_value = (1,)
+    probe = MagicMock(return_value=None)
+    monkeypatch.setattr(reader, "_conn", lambda: conn)
+    monkeypatch.setattr(reader, "_probe_oldest_open_txn", probe)
+
+    reader._ensure_open_txn_detection()
+
+    assert reader._open_txn_detection_checked is True
+    probe.assert_called_once_with()
+    assert "GV$INSTANCE" in cur.execute.call_args.args[0].upper()
+
+
+def test_buffer_off_startup_refuses_when_gv_instance_is_not_granted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = _make_open_txn_reader(monkeypatch)
+    reader._open_txn_detection_checked = False
+    conn, cur = _open_txn_connection()
+    cur.execute.side_effect = RuntimeError(
+        'ORA-00942: table or view "SYS"."GV_$INSTANCE" does not exist'
+    )
+    monkeypatch.setattr(reader, "_conn", lambda: conn)
+
+    with pytest.raises(OracleLogMinerReadError) as raised:
+        reader._ensure_open_txn_detection()
+
+    assert getattr(raised.value, "code", None) == (
+        "oracle_instance_detection_unavailable"
+    )
+    assert "SELECT ON GV_$INSTANCE" in str(raised.value)
+    assert cur.execute.call_count == 1
 
 
 @pytest.mark.parametrize(
@@ -246,14 +352,19 @@ def test_single_table_poll_applies_oldest_transaction_hold(
     reader = _make_open_txn_reader(monkeypatch)
     reader.scn = cursor_scn
     conn, cur = _open_txn_connection()
-    calls: list[int] = []
+    calls: list[bool] = []
     fetches: list[int] = []
 
-    def hold(end_scn):
-        calls.append(end_scn)
-        return min(end_scn, 149)
+    def window_end():
+        calls.append(True)
+        return 149, True
 
-    monkeypatch.setattr(reader, "_hold_at_oldest_open_txn", hold, raising=False)
+    monkeypatch.setattr(reader, "_buffer_off_window_end", window_end, raising=False)
+    monkeypatch.setattr(
+        reader,
+        "_hold_at_oldest_open_txn",
+        lambda *_a: pytest.fail("single-table poll must use atomic window sampling"),
+    )
     monkeypatch.setattr(reader, "_mining_conn", lambda: conn)
     monkeypatch.setattr(oracle_logminer, "fetch_oldest_available_scn", lambda _cur: 1)
     monkeypatch.setattr(oracle_logminer, "fetch_redo_inventory", lambda _cur: [])
@@ -278,8 +389,7 @@ def test_single_table_poll_applies_oldest_transaction_hold(
 
     list(reader._poll_once())
 
-    assert len(calls) == 1
-    assert calls[0] == 200
+    assert calls == [True]
     assert reader.scn == expected_scn
     assert len(fetches) == expected_fetches
 
@@ -289,13 +399,18 @@ def test_shared_poll_applies_oldest_transaction_hold(
 ) -> None:
     reader = _make_open_txn_reader(monkeypatch, shared=True)
     conn, cur = _open_txn_connection()
-    calls: list[int] = []
+    calls: list[bool] = []
 
-    def hold(end_scn):
-        calls.append(end_scn)
-        return min(end_scn, 149)
+    def window_end():
+        calls.append(True)
+        return 149, True
 
-    monkeypatch.setattr(reader, "_hold_at_oldest_open_txn", hold, raising=False)
+    monkeypatch.setattr(reader, "_buffer_off_window_end", window_end, raising=False)
+    monkeypatch.setattr(
+        reader,
+        "_hold_at_oldest_open_txn",
+        lambda *_a: pytest.fail("shared poll must use atomic window sampling"),
+    )
     monkeypatch.setattr(reader, "_mining_conn", lambda: conn)
     monkeypatch.setattr(oracle_logminer, "fetch_oldest_available_scn", lambda _cur: 1)
     monkeypatch.setattr(oracle_logminer, "fetch_redo_inventory", lambda _cur: [])
@@ -314,8 +429,7 @@ def test_shared_poll_applies_oldest_transaction_hold(
 
     list(reader._poll_shared_multi())
 
-    assert len(calls) == 1
-    assert calls[0] == 200
+    assert calls == [True]
     assert reader.scn <= 149
 
 
@@ -324,13 +438,18 @@ def test_peek_applies_oldest_transaction_hold(
 ) -> None:
     reader = _make_open_txn_reader(monkeypatch)
     conn, cur = _open_txn_connection()
-    calls: list[int] = []
+    calls: list[bool] = []
 
-    def hold(end_scn):
-        calls.append(end_scn)
-        return min(end_scn, 149)
+    def window_end():
+        calls.append(True)
+        return 149, True
 
-    monkeypatch.setattr(reader, "_hold_at_oldest_open_txn", hold, raising=False)
+    monkeypatch.setattr(reader, "_buffer_off_window_end", window_end, raising=False)
+    monkeypatch.setattr(
+        reader,
+        "_hold_at_oldest_open_txn",
+        lambda *_a: pytest.fail("peek must use atomic window sampling"),
+    )
     monkeypatch.setattr(reader, "_mining_conn", lambda: conn)
     monkeypatch.setattr(
         oracle_logminer,
@@ -344,8 +463,7 @@ def test_peek_applies_oldest_transaction_hold(
     assert reader._peek_stream_events_during_chunk(
         MagicMock(chunk_size=10)
     ) == []
-    assert len(calls) == 1
-    assert calls[0] == 200
+    assert calls == [True]
 
 
 def test_empty_window_retry_reapplies_oldest_transaction_hold(
@@ -353,13 +471,18 @@ def test_empty_window_retry_reapplies_oldest_transaction_hold(
 ) -> None:
     reader = _make_open_txn_reader(monkeypatch)
     _conn, cur = _open_txn_connection()
-    calls: list[int] = []
+    calls: list[bool] = []
 
-    def hold(end_scn):
-        calls.append(end_scn)
-        return min(end_scn, 149)
+    def window_end():
+        calls.append(True)
+        return 149, True
 
-    monkeypatch.setattr(reader, "_hold_at_oldest_open_txn", hold, raising=False)
+    monkeypatch.setattr(reader, "_buffer_off_window_end", window_end, raising=False)
+    monkeypatch.setattr(
+        reader,
+        "_hold_at_oldest_open_txn",
+        lambda *_a: pytest.fail("empty-window retry must use atomic window sampling"),
+    )
     monkeypatch.setattr(reader, "_empty_window_retry_sec", lambda: 1)
     monkeypatch.setattr(oracle_logminer.time, "sleep", lambda _delay: None)
     monkeypatch.setattr(
@@ -378,7 +501,7 @@ def test_empty_window_retry_reapplies_oldest_transaction_hold(
     )
 
     assert rows == []
-    assert calls == [200]
+    assert calls == [True]
     assert end_scn == 149
 
 
@@ -978,6 +1101,9 @@ def test_committed_checkpoint_restarts_within_scn_without_duplicate_or_skip(
         table="T", primary_key="ID", schema="APP", resume_token=token,
     )
     reader.phase = "streaming"
+    if not buffer_mode:
+        reader._open_txn_detection_checked = True
+        reader._buffer_off_window_end = lambda: (120, False)
     conn = _make_mining_conn(rows, head_scn=120)
     with (
         patch.object(reader, "_mining_conn", return_value=conn),

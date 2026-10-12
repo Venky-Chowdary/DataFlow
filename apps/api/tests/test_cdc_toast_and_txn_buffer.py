@@ -94,6 +94,34 @@ def test_open_txn_detection_error_has_stable_job_failure_code() -> None:
     assert extras["oracle_open_txn_detection_unavailable"] is True
 
 
+def test_buffer_off_rac_refusals_have_stable_job_failure_codes() -> None:
+    import connectors.oracle_logminer as oracle_logminer
+    from src.transfer.job_failure import _job_failure_fields
+
+    errors = (
+        (
+            oracle_logminer.OracleInstanceDetectionUnavailable(
+                RuntimeError("ORA-00942"),
+                cursor_key="oracle-instance-test",
+            ),
+            "oracle_instance_detection_unavailable",
+            "oracle_instance_detection_unavailable",
+        ),
+        (
+            oracle_logminer.OracleBufferOffRacUnsupported(
+                cursor_key="oracle-rac-test"
+            ),
+            "oracle_buffer_off_rac_unsupported",
+            "oracle_buffer_off_rac_unsupported",
+        ),
+    )
+    for error, code, flag in errors:
+        details, extras = _job_failure_fields(error)
+        assert details["code"] == code
+        assert details["retriable"] is False
+        assert extras[flag] is True
+
+
 def test_txn_buffer_spills_to_disk_then_commits(tmp_path: Path) -> None:
     """Large open txns spill to disk so RAM stays bounded; COMMIT reconstitutes all events."""
     buf = TransactionBuffer(max_events=100, spill_after=3, spill_dir=tmp_path)

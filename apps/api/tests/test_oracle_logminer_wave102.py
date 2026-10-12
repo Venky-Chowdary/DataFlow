@@ -162,7 +162,9 @@ def test_late_redo_at_window_end_is_remined_exactly_once(
         ),
     )
     reader.phase = "streaming"
+    reader._open_txn_detection_checked = True
     reader._probe_oldest_open_txn = lambda _cur=None: None
+    reader._buffer_off_window_end = lambda: (12, False)
     cursor = MagicMock()
     cursor.fetchone.return_value = (12,)
     conn = MagicMock()
@@ -331,7 +333,9 @@ def test_poll_truncated_window_does_not_skip_past_last_row(monkeypatch):
         resume_token=encode_logminer_token(10, table="ORDERS", phase="streaming"),
     )
     cdc.phase = "streaming"
+    cdc._open_txn_detection_checked = True
     monkeypatch.setattr(cdc, "_probe_oldest_open_txn", lambda _cur=None: None)
+    monkeypatch.setattr(cdc, "_buffer_off_window_end", lambda: (99, False))
 
     mined = [
         (

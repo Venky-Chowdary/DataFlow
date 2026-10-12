@@ -143,6 +143,9 @@ def test_oracle_preflight_blocks_buffer_opt_out_without_v_transaction_grant(
             "_probe_oldest_open_txn": lambda self: (_ for _ in ()).throw(
                 RuntimeError("ORA-00942: V_$TRANSACTION is not visible")
             ),
+            "_ensure_open_txn_detection": lambda self: (_ for _ in ()).throw(
+                RuntimeError("ORA-00942: V_$TRANSACTION is not visible")
+            ),
             "close": lambda self: None,
         },
     )()
@@ -164,6 +167,76 @@ def test_oracle_preflight_blocks_buffer_opt_out_without_v_transaction_grant(
     assert "SELECT ON V_$TRANSACTION" in gate["details"]["detail"]
 
 
+def test_oracle_preflight_blocks_buffer_off_on_rac(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
+    reader = type(
+        "ProbeReader",
+        (),
+        {
+            "_probe_oldest_open_txn": lambda self: None,
+            "_ensure_open_txn_detection": lambda self: (_ for _ in ()).throw(
+                RuntimeError(
+                    "Buffer-off is unsupported on Oracle RAC because "
+                    "V$TRANSACTION is instance-local"
+                )
+            ),
+            "close": lambda self: None,
+        },
+    )()
+    monkeypatch.setattr(probe_mod, "_try_reader", lambda *_a, **_k: (True, reader))
+
+    probe = probe_mod.probe_log_capture(
+        "oracle",
+        {"host": "oracle"},
+        table="orders",
+        schema="APP",
+        primary_key="id",
+    )
+    gate = _gate(probe)
+
+    assert probe.available is False
+    assert "Oracle RAC" in probe.detail
+    assert gate is not None and gate["status"] == "block"
+    assert "Oracle RAC" in gate["message"]
+
+
+def test_oracle_preflight_blocks_buffer_off_when_gv_instance_grant_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
+    reader = type(
+        "ProbeReader",
+        (),
+        {
+            "_probe_oldest_open_txn": lambda self: None,
+            "_ensure_open_txn_detection": lambda self: (_ for _ in ()).throw(
+                RuntimeError(
+                    'ORA-00942: table or view "SYS"."GV_$INSTANCE" does not exist; '
+                    "GRANT SELECT ON GV_$INSTANCE TO APP"
+                )
+            ),
+            "close": lambda self: None,
+        },
+    )()
+    monkeypatch.setattr(probe_mod, "_try_reader", lambda *_a, **_k: (True, reader))
+
+    probe = probe_mod.probe_log_capture(
+        "oracle",
+        {"host": "oracle"},
+        table="orders",
+        schema="APP",
+        primary_key="id",
+    )
+    gate = _gate(probe)
+
+    assert probe.available is False
+    assert "SELECT ON GV_$INSTANCE" in probe.detail
+    assert gate is not None and gate["status"] == "block"
+    assert "SELECT ON GV_$INSTANCE" in gate["details"]["detail"]
+
+
 def test_oracle_preflight_skips_transaction_grant_check_when_buffer_is_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -174,6 +247,9 @@ def test_oracle_preflight_skips_transaction_grant_check_when_buffer_is_on(
         {
             "_probe_oldest_open_txn": lambda self: (_ for _ in ()).throw(
                 AssertionError("buffer-on preflight must not query V$TRANSACTION")
+            ),
+            "_ensure_open_txn_detection": lambda self: (_ for _ in ()).throw(
+                AssertionError("buffer-on preflight must not check GV$INSTANCE")
             ),
             "close": lambda self: None,
         },

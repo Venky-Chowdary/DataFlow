@@ -187,6 +187,8 @@ def test_oracle_poll_retries_transient_connection_loss(
     reader.phase = "streaming"
     reader.scn = 100
     reader._probe_oldest_open_txn = lambda _cur=None: None
+    reader._open_txn_detection_checked = True
+    reader._buffer_off_window_end = lambda: (100, False)
     cursor = MagicMock()
     cursor.fetchone.return_value = (100,)
     conn = _connection(cursor)
@@ -245,6 +247,8 @@ def test_oracle_shared_poll_retries_transient_connection_loss(
     reader.phase = "streaming"
     reader.scn = 100
     reader._probe_oldest_open_txn = lambda _cur=None: None
+    reader._open_txn_detection_checked = True
+    reader._buffer_off_window_end = lambda: (100, False)
     cursor = MagicMock()
     cursor.fetchone.return_value = (100,)
     conn = _connection(cursor)
@@ -401,6 +405,8 @@ def test_oracle_poll_exhaustion_raises_transient_read_error(
     reader.phase = "streaming"
     reader.scn = 100
     reader._probe_oldest_open_txn = lambda _cur=None: None
+    reader._open_txn_detection_checked = True
+    reader._buffer_off_window_end = lambda: (100, False)
     attempts = 0
 
     def connection_lost():
@@ -471,6 +477,8 @@ def test_oracle_poll_does_not_retry_nontransient_read_error(monkeypatch) -> None
     reader.phase = "streaming"
     reader.scn = 100
     reader._probe_oldest_open_txn = lambda _cur=None: None
+    reader._open_txn_detection_checked = True
+    reader._buffer_off_window_end = lambda: (100, False)
     attempts = 0
 
     def invalid_query():

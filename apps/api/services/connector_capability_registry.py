@@ -132,13 +132,18 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": True,
         "cdc_prerequisites": (
             "Oracle LogMiner transaction buffering is enabled by default. Setting "
-            "DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires SELECT ON V_$TRANSACTION; "
-            "the reader holds its SCN window at the oldest open transaction. "
-            "RAC/GV$TRANSACTION behavior is unverified. Prefer LogMiner CDC when "
-            "privileges allow; Flashback Query is the fallback. Query-based CDC "
-            "requires a monotonic cursor column. Oracle LOB values are read by "
-            "primary key at capture time; final state converges, though between "
-            "two changes a row may briefly carry a LOB value newer than its other "
+            "DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires SELECT ON V_$TRANSACTION "
+            "and SELECT ON GV_$INSTANCE, and refuses on RAC because V$TRANSACTION "
+            "is instance-local. Any open transaction on any table or schema holds "
+            "the buffer-off SCN window at the oldest transaction until it ends; "
+            "the throttled hold WARNING is the only signal. CURRENT_SCN and "
+            "V$TRANSACTION are sampled in one statement, but the views are not "
+            "guaranteed to be read atomically, leaving a narrow residual; buffering "
+            "is the safe default. RAC behavior is not live-verified. Prefer LogMiner "
+            "CDC when privileges allow; Flashback Query is the fallback. Query-based "
+            "CDC requires a monotonic cursor column. Oracle LOB values are read by "
+            "primary key at capture time; final state converges, though between two "
+            "changes a row may briefly carry a LOB value newer than its other "
             "columns. LOB CDC requires a primary key."
         ),
         "common_issues": [
@@ -146,8 +151,10 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "NUMBER with no precision maps to a wide decimal.",
             "Upsert prefers native MERGE with NULL-safe PK match (PTT/GTT stage); falls back to delete+insert. Still at-least-once.",
             "LogMiner needs supplemental logging.",
-            "DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires SELECT ON V_$TRANSACTION; without it, capture preflight blocks.",
-            "RAC/GV$TRANSACTION behavior for oldest-open-transaction detection is unverified.",
+            "DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires SELECT ON V_$TRANSACTION and SELECT ON GV_$INSTANCE; it refuses on RAC.",
+            "Any open transaction on any table or schema holds the buffer-off window until it ends; the throttled hold WARNING is the only signal.",
+            "The head and oldest transaction are sampled in one statement, but V$DATABASE and V$TRANSACTION are not guaranteed to be read atomically; a narrow residual remains. Buffering stays on by default.",
+            "RAC behavior is not live-verified.",
         ],
         "recommended_batch_size": 2000,
     },

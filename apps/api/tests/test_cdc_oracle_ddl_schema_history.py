@@ -160,6 +160,13 @@ def test_oracle_logminer_records_live_ddl_without_emitting_it_as_data(
 ) -> None:
     from connectors.generic_sql import get_connection
     from connectors.oracle_logminer import OracleLogMinerCdc
+    from test_cdc_oracle_logminer_txn_live import (
+        _ensure_oracle_gv_instance_readable,
+        _oracle_v_transaction_grant_count,
+        _oracle_v_transaction_grant_user,
+        _set_oracle_gv_instance_grant,
+        _set_oracle_v_transaction_grant,
+    )
 
     monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     cfg = _oracle_cfg()
@@ -177,8 +184,15 @@ def test_oracle_logminer_records_live_ddl_without_emitting_it_as_data(
         schema=schema,
         cursor_key=f"o6-ddl:{table}",
     )
+    cdc_user = _oracle_v_transaction_grant_user(cfg)
     created = False
+    transaction_probe_granted = False
+    instance_probe_granted = False
     try:
+        transaction_probe_granted = _oracle_v_transaction_grant_count(cdc_user) == 0
+        if transaction_probe_granted:
+            _set_oracle_v_transaction_grant(cdc_user, enabled=True)
+        instance_probe_granted = _ensure_oracle_gv_instance_readable(cfg)
         delivered: dict[str, dict] = {}
 
         def collect_poll() -> None:
@@ -275,20 +289,28 @@ def test_oracle_logminer_records_live_ddl_without_emitting_it_as_data(
         assert reader.last_ddl_at
     finally:
         reader.close()
-        if created:
-            with get_connection(
-                host=cfg["host"],
-                port=cfg["port"],
-                database=cfg["database"],
-                username=cfg["username"],
-                password=cfg["password"],
-                connection_string="",
-                ssl=False,
-                db_type="oracle",
-            ) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(f"DROP TABLE {table_ref} PURGE")
-                conn.commit()
+        try:
+            if created:
+                with get_connection(
+                    host=cfg["host"],
+                    port=cfg["port"],
+                    database=cfg["database"],
+                    username=cfg["username"],
+                    password=cfg["password"],
+                    connection_string="",
+                    ssl=False,
+                    db_type="oracle",
+                ) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(f"DROP TABLE {table_ref} PURGE")
+                    conn.commit()
+        finally:
+            try:
+                if transaction_probe_granted:
+                    _set_oracle_v_transaction_grant(cdc_user, enabled=False)
+            finally:
+                if instance_probe_granted:
+                    _set_oracle_gv_instance_grant(cdc_user, enabled=False)
 
 
 @pytest.mark.skipif(
@@ -306,6 +328,13 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
     from services.cdc_mapping_review import acknowledge_review
     from src.transfer.cdc_transfer import run_cdc_database_transfer
     from src.transfer.models import EndpointConfig
+    from test_cdc_oracle_logminer_txn_live import (
+        _ensure_oracle_gv_instance_readable,
+        _oracle_v_transaction_grant_count,
+        _oracle_v_transaction_grant_user,
+        _set_oracle_gv_instance_grant,
+        _set_oracle_v_transaction_grant,
+    )
 
     monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "1" if txn_buffer else "0")
     monkeypatch.setenv(
@@ -323,6 +352,9 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
     qualified = f"{schema}.{table}"
     job_id = f"oracle-ddl-eos-{uuid.uuid4().hex[:8]}"
     created = False
+    cdc_user = _oracle_v_transaction_grant_user(cfg)
+    transaction_probe_granted = False
+    instance_probe_granted = False
 
     src = EndpointConfig(
         kind="database",
@@ -425,6 +457,13 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
                 ]
 
     try:
+        if not txn_buffer:
+            transaction_probe_granted = (
+                _oracle_v_transaction_grant_count(cdc_user) == 0
+            )
+            if transaction_probe_granted:
+                _set_oracle_v_transaction_grant(cdc_user, enabled=True)
+            instance_probe_granted = _ensure_oracle_gv_instance_readable(cfg)
         with oracle_connection(
             host=cfg["host"],
             port=cfg["port"],
@@ -685,6 +724,10 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
                 with conn.cursor() as cur:
                     cur.execute(f"DROP TABLE {table_ref} PURGE")
                 conn.commit()
+        if transaction_probe_granted:
+            _set_oracle_v_transaction_grant(cdc_user, enabled=False)
+        if instance_probe_granted:
+            _set_oracle_gv_instance_grant(cdc_user, enabled=False)
 
 
 def _unit_reader(*, table: str | list[str] = "T1", resume_token=None):
@@ -720,6 +763,8 @@ def test_oracle_ddl_ambiguity_uses_numeric_rs_id_order(
     reader = _unit_reader()
     reader.phase = "streaming"
     reader.scn = 100
+    reader._open_txn_detection_checked = True
+    monkeypatch.setattr(reader, "_buffer_off_window_end", lambda: (101, False))
     monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
     monkeypatch.setattr(
         "services.cdc_incremental_runner.interleave_incremental_snapshot",
@@ -920,6 +965,8 @@ def test_oracle_shared_reader_records_ddl_for_each_tracked_table(
     reader = _unit_reader(table=["T1", "T2"])
     reader.phase = "streaming"
     reader.scn = 1
+    reader._open_txn_detection_checked = True
+    monkeypatch.setattr(reader, "_buffer_off_window_end", lambda: (100, False))
     monkeypatch.setattr(reader, "_acquire_cdc_lease", lambda: None)
     monkeypatch.setattr(logminer, "assert_resume_scn_in_redo", lambda *_a, **_k: None)
     monkeypatch.setattr(logminer, "fetch_oldest_available_scn", lambda _cur: 1)

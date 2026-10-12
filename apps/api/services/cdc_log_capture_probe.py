@@ -222,20 +222,31 @@ def probe_log_capture(
 
         if not oracle_txn_buffer_enabled():
             try:
-                reader._probe_oldest_open_txn()
+                reader._ensure_open_txn_detection()
             except Exception as exc:  # noqa: BLE001 — unsafe opt-out must block preflight
                 message = str(exc)
                 classification_text = message
+                grant_object = ""
                 if "ORA-00942" in message.upper() or "ORA-01031" in message.upper():
+                    view = (
+                        "GV$INSTANCE"
+                        if "GV$INSTANCE" in message.upper()
+                        else "V$TRANSACTION"
+                    )
+                    grant_object = (
+                        "GV_$INSTANCE" if view == "GV$INSTANCE" else "V_$TRANSACTION"
+                    )
                     classification_text = (
-                        f"insufficient privilege to inspect V$TRANSACTION: {message}"
+                        f"insufficient privilege to inspect {view}: {message}"
                     )
                 refusal = classify_log_capture_failure("oracle", classification_text)
-                detail = (
-                    f"{refusal.detail}. DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires "
-                    "SELECT ON V_$TRANSACTION (for example, GRANT SELECT ON "
-                    "V_$TRANSACTION TO <cdc user>)."
-                )
+                detail = refusal.detail
+                if grant_object and f"SELECT ON {grant_object}" not in detail.upper():
+                    detail += (
+                        f". DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires SELECT ON "
+                        f"{grant_object} (for example, GRANT SELECT ON "
+                        f"{grant_object} TO <cdc user>)."
+                    )
                 return LogCaptureProbe(
                     dialect,
                     False,

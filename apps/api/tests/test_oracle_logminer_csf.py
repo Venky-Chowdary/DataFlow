@@ -237,7 +237,9 @@ def test_full_window_rewinds_trailing_group_without_loss_or_duplicate(monkeypatc
         ),
     ]
     reader = _reader(batch_size=2)
+    reader._open_txn_detection_checked = True
     monkeypatch.setattr(reader, "_probe_oldest_open_txn", lambda _cur=None: None)
+    monkeypatch.setattr(reader, "_buffer_off_window_end", lambda: (102, False))
     cur = _WindowCursor(rows)
     conn = _MiningConnection(cur)
 

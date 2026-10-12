@@ -52,37 +52,93 @@ def _oracle_admin_pdb() -> str:
     return service
 
 
-def _oracle_v_transaction_grant_count(user: str) -> int:
+def _oracle_view_grant_count(user: str, view: str) -> int:
     from test_oracle_redo_inventory import _oracle_admin_sql
 
     cdc_user = user.upper()
     if not re.fullmatch(r"[A-Z][A-Z0-9_$#]*", cdc_user):
         raise ValueError(f"Unexpected Oracle CDC username: {user!r}")
+    if view not in {"V_$TRANSACTION", "GV_$INSTANCE"}:
+        raise ValueError(f"Unexpected Oracle system view: {view!r}")
     output = _oracle_admin_sql(
         f"ALTER SESSION SET CONTAINER = {_oracle_admin_pdb()};\n"
         "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\n"
         "SELECT COUNT(*) FROM DBA_TAB_PRIVS "
-        "WHERE TABLE_NAME = 'V_$TRANSACTION' "
+        f"WHERE TABLE_NAME = '{view}' "
         f"AND GRANTEE = '{cdc_user}' AND PRIVILEGE = 'SELECT';"
     )
     values = re.findall(r"\d+", output)
     return int(values[-1]) if values else 0
 
 
-def _set_oracle_v_transaction_grant(user: str, *, enabled: bool) -> None:
+def _oracle_v_transaction_grant_count(user: str) -> int:
+    return _oracle_view_grant_count(user, "V_$TRANSACTION")
+
+
+def _oracle_gv_instance_grant_count(user: str) -> int:
+    return _oracle_view_grant_count(user, "GV_$INSTANCE")
+
+
+def _set_oracle_view_grant(user: str, view: str, *, enabled: bool) -> None:
     from test_oracle_redo_inventory import _oracle_admin_sql
 
     cdc_user = user.upper()
     if not re.fullmatch(r"[A-Z][A-Z0-9_$#]*", cdc_user):
         raise ValueError(f"Unexpected Oracle CDC username: {user!r}")
+    if view not in {"V_$TRANSACTION", "GV_$INSTANCE"}:
+        raise ValueError(f"Unexpected Oracle system view: {view!r}")
     command = (
-        f"GRANT SELECT ON V_$TRANSACTION TO {cdc_user};"
+        f"GRANT SELECT ON {view} TO {cdc_user};"
         if enabled
-        else f"REVOKE SELECT ON V_$TRANSACTION FROM {cdc_user};"
+        else f"REVOKE SELECT ON {view} FROM {cdc_user};"
     )
     _oracle_admin_sql(
         f"ALTER SESSION SET CONTAINER = {_oracle_admin_pdb()};\n{command}"
     )
+
+
+def _set_oracle_v_transaction_grant(user: str, *, enabled: bool) -> None:
+    _set_oracle_view_grant(user, "V_$TRANSACTION", enabled=enabled)
+
+
+def _set_oracle_gv_instance_grant(user: str, *, enabled: bool) -> None:
+    _set_oracle_view_grant(user, "GV_$INSTANCE", enabled=enabled)
+
+
+def _oracle_gv_instance_count(cfg: dict) -> int:
+    from connectors.generic_sql import get_connection
+
+    with get_connection(
+        host=cfg["host"],
+        port=cfg["port"],
+        database=cfg["database"],
+        username=cfg["username"],
+        password=cfg["password"],
+        connection_string="",
+        ssl=False,
+        db_type="oracle",
+    ) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM GV$INSTANCE")
+            row = cur.fetchone()
+    if not row:
+        raise RuntimeError("GV$INSTANCE returned no instance count")
+    return int(row[0])
+
+
+def _ensure_oracle_gv_instance_readable(cfg: dict) -> bool:
+    """Grant GV$INSTANCE for this test if the CDC user cannot already read it."""
+    try:
+        _oracle_gv_instance_count(cfg)
+        return False
+    except Exception as exc:
+        if "ORA-00942" not in str(exc).upper() and "ORA-01031" not in str(exc).upper():
+            raise
+        user = _oracle_v_transaction_grant_user(cfg)
+        if _oracle_gv_instance_grant_count(user):
+            raise
+        _set_oracle_gv_instance_grant(user, enabled=True)
+        return True
 
 
 @pytest.mark.skipif(
@@ -116,6 +172,7 @@ def test_oracle_logminer_delivers_long_transaction_after_later_commit(
     )
     table_created = False
     transaction_probe_granted = False
+    instance_probe_granted = False
 
     with ExitStack() as stack:
         session_a = stack.enter_context(
@@ -144,6 +201,7 @@ def test_oracle_logminer_delivers_long_transaction_after_later_commit(
         )
         try:
             if not txn_buffer:
+                instance_probe_granted = _ensure_oracle_gv_instance_readable(cfg)
                 cdc_user = _oracle_v_transaction_grant_user(cfg)
                 transaction_probe_granted = (
                     _oracle_v_transaction_grant_count(cdc_user) == 0
@@ -204,17 +262,23 @@ def test_oracle_logminer_delivers_long_transaction_after_later_commit(
             assert "2" in delivered, f"later committed row was not delivered: {delivered}"
         finally:
             try:
-                if transaction_probe_granted:
-                    _set_oracle_v_transaction_grant(
+                if instance_probe_granted:
+                    _set_oracle_gv_instance_grant(
                         _oracle_v_transaction_grant_user(cfg), enabled=False
                     )
             finally:
-                session_a.rollback()
-                reader.close()
-                if table_created:
-                    with session_b.cursor() as cur:
-                        cur.execute(f"DROP TABLE {table_ref} PURGE")
-                    session_b.commit()
+                try:
+                    if transaction_probe_granted:
+                        _set_oracle_v_transaction_grant(
+                            _oracle_v_transaction_grant_user(cfg), enabled=False
+                        )
+                finally:
+                    session_a.rollback()
+                    reader.close()
+                    if table_created:
+                        with session_b.cursor() as cur:
+                            cur.execute(f"DROP TABLE {table_ref} PURGE")
+                        session_b.commit()
 
 
 @pytest.mark.skipif(
@@ -233,11 +297,13 @@ def test_oracle_buffer_off_without_transaction_grant_fails_closed(
     cfg = _oracle_cfg()
     cdc_user = _oracle_v_transaction_grant_user(cfg)
     had_grant = _oracle_v_transaction_grant_count(cdc_user) > 0
-    if had_grant:
-        _set_oracle_v_transaction_grant(cdc_user, enabled=False)
     monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
     reader = None
+    instance_probe_granted = False
     try:
+        instance_probe_granted = _ensure_oracle_gv_instance_readable(cfg)
+        if had_grant:
+            _set_oracle_v_transaction_grant(cdc_user, enabled=False)
         reader = OracleLogMinerCdc(
             cfg,
             table="CDC_TXN_GRANT_PROBE",
@@ -254,8 +320,111 @@ def test_oracle_buffer_off_without_transaction_grant_fails_closed(
     finally:
         if reader is not None:
             reader.close()
-        if had_grant:
-            _set_oracle_v_transaction_grant(cdc_user, enabled=True)
+        try:
+            if had_grant:
+                _set_oracle_v_transaction_grant(cdc_user, enabled=True)
+        finally:
+            if instance_probe_granted:
+                _set_oracle_gv_instance_grant(cdc_user, enabled=False)
+
+
+@pytest.mark.skipif(
+    not _oracle_logminer_ready(),
+    reason="Oracle LogMiner not reachable — set DATAFLOW_ORACLE_ENABLE=1 on a CDC-ready :1521",
+)
+def test_oracle_buffer_off_single_instance_passes_with_required_view_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _oracle_cfg()
+    cdc_user = _oracle_v_transaction_grant_user(cfg)
+    transaction_probe_granted = _oracle_v_transaction_grant_count(cdc_user) == 0
+    if transaction_probe_granted:
+        _set_oracle_v_transaction_grant(cdc_user, enabled=True)
+    instance_probe_granted = False
+    reader = None
+    try:
+        instance_probe_granted = _ensure_oracle_gv_instance_readable(cfg)
+        assert _oracle_gv_instance_count(cfg) == 1
+        monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
+        reader = OracleLogMinerCdc(
+            cfg,
+            table="CDC_TXN_INSTANCE_PROBE",
+            primary_key="ID",
+            schema=str(cfg["schema"]),
+            resume_token=encode_logminer_token(
+                100, table="CDC_TXN_INSTANCE_PROBE", phase="streaming"
+            ),
+        )
+        reader._ensure_open_txn_detection()
+        assert reader._open_txn_detection_checked is True
+    finally:
+        if reader is not None:
+            reader.close()
+        try:
+            if instance_probe_granted:
+                _set_oracle_gv_instance_grant(cdc_user, enabled=False)
+        finally:
+            if transaction_probe_granted:
+                _set_oracle_v_transaction_grant(cdc_user, enabled=False)
+
+
+@pytest.mark.skipif(
+    not _oracle_logminer_ready(),
+    reason="Oracle LogMiner not reachable — set DATAFLOW_ORACLE_ENABLE=1 on a CDC-ready :1521",
+)
+def test_oracle_buffer_off_with_v_transaction_but_without_gv_instance_grant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from connectors.oracle_logminer import (
+        OracleInstanceDetectionUnavailable,
+        OracleLogMinerCdc,
+        encode_logminer_token,
+    )
+
+    cfg = _oracle_cfg()
+    cdc_user = _oracle_v_transaction_grant_user(cfg)
+    transaction_probe_granted = _oracle_v_transaction_grant_count(cdc_user) == 0
+    if transaction_probe_granted:
+        _set_oracle_v_transaction_grant(cdc_user, enabled=True)
+    had_instance_grant = _oracle_gv_instance_grant_count(cdc_user) > 0
+    if had_instance_grant:
+        _set_oracle_gv_instance_grant(cdc_user, enabled=False)
+    reader = None
+    try:
+        monkeypatch.setenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", "0")
+        reader = OracleLogMinerCdc(
+            cfg,
+            table="CDC_TXN_INSTANCE_PROBE",
+            primary_key="ID",
+            schema=str(cfg["schema"]),
+            resume_token=encode_logminer_token(
+                100, table="CDC_TXN_INSTANCE_PROBE", phase="streaming"
+            ),
+        )
+        try:
+            instance_count = _oracle_gv_instance_count(cfg)
+        except Exception as access_error:
+            assert (
+                "ORA-00942" in str(access_error).upper()
+                or "ORA-01031" in str(access_error).upper()
+            ), f"unexpected GV$INSTANCE access failure: {access_error}"
+            with pytest.raises(OracleInstanceDetectionUnavailable) as exc:
+                reader._ensure_open_txn_detection()
+            assert exc.value.code == "oracle_instance_detection_unavailable"
+            assert "SELECT ON GV_$INSTANCE" in str(exc.value)
+        else:
+            assert instance_count == 1
+            reader._ensure_open_txn_detection()
+            assert reader._open_txn_detection_checked is True
+    finally:
+        if reader is not None:
+            reader.close()
+        try:
+            if had_instance_grant:
+                _set_oracle_gv_instance_grant(cdc_user, enabled=True)
+        finally:
+            if transaction_probe_granted:
+                _set_oracle_v_transaction_grant(cdc_user, enabled=False)
 
 
 @pytest.mark.skipif(
@@ -787,7 +956,9 @@ def test_oracle_single_table_poll_keeps_transactions_whole(
     )
     cdc.phase = "streaming"
     cdc.scn = 100
+    cdc._open_txn_detection_checked = True
     monkeypatch.setattr(cdc, "_probe_oldest_open_txn", lambda _cur=None: None)
+    monkeypatch.setattr(cdc, "_buffer_off_window_end", lambda: (300, False))
     cdc._lob_column_cache["T"] = ()
 
     conn = MagicMock()
