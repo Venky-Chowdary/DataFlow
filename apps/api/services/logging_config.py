@@ -290,6 +290,7 @@ def configure_logging(*, force: bool = False) -> None:
     handler = logging.StreamHandler(stream=sys.stderr)
     handler.setFormatter(formatter)
     handler.addFilter(context_filter)
+    handler.addFilter(_LibraryFloorFilter())
 
     root = logging.getLogger()
     # Replace rather than append: Uvicorn may already have installed a handler,
@@ -301,7 +302,11 @@ def configure_logging(*, force: bool = False) -> None:
     try:
         from services.otel_logging import install_otel_log_handler
 
-        install_otel_log_handler(root)
+        otel_handler = install_otel_log_handler(root)
+        if otel_handler is not None and not any(
+            isinstance(f, _LibraryFloorFilter) for f in otel_handler.filters
+        ):
+            otel_handler.addFilter(_LibraryFloorFilter())
     except Exception as exc:  # noqa: BLE001 - local logging must remain available
         # Local logging must remain available even if remote export is broken.
         logging.getLogger(__name__).warning(
@@ -330,16 +335,8 @@ def _library_levels() -> dict[str, int]:
     rather than raising — a malformed log setting must not stop the process from
     booting.
     """
-    defaults = {
-        "pymongo": logging.WARNING,
-        "botocore": logging.WARNING,
-        "boto3": logging.WARNING,
-        "urllib3": logging.WARNING,
-        "snowflake.connector": logging.WARNING,
-        "sqlalchemy.engine": logging.WARNING,
-        "asyncio": logging.WARNING,
-        "watchfiles": logging.WARNING,
-    }
+    defaults = dict(SENSITIVE_LIBRARY_FLOORS)
+    defaults.update({"asyncio": logging.WARNING, "watchfiles": logging.WARNING})
     raw = (getenv_brand("LOG_LEVELS") or "").strip()
     for pair in raw.split(","):
         if "=" not in pair:
@@ -347,8 +344,52 @@ def _library_levels() -> dict[str, int]:
         name, _, level_name = pair.partition("=")
         level = getattr(logging, level_name.strip().upper(), None)
         if isinstance(level, int):
-            defaults[name.strip()] = level
+            name = name.strip()
+            floor = _sensitive_floor(name)
+            defaults[name] = level if floor is None else max(level, floor)
     return defaults
+
+
+# Libraries that log credentials, auth headers, signed URLs, DSNs or bound row
+# values below WARNING (kafka: PLAIN auth_bytes; botocore: Authorization header
+# and signature; urllib3/httpx: full URL incl. query; sqlalchemy.engine and
+# pymongo.command: SQL params / command documents). The floor is a hard minimum:
+# DATAFLOW_LOG_LEVELS may raise it, never lower it, and _LibraryFloorFilter on
+# our handlers enforces it even if a library lowers its own logger level
+# (boto3.set_stream_logger does).
+SENSITIVE_LIBRARY_FLOORS: dict[str, int] = {
+    name: logging.WARNING
+    for name in (
+        "kafka",
+        "botocore",
+        "boto3",
+        "urllib3",
+        "httpx",
+        "httpcore",
+        "snowflake.connector",
+        "google.auth",
+        "azure",
+        "paramiko",
+        "pymongo",
+        "sqlalchemy.engine",
+    )
+}
+
+
+def _sensitive_floor(logger_name: str) -> int | None:
+    name = logger_name
+    while name:
+        floor = SENSITIVE_LIBRARY_FLOORS.get(name)
+        if floor is not None:
+            return floor
+        name = name.rpartition(".")[0]
+    return None
+
+
+class _LibraryFloorFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        floor = _sensitive_floor(record.name)
+        return floor is None or record.levelno >= floor
 
 
 def reset_for_tests() -> None:
