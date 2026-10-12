@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import PyMongoError
 from services.runtime_estimate import estimate_for_job_doc
 from services.team_store import can_read_workspace, can_write_workspace
+from services.workspace_access import assert_resource_workspace
 from services.value_serializer import json_default
 from services.connector_telemetry import connector_operation, driver_family
 
@@ -1894,7 +1895,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
 
 
 @router.get("/{connector_id}")
-async def get_connector(connector_id: str):
+async def get_connector(connector_id: str, request: Request):
     """Get a specific connector"""
     try:
         from services.mongodb_service import redact_connector_secrets
@@ -1905,6 +1906,7 @@ async def get_connector(connector_id: str):
         if not connector:
             raise HTTPException(status_code=404, detail="Connector not found")
 
+        assert_resource_workspace(request, str(connector.get("workspace_id") or ""))
         return redact_connector_secrets(connector)
 
     except HTTPException:
@@ -1914,10 +1916,14 @@ async def get_connector(connector_id: str):
 
 
 @router.delete("/{connector_id}")
-async def delete_connector(connector_id: str):
+async def delete_connector(connector_id: str, request: Request):
     """Delete a connector"""
     try:
         mongo = get_mongodb_service()
+        connector = mongo.get_connector(connector_id)
+        if not connector:
+            raise HTTPException(status_code=404, detail="Connector not found")
+        assert_resource_workspace(request, str(connector.get("workspace_id") or ""))
         success = mongo.delete_connector(connector_id)
 
         if not success:
