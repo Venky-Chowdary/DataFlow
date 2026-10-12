@@ -141,7 +141,7 @@ class TransferRequest(BaseModel):
 async def test_connection(request: TestConnectionRequest):
     with connector_operation(
         "probe",
-        driver_family="other",
+        driver_family="unknown",
         surface="connectors_test",
     ) as op:
         return await _test_connection_impl(request, op)

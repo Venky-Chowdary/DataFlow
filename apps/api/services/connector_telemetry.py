@@ -52,22 +52,6 @@ _ACTIVE_OPERATIONS: ContextVar[dict[str, ConnectorOp]] = ContextVar(
 )
 
 
-def _emit_safely(event: str, *, outcome: str, level: int, **fields: Any) -> None:
-    try:
-        emit_event(
-            _LOG,
-            event,
-            outcome=outcome,
-            level=level,
-            **fields,
-        )
-    except Exception as exc:
-        try:
-            _LOG.debug("connector telemetry emission failed: %s", type(exc).__name__)
-        except Exception:
-            pass
-
-
 def _safe_category(category: str) -> str:
     return category if category in _SAFE_CATEGORIES else "unsupported"
 
@@ -103,7 +87,7 @@ class ConnectorOp:
         for key, value in fields.items():
             current = self.fields.get(key)
             if current in (None, "") or (
-                isinstance(current, str) and current.lower() in {"other", "unknown"}
+                isinstance(current, str) and current.lower() == "unknown"
             ):
                 if key in _ALLOWED_FIELDS:
                     self.fields[key] = value
@@ -131,7 +115,8 @@ class ConnectorOp:
         fields = dict(self.fields)
         if self.category is not None:
             fields["category"] = self.category
-        _emit_safely(
+        emit_event(
+            _LOG,
             f"connector.{self.op}.{outcome}",
             outcome=outcome,
             level=_LEVELS[outcome],
@@ -215,7 +200,8 @@ def log_retry(
             fields["http_status"] = status
         if request_id:
             fields["request_id"] = request_id
-        _emit_safely(
+        emit_event(
+            _LOG,
             event,
             outcome=outcome,
             level=level,
@@ -227,28 +213,32 @@ def log_retry(
 
 
 def driver_family(raw: str) -> str:
-    raw = str(raw or "")
-    if raw in _LITERAL_DRIVER_FAMILIES:
-        return raw
+    cid = str(raw or "").lower().strip()
     try:
         from connectors.sdk import list_descriptors
         from src.transfer.connector_capabilities import (
+            CATALOG_ID_ALIASES,
             file_source_types,
-            resolve_driver_type,
         )
         from src.transfer.connector_registry import registered_driver_types
 
-        resolved = resolve_driver_type(str(raw or ""))
+        descriptors = list_descriptors()
         allowed = (
             set(registered_driver_types())
             | set(file_source_types())
             | {"generic_sql", "rest_api"}
-            | {descriptor.id for descriptor in list_descriptors()}
-            | _LITERAL_DRIVER_FAMILIES
+            | {descriptor.id for descriptor in descriptors}
         )
-        return resolved if resolved in allowed else "other"
-    except Exception:
-        return "other"
+        if cid in _LITERAL_DRIVER_FAMILIES or cid in allowed:
+            return cid
+        for descriptor in descriptors:
+            if cid in {str(item).lower().strip() for item in descriptor.catalog_ids}:
+                return descriptor.id
+        alias = CATALOG_ID_ALIASES.get(cid)
+        return alias if alias in allowed else "unknown"
+    except Exception as exc:
+        _LOG.debug("driver family resolution failed: %s", type(exc).__name__)
+        return "unknown"
 
 
 def _resolve_retry_driver_family(raw: str) -> str:

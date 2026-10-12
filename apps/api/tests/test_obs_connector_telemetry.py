@@ -90,7 +90,7 @@ def _assert_terminal(
 def test_connector_operation_deduplicates_and_filters_fields(event_capture) -> None:
     with connector_operation(
         "probe",
-        driver_family="other",
+        driver_family="unknown",
         surface="outer",
         connector_id="outer-id",
     ) as outer:
@@ -187,62 +187,80 @@ def test_failed_mark_survives_propagating_exception(event_capture) -> None:
     _assert_no_sentinels(event_capture)
 
 
-def test_telemetry_emission_failure_never_raises(monkeypatch, event_capture) -> None:
-    from services import connector_telemetry
+def test_ops_event_guard_handles_a_raising_logging_handler(event_capture) -> None:
+    class RaisingHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            raise RuntimeError("handler failure")
 
-    def fail_emit(*args, **kwargs):
-        raise RuntimeError(" ".join(_SENTINELS))
+    logger = logging.getLogger("dataflow.connector")
+    raising = RaisingHandler()
+    logger.addHandler(raising)
+    try:
+        with connector_operation("probe", driver_family="postgresql") as op:
+            op.succeeded()
+        _assert_terminal(event_capture, "probe", "succeeded", logging.INFO)
 
-    monkeypatch.setattr(connector_telemetry, "emit_event", fail_emit)
-    with connector_operation("probe", driver_family="postgresql") as op:
-        op.succeeded()
+        event_capture.records.clear()
+        error = RuntimeError("probe failure")
+        with pytest.raises(RuntimeError) as raised:
+            with connector_operation("probe", driver_family="postgresql"):
+                raise error
+        assert raised.value is error
+        _assert_terminal(event_capture, "probe", "errored", logging.ERROR)
+    finally:
+        logger.removeHandler(raising)
 
-    assert not _terminal(event_capture, "probe")
-    assert any("emission failed" in record.getMessage() for record in event_capture.records)
-    _assert_no_sentinels(event_capture)
 
-
-def test_driver_family_is_bounded_and_resolves_sdk_descriptors(
-    monkeypatch, event_capture
-) -> None:
+def test_driver_family_uses_exact_keys_aliases_and_sdk_catalog_ids() -> None:
     from connectors.sdk import list_descriptors
-    from src.transfer.connector_capabilities import (
-        _DRIVER_CAPS,
-        _FILE_CAPS,
-        resolve_driver_type,
-    )
+    from src.transfer.connector_capabilities import CATALOG_ID_ALIASES
 
-    allowed = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql", "rest_api"}
-    allowed.update(descriptor.id for descriptor in list_descriptors())
-    for family in allowed:
-        resolved = resolve_driver_type(family)
-        expected = resolved if resolved in allowed else "other"
-        assert driver_family(family) == expected
-    allowed.update({"http", "sdk_declarative", "singer"})
-    for raw in (*_SENTINELS, "arbitrary-driver-id"):
-        resolved = resolve_driver_type(raw)
-        assert driver_family(raw) == (
-            resolved if resolved in allowed else "other"
-        )
-    assert resolve_driver_type("zzqx-unknown") not in allowed
-    assert driver_family("zzqx-unknown") == "other"
-    assert {driver_family(name) for name in ("http", "sdk_declarative", "singer")} == {
-        "http",
-        "sdk_declarative",
-        "singer",
+    allowed = {"postgresql", "csv", "sqlite"} | {
+        descriptor.id for descriptor in list_descriptors()
     }
-    from src.transfer import connector_capabilities
+    assert all(driver_family(key) == key for key in allowed)
+    assert driver_family("  POSTGRESQL ") == "postgresql"
+    assert driver_family("csv") == "csv"
+    assert driver_family("sqlite") == "sqlite"
+    assert driver_family("http") == "http"
+    assert driver_family("sdk_declarative") == "sdk_declarative"
+    assert driver_family("singer") == "singer"
 
-    def fail_resolve(_raw):
-        raise RuntimeError(" ".join(_SENTINELS))
+    aliases = {
+        "amazon_rds_postgresql": "postgresql",
+        "mariadb": "mysql",
+        "csv___tsv": "csv",
+        "excel_workbook": "excel",
+    }
+    for alias, canonical in aliases.items():
+        assert CATALOG_ID_ALIASES[alias] == canonical
+        assert driver_family(alias) == canonical
+    github = next(
+        descriptor for descriptor in list_descriptors() if "github" in descriptor.catalog_ids
+    )
+    assert driver_family("github") == github.id
 
-    monkeypatch.setattr(connector_capabilities, "resolve_driver_type", fail_resolve)
-    assert driver_family("postgresql") == "other"
+    for raw in (
+        "S3NT1NEL-api-key",
+        "postgres_like_vendor",
+        "mongolia",
+        "zzqx-unknown",
+        *_SENTINELS,
+    ):
+        assert driver_family(raw) == "unknown"
 
-    with connector_operation("probe", driver_family=driver_family("postgresql")) as op:
-        op.succeeded()
-    _assert_terminal(event_capture, "probe", "succeeded", logging.INFO)
-    _assert_no_sentinels(event_capture)
+
+def test_driver_family_resolution_errors_are_debug_logged(monkeypatch, caplog) -> None:
+    from src.transfer import connector_registry
+
+    def fail_registry():
+        raise RuntimeError("do not log exception text")
+
+    monkeypatch.setattr(connector_registry, "registered_driver_types", fail_registry)
+    with caplog.at_level(logging.DEBUG, logger="dataflow.connector"):
+        assert driver_family("unregistered-type") == "unknown"
+    assert "RuntimeError" in caplog.text
+    assert "do not log exception text" not in caplog.text
 
 
 def test_log_retry_marks_scheduled_and_exhausted_attempts(event_capture) -> None:
