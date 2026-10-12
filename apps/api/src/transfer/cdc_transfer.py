@@ -1746,7 +1746,7 @@ def _run_cdc_multi_stream(
             logger.warning(
                 "Shared multi-table CDC reader unavailable (%s); "
                 "falling back to per-table readers",
-                exc,
+                type(exc).__name__,
             )
 
     return _run_cdc_multi_stream_sequential(

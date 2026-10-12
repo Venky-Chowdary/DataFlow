@@ -40,7 +40,12 @@ def capture():
     handler = _Capture()
     loggers = [
         logging.getLogger(n)
-        for n in ("src.transfer.reconcile_step", "services.quarantine_dlq", "src.transfer.cdc_transfer")
+        for n in (
+            "src.transfer.reconcile_step",
+            "services.quarantine_dlq",
+            "src.transfer.cdc_transfer",
+            "dataflow.transfer",
+        )
     ]
     levels = [log.level for log in loggers]
     for log in loggers:
@@ -413,3 +418,103 @@ def test_lag_fields_failure_on_the_error_path_is_logged_at_debug_by_class(monkey
     assert record.levelno == logging.DEBUG
     assert "ValueError" in record.getMessage()
     assert "DEADBEEF" not in record.getMessage() and not record.exc_info
+
+
+def test_shared_reader_health_step_failure_after_close_propagates_without_a_cycle_event(
+    tmp_path, monkeypatch, capture
+):
+    """The per-table health step runs after the reader closed. A failure there
+    adds no CDC event; the original exception must still leave the reader so
+    the engine records ``transfer.run.failed`` (proved live in
+    ``test_shared_reader_health_failure_reaches_transfer_run_failed_live``)."""
+    from unittest.mock import patch
+
+    from services.cdc_engine import ChangeBatch
+    from services.sync_cursor import SyncContract
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+    token = f"slot={TABLE}_slot|phase=streaming|lsn={LSN}"
+    boom = RuntimeError(_SECRET_ERR)
+
+    class FakeCdc:
+        closed = False
+
+        def __init__(self, *a, **k):
+            pass
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            yield ChangeBatch(inserts=[{"id": VALUE}], resume_token=token, table=TABLE)
+            yield ChangeBatch(resume_token=token, ack_barrier=True)
+
+        def poll(self):
+            return iter(())
+
+        def ack(self, token=None):
+            pass
+
+        def close(self):
+            FakeCdc.closed = True
+
+    def health(*_a, **_k):
+        assert FakeCdc.closed, "health step ran before the reader closed"
+        raise boom
+
+    source = EndpointConfig(kind="database", format="postgresql", database="app", table=TABLE)
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(tmp_path / "d.db"), table=TABLE
+    )
+    with patch.object(cdc_transfer, "PostgreSqlChangeStreamCdc", FakeCdc), \
+         patch.object(cdc_transfer, "_apply_change_batch", side_effect=_fake_apply), \
+         patch.object(cdc_transfer, "resolve_dest_table", side_effect=lambda *_a, **_k: "t"), \
+         patch("services.row_conservation.record_stream_health", side_effect=health), \
+         patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "1"}), \
+         pytest.raises(RuntimeError) as raised:
+        cdc_transfer._run_cdc_shared_multi_table(
+            source, destination, [{"source": "id", "target": "id"}], {"id": "string"}, None,
+            sync_mode="cdc",
+            stream_contracts=[
+                {"name": TABLE, "selected": True, "primary_key": "id"},
+                {"name": "users", "selected": True, "primary_key": "id"},
+            ],
+            selected=[
+                SyncContract(name=TABLE, primary_key="id", sync_mode="cdc"),
+                SyncContract(name="users", primary_key="id", sync_mode="cdc"),
+            ],
+            job_id="job-shared", checkpoint=None, checkpoint_service=None,
+            backfill_new_fields=False, validation_mode="strict", limit=0,
+        )
+    assert raised.value is boom
+    assert capture.named("cdc.cycle.completed") == []
+
+
+def test_shared_reader_fallback_warning_logs_the_class_not_the_message(monkeypatch, caplog):
+    boom = RuntimeError(_SECRET_ERR)
+
+    def shared(*_a, **_k):
+        raise boom
+
+    monkeypatch.setattr(cdc_transfer, "_run_cdc_shared_multi_table", shared)
+    monkeypatch.setattr(
+        cdc_transfer, "_run_cdc_multi_stream_sequential", lambda *a, **k: (0, [], {}, [])
+    )
+    src = EndpointConfig(kind="database", format="postgresql", database="app", table=TABLE)
+    dst = EndpointConfig(kind="database", format="sqlite", database="d.db", table=TABLE)
+    from services.sync_cursor import SyncContract
+
+    with caplog.at_level(logging.DEBUG, logger=cdc_transfer.logger.name):
+        cdc_transfer._run_cdc_multi_stream(
+            src, dst, [], {}, None,
+            sync_mode="cdc",
+            stream_contracts=[{"name": TABLE, "selected": True}, {"name": "users", "selected": True}],
+            selected=[SyncContract(name=TABLE, sync_mode="cdc"), SyncContract(name="users", sync_mode="cdc")],
+            job_id="j", checkpoint=None, checkpoint_service=None,
+            backfill_new_fields=False, validation_mode="strict", limit=0,
+        )
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    text = warning.getMessage()
+    assert "RuntimeError" in text
+    assert "DEADBEEF" not in text and TABLE not in text and not warning.exc_info
