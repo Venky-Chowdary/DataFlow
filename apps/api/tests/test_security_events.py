@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -181,6 +182,52 @@ def test_unknown_security_event_warns_but_is_still_audited(security_app, caplog)
     )
     assert event["outcome"] == "succeeded"
     assert "Unknown security audit event" in caplog.text
+
+
+def test_context_failure_is_logged_without_leaking_exception_and_event_is_written(
+    security_app,
+    monkeypatch,
+    caplog,
+):
+    from services import audit_coverage, workspace_access
+
+    def fail_workspace_lookup(_request):
+        raise RuntimeError("SENTINEL_CTX")
+
+    monkeypatch.setattr(
+        workspace_access,
+        "authorized_workspace_id",
+        fail_workspace_lookup,
+    )
+    caplog.set_level(logging.DEBUG, logger="services.audit_coverage")
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/context-failure",
+            "headers": [],
+        }
+    )
+    request.state.correlation_id = "context-failure-correlation"
+
+    audit_coverage.record_security_event(
+        "acl.grant.create",
+        outcome="succeeded",
+        request=request,
+        resource="acl:context-failure",
+    )
+
+    assert any(
+        record.message == "audit context workspace_id unavailable: RuntimeError"
+        for record in caplog.records
+    )
+    assert "SENTINEL_CTX" not in caplog.text
+    event = next(
+        event
+        for event in _events(security_app)
+        if event.get("correlation_id") == "context-failure-correlation"
+    )
+    assert event["action"] == "acl.grant.create"
 
 
 @pytest.mark.parametrize(
