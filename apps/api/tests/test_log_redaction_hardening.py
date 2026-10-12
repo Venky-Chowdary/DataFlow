@@ -45,6 +45,8 @@ SENSITIVE_KEYS = (
     "webhook_url",
     "secret_value",
     "code_verifier",
+    "service_account_json",
+    "serviceAccountKey",
 )
 
 TEXT_CASES = (
@@ -103,6 +105,8 @@ SAFE_METADATA = {
     "request_count": 3,
     "duration_ms": 12.5,
     "api_key_id": "key-abc123",
+    "service_account_id": "sa-123",
+    "service_account_email": "etl@example.test",
     "token_type": "Bearer",
     "secret_name": "prod-db",
     "has_token": True,
@@ -197,6 +201,10 @@ def test_sensitive_values_are_redacted_at_top_level_nested_and_in_lists(key):
         ("token_count", False),
         ("api_key_id", False),
         ("secret_name", False),
+        ("service_account_json", True),
+        ("serviceAccountKey", True),
+        ("service_account_id", False),
+        ("service_account_email", False),
         ("tokenType", False),
         ("key_prefix", False),
         ("expires_at", False),

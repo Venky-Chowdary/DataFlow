@@ -22,6 +22,8 @@ _SENSITIVE_EXACT = frozenset(
         "xapikey",
         "privatekey",
         "serviceaccount",
+        "serviceaccountjson",
+        "serviceaccountkey",
         "credential",
         "credentials",
         "connectionstring",

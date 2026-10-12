@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from services.platform_config import data_dir
+from services.log_redaction import REDACTED
 from services.secret_config import mask_secrets_in_text
 from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
 
@@ -591,7 +592,7 @@ def _is_masked_placeholder(value: Any) -> bool:
         return True
     if isinstance(value, str):
         v = value.strip()
-        if not v or v == "****":
+        if not v or v == "****" or v == REDACTED:
             return True
         if "****" in v or "<redacted>" in v.lower():
             return True
