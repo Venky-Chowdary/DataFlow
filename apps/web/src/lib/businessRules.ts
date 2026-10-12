@@ -587,6 +587,12 @@ export function ruleReviewHint(rule: CompiledRule, canAcceptHere: boolean): stri
     }
     return "Clear rename / passthrough the compiler left for you. Accept as Direct to put it on Map, or leave it and remap there.";
   }
+  if (
+    DIRECT_KINDS.has((rule.kind || "").toLowerCase())
+    && (rule.issues || []).some((issue) => /is not on the selected (source|destination)/i.test(issue))
+  ) {
+    return "A column this rule names is not on the selected source or destination. Remap it on Map, or fix the workbook and re-upload.";
+  }
   if (rule.status !== "executable") {
     return "Not compiled — rewrite this rule in a supported form, or add an explicit Transform step, then re-upload.";
   }

@@ -441,6 +441,19 @@ describe("operator accept of a review rule", () => {
     assert.match(ruleReviewHint(report.rules[2], true), /Accept as Direct/);
   });
 
+  it("tells a direct rule with an unbound column to remap, not rewrite", () => {
+    const missing: CompiledRule = {
+      ...report.rules[2],
+      kind: "direct",
+      status: "needs_confirmation",
+      issues: ["Destination column “phone_no” is not on the selected destination."],
+    };
+    assert.equal(canAcceptAsDirect(missing), false);
+    const hint = ruleReviewHint(missing, true);
+    assert.match(hint, /not on the selected source or destination\. Remap it on Map/);
+    assert.doesNotMatch(hint, /rewrite this rule/);
+  });
+
   it("labels pre-run executable rules Ready and shows the rule id once", () => {
     assert.equal(ruleStatusLabel("executable"), "Ready");
     assert.equal(ruleStatusLabel("conflict"), "Conflict");
