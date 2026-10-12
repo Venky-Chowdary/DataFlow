@@ -370,11 +370,26 @@ app.add_middleware(
 
 @app.middleware("http")
 async def add_timing_header(request: Request, call_next):
+    from services.audit_coverage import begin_request_audit, end_request_audit
+
+    token = begin_request_audit()
+    try:
+        return await _add_timing_header_response(request, call_next)
+    finally:
+        end_request_audit(token)
+
+
+async def _add_timing_header_response(request: Request, call_next):
+    from services.audit_coverage import current_request_audit
+
     start_time = time.time()
     raw_correlation_id = request.headers.get("X-Correlation-ID")
     correlation_id, correlation_id_rejected = sanitize_correlation_id(raw_correlation_id)
     request.state.correlation_id = correlation_id
     request.state.correlation_id_rejected = correlation_id_rejected
+    tracker = current_request_audit()
+    if tracker is not None:
+        tracker["correlation_id_rejected"] = bool(correlation_id_rejected)
     if correlation_id_rejected:
         from services.ops_events import emit_event
 
@@ -507,6 +522,10 @@ async def add_timing_header(request: Request, call_next):
             },
             headers={"X-Correlation-ID": correlation_id},
         )
+    if tracker is not None:
+        tracker["workspace_header_rejected"] = bool(
+            getattr(request.state, "workspace_header_rejected", False)
+        )
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
     response.headers["X-Correlation-ID"] = correlation_id
@@ -524,6 +543,7 @@ async def add_timing_header(request: Request, call_next):
         request.method != "GET"
         and path.startswith("/api/v1/")
         and "/health" not in path
+        and (tracker is None or tracker.get("named", 0) == 0)
     ):
         try:
             from services.audit_log import append_audit_event

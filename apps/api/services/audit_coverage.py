@@ -48,6 +48,27 @@ SECURITY_EVENTS: dict[str, str] = {
 _REQUEST_PRINCIPAL: ContextVar[dict[str, str] | None] = ContextVar(
     "audit_request_principal", default=None
 )
+_REQUEST_AUDIT: ContextVar[dict[str, Any] | None] = ContextVar(
+    "audit_request_state", default=None
+)
+
+
+def begin_request_audit() -> Token[dict[str, Any] | None]:
+    return _REQUEST_AUDIT.set(
+        {
+            "named": 0,
+            "correlation_id_rejected": False,
+            "workspace_header_rejected": False,
+        }
+    )
+
+
+def current_request_audit() -> dict[str, Any] | None:
+    return _REQUEST_AUDIT.get()
+
+
+def end_request_audit(token: Token[dict[str, Any] | None]) -> None:
+    _REQUEST_AUDIT.reset(token)
 
 
 def set_request_principal(principal: dict[str, str]) -> Token[dict[str, str] | None]:
@@ -183,6 +204,11 @@ def record_security_event(
                 workspace_id = authorized_workspace_id(request)
             except Exception:
                 workspace_id = ""
+            tracker = current_request_audit()
+            if tracker is not None:
+                tracker["workspace_header_rejected"] = bool(
+                    getattr(request.state, "workspace_header_rejected", False)
+                )
             correlation_id = getattr(request.state, "correlation_id", None)
             if correlation_id is None:
                 correlation_id = tracing.get_correlation_id()
@@ -371,6 +397,13 @@ class AuditAccessMiddleware(BaseHTTPMiddleware):
         action = _rule_for_request(request)
         if action is None:
             return
+        tracker = current_request_audit()
+        if tracker is not None:
+            if tracker.get("named", 0) > 0:
+                return
+            tracker["workspace_header_rejected"] = bool(
+                getattr(request.state, "workspace_header_rejected", False)
+            )
 
         principal = request_principal(request)
         auth_kind, api_key_id = _auth_metadata(request)

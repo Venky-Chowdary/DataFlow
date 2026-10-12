@@ -139,7 +139,7 @@ def _key_headers(context, token: str, correlation_id: str) -> dict[str, str]:
 
 def _assert_key_events(events, *, kind: str, key_id: str, status: int) -> None:
     assert events
-    assert {event["action"] for event in events} >= {"http.post"}
+    assert len(events) == 1
     for event in events:
         assert event["actor"] == f"{kind}:{key_id}"
         assert event["actor_type"] == kind
@@ -164,7 +164,7 @@ def test_service_account_write_audits_the_key_principal(attribution_app):
     )
 
     assert response.status_code == 200, response.text
-    assert {event["action"] for event in events} >= {"http.post", "connector.create"}
+    assert {event["action"] for event in events} == {"connector.create"}
     _assert_key_events(
         events,
         kind="service_account",
@@ -188,7 +188,7 @@ def test_scim_write_audits_the_scim_token_principal(attribution_app):
     )
 
     assert response.status_code == 201, response.text
-    assert {event["action"] for event in events} >= {"http.post"}
+    assert {event["action"] for event in events} == {"http.post"}
     _assert_key_events(
         events,
         kind="scim",
@@ -209,7 +209,7 @@ def test_workspace_api_key_write_audits_the_key_principal(attribution_app):
     )
 
     assert response.status_code == 200, response.text
-    assert {event["action"] for event in events} >= {"http.post", "connector.create"}
+    assert {event["action"] for event in events} == {"connector.create"}
     _assert_key_events(
         events,
         kind="api_key",
@@ -231,7 +231,7 @@ def test_user_session_write_keeps_email_actor_without_key_creator(attribution_ap
     )
 
     assert response.status_code == 200, response.text
-    assert {event["action"] for event in events} >= {"http.post", "connector.create"}
+    assert {event["action"] for event in events} == {"connector.create"}
     assert events
     for event in events:
         assert event["actor"] == "admin@x"

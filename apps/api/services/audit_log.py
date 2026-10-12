@@ -208,6 +208,25 @@ def append_audit_event(
     Process-local ``_APPEND_LOCK`` serializes writers to reduce chain forks. Cross-
     process/replica races still need a single authoritative store (Mongo preferred).
     """
+    from services.audit_coverage import current_request_audit
+
+    tracker = current_request_audit()
+    if tracker is not None:
+        if not action.startswith("http."):
+            tracker["named"] = int(tracker.get("named", 0)) + 1
+        if correlation_id is None:
+            from services.tracing import get_correlation_id
+
+            correlation_id = get_correlation_id() or None
+        if tracker.get("correlation_id_rejected") or tracker.get(
+            "workspace_header_rejected"
+        ):
+            details = dict(details or {})
+            if tracker.get("correlation_id_rejected"):
+                details["correlation_id_rejected"] = True
+            if tracker.get("workspace_header_rejected"):
+                details["workspace_header_rejected"] = True
+
     if principal is None:
         from services.audit_coverage import current_request_principal
 

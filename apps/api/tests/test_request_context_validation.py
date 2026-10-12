@@ -83,12 +83,11 @@ def _audit_events(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line]
 
 
-def _generic_http_post(path: Path, *, route: str, correlation_id: str) -> dict:
+def _auth_logout_event(path: Path, *, correlation_id: str) -> dict:
     return next(
         event
         for event in _audit_events(path)
-        if event.get("action") == "http.post"
-        and event.get("resource") == route
+        if event.get("action") == "auth.logout"
         and event.get("correlation_id") == correlation_id
     )
 
@@ -151,9 +150,8 @@ def test_rejected_correlation_id_is_sanitized_audited_and_emitted_once(
     correlation_id = response.headers["X-Correlation-ID"]
     assert correlation_id != raw
     UUID(correlation_id)
-    event = _generic_http_post(
+    event = _auth_logout_event(
         request_context["audit_path"],
-        route="/api/v1/auth/logout",
         correlation_id=correlation_id,
     )
     assert event["details"]["correlation_id_rejected"] is True
@@ -181,9 +179,8 @@ def test_valid_correlation_id_is_echoed_and_audited_without_rejection(request_co
 
     assert response.status_code == 200
     assert response.headers["X-Correlation-ID"] == correlation_id
-    event = _generic_http_post(
+    event = _auth_logout_event(
         request_context["audit_path"],
-        route="/api/v1/auth/logout",
         correlation_id=correlation_id,
     )
     assert "correlation_id_rejected" not in event["details"]
@@ -233,7 +230,7 @@ def test_authorized_workspace_id_caches_member_and_rejects_other_cases(monkeypat
     assert failed.state.workspace_header_rejected is True
 
 
-def test_generic_audit_never_uses_an_unauthorized_workspace_header(request_context):
+def test_named_logout_never_uses_an_unauthorized_workspace_header(request_context):
     client = request_context["client"]
     route = "/api/v1/auth/logout"
     bad_correlation = "workspace-scope-bad"
@@ -246,9 +243,8 @@ def test_generic_audit_never_uses_an_unauthorized_workspace_header(request_conte
         },
     )
     assert bad_response.status_code == 200
-    rejected = _generic_http_post(
+    rejected = _auth_logout_event(
         request_context["audit_path"],
-        route=route,
         correlation_id=bad_correlation,
     )
     assert rejected["workspace_id"] == ""
@@ -264,9 +260,8 @@ def test_generic_audit_never_uses_an_unauthorized_workspace_header(request_conte
         },
     )
     assert good_response.status_code == 200
-    accepted = _generic_http_post(
+    accepted = _auth_logout_event(
         request_context["audit_path"],
-        route=route,
         correlation_id=good_correlation,
     )
     assert accepted["workspace_id"] == request_context["workspace_id"]
@@ -288,7 +283,7 @@ def test_authorized_workspace_id_does_not_reject_missing_header(request_context,
     assert calls == []
 
 
-def test_generic_audit_does_not_flag_missing_workspace_header(request_context):
+def test_named_logout_does_not_flag_missing_workspace_header(request_context):
     correlation_id = "workspace-header-absent"
     route = "/api/v1/auth/logout"
     response = request_context["client"].post(
@@ -297,9 +292,8 @@ def test_generic_audit_does_not_flag_missing_workspace_header(request_context):
     )
 
     assert response.status_code == 200
-    event = _generic_http_post(
+    event = _auth_logout_event(
         request_context["audit_path"],
-        route=route,
         correlation_id=correlation_id,
     )
     assert event["workspace_id"] == ""
