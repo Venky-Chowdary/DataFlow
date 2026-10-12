@@ -25,10 +25,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any
 
+from services.ops_events import emit_event
 from services.schedule_store import (
     PipelineSchedule,
     get_schedule,
@@ -88,6 +90,22 @@ class ApprovalRequired(ValueError):
         self.corrective_action = corrective_action
         self.scopes = tuple(scopes or ())
         self.evidence = dict(evidence or {})
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _approval_event(event: str, outcome: str, schedule_id: str, request: dict[str, Any], **fields: Any) -> None:
+    """Approval lifecycle event: ids and the finding code — never finding text,
+    the operator's reason, or the actor's identity (the audit log owns those)."""
+    emit_event(
+        _logger, event, outcome=outcome, level=logging.INFO,
+        schedule_id=schedule_id,
+        approval_id=str(request.get("id") or "") or None,
+        code=str(request.get("code") or "") or None,
+        job_id=str(request.get("job_id") or "") or None,
+        **fields,
+    )
 
 
 def _now() -> str:
@@ -182,7 +200,7 @@ def open_approval_request(
             "job_id": payload.get("job_id") or existing.get("job_id") or "",
             "run_attempt": payload.get("run_attempt") or existing.get("run_attempt") or 0,
         }
-    return update_schedule(
+    updated = update_schedule(
         schedule_id,
         {
             "approval_request": payload,
@@ -191,6 +209,12 @@ def open_approval_request(
             "retry_attempt": 0,
         },
     )
+    if updated is not None:
+        _approval_event(
+            "approval.requested", "held", schedule_id, payload,
+            occurrences=int(payload.get("occurrences") or 1),
+        )
+    return updated
 
 
 def approval_from_decision(
@@ -346,6 +370,11 @@ def approve_request(
             "binding_hash": binding.get("binding_hash", ""),
         },
     )
+    _approval_event(
+        "approval.approved", "succeeded", schedule_id, request,
+        standing_authorization=bool(grant_standing),
+        single_use=bool(grant is not None and grant.max_uses == 1),
+    )
     return {
         "schedule": updated,
         "approval": patch["approval_request"],
@@ -391,6 +420,10 @@ def reject_request(
             "reason": reason,
             "schedule_disabled": bool(disable),
         },
+    )
+    _approval_event(
+        "approval.rejected", "succeeded", schedule_id, request,
+        schedule_disabled=bool(disable),
     )
     return {"schedule": updated, "approval": patch["approval_request"]}
 

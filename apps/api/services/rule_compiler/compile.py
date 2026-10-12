@@ -14,9 +14,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from collections import defaultdict
 from typing import Any
+
+from services.ops_events import operation
 
 from .classify import (
     _CLOSED_FORMULA_KINDS,
@@ -391,7 +394,35 @@ def _preload_refused(sync_mode: str) -> bool:
     return (sync_mode or "").strip().lower() in _PRELOAD_REFUSED_SYNCS
 
 
-def compile_rule_workbook(
+_logger = logging.getLogger(__name__)
+
+
+def compile_rule_workbook(filename: str, payload: bytes, **kwargs: Any) -> dict[str, Any]:
+    """Ingest + classify + bind; emits ``rules.compile.succeeded``/``.failed``.
+
+    The event carries counts and the report fingerprint — never the filename,
+    rule text, or column names.
+    """
+    with operation(
+        _logger, "rules.compile", sync_mode=kwargs.get("sync_mode") or None
+    ) as res:
+        report = _compile_rule_workbook(filename, payload, **kwargs)
+        coverage = report.get("coverage") or {}
+        res.update(
+            rule_count=report.get("rule_count"),
+            executable=coverage.get("executable"),
+            review=coverage.get("review"),
+            conflict=coverage.get("conflict"),
+            coverage_percent=coverage.get("percent"),
+            unmapped_source_count=report.get("unmapped_source_count"),
+            unused_dest_count=report.get("unused_dest_count"),
+            truncated_rows=bool(report.get("truncated_rows")),
+            report_fingerprint=report.get("report_fingerprint"),
+        )
+    return report
+
+
+def _compile_rule_workbook(
     filename: str,
     payload: bytes,
     *,

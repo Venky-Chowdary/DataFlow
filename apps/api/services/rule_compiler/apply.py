@@ -16,11 +16,13 @@ and nothing else is written.
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
 from services.code_crosswalk import apply_code_crosswalk
+from services.ops_events import operation
 from services.shape_apply import build_shape_runner
 from services.shape_engine import ShapeRowError
 from services.transform_engine import apply_transform
@@ -285,7 +287,39 @@ def _shape_population(
     return kept, quarantine
 
 
+_logger = logging.getLogger(__name__)
+
+
 def apply_compiled_projection(
+    report: Mapping[str, Any],
+    *,
+    source_table: str,
+    rows: Sequence[Mapping[str, Any]],
+    source_columns: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Project one source table; emits ``rules.apply.succeeded``/``.failed``.
+
+    One event per table population (never per row) with counts only; a
+    refused row is quarantined, so refusals are a count, not a failure.
+    """
+    with operation(
+        _logger, "rules.apply",
+        report_fingerprint=str(report.get("report_fingerprint") or "") or None,
+    ) as res:
+        out = _apply_compiled_projection(
+            report, source_table=source_table, rows=rows, source_columns=source_columns
+        )
+        res.update(
+            source_rows=out.get("source_rows"),
+            shaped_rows=out.get("shaped_rows"),
+            edges=out.get("edges"),
+            written=out.get("written"),
+            refused=out.get("refused"),
+        )
+    return out
+
+
+def _apply_compiled_projection(
     report: Mapping[str, Any],
     *,
     source_table: str,
