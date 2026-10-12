@@ -1318,7 +1318,6 @@ export function ColumnReviewPanel({
                   )}
                   <td className="df2-column-reason">
                     <ReasonDisclosure
-                      id={`reason-${index}-${m.source}`}
                       label={m.target || m.source}
                       fullText={m.businessRule
                         ? `${m.businessRule.kindLabel} — ${m.businessRule.text || m.reason}`
@@ -1327,7 +1326,7 @@ export function ColumnReviewPanel({
                       {m.businessRule ? (
                         <div className="df2-column-rule-why">
                           <span className="df2-column-rule-kind">{m.businessRule.kindLabel}</span>
-                          <span>{m.businessRule.text || m.reason || "Direct"}</span>
+                          <span className="df2-column-rule-text" data-clamp>{m.businessRule.text || m.reason || "Direct"}</span>
                           {m.businessRule.row != null ? (
                             <span className="df2-column-rule-prov">
                               {m.businessRule.sheet ? `${m.businessRule.sheet} · ` : ""}
@@ -1336,7 +1335,7 @@ export function ColumnReviewPanel({
                           ) : null}
                         </div>
                       ) : (
-                        m.reason || "Semantic match"
+                        <span className="df2-column-reason-plain" data-clamp>{m.reason || "Semantic match"}</span>
                       )}
                     </ReasonDisclosure>
                   </td>

@@ -142,16 +142,25 @@
   word-break: break-word;
 }
 
-.df2-page-transfer-studio .df2-column-reason-text {
+/* The clamp lives on the marked element ([data-clamp]) — never a fractional
+   max-height that can cut a glyph mid-line. Kind / provenance lines stay whole. */
+.df2-page-transfer-studio .df2-column-reason-text [data-clamp] {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
   overflow: hidden;
-  max-height: calc(1.35em * 3);
 }
 
-.df2-page-transfer-studio .df2-column-reason-text.is-open {
+.df2-page-transfer-studio .df2-column-reason-text .df2-column-rule-text[data-clamp] {
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.df2-page-transfer-studio .df2-column-reason-text .df2-column-reason-plain[data-clamp] {
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+.df2-page-transfer-studio .df2-column-reason-text.is-open [data-clamp] {
   -webkit-line-clamp: unset;
   line-clamp: none;
   max-height: none;
