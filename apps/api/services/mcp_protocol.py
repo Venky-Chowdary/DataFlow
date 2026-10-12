@@ -84,18 +84,21 @@ def _execute_tool(
     try:
         result = get_pilot_tools().execute(name, arguments or {})
     except Exception as exc:
-        logger.exception("MCP tool %s raised", name)
+        logger.error("MCP tool call failed (%s)", type(exc).__name__)
         masked = mask_secrets_in_text(str(exc))
+        duration_ms = (time.perf_counter() - start) * 1000
         log_mcp_invocation(
             tool=name,
             client=context.client,
             arguments=arguments or {},
             status="error",
             error=masked,
-            duration_ms=(time.perf_counter() - start) * 1000,
+            duration_ms=duration_ms,
             actor=context.actor,
             correlation_id=context.correlation_id,
             error_kind="tool_error",
+            error_type=type(exc).__name__,
+            event_error=exc,
         )
         return {
             "content": [
@@ -110,6 +113,7 @@ def _execute_tool(
     ms = (time.perf_counter() - start) * 1000
     if not result.success:
         error = mask_secrets_in_text(str(result.error or "tool failed"))
+        error_kind = "permission_denied" if is_permission_denial(error) else "tool_error"
         log_mcp_invocation(
             tool=name,
             client=context.client,
@@ -119,7 +123,15 @@ def _execute_tool(
             duration_ms=ms,
             actor=context.actor,
             correlation_id=context.correlation_id,
-            error_kind="permission_denied" if is_permission_denial(error) else "tool_error",
+            error_kind=error_kind,
+            error_type=(
+                type(result.error).__name__
+                if isinstance(result.error, BaseException)
+                else "ToolError"
+            ),
+            event_error=(
+                result.error if isinstance(result.error, BaseException) else None
+            ),
         )
         return {
             "content": [{"type": "text", "text": error}],

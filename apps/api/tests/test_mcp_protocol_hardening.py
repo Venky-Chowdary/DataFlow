@@ -221,7 +221,8 @@ def test_streamable_tool_exception_redacts_client_and_invocation_log(
     assert "s3cret" not in text
     assert "query-secret" not in text
     assert "postgresql://u:****@h/db" in text
-    assert "MCP tool list_connectors raised" in caplog.text
+    assert "MCP tool call failed (RuntimeError)" in caplog.text
+    assert "postgresql://" not in caplog.text
     assert len(captured) == 1
     assert "s3cret" not in captured[0]["error"]
     assert "query-secret" not in captured[0]["error"]

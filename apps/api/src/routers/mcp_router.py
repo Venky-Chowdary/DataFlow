@@ -384,6 +384,8 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
             error_kind=(
                 "permission_denied" if is_permission_denial(masked) else "tool_error"
             ),
+            error_type=type(exc).__name__,
+            event_error=exc,
         )
         raise HTTPException(
             status_code=500,
@@ -404,6 +406,14 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
             actor=str(actor or "mcp-agent"),
             error_kind=(
                 "permission_denied" if is_permission_denial(error) else "tool_error"
+            ),
+            error_type=(
+                type(result.error).__name__
+                if isinstance(result.error, BaseException)
+                else "ToolError"
+            ),
+            event_error=(
+                result.error if isinstance(result.error, BaseException) else None
             ),
         )
         raise HTTPException(

@@ -3126,7 +3126,7 @@ export async function fetchMcpLogs(limit = 50): Promise<Array<{
   actor?: string | null;
   status: string;
   ms: number;
-  error?: string | null;
+  error_type?: string | null;
   error_kind?: string | null;
 }>> {
   const res = await apiFetch(`${API_BASE}/mcp/logs?limit=${limit}`);

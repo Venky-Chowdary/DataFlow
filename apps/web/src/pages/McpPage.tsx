@@ -70,7 +70,7 @@ type McpLog = {
   actor: string | null;
   status: "ok" | "error";
   errorKind: string | null;
-  error: string | null;
+  errorType: string | null;
   ms: number;
 };
 
@@ -103,7 +103,7 @@ export function McpPage() {
               actor: r.actor ?? null,
               status: r.status === "ok" ? "ok" : "error",
               errorKind: r.error_kind ?? null,
-              error: r.error ?? null,
+              errorType: r.error_type ?? null,
               ms: r.ms,
             })),
           ),
@@ -293,7 +293,7 @@ export function McpPage() {
                                   log.status,
                                   log.errorKind,
                                 )}`}
-                                title={log.error ?? undefined}
+                                title={log.errorType ?? undefined}
                               >
                                 {mcpLogStatusLabel(log.status, log.errorKind)}
                               </span>
