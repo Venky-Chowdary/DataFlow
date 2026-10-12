@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import sys
 from pathlib import Path
 from typing import Any
@@ -172,6 +173,9 @@ def commit_kafka_offsets(cfg: dict[str, Any], cursor: dict[str, Any] | None) -> 
         consumer.close()
 
 
+_JOIN_WAIT_S = 15.0
+
+
 def read_topic_batch(
     *,
     cfg: dict[str, Any],
@@ -209,8 +213,10 @@ def read_topic_batch(
     try:
         records: list[dict[str, Any]] = []
         polls = 0
+        # Until the group join assigns partitions, an empty poll is not
+        # "caught up": the broker delays a new group's first join (3 s default).
+        join_deadline = time.monotonic() + _JOIN_WAIT_S
         while len(records) < limit and polls < 5:
-            polls += 1
             got = 0
             for row in consumer.poll_rows(
                 max_records=min(limit - len(records), 500),
@@ -220,6 +226,10 @@ def read_topic_batch(
                 got += 1
                 if len(records) >= limit:
                     break
+            if consumer.has_assignment():
+                polls += 1
+            elif time.monotonic() < join_deadline:
+                continue
             if got == 0:
                 break
 

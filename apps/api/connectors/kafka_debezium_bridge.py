@@ -192,6 +192,9 @@ class KafkaDebeziumConsumer:
         if offsets is None:
             self._pending_offsets.clear()
 
+    def has_assignment(self) -> bool:
+        return bool(self._consumer is not None and self._consumer.assignment())
+
     def poll_rows(self, *, max_records: int = 500, timeout_ms: int = 1000) -> Iterator[dict[str, Any]]:
         """Yield destination rows — Debezium envelopes preferred, else JSON passthrough."""
         if self._consumer is None:
