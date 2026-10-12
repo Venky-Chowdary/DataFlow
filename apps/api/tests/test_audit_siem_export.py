@@ -48,7 +48,7 @@ def _append(audit_log, *, action="test.event", actor="operator", resource="/test
 
 def test_ndjson_contains_one_parseable_hash_bearing_event_per_line(audit_client):
     client, audit_log = audit_client
-    _append(audit_log, action="siem.one", details={"secret_field": "included-in-ndjson"})
+    _append(audit_log, action="siem.one", details={"sample_field": "included-in-ndjson"})
     _append(audit_log, action="siem.two", details={"sequence": 2})
 
     response = client.get(
@@ -61,7 +61,7 @@ def test_ndjson_contains_one_parseable_hash_bearing_event_per_line(audit_client)
     assert len(rows) == 2
     assert all(row["event_hash"] and "chain_seq" in row for row in rows)
     assert all("prev_hash" in row for row in rows)
-    assert any(row["details"].get("secret_field") == "included-in-ndjson" for row in rows)
+    assert any(row["details"].get("sample_field") == "included-in-ndjson" for row in rows)
 
 
 def test_cef_golden_escaping_and_details_omission(audit_client):

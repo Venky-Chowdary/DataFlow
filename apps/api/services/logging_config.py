@@ -216,7 +216,7 @@ class TextFormatter(logging.Formatter):
             if getattr(record, field, "")
         ]
         record.context = f" ({' '.join(bits)})" if bits else ""
-        return super().format(record)
+        return redact_log_text(super().format(record))
 
 
 def log_format() -> str:

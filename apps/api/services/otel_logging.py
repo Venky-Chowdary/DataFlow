@@ -5,10 +5,11 @@ from __future__ import annotations
 import copy
 import logging
 import threading
+import traceback
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.log_redaction import SECRET_KEY, redact_log_text
+from services.log_redaction import REDACTED, redact_log_text, redact_log_value
 
 logger = logging.getLogger(__name__)
 
@@ -23,9 +24,43 @@ def _redacted_record(record: logging.LogRecord) -> logging.LogRecord:
     cloned = copy.copy(record)
     cloned.msg = redact_log_text(record.getMessage())
     cloned.args = ()
+    try:
+        from services.logging_config import _RESERVED_RECORD_ATTRS
+    except (ImportError, AttributeError):
+        reserved = frozenset(logging.makeLogRecord({}).__dict__)
+    else:
+        reserved = _RESERVED_RECORD_ATTRS
     for key in tuple(cloned.__dict__):
-        if SECRET_KEY.match(key):
-            setattr(cloned, key, "***")
+        if key not in reserved:
+            setattr(cloned, key, redact_log_value(key, cloned.__dict__[key]))
+
+    if record.exc_info:
+        try:
+            exc_type, exc_value, _ = record.exc_info
+            exception_type = getattr(exc_type, "__name__", "") or type(
+                exc_value
+            ).__name__
+        except Exception:
+            exc_value = None
+            exception_type = "Exception"
+        try:
+            exception_message = redact_log_text(str(exc_value))
+        except Exception:
+            exception_message = REDACTED
+        try:
+            exception_stacktrace = redact_log_text(
+                "".join(traceback.format_exception(*record.exc_info))
+            )
+        except Exception:
+            exception_stacktrace = REDACTED
+        cloned.exc_info = None
+        cloned.exc_text = None
+        setattr(cloned, "exception.type", exception_type)
+        setattr(cloned, "exception.message", exception_message)
+        setattr(cloned, "exception.stacktrace", exception_stacktrace)
+
+    if record.stack_info:
+        cloned.stack_info = redact_log_text(record.stack_info)
     return cloned
 
 

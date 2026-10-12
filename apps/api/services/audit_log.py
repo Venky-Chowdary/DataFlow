@@ -17,6 +17,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from services.log_redaction import _redacts_value, is_sensitive_key, redact_log_text
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 
@@ -25,12 +26,6 @@ MAX_EVENTS = int(os.getenv("DATAFLOW_AUDIT_MAX_EVENTS", "5000"))
 _APPEND_LOCK = threading.RLock()
 _LAST_RETENTION_PURGE = 0.0
 _RETENTION_PURGE_INTERVAL_SEC = 60 * 60
-
-_SENSITIVE_KEYS = frozenset({
-    "password", "secret", "token", "api_key", "connection_string",
-    "authorization", "credential", "private_key",
-})
-
 
 AUDIT_LEVELS = frozenset({"info", "success", "warn", "error"})
 
@@ -79,15 +74,18 @@ def _redact(value: Any) -> Any:
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for k, v in value.items():
-            if k.lower() in _SENSITIVE_KEYS:
+            if is_sensitive_key(k) and _redacts_value(v):
                 out[k] = "[REDACTED]"
             else:
                 out[k] = _redact(v)
         return out
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_redact(v) for v in value[:50]]
-    if isinstance(value, str) and len(value) > 512:
-        return value[:512] + "…"
+    if isinstance(value, str):
+        redacted = redact_log_text(value)
+        if len(redacted) > 512:
+            return redacted[:512] + "…"
+        return redacted
     return value
 
 
@@ -215,7 +213,7 @@ def append_audit_event(
             "time": _now(),
             "actor": actor,
             "action": action,
-            "resource": resource,
+            "resource": redact_log_text(resource),
             "level": canonical_level(level),
             "correlation_id": correlation_id,
             "workspace_id": ws,

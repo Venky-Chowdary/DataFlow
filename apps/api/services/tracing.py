@@ -29,7 +29,6 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
-import re
 import socket
 import threading
 from contextlib import contextmanager
@@ -37,6 +36,7 @@ from contextvars import ContextVar
 from typing import Any, Iterator
 
 from services.brand_env import getenv_brand
+from services.log_redaction import _redacts_value, is_sensitive_key, redact_log_text
 
 logger = logging.getLogger(__name__)
 
@@ -49,12 +49,6 @@ _TRACER: Any = None
 #: so an API call and the job it started share one operator-visible identity.
 _CORRELATION_ID: ContextVar[str] = ContextVar("df_correlation_id", default="")
 _TRACEPARENT: ContextVar[str] = ContextVar("df_traceparent", default="")
-
-_SECRET_KEYS = re.compile(
-    r"(password|passwd|secret|token|api[_-]?key|private[_-]?key|authorization|credential)",
-    re.IGNORECASE,
-)
-
 
 def tracing_enabled() -> bool:
     return getenv_brand("ENABLE_TRACING", "0").lower() in ("1", "true", "yes")
@@ -166,10 +160,12 @@ def redact_attributes(attrs: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     out: dict[str, Any] = {}
     for key, value in attrs.items():
-        if _SECRET_KEYS.search(str(key)):
+        if is_sensitive_key(key) and _redacts_value(value):
             out[str(key)] = "***"
             continue
-        if isinstance(value, (str, int, float, bool)) or value is None:
+        if isinstance(value, str):
+            out[str(key)] = redact_log_text(value)
+        elif isinstance(value, (int, float, bool)) or value is None:
             out[str(key)] = value
         else:
             # Nested structures are almost always endpoint configs; never

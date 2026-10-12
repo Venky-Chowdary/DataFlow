@@ -288,7 +288,7 @@ def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
                 "name": user.get("name", user["email"]),
                 "role": user.get("role", "member"),
             }
-        logger.info("Login failed for %s — password mismatch", normalized)
+        logger.info("Login failed — password mismatch")
         return None
     # Never dump the configured user directory — aids account discovery via logs.
     logger.info("Login failed — unknown email (users_configured=%s)", len(users))
