@@ -67,7 +67,7 @@ from .adapters import (
     resolve_connector_config,
     resolve_dest_table,
 )
-from .connector_capabilities import resolve_driver_type
+from .connector_capabilities import resolve_driver_type, source_read_driver
 from .job_quarantine import align_reported_rejects
 from .stream_row_accounting import (
     _mark_raw_page,
@@ -95,6 +95,11 @@ from services.phase_profile import (  # noqa: E402
 from services.connector_telemetry import log_retry
 
 logger = logging.getLogger(__name__)
+
+
+def _stream_source_read_driver(source_format: str) -> str:
+    return source_read_driver(resolve_driver_type(source_format))
+
 
 #: Distinct warning messages retained per transfer. Only the first 10 are shown,
 #: but keeping a few more lets the summary report an honest suppressed count.
@@ -392,6 +397,7 @@ def _stream_database_transfer_impl(
     pending_shape = shape_runner is not None or bool(shape_steps)
     from .connector_capabilities import resolve_bind_dialect
     src_type = resolve_driver_type(source.format)
+    src_read_type = _stream_source_read_driver(source.format)
     dest_type = resolve_driver_type(destination.format)
     from connectors.sdk import get_descriptor
 
@@ -453,7 +459,7 @@ def _stream_database_transfer_impl(
         from services.keyset_pagination import incremental_tiebreak_column
 
         cursor_pk_source = incremental_tiebreak_column(
-            src_type, cursor_source_col, pk_source_cols
+            src_read_type, cursor_source_col, pk_source_cols
         )
     if requires_upsert(effective_sync) and not pk_target_cols:
         # No contract key, but the destination table may declare one. That is
@@ -494,10 +500,10 @@ def _stream_database_transfer_impl(
         {},
         {},
     )
-    if src_type in _PK_INTROSPECT_TYPES:
+    if src_read_type in _PK_INTROSPECT_TYPES:
         try:
             _src_rich_catalog = _introspect_table_schema_rich(
-                src_type,
+                src_read_type,
                 src_cfg,
                 _source_name(source),
                 [str(m.get("source") or "") for m in mappings if m.get("source")],
@@ -513,7 +519,7 @@ def _stream_database_transfer_impl(
 
         _tb_types, _tb_nulls, _tb_keys = _src_rich_catalog
         cursor_pk_source = catalog_incremental_tiebreak(
-            src_type,
+            src_read_type,
             cursor_source_col,
             contract_pk=pk_source_cols,
             catalog_pk=list(_tb_keys.get("primary_key_columns") or []),
@@ -529,7 +535,7 @@ def _stream_database_transfer_impl(
         )
         if pk_source_cols and incremental and cursor_source_col and not cursor_pk_source:
             cursor_pk_source = incremental_tiebreak_column(
-                src_type, cursor_source_col, pk_source_cols
+                src_read_type, cursor_source_col, pk_source_cols
             )
     if requires_upsert(effective_sync) and not pk_target_cols:
         raise ValueError(
@@ -540,7 +546,7 @@ def _stream_database_transfer_impl(
         "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
     )
     _create_scope_token, _create_scope = begin_fast_path_create_scope(
-        _fast_path_source_catalog(src_type, mappings, schema, _src_rich_catalog),
+        _fast_path_source_catalog(src_read_type, mappings, schema, _src_rich_catalog),
         mappings,
         resolve_dest_table(dest_type, destination, _source_name(source)),
     )
@@ -555,7 +561,7 @@ def _stream_database_transfer_impl(
             _scope = resolve_incremental_read_scope(
                 sync_mode=effective_sync,
                 stream_contracts=stream_contracts,
-                source_type=src_type,
+                source_type=src_read_type,
                 source_database=source.database or src_cfg.get("database", ""),
                 source_object=_tbl,
                 dest_type=dest_type,
@@ -669,7 +675,7 @@ def _stream_database_transfer_impl(
             destination=destination,
             mappings=mappings,
             schema=schema,
-            src_type=src_type,
+            src_type=src_read_type,
             dest_type=dest_type,
             src_cfg=src_cfg,
             dest_cfg=dest_cfg,
@@ -771,7 +777,7 @@ def _stream_database_transfer_impl(
         job_id=job_id,
         has_primary_key=bool(pk_target_cols),
     )
-    if src_type not in _STREAMING_SOURCES and not sdk_source:
+    if src_read_type not in _STREAMING_SOURCES and not sdk_source:
         raise ValueError(f"Streaming source '{src_type}' not supported")
     if dest_type not in _STREAMING_DESTINATIONS:
         raise ValueError(f"Streaming destination '{dest_type}' not supported")
@@ -791,7 +797,7 @@ def _stream_database_transfer_impl(
             try:
                 spec = parse_callable_source(
                     procedure_text_of(source) or procedure_text_of(src_cfg),
-                    dialect=src_type,
+                    dialect=src_read_type,
                     mode=source_read_mode_of(source) or source_read_mode_of(src_cfg),
                     params=procedure_params_of(source) or procedure_params_of(src_cfg),
                 )
@@ -817,7 +823,7 @@ def _stream_database_transfer_impl(
         scope = resolve_incremental_read_scope(
             sync_mode=effective_sync,
             stream_contracts=stream_contracts,
-            source_type=src_type,
+            source_type=src_read_type,
             source_database=source.database or src_cfg.get("database", ""),
             source_object=cursor_source_object,
             dest_type=dest_type,
@@ -845,7 +851,7 @@ def _stream_database_transfer_impl(
         incremental
         and cursor_source_col
         and watermark
-        and not source_bounds_cursor_reads(src_type)
+        and not source_bounds_cursor_reads(src_read_type)
     )
 
     src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
@@ -896,7 +902,7 @@ def _stream_database_transfer_impl(
     # Property 3 — one MVCC/transaction snapshot for the whole full-refresh read
     # (sample probe + pages + optional checksum re-read). Incremental syncs
     # intentionally follow watermarks and do not bind a frozen snapshot.
-    if not incremental and src_type in ("postgresql", "redshift"):
+    if not incremental and src_read_type in ("postgresql", "redshift"):
         try:
             from services.source_snapshot import (
                 activate_snapshot,
@@ -1016,7 +1022,7 @@ def _stream_database_transfer_impl(
         # filtered-scan check has to see that same column or the two owners
         # disagree on the first incremental run (E3-002).
         cursor_pk_source = catalog_incremental_tiebreak(
-            src_type,
+            src_read_type,
             cursor_source_col,
             contract_pk=pk_source_cols,
             catalog_pk=list(_cat_keys.get("primary_key_columns") or []),
@@ -1030,7 +1036,7 @@ def _stream_database_transfer_impl(
         nullable=_cat_nulls,
     )
     _filtered_scan_reason = incremental_read_needs_filtered_scan(
-        src_type=src_type,
+        src_type=src_read_type,
         incremental=bool(incremental),
         cursor_column=cursor_source_col,
         tiebreak_column=cursor_pk_source,
@@ -1074,7 +1080,7 @@ def _stream_database_transfer_impl(
     else:
         sample_probe, _ = _unwrap_read(
             _read_batch(
-                src_type, src_cfg, table, None, 0, sample_limit, database=src_db,
+                src_read_type, src_cfg, table, None, 0, sample_limit, database=src_db,
                 **_cursor_read_args(watermark),
             )
         )
@@ -1181,7 +1187,7 @@ def _stream_database_transfer_impl(
     # An incremental cursor with no unique tie-break also holds a scan: the
     # filter is the run watermark and paging is fetchmany, so the bookmark a
     # resume carries is a row count, never a seek key.
-    _hold_snapshot = src_type in _SNAPSHOT_SCAN_SOURCES and (
+    _hold_snapshot = src_read_type in _SNAPSHOT_SCAN_SOURCES and (
         bool(_filtered_scan_reason)
         or (
             not incremental
@@ -1199,7 +1205,7 @@ def _stream_database_transfer_impl(
     else:
         probe, ddb_cursor = _unwrap_read(
             _read_batch(
-                src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
+                src_read_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
                 **_probe_cursor_kw,
                 **_scan_kw,
                 **(
@@ -1341,7 +1347,7 @@ def _stream_database_transfer_impl(
                 except Exception:
                     schema = {c: "TEXT" for c in columns}
             else:
-                schema = _introspect_table_schema(src_type, src_cfg, table, columns)
+                schema = _introspect_table_schema(src_read_type, src_cfg, table, columns)
                 if not schema:
                     schema = {c: "string" for c in columns}
 
@@ -1500,12 +1506,12 @@ def _stream_database_transfer_impl(
     # so both stay eligible here.
     inline_fingerprints_used = not (
         should_reread_source(
-            src_type=src_type,
+            src_type=src_read_type,
             dest_type=dest_type,
             incremental=incremental,
             partial_write_pass=False,
         )
-        and src_type in REREAD_SCAN_SOURCES
+        and src_read_type in REREAD_SCAN_SOURCES
     )
     # Restore cumulative quarantine counts on resume — Gate-8 conservation is
     # source - (rejected - coerced_null) - skipped. committed_offset already spans
@@ -1565,7 +1571,7 @@ def _stream_database_transfer_impl(
     # answers to the same planner); the paged read reuses that catalog here.
     source_schema_catalog: dict[str, Any] | None = None
     _src_schema_types, _src_schema_nulls, _src_keys = _src_rich_catalog
-    if src_type in _pk_introspect_types:
+    if src_read_type in _pk_introspect_types:
         try:
             if not keyset_pk_cols:
                 keyset_pk_cols = [
@@ -1600,7 +1606,7 @@ def _stream_database_transfer_impl(
 
             source_schema_catalog = catalog_to_payload(
                 build_catalog_from_introspect(
-                    dialect=src_type,
+                    dialect=src_read_type,
                     columns=list(columns or []),
                     column_types=_src_schema_types or dict(schema or {}),
                     nullable=_src_schema_nulls,
@@ -1632,7 +1638,7 @@ def _stream_database_transfer_impl(
     if keyset_after in (None, "") and incremental and keyset_col == cursor_source_col:
         keyset_after = watermark
     decision = decide_keyset_pagination(
-        src_type=src_type,
+        src_type=src_read_type,
         keyset_order_cols=keyset_order_cols,
         keyset_col=keyset_col,
         keyset_tiebreak=keyset_tiebreak,
@@ -1703,7 +1709,7 @@ def _stream_database_transfer_impl(
         def _resume_scan_next():
             nxt, _extra = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -1730,7 +1736,7 @@ def _stream_database_transfer_impl(
 
         if (
             bulk_export_enabled()
-            and bulk_export_implemented(src_type)
+            and bulk_export_implemented(src_read_type)
             and not incremental
             and not _is_resume
             and not source_filter
@@ -1772,7 +1778,7 @@ def _stream_database_transfer_impl(
                 bulk_export_iter = None
         elif (
             bulk_export_forced()
-            and src_type in ("snowflake", "bigquery")
+            and src_read_type in ("snowflake", "bigquery")
             and not incremental
         ):
             raise NotImplementedError(
@@ -1782,7 +1788,7 @@ def _stream_database_transfer_impl(
     except ImportError:
         bulk_export_iter = None
 
-    if keyset_col and not use_keyset and src_type in KEYSET_CAPABLE_SOURCES:
+    if keyset_col and not use_keyset and src_read_type in KEYSET_CAPABLE_SOURCES:
         logger.info(
             "Keyset pagination disabled for %s.%s — no unique bookmark (declare a "
             "primary_key on the stream contract to re-enable seek reads). Falling "
@@ -1867,7 +1873,7 @@ def _stream_database_transfer_impl(
             )
             batch, _ = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -1904,7 +1910,7 @@ def _stream_database_transfer_impl(
             and not page_may_be_partial
         ):
             if (
-                src_type
+                src_read_type
                 in (
                     "postgresql",
                     "redshift",
@@ -1918,14 +1924,14 @@ def _stream_database_transfer_impl(
                     "generic_sql",
                 )
                 and (incremental or use_keyset)
-            ) or src_type in ("elasticsearch", "redis", "kafka", "qdrant"):
+            ) or src_read_type in ("elasticsearch", "redis", "kafka", "qdrant"):
                 return None
         if src_type == "dynamodb":
             if not ddb_cursor:
                 return None
             batch, ddb_cursor = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -1942,7 +1948,7 @@ def _stream_database_transfer_impl(
                 return None
             batch, kafka_cursor = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -1959,7 +1965,7 @@ def _stream_database_transfer_impl(
                 return None
             batch, qdrant_offset = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -1978,7 +1984,7 @@ def _stream_database_transfer_impl(
             # then OFFSET — never the advancing page max (that drops rows).
             batch, _ = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -1994,11 +2000,11 @@ def _stream_database_transfer_impl(
             incremental
             and cursor_source_col
             and not _filtered_scan_reason
-            and source_bounds_cursor_reads(src_type)
+            and source_bounds_cursor_reads(src_read_type)
         ):
             batch, _ = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -2037,7 +2043,7 @@ def _stream_database_transfer_impl(
             )
             batch, extra = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -2064,7 +2070,7 @@ def _stream_database_transfer_impl(
         elif src_type == "elasticsearch":
             batch, es_search_after = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -2081,7 +2087,7 @@ def _stream_database_transfer_impl(
                 return None
             batch, qdrant_offset = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -2096,7 +2102,7 @@ def _stream_database_transfer_impl(
         elif src_type == "redis":
             batch, redis_scan_state = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -2115,7 +2121,7 @@ def _stream_database_transfer_impl(
             # becomes the predicate, so rows tied at a page edge are kept.
             batch, _ = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -2130,7 +2136,7 @@ def _stream_database_transfer_impl(
         else:
             batch, extra = _unwrap_read(
                 _read_batch(
-                    src_type,
+                    src_read_type,
                     src_cfg,
                     table,
                     columns,
@@ -2140,7 +2146,7 @@ def _stream_database_transfer_impl(
                     known_total_rows=total_rows,
                     **(
                         {"scan_state": src_scan}
-                        if src_type in _SNAPSHOT_SCAN_SOURCES and src_scan
+                        if src_read_type in _SNAPSHOT_SCAN_SOURCES and src_scan
                         else {}
                     ),
                 )
@@ -3223,7 +3229,7 @@ def _stream_database_transfer_impl(
         and (is_overwrite_sync(effective_sync) or resumed_pass)
     )
     _reread = should_reread_source(
-        src_type=src_type,
+        src_type=src_read_type,
         dest_type=dest_type,
         incremental=incremental,
         partial_write_pass=_partial_write_pass,
@@ -3244,14 +3250,14 @@ def _stream_database_transfer_impl(
             "(incremental, CDC, or DATAFLOW_RECONCILE_SOURCE_REREAD=0). "
             "Set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second scan."
         )
-    elif src_type in REREAD_SCAN_SOURCES:
+    elif src_read_type in REREAD_SCAN_SOURCES:
         # Independent re-read — snapshot scan (no OFFSET) on warehouse sources.
         from connectors.sql_snapshot_scan import close_table_scan
 
         checksum_started = time.perf_counter()
         fp_accumulator = FingerprintAccumulator()
         reread_plan = reread_pagination_plan(
-            src_type=src_type,
+            src_type=src_read_type,
             incremental=incremental,
             callable_source=bool(is_callable_source(source) or is_callable_source(src_cfg)),
         )
@@ -3286,7 +3292,7 @@ def _stream_database_transfer_impl(
                 _scan_kw = {"scan_state": reread_scan} if reread_scan is not None else {}
                 batch, _ = _unwrap_read(
                     _read_batch(
-                        src_type,
+                        src_read_type,
                         src_cfg,
                         table,
                         columns,
@@ -3666,10 +3672,9 @@ class _NoOpCheckpointService:
 def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> bool:
     if source.kind != "database" or destination.kind != "database":
         return False
-    from .connector_capabilities import source_read_driver
     from connectors.sdk import get_descriptor
 
-    source_driver = source_read_driver(resolve_driver_type(source.format))
+    source_driver = _stream_source_read_driver(source.format)
     descriptor = get_descriptor(source_driver)
     sdk_source = bool(
         descriptor

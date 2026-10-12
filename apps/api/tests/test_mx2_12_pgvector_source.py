@@ -93,6 +93,37 @@ def test_pgvector_streams_as_a_source():
     assert supports_streaming(EndpointConfig(kind="database", format="pgvector"), sqlite)
 
 
+def test_pgvector_stream_guard_and_reader_use_postgresql(monkeypatch):
+    from types import SimpleNamespace
+
+    from connectors import postgresql_reader
+    from src.transfer.batch_readers import _read_batch_impl
+    from src.transfer.stream import _STREAMING_SOURCES, _stream_source_read_driver
+
+    read_driver = _stream_source_read_driver("pgvector")
+    assert read_driver == "postgresql"
+    assert read_driver in _STREAMING_SOURCES
+
+    called = {}
+
+    def read_postgresql(**kwargs):
+        called.update(kwargs)
+        return SimpleNamespace(rows=[{"id": 1}], headers=["id"])
+
+    monkeypatch.setattr(postgresql_reader, "read_table_batch", read_postgresql)
+    batch = _read_batch_impl(
+        "pgvector",
+        {"host": "localhost", "port": 5432, "database": "dataflow"},
+        "items",
+        ["id"],
+        0,
+        1,
+    )
+
+    assert batch.rows == [{"id": 1}]
+    assert called["table"] == "items"
+
+
 @live
 def test_table_mode_read_returns_rows(products_table):
     from src.transfer.adapters import read_source_database
