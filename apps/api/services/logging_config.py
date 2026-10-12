@@ -21,8 +21,9 @@ This module fixes both:
 * A :class:`ContextFilter` that stamps every record with the ambient
   ``correlation_id``, ``job_id``, and ``trace_id``, so a single grep or a single
   structured query returns the whole story of one job across every module.
-* :func:`job_log_context`, a context manager that binds a ``job_id`` for the
-  duration of a transfer, including across the thread-pool boundary.
+* :func:`log_context`, a context manager that binds ``job_id``,
+  ``workspace_id``, ``schedule_id``, ``run_id``, ``attempt`` and ``phase`` for
+  a block (:func:`job_log_context` is the job-only form used by the engine).
 
 Both the filter and the context are ``ContextVar``-backed, which means they
 follow ``async`` tasks correctly and are captured explicitly for worker threads
@@ -46,8 +47,20 @@ from services.log_redaction import redact_log_text, redact_log_value
 #: :func:`job_log_context` so engine and connector logs self-identify.
 _JOB_ID: ContextVar[str] = ContextVar("df_log_job_id", default="")
 
+#: Ambient identity bound by :func:`log_context`, keyed by record field name.
+_BOUND_FIELDS: dict[str, ContextVar[str]] = {
+    "job_id": _JOB_ID,
+    "workspace_id": ContextVar("df_log_workspace_id", default=""),
+    "schedule_id": ContextVar("df_log_schedule_id", default=""),
+    "run_id": ContextVar("df_log_run_id", default=""),
+    "attempt": ContextVar("df_log_attempt", default=""),
+    "phase": ContextVar("df_log_phase", default=""),
+}
+
 #: Fields a LogRecord always carries after :class:`ContextFilter` runs.
-_CONTEXT_FIELDS = ("correlation_id", "job_id", "trace_id")
+_CONTEXT_FIELDS = ("correlation_id", "trace_id", *_BOUND_FIELDS)
+
+_MAX_CONTEXT_CHARS = 256
 
 #: Attributes present on every LogRecord. Anything outside this set was passed
 #: by the caller via ``extra=`` and is worth emitting as a structured field.
@@ -97,17 +110,41 @@ def reset_job_id(token: Token) -> None:
 
 
 @contextmanager
+def log_context(**ids: Any) -> Iterator[None]:
+    """Stamp every record emitted in this block with the given identity fields.
+
+    Accepts the keys of ``_BOUND_FIELDS``; ``None`` clears a field for the
+    block. Unknown keys are ignored with a warning rather than failing the
+    caller. Values are restored on exit, so nested scopes compose.
+    """
+    tokens: list[tuple[ContextVar[str], Token]] = []
+    unknown = sorted(key for key in ids if key not in _BOUND_FIELDS)
+    if unknown:
+        logging.getLogger(__name__).warning(
+            "log_context ignored unknown fields: %s", ",".join(unknown)
+        )
+    try:
+        for key, value in ids.items():
+            var = _BOUND_FIELDS.get(key)
+            if var is None:
+                continue
+            text = "" if value is None else str(value).strip()
+            tokens.append((var, var.set(text[:_MAX_CONTEXT_CHARS])))
+        yield
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
+
+
+@contextmanager
 def job_log_context(job_id: str | None) -> Iterator[None]:
     """Stamp every log record emitted in this block with ``job_id``.
 
     Used by the transfer engine so that connector and reconciliation logs, which
     have no idea a job exists, still become attributable to one.
     """
-    token = set_job_id(job_id)
-    try:
+    with log_context(job_id=job_id):
         yield
-    finally:
-        reset_job_id(token)
 
 
 class ContextFilter(logging.Filter):
@@ -119,8 +156,9 @@ class ContextFilter(logging.Filter):
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if not hasattr(record, "job_id"):
-            record.job_id = _JOB_ID.get()
+        for field, var in _BOUND_FIELDS.items():
+            if not hasattr(record, field):
+                setattr(record, field, var.get())
         if not hasattr(record, "correlation_id"):
             record.correlation_id = _safe_correlation_id()
         if not hasattr(record, "trace_id"):
