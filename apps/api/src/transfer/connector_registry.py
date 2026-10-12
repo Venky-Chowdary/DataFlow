@@ -341,11 +341,16 @@ def _already_operator_copy(raw: str) -> bool:
     return any(text.startswith(prefix) for prefix in _OPERATOR_COPY_PREFIXES)
 
 
+def _driver_snippet(raw: str) -> str:
+    snippet = " ".join(str(raw or "").strip().split())
+    if len(snippet) > 120:
+        return snippet[:117] + "..."
+    return snippet
+
+
 def _with_cause(message: str, raw: str) -> str:
     """Keep the driver code visible — never replace 250001/28000 with a slogan."""
-    snippet = " ".join(str(raw or "").strip().split())
-    if len(snippet) > 220:
-        snippet = snippet[:217] + "..."
+    snippet = _driver_snippet(raw)
     if not snippet or snippet.lower() in message.lower():
         return message
     if _already_operator_copy(snippet):
@@ -396,7 +401,10 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
                         "Check the service is running, use private port 3306/5432, and that both "
                         "services share the same Railway project/network."
                     )
-                return f"Connection failed on Railway private network: {raw_s.split(hint)[0].strip()}"
+                return (
+                    "Connection failed on Railway private network: "
+                    f"{_driver_snippet(raw_s.split(hint)[0])}"
+                )
             return (
                 "Cannot reach the Railway private database host from this API service. "
                 "Check project linking, private hostname, and private port (3306/5432)."
@@ -456,9 +464,7 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
         r"host key|not trusted|fingerprint|known_hosts|preauth|before authentication",
         text,
     ):
-        cleaned = " ".join(raw_s.split())
-        if len(cleaned) > 500:
-            cleaned = cleaned[:497] + "..."
+        cleaned = _driver_snippet(raw_s)
         return cleaned
 
     # Auth / credentials — first because it is the most common and sensitive.
@@ -621,7 +627,7 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
         return "SFTP path not found. Check the remote directory and file path."
 
     # Fallback: keep the raw message but prefix it clearly.
-    return f"Connection failed: {raw_s}"
+    return f"Connection failed: {_driver_snippet(raw_s)}"
 
 
 def probe_file_source(fmt: str, path: str) -> tuple[bool, str]:
