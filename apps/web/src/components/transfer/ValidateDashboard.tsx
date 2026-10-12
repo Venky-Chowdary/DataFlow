@@ -212,6 +212,13 @@ const STATUS_LABEL: Record<string, string> = {
   pending: "Pending",
 };
 
+/** Catalog id → operator code. g9_data_integrity is G9, not its position in the grid. */
+function gateDisplayCode(key: string): string {
+  const match = key.match(/^g(\d+[a-z]?)/i);
+  if (match) return `G${match[1].toUpperCase()}`;
+  return key.replace(/_/g, " ").slice(0, 8).toUpperCase();
+}
+
 interface ValidateDashboardProps {
   preflight: PreflightResult | null;
   running?: boolean;
@@ -2933,7 +2940,7 @@ export function ValidateDashboard({
           <strong>Validation rules</strong>
           <span>{totalGates} checks enforced before write · threshold {(confidenceThreshold * 100).toFixed(0)}%</span>
         </div>
-        <div className="df2-vd-rules-grid">
+        <div className="df2-vd-rules-grid" role="list">
           {displayGates.map((meta, index) => {
             const { status, message, issues, durationMs, privilegeProbe, evidenceScope } = statusForGate(meta, index);
             const scopeCoverage = evidenceScope?.coverage != null ? String(evidenceScope.coverage) : "";
@@ -2944,13 +2951,33 @@ export function ValidateDashboard({
               ? evidenceScope.columns
               : null;
             const scopeNote = evidenceScope?.note != null ? String(evidenceScope.note) : "";
+            const showPrivilege = status !== "pending" && Boolean(privilegeProbe && (privilegeProbe.method || privilegeProbe.status));
+            const destExistence = status !== "pending" && /g2_destination|destination/i.test(meta.key)
+              ? (() => {
+                const gate = gateByKey.get(meta.key);
+                const exists = gate?.details?.table_exists;
+                if (exists === true) return "table exists";
+                if (exists === false) return "create-new";
+                if (/unknown|existence/i.test(message || "")) return "existence unknown";
+                return null;
+              })()
+              : null;
+            const showDuration = status !== "pending" && durationMs != null && durationMs > 0;
+            const showScope = status !== "pending" && Boolean(evidenceScope);
             return (
               <article
                 key={`${meta.key}-${index}`}
-                className={`df2-vd-rule status-${status}${status === "pass" || status === "skip" ? " is-compact" : ""}`}
+                className={`df2-vd-rule status-${status}`}
+                role="listitem"
+                data-gate={meta.key}
               >
                 <div className="df2-vd-rule-top">
-                  <span className="df2-vd-rule-icon"><DtIcon name={meta.icon} size={15} /></span>
+                  <span className="df2-vd-rule-ident">
+                    <span className="df2-vd-rule-code">{gateDisplayCode(meta.key)}</span>
+                    <span className="df2-vd-rule-icon" aria-hidden>
+                      <DtIcon name={meta.icon} size={14} />
+                    </span>
+                  </span>
                   <span className={`df2-vd-rule-status status-${status}`}>
                     {status === "pass" && <DtIcon name="check" size={11} />}
                     {status === "block" && <DtIcon name="x" size={11} />}
@@ -2960,80 +2987,66 @@ export function ValidateDashboard({
                   </span>
                 </div>
                 <strong className="df2-vd-rule-label">{meta.label}</strong>
-                {(status === "block" || status === "warn" || status === "running" || status === "pending") && (
-                  <p className="df2-vd-rule-desc">{meta.rule}</p>
-                )}
-                {status !== "pending" && status !== "pass" && message && (
-                  <p className="df2-vd-rule-msg">{message}</p>
-                )}
-                {status === "pass" && message && (
-                  <p className="df2-vd-rule-msg is-compact-msg" title={message}>{message}</p>
-                )}
-                {status !== "pending" && evidenceScope && (
-                  <p className="df2-vd-rule-scope" title={scopeNote || undefined}>
-                    <span className={`df2-vd-scope-chip cov-${scopeCoverage || "na"}`}>
-                      {scopeCoverage === "sample"
-                        ? "Sample"
-                        : scopeCoverage === "full_schema"
-                          ? "Full schema"
-                          : scopeCoverage === "full_selected"
-                            ? "Full selected"
-                            : scopeCoverage === "pending"
-                              ? "Pending"
-                              : "Scope"}
-                    </span>
-                    {scopeSample != null && (
-                      <span>{Number(scopeSample).toLocaleString()} row{Number(scopeSample) === 1 ? "" : "s"}</span>
-                    )}
-                    {scopeCols != null && (
-                      <span>{Number(scopeCols).toLocaleString()} col{Number(scopeCols) === 1 ? "" : "s"}</span>
-                    )}
-                  </p>
-                )}
-                {status !== "pending" && privilegeProbe && (privilegeProbe.method || privilegeProbe.status) && (
-                  <div className={`df2-vd-priv-probe status-${privilegeProbe.status || "unknown"}`}>
-                    {privilegeProbe.status && (
-                      <span className="df2-vd-priv-chip">{privilegeProbe.status}</span>
-                    )}
-                    {privilegeProbe.method && (
-                      <span className="df2-vd-priv-method">{privilegeProbe.method}</span>
-                    )}
-                    {privilegeProbe.engine && (
-                      <span className="df2-vd-priv-engine">{privilegeProbe.engine}</span>
-                    )}
-                    {privilegeProbe.can_create_table != null && (
-                      <span className="df2-vd-priv-method">
-                        create={privilegeProbe.can_create_table ? "yes" : "no"}
+                <p className="df2-vd-rule-desc" title={meta.rule}>{meta.rule}</p>
+                {status !== "pending" && message ? (
+                  <p className="df2-vd-rule-msg" title={message}>{message}</p>
+                ) : status === "pending" ? (
+                  <p className="df2-vd-rule-msg is-pending-note">Not run yet</p>
+                ) : null}
+                <div className="df2-vd-rule-foot">
+                  {showScope && (
+                    <p className="df2-vd-rule-scope" title={scopeNote || undefined}>
+                      <span className={`df2-vd-scope-chip cov-${scopeCoverage || "na"}`}>
+                        {scopeCoverage === "sample"
+                          ? "Sample"
+                          : scopeCoverage === "full_schema"
+                            ? "Full schema"
+                            : scopeCoverage === "full_selected"
+                              ? "Full selected"
+                              : scopeCoverage === "pending"
+                                ? "Pending"
+                                : "Scope"}
                       </span>
-                    )}
-                    {privilegeProbe.can_write != null && (
-                      <span className="df2-vd-priv-method">
-                        write={privilegeProbe.can_write ? "yes" : "no"}
-                      </span>
-                    )}
-                  </div>
-                )}
-                {status !== "pending" && /g2_destination|destination/i.test(meta.key) && (() => {
-                  const gate = gateByKey.get(meta.key);
-                  const exists = gate?.details?.table_exists;
-                  const label =
-                    exists === true
-                      ? "table exists"
-                      : exists === false
-                        ? "create-new"
-                        : /unknown|existence/i.test(message || "")
-                          ? "existence unknown"
-                          : null;
-                  if (!label) return null;
-                  return (
-                    <div className="df2-vd-priv-probe status-unknown">
-                      <span className="df2-vd-priv-chip">{label}</span>
+                      {scopeSample != null && (
+                        <span>{Number(scopeSample).toLocaleString()} row{Number(scopeSample) === 1 ? "" : "s"}</span>
+                      )}
+                      {scopeCols != null && (
+                        <span>{Number(scopeCols).toLocaleString()} col{Number(scopeCols) === 1 ? "" : "s"}</span>
+                      )}
+                    </p>
+                  )}
+                  {showPrivilege && privilegeProbe && (
+                    <div className={`df2-vd-priv-probe status-${privilegeProbe.status || "unknown"}`}>
+                      {privilegeProbe.status && (
+                        <span className="df2-vd-priv-chip">{privilegeProbe.status}</span>
+                      )}
+                      {privilegeProbe.method && (
+                        <span className="df2-vd-priv-method">{privilegeProbe.method}</span>
+                      )}
+                      {privilegeProbe.engine && (
+                        <span className="df2-vd-priv-engine">{privilegeProbe.engine}</span>
+                      )}
+                      {privilegeProbe.can_create_table != null && (
+                        <span className="df2-vd-priv-method">
+                          create={privilegeProbe.can_create_table ? "yes" : "no"}
+                        </span>
+                      )}
+                      {privilegeProbe.can_write != null && (
+                        <span className="df2-vd-priv-method">
+                          write={privilegeProbe.can_write ? "yes" : "no"}
+                        </span>
+                      )}
                     </div>
-                  );
-                })()}
-                {status !== "pending" && durationMs != null && durationMs > 0 && (
-                  <p className="df2-vd-rule-dur">Engine time {formatDuration(durationMs)}</p>
-                )}
+                  )}
+                  {destExistence && (
+                    <div className="df2-vd-priv-probe status-unknown">
+                      <span className="df2-vd-priv-chip">{destExistence}</span>
+                    </div>
+                  )}
+                  {showDuration && (
+                    <p className="df2-vd-rule-dur">Engine {formatDuration(durationMs)}</p>
+                  )}
+                </div>
                 {issues.length > 0 && (
                   <ul className="df2-vd-rule-issues">
                     {issues.slice(0, 4).map((issue) => (

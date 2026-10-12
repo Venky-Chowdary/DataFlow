@@ -14537,6 +14537,16 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
   color: var(--df-success);
 }
 
+.df2-app .df2-vd-rule-status.status-warn {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
+.df2-app .df2-vd-rule-status.status-running {
+  background: var(--df-info-bg);
+  color: var(--df-info);
+}
+
 .df2-app .df2-preflight-compact-summary .block,
 .df2-app .df2-vd-rule-status.status-block {
   background: var(--df-danger-bg);
@@ -14544,8 +14554,10 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
 }
 
 .df2-app .df2-preflight-compact-summary .skip,
-.df2-app .df2-vd-rule-status.status-skip {
+.df2-app .df2-vd-rule-status.status-skip,
+.df2-app .df2-vd-rule-status.status-pending {
   background: var(--df-surface-muted);
+  color: var(--df-text-tertiary);
 }
 
 .df2-app .df2-vd-proof-chip {
