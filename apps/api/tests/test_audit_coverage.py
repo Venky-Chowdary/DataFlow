@@ -114,7 +114,9 @@ def test_sensitive_routes_record_actor_status_and_correlation_without_secrets(
         matching = [event for event in rows if event.get("action") == action]
         assert len(matching) == 1, (action, matching)
         event = matching[0]
-        assert event["actor"] == audit_app["actor"]
+        assert event["actor"] == f"api_key:{audit_app['key_id']}"
+        assert event["actor_type"] == "api_key"
+        assert event["actor_id"] == audit_app["key_id"]
         assert event["workspace_id"] == audit_app["workspace_id"]
         assert event["correlation_id"] == "audit-correlation-1"
         assert event["details"]["status"] == status

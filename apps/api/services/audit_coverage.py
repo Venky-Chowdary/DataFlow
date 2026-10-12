@@ -7,6 +7,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from contextvars import ContextVar, Token
 from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -16,6 +17,64 @@ from starlette.responses import Response
 from services import audit_log
 
 logger = logging.getLogger(__name__)
+
+_REQUEST_PRINCIPAL: ContextVar[dict[str, str] | None] = ContextVar(
+    "audit_request_principal", default=None
+)
+
+
+def set_request_principal(principal: dict[str, str]) -> Token[dict[str, str] | None]:
+    return _REQUEST_PRINCIPAL.set(dict(principal))
+
+
+def current_request_principal() -> dict[str, str] | None:
+    principal = _REQUEST_PRINCIPAL.get()
+    return dict(principal) if principal is not None else None
+
+
+def reset_request_principal(token: Token[dict[str, str] | None]) -> None:
+    _REQUEST_PRINCIPAL.reset(token)
+
+
+def request_principal(request: Request) -> dict[str, str]:
+    state = request.state
+    user = getattr(state, "user", None)
+    user = user if isinstance(user, dict) else {}
+    auth_kind = (
+        getattr(state, "auth_kind", None)
+        or user.get("auth_kind")
+        or ("session" if user else "anonymous")
+    )
+    key_auth = bool(
+        getattr(state, "api_key_auth", False)
+        or getattr(state, "api_key_id", None)
+        or user.get("api_key_id")
+        or user.get("auth_kind") == "api_key"
+    )
+    if key_auth:
+        kind = user.get("kind")
+        actor_type = kind if kind in {"service_account", "scim", "api_key"} else "api_key"
+        return {
+            "actor_type": str(actor_type),
+            "actor_id": str(
+                getattr(state, "api_key_id", None) or user.get("api_key_id") or ""
+            ),
+            "auth_method": str(auth_kind or "api_key"),
+            "created_by": str(getattr(state, "api_key_created_by", None) or ""),
+        }
+    if not user:
+        return {
+            "actor_type": "anonymous",
+            "actor_id": "",
+            "auth_method": str(auth_kind or "anonymous"),
+        }
+    actor_type = "mcp_oauth" if user.get("auth_kind") == "oauth" else "user"
+    return {
+        "actor_type": actor_type,
+        "actor_id": str(user.get("email") or getattr(state, "user_email", None) or ""),
+        "auth_method": str(auth_kind),
+    }
+
 
 # Entries use the registered route template as a prefix. Dynamic segments are
 # written as FastAPI declares them, which keeps coverage testable against app.routes.
@@ -102,15 +161,13 @@ def _correlation_id(request: Request) -> str | None:
 
 
 def _auth_metadata(request: Request) -> tuple[str, str | None]:
-    user = getattr(request.state, "user", None)
-    user = user if isinstance(user, dict) else {}
-    api_key_id = getattr(request.state, "api_key_id", None) or user.get("api_key_id")
-    auth_kind = (
-        getattr(request.state, "auth_kind", None)
-        or user.get("auth_kind")
-        or ("session" if user else "anonymous")
+    principal = request_principal(request)
+    api_key_id = (
+        principal["actor_id"]
+        if principal["actor_type"] in {"service_account", "scim", "api_key"}
+        else None
     )
-    return str(auth_kind), str(api_key_id) if api_key_id else None
+    return principal["auth_method"], api_key_id
 
 
 class AuditAccessMiddleware(BaseHTTPMiddleware):
@@ -131,6 +188,7 @@ class AuditAccessMiddleware(BaseHTTPMiddleware):
         if action is None:
             return
 
+        principal = request_principal(request)
         auth_kind, api_key_id = _auth_metadata(request)
         details: dict[str, Any] = {
             "auth_kind": auth_kind,
@@ -150,6 +208,7 @@ class AuditAccessMiddleware(BaseHTTPMiddleware):
                 correlation_id=_correlation_id(request),
                 workspace_id=audit_log.workspace_id_from_request(request),
                 details=details,
+                principal=principal,
             )
         except Exception as exc:
             _record_audit_failure(exc)

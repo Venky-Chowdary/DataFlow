@@ -192,6 +192,7 @@ def append_audit_event(
     details: dict[str, Any] | None = None,
     workspace_id: str | None = None,
     tenant_id: str | None = None,
+    principal: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Record a redacted audit event to MongoDB (preferred) or a local JSONL file.
 
@@ -202,6 +203,26 @@ def append_audit_event(
     Process-local ``_APPEND_LOCK`` serializes writers to reduce chain forks. Cross-
     process/replica races still need a single authoritative store (Mongo preferred).
     """
+    if principal is None:
+        from services.audit_coverage import current_request_principal
+
+        principal = current_request_principal()
+
+    principal_fields: dict[str, str] = {}
+    if principal:
+        actor_type = str(principal.get("actor_type") or "anonymous")
+        actor_id = str(principal.get("actor_id") or "")
+        principal_fields = {
+            "actor_type": actor_type,
+            "actor_id": actor_id,
+            "auth_method": str(principal.get("auth_method") or ""),
+        }
+        if actor_type in {"service_account", "scim", "api_key"}:
+            created_by = str(principal.get("created_by") or "")
+            principal_fields["created_by"] = created_by
+            if actor == created_by or actor == "api-key":
+                actor = f"{actor_type}:{actor_id}"
+
     with _APPEND_LOCK:
         secret = _platform_hmac_secret()
         tip = _chain_tip()
@@ -217,6 +238,7 @@ def append_audit_event(
             "id": str(uuid.uuid4()),
             "time": _now(),
             "actor": actor,
+            **principal_fields,
             "action": action,
             "resource": redact_secret_shapes(resource),
             "level": canonical_level(level),

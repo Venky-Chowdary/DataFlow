@@ -479,6 +479,7 @@ async def add_timing_header(request: Request, call_next):
     ):
         try:
             from services.audit_log import append_audit_event
+            from services.audit_coverage import request_principal
             from services.workspace_access import authorized_workspace_id
 
             actor = getattr(request.state, "user_email", None) or "anonymous"
@@ -499,6 +500,7 @@ async def add_timing_header(request: Request, call_next):
                 correlation_id=correlation_id,
                 workspace_id=workspace_id,
                 details=details,
+                principal=request_principal(request),
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)

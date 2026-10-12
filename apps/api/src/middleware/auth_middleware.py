@@ -92,6 +92,7 @@ def _attach_user(request: Request, token: str) -> bool:
             user["tenant_ids"] = key_info["tenant_ids"]
         request.state.user = user
         request.state.api_key_id = key_info["id"]
+        request.state.api_key_created_by = key_info.get("created_by") or ""
         request.state.api_key_auth = True
         return True
 
@@ -131,55 +132,77 @@ def _tenant_bind_forbidden(request: Request) -> JSONResponse | None:
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
-        auth = request.headers.get("Authorization", "")
-        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
-        # EventSource / SSE cannot send custom headers, so the token may be
-        # passed as a query parameter.  Only allow this fallback on the SSE
-        # stream paths to keep tokens out of general access logs.
-        if not token and request.url.path.endswith("/stream"):
-            token = request.query_params.get("token") or request.query_params.get("access_token") or ""
+        principal_context = None
+        principal_token = None
+        try:
+            auth = request.headers.get("Authorization", "")
+            token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+            # EventSource / SSE cannot send custom headers, so the token may be
+            # passed as a query parameter.  Only allow this fallback on the SSE
+            # stream paths to keep tokens out of general access logs.
+            if not token and request.url.path.endswith("/stream"):
+                token = request.query_params.get("token") or request.query_params.get("access_token") or ""
 
-        # Resolved on the module, not copied at import: enforcement is a live
-        # setting, and a stale copy means the middleware and the auth service
-        # disagree about whether the request needs a token.
-        if not _auth_service.auth_required():
-            if token:
-                _attach_user(request, token)
-                forbidden = _tenant_bind_forbidden(request)
-                if forbidden is not None:
-                    return forbidden
+            # Resolved on the module, not copied at import: enforcement is a live
+            # setting, and a stale copy means the middleware and the auth service
+            # disagree about whether the request needs a token.
+            if not _auth_service.auth_required():
+                if token and _attach_user(request, token):
+                    from services import audit_coverage
+
+                    principal_context = audit_coverage
+                    principal_token = audit_coverage.set_request_principal(
+                        audit_coverage.request_principal(request)
+                    )
+                    forbidden = _tenant_bind_forbidden(request)
+                    if forbidden is not None:
+                        return forbidden
+                return await call_next(request)
+
+            path = request.url.path
+            if (
+                request.method == "OPTIONS"
+                or path == "/"
+                or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+                or _is_public_sso_path(path)
+                or _is_public_mcp_path(path, request.method)
+            ):
+                # Public routes still attach identity when a Bearer token is present
+                # (MCP tools/call uses this; discovery works without a token).
+                if token and _attach_user(request, token):
+                    from services import audit_coverage
+
+                    principal_context = audit_coverage
+                    principal_token = audit_coverage.set_request_principal(
+                        audit_coverage.request_principal(request)
+                    )
+                    forbidden = _tenant_bind_forbidden(request)
+                    if forbidden is not None:
+                        return forbidden
+                return await call_next(request)
+
+            if not token or not _attach_user(request, token):
+                if path == "/api/v1/mcp/tools/call":
+                    from services.mcp_oauth import bearer_challenge
+
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "Authentication required"},
+                        headers={"WWW-Authenticate": bearer_challenge()},
+                    )
+                return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+
+            from services import audit_coverage
+
+            principal_context = audit_coverage
+            principal_token = audit_coverage.set_request_principal(
+                audit_coverage.request_principal(request)
+            )
+            forbidden = _tenant_bind_forbidden(request)
+            if forbidden is not None:
+                return forbidden
+
             return await call_next(request)
-
-        path = request.url.path
-        if (
-            request.method == "OPTIONS"
-            or path == "/"
-            or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
-            or _is_public_sso_path(path)
-            or _is_public_mcp_path(path, request.method)
-        ):
-            # Public routes still attach identity when a Bearer token is present
-            # (MCP tools/call uses this; discovery works without a token).
-            if token:
-                _attach_user(request, token)
-                forbidden = _tenant_bind_forbidden(request)
-                if forbidden is not None:
-                    return forbidden
-            return await call_next(request)
-
-        if not token or not _attach_user(request, token):
-            if path == "/api/v1/mcp/tools/call":
-                from services.mcp_oauth import bearer_challenge
-
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "Authentication required"},
-                    headers={"WWW-Authenticate": bearer_challenge()},
-                )
-            return JSONResponse(status_code=401, content={"detail": "Authentication required"})
-
-        forbidden = _tenant_bind_forbidden(request)
-        if forbidden is not None:
-            return forbidden
-
-        return await call_next(request)
+        finally:
+            if principal_context is not None and principal_token is not None:
+                principal_context.reset_request_principal(principal_token)

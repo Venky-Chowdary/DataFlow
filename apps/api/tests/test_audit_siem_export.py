@@ -112,6 +112,7 @@ def test_cef_golden_escaping_and_details_omission(audit_client):
         f"cs2={extension_escape(event['event_hash'])} "
         "cs3Label=prev_hash "
         f"cs3={extension_escape(event['prev_hash'] or '')} "
+        "cs4Label=actor_type cs4= cs5Label=actor_id cs5= "
         "cn1Label=chain_seq "
         f"cn1={event['chain_seq']} "
         f"externalId={extension_escape(event['id'])}"

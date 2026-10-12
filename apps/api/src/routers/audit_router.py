@@ -97,6 +97,7 @@ def _cef_line(event: dict[str, object]) -> str:
         f"cs2={_cef_extension_escape(event.get('event_hash') or '')}",
         "cs3Label=prev_hash",
         f"cs3={_cef_extension_escape(event.get('prev_hash') or '')}",
+        f"cs4Label=actor_type cs4={_cef_extension_escape(event.get('actor_type') or '')} cs5Label=actor_id cs5={_cef_extension_escape(event.get('actor_id') or '')}",
         "cn1Label=chain_seq",
         f"cn1={event.get('chain_seq') or 0}",
         f"externalId={_cef_extension_escape(event.get('id') or '')}",
@@ -233,7 +234,7 @@ async def export_events(
         )
 
     columns = [
-        "id", "time", "actor", "action", "resource", "level",
+        "id", "time", "actor", "actor_type", "actor_id", "action", "resource", "level",
         "workspace_id", "tenant_id", "event_hash", "prev_hash", "hash_alg",
         "details",
     ]
