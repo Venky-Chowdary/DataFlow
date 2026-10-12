@@ -104,6 +104,7 @@ responses>=0.24.0  # HTTP mocking for SaaS connector tests
 # oauthlib stays on 3.3.1 because databricks-sql-connector 4.6.0 requires
 # oauthlib<4. Raising it here fails the install. PYSEC-2026-4114 waits on
 # a connector release that accepts oauthlib 4.
+# PYSEC-2026-4114 / PYSEC-2026-4113 accepted until 2026-11-11 via --ignore-vuln in ci.yml; see docs/SECURITY_SCANNING.md.
 urllib3>=2.8.0
 python-dotenv>=1.2.2
 

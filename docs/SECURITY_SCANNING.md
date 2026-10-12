@@ -46,3 +46,12 @@ issues. Bandit — the industry-standard Python security scanner — finds **1**
 pip install bandit
 bandit -c bandit.yaml -r apps/api/connectors apps/api/services apps/api/src -lll   # HIGH gate → 0
 ```
+
+## Accepted vulnerability exceptions
+
+Every exception is time-bounded and enforced in CI (`.github/workflows/ci.yml`, pip-audit step). After expiry the gate fails until the exception is re-reviewed or removed.
+
+| ID | Package | Accepted on | Expires | Why it is accepted | Exit criteria |
+|---|---|---|---|---|---|
+| PYSEC-2026-4114 (GHSA-xpv3-w29h-x7cv / CVE-2026-49265) | `oauthlib` 3.3.1, transitive via `databricks-sql-connector` 4.6.0, which requires `oauthlib<4` | 2026-10-12 | 2026-11-11 | Timing side channel in PKCE `code_verifier` comparison, an authorization-server code path. No released Databricks connector accepts oauthlib 4 (upstream: https://github.com/databricks/databricks-sql-python/issues/964). DataFlow code never imports `oauthlib`; neither DataFlow nor the connector runs oauthlib's server-side endpoints. | Raise the `oauthlib` floor in `apps/api/requirements.txt` and delete the `--ignore-vuln` as soon as a connector release accepts oauthlib 4. Otherwise, at expiry, either renew after re-review or move the Databricks connector out of the default install. |
+| PYSEC-2026-4113 (GHSA-hj66-6f7g-4r5v / CVE-2026-49264) | `oauthlib` 3.3.1, transitive via `databricks-sql-connector` 4.6.0, which requires `oauthlib<4` | 2026-10-12 | 2026-11-11 | JSONP callback injection in `RevocationEndpoint`, a server endpoint. No released Databricks connector accepts oauthlib 4 (upstream: https://github.com/databricks/databricks-sql-python/issues/964). DataFlow code never imports `oauthlib`; neither DataFlow nor the connector runs oauthlib's server-side endpoints. | Raise the `oauthlib` floor in `apps/api/requirements.txt` and delete the `--ignore-vuln` as soon as a connector release accepts oauthlib 4. Otherwise, at expiry, either renew after re-review or move the Databricks connector out of the default install. |
