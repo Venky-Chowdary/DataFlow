@@ -1526,6 +1526,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             src = m.get("source") or m.get("source_column") or ""
             if src in body.transform_overrides:
                 m["transform"] = body.transform_overrides[src]
+                m["transform_override"] = True
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 

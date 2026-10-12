@@ -1582,8 +1582,12 @@ def _float_magnitude_bounds(
 
     SQL Server FLOAT(53) rejects subnormals (the documented floor is about
     2.23e-308). ``5e-324`` then aborts the whole executemany instead of
-    quarantining that row. REAL / FLOAT(n≤24) is the 4-byte window on every
-    engine. MySQL DOUBLE stores subnormals, so a bare DOUBLE is not refused.
+    quarantining that row. PostgreSQL and SQL Server REAL, plus FLOAT4 /
+    FLOAT32 / FLOAT(n≤24), are the 4-byte window. SQLite REAL is an 8-byte
+    double and MySQL/MariaDB REAL is DOUBLE (unless REAL_AS_FLOAT, which
+    this carrier check cannot see). Those stay IEEE-64 so 1e308 is not
+    quarantined after preflight accepted it. MySQL DOUBLE stores subnormals,
+    so a bare DOUBLE is not refused.
     """
     ddl = (ddl_type or "").strip().lower()
     base = ddl.split("(", 1)[0].strip()
@@ -1593,11 +1597,16 @@ def _float_magnitude_bounds(
         token = inside.split(",", 1)[0].strip()
         if token.isdigit():
             width = int(token)
-    if base in {"real", "float4", "float32"} or (
+    eng = (engine or "").strip().lower().replace(" ", "_")
+    from services.type_system import REAL_IS_DOUBLE_DIALECTS, _normalize_dest_db
+
+    dialect = _normalize_dest_db(eng) if eng else ""
+    if base == "real" and dialect in REAL_IS_DOUBLE_DIALECTS:
+        return None
+    if base in {"float4", "float32", "real"} or (
         base == "float" and width is not None and width <= 24
     ):
         return (1.18e-38, 3.40e38)
-    eng = (engine or "").strip().lower().replace(" ", "_")
     sqlserver = eng in {
         "sqlserver",
         "mssql",

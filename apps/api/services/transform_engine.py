@@ -1294,6 +1294,11 @@ def integer_parse_failure_reason(value: str) -> str:
 # truth (Airbyte-class); refuse — operator must remap or transform.
 _STRICT_BOOL_TRUE = frozenset({"true", "t", "1"})
 _STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
+# The boolean *transform* accepts the words operators type. Inference and
+# numeric coercion stay on the strict set so a Y/N text column is not retargeted
+# as BOOLEAN and then rejected, and so "yes" does not become 1 in an integer.
+_TRANSFORM_BOOL_TRUE = _STRICT_BOOL_TRUE | frozenset({"yes", "y", "on"})
+_TRANSFORM_BOOL_FALSE = _STRICT_BOOL_FALSE | frozenset({"no", "n", "off"})
 
 #: Every token the write path can actually coerce to a boolean. A column typed
 #: BOOLEAN off ``Y``/``N`` samples is rejected here on every row ("Invalid
@@ -1312,12 +1317,34 @@ CANONICAL_BOOLEAN_SAMPLE_PATTERN = (
 
 
 def _parse_boolean(value: str) -> bool | None:
+    """Canonical boolean wire only: true/false/1/0/t/f.
+
+    Informal yes/on/y must not become TRUE here. Inference, bind, and an
+    unrequested boolean cast all use this parser so a text column of answers
+    is not rewritten as a flag.
+    """
     text = value.strip().lower()
     if text in NULL_SENTINELS:
         return None
     if text in _STRICT_BOOL_TRUE:
         return True
     if text in _STRICT_BOOL_FALSE:
+        return False
+    return None
+
+
+def _parse_operator_boolean(value: str) -> bool | None:
+    """Boolean cast the operator asked for (replay ``transform_overrides``).
+
+    yes/y/on and no/n/off are part of that cast. They stay refused on the
+    canonical parser so a guessed boolean column cannot invent TRUE.
+    """
+    text = value.strip().lower()
+    if text in NULL_SENTINELS:
+        return None
+    if text in _TRANSFORM_BOOL_TRUE:
+        return True
+    if text in _TRANSFORM_BOOL_FALSE:
         return False
     return None
 
@@ -1479,8 +1506,9 @@ def _hash_pii(value: str) -> str:
         # Fail closed — never hash with a shared public default (would be reversible
         # across tenants that ship the same binary).
         raise ValueError(
-            "hash_pii requires DATAFLOW_PII_HASH_KEY (or DATAFLOW_SECRET) — "
-            "refusing insecure default key"
+            "hash_pii is not configured. Set DATAFLOW_PII_HASH_KEY to an HMAC "
+            "secret and retry this replay. No row was hashed, and a shared "
+            "default key is refused because it would be reversible across tenants."
         )
     digest = hmac.new(
         secret.encode("utf-8"),
@@ -2015,7 +2043,12 @@ def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
     return _format_datetime(first), None
 
 
-def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
+def apply_transform(
+    raw: str | None,
+    transform: str,
+    *,
+    accept_informal_boolean: bool = False,
+) -> tuple[Any, str | None]:
     """Returns (value, error).
 
     Explicit SQL/Dynamo NULL sentinels → None. Empty string is preserved for
@@ -2105,7 +2138,11 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return parsed_int, None
 
     if transform == "boolean":
-        parsed_bool = _parse_boolean(text)
+        parsed_bool = (
+            _parse_operator_boolean(text)
+            if accept_informal_boolean
+            else _parse_boolean(text)
+        )
         if parsed_bool is None:
             return None, f"Invalid boolean: {text!r}"
         return parsed_bool, None

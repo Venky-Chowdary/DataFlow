@@ -169,8 +169,17 @@ def test_sqlserver_subnormal_quarantines_one_row():
 
     with pytest.raises(ValueError, match="quarantined"):
         coerce_float_wire(5e-324, ddl_type="FLOAT", engine="sqlserver")
+    # MySQL and SQLite REAL are IEEE-64. A float32 window quarantined 1e308
+    # after preflight had accepted it (QA R2-009 / R2-010).
+    assert coerce_float_wire(5e-324, ddl_type="REAL", engine="mysql") == 5e-324
+    assert coerce_float_wire(1e308, ddl_type="REAL", engine="mysql") == 1e308
+    assert coerce_float_wire(1e308, ddl_type="REAL", engine="sqlite") == 1e308
     with pytest.raises(ValueError, match="quarantined"):
-        coerce_float_wire(5e-324, ddl_type="REAL", engine="mysql")
+        coerce_float_wire(1e308, ddl_type="REAL", engine="postgresql")
+    with pytest.raises(ValueError, match="quarantined"):
+        coerce_float_wire(1e308, ddl_type="REAL", engine="sqlserver")
+    with pytest.raises(ValueError, match="quarantined"):
+        coerce_float_wire(1e308, ddl_type="FLOAT4", engine="sqlite")
     assert coerce_float_wire(5e-324, ddl_type="DOUBLE", engine="mysql") == 5e-324
     assert coerce_float_wire(1.5, ddl_type="FLOAT", engine="sqlserver") == 1.5
 

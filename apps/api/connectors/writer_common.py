@@ -1709,7 +1709,16 @@ def _convert_mapped_cell(
     from services.blank_cell_contract import blank_typed_cell_is_sql_null
     from services.code_crosswalk import apply_code_crosswalk
 
-    converted, err = apply_transform(val, transform)
+    # Replay stamps transform_override when the operator named the cast.
+    # That boolean cast accepts yes/y/on and no/n/off. A guessed boolean
+    # column still uses the canonical parser and leaves "yes" unchanged
+    # only when the transform was dropped; here the operator asked for it.
+    operator_boolean = bool(
+        isinstance(mapping, dict) and mapping.get("transform_override")
+    )
+    converted, err = apply_transform(
+        val, transform, accept_informal_boolean=operator_boolean
+    )
     if not err and isinstance(mapping, dict):
         converted, xwalk_err = apply_code_crosswalk(converted, mapping)
         if xwalk_err:
