@@ -353,7 +353,9 @@ def test_deprovision_reactivation_and_delete(scim_client, monkeypatch):
     ]
     assert len(deprovision) == 1
     assert deprovision[0]["details"]["sessions_revoked"] == 1
-    assert deprovision[0]["details"]["api_keys_revoked"] == "[REDACTED]"
+    revoked_ids = deprovision[0]["details"]["revoked_api_key_ids"]
+    assert revoked_ids == [personal["id"]]
+    assert "[REDACTED]" not in revoked_ids
     assert deprovision[0]["details"]["kept_service_accounts"] == 1
 
     reactivated = client.patch(

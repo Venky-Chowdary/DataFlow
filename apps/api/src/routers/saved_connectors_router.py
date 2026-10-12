@@ -328,7 +328,7 @@ def rotate_saved_connector_secrets(
             details={
                 "fields": sorted(k for k in payload if k != "credentials_rotated_at"),
                 "pool_invalidated": pool_invalidated,
-                "credentials_rotated_at": rotated_at,
+                "rotation_timestamp": rotated_at,
             },
         )
     except Exception:

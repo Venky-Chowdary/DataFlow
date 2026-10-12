@@ -24,7 +24,7 @@ from pymongo import MongoClient
 from pymongo.collection import Collection
 from pymongo.errors import PyMongoError
 
-from services import team_store, user_store
+from services import audit_log, team_store, user_store
 from services.auth_rate_limit import reset_auth_rate_limits
 from services.password_hash import hash_password, verify_password
 from src.main import app
@@ -377,7 +377,8 @@ def authenticated(stores, monkeypatch):
     return c
 
 
-def test_issued_password_signs_in_then_must_be_rotated(authenticated):
+def test_issued_password_signs_in_then_must_be_rotated(authenticated, monkeypatch):
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
     created = authenticated.post(
         "/api/v1/team/users",
         json={"email": "newhire@example.com", "name": "New Hire"},
@@ -385,6 +386,13 @@ def test_issued_password_signs_in_then_must_be_rotated(authenticated):
     assert created.status_code == 200, created.text
     issued = created.json()["temporary_password"]
     assert issued
+    user_created = next(
+        event
+        for event in audit_log.list_audit_events(limit=100)
+        if event.get("action") == "team.user.create"
+        and event.get("details", {}).get("email") == "newhire@example.com"
+    )
+    assert user_created["details"]["password_issued_present"] is True
 
     fresh = TestClient(app)
     login = fresh.post(

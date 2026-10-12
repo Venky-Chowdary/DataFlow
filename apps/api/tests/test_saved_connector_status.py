@@ -80,6 +80,56 @@ def test_saved_connector_test_success_updates_card_status(monkeypatch, tmp_path:
     assert found["status"] == "configured"
 
 
+def test_secret_rotation_audit_keeps_rotation_timestamp(monkeypatch, tmp_path: Path) -> None:
+    store = tmp_path / "connectors.json"
+    store.write_text('{"connectors": []}', encoding="utf-8")
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(store))
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    monkeypatch.setenv("DATAFLOW_JOB_STORE", "memory")
+    monkeypatch.setenv("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+
+    import services.connector_store as cs
+    from services import audit_log
+
+    monkeypatch.setattr(cs, "_backend_choice", "file")
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+
+    from fastapi.testclient import TestClient
+
+    from src.main import app
+
+    client = TestClient(app)
+    created = client.post(
+        "/api/v1/connectors/saved",
+        json={
+            "name": "Rotation audit",
+            "type": "postgresql",
+            "role": "both",
+            "host": "localhost",
+            "port": 5432,
+            "database": "rotation_audit",
+            "username": "operator",
+            "password": "initial-secret",
+        },
+    )
+    assert created.status_code == 200, created.text
+
+    rotated = client.post(
+        f"/api/v1/connectors/saved/{created.json()['id']}/rotate-secrets",
+        json={"password": "rotated-secret"},
+    )
+    assert rotated.status_code == 200, rotated.text
+    timestamp = rotated.json()["credentials_rotated_at"]
+    event = next(
+        item
+        for item in audit_log.list_audit_events(limit=100)
+        if item.get("action") == "connector.rotate_secrets"
+        and item.get("resource") == f"connector:{created.json()['id']}"
+    )
+    assert event["details"]["rotation_timestamp"] == timestamp
+    assert event["details"]["pool_invalidated"] is False
+
+
 def test_save_with_form_test_ok_persists_status(monkeypatch, tmp_path: Path) -> None:
     """In-form Test success must show as passed on first list load (no re-Test click)."""
     store = tmp_path / "connectors.json"

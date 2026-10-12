@@ -148,7 +148,7 @@ _SENSITIVE_QUERY = re.compile(
 _KEY_VALUE_ASSIGNMENT = re.compile(
     r"""(?P<key_open>["']?)(?P<key>[A-Za-z0-9_.-]+)(?P<key_close>["']?)"""
     r"""(?P<separator>\s*[:=]\s*)(?P<value_open>["']?)"""
-    r"""(?P<value>[^\s,;&"'}]+)"""
+    r"""(?P<value>[^\s,;&"'})\]]+)"""
 )
 
 
@@ -227,7 +227,7 @@ def _redact_assignment(match: re.Match[str]) -> str:
     ):
         return match.group(0)
     numeric_value = re.fullmatch(r"\d+(?:\.\d+)?", match.group("value"))
-    if match.group("value").lower() in {"true", "false", "none", "null"}:
+    if match.group("value").lower() in {"yes", "no", "none", "null"}:
         return match.group(0)
     if numeric_value and not _numeric_is_secret(match.group("key")):
         return match.group(0)

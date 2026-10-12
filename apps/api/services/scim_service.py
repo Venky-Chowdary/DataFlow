@@ -406,7 +406,7 @@ def deprovision_user(email: str, *, actor: str) -> None:
             details={
                 "scim_id": mapping.get("id") if mapping else None,
                 "sessions_revoked": sessions_revoked,
-                "api_keys_revoked": revoked_ids,
+                "revoked_api_key_ids": revoked_ids,
                 "kept_service_accounts": kept_service_accounts,
             },
         )

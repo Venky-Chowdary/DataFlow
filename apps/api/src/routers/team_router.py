@@ -194,7 +194,7 @@ async def post_user(body: UserCreateBody, request: Request):
             "platform_role": user["role"],
             "workspace_id": body.workspace_id,
             "workspace_role": body.workspace_role if body.workspace_id else "",
-            "password_issued": issued is not None,
+            "password_issued_present": issued is not None,
         },
     )
     return {"user": user, "membership": membership, "temporary_password": issued}

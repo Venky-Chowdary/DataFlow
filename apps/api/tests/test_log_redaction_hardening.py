@@ -311,6 +311,21 @@ def test_numeric_assignment_counts_are_preserved_but_numeric_secrets_are_redacte
 @pytest.mark.parametrize(
     ("text", "expected"),
     (
+        ("(using password: YES)", "(using password: YES)"),
+        ("(using password: NO)", "(using password: NO)"),
+        ("password=abc)", "password=***)"),
+        ("pwd=x]", "pwd=***]"),
+        ("[token=SENTINEL]", "[token=***]"),
+        ("password=yesterday", "password=***"),
+    ),
+)
+def test_assignment_redaction_keeps_closers_and_mysql_boolean_flags(text, expected):
+    assert log_redaction.redact_log_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
         ("password=123456", "password=***"),
         ("pin=4821", "pin=***"),
         ("otp=999111", "otp=***"),
@@ -318,10 +333,11 @@ def test_numeric_assignment_counts_are_preserved_but_numeric_secrets_are_redacte
         ("token=42", "token=***"),
         ("token_count=5", "token_count=5"),
         ("prompt_tokens=50", "prompt_tokens=50"),
-        ("has_token=True", "has_token=True"),
+        ("has_token=True", "has_token=***"),
         ("spinner=3", "spinner=3"),
         ("options=2", "options=2"),
-        ("password=True", "password=True"),
+        ("password=True", "password=***"),
+        ("password=false", "password=***"),
         ("token=null", "token=null"),
     ),
 )
@@ -358,6 +374,8 @@ def test_structured_numeric_secret_values_use_the_shared_key_rule():
         **dict.fromkeys(sensitive_values, "***"),
         **safe_values,
     }
+    assert log_redaction.redact_log_value("password", True) is True
+    assert audit_log._redact({"password": True}) == {"password": True}
 
 
 def test_secret_config_delegates_key_sensitivity_and_preserves_legacy_output():
