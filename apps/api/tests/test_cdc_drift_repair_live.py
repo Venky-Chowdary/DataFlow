@@ -33,6 +33,10 @@ from connectors.sqlserver_cdc_native import (  # noqa: E402
     decode_mssql_cdc_token,
     encode_mssql_cdc_token,
 )
+from cdc_sqlserver_live_helpers import (  # noqa: E402
+    sqlserver_server_now,
+    wait_for_sqlserver_capture_job_healthy,
+)
 from services.brand_env import getenv_brand  # noqa: E402
 from services.cdc_exactly_once import WATERMARK_TABLE, batch_lsn  # noqa: E402
 from services import cdc_lease_store  # noqa: E402
@@ -911,67 +915,71 @@ def test_cdc_drift_repair_live(route: str, tmp_path: Path, monkeypatch, caplog) 
             (mongo.get_job(job_id) or {}).get("status") == "completed"
         )
     finally:
-        if route == "sqlserver" and capture_job_may_be_stopped:
-            with source_reader._conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("EXEC sys.sp_cdc_start_job 'capture'")
-                conn.commit()
-        if held_lease is not None:
-            release_lease(
-                cursor_key,
-                holder_id=held_lease.holder_id,
-                generation=held_lease.generation,
-            )
         try:
-            if route == "oracle" and source_table_created:
-                with get_connection(**source_connect_cfg) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            f'DROP TABLE "{source_schema}"."{source_table}" PURGE'
-                        )
-                    conn.commit()
-            elif route == "sqlserver" and source_table_created:
+            if route == "sqlserver" and capture_job_may_be_stopped:
+                since = sqlserver_server_now(source_reader)
                 with source_reader._conn() as conn:
                     with conn.cursor() as cur:
-                        cur.execute(
-                            f"""
-                            EXEC sys.sp_cdc_disable_table
-                                @source_schema = N'dbo',
-                                @source_name = N'{source_table}',
-                                @capture_instance = N'all';
-                            DROP TABLE IF EXISTS dbo.[{source_table}];
-                            """
-                        )
+                        cur.execute("EXEC sys.sp_cdc_start_job 'capture'")
                     conn.commit()
-        except Exception:
-            pass
-        try:
-            with pg_connection(**pg_cfg) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f'DROP TABLE IF EXISTS public."{dest_table}"'
-                    )
-                    if cursor_key:
+                wait_for_sqlserver_capture_job_healthy(source_reader, since=since)
+        finally:
+            if held_lease is not None:
+                release_lease(
+                    cursor_key,
+                    holder_id=held_lease.holder_id,
+                    generation=held_lease.generation,
+                )
+            try:
+                if route == "oracle" and source_table_created:
+                    with get_connection(**source_connect_cfg) as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                f'DROP TABLE "{source_schema}"."{source_table}" PURGE'
+                            )
+                        conn.commit()
+                elif route == "sqlserver" and source_table_created:
+                    with source_reader._conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                f"""
+                                EXEC sys.sp_cdc_disable_table
+                                    @source_schema = N'dbo',
+                                    @source_name = N'{source_table}',
+                                    @capture_instance = N'all';
+                                DROP TABLE IF EXISTS dbo.[{source_table}];
+                                """
+                            )
+                        conn.commit()
+            except Exception:
+                pass
+            try:
+                with pg_connection(**pg_cfg) as conn:
+                    with conn.cursor() as cur:
                         cur.execute(
-                            f'DELETE FROM "{WATERMARK_TABLE}" WHERE stream_key = %s',
-                            (cursor_key,),
+                            f'DROP TABLE IF EXISTS public."{dest_table}"'
                         )
-                conn.commit()
-        except Exception:
-            pass
-        if cursor_key:
-            clear_watermark(cursor_key)
-        if source_connection is not None:
-            try:
-                source_connection.close()
+                        if cursor_key:
+                            cur.execute(
+                                f'DELETE FROM "{WATERMARK_TABLE}" WHERE stream_key = %s',
+                                (cursor_key,),
+                            )
+                    conn.commit()
             except Exception:
                 pass
-        if source_reader is not None:
-            try:
-                source_reader.close()
-            except Exception:
-                pass
-        cdc_lease_store.reset_store(original_lease_store)
+            if cursor_key:
+                clear_watermark(cursor_key)
+            if source_connection is not None:
+                try:
+                    source_connection.close()
+                except Exception:
+                    pass
+            if source_reader is not None:
+                try:
+                    source_reader.close()
+                except Exception:
+                    pass
+            cdc_lease_store.reset_store(original_lease_store)
 
 
 @pytest.mark.parametrize(

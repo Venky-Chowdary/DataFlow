@@ -20,6 +20,10 @@ from connectors.sqlserver_cdc_native import (
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.brand_env import getenv_brand
 from test_cdc_sqlserver_native_integration import CFG, _sqlserver_native_ready
+from cdc_sqlserver_live_helpers import (
+    sqlserver_server_now,
+    wait_for_sqlserver_capture_job_healthy,
+)
 
 
 @pytest.mark.skipif(
@@ -81,6 +85,9 @@ def test_native_capture_switch_drains_old_instance_before_new() -> None:
     try:
         if not bootstrap.is_available():
             pytest.skip("SQL Server native CDC is not reachable")
+        wait_for_sqlserver_capture_job_healthy(
+            reader, since=sqlserver_server_now(reader)
+        )
         with bootstrap._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
