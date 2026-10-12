@@ -159,11 +159,24 @@ def record_security_event(
     principal: dict[str, str] | None = None,
 ) -> None:
     """Write one named, redacted audit event and its operational log line."""
-    try:
-        from services import ops_events, tracing
+    def context_value(getter, default):
+        try:
+            return getter()
+        except Exception:
+            return default
 
-        if event not in SECURITY_EVENTS:
-            logger.warning("Unknown security audit event %r", event)
+    try:
+        from services import ops_events
+    except Exception:
+        ops_events = None
+    try:
+        from services import tracing
+    except Exception:
+        tracing = None
+
+    if event not in SECURITY_EVENTS:
+        logger.warning("Unknown security audit event %r", event)
+    if ops_events is not None:
         try:
             ops_events.validate_event(event, outcome)
         except Exception as exc:
@@ -172,92 +185,125 @@ def record_security_event(
                 type(exc).__name__,
             )
 
-        resolved_principal = principal
-        if resolved_principal is None:
-            resolved_principal = (
-                request_principal(request)
-                if request is not None
-                else current_request_principal()
-            )
-
-        if actor is None:
-            if request is not None:
-                resolved_actor = audit_log.actor_from_request(request)
-            elif resolved_principal:
-                actor_type = str(resolved_principal.get("actor_type") or "anonymous")
-                actor_id = str(resolved_principal.get("actor_id") or "")
-                resolved_actor = (
-                    f"{actor_type}:{actor_id}"
-                    if actor_type in {"service_account", "scim", "api_key"}
-                    else actor_id or "system"
-                )
-            else:
-                resolved_actor = "system"
-        else:
-            resolved_actor = actor
-
-        trace_id = tracing.current_trace_id() or ""
+    resolved_principal = principal
+    if resolved_principal is None:
         if request is not None:
-            try:
-                from services.workspace_access import authorized_workspace_id
+            resolved_principal = context_value(
+                lambda: request_principal(request),
+                {},
+            )
+        else:
+            resolved_principal = context_value(current_request_principal, {})
 
-                workspace_id = authorized_workspace_id(request)
-            except Exception:
-                workspace_id = ""
-            tracker = current_request_audit()
-            if tracker is not None:
-                tracker["workspace_header_rejected"] = bool(
-                    getattr(request.state, "workspace_header_rejected", False)
+    if actor is None:
+        if request is not None:
+            resolved_actor = context_value(
+                lambda: audit_log.actor_from_request(request),
+                "system",
+            )
+        elif resolved_principal:
+            actor_type = str(resolved_principal.get("actor_type") or "anonymous")
+            actor_id = str(resolved_principal.get("actor_id") or "")
+            resolved_actor = (
+                f"{actor_type}:{actor_id}"
+                if actor_type in {"service_account", "scim", "api_key"}
+                else actor_id or "system"
+            )
+        else:
+            resolved_actor = "system"
+    else:
+        resolved_actor = actor
+
+    trace_id = ""
+    if tracing is not None:
+        trace_id = context_value(tracing.current_trace_id, "") or ""
+
+    if request is not None:
+        def request_workspace_id():
+            from services.workspace_access import authorized_workspace_id
+
+            return authorized_workspace_id(request)
+
+        workspace_id = context_value(request_workspace_id, "") or ""
+        tracker = context_value(current_request_audit, None)
+        if tracker is not None:
+            rejected = bool(
+                context_value(
+                    lambda: getattr(request.state, "workspace_header_rejected", False),
+                    False,
                 )
-            correlation_id = getattr(request.state, "correlation_id", None)
-            if correlation_id is None:
-                correlation_id = tracing.get_correlation_id()
+            )
+            context_value(
+                lambda: tracker.__setitem__("workspace_header_rejected", rejected),
+                None,
+            )
+        correlation_id = context_value(
+            lambda: getattr(request.state, "correlation_id", None),
+            None,
+        )
+        if correlation_id is None and tracing is not None:
+            correlation_id = context_value(tracing.get_correlation_id, None)
+
+        def request_route_template():
             route = request.scope.get("route")
-            route_template = http_route_template(
+            return http_route_template(
                 request.url.path,
                 getattr(route, "path", None),
             ) or ""
-        else:
+
+        route_template = context_value(request_route_template, "") or ""
+    else:
+        def context_workspace_id():
             from services import logging_config
 
             workspace_var = getattr(logging_config, "_BOUND_FIELDS", {}).get(
                 "workspace_id"
             )
-            workspace_id = workspace_var.get() if workspace_var is not None else ""
-            correlation_id = tracing.get_correlation_id()
-            route_template = ""
+            return workspace_var.get() if workspace_var is not None else ""
 
-        event_details = dict(details or {})
-        if status is not None:
-            event_details["status"] = status
-        if duration_ms is not None:
-            event_details["duration_ms"] = duration_ms
+        workspace_id = context_value(context_workspace_id, "") or ""
+        correlation_id = (
+            context_value(tracing.get_correlation_id, None)
+            if tracing is not None
+            else None
+        )
+        route_template = ""
 
-        audit_level = level or {
-            "succeeded": "success",
-            "failed": "warn",
-            "errored": "error",
-        }.get(outcome, "info")
+    event_details = context_value(lambda: dict(details or {}), {})
+    if status is not None:
+        event_details["status"] = status
+    if duration_ms is not None:
+        event_details["duration_ms"] = duration_ms
+
+    audit_level = level or {
+        "succeeded": "success",
+        "failed": "warn",
+        "errored": "error",
+    }.get(outcome, "info")
+    try:
+        audit_log.append_audit_event(
+            action=event,
+            resource=resource,
+            actor=resolved_actor,
+            level=audit_level,
+            correlation_id=str(correlation_id) if correlation_id else None,
+            workspace_id=workspace_id,
+            details=event_details,
+            principal=resolved_principal,
+            outcome=outcome,
+            reason_code=reason_code,
+            session_id=session_id,
+            trace_id=trace_id,
+            route_template=route_template,
+        )
+    except Exception as exc:
         try:
-            audit_log.append_audit_event(
-                action=event,
-                resource=resource,
-                actor=resolved_actor,
-                level=audit_level,
-                correlation_id=str(correlation_id) if correlation_id else None,
-                workspace_id=workspace_id,
-                details=event_details,
-                principal=resolved_principal,
-                outcome=outcome,
-                reason_code=reason_code,
-                session_id=session_id,
-                trace_id=trace_id,
-                route_template=route_template,
-            )
-        except Exception as exc:
             _record_audit_failure(exc)
+        except Exception:
+            logger.error("Security audit append failed (%s)", type(exc).__name__)
 
-        principal_fields = resolved_principal or {}
+    principal_fields = resolved_principal or {}
+    if ops_events is not None:
         try:
             ops_events.emit_event(
                 logger,
@@ -274,16 +320,10 @@ def record_security_event(
                 reason_code=reason_code,
             )
         except Exception as exc:
-            _record_audit_failure(exc)
-    except Exception as exc:
-        try:
-            _record_audit_failure(exc)
-        except Exception:
-            logger.error(
-                "Security audit event failed (%s)",
-                type(exc).__name__,
-                exc_info=exc,
-            )
+            try:
+                _record_audit_failure(exc)
+            except Exception:
+                logger.error("Security audit ops emission failed (%s)", type(exc).__name__)
 
 
 # Entries use the registered route template as a prefix. Dynamic segments are

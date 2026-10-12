@@ -212,8 +212,6 @@ def append_audit_event(
 
     tracker = current_request_audit()
     if tracker is not None:
-        if not action.startswith("http."):
-            tracker["named"] = int(tracker.get("named", 0)) + 1
         if correlation_id is None:
             from services.tracing import get_correlation_id
 
@@ -287,36 +285,87 @@ def append_audit_event(
         }
         event["event_hash"] = _hmac_event_hash(event, secret)
 
-        coll = _mongo_collection()
-        if coll is not None:
-            try:
-                coll.insert_one(event)
-                _maybe_anchor_tip(event)
-                _maybe_opportunistic_audit_purge()
-                return event
-            except Exception as exc:
-                logging.getLogger(__name__).warning(
-                    "Mongo audit insert failed; falling back to file with file-local prev: %s",
-                    exc,
-                    exc_info=exc,
-                )
-                # Rebuild chain tip from the file store so we do not link to a Mongo
-                # tip that never landed in JSONL.
-                file_tip = _latest_record_from_file()
-                event["prev_hash"] = (
-                    str(file_tip.get("event_hash")) if file_tip else None
-                )
-                event["chain_seq"] = chain_seq_of(file_tip) + 1
-                event["event_hash"] = _hmac_event_hash(event, secret)
+        try:
+            persisted = _persist_event(event)
+        except Exception as exc:
+            _emit_audit_write_failed(
+                event,
+                store="file",
+                fallback="none",
+                error=exc,
+            )
+            raise
+        if tracker is not None and not action.startswith("http."):
+            tracker["named"] = int(tracker.get("named", 0)) + 1
+        return persisted
 
+
+def _persist_event(event: dict[str, Any]) -> dict[str, Any]:
+    def persist_to_file() -> dict[str, Any]:
         STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        file_event = {k: v for k, v in event.items() if k != "_id"}
+        file_event = {key: value for key, value in event.items() if key != "_id"}
         with STORE_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(file_event, ensure_ascii=False, default=json_default) + "\n")
+            fh.write(
+                json.dumps(file_event, ensure_ascii=False, default=json_default) + "\n"
+            )
         _trim_if_needed()
         _maybe_opportunistic_audit_purge()
         _maybe_anchor_tip(event)
         return event
+
+    coll = _mongo_collection()
+    if coll is not None:
+        try:
+            coll.insert_one(event)
+            _maybe_anchor_tip(event)
+            _maybe_opportunistic_audit_purge()
+            return event
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Mongo audit insert failed; falling back to file with file-local prev: %s",
+                exc,
+                exc_info=exc,
+            )
+            _emit_audit_write_failed(event, store="mongo", fallback="file", error=exc)
+            file_tip = _latest_record_from_file()
+            event["prev_hash"] = (
+                str(file_tip.get("event_hash")) if file_tip else None
+            )
+            event["chain_seq"] = chain_seq_of(file_tip) + 1
+            event["event_hash"] = _hmac_event_hash(
+                event,
+                _platform_hmac_secret(),
+            )
+            return persist_to_file()
+
+    return persist_to_file()
+
+
+def _emit_audit_write_failed(
+    event: dict[str, Any],
+    *,
+    store: str,
+    fallback: str,
+    error: Exception,
+) -> None:
+    try:
+        from services import ops_events
+
+        ops_events.emit_event(
+            logging.getLogger(__name__),
+            "audit.write.failed",
+            outcome="errored",
+            error=error,
+            action=str(event.get("action") or ""),
+            store=store,
+            fallback=fallback,
+            correlation_id=event.get("correlation_id"),
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "Could not emit audit write failure event (%s)",
+            type(exc).__name__,
+        )
 
 
 def _maybe_anchor_tip(event: dict[str, Any]) -> None:
