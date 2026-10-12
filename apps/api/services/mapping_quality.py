@@ -489,6 +489,12 @@ def classify_mapping_confidence(
         "confidence_class": cls,
         "confidence_class_label": CONFIDENCE_CLASS_LABELS[cls],
         "type_path_class": str(mapping.get("conversion_class") or ""),
+        "type_same_declared": bool(
+            str(mapping.get("source_type") or mapping.get("inferred_type") or "").strip()
+            and str(mapping.get("target_type") or mapping.get("dest_type") or "").strip()
+            and type_same
+        ),
+        "source_expr": src,
         "semantic_role": str(
             mapping.get("semantic_role")
             or profile.get("semantic_role")
@@ -514,7 +520,15 @@ def apply_confidence_class(
     conf = float(confidence)
     if cls == "create_new_projected":
         conv = str(classification.get("type_path_class") or "").lower()
-        if conv in {"equivalent", "identity"}:
+        expression = "(" in str(classification.get("source_expr") or "")
+        same_declared = bool(classification.get("type_same_declared"))
+        hard_loss = conv in {"narrowing", "lossy", "incompatible"}
+        # round(x*1.18, 2) is a SQL expression classified as a cast and sat
+        # under the 0.85 floor (R3-M3). A declared same-type projection is
+        # the same case. A real text→numeric cast is not lifted.
+        if not hard_loss and (
+            conv in {"equivalent", "identity"} or expression or same_declared
+        ):
             role = str(classification.get("semantic_role") or "").lower()
             if role in {"categorical", "market_segment"}:
                 return round(min(0.88, max(conf, 0.82)), 3)

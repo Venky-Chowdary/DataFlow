@@ -429,6 +429,7 @@ def ambiguous_number_columns(
     rows: list[dict] | None,
     columns: list[str] | None = None,
     number_locale: str = "",
+    column_types: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Columns whose samples fail Auto grouping and look numeric.
 
@@ -437,8 +438,11 @@ def ambiguous_number_columns(
     if _active_number_locale(number_locale) or not rows:
         return []
     cols = columns or (list(rows[0].keys()) if rows and isinstance(rows[0], dict) else [])
+    declared = column_types or {}
     findings: list[dict[str, Any]] = []
     for col in cols:
+        if _declared_text_column(declared, str(col)):
+            continue
         samples: list[str] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -464,10 +468,20 @@ def ambiguous_number_columns(
 NUMBER_LOCALE_DEFAULT = "US"
 
 
+def _declared_text_column(column_types: dict[str, str], column: str) -> bool:
+    raw = str(column_types.get(column) or "").strip()
+    if not raw:
+        return False
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(raw) in {"string", "text"}
+
+
 def assumed_number_locale(
     rows: list[dict] | None,
     columns: list[str] | None = None,
     number_locale: str = "",
+    column_types: dict[str, str] | None = None,
 ) -> str:
     """``US`` when a sample still holds Auto-ambiguous numbers, else ''.
 
@@ -479,7 +493,9 @@ def assumed_number_locale(
     """
     if _active_number_locale(number_locale) or not rows:
         return ""
-    if not ambiguous_number_columns(rows, columns, number_locale=number_locale):
+    if not ambiguous_number_columns(
+        rows, columns, number_locale=number_locale, column_types=column_types
+    ):
         return ""
     return NUMBER_LOCALE_DEFAULT
 

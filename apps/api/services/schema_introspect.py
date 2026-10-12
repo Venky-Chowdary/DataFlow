@@ -3492,6 +3492,13 @@ def _introspect_sqlite(
     if not table:
         return {"ok": False, "error": "SQLite table name is required", "columns": [], "tables": []}
 
+    from connectors.sqlite_common import require_sqlite_source_file
+
+    try:
+        require_sqlite_source_file(path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
     try:
         from connectors.sql_identifiers import quote_sql_identifier
 

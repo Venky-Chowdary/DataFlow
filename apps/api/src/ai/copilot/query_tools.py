@@ -20,7 +20,7 @@ from .schema_tools import AmbiguousConnectorError, _safe_connector, list_connect
 _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$")
 _DEFAULT_SAMPLE = 25
 _MAX_SAMPLE = 100
-_MAX_QUERY_ROWS = 200
+_MAX_QUERY_ROWS = 10_000
 # Name resolution reads the inventory to decide whether a table exists, so it
 # asks for far more than a chat reply would ever print. Enterprise schemas with
 # thousands of objects are ordinary.
@@ -639,7 +639,9 @@ def run_connector_query(
 
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
     cid = str(conn.get("id") or conn.get("_id") or "")
-    limit = max(1, min(int(limit or _MAX_QUERY_ROWS), _MAX_QUERY_ROWS))
+    requested = int(limit or 1000)
+    limit = max(1, min(requested, _MAX_QUERY_ROWS))
+    clipped = requested > limit
 
     try:
         from services.connector_store import get_connector
@@ -725,7 +727,7 @@ def run_connector_query(
             "query": sql,
             "collection": collection or None,
             "limit": limit,
-            "truncated": truncated,
+            "truncated": bool(truncated) or len(rows) >= limit or clipped,
         }
         result_id = _store_result(
             rows=rows,

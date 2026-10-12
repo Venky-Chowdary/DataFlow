@@ -11,7 +11,7 @@ from connectors.sql_snapshot_scan import (
     publish_scan_order,
     scan_filter_value,
 )
-from connectors.sqlite_common import sqlite_file_path
+from connectors.sqlite_common import require_sqlite_source_file, sqlite_file_path
 from connectors.writer_common import quote_sql_identifier
 from services.value_serializer import cell_to_string
 
@@ -56,6 +56,7 @@ def read_table_batch(
         raise ValueError("SQLite path is required (database or connection_string).")
     if not table:
         raise ValueError("SQLite source table name required.")
+    require_sqlite_source_file(path)
 
     table_quoted = quote_sql_identifier(table)
     shared = conn if conn is not None else get_source_snapshot_conn()
@@ -149,6 +150,7 @@ def read_table_scan_batch(
         raise ValueError("SQLite path is required (database or connection_string).")
     if not table:
         raise ValueError("SQLite source table name required.")
+    require_sqlite_source_file(path)
 
     table_quoted = quote_sql_identifier(table)
     filter_value = scan_filter_value(filter_column, filter_after)
