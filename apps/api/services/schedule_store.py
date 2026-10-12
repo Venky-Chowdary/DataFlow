@@ -243,6 +243,13 @@ class PipelineSchedule:
     #: Counted rather than dropped so a cadence gap is visible after the fact.
     missed_window_count: int = 0
     last_missed_windows: int = 0
+    #: Slots skipped when the claim advanced next_run_at, recorded on the
+    #: run that finishes. Counting them only at completion saw the already
+    #: advanced next_run_at and stored 0 (R3-H2).
+    claimed_missed_windows: int = 0
+    #: Operator accepted additive schema drift when the schedule was staged.
+    #: Hard-breaking drift still blocks. Standing authorization can also ack.
+    schema_drift_acknowledged: bool = False
     #: A pending retry is durable state, not an in-process timer: a redeploy
     #: between attempt 1 and attempt 2 must not drop the retry on the floor.
     retry_at: str | None = None
@@ -372,6 +379,8 @@ class PipelineSchedule:
             run_count=int(data.get("run_count", 0)),
             missed_window_count=max(0, int(data.get("missed_window_count", 0) or 0)),
             last_missed_windows=max(0, int(data.get("last_missed_windows", 0) or 0)),
+            claimed_missed_windows=max(0, int(data.get("claimed_missed_windows", 0) or 0)),
+            schema_drift_acknowledged=bool(data.get("schema_drift_acknowledged", False)),
             retry_at=data.get("retry_at"),
             retry_attempt=max(0, int(data.get("retry_attempt", 0) or 0)),
             running=bool(data.get("running", False)),
@@ -1498,11 +1507,10 @@ def claim_holder(
     )
     if dest is not None:
         return _holder_entry("same_destination", dest)
-    pair = _connector_pair_holder(
-        sched.source_connector_id, sched.dest_connector_id, sched.id, peers
-    )
-    if pair is not None:
-        return _holder_entry("same_connector_pair", pair)
+    # Distinct tables on the same connector pair must run together. A pair
+    # lock made two */1 schedules alternate (each actually every 2 minutes)
+    # even though they wrote different objects (R3-H2). The destination
+    # object lock above still stops two writers on one table.
     return None
 
 
@@ -1613,6 +1621,7 @@ def _claim_running_mongo(
     *,
     next_run_at: str | None = None,
     stale: PipelineSchedule | None = None,
+    missed_windows: int = 0,
 ) -> PipelineSchedule | None:
     """CAS the running flag on the per-schedule Mongo document.
 
@@ -1647,6 +1656,7 @@ def _claim_running_mongo(
                 "running_instance": instance,
                 "running_started_at": now,
                 "running_job_id": "",
+                "claimed_missed_windows": max(0, int(missed_windows or 0)),
                 **({"next_run_at": next_run_at} if next_run_at else {}),
             },
             "$inc": {"version": 1},
@@ -1663,9 +1673,8 @@ def _claim_running_mongo(
 def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule | None:
     """Mark a schedule as running on this instance.
 
-    Acts as a concurrency guard: returns ``None`` if this schedule, another
-    schedule writing the same destination object, or another schedule for the
-    same source→dest connector pair already has a live, non-stale run.
+    Acts as a concurrency guard: returns ``None`` if this schedule or another
+    schedule writing the same destination object already has a live, non-stale run.
     """
     with _CLAIM_LOCK:
         schedules = _load_all()
@@ -1702,7 +1711,12 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                 # snapshot write when it lost let two beats both "win" a stale
                 # reclaim and start two writers against one destination.
                 claimed = _claim_running_mongo(
-                    schedule_id, instance, now, next_run_at=advanced, stale=s
+                    schedule_id,
+                    instance,
+                    now,
+                    next_run_at=advanced,
+                    stale=s,
+                    missed_windows=missed,
                 )
                 if claimed is None:
                     _record_refusal(
@@ -1727,6 +1741,7 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                 "running_started_at": now,
                 "running_job_id": "",
                 "next_run_at": advanced,
+                "claimed_missed_windows": missed,
             })
             schedules[i] = updated
             _save_all(schedules)
@@ -1800,7 +1815,7 @@ def mark_schedule_run(
             return s
         missed = count_missed_windows(
             cron=s.cron, interval=s.interval, tz=s.timezone, next_run_at=s.next_run_at
-        )
+        ) + max(0, int(getattr(s, "claimed_missed_windows", 0) or 0))
         # Windows that elapsed while this run was busy are counted, not
         # replayed. Pinning next_run to the completion instant left the
         # schedule due at a time that is not a cadence boundary, and the
@@ -1824,6 +1839,7 @@ def mark_schedule_run(
             "run_count": s.run_count + 1,
             "missed_window_count": s.missed_window_count + missed,
             "last_missed_windows": missed,
+            "claimed_missed_windows": 0,
             "retry_at": None,
             "retry_attempt": 0,
             "running": False,

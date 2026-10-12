@@ -244,9 +244,9 @@ def test_mark_run_advances_cursor(temp_store):
 
 def test_concurrency_guard_same_connector_pair(temp_store):
     a = _make(store, name="a")
-    b = _make(store, name="b")  # same src/dst connector pair
+    b = _make(store, name="b")  # same dest table
     assert store.mark_schedule_running(a.id, "inst-1") is not None
-    # Second schedule for the same connector pair is blocked while a is running.
+    # Same destination object is blocked while a is running.
     assert store.mark_schedule_running(b.id, "inst-2") is None
     store.clear_schedule_running(a.id)
     assert store.mark_schedule_running(b.id, "inst-2") is not None
