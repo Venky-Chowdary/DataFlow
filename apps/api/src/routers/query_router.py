@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from services import connector_store
 from services.connector_telemetry import connector_operation, driver_family
+from services.tracing import get_correlation_id
 from services.value_serializer import sanitize_json_value
 
 router = APIRouter(prefix="/query", tags=["query"])
@@ -322,11 +323,15 @@ async def query_execute(
         )
     except HTTPException:
         raise
-    except Exception as exc:
+    except Exception:
         # Defensive: prevent an unhandled ExceptionGroup from crashing the worker.
+        cid = get_correlation_id()
         return JSONResponse(
             status_code=500,
-            content={"detail": f"Query execution failed: {exc}"},
+            content={
+                "detail": f"Query execution failed. Reference: {cid}",
+                "correlation_id": cid,
+            },
         )
 
 
@@ -351,8 +356,13 @@ async def query_export(
         )
     except HTTPException:
         raise
-    except Exception as exc:
-        return QueryExportResult(success=False, error=f"Query execution failed: {exc}", format=body.format)
+    except Exception:
+        cid = get_correlation_id()
+        return QueryExportResult(
+            success=False,
+            error=f"Query execution failed. Reference: {cid}",
+            format=body.format,
+        )
     if not rows:
         return QueryExportResult(success=True, row_count=0, format=body.format)
 
@@ -398,8 +408,13 @@ async def query_export(
             row_count=len(rows),
             format=body.format,
         )
-    except Exception as e:
-        return QueryExportResult(success=False, error=str(e), format=body.format)
+    except Exception:
+        cid = get_correlation_id()
+        return QueryExportResult(
+            success=False,
+            error=f"Export failed. Reference: {cid}",
+            format=body.format,
+        )
 
 
 @router.post("/schema", response_model=QuerySchemaResult)
@@ -618,8 +633,13 @@ def _export_to_connector(
             filename=body.destination or "",
             download_url=dest_summary.get("download_url", ""),
         )
-    except Exception as e:
-        return QueryExportResult(success=False, error=str(e), format=dest_connector.type)
+    except Exception:
+        cid = get_correlation_id()
+        return QueryExportResult(
+            success=False,
+            error=f"Export failed. Reference: {cid}",
+            format=dest_connector.type,
+        )
 
 
 def _run_query(
