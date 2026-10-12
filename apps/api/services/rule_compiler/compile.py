@@ -424,8 +424,11 @@ def compile_rule_workbook(
     kind_by_sheet = {str(item["sheet"] or ""): str(item["kind"] or "") for item in sheet_kinds}
     notes_sheets = {item["sheet"] for item in sheet_kinds if item["kind"] == "notes"}
     validation_sheets = {item["sheet"] for item in sheet_kinds if item["kind"] == "validation"}
-    lookup_pairs = _collect_lookup_pairs(rows, src_cols)
-    orphan_notices = _attach_orphan_enumerations(rows, lookup_pairs, src_cols, dst_cols)
+    lookup_provenance: dict[tuple[str, str], dict[str, Any]] = {}
+    lookup_pairs = _collect_lookup_pairs(rows, src_cols, lookup_provenance)
+    orphan_notices = _attach_orphan_enumerations(
+        rows, lookup_pairs, src_cols, dst_cols, lookup_provenance,
+    )
     named_catalog, catalog_conflicts = _collect_named_catalog(rows)
     compiled: list[dict[str, Any]] = []
     shape_steps: list[dict[str, Any]] = []
@@ -530,16 +533,19 @@ def compile_rule_workbook(
         )
         if already:
             continue
+        source_provenance = lookup_provenance.get(edge, {})
+        synthetic_row = {
+            "source_column": src,
+            "dest_column": dst or src,
+            "rule": "",
+            "lookup_from": next(iter(mapping)),
+            "lookup_to": next(iter(mapping.values())),
+            "_sheet": source_provenance.get("sheet") or "Lookups",
+        }
+        if source_provenance.get("row"):
+            synthetic_row["_row"] = source_provenance["row"]
         synthetic = _compile_row(
-            {
-                "source_column": src,
-                "dest_column": dst or src,
-                "rule": "",
-                "lookup_from": next(iter(mapping)),
-                "lookup_to": next(iter(mapping.values())),
-                "_sheet": "Lookups",
-                "_row": 0,
-            },
+            synthetic_row,
             src_cols=src_cols,
             dst_cols=dst_cols,
             source_table=source_table,
@@ -898,8 +904,25 @@ def _bind_method_counts(compiled: list[dict[str, Any]]) -> dict[str, int]:
 def _collect_lookup_pairs(
     rows: list[dict[str, Any]],
     src_cols: list[str] | None = None,
+    provenance: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[tuple[str, str], dict[str, str]]:
     pairs: dict[tuple[str, str], dict[str, str]] = defaultdict(dict)
+    def record_source(edge: tuple[str, str], raw: dict[str, Any]) -> None:
+        if provenance is None or edge in provenance:
+            return
+        source: dict[str, Any] = {}
+        sheet = str(raw.get("_sheet") or "").strip()
+        if sheet:
+            source["sheet"] = sheet
+        try:
+            row = int(raw.get("_row") or 0)
+        except (TypeError, ValueError):
+            row = 0
+        if row > 0:
+            source["row"] = row
+        if source:
+            provenance[edge] = source
+
     for raw in rows:
         frm = str(raw.get("lookup_from") or "").strip()
         to = str(raw.get("lookup_to") or "").strip()
@@ -910,14 +933,20 @@ def _collect_lookup_pairs(
         if not src:
             continue
         edge_dst = dst or src
-        pairs[(src, edge_dst)][frm] = to
+        edge = (src, edge_dst)
+        pairs[edge][frm] = to
+        record_source(edge, raw)
         resolved = resolve_name(src, src_cols) if src_cols else ""
         if resolved:
             # Keep the lookup-type label as dest when the sheet did not name one,
             # so STATE vs REGION tables on the same source stay distinct edges.
-            pairs[(resolved, dst or src)][frm] = to
+            resolved_edge = (resolved, dst or src)
+            pairs[resolved_edge][frm] = to
+            record_source(resolved_edge, raw)
             if dst:
-                pairs[(resolved, dst)][frm] = to
+                dest_edge = (resolved, dst)
+                pairs[dest_edge][frm] = to
+                record_source(dest_edge, raw)
     return pairs
 
 
@@ -1306,14 +1335,17 @@ def _attach_orphan_enumerations(
     lookup_pairs: dict[tuple[str, str], dict[str, str]],
     src_cols: list[str],
     dst_cols: list[str],
+    provenance: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> list[str]:
     """Informatica Domains/Enumerations + Clio: compile a named edge, never invent one."""
     orphans: dict[str, dict[str, str]] = defaultdict(dict)
+    orphan_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in rows:
         frm = str(raw.get("lookup_from") or "").strip()
         to = str(raw.get("lookup_to") or "").strip()
         if frm and to and not str(raw.get("source_column") or "").strip():
             orphans[str(raw.get("_sheet") or "")][frm] = to
+            orphan_rows[str(raw.get("_sheet") or "")].append(raw)
     notices: list[str] = []
     for sheet, mapping in orphans.items():
         if not mapping:
@@ -1342,17 +1374,35 @@ def _attach_orphan_enumerations(
             if edge_src:
                 candidates.append((edge_src, edge_dst, spoken_src, spoken_dst))
         unique = {(item[0], item[1]): item for item in candidates}
+        first_row = orphan_rows[sheet][0] if orphan_rows[sheet] else {}
+
+        def add_orphan_edge(edge: tuple[str, str]) -> None:
+            lookup_pairs[edge].update(mapping)
+            if provenance is not None and edge not in provenance:
+                source: dict[str, Any] = {}
+                source_sheet = str(first_row.get("_sheet") or "").strip()
+                if source_sheet:
+                    source["sheet"] = source_sheet
+                try:
+                    source_row = int(first_row.get("_row") or 0)
+                except (TypeError, ValueError):
+                    source_row = 0
+                if source_row > 0:
+                    source["row"] = source_row
+                if source:
+                    provenance[edge] = source
+
         if len(unique) == 1:
             src, dst, spoken_src, spoken_dst = next(iter(unique.values()))
-            lookup_pairs[(src, dst)].update(mapping)
+            add_orphan_edge((src, dst))
             if spoken_src:
-                lookup_pairs[(spoken_src, spoken_dst or spoken_src)].update(mapping)
+                add_orphan_edge((spoken_src, spoken_dst or spoken_src))
             continue
         if not unique:
             pool = [c for c in (dst_cols or src_cols) if c]
             winner, _score = unique_linguistic_match(sheet, pool) if sheet and pool else ("", 0.0)
             if winner:
-                lookup_pairs[(winner, winner)].update(mapping)
+                add_orphan_edge((winner, winner))
                 continue
             notices.append(
                 f"{len(mapping)} code pair(s) on sheet “{sheet or 'Lookups'}” have "
@@ -1495,6 +1545,17 @@ def _refuse_preload_on_history(item: dict[str, Any], sync_mode: str) -> None:
     ]
 
 
+def _rule_provenance(raw: dict[str, Any]) -> dict[str, Any]:
+    provenance: dict[str, Any] = {"sheet": raw.get("_sheet") or ""}
+    try:
+        row = int(raw.get("_row") or 0)
+    except (TypeError, ValueError):
+        row = 0
+    if row > 0:
+        provenance["row"] = row
+    return provenance
+
+
 def _review_notice(text: str, issue: str, source_table: str, dest_table: str) -> dict[str, Any]:
     return {
         "source_table": source_table,
@@ -1516,7 +1577,7 @@ def _review_notice(text: str, issue: str, source_table: str, dest_table: str) ->
         "shape_steps": [],
         "status": "needs_confirmation",
         "issues": [issue],
-        "provenance": {"sheet": "", "row": 0},
+        "provenance": _rule_provenance({}),
     }
 
 
@@ -2317,10 +2378,7 @@ def _compile_row(
         "unique": bool(classified.get("unique")),
         "bind_method": src_method or dst_method or "",
         "bind_score": round(min(src_score or 1.0, dst_score or 1.0) if (src_method or dst_method) else 0.0, 3),
-        "provenance": {
-            "sheet": raw.get("_sheet") or "",
-            "row": int(raw.get("_row") or 0),
-        },
+        "provenance": _rule_provenance(raw),
     }
 
 
@@ -2363,10 +2421,7 @@ def _join_review_item(
             "source_query. Confirm the join in Source → query or Operations "
             "Transforms — a guessed grain is how migrations lose or duplicate rows."
         ],
-        "provenance": {
-            "sheet": raw.get("_sheet") or "",
-            "row": int(raw.get("_row") or 0),
-        },
+        "provenance": _rule_provenance(raw),
     }
 
 

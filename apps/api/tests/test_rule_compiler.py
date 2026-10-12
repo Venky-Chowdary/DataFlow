@@ -164,6 +164,31 @@ def test_xlsx_roundtrip():
     assert report["rules"][0]["provenance"]["row"] == 2
 
 
+def test_lookup_only_mapping_uses_physical_lookup_sheet_row():
+    pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Lookup_Tables"
+    ws.append(["Lookup_Type", "Source_Value", "Destination_Value"])
+    ws.append(["country_code", "US", "US"])
+    ws.append(["country_code", "IN", "IN"])
+    ws.append(["country_code", "GB", "GB"])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    report = compile_rule_workbook(
+        "lookup.xlsx",
+        buf.getvalue(),
+        source_columns=["country_code"],
+        dest_columns=["country_code"],
+    )
+
+    rule = next(item for item in report["rules"] if item["source_column"] == "country_code")
+    assert rule["provenance"] == {"sheet": "Lookup_Tables", "row": 2}
+
+
 def test_unbound_source_is_not_executed():
     csv = b"Source Column,Destination Column,Rule\nbogus,first_name,Direct\n"
     report = compile_rule_workbook(

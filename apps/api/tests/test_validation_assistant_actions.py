@@ -193,3 +193,41 @@ def test_unproven_population_fit_widen_is_not_mapping_applyable():
     widen = next(a for a in explained["suggested_actions"] if a["kind"] == "change_target_type")
     assert widen["apply_proven"] is False
     assert widen["mapping_applyable"] is False
+
+
+def test_explain_summary_counts_unique_blocking_gates_and_review_columns():
+    explained = explain_validation(
+        {
+            "passed": False,
+            "blockers": [
+                {"id": "g20_code_crosswalk", "message": "Code crosswalk coverage", "details": {}},
+                {
+                    "id": "g20_code_crosswalk",
+                    "message": "1 coded column has values without a crosswalk target.",
+                    "details": {},
+                },
+                {
+                    "id": "g4_mapping_confidence",
+                    "message": "Mapping confidence below floor",
+                    "details": {},
+                },
+                {
+                    "id": "g4_mapping_confidence",
+                    "message": "2 mappings are below the confidence floor.",
+                    "details": {},
+                },
+            ],
+            "root_causes": [
+                {
+                    "kind": "mapping_confidence",
+                    "impacted_gates": ["g4_mapping_confidence"],
+                    "affected_columns": ["email", "signup_date"],
+                },
+            ],
+            "coercion_report": {"columns": []},
+        },
+        use_llm=False,
+    )
+    assert explained["summary"] == (
+        "Validation blocked: 2 blocking gate(s), 2 column(s) need attention."
+    )
