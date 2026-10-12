@@ -65,8 +65,19 @@ def resolve_object_store_export_format(filename: str) -> str | None:
 
 
 def normalize_object_base_key(table_name: str, schema: str = "") -> str:
-    """Canonical object key from table/schema (single-chunk layout)."""
-    key = (table_name or schema or "exports/dataflow_export.json").strip()
+    """Canonical object key from table plus an optional connector prefix.
+
+    ``schema`` is the object-store prefix (``QA_R3``). It is applied in front
+    of the table key and is not dropped when the table is set. A key that
+    already starts with the prefix is left alone.
+    """
+    raw = (table_name or "").strip().lstrip("/")
+    prefix = (schema or "").strip().strip("/")
+    if prefix and raw and raw != prefix and not raw.startswith(prefix + "/"):
+        raw = f"{prefix}/{raw}"
+    elif not raw:
+        raw = prefix
+    key = (raw or "exports/dataflow_export.json").strip()
     if not key.lower().endswith(OBJECT_STORE_EXPORT_EXTS):
         key = f"{key.rstrip('/')}/export.json"
     return key
@@ -174,7 +185,7 @@ def resolve_object_write_layout(
     """
     from services.sync_cursor import is_overwrite_sync
 
-    base = normalize_object_base_key(table_name or schema)
+    base = normalize_object_base_key(table_name, schema)
     total = max(1, int(total_chunks or 1))
     overwrite = is_overwrite_sync(sync_mode)
 

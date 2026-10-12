@@ -430,10 +430,11 @@ def materialize_object_store_export(
     policy = transform_error_policy(error_policy)
     dest_types = dest_types or {}
     column_types = column_types or {}
-    # A parquet object with no columns is a 0-column file the reader then
-    # counts as an empty destination (DEF-C-043). CSV on the same route still
-    # has a header line; parquet must fail closed instead of uploading that.
-    if str(key or "").lower().endswith(".parquet") and not target_cols:
+    # Zero destination columns used to upload 200 lines of ``{}`` (JSONL) or
+    # blank CSV lines and a checksum of empty input (R3-C1). Parquet already
+    # refused that file. Every object-store format does now.
+    if not target_cols:
+        kind = "Parquet" if str(key or "").lower().endswith(".parquet") else "Object-store"
         return ObjectStoreMaterializeResult(
             export=None,
             rows_written=0,
@@ -442,8 +443,8 @@ def materialize_object_store_export(
             checksum="",
             meta={},
             abort_error=(
-                "Parquet export resolved no destination columns — "
-                "refuse a 0-column file"
+                f"{kind} export resolved no destination columns — "
+                "refuse an empty-record file"
             ),
             rejected_rows=0,
             coerced_null_rows=0,

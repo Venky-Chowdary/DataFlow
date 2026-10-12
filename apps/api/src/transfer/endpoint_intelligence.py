@@ -81,6 +81,17 @@ def _dest_table_schema_only(endpoint: EndpointConfig) -> bool:
     )
 
 
+def _joined_object_key(endpoint: Any, cfg: dict[str, Any], raw: str) -> str:
+    """Same key the object-store writer will put, including the schema prefix."""
+    from connectors.object_store_common import normalize_object_base_key
+
+    key = str(raw or "").strip()
+    if not key:
+        return ""
+    schema = str(cfg.get("schema") or getattr(endpoint, "schema", "") or "")
+    return normalize_object_base_key(key, schema)
+
+
 def _is_absent_object_error(message: str) -> bool:
     """True only when the catalog said the *table* is missing — not a login failure."""
     low = (message or "").lower()
@@ -599,7 +610,11 @@ def _introspect_endpoint_impl(
         if key and probe.ok:
             from connectors.s3 import s3_object_exists
 
-            exists = s3_object_exists(cfg, str(cfg.get("database") or ""), str(key))
+            exists = s3_object_exists(
+                cfg,
+                str(cfg.get("database") or ""),
+                _joined_object_key(endpoint, cfg, str(key)),
+            )
             if exists is not None:
                 out["table_exists"] = exists
             _attach_db_sample(out, endpoint)
@@ -623,7 +638,9 @@ def _introspect_endpoint_impl(
             from connectors.gcs import gcs_blob_exists
 
             exists = gcs_blob_exists(
-                cfg, str(cfg.get("database") or ""), str(key)
+                cfg,
+                str(cfg.get("database") or ""),
+                _joined_object_key(endpoint, cfg, str(key)),
             )
             if exists is not None:
                 out["table_exists"] = exists
@@ -1052,7 +1069,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             from connectors.s3_reader import read_object
 
             bucket = cfg["database"]
-            key = endpoint.table or endpoint.collection or ""
+            key = _joined_object_key(
+                endpoint, cfg, endpoint.table or endpoint.collection or ""
+            )
             if bucket and key:
                 try:
                     batch = read_object(
@@ -1084,7 +1103,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             from connectors.gcs_reader import read_object
 
             bucket = cfg["database"]
-            key = endpoint.table or endpoint.collection or ""
+            key = _joined_object_key(
+                endpoint, cfg, endpoint.table or endpoint.collection or ""
+            )
             if bucket and key:
                 try:
                     batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
@@ -1112,7 +1133,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             from connectors.adls_reader import read_object
 
             bucket = cfg["database"]
-            key = endpoint.table or endpoint.collection or ""
+            key = _joined_object_key(
+                endpoint, cfg, endpoint.table or endpoint.collection or ""
+            )
             if bucket and key:
                 try:
                     batch = read_object(

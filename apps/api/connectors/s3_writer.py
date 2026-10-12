@@ -42,6 +42,27 @@ class WriteResult(_WriteResult):
     driver: str = "boto3"
 
 
+def _s3_key_absent(client, bucket: str, key: str) -> bool:
+    """True only on a proven 404. Access denied stays False so we do not delete."""
+    from botocore.exceptions import ClientError
+
+    try:
+        client.head_object(Bucket=bucket, Key=key)
+        return False
+    except ClientError as exc:
+        code = str((exc.response or {}).get("Error", {}).get("Code") or "")
+        return code in {"404", "NoSuchKey", "NotFound"}
+    except Exception:
+        return False
+
+
+def _delete_s3_key(client, bucket: str, key: str) -> None:
+    try:
+        client.delete_object(Bucket=bucket, Key=key)
+    except Exception:
+        return
+
+
 def _ensure_bucket(client, bucket: str, cfg: dict[str, Any]) -> None:
     """Create the S3 bucket if it does not already exist.
 
@@ -225,6 +246,10 @@ def write_mapped_rows(
                 raise RuntimeError(
                     f"S3 bucket {bucket!r} is missing or inaccessible and create_table is disabled"
                 ) from exc
+        # A key this run creates is deleted if strict policy aborts after promote.
+        # An object that already existed is left in place: the promote already
+        # replaced it, and deleting it would drop the previous generation too.
+        created_here = _s3_key_absent(client, bucket, key)
         # Staging→live before any purge: failed put must not wipe the prior export.
         staging_key = object_staging_key(key)
         threshold, part_size = resolve_multipart_limits(extra)
@@ -271,6 +296,9 @@ def write_mapped_rows(
 
         _final_abort = reject_on_strict_policy(policy, rejected_details, "S3")
         if _final_abort:
+            if created_here:
+                _delete_s3_key(client, bucket, key)
+                _delete_s3_key(client, bucket, staging_key)
             return WriteResult(
                 ok=False,
                 rows_written=written,

@@ -69,7 +69,8 @@ def _decide(
             "retained",
             "CDC and history loads are not rolled back as a batch.",
         )
-    if getattr(destination, "kind", "") != "database":
+    store = _object_store_family(destination)
+    if getattr(destination, "kind", "") != "database" and not store:
         return (
             "retained",
             "This destination is not a SQL table, so the failed batch was not deleted.",
@@ -107,6 +108,11 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
     from services.dialect_profiles import schema_from_cfg
 
     schema = schema_from_cfg(db_type, cfg)
+    store = _object_store_kind(db_type)
+    if store in {"s3", "gcs", "adls"}:
+        return _clear_object_store(
+            dest_summary, store, cfg, schema=schema, table_name=table
+        )
     removed = _delete_all_rows(db_type, cfg, schema=schema, table_name=table)
     after = precount_table(db_type, cfg, table)
     dest_summary["partial_batch_rows_after_undo"] = after
@@ -122,6 +128,81 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
     return (
         "The destination was empty before this run, but the partial batch "
         "could not be removed. The failed rows are still in the table."
+    )
+
+
+def _object_store_family(destination: Any) -> str:
+    from services.dest_precount import _object_store_kind
+
+    fmt = str(getattr(destination, "format", "") or "")
+    kind = _object_store_kind(fmt)
+    return kind if kind in {"s3", "gcs", "adls"} else ""
+
+
+def _object_store_kind(db_type: str) -> str:
+    from services.dest_precount import _object_store_kind as family
+
+    return family(db_type)
+
+
+def _clear_object_store(
+    dest_summary: dict[str, Any],
+    kind: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> str:
+    """Delete the object this run created when the bucket key was absent before.
+
+    A blank CSV counts as zero rows and a JSONL of ``{}`` counts as rows.
+    Either way the key is the partial batch. Saying the destination is still
+    empty while the object remains is a false proof (R3-C1).
+    """
+    from connectors.object_store_common import normalize_object_base_key
+    from connectors.object_store_leftover import _delete_object_key
+    from services.dest_precount import _object_store_list_keys
+
+    bucket = str(cfg.get("database") or "").strip()
+    prefix = schema or str(cfg.get("schema") or "")
+    base = normalize_object_base_key(table_name, prefix)
+    present = _object_store_list_keys(kind, cfg, bucket, table_name)
+    keys = list(present or [])
+    if base not in keys:
+        keys.append(base)
+    deleted = False
+    error = ""
+    for obj_key in keys:
+        try:
+            _delete_object_key(kind, cfg, bucket, obj_key)
+            deleted = True
+        except Exception as exc:  # noqa: BLE001 — report the key that stayed
+            error = str(exc)
+    after_keys = _object_store_list_keys(kind, cfg, bucket, table_name)
+    dest_summary["partial_batch_rows_after_undo"] = (
+        None if after_keys is None else len(after_keys)
+    )
+    if after_keys == []:
+        dest_summary["partial_batch_removed"] = True
+        return (
+            "The destination object was absent before this run. "
+            "The partial object was removed."
+        )
+    if after_keys:
+        return (
+            "The destination was empty before this run, but the partial object "
+            f"could not be removed ({base}). The failed file is still in the bucket."
+            + (f" {error}" if error else "")
+        )
+    if deleted:
+        dest_summary["partial_batch_removed"] = True
+        return (
+            "The destination object was absent before this run. "
+            "The partial object was removed."
+        )
+    return (
+        "The destination was empty before this run, but the partial object "
+        "could not be removed. The failed file may still be in the bucket."
     )
 
 

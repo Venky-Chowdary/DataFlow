@@ -47,7 +47,7 @@ def test_s3(
     ssl: bool,
     warehouse: str = "",
 ) -> ConnectResult:
-    del schema, warehouse
+    del warehouse
 
     bucket = (database or "").strip()
     access_key = (username or "").strip()
@@ -91,7 +91,8 @@ def test_s3(
         try:
             from connectors.s3_reader import list_objects
 
-            keys = list_objects(cfg, bucket)
+            prefix = (schema or "").strip().strip("/")
+            keys = list_objects(cfg, bucket, prefix)
         except Exception as exc:
             keys = []
             list_error = str(exc)
