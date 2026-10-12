@@ -16,6 +16,7 @@ from connectors.sdk import (
 )
 from connectors.sdk.declarative.errors import ConnectorAuthError
 from connectors.sdk.declarative.requester import _github_rate_limited
+from services.connector_telemetry import connector_operation, driver_family
 from services.value_serializer import load_http_json
 
 DEFAULT_HOST = "api.hubapi.com"
@@ -229,6 +230,19 @@ class HubSpotCDKConnector(BaseConnector):
         return ok
 
     def check(self) -> tuple[bool, str]:
+        with connector_operation(
+            "probe",
+            driver_family=driver_family(self.descriptor.id or self.name),
+            surface="sdk_check",
+        ) as op:
+            result = self._check_impl()
+            if result[0]:
+                op.succeeded()
+            else:
+                op.failed(category="probe_failed")
+            return result
+
+    def _check_impl(self) -> tuple[bool, str]:
         access = self._token()
         if not access:
             return False, "HubSpot private app token is required"

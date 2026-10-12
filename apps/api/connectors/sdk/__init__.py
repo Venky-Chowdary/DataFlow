@@ -23,6 +23,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterator
 
+from services.connector_telemetry import connector_operation, driver_family
+
 from connectors.sdk.declarative.errors import ConnectorError
 from services.secret_config import redact_config, redact_url
 
@@ -149,11 +151,25 @@ class BaseConnector(ABC):
 
     def check(self) -> tuple[bool, str]:
         """Live auth/connectivity probe (Airbyte ``check``)."""
-        try:
-            ok = self.test_connection()
-            return (True, "OK") if ok else (False, "Connection check failed")
-        except Exception as exc:
-            return False, str(exc)
+        descriptor = getattr(self, "descriptor", None)
+        family = driver_family(
+            getattr(descriptor, "id", "") or getattr(self, "name", "")
+        )
+        with connector_operation(
+            "probe",
+            driver_family=family,
+            surface="sdk_check",
+        ) as op:
+            try:
+                ok = self.test_connection()
+            except Exception as exc:
+                op.errored(exc)
+                return False, str(exc)
+            if ok:
+                op.succeeded()
+                return True, "OK"
+            op.failed(category="probe_failed")
+            return False, "Connection check failed"
 
     def discover(self) -> list[StreamSchema]:
         """Return available streams + schemas (Airbyte ``discover``)."""
@@ -361,6 +377,23 @@ class SingerTapBridge(BaseConnector):
         return ok
 
     def check(self) -> tuple[bool, str]:
+        descriptor = getattr(self, "descriptor", None)
+        family = driver_family(
+            getattr(descriptor, "id", "") or getattr(self, "name", "")
+        )
+        with connector_operation(
+            "probe",
+            driver_family=family,
+            surface="sdk_check",
+        ) as op:
+            result = self._check_impl()
+            if result[0]:
+                op.succeeded()
+            else:
+                op.failed(category="probe_failed")
+            return result
+
+    def _check_impl(self) -> tuple[bool, str]:
         cmd = self.config.get("tap_command")
         if not cmd:
             return False, "Singer tap requires tap_command"

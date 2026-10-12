@@ -17,6 +17,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from services import connector_store
+from services.connector_telemetry import connector_operation, driver_family
 from services.value_serializer import sanitize_json_value
 
 router = APIRouter(prefix="/query", tags=["query"])
@@ -343,7 +344,11 @@ async def query_export(
         raise HTTPException(status_code=404, detail="Connector not found")
 
     try:
-        rows, columns, schema, _ = _run_query(connector, body)
+        rows, columns, schema, _ = _run_query(
+            connector,
+            body,
+            surface="query_export",
+        )
     except HTTPException:
         raise
     except Exception as exc:
@@ -617,14 +622,35 @@ def _export_to_connector(
         return QueryExportResult(success=False, error=str(e), format=dest_connector.type)
 
 
-def _run_query(connector: connector_store.SavedConnector, body: QueryExecuteRequest):
+def _run_query(
+    connector: connector_store.SavedConnector,
+    body: QueryExecuteRequest,
+    *,
+    surface: str = "query",
+):
     ctype = (connector.type or "").lower().strip()
-    if ctype == "mongodb":
-        return _run_mongodb_query(connector, body)
-    if ctype == "snowflake":
-        return _run_snowflake_query(connector, body)
-    # MySQL-wire family must use pymysql dialect (handled in generic_sql._DRIVERNAME_MAP).
-    return _run_sql_query(connector, body)
+    with connector_operation(
+        "query",
+        driver_family=driver_family(ctype),
+        role="source",
+        surface=surface,
+        connector_id=connector.id,
+    ) as op:
+        try:
+            if ctype == "mongodb":
+                result = _run_mongodb_query(connector, body)
+            elif ctype == "snowflake":
+                result = _run_snowflake_query(connector, body)
+            else:
+                # MySQL-wire family must use pymysql dialect (handled in generic_sql._DRIVERNAME_MAP).
+                result = _run_sql_query(connector, body)
+        except HTTPException as exc:
+            if exc.status_code < 500:
+                op.failed(category="invalid_request", error=exc)
+            raise
+        rows, columns, *_ = result
+        op.succeeded(row_count=len(rows), column_count=len(columns))
+        return result
 
 
 def _run_mongodb_query(connector, body):

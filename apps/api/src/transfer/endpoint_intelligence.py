@@ -21,6 +21,7 @@ from .connector_capabilities import CATALOG_ID_ALIASES, resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
 from services.procedure_source import is_callable_source
+from services.connector_telemetry import connector_operation, driver_family
 
 
 def _list_sqlalchemy_tables(
@@ -272,6 +273,33 @@ def _s3_family_format(fmt: str) -> str:
 
 
 def introspect_endpoint(
+    endpoint: EndpointConfig,
+    sample_content: bytes | None = None,
+    filename: str = "",
+) -> dict:
+    raw_role = str((endpoint.extra or {}).get("introspect_purpose") or "")
+    role = raw_role if raw_role in {"source", "destination"} else ""
+    with connector_operation(
+        "introspect",
+        driver_family=driver_family(endpoint.format or endpoint.kind),
+        role=role,
+        surface="introspect",
+        connector_id=endpoint.connector_id,
+    ) as op:
+        out = _introspect_endpoint_impl(endpoint, sample_content, filename)
+        if out.get("connected"):
+            op.succeeded(
+                object_count=len(out.get("objects") or []),
+                column_count=len(out.get("columns") or []),
+            )
+        elif endpoint.kind == "file" and not sample_content:
+            op.skipped(category="no_input")
+        else:
+            op.failed(category="not_connected")
+        return out
+
+
+def _introspect_endpoint_impl(
     endpoint: EndpointConfig,
     sample_content: bytes | None = None,
     filename: str = "",

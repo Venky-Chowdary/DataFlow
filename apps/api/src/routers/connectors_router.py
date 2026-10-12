@@ -24,6 +24,7 @@ from pymongo.errors import PyMongoError
 from services.runtime_estimate import estimate_for_job_doc
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import json_default
+from services.connector_telemetry import connector_operation, driver_family
 
 from ..services.file_parser import FileParser
 from ..services.mongodb_service import get_mongodb_service
@@ -138,12 +139,22 @@ class TransferRequest(BaseModel):
 
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest):
+    with connector_operation(
+        "probe",
+        driver_family="other",
+        surface="connectors_test",
+    ) as op:
+        return await _test_connection_impl(request, op)
+
+
+async def _test_connection_impl(request: TestConnectionRequest, op):
     """Test a connector configuration before saving"""
     from ..transfer.connector_capabilities import file_source_types
     from ..transfer.connector_registry import humanize_connection_error, probe_file_source
 
     try:
         driver = resolve_driver_type(request.type)
+        op.update(driver_family=driver_family(driver))
         # Resolve catalog twins (excel_workbook → excel) before the file-source
         # check. Checking the raw tile id skipped probe_file_source and claimed
         # "No connectivity probe" for Excel/CSV upload aliases.
@@ -183,6 +194,7 @@ async def test_connection(request: TestConnectionRequest):
             private_key=getattr(request, "private_key", None) or "",
         )
         if auth_error:
+            op.failed(category="auth_config")
             return {
                 "success": False,
                 "message": auth_error,
@@ -238,6 +250,7 @@ async def test_connection(request: TestConnectionRequest):
         return payload
 
     except Exception as e:
+        op.errored(e)
         return {
             "success": False,
             "message": humanize_connection_error(resolve_driver_type(request.type or ""), e),

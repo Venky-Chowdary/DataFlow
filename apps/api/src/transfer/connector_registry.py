@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from connectors.sdk import list_descriptors
+from services.connector_telemetry import connector_operation, driver_family
 
 from .connector_capabilities import _DRIVER_CAPS, default_port, file_source_types
 
@@ -627,36 +628,58 @@ def probe_file_source(fmt: str, path: str) -> tuple[bool, str]:
     kind = (fmt or "").strip().lower()
     location = (path or "").strip()
     label = (kind or "file").upper()
-    if kind not in file_source_types():
-        return False, f"No file-source probe for {label}."
-    if not location:
-        return False, (
-            f"{label} needs a file path or object-store URI before Test can prove a read. "
-            "Catalog support is not a successful connection."
-        )
-    if "://" in location:
-        return False, (
-            f"{label} URI recorded. Test does not download remote objects — "
-            "that would claim Connected without a read. Use Transfer Validate to prove the file."
-        )
-    if not os.path.exists(location):
-        return False, f"Path not found: {location}. Create the file or mount the volume before Test."
-    try:
-        from .file_stream import peek_file_source
+    with connector_operation(
+        "probe",
+        driver_family=driver_family(kind),
+        surface="probe_file_source",
+    ) as op:
+        if kind not in file_source_types():
+            op.failed(category="unsupported")
+            return False, f"No file-source probe for {label}."
+        if not location:
+            op.failed(category="no_input")
+            return False, (
+                f"{label} needs a file path or object-store URI before Test can prove a read. "
+                "Catalog support is not a successful connection."
+            )
+        if "://" in location:
+            op.failed(category="unsupported")
+            return False, (
+                f"{label} URI recorded. Test does not download remote objects — "
+                "that would claim Connected without a read. Use Transfer Validate to prove the file."
+            )
+        if not os.path.exists(location):
+            op.failed(category="not_found")
+            return False, f"Path not found: {location}. Create the file or mount the volume before Test."
+        try:
+            from .file_stream import peek_file_source
 
-        columns, _schema, total, _sample = peek_file_source(location, os.path.basename(location))
-        n_cols = len(columns or [])
-        return True, f"{label} readable — {int(total or 0)} rows, {n_cols} columns."
-    except Exception as exc:
-        return False, humanize_connection_error(kind, exc)
+            columns, _schema, total, _sample = peek_file_source(location, os.path.basename(location))
+            n_cols = len(columns or [])
+            op.succeeded(row_count=int(total or 0), column_count=n_cols)
+            return True, f"{label} readable — {int(total or 0)} rows, {n_cols} columns."
+        except Exception as exc:
+            op.errored(exc)
+            return False, humanize_connection_error(kind, exc)
 
 
 def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     """Execute connectivity probe for a driver using resolved config."""
-    try:
-        return _run_probe_impl(db_type, cfg)
-    except Exception as exc:
-        return False, humanize_connection_error((db_type or "").lower(), exc)
+    with connector_operation(
+        "probe",
+        driver_family=driver_family(db_type),
+        surface="run_probe",
+    ) as op:
+        try:
+            result = _run_probe_impl(db_type, cfg)
+        except Exception as exc:
+            op.errored(exc)
+            return False, humanize_connection_error((db_type or "").lower(), exc)
+        if result[0]:
+            op.succeeded()
+        else:
+            op.failed(category="probe_failed")
+        return result
 
 
 def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:

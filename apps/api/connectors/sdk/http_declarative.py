@@ -16,6 +16,7 @@ from connectors.sdk import (
 )
 from connectors.sdk.declarative.connector import DeclarativeSource
 from connectors.sdk.declarative.errors import PaginationError
+from services.connector_telemetry import connector_operation, driver_family
 
 __all__ = [
     "DeclarativeHttpConnector",
@@ -214,6 +215,19 @@ class DeclarativeHttpConnector(DeclarativeSource):
         }
 
     def check(self) -> tuple[bool, str]:
+        with connector_operation(
+            "probe",
+            driver_family=driver_family(self.descriptor.id or self.name),
+            surface="sdk_check",
+        ) as op:
+            result = self._check_impl()
+            if result[0]:
+                op.succeeded()
+            else:
+                op.failed(category="probe_failed")
+            return result
+
+    def _check_impl(self) -> tuple[bool, str]:
         try:
             if not self._legacy_http_spec.streams:
                 return False, "No streams defined in declarative spec"
