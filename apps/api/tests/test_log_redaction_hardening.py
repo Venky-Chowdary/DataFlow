@@ -759,3 +759,45 @@ def test_failed_password_login_does_not_log_email(monkeypatch, caplog):
 
     rendered = json.dumps([record.getMessage() for record in caplog.records])
     assert email not in rendered
+
+
+def test_exception_tracebacks_are_redacted_across_log_sinks():
+    logger = logging.getLogger("dataflow.r4.traceback-redaction")
+    old_level, old_propagate = logger.level, logger.propagate
+    capture = logging.Handler()
+    capture.records = []
+    capture.emit = lambda record: capture.records.append(record)
+    logger.setLevel(logging.ERROR)
+    logger.propagate = False
+    logger.addHandler(capture)
+
+    def _raise_r4_sensitive_error():
+        raise RuntimeError(
+            "password=S3NT1NEL-pw postgresql://u:S3NT1NEL-dsn@h/db"
+        )
+
+    try:
+        try:
+            _raise_r4_sensitive_error()
+        except RuntimeError as exc:
+            logger.error("x", exc_info=exc)
+    finally:
+        logger.removeHandler(capture)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
+
+    record = capture.records[0]
+    json_exception = json.loads(JsonFormatter().format(record))["exception"]
+    text_traceback = TextFormatter().format(record)
+    otel_record = otel_logging._redacted_record(record)
+    otel_message = getattr(otel_record, "exception.message")
+    otel_traceback = getattr(otel_record, "exception.stacktrace")
+
+    for rendered in (json_exception, text_traceback, otel_message, otel_traceback):
+        assert "Traceback" in rendered or rendered == otel_message
+        assert "_raise_r4_sensitive_error" in rendered or rendered == otel_message
+        assert "S3NT1NEL-pw" not in rendered
+        assert "S3NT1NEL-dsn" not in rendered
+
+    assert "password=***" in otel_message
+    assert "Traceback" in otel_traceback

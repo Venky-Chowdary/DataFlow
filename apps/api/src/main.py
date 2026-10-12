@@ -464,6 +464,14 @@ async def add_timing_header(request: Request, call_next):
             status_code=500,
             **safe_fields,
         )
+        logger.error(
+            "http.request.unhandled.traceback",
+            exc_info=exc,
+            extra={
+                "event": "http.request.unhandled.traceback",
+                "correlation_id": correlation_id,
+            },
+        )
         response = JSONResponse(
             status_code=500,
             content={
@@ -688,6 +696,14 @@ async def global_exception_handler(request: Request, exc: Exception):
         public_message="An unexpected error occurred.",
         status_code=500,
         **safe_fields,
+    )
+    logger.error(
+        "http.request.unhandled.traceback",
+        exc_info=exc,
+        extra={
+            "event": "http.request.unhandled.traceback",
+            "correlation_id": correlation_id,
+        },
     )
     return JSONResponse(
         status_code=500,

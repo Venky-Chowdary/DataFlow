@@ -17,6 +17,7 @@ _SENTINEL = (
     "password=S3NT1NEL-pw postgresql://u:S3NT1NEL-dsn@h/db "
     "row=S3NT1NEL-row SELECT * FROM S3NT1NEL_tbl"
 )
+_TRACEBACK_SECRET = "password=S3NT1NEL-pw postgresql://u:S3NT1NEL-dsn@h/db"
 _JSON_EXECUTE = {
     "source": {
         "kind": "database",
@@ -72,6 +73,23 @@ def error_capture():
     old_propagate = logger.propagate
     capture = _Capture()
     logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    logger.addHandler(capture)
+    try:
+        yield capture
+    finally:
+        logger.removeHandler(capture)
+        logger.setLevel(old_level)
+        logger.propagate = old_propagate
+
+
+@pytest.fixture
+def api_trace_capture():
+    logger = logging.getLogger("dataflow.api")
+    old_level = logger.level
+    old_propagate = logger.propagate
+    capture = _Capture()
+    logger.setLevel(logging.ERROR)
     logger.propagate = False
     logger.addHandler(capture)
     try:
@@ -683,3 +701,115 @@ def test_global_handler_request_scope_uses_route_template(error_capture, monkeyp
     assert record.route_template == "/global/{item}"
     assert "S3NT1NEL" not in error_capture.rendered()
     assert "S3NT1NEL" not in response.body.decode()
+
+
+def test_middleware_logs_redacted_traceback_without_changing_response(
+    error_client, error_capture, api_trace_capture
+):
+    from src import main
+
+    cid = "middleware-trace-r4"
+    path = "/__safe-errors-r4-traceback"
+
+    async def _raise_r4_middleware_error():
+        raise RuntimeError(_TRACEBACK_SECRET)
+
+    main.app.add_api_route(path, _raise_r4_middleware_error, methods=["GET"])
+    try:
+        response = error_client.get(path, headers={"X-Correlation-ID": cid})
+    finally:
+        main.app.router.routes[:] = [
+            route
+            for route in main.app.router.routes
+            if getattr(route, "path", None) != path
+        ]
+
+    expected = {
+        "error": "Internal Server Error",
+        "detail": f"An unexpected error occurred. Reference: {cid}",
+        "correlation_id": cid,
+    }
+    assert response.status_code == 500
+    assert response.content == json.dumps(
+        expected, separators=(",", ":")
+    ).encode()
+    assert response.headers["X-Correlation-ID"] == cid
+    assert "S3NT1NEL-pw" not in response.text
+    assert "S3NT1NEL-dsn" not in response.text
+    trace_records = [
+        record
+        for record in api_trace_capture.records
+        if getattr(record, "event", None) == "http.request.unhandled.traceback"
+    ]
+    assert trace_records
+    assert trace_records[-1].correlation_id == cid
+    rendered = api_trace_capture.rendered()
+    assert "Traceback" in rendered
+    assert "_raise_r4_middleware_error" in rendered
+    assert "S3NT1NEL-pw" not in rendered
+    assert "S3NT1NEL-dsn" not in rendered
+    assert "S3NT1NEL" not in error_capture.rendered()
+
+
+def test_global_handler_logs_redacted_traceback_without_changing_response(
+    error_capture, api_trace_capture, monkeypatch
+):
+    from services import tracing
+    from src import main
+
+    monkeypatch.delenv("DATAFLOW_EXPOSE_ERROR_DETAIL", raising=False)
+    cid = "global-trace-r4"
+    tracing.set_correlation_id(cid)
+    path = "/global-trace/S3NT1NEL-row"
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "headers": [],
+        "server": ("test", 80),
+        "client": ("test", 1234),
+        "root_path": "",
+        "route": SimpleNamespace(path="/global-trace/{item}"),
+    }
+
+    def _raise_r4_global_error():
+        raise RuntimeError(_TRACEBACK_SECRET)
+
+    try:
+        try:
+            _raise_r4_global_error()
+        except RuntimeError as exc:
+            response = asyncio.run(
+                main.global_exception_handler(Request(scope), exc)
+            )
+    finally:
+        tracing.set_correlation_id("")
+
+    expected = {
+        "error": "Internal Server Error",
+        "detail": f"An unexpected error occurred. Reference: {cid}",
+        "correlation_id": cid,
+    }
+    assert response.status_code == 500
+    assert response.body == json.dumps(
+        expected, separators=(",", ":")
+    ).encode()
+    assert response.headers["X-Correlation-ID"] == cid
+    trace_records = [
+        record
+        for record in api_trace_capture.records
+        if getattr(record, "event", None) == "http.request.unhandled.traceback"
+    ]
+    assert trace_records
+    assert trace_records[-1].correlation_id == cid
+    rendered = api_trace_capture.rendered()
+    assert "Traceback" in rendered
+    assert "_raise_r4_global_error" in rendered
+    assert "S3NT1NEL-pw" not in rendered
+    assert "S3NT1NEL-dsn" not in rendered
+    assert "S3NT1NEL" not in error_capture.rendered()
