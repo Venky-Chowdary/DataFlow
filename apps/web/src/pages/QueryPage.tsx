@@ -93,6 +93,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
   const [schemaConnected, setSchemaConnected] = useState<boolean | undefined>(undefined);
   const [schemaTypeSource, setSchemaTypeSource] = useState("");
   const [schemaWarnings, setSchemaWarnings] = useState<string[]>([]);
+  const [schemaTruncated, setSchemaTruncated] = useState(false);
 
   const [detectedParams, setDetectedParams] = useState<string[]>([]);
   const [queryLoading, setQueryLoading] = useState(false);
@@ -119,6 +120,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
     setHistory(loadHistory(workspaceId));
     setLayout(loadLayout());
     setSchemaObjects([]);
+    setSchemaTruncated(false);
     setSchemaError("");
     setResult(null);
   }, [workspaceId]);
@@ -181,6 +183,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
       const isCurrent = () => seq === schemaSeq.current;
       if (!connectorId) {
         setSchemaObjects([]);
+        setSchemaTruncated(false);
         setSchemaConnected(undefined);
         setSchemaError("");
         return;
@@ -198,12 +201,14 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
         const data = await fetchQuerySchema({ connector_id: connectorId, database });
         if (!isCurrent()) return;
         setSchemaObjects(data.objects.map(toSchemaObject));
+        setSchemaTruncated(data.objects_truncated === true);
         setSchemaConnected(data.connected);
         setSchemaTypeSource(data.type_source ?? "");
         setSchemaWarnings(data.warnings ?? []);
       } catch (e) {
         if (!isCurrent()) return;
         setSchemaObjects([]);
+        setSchemaTruncated(false);
         setSchemaError(querySchemaErrorCopy((e as Error).message || "Schema introspection failed"));
         setSchemaConnected(false);
       } finally {
@@ -580,6 +585,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
               connected={schemaConnected}
               typeSource={schemaTypeSource}
               warnings={schemaWarnings}
+              objectsTruncated={schemaTruncated}
               onExpand={(name) => void expandObject(name)}
               onRefresh={() =>
                 void loadObjects(active?.connectorId ?? "", active?.database ?? "")

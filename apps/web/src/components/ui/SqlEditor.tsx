@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type Ref } from "react";
 import { highlightSql } from "../../lib/queryHighlight";
 import { diagnoseSql, type SqlDiagnosis, type SqlEditorMode } from "../../lib/sqlEditorModel";
 import { Dialog } from "./Dialog";
@@ -20,6 +20,23 @@ interface SqlEditorProps {
   expandable?: boolean;
   hideExpand?: boolean;
   fill?: boolean;
+  /** Parent receives insert-at-caret. Column clicks in the schema browser use it. */
+  bindInsert?: (insert: (text: string) => void) => void;
+}
+
+/** Insert text at a caret, or at the end when the editor has no selection yet. */
+export function insertTextAtCaret(
+  value: string,
+  start: number,
+  end: number,
+  text: string,
+): { value: string; caret: number } {
+  const safeStart = Math.max(0, Math.min(start, value.length));
+  const safeEnd = Math.max(safeStart, Math.min(end, value.length));
+  return {
+    value: value.slice(0, safeStart) + text + value.slice(safeEnd),
+    caret: safeStart + text.length,
+  };
 }
 
 /**
@@ -45,7 +62,8 @@ function SqlEditorBody({
   hideExpand,
   fill,
   onExpand,
-}: SqlEditorProps & { onExpand?: () => void }) {
+  textareaRef,
+}: SqlEditorProps & { onExpand?: () => void; textareaRef?: Ref<HTMLTextAreaElement> }) {
   const highlighted = useMemo(() => highlightSql(value), [value]);
   const diagnosis: SqlDiagnosis = useMemo(
     () => diagnoseSql(value, { mode, dialect, bound }),
@@ -105,6 +123,7 @@ function SqlEditorBody({
           />
           <textarea
             id={id}
+            ref={textareaRef}
             className="df2-sql-input"
             value={value}
             onChange={(e) => onChange(e.target.value)}
@@ -143,12 +162,32 @@ function SqlEditorBody({
 export function SqlEditor(props: SqlEditorProps) {
   const [expanded, setExpanded] = useState(false);
   const expandable = props.expandable !== false && !props.hideExpand;
+  const compactRef = useRef<HTMLTextAreaElement>(null);
+  const expandedRef = useRef<HTMLTextAreaElement>(null);
+  const { bindInsert, value, onChange } = props;
+
+  useEffect(() => {
+    if (!bindInsert) return;
+    bindInsert((text: string) => {
+      const el = expanded ? expandedRef.current : compactRef.current;
+      const start = el?.selectionStart ?? value.length;
+      const end = el?.selectionEnd ?? start;
+      const next = insertTextAtCaret(value, start, end, text);
+      onChange(next.value);
+      window.requestAnimationFrame(() => {
+        const target = expanded ? expandedRef.current : compactRef.current;
+        target?.focus();
+        target?.setSelectionRange(next.caret, next.caret);
+      });
+    });
+  }, [bindInsert, expanded, onChange, value]);
 
   return (
     <>
       <SqlEditorBody
         {...props}
         expandable={expandable}
+        textareaRef={compactRef}
         onExpand={() => setExpanded(true)}
       />
       <Dialog
@@ -182,6 +221,7 @@ export function SqlEditor(props: SqlEditorProps) {
           fill
           hideExpand
           expandable={false}
+          textareaRef={expandedRef}
         />
       </Dialog>
     </>

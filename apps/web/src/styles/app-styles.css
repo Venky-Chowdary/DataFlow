@@ -45,6 +45,7 @@
 @import "./transform-prep.css";
 /* Canonical final component layer — extend this or tokens.css only. */
 @import "./enterprise-ui.css";
+@import "./studio-next.css";
 /* Public hero system — authority for the marketing hero band + hero drawings. */
 @import "./marketing-hero.css";
 

@@ -20,6 +20,8 @@ import { DestProcedurePanel, type DestWriteMode } from "../components/transfer/D
 import { SqlEditor } from "../components/ui/SqlEditor";
 import { DestinationAdvancedDrawer } from "../components/transfer/DestinationAdvancedDrawer";
 import { ObjectNameCombobox } from "../components/transfer/ObjectNameCombobox";
+import { TransferSchemaBrowser } from "../components/transfer/TransferSchemaBrowser";
+import { useStudioFlags } from "../lib/useStudioFlags";
 import { Button } from "../components/ui/Button";
 import { HiddenFileInput } from "../components/ui/HiddenFileInput";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
@@ -326,6 +328,11 @@ export function TransferPage({
   const [sourceTable, setSourceTable] = useState("");
   const [sourceCollection, setSourceCollection] = useState("");
   const [sourceReadMode, setSourceReadMode] = useState<SourceReadMode>("table");
+  const studioFlags = useStudioFlags();
+  const sqlInsertRef = useRef<((text: string) => void) | null>(null);
+  const bindSqlInsert = useCallback((insert: (text: string) => void) => {
+    sqlInsertRef.current = insert;
+  }, []);
   const [procedureCall, setProcedureCall] = useState("");
   const [procedureParams, setProcedureParams] = useState<Record<string, string>>({});
   const [destWriteMode, setDestWriteMode] = useState<DestWriteMode>("table");
@@ -6748,6 +6755,7 @@ export function TransferPage({
                     }
                     hint="One statement. :name binds below, or quoted/numeric literals. Extra result columns stay on Map — never silent drop."
                     rows={6}
+                    bindInsert={bindSqlInsert}
                   />
                   {bindNamesFromSql(procedureCall).length > 0 && (
                     <div className="df2-source-bind-params">
@@ -6803,6 +6811,29 @@ export function TransferPage({
                 </div>
                 )}
               </div>
+
+              {studioFlags.schemaBrowser && sourceKind === "database" && sourceConnectorId ? (
+                <TransferSchemaBrowser
+                  connectorId={sourceConnectorId}
+                  mode={
+                    sourceReadMode === "query"
+                      ? "query"
+                      : sourceReadMode === "procedure"
+                        ? "procedure"
+                        : "table"
+                  }
+                  onUseObject={(name) => {
+                    const append = (current: string) => {
+                      const parts = current.split(",").map((part) => part.trim()).filter(Boolean);
+                      if (parts.includes(name)) return current;
+                      return parts.length ? `${parts.join(", ")}, ${name}` : name;
+                    };
+                    if (sourceConnector?.type === "mongodb") setSourceCollection(append);
+                    else setSourceTable(append);
+                  }}
+                  onInsertText={(text) => sqlInsertRef.current?.(text)}
+                />
+              ) : null}
 
               {!isCallableSourceMode(sourceReadMode) && (
               <div className="df2-source-multistream">
@@ -7719,6 +7750,8 @@ export function TransferPage({
               ? { [targetCollection]: Object.keys(destSchemaMap) }
               : undefined
           }
+          canvasEnabled={studioFlags.canvas}
+          onOpenSchema={() => setStep(STEP_SOURCE)}
           onApplyRules={(report) => {
             setBusinessRuleReport(report);
             const primary = primarySourceStream || sourceTable || undefined;

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { STUDIO_CANVAS_KEY, STUDIO_SCHEMA_BROWSER_KEY, writeLocalStudioFlag } from "../lib/studioFlags";
 import { DtIcon } from "../components/DtIcon";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -54,6 +55,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [orgName, setOrgName] = useState("Datawrap");
   const [timezone, setTimezone] = useState("UTC");
   const [retention, setRetention] = useState("90");
+  const [studioSchemaBrowser, setStudioSchemaBrowser] = useState(false);
+  const [studioCanvas, setStudioCanvas] = useState(false);
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
   /** Why General could not be read. Empty means the values below are the API's. */
@@ -127,6 +130,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         setOrgName(ws.org_name);
         setTimezone(ws.timezone);
         setRetention(String(ws.retention_days));
+        setStudioSchemaBrowser(ws.studio_schema_browser === true);
+        setStudioCanvas(ws.studio_canvas === true);
         setSettingsLoaded(true);
         setSettingsError("");
         generalDirtyRef.current = false;
@@ -494,10 +499,20 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         org_name: orgName,
         timezone,
         retention_days: Number(retention) || 90,
+        studio_schema_browser: studioSchemaBrowser,
+        studio_canvas: studioCanvas,
       });
       setOrgName(ws.org_name);
       setTimezone(ws.timezone);
       setRetention(String(ws.retention_days));
+      setStudioSchemaBrowser(ws.studio_schema_browser === true);
+      setStudioCanvas(ws.studio_canvas === true);
+      try {
+        writeLocalStudioFlag(STUDIO_SCHEMA_BROWSER_KEY, ws.studio_schema_browser === true, localStorage);
+        writeLocalStudioFlag(STUDIO_CANVAS_KEY, ws.studio_canvas === true, localStorage);
+      } catch {
+        // A browser that blocks storage still saved the workspace gate.
+      }
       generalDirtyRef.current = false;
       toast({ title: "Settings saved", message: "Organization preferences updated.", tone: "success" });
     } catch (err) {
@@ -742,6 +757,38 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                             setRetention(e.target.value);
                           }}
                         />
+                      </div>
+                      <div className="df2-settings-field">
+                        <label htmlFor="studio-schema-browser">Schema browser</label>
+                        <input
+                          id="studio-schema-browser"
+                          type="checkbox"
+                          checked={studioSchemaBrowser}
+                          disabled={!generalEditable}
+                          onChange={(e) => {
+                            generalDirtyRef.current = true;
+                            setStudioSchemaBrowser(e.target.checked);
+                          }}
+                        />
+                        <p className="df2-label-hint">
+                          Workspace gate for the database tree beside the source table. Saving also opts in this browser. Other browsers stay on the wizard until they save here.
+                        </p>
+                      </div>
+                      <div className="df2-settings-field">
+                        <label htmlFor="studio-canvas">Recipe canvas</label>
+                        <input
+                          id="studio-canvas"
+                          type="checkbox"
+                          checked={studioCanvas}
+                          disabled={!generalEditable}
+                          onChange={(e) => {
+                            generalDirtyRef.current = true;
+                            setStudioCanvas(e.target.checked);
+                          }}
+                        />
+                        <p className="df2-label-hint">
+                          Workspace gate for the ordered transform canvas. Off keeps the step list. The logo and the rest of the wizard stay as they are.
+                        </p>
                       </div>
                       <div className="df2-settings-field">
                         <label>Default destination</label>

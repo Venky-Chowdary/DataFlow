@@ -41,7 +41,10 @@ describe("studioPicker", () => {
 describe("Transform step builder uses the studio picker", () => {
   it("does not render a native operation select", () => {
     const webRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-    const builder = readFileSync(join(webRoot, "components/transfer/TransformStepBuilder.tsx"), "utf8");
+    const builder = [
+      readFileSync(join(webRoot, "components/transfer/TransformStepBuilder.tsx"), "utf8"),
+      readFileSync(join(webRoot, "components/transfer/ShapeStepFields.tsx"), "utf8"),
+    ].join("\n");
     assert.match(builder, /StudioPicker/);
     assert.match(builder, /StudioMultiPicker/);
     assert.doesNotMatch(builder, /<select/);

@@ -876,3 +876,164 @@ jobs:
           -r apps/api/connectors apps/api/services apps/api/src
           -lll
           -q
+
+  # Wizard project only. Flag-off Transfer Studio. This is the studio UI
+  # check to require. studio-ui-next covers the flagged surfaces and should
+  # not be a required status check.
+  studio-ui:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install web
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Start API
+        working-directory: apps/api
+        env:
+          REQUIRE_AUTH: "0"
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+        run: |
+          python -m uvicorn src.main:app --host 127.0.0.1 --port 8001 > /tmp/studio-api.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:8001/api/v1/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API did not become ready" >&2
+          cat /tmp/studio-api.log >&2 || true
+          exit 1
+
+      - name: Start Vite
+        run: |
+          npm run dev --workspace=@dataflow/web > /tmp/studio-web.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:5173 >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Vite did not become ready" >&2
+          cat /tmp/studio-web.log >&2 || true
+          exit 1
+
+      - name: Wizard Playwright
+        working-directory: apps/web
+        env:
+          CI: "1"
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:5173
+        run: npx playwright test --project=wizard
+
+      - name: Upload wizard report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-ui-wizard
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+            /tmp/studio-api.log
+            /tmp/studio-web.log
+          if-no-files-found: warn
+
+  studio-ui-next:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install web
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Start API
+        working-directory: apps/api
+        env:
+          REQUIRE_AUTH: "0"
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+        run: |
+          python -m uvicorn src.main:app --host 127.0.0.1 --port 8001 > /tmp/studio-api.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:8001/api/v1/health >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "API did not become ready" >&2
+          cat /tmp/studio-api.log >&2 || true
+          exit 1
+
+      - name: Start Vite
+        run: |
+          npm run dev --workspace=@dataflow/web > /tmp/studio-web.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:5173 >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Vite did not become ready" >&2
+          cat /tmp/studio-web.log >&2 || true
+          exit 1
+
+      - name: Flagged schema browser and canvas
+        working-directory: apps/web
+        env:
+          CI: "1"
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:5173
+        run: npx playwright test --project=studio-next
+
+      - name: Upload studio-next report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-ui-next
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+            /tmp/studio-api.log
+            /tmp/studio-web.log
+          if-no-files-found: warn

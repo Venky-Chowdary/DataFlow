@@ -71,13 +71,18 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
+          const norm = id.replace(/\\/g, "/");
+          // The recipe canvas is a dynamic import. Keep xyflow out of the
+          // wizard chunk so flag-off Transfer Studio does not download it.
+          if (norm.includes("@xyflow") || norm.includes("/components/transfer/TransformFlow")) {
+            return "studio-canvas";
+          }
           if (id.includes("node_modules")) {
             if (id.includes("react-dom") || id.includes("/react/")) {
               return "react-vendor";
             }
             return "vendor";
           }
-          const norm = id.replace(/\\/g, "/");
           if (
             norm.includes("/pages/TransferPage") ||
             norm.includes("/pages/transfer/") ||

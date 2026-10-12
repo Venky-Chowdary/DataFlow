@@ -182,10 +182,10 @@ describe("Transfer Studio chrome contracts", () => {
   });
 
   it("a required Transform option says so before Add is clicked", () => {
-    const builder = readFileSync(
-      join(webRoot, "components/transfer/TransformStepBuilder.tsx"),
-      "utf8",
-    );
+    const builder = [
+      readFileSync(join(webRoot, "components/transfer/TransformStepBuilder.tsx"), "utf8"),
+      readFileSync(join(webRoot, "components/transfer/ShapeStepFields.tsx"), "utf8"),
+    ].join("\n");
     const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
 
     assert.match(builder, /const blankRequired = useMemo\(/);

@@ -290,23 +290,40 @@ const paths: Record<string, React.ReactNode> = {
   ),
 };
 
-export function DtIcon({ name, size = 20 }: { name: string; size?: number }) {
-  /* HD stroke — thin 1.5 paths wash out on light marketing surfaces */
-  const stroke = size >= 18 ? 2.15 : 2;
-  return (
-    <span className="dt-nav-icon" aria-hidden="true">
-      <svg
-        width={size}
-        height={size}
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={stroke}
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        {paths[name] || paths.database}
-      </svg>
-    </span>
+export function DtIcon({
+  name,
+  size = 20,
+  chrome = "nav",
+}: {
+  name: string;
+  size?: number;
+  /**
+   * `nav` is the historical wrapper and stroke, so existing screens stay put.
+   * `product` is the studio family: 1.75 at 16/20, 2 at 24, no nav metrics,
+   * and an unknown name draws nothing.
+   */
+  chrome?: "nav" | "product";
+}) {
+  const known = Object.prototype.hasOwnProperty.call(paths, name);
+  if (!known && chrome === "product" && typeof console !== "undefined") {
+    console.warn(`DtIcon: unknown icon "${name}"`);
+  }
+  const stroke = chrome === "product" ? (size >= 24 ? 2 : 1.75) : (size >= 18 ? 2.15 : 2);
+  const svg = (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={stroke}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {known ? paths[name] : chrome === "product" ? null : paths.database}
+    </svg>
   );
+  if (chrome === "product") return svg;
+  return <span className="dt-nav-icon">{svg}</span>;
 }

@@ -4,6 +4,7 @@ import { TransformColumnCatalog } from "../../components/transfer/TransformColum
 import { TransformColumnChart } from "../../components/transfer/TransformColumnChart";
 import { TransformGuidePanel } from "../../components/transfer/TransformGuidePanel";
 import { TransformStepBuilder } from "../../components/transfer/TransformStepBuilder";
+import { TransferTransformCanvas } from "../../components/transfer/TransferTransformCanvas";
 import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
 import { Dialog } from "../../components/ui/Dialog";
 import { fetchShapeCatalog, importBusinessRules, previewShapeRecipe, profileShapeSource } from "../../lib/api";
@@ -21,6 +22,7 @@ import {
   kitchenCatalogColumns,
   kitchenSampleValues,
   previewSampleNote,
+  samplePopulationBanner,
   recipePayload,
   stampStepSourceTable,
   summarizeEffect,
@@ -79,6 +81,10 @@ interface TransferTransformStepProps {
   destCatalog?: Record<string, string[]>;
   /** Full-program hash when the sample on screen is not the primary table. */
   onProgramHash?: (hash: string) => void;
+  /** Ordered canvas. Off keeps the step list. */
+  canvasEnabled?: boolean;
+  /** Return to the source step so the operator can open the schema tree. */
+  onOpenSchema?: () => void;
 }
 
 const PREVIEW_ROWS = 12;
@@ -135,6 +141,8 @@ export function TransferTransformStep({
   destTables = [],
   destCatalog = {},
   onProgramHash,
+  canvasEnabled = false,
+  onOpenSchema,
 }: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
@@ -407,7 +415,7 @@ export function TransferTransformStep({
   const resultRefused = Boolean(previewError || preview?.refusal);
 
   return (
-    <section className="df2-xform" aria-labelledby="xform-title">
+    <section className={canvasEnabled ? "df2-xform df2-studio-next" : "df2-xform"} aria-labelledby="xform-title">
       <header className="df2-xform-head">
         <div className="df2-xform-head-row">
           <div className="df2-xform-head-copy">
@@ -439,6 +447,7 @@ export function TransferTransformStep({
             </button>
           </div>
         </div>
+        {!canvasEnabled && (
         <div className="df2-tabs df2-xform-panes" role="tablist" aria-label="Transform workspace">
           <button
             type="button"
@@ -467,6 +476,7 @@ export function TransferTransformStep({
             </span>
           </button>
         </div>
+        )}
       </header>
 
       {preloadRefused && (
@@ -576,8 +586,9 @@ export function TransferTransformStep({
       <div
         role="tabpanel"
         id="xform-panel-prepare"
-        aria-labelledby="xform-tab-prepare"
-        hidden={pane !== "prepare"}
+        aria-labelledby={canvasEnabled ? undefined : "xform-tab-prepare"}
+        aria-label={canvasEnabled ? "Rules and transforms" : undefined}
+        hidden={canvasEnabled ? false : pane !== "prepare"}
         className="df2-xform-panel"
       >
       {onApplyRules ? <div className="df2-rule-import">
@@ -664,6 +675,35 @@ export function TransferTransformStep({
           ) : null}
         </section>
 
+        {canvasEnabled ? (
+          <TransferTransformCanvas
+            catalog={catalog}
+            steps={steps}
+            onChangeSteps={onChangeSteps}
+            columns={columnsAfter.map((name) => ({
+              name,
+              type: String(preview?.column_types?.[name] || previewSchema[name] || ""),
+            }))}
+            suggestions={openSuggestions}
+            canPlan={plan.allowed}
+            disabledReason={plan.reason}
+            syncRefused={preloadRefused}
+            refusalReason={preloadTransformRefusalReason(syncMode)}
+            activeTable={activeTable}
+            previewBanner={samplePopulationBanner(
+              Math.min(PREVIEW_ROWS, beforeRows.length),
+              rowCount,
+            )}
+            effectSummary={summarizeEffect(effect)}
+            onRunPreview={() => {
+              setPreviewError("");
+              setPreviewRetry((count) => count + 1);
+            }}
+            onContinue={onContinue}
+            canContinue={continueState.enabled}
+            onOpenSchema={onOpenSchema ?? onBack}
+          />
+        ) : (
         <section className="df2-xform-card" aria-labelledby="xform-recipe-title">
           <header className="df2-xform-card-head">
             <h3 id="xform-recipe-title">Steps, in order</h3>
@@ -812,6 +852,7 @@ export function TransferTransformStep({
             />
           )}
         </section>
+        )}
       {ruleReport ? (
         <BusinessRuleLedger
           report={ruleReport}
@@ -825,8 +866,9 @@ export function TransferTransformStep({
       <div
         role="tabpanel"
         id="xform-panel-result"
-        aria-labelledby="xform-tab-result"
-        hidden={pane !== "result"}
+        aria-labelledby={canvasEnabled ? undefined : "xform-tab-result"}
+        aria-label={canvasEnabled ? "Transform result" : undefined}
+        hidden={canvasEnabled ? false : pane !== "result"}
         className="df2-xform-panel"
       >
       <dl className="df2-xform-stats">
@@ -977,6 +1019,7 @@ export function TransferTransformStep({
                             className={changed.has(`${index}:${column}`) ? "is-xform-changed" : ""}
                             title={changed.has(`${index}:${column}`) ? "Changed by the recipe" : undefined}
                           >
+                            {changed.has(`${index}:${column}`) ? <span className="df2-sr-only">changed</span> : null}
                             {cellText(row[column])}
                           </td>
                         ))}
@@ -1005,7 +1048,7 @@ export function TransferTransformStep({
         <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>
           Back to Destination
         </button>
-        {pane === "prepare" ? (
+        {!canvasEnabled && pane === "prepare" ? (
           <button
             type="button"
             className="df2-btn df2-btn-primary"

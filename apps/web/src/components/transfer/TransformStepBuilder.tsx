@@ -1,17 +1,15 @@
 import { useCallback, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
-import { StudioMultiPicker, StudioPicker } from "../ui/StudioPicker";
+import { StudioPicker } from "../ui/StudioPicker";
+import { ShapeStepFields } from "./ShapeStepFields";
 import { checkShapeExpression } from "../../lib/api";
 import type { StudioPickerOption } from "../../lib/studioPicker";
 import {
-  draftOptionsForWire,
-  fieldsFor,
   isBlankOption,
-  linesToList,
   missingRequired,
   operationsByFamily,
-  parseNumberOption,
   settleExpressionCheck,
+  stepFromDraft,
   type ShapeCatalog,
   type ShapeOperation,
   type ShapeStepWire,
@@ -133,20 +131,16 @@ export function TransformStepBuilder({
       setError("Pick an operation.");
       return;
     }
-    const missing = missingRequired(operation, column, options);
-    if (missing) {
-      setError(missing);
-      return;
-    }
     if (expressionError) {
       setError(expressionError);
       return;
     }
-    const step: ShapeStepWire = { op: operation.op, options: draftOptionsForWire(options) };
-    if (operation.needs_column) step.column = column;
-    if (label.trim()) step.label = label.trim();
-    if (policy !== "refuse") step.on_error = policy;
-    onAdd(step);
+    const built = stepFromDraft(operation, column, options, label, policy);
+    if (!built.step) {
+      setError(built.error);
+      return;
+    }
+    onAdd(built.step);
     reset();
   }, [column, expressionError, label, onAdd, operation, options, policy, reset]);
 
@@ -239,113 +233,17 @@ export function TransformStepBuilder({
 
       {operation && (
         <div className="df2-xform-builder-row">
-          {fieldsFor(operation).map((field) => {
-            const id = `xform-opt-${field.name}`;
-            const value = options[field.name];
-            if (field.kind === "boolean") {
-              return (
-                <label key={field.name} className="df2-policy-toggle df2-xform-toggle">
-                  <input
-                    type="checkbox"
-                    checked={value === true}
-                    disabled={!canPlan}
-                    onChange={(e) => setOptions({ ...options, [field.name]: e.target.checked })}
-                  />
-                  <span><strong>{field.label}</strong><small>{field.hint}</small></span>
-                </label>
-              );
-            }
-            const invalid = field.required && blankRequired.has(field.name);
-            if (field.kind === "choice") {
-              return (
-                <StudioPicker
-                  key={field.name}
-                  id={id}
-                  label={field.label}
-                  required={field.required}
-                  invalid={invalid}
-                  value={typeof value === "string" ? value : ""}
-                  options={(field.choices ?? []).map((choice) => ({ value: choice, label: choice }))}
-                  placeholder="Pick…"
-                  disabled={!canPlan}
-                  searchable={(field.choices ?? []).length > 6}
-                  hint={field.hint}
-                  onChange={(next) => setOptions({ ...options, [field.name]: next })}
-                />
-              );
-            }
-            if (field.kind === "columns") {
-              return (
-                <StudioMultiPicker
-                  key={field.name}
-                  id={id}
-                  label={field.label}
-                  required={field.required}
-                  invalid={invalid}
-                  value={Array.isArray(value) ? (value as string[]) : []}
-                  options={columnOptions}
-                  disabled={!canPlan}
-                  hint={field.hint}
-                  onChange={(next) => setOptions({ ...options, [field.name]: next })}
-                />
-              );
-            }
-            return (
-              <div
-                className={`df2-field${invalid ? " is-invalid" : ""}`}
-                key={field.name}
-              >
-                <label className="df2-label" htmlFor={id}>
-                  {field.label}{field.required ? " *" : ""}
-                </label>
-                {field.kind === "list" ? (
-                  <textarea
-                    id={id}
-                    className="df2-input df2-studio-field"
-                    rows={3}
-                    value={Array.isArray(value) ? (value as string[]).join("\n") : ""}
-                    disabled={!canPlan}
-                    onChange={(e) => setOptions({ ...options, [field.name]: linesToList(e.target.value) })}
-                  />
-                ) : field.kind === "expression" ? (
-                  <textarea
-                    id={id}
-                    className={`df2-input df2-studio-field df2-xform-code${expressionError ? " is-invalid" : ""}`}
-                    rows={3}
-                    placeholder="[status] <> 'void'"
-                    value={typeof value === "string" ? value : ""}
-                    disabled={!canPlan}
-                    onChange={(e) => {
-                      const text = e.target.value;
-                      setOptions({ ...options, [field.name]: text });
-                      void validateExpression(text);
-                    }}
-                  />
-                ) : (
-                  <input
-                    id={id}
-                    className={`df2-input df2-studio-field${field.name === "format" || field.name === "output_format" || field.name === "characters" ? " df2-xform-code" : ""}`}
-                    inputMode={field.kind === "number" ? "numeric" : undefined}
-                    value={value === undefined || value === null ? "" : String(value)}
-                    disabled={!canPlan}
-                    onChange={(e) => {
-                      const raw = e.target.value;
-                      setOptions({
-                        ...options,
-                        [field.name]: field.kind === "number" ? parseNumberOption(raw) : raw,
-                      });
-                    }}
-                  />
-                )}
-                {field.hint && <span className="df2-label-hint">{field.hint}</span>}
-                {invalid && (
-                  <span className="df2-xform-required" role="alert">
-                    {field.label} is required for {operation.op}.
-                  </span>
-                )}
-              </div>
-            );
-          })}
+          <ShapeStepFields
+            operation={operation}
+            columns={columns}
+            options={options}
+            onChange={setOptions}
+            canPlan={canPlan}
+            expressionError={expressionError}
+            onExpressionChange={(text) => void validateExpression(text)}
+            idPrefix="xform-opt"
+            blankRequired={blankRequired}
+          />
           <div className="df2-field">
             <label className="df2-label" htmlFor="xform-label">Step name (optional)</label>
             <input
