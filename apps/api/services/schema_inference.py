@@ -551,9 +551,11 @@ def classify_value(value: str, *, field_name: str | None = None) -> str:
         if _has_explicit_timezone_suffix(s):
             return "TIMESTAMPTZ"
         # Excel stores a date-only cell as midnight and serializes it with
-        # T00:00:00. That is a DATE. A real time-of-day stays TIMESTAMP, and
-        # TIMESTAMP → DATE stays lossy.
-        if re.search(r"(?:[T ])00:00:00(?:\.0+)?$", s):
+        # T00:00:00. That is a DATE. A SQL timestamp that happens to be
+        # midnight uses a space (``2026-10-01 00:00:00``). Treating that as
+        # DATE dropped the time and then blocked a later non-midnight row
+        # as lossy (QA R2-018). Only the Excel ``T`` form is a date.
+        if re.search(r"T00:00:00(?:\.0+)?$", s):
             return "DATE"
         return "TIMESTAMP"
 

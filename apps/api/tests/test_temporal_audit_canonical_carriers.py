@@ -82,6 +82,12 @@ def test_a_date_only_column_stays_a_date(days):
     check_date_only_column_stays_a_date(days)
 
 
+def test_sql_midnight_timestamp_stays_a_timestamp():
+    """A space-separated midnight is a timestamp, not an Excel date (QA R2-018)."""
+    assert _inferred(["2026-10-01 00:00:00", "2026-10-02 00:00:00"]) == "TIMESTAMP"
+    assert _inferred(["2026-10-01T00:00:00", "2026-10-02T00:00:00"]) == "DATE"
+
+
 @pytest.mark.parametrize(("dialect", "db_type"), ENGINES)
 def test_declared_date_binds_a_date_and_datetime_binds_a_datetime(dialect, db_type):
     date_t = _sa_type_for_logical("DATE", dialect, db_type)
