@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -70,23 +71,38 @@ def test_bad_password_audit_uses_normalized_truncated_actor_and_no_password(logi
 
 def test_login_lockout_event_is_written_once(login_app):
     client = login_app["client"]
-    for _ in range(3):
+    correlation_ids = [str(uuid4()) for _ in range(3)]
+    for correlation_id in correlation_ids:
         response = client.post(
             "/api/v1/auth/login",
             json={"email": "admin@example.test", "password": "wrong-password-123"},
+            headers={"X-Correlation-ID": correlation_id},
         )
         assert response.status_code in (401, 429)
 
     rows = _events(login_app)
     locked = [row for row in rows if row["action"] == "auth.login.locked"]
     assert len(locked) == 1
-    failures = [
-        row for row in rows
-        if row["action"] == "auth.login" and row.get("outcome") == "failed"
-    ]
-    assert failures
-    assert any(row["reason_code"] == "locked" for row in failures)
-    assert all(row["actor"] == "admin@example.test" for row in locked + failures)
+    by_correlation = {
+        correlation_id: [
+            row for row in rows if row.get("correlation_id") == correlation_id
+        ]
+        for correlation_id in correlation_ids
+    }
+    newly_locked = by_correlation[correlation_ids[1]]
+    assert [row["action"] for row in newly_locked] == ["auth.login.locked"]
+    assert newly_locked[0]["outcome"] == "failed"
+    assert newly_locked[0]["reason_code"] == "locked"
+    assert newly_locked[0]["details"]["status"] == 429
+
+    later_attempt = by_correlation[correlation_ids[2]]
+    assert [row["action"] for row in later_attempt] == ["auth.login"]
+    assert later_attempt[0]["outcome"] == "failed"
+    assert later_attempt[0]["reason_code"] == "locked"
+    assert all(
+        row["actor"] == "admin@example.test"
+        for row in newly_locked + later_attempt
+    )
 
 
 def test_disabled_account_login_audit_has_disabled_reason(login_app):

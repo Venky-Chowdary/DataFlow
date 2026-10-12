@@ -824,11 +824,13 @@ def _record_login_audit(
         from services.audit_coverage import record_security_event
 
         if action == "auth.login.locked":
-            from services.audit_log import append_audit_event
-
-            append_audit_event(
-                action=action,
+            record_security_event(
+                action,
+                outcome="failed",
+                request=request,
                 resource="/auth/login",
+                reason_code=reason or "locked",
+                status=429,
                 actor=actor,
                 level=level,
                 details={"reason": reason} if reason else {},
@@ -902,12 +904,13 @@ async def login(body: LoginRequest, request: Request):
                 actor=actor,
                 reason="locked",
             )
-        _record_login_audit(
-            request,
-            action="auth.login.failure",
-            actor=actor,
-            reason="locked",
-        )
+        else:
+            _record_login_audit(
+                request,
+                action="auth.login.failure",
+                actor=actor,
+                reason="locked",
+            )
         retry = float(limited.get("retry_after_sec") or 60)
         raise HTTPException(
             status_code=429,
