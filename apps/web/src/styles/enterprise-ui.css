@@ -11760,7 +11760,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-result-reuse-bar > span {
   display: block;
   height: 100%;
-  background: var(--df-accent, #3b82f6);
+  background: var(--df-logo-ink);
   border-radius: inherit;
 }
 
@@ -12077,6 +12077,15 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-weight: 700;
   color: var(--df-text-secondary, #64748b);
   min-width: 28px;
+}
+
+@media (max-width: 1280px) {
+  /* Destination and Models reuse the schedule cadence/sync classes.
+     Keep them visible here; only Schedules drops those columns. */
+  .df2-xform-rows .df2-pipeline-row-cadence,
+  .df2-xform-rows .df2-pipeline-row-sync {
+    display: block;
+  }
 }
 
 @media (max-width: 900px) {
