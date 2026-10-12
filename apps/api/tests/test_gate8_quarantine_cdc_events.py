@@ -180,3 +180,90 @@ def test_every_persist_caller_passes_a_known_source_literal():
     assert found, "no persist_rejected_rows(source=...) callers found"
     for literal in found:
         assert literal.strip("\"'") in dlq._QUARANTINE_SOURCES, literal
+
+
+def test_shared_multi_table_reader_emits_one_cycle_event_without_table_names(
+    tmp_path, monkeypatch, capture
+):
+    """Drive ``_run_cdc_shared_multi_table`` in-process (stub log reader, SQLite
+    dest, stub apply). One reader = one position and one lag, so one event."""
+    from unittest.mock import patch
+
+    from services.cdc_engine import ChangeBatch
+    from services.sync_cursor import SyncContract
+
+    monkeypatch.setattr("services.sync_cursor.STORE_PATH", tmp_path / "cursors.json")
+    monkeypatch.setattr("services.sync_cursor._mongo_cursors", lambda: None)
+    token = f"slot={TABLE}_slot|phase=streaming|lsn={LSN}"
+
+    class FakeCdc:
+        def __init__(self, *a, **k):
+            pass
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            yield ChangeBatch(inserts=[{"id": VALUE}], resume_token=token, table=TABLE)
+            yield ChangeBatch(inserts=[{"id": "u1"}], resume_token=token, table="users")
+            yield ChangeBatch(resume_token=token, ack_barrier=True)
+
+        polled = False
+
+        def poll(self):
+            if FakeCdc.polled:
+                return
+            FakeCdc.polled = True
+            yield ChangeBatch(
+                updates=[{"id": VALUE, "v": VALUE}], deletes=[{"id": "u1"}],
+                resume_token=token, table=TABLE, ack_barrier=True,
+            )
+
+        def ack(self, token=None):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_apply(*args, **kwargs):
+        change = args[4]
+        return (len(change.inserts) + len(change.updates), "ck", {}, len(change.deletes))
+
+    source = EndpointConfig(kind="database", format="postgresql", database="app", table=TABLE)
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(tmp_path / "d.db"), table=TABLE
+    )
+    with patch.object(cdc_transfer, "PostgreSqlChangeStreamCdc", FakeCdc), \
+         patch.object(cdc_transfer, "_apply_change_batch", side_effect=fake_apply), \
+         patch.object(cdc_transfer, "resolve_dest_table", side_effect=lambda *_a, **_k: "t"), \
+         patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "2"}):
+        rows, _ddl, summary, _ = cdc_transfer._run_cdc_shared_multi_table(
+            source, destination, [{"source": "id", "target": "id"}], {"id": "string"}, None,
+            sync_mode="cdc",
+            stream_contracts=[
+                {"name": TABLE, "selected": True, "primary_key": "id"},
+                {"name": "users", "selected": True, "primary_key": "id"},
+            ],
+            selected=[
+                SyncContract(name=TABLE, primary_key="id", sync_mode="cdc"),
+                SyncContract(name="users", primary_key="id", sync_mode="cdc"),
+            ],
+            job_id="job-shared", checkpoint=None, checkpoint_service=None,
+            backfill_new_fields=False, validation_mode="strict", limit=0,
+            workspace_id="ws-shared",
+        )
+
+    assert summary.get("cdc_shared_reader") is True
+    (event,) = capture.named("cdc.cycle.completed")
+    assert event.outcome == "succeeded" and event.levelno == logging.INFO
+    assert (event.job_id, event.workspace_id) == ("job-shared", "ws-shared")
+    assert (event.source_type, event.destination_type) == ("postgresql", "sqlite")
+    assert event.table_count == 2
+    assert (event.upserts, event.deletes) == (3, 1)
+    assert event.upserts + event.deletes == rows
+    assert event.inserts is None and event.updates is None
+    assert event.position_kind == ("lsn" if summary["cdc"]["watermark"] else "none")
+    assert event.delivery == "at-least-once"
+    _clean(capture.records)
+    for record in capture.records:
+        assert "users" not in JsonFormatter().format(record)

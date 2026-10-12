@@ -270,20 +270,29 @@ def _emit_cdc_cycle(
     workspace_id: str,
     src_type: str,
     dest_type: str,
-    inserts: int,
-    updates: int,
+    inserts: int | None,
+    updates: int | None,
     deletes: int,
     lag_fields: dict[str, Any],
     delivery: str,
     has_position: bool,
+    upserts: int | None = None,
+    table_count: int | None = None,
 ) -> None:
-    """One ``cdc.cycle.completed`` per stream run: counts, lag and the *kind*
-    of position — never the LSN/binlog/token value or any slot/table name."""
+    """One ``cdc.cycle.completed`` per reader run: counts, lag and the *kind*
+    of position — never the LSN/binlog/token value or any slot/table name.
+
+    The shared multi-table reader has one log position and one lag for all
+    its tables, so it emits once with ``table_count`` and combined
+    ``upserts`` (its apply step does not split inserts from updates)."""
     emit_event(
         logger, "cdc.cycle.completed", outcome="succeeded",
         job_id=job_id or None, workspace_id=workspace_id or None,
         source_type=src_type or None, destination_type=dest_type or None,
-        inserts=int(inserts or 0), updates=int(updates or 0), deletes=int(deletes or 0),
+        inserts=None if inserts is None else int(inserts),
+        updates=None if updates is None else int(updates),
+        upserts=None if upserts is None else int(upserts),
+        deletes=int(deletes or 0), table_count=table_count,
         lag_seconds=lag_fields.get("cdc_lag_seconds"),
         lag_bytes=lag_fields.get("replication_lag_bytes"),
         lag_basis=lag_fields.get("cdc_lag_basis"),
@@ -1705,6 +1714,7 @@ def _run_cdc_multi_stream(
                 limit=limit,
                 delivery_guarantee=delivery_guarantee,
                 delivery_pinned=delivery_pinned,
+                workspace_id=workspace_id,
             )
         except Exception as exc:
             from services.cdc_lease import CdcLeaseConflict
@@ -1757,6 +1767,7 @@ def _run_cdc_shared_multi_table(
     limit: int,
     delivery_guarantee: str = "at_least_once",
     delivery_pinned: bool = False,
+    workspace_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """One log consumer for N tables (Debezium-class); demux apply per stream.
 
@@ -2036,6 +2047,7 @@ def _run_cdc_shared_multi_table(
         )
 
     total_rows = 0
+    cycle_counts = {"upserts": 0, "deletes": 0}
     stream_health: dict[str, dict[str, Any]] = {
         t: {"name": t, "status": "running", "records_processed": 0} for t in tables
     }
@@ -2233,6 +2245,8 @@ def _run_cdc_shared_multi_table(
                 )
             chunk_idx += 1
         total_rows += rows_written + deleted
+        cycle_counts["upserts"] += int(rows_written or 0)
+        cycle_counts["deletes"] += int(deleted or 0)
         stream_health[stream]["records_processed"] = (
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
@@ -2415,13 +2429,22 @@ def _run_cdc_shared_multi_table(
             count_source=False,
         )
     lag_fields = _cdc_lag_fields(cdc)
+    shared_watermark = get_watermark(shared_key)
+    _emit_cdc_cycle(
+        job_id=job_id, workspace_id=workspace_id, src_type=src_type,
+        dest_type=dest_type, inserts=None, updates=None,
+        upserts=cycle_counts["upserts"], deletes=cycle_counts["deletes"],
+        lag_fields=lag_fields,
+        delivery="exactly_once" if eos_active else "at-least-once",
+        has_position=shared_watermark is not None, table_count=len(tables),
+    )
     last_summary = dict(last_summary or {})
     last_summary["streams"] = list(stream_health.values())
     last_summary["cursor_key"] = shared_key
     last_summary["cdc"] = {
         "shared_reader": True,
         "tables": tables,
-        "watermark": get_watermark(shared_key),
+        "watermark": shared_watermark,
         "cursor_key": shared_key,
         **lag_fields,
     }
