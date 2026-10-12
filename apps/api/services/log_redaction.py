@@ -131,7 +131,7 @@ def is_sensitive_key(key: object) -> bool:
     return any(stem in normalized for stem in _SENSITIVE_STEMS)
 
 
-def _redacts_value(value: Any) -> bool:
+def is_redactable_value(value: Any) -> bool:
     """Scalars retain their diagnostic value; compound or textual values do not."""
     return not (
         value is None
@@ -156,14 +156,18 @@ def _redact_assignment(match: re.Match[str]) -> str:
         and match.group("value").lower() in {"bearer", "basic"}
     ):
         return match.group(0)
-    return (
-        prefix
-        + REDACTED
+    normalized = re.sub(r"[^a-z0-9]", "", match.group("key").lower())
+    numeric_value = re.fullmatch(r"\d+(?:\.\d+)?", match.group("value"))
+    numeric_secret_key = normalized in _SENSITIVE_EXACT or any(
+        stem in normalized for stem in ("password", "passwd", "pwd", "secret", "pin")
     )
+    if numeric_value and not numeric_secret_key:
+        return match.group(0)
+    return prefix + REDACTED
 
 
-def redact_log_text(value: str) -> str:
-    """Redact common credentials from a free-form log line without raising."""
+def redact_secret_shapes(value: str) -> str:
+    """Redact recognized secret shapes without interpreting arbitrary assignments."""
     try:
         redacted = value if isinstance(value, str) else str(value)
         redacted = _BEARER_OR_BASIC.sub(r"\1 ***", redacted)
@@ -173,14 +177,22 @@ def redact_log_text(value: str) -> str:
             redacted = pattern.sub(r"\1/***", redacted)
         redacted = _URI_USERINFO.sub(r"\1***\2", redacted)
         redacted = _SENSITIVE_QUERY.sub(r"\1***", redacted)
-        return _KEY_VALUE_ASSIGNMENT.sub(_redact_assignment, redacted)
+        return redacted
+    except Exception:
+        return REDACTED
+
+
+def redact_log_text(value: str) -> str:
+    """Redact common credentials from a free-form log line without raising."""
+    try:
+        return _KEY_VALUE_ASSIGNMENT.sub(_redact_assignment, redact_secret_shapes(value))
     except Exception:
         return REDACTED
 
 
 def redact_log_value(key: object, value: Any) -> Any:
     """Redact a structured value recursively using its field name as context."""
-    if is_sensitive_key(key) and _redacts_value(value):
+    if is_sensitive_key(key) and is_redactable_value(value):
         return REDACTED
     if isinstance(value, str):
         return redact_log_text(value)

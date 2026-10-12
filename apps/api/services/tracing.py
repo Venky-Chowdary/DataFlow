@@ -36,7 +36,11 @@ from contextvars import ContextVar
 from typing import Any, Iterator
 
 from services.brand_env import getenv_brand
-from services.log_redaction import _redacts_value, is_sensitive_key, redact_log_text
+from services.log_redaction import (
+    is_redactable_value,
+    is_sensitive_key,
+    redact_log_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +164,7 @@ def redact_attributes(attrs: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     out: dict[str, Any] = {}
     for key, value in attrs.items():
-        if is_sensitive_key(key) and _redacts_value(value):
+        if is_sensitive_key(key) and is_redactable_value(value):
             out[str(key)] = "***"
             continue
         if isinstance(value, str):

@@ -207,7 +207,7 @@ def test_sensitive_key_predicate_uses_normalization_and_safe_suffixes(key, expec
     ),
 )
 def test_sensitive_value_rule_preserves_scalars(value, expected):
-    assert log_redaction._redacts_value(value) is expected
+    assert log_redaction.is_redactable_value(value) is expected
 
 
 @pytest.mark.parametrize(("name", "template"), TEXT_CASES, ids=[case[0] for case in TEXT_CASES])
@@ -227,6 +227,13 @@ def test_authorization_header_keeps_scheme_and_masks_credential(scheme):
         log_redaction.redact_log_text(f"Authorization: {scheme} {sentinel}")
         == f"Authorization: {scheme} ***"
     )
+
+
+def test_secret_shapes_redaction_does_not_interpret_field_assignments():
+    resource = "api_key:key-123"
+
+    assert log_redaction.redact_secret_shapes(resource) == resource
+    assert log_redaction.redact_log_text(resource) == "api_key:***"
 
 
 def test_recursive_log_value_redaction_handles_bytes_tuples_and_non_string_keys():
@@ -250,6 +257,27 @@ def test_safe_values_and_text_remain_unchanged_across_redaction_helpers():
     for value in SAFE_TEXT:
         assert log_redaction.redact_log_text(value) == value
         assert audit_log._redact(value) == value
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("tokens: 1234", "tokens: 1234"),
+        ("tokens: 12.5", "tokens: 12.5"),
+        ("prompt_tokens=50", "prompt_tokens=50"),
+        ("completion_tokens: 7", "completion_tokens: 7"),
+        ("LLM used tokens: 1234", "LLM used tokens: 1234"),
+        ("token_pin=123", "token_pin=***"),
+        ("password=1234", "password=***"),
+        ("pwd=9876", "pwd=***"),
+        ("token=42", "token=***"),
+        ("client_secret=123456", "client_secret=***"),
+    ),
+)
+def test_numeric_assignment_counts_are_preserved_but_numeric_secrets_are_redacted(
+    text, expected
+):
+    assert log_redaction.redact_log_text(text) == expected
 
 
 def test_json_formatter_redacts_message_extras_and_exception():
@@ -380,18 +408,63 @@ def test_audit_file_redacts_before_hashing_and_preserves_chain(
 
     event = audit_log.append_audit_event(
         action="redaction.test",
-        resource=f"client_secret={sentinel}",
+        resource="redaction.test",
         details=_audit_details(sentinel),
     )
 
     raw = path.read_text(encoding="utf-8")
     stored = json.loads(raw)
     assert sentinel not in raw
-    assert event["resource"] == "client_secret=***"
+    assert event["resource"] == "redaction.test"
     for key in SENSITIVE_KEYS:
         assert stored["details"]["key_values"][key] == "[REDACTED]"
         assert stored["details"]["nested"]["key_values"][key] == "[REDACTED]"
         assert stored["details"]["rows"][0]["key_values"][key] == "[REDACTED]"
+    assert evidence_chain.verify_chain()["verified"] is True
+    assert evidence_chain.verify_chain()["findings"] == []
+
+
+def test_audit_file_preserves_typed_resource_identifiers(tmp_path, monkeypatch):
+    path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(audit_log, "STORE_PATH", path)
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+    resources = ("api_key:key-123", "scim_token:sa-1", "webhook:wh-1")
+
+    for resource in resources:
+        audit_log.append_audit_event(action="resource.test", resource=resource)
+
+    stored = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [event["resource"] for event in stored] == list(resources)
+    assert evidence_chain.verify_chain()["verified"] is True
+    assert evidence_chain.verify_chain()["findings"] == []
+
+
+def test_audit_file_resource_redacts_secret_shapes_without_losing_chain(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(audit_log, "STORE_PATH", path)
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+    sentinels = tuple(_sentinel() for _ in range(4))
+    resources = (
+        f"postgresql://u:{sentinels[0]}@h/db",
+        f"/cb?code={sentinels[1]}&state=x",
+        f"dfk_{sentinels[2]}",
+        f"Bearer {sentinels[3]}",
+    )
+
+    for resource in resources:
+        audit_log.append_audit_event(action="resource.test", resource=resource)
+
+    raw = path.read_text(encoding="utf-8")
+    stored = [json.loads(line) for line in raw.splitlines()]
+    assert all(sentinel not in raw for sentinel in sentinels)
+    assert [event["resource"] for event in stored] == [
+        "postgresql://u:***@h/db",
+        "/cb?code=***&state=x",
+        "dfk_***",
+        "Bearer ***",
+    ]
     assert evidence_chain.verify_chain()["verified"] is True
     assert evidence_chain.verify_chain()["findings"] == []
 
@@ -426,12 +499,54 @@ def test_audit_mongo_store_receives_redacted_event(tmp_path, monkeypatch):
 
     audit_log.append_audit_event(
         action="redaction.test",
-        resource=f"client_secret={sentinel}",
+        resource="redaction.test",
         details=_audit_details(sentinel),
     )
 
     assert len(collection.docs) == 1
     assert sentinel not in json.dumps(collection.docs[0], default=str)
+
+
+def test_audit_mongo_resource_redacts_secret_shapes(tmp_path, monkeypatch):
+    class _Cursor:
+        def sort(self, *_args, **_kwargs):
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+        def __iter__(self):
+            return iter(())
+
+    class _Collection:
+        def __init__(self):
+            self.docs = []
+
+        def find(self, *_args, **_kwargs):
+            return _Cursor()
+
+        def insert_one(self, document):
+            self.docs.append(document)
+
+    collection = _Collection()
+    monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: collection)
+    monkeypatch.setattr(audit_log, "_maybe_anchor_tip", lambda _event: None)
+    monkeypatch.setattr(audit_log, "_maybe_opportunistic_audit_purge", lambda: None)
+    sentinels = tuple(_sentinel() for _ in range(4))
+    resources = (
+        f"postgresql://u:{sentinels[0]}@h/db",
+        f"/cb?code={sentinels[1]}&state=x",
+        f"dfk_{sentinels[2]}",
+        f"Bearer {sentinels[3]}",
+    )
+
+    for resource in resources:
+        audit_log.append_audit_event(action="resource.test", resource=resource)
+
+    serialized = json.dumps(collection.docs, default=str)
+    assert len(collection.docs) == len(resources)
+    assert all(sentinel not in serialized for sentinel in sentinels)
 
 
 def test_audit_redaction_preserves_list_and_string_caps():

@@ -17,7 +17,12 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from services.log_redaction import _redacts_value, is_sensitive_key, redact_log_text
+from services.log_redaction import (
+    is_redactable_value,
+    is_sensitive_key,
+    redact_log_text,
+    redact_secret_shapes,
+)
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 
@@ -74,7 +79,7 @@ def _redact(value: Any) -> Any:
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for k, v in value.items():
-            if is_sensitive_key(k) and _redacts_value(v):
+            if is_sensitive_key(k) and is_redactable_value(v):
                 out[k] = "[REDACTED]"
             else:
                 out[k] = _redact(v)
@@ -213,7 +218,7 @@ def append_audit_event(
             "time": _now(),
             "actor": actor,
             "action": action,
-            "resource": redact_log_text(resource),
+            "resource": redact_secret_shapes(resource),
             "level": canonical_level(level),
             "correlation_id": correlation_id,
             "workspace_id": ws,
