@@ -84,6 +84,49 @@ def test_claim_and_reclaim_emit_structured_counts(monkeypatch, caplog):
     assert reclaimed.reclaimed_count == 1
 
 
+def test_job_handler_failure_emits_type_only_event(monkeypatch, caplog):
+    from services import worker_fleet
+
+    job_id = "handler-error-event"
+    sentinel = "SENTINEL_HANDLER_EXCEPTION"
+    stop = threading.Event()
+    claimed = False
+
+    class _Lease:
+        def release(self, _job_id):
+            return None
+
+    def _claim(_store, **_kwargs):
+        nonlocal claimed
+        if claimed:
+            return None
+        claimed = True
+        stop.set()
+        return job_id
+
+    def _handler(_job_id):
+        raise RuntimeError(sentinel)
+
+    monkeypatch.setattr(worker_fleet, "WorkerLeaseStore", lambda _worker_id: _Lease())
+    monkeypatch.setattr(worker_fleet, "reclaim_stale_claims", lambda: 0)
+    monkeypatch.setattr(worker_fleet, "claim_next_job", _claim)
+    monkeypatch.setattr(
+        worker_fleet,
+        "_run_with_lease_heartbeat",
+        lambda _store, claimed_job_id, handler, _ttl: handler(claimed_job_id),
+    )
+    monkeypatch.setattr(worker_fleet, "_finish_queue_row", lambda *_args, **_kwargs: None)
+
+    with caplog.at_level("ERROR"):
+        worker_fleet.run_fleet_loop(_handler, stop_event=stop, max_inflight=1)
+
+    error, = _events(caplog, "job.handler.run")
+    assert error.outcome == "errored"
+    assert error.job_id == job_id
+    assert error.error_type == "RuntimeError"
+    assert sentinel not in caplog.text
+
+
 def test_lease_acquire_reports_held_by_other(monkeypatch, caplog):
     monkeypatch.setenv("DATAFLOW_JOB_STORE", "memory")
     a = WorkerLeaseStore("worker-a-event")
