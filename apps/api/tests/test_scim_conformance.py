@@ -313,7 +313,8 @@ def test_scim_mutations_write_private_named_events(scim_client, caplog):
     )
     assert added_member.status_code == 200, added_member.text
     assert add_event["details"]["group_id"] == group_id
-    assert add_event["details"]["member_ids_added"] == [group_member_id]
+    assert add_event["details"]["member_id"] == group_member_id
+    assert add_event["details"]["direction"] == "add"
 
     removed_member, remove_event = _scim_audit_request(
         scim_client,
@@ -332,7 +333,8 @@ def test_scim_mutations_write_private_named_events(scim_client, caplog):
     )
     assert removed_member.status_code == 200, removed_member.text
     assert remove_event["details"]["group_id"] == group_id
-    assert remove_event["details"]["member_ids_removed"] == [group_member_id]
+    assert remove_event["details"]["member_id"] == group_member_id
+    assert remove_event["details"]["direction"] == "remove"
 
     replaced_group, group_replace_event = _scim_audit_request(
         scim_client,
@@ -389,9 +391,7 @@ def test_group_audit_events_carry_request_correlation_and_group_id(scim_client, 
         {group_name.lower(): {"workspace_id": workspace.id, "role": "viewer"}}
     )
     sentinels = [
-        "GROUP_AUDIT_EMAIL_ONE@example.test",
-        "GROUP_AUDIT_EMAIL_TWO@example.test",
-        "GROUP_AUDIT_EMAIL_THREE@example.test",
+        *(f"GROUP_AUDIT_EMAIL_{index}@example.test" for index in range(6)),
         "GROUP_AUDIT_GIVENNAME",
         "GROUP_AUDIT_PHONE",
     ]
@@ -403,7 +403,7 @@ def test_group_audit_events_carry_request_correlation_and_group_id(scim_client, 
             name={"givenName": sentinels[3]},
             phoneNumbers=[{"value": sentinels[4]}],
         ).json()
-        for index in range(3)
+        for index in range(6)
     ]
 
     def request_with_events(method, path, expected_status, payload=None):
@@ -434,6 +434,31 @@ def test_group_audit_events_carry_request_correlation_and_group_id(scim_client, 
             assert event["details"]["group_id"] == group_id
             assert event["actor_type"] == "scim"
 
+    def assert_member_events(events, group_id, expected_members):
+        member_events = [
+            event
+            for event in events
+            if event["action"]
+            in {"scim.group.member_add", "scim.group.member_remove"}
+        ]
+        expected = sorted(expected_members)
+        actual = sorted(
+            (
+                event["details"]["member_id"],
+                event["details"]["direction"],
+            )
+            for event in member_events
+        )
+        assert actual == expected
+        for event in member_events:
+            member_id = event["details"]["member_id"]
+            direction = event["details"]["direction"]
+            assert event["details"] == {
+                "group_id": group_id,
+                "member_id": member_id,
+                "direction": direction,
+            }
+
     created, create_correlation, create_events = request_with_events(
         "POST",
         "/api/v1/scim/v2/Groups",
@@ -451,8 +476,36 @@ def test_group_audit_events_carry_request_correlation_and_group_id(scim_client, 
         create_events,
         create_correlation,
         group_id,
-        ["scim.group.create", "scim.group.member_add"],
+        ["scim.group.create", "scim.group.member_add", "scim.group.member_add"],
     )
+    assert_member_events(
+        create_events,
+        group_id,
+        [(members[0]["id"], "add"), (members[1]["id"], "add")],
+    )
+
+    added, add_correlation, add_events = request_with_events(
+        "PATCH",
+        f"/api/v1/scim/v2/Groups/{group_id}",
+        200,
+        {
+            "Operations": [
+                {
+                    "op": "add",
+                    "path": "members",
+                    "value": [{"value": members[2]["id"]}],
+                }
+            ]
+        },
+    )
+    assert added.json()["id"] == group_id
+    assert_group_events(
+        add_events,
+        add_correlation,
+        group_id,
+        ["scim.group.member_add"],
+    )
+    assert_member_events(add_events, group_id, [(members[2]["id"], "add")])
 
     scim_store.set_group_mappings(
         {group_name.lower(): {"workspace_id": workspace.id, "role": "editor"}}
@@ -466,12 +519,16 @@ def test_group_audit_events_carry_request_correlation_and_group_id(scim_client, 
                 {
                     "op": "add",
                     "path": "members",
-                    "value": [{"value": members[2]["id"]}],
+                    "value": [
+                        {"value": members[index]["id"]} for index in (3, 4, 5)
+                    ],
                 },
                 {
                     "op": "remove",
                     "path": "members",
-                    "value": [{"value": members[1]["id"]}],
+                    "value": [
+                        {"value": members[index]["id"]} for index in (0, 1)
+                    ],
                 },
             ]
         },
@@ -484,8 +541,19 @@ def test_group_audit_events_carry_request_correlation_and_group_id(scim_client, 
         [
             "scim.group.role_change",
             "scim.group.member_add",
+            "scim.group.member_add",
+            "scim.group.member_add",
+            "scim.group.member_remove",
             "scim.group.member_remove",
         ],
+    )
+    assert_member_events(
+        patch_events,
+        group_id,
+        [
+            (members[index]["id"], "add") for index in (3, 4, 5)
+        ]
+        + [(members[index]["id"], "remove") for index in (0, 1)],
     )
 
     deleted, delete_correlation, delete_events = request_with_events(
@@ -498,7 +566,18 @@ def test_group_audit_events_carry_request_correlation_and_group_id(scim_client, 
         delete_events,
         delete_correlation,
         group_id,
-        ["scim.group.member_remove", "scim.group.delete"],
+        [
+            "scim.group.member_remove",
+            "scim.group.member_remove",
+            "scim.group.member_remove",
+            "scim.group.member_remove",
+            "scim.group.delete",
+        ],
+    )
+    assert_member_events(
+        delete_events,
+        group_id,
+        [(members[index]["id"], "remove") for index in (2, 3, 4, 5)],
     )
 
     audit_bytes = audit_log.STORE_PATH.read_bytes()

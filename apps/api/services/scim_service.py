@@ -800,19 +800,27 @@ def _apply_group_members_locked(
     group["members"] = proposed
     saved = _store_call(scim_store.update_group, group)
     _store_call(scim_store.set_managed_memberships, managed)
-    if added := sorted(set(proposed) - previous):
+    for member_id in sorted(set(proposed) - previous):
         _audit(
             "scim.group.member_add",
             actor=actor,
             resource=f"scim_group:{group['id']}",
-            details={"group_id": group["id"], "member_ids_added": added},
+            details={
+                "group_id": group["id"],
+                "member_id": member_id,
+                "direction": "add",
+            },
         )
-    if removed := sorted(previous - set(proposed)):
+    for member_id in sorted(previous - set(proposed)):
         _audit(
             "scim.group.member_remove",
             actor=actor,
             resource=f"scim_group:{group['id']}",
-            details={"group_id": group["id"], "member_ids_removed": removed},
+            details={
+                "group_id": group["id"],
+                "member_id": member_id,
+                "direction": "remove",
+            },
         )
     return saved
 
