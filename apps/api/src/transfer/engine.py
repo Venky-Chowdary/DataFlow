@@ -27,7 +27,6 @@ _engine_module = sys.modules[__name__]
 
 try:
     from services import lineage_telemetry as lineage
-    from services.connector_telemetry import log_retry
     from services.error_handling import (
         FullRefreshDropFailed,  # noqa: F401
         RetryBudget,
@@ -193,24 +192,10 @@ from services.checkpoint_service import (
 )
 from src.transfer.resume_state import resolve_resume_checkpoint
 
-from services.ops_events import CANCELLATION_ERRORS, emit_event
+from . import lifecycle_events
 
 logger = logging.getLogger("dataflow.transfer")
 
-
-def _run_event_fields(request: TransferRequest, job_id: str, resume: bool) -> dict[str, Any]:
-    """Bounded descriptors for transfer lifecycle events — never object names."""
-    return {
-        "job_id": job_id,
-        "workspace_id": request.workspace_id or None,
-        "operation": request.operation or None,
-        "source_kind": request.source.kind or None,
-        "source_type": request.source.format or None,
-        "destination_kind": request.destination.kind or None,
-        "destination_type": request.destination.format or None,
-        "sync_mode": request.sync_mode or None,
-        "resume": bool(resume),
-    }
 
 from src.transfer.reconcile_heartbeat import (  # noqa: E402
     reconcile_heartbeat_scope as _reconcile_heartbeat_scope,
@@ -1439,24 +1424,15 @@ class UniversalTransferEngine:
             hydrate_file_source(request)
         # Create-new invention needs the source engine to keep Unicode polarity
         # (PostgreSQL VARCHAR → SQL Server NVARCHAR, not code-page VARCHAR).
-        fields = _run_event_fields(request, job_id, resume)
         started = time.monotonic()
-        emit_event(logger, "transfer.run.started", outcome="started", **fields)
+        fields = lifecycle_events.emit_run_started(logger, request, job_id, resume)
         try:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
             ):
                 result = self._execute_tracked_inner(request, job_id, resume=resume)
         except BaseException as exc:
-            cancelled = isinstance(exc, CANCELLATION_ERRORS)
-            emit_event(
-                logger,
-                "transfer.run.cancelled" if cancelled else "transfer.run.failed",
-                outcome="cancelled" if cancelled else "errored",
-                duration_ms=(time.monotonic() - started) * 1000.0,
-                error=exc,
-                **fields,
-            )
+            lifecycle_events.emit_run_exception(logger, fields, started, exc)
             raise
         try:
             written = int(
@@ -1480,15 +1456,7 @@ class UniversalTransferEngine:
                 clear_auto_create_job(job_id)
         except Exception:
             logger.debug("auto_create finalize failed", exc_info=True)
-        succeeded = bool(getattr(result, "success", False))
-        emit_event(
-            logger,
-            "transfer.run.succeeded" if succeeded else "transfer.run.failed",
-            outcome="succeeded" if succeeded else "failed",
-            duration_ms=(time.monotonic() - started) * 1000.0,
-            records_transferred=int(getattr(result, "records_transferred", 0) or 0),
-            **fields,
-        )
+        lifecycle_events.emit_run_finished(logger, fields, started, result)
         return result
 
     def _execute_tracked_inner(
@@ -2118,10 +2086,8 @@ class UniversalTransferEngine:
             records, columns, schema = with_retry(
                 lambda: self._read_source(request),
                 budget=read_budget,
-                on_transient=log_retry(
-                    "source_read",
-                    driver_family=request.source.format or request.source.kind,
-                    budget=read_budget,
+                on_transient=lifecycle_events.source_read_retry_callback(
+                    request, read_budget
                 ),
             )
             schema = _authoritative_source_schema(request.source, schema, columns)
@@ -5314,14 +5280,9 @@ class UniversalTransferEngine:
         # double submit is told about the in-flight job instead of starting a
         # second writer against the same destination table.
         claim = self._claim_idempotency(request, job_doc)
-        request_fields = _run_event_fields(request, "", False)
-        request_fields.pop("job_id")
-        request_fields.pop("resume")
+        request_fields = lifecycle_events.job_requested_fields(request)
         if claim is not None and claim.duplicate:
-            emit_event(
-                logger, "job.requested", outcome="skipped",
-                reason="duplicate_submission", **request_fields,
-            )
+            lifecycle_events.emit_job_requested_skipped(logger, request_fields)
             raise DuplicateTransferSubmission(claim)
 
         try:
@@ -5352,9 +5313,8 @@ class UniversalTransferEngine:
             mark_used(job_doc.get("source_connector_id"), job_doc.get("dest_connector_id"))
         except Exception as used_exc:
             logger.debug("mark_used after job create skipped: %s", used_exc)
-        emit_event(
-            logger, "job.requested", outcome="succeeded", job_id=str(job_id),
-            triggered_by_set=bool(job_doc.get("triggered_by")), **request_fields,
+        lifecycle_events.emit_job_requested_succeeded(
+            logger, str(job_id), bool(job_doc.get("triggered_by")), request_fields
         )
         return job_id
 
