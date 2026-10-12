@@ -449,6 +449,7 @@ def _sign_required_risk_contracts(
     acceptance: dict[str, Any],
     *,
     table: str,
+    force_columns: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Sign a continue-policy contract only on mappings a gate already requires.
 
@@ -463,6 +464,7 @@ def _sign_required_risk_contracts(
         mapping_requires_risk_contract,
     )
     from services.decision_kernel import is_lossy_coercion
+    from services.type_coercion import is_precision_collapse_coercion
     from services.migration_risk_contract import (
         CONTINUE_POLICIES,
         create_migration_risk_contract,
@@ -503,21 +505,37 @@ def _sign_required_risk_contracts(
         for c in (acceptance.get("columns") or [])
         if str(c or "").strip()
     }
+    forced = {str(c).strip() for c in (force_columns or set()) if str(c).strip()}
     out: list[dict[str, Any]] = []
     signed = 0
     for raw in mappings or []:
         row = dict(raw)
         source = str(row.get("source") or "")
         target = str(row.get("target") or "")
-        if named and source not in named and target not in named:
+        in_force = bool(forced) and (source in forced or target in forced)
+        if named and source not in named and target not in named and not in_force:
             out.append(row)
             continue
-        src_t = str(row.get("source_type") or "")
-        tgt_t = str(row.get("target_type") or "")
+        src_t = str(row.get("source_type") or row.get("sourceType") or "")
+        tgt_t = str(row.get("target_type") or row.get("targetType") or "")
+        fidelity = str(row.get("fidelity") or "").strip().lower()
         needs = mapping_requires_risk_contract(row) or mapping_is_structural_review(row)
+        needs = needs or fidelity in {"lossy_cast", "cast", "mutate", "narrow", "lossy"}
+        needs = needs or in_force
         if src_t and tgt_t:
             needs = needs or bool(is_lossy_coercion(src_t, tgt_t))
-        if not needs or row.get("risk_contract") or row.get("riskContract"):
+            needs = needs or bool(is_precision_collapse_coercion(src_t, tgt_t))
+        already = row.get("risk_contract") or row.get("riskContract")
+        if already and not in_force:
+            out.append(row)
+            continue
+        if already and in_force:
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            if mapping_has_clearing_risk_contract(row):
+                out.append(row)
+                continue
+        if not needs:
             out.append(row)
             continue
         contract = create_migration_risk_contract(
@@ -537,12 +555,59 @@ def _sign_required_risk_contracts(
         row["risk_contract"] = contract.to_dict()
         signed += 1
         out.append(row)
-    if named and signed == 0:
+    if named and signed == 0 and forced:
         raise ValueError(
             "risk_acceptance named columns that do not require a Migration Risk Contract. "
             "Nothing was signed."
         )
     return out
+
+
+def _apply_column_transforms(
+    mappings: list[dict[str, Any]],
+    column_transforms: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Stamp operator transforms onto the mapping the writer will run.
+
+    Replay was the only tool that accepted a transform (QA R2-060).
+    """
+    if not isinstance(column_transforms, dict) or not column_transforms:
+        return list(mappings or [])
+    out: list[dict[str, Any]] = []
+    for raw in mappings or []:
+        row = dict(raw)
+        source = str(row.get("source") or "")
+        target = str(row.get("target") or "")
+        spec = column_transforms.get(source)
+        if spec is None:
+            spec = column_transforms.get(target)
+        if spec is not None and str(spec).strip():
+            row["transform"] = str(spec).strip()
+            row["transform_override"] = True
+        out.append(row)
+    return out
+
+
+def _fidelity_columns_from_preflight(preflight: dict[str, Any], mappings: list[dict[str, Any]]) -> set[str]:
+    """Columns a blocked preflight is still talking about."""
+    blob_parts: list[str] = []
+    for bucket in ("blockers", "gates"):
+        for item in preflight.get(bucket) or []:
+            if not isinstance(item, dict):
+                continue
+            blob_parts.append(str(item.get("message") or ""))
+            details = item.get("details") or {}
+            if isinstance(details, dict):
+                for issue in details.get("issues") or []:
+                    blob_parts.append(str(issue))
+    blob = " \n ".join(blob_parts)
+    found: set[str] = set()
+    for row in mappings or []:
+        for key in ("source", "target"):
+            name = str(row.get(key) or "")
+            if name and name in blob:
+                found.add(name)
+    return found
 
 
 def _plan_source_types_authoritative(
@@ -598,6 +663,8 @@ def plan_transfer(
     all_tables: bool = False,
     risk_acceptance: dict[str, Any] | None = None,
     pii_acknowledgement: dict[str, Any] | None = None,
+    column_transforms: dict[str, Any] | None = None,
+    schema_drift_acknowledged: bool = False,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -805,6 +872,7 @@ def plan_transfer(
         use_llm=False,
     )
     mappings = list(mapping.get("mappings") or [])
+    mappings = _apply_column_transforms(mappings, column_transforms)
     if zone_columns:
         mappings = stamp_zone_transform(mappings, source_timezone, zone_columns)
 
@@ -835,45 +903,59 @@ def plan_transfer(
     except ValueError as exc:
         return _tool_result(tool, success=False, error=str(exc))
 
-    if risk_acceptance:
-        try:
-            mappings = _sign_required_risk_contracts(
-                mappings,
-                risk_acceptance,
-                table=dst_table,
-            )
-        except ValueError as exc:
-            return _tool_result(tool, success=False, error=str(exc))
+    blocked_for_contract: set[str] = set()
+    preflight: dict[str, Any] = {}
+    for _contract_pass in (1, 2):
+        if risk_acceptance:
+            try:
+                mappings = _sign_required_risk_contracts(
+                    mappings,
+                    risk_acceptance,
+                    table=dst_table,
+                    force_columns=blocked_for_contract or None,
+                )
+            except ValueError as exc:
+                return _tool_result(tool, success=False, error=str(exc))
 
-    preflight = _run_preflight(
-        src_conn=src_conn,
-        dst_conn=dst_conn,
-        src_table=src_table,
-        dst_table=dst_table,
-        src_rows=src_rows,
-        sample_rows=sample_rows,
-        mappings=mappings,
-        mode=mode,
-        schema_policy=schema_policy,
-        validation_mode=validation_mode,
-        src_db_type=str(src_info.get("db_type") or ""),
-        source_config=_stamp_callable_source_config(
-            _endpoint_dict(src_info.get("endpoint")),
-            callable_plan,
-        ),
-        dest_db_type=str(dst_info.get("db_type") or ""),
-        dest_exists=dest_exists,
-        source_primary_key=(
-            _primary_key_csv(contracts[0].get("primary_key"))
-            if contracts
-            else _source_primary_key(src_info)
-        ),
-        write_via_staging=bool(write_via_staging),
-        source_read_mode=str((callable_plan or {}).get("mode") or ""),
-        source_filter=row_rules["source_filter"] or None,
-        stream_contracts=row_rules["stream_contracts"] or None,
-        pii_ack=pii_ack,
-    )
+        preflight = _run_preflight(
+            src_conn=src_conn,
+            dst_conn=dst_conn,
+            src_table=src_table,
+            dst_table=dst_table,
+            src_rows=src_rows,
+            sample_rows=sample_rows,
+            mappings=mappings,
+            mode=mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            src_db_type=str(src_info.get("db_type") or ""),
+            source_config=_stamp_callable_source_config(
+                _endpoint_dict(src_info.get("endpoint")),
+                callable_plan,
+            ),
+            dest_db_type=str(dst_info.get("db_type") or ""),
+            dest_exists=dest_exists,
+            source_primary_key=(
+                _primary_key_csv(contracts[0].get("primary_key"))
+                if contracts
+                else _source_primary_key(src_info)
+            ),
+            write_via_staging=bool(write_via_staging),
+            source_read_mode=str((callable_plan or {}).get("mode") or ""),
+            source_filter=row_rules["source_filter"] or None,
+            stream_contracts=row_rules["stream_contracts"] or None,
+            pii_ack=pii_ack,
+            schema_drift_acknowledged=bool(schema_drift_acknowledged),
+        )
+        if (
+            _contract_pass == 2
+            or not risk_acceptance
+            or _is_execute_cleared(preflight)
+        ):
+            break
+        blocked_for_contract = _fidelity_columns_from_preflight(preflight, mappings)
+        if not blocked_for_contract:
+            break
 
     contract_refusal = _plan_contract_refusal(
         contract_id,
@@ -933,6 +1015,19 @@ def plan_transfer(
             "engine_mappings": mappings,
             "column_types": {r["name"]: r["inferred_type"] for r in src_rows},
             "sync_mode": mode,
+            "sync_mode_requested": (sync_mode or "").strip(),
+            **(
+                {
+                    "sync_mode_alias_note": (
+                        f"{(sync_mode or '').strip()} and {mode} are the same "
+                        "upsert write, not a second copy."
+                    )
+                }
+                if (sync_mode or "").strip()
+                and (sync_mode or "").strip().lower().replace("-", "_").replace(" ", "_")
+                != mode
+                else {}
+            ),
             "schema_policy": schema_policy,
             "validation_mode": validation_mode,
             "source_filter": row_rules["source_filter"],
@@ -1334,6 +1429,7 @@ def _run_preflight(
     source_kind: str = "database",
     known_row_count: int | None = None,
     pii_ack: dict[str, str] | None = None,
+    schema_drift_acknowledged: bool = False,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.preflight_run_store import save_preflight_run
@@ -1485,6 +1581,17 @@ def _run_preflight(
             compliance_acknowledged=bool(pii_ack),
             acknowledgment_actor=(pii_ack or {}).get("approved_by", ""),
             acknowledgment_reason=(pii_ack or {}).get("reason", ""),
+            schema_drift_acknowledged=bool(schema_drift_acknowledged),
+            rows_are_population=(
+                (source_read_mode or "").strip().lower() in {"query", "procedure"}
+                and not sample_rows
+            ),
+            population_rows=(
+                []
+                if (source_read_mode or "").strip().lower() in {"query", "procedure"}
+                and not sample_rows
+                else None
+            ),
         )
         result = apply_policy_gates(
             result,
@@ -1840,6 +1947,8 @@ def start_transfer(
     all_tables: bool = False,
     risk_acceptance: dict[str, Any] | None = None,
     pii_acknowledgement: dict[str, Any] | None = None,
+    column_transforms: dict[str, Any] | None = None,
+    schema_drift_acknowledged: bool = False,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -1870,6 +1979,8 @@ def start_transfer(
         all_tables=all_tables,
         risk_acceptance=risk_acceptance,
         pii_acknowledgement=pii_acknowledgement,
+        column_transforms=column_transforms,
+        schema_drift_acknowledged=schema_drift_acknowledged,
         # The plan evaluates the bound contract against this route (QA MX3-18).
         contract_id=contract_id,
         require_signed_contract=require_signed_contract,
@@ -1969,6 +2080,7 @@ def start_transfer(
         # Chat can never turn the gates off.
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
+        "schema_drift_acknowledged": bool(schema_drift_acknowledged),
     }
     pii_ack = _pii_acknowledgement(pii_acknowledgement)
     if pii_ack:

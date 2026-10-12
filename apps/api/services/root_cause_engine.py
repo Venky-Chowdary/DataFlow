@@ -1002,6 +1002,64 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 )
             )
 
+    # A source type change (text → int) is schema drift. Reporting it as
+    # mapping confidence sent the operator to Map approve (QA R2-078).
+    type_changes: list[dict[str, Any]] = []
+    for item in [*blockers, *[g for g in gates if g.get("status") == "block"]]:
+        if str(item.get("id") or "") != "schema_drift":
+            continue
+        evolution = (item.get("details") or {}).get("schema_evolution") or {}
+        for change in evolution.get("breaking") or []:
+            if isinstance(change, dict) and change.get("kind") == "type_change":
+                type_changes.append(change)
+    type_change_columns = {
+        str(change.get("column") or "")
+        for change in type_changes
+        if change.get("column")
+    }
+    if type_changes:
+        described = "; ".join(
+            f"{c.get('column')} {c.get('old_type')} → {c.get('new_type')}"
+            for c in type_changes[:5]
+        )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id(
+                    "schema_type_drift",
+                    sorted(type_change_columns),
+                    ["schema_drift"],
+                ),
+                kind="schema_type_drift",
+                title="Schema type change",
+                summary=f"Type drift: {described}.",
+                business_impact=(
+                    "The source column's type changed. Execute stays locked until "
+                    "the mapping is remapped or the drift is acknowledged."
+                ),
+                affected_columns=sorted(type_change_columns),
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    "Acknowledge schema drift (schema_drift_acknowledged) if the "
+                    "new type should load as-is, or remap the column to a carrier "
+                    "that preserves the new type, then re-Validate."
+                ),
+                alternative_fixes=[
+                    "Revert the source column to the previous type",
+                    "Set schema_policy to pause_on_change and fix the source first",
+                ],
+                recovery_strategy="Acknowledge or remap, then re-Validate. Nothing was written.",
+                expected_runtime_impact="Re-Validate only",
+                quarantine_policy="n/a — no rows moved",
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                impacted_gates=["schema_drift"],
+                absorbed_blocker_ids=["schema_drift"],
+                severity="block",
+            )
+        )
+
     # Module 3: mapping confidence — G4 is sole hard authority (not proof/G9).
     conf_gates = [
         g
@@ -1083,6 +1141,8 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 severity="block",
             )
         )
+        if type_change_columns and (not cols or set(cols) <= type_change_columns):
+            roots.pop()
 
     # Sample transform / cast failures (empty url, bad decimal, …) — own root.
     # Must not be framed as Lossy / fidelity collapse after TEXT→INTEGER contracts.
@@ -1628,9 +1688,14 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 "before any rows moved."
             )
         )
+        # The issue text is part of the id. Empty columns made every g9
+        # failure share rc-sync-contract-incomplete-c29ba4643b58, including
+        # "CDC is not supported on sqlite" (QA RT5-11 / TC41).
         roots.append(
             MigrationRootCause(
-                root_id=_root_id("sync_contract_incomplete", [], absorbed),
+                root_id=_root_id(
+                    "sync_contract_incomplete", contract_issues[:3], absorbed
+                ),
                 kind="sync_contract_incomplete",
                 title="Sync contract incomplete",
                 summary=contract_summary,
@@ -1645,8 +1710,12 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 recommended_fix=(
                     contract_fixes[0]
                     if contract_fixes
-                    else "Open Sync → identity settings → choose the primary key "
-                    "(and cursor column for incremental), then re-Validate."
+                    else (
+                        contract_issues[0]
+                        if contract_issues
+                        else "Open Sync → identity settings → choose the primary key "
+                        "(and cursor column for incremental), then re-Validate."
+                    )
                 ),
                 alternative_fixes=[
                     *contract_fixes[1:3],

@@ -566,6 +566,11 @@ def classify_value(value: str, *, field_name: str | None = None) -> str:
         except ValueError:
             continue
 
+    # '45%' is a percentage token. Stripping the marker and inferring INTEGER
+    # then blocks the same value as a lossy cast (QA R2-017). Keep the text.
+    if s.rstrip().endswith("%"):
+        return "VARCHAR"
+
     decimal_parsed = _parse_decimal(s)
     if decimal_parsed is not None:
         from services.transform_engine import numeric_text_without_markers

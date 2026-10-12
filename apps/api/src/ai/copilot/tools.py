@@ -228,8 +228,22 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "get_transfer_capabilities",
-        "description": "Show supported source→destination transfer combinations.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": (
+            "Show supported source→destination transfer combinations. "
+            "The default is a short summary (counts and driver lists). "
+            "Pass detail=full only when the complete route matrix is required."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "type": "string",
+                    "enum": ["summary", "full"],
+                    "description": "summary (default) omits the route matrix; full returns every combination",
+                },
+            },
+            "required": [],
+        },
     },
     {
         "name": "navigate",
@@ -504,6 +518,19 @@ TOOL_DEFINITIONS: list[dict] = [
                         "compliance_acknowledged + acknowledgment_actor/reason."
                     ),
                 },
+                "column_transforms": {
+                    "type": "object",
+                    "description": (
+                        "Per-column transforms keyed by source or target column. "
+                        "Applied on the planned mapping as an operator override."
+                    ),
+                },
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Acknowledge a schema_drift review block so the plan can clear."
+                    ),
+                },
             },
             "required": [],
         },
@@ -595,6 +622,22 @@ TOOL_DEFINITIONS: list[dict] = [
                         "(the finding names the columns and rule). Requires "
                         "approved_by and reason; recorded on the job as "
                         "compliance_acknowledged + acknowledgment_actor/reason."
+                    ),
+                },
+                "column_transforms": {
+                    "type": "object",
+                    "description": (
+                        "Per-column transforms applied on the load, keyed by "
+                        "source or target column name. Example: {\"email\": \"hash_pii\"}. "
+                        "Stamped as an operator override, not only on quarantine replay."
+                    ),
+                },
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Acknowledge a schema_drift block (type change or new "
+                        "columns under manual_review) so Validate can proceed. "
+                        "The acknowledgement is recorded on the transfer."
                     ),
                 },
             },
@@ -769,6 +812,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "contract_id": {"type": "string"},
                 "require_signed_contract": {"type": "boolean"},
+                "column_transforms": {
+                    "type": "object",
+                    "description": (
+                        "Per-column transforms stored on the schedule mapping, "
+                        "keyed by source or target column. Applied on every run, "
+                        "not only on quarantine replay."
+                    ),
+                },
             },
             "required": ["cadence"],
         },
@@ -2008,9 +2059,21 @@ class DataPilotTools:
             },
         )
 
-    def _get_capabilities(self) -> ToolResult:
+    def _get_capabilities(self, detail: str = "summary") -> ToolResult:
         from ...transfer.registry import get_capabilities
-        return ToolResult(name="get_transfer_capabilities", success=True, output=get_capabilities())
+
+        full = get_capabilities()
+        if str(detail or "").strip().lower() in {"full", "all", "verbose"}:
+            return ToolResult(name="get_transfer_capabilities", success=True, output=full)
+        combos = list(full.get("live_combinations") or [])
+        summary = {k: v for k, v in full.items() if k != "live_combinations"}
+        summary["detail"] = "summary"
+        summary["live_combination_count"] = len(combos)
+        summary["full_detail"] = (
+            "Pass detail=full to receive every source×destination combination. "
+            "The default summary omits that matrix."
+        )
+        return ToolResult(name="get_transfer_capabilities", success=True, output=summary)
 
     def _navigate(self, screen: str = "dashboard") -> ToolResult:
         # Alias product labels → Screen ids
@@ -2818,6 +2881,13 @@ class DataPilotTools:
         elif has_cursor and has_primary_key and needs_history:
             mode = "Incremental Append + Deduped"
             reason = "Cursor and key allow efficient updates while preserving change history."
+        elif has_primary_key and mentions_update:
+            mode = "Incremental Upsert"
+            reason = (
+                "The workload updates existing rows and a primary key is present. "
+                "Incremental append would insert a second copy of each changed row. "
+                "Incremental upsert updates the destination row in place."
+            )
         elif mentions_delete and has_primary_key:
             mode = "Mirror"
             reason = (
@@ -3051,6 +3121,14 @@ class DataPilotTools:
             "last_run_at": s.last_run_at,
             "last_status": s.last_status,
             "run_count": s.run_count,
+            "missed_window_count": int(getattr(s, "missed_window_count", 0) or 0),
+            "last_missed_windows": int(getattr(s, "last_missed_windows", 0) or 0),
+            # One overdue slot fires after resume. Extra missed windows are
+            # counted on the schedule and are not replayed (QA R2-115).
+            "catch_up_policy": (
+                "Resume keeps a past next_run_at so the beat fires one catch-up. "
+                "Further missed windows are counted and not replayed."
+            ),
         }
         validation_mode = str(getattr(s, "validation_mode", "") or "").strip()
         schema_policy = str(getattr(s, "schema_policy", "") or "").strip()
@@ -3491,6 +3569,8 @@ class DataPilotTools:
         limit: int = 0,
         risk_acceptance: dict | None = None,
         pii_acknowledgement: dict | None = None,
+        column_transforms: dict | None = None,
+        schema_drift_acknowledged: bool = False,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -3523,6 +3603,8 @@ class DataPilotTools:
             all_tables=all_tables,
             risk_acceptance=risk_acceptance,
             pii_acknowledgement=pii_acknowledgement,
+            column_transforms=column_transforms,
+            schema_drift_acknowledged=schema_drift_acknowledged,
         )
 
     def _start_transfer(
@@ -3556,6 +3638,8 @@ class DataPilotTools:
         all_tables: bool = False,
         risk_acceptance: dict | None = None,
         pii_acknowledgement: dict | None = None,
+        column_transforms: dict | None = None,
+        schema_drift_acknowledged: bool = False,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -3589,6 +3673,8 @@ class DataPilotTools:
             all_tables=all_tables,
             risk_acceptance=risk_acceptance,
             pii_acknowledgement=pii_acknowledgement,
+            column_transforms=column_transforms,
+            schema_drift_acknowledged=schema_drift_acknowledged,
         )
 
     def _start_dataset_transfer(
@@ -3652,6 +3738,7 @@ class DataPilotTools:
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         limit: int = 0,
+        column_transforms: dict | None = None,
     ) -> ToolResult:
         from .schedule_tools import create_schedule
 
@@ -3683,6 +3770,7 @@ class DataPilotTools:
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             limit=limit,
+            column_transforms=column_transforms,
         )
 
     def _analyze_result(

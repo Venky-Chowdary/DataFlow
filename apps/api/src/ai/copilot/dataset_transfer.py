@@ -145,7 +145,35 @@ def stage_dataset_transfer(
 
     from .data_analyst import get_data_analyst
 
-    schema = get_data_analyst().resolve_dataset(hint)
+    analyst = get_data_analyst()
+    feeder = getattr(analyst, "feeder", None)
+    schemas = list(feeder.feed_all() or []) if feeder is not None and hasattr(feeder, "feed_all") else []
+    if schemas:
+        from services.dataset_resolve import exact_datasets
+
+        matches = exact_datasets(schemas, hint)
+        shapes = {
+            (
+                (getattr(s, "file_type", "") or "").lower(),
+                tuple(getattr(s, "columns", []) or []),
+            )
+            for s in matches
+        }
+        if len(matches) > 1 and len(shapes) > 1:
+            listed = ", ".join(
+                f"{getattr(s, 'name', '')}.{getattr(s, 'file_type', '') or 'file'} "
+                f"({len(getattr(s, 'columns', []) or [])} columns)"
+                for s in matches
+            )
+            return _tool_result(
+                tool,
+                success=False,
+                error=(
+                    f"More than one dataset is named {hint}. "
+                    f"Name the file: {listed}."
+                ),
+            )
+    schema = analyst.resolve_dataset(hint)
     if schema is None or getattr(schema, "source", "") != "upload" or not getattr(schema, "path", ""):
         found = getattr(schema, "name", "") if schema is not None else ""
         if found and getattr(schema, "source", "") != "upload":

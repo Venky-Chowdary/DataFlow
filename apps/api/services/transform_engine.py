@@ -2196,8 +2196,10 @@ def apply_transform(
         return parsed_binary, None
 
     if transform in {"trim", "trim_id"}:
-        cleaned = re.sub(r"\s+", " ", text)
-        return cleaned, None
+        # Strip the ends only. Collapsing internal runs rewrote '  pad  '
+        # into ' pad ' on a normal load (QA R2-019). collapse_whitespace is
+        # the explicit shape operation for that.
+        return text.strip(), None
 
     if transform == "strip_controls":
         cleaned = _strip_format_controls(text)
@@ -2292,7 +2294,10 @@ def apply_transform(
 
                     _b64.b64decode(out, validate=True)
                 except Exception:
-                    return None, f"Invalid base64: {text!r}"
+                    return None, (
+                        f"Invalid base64: {text!r}. This transform decodes an "
+                        "existing base64 or hex payload; it does not encode plain text."
+                    )
                 return out, None
             return out, None
         return str(converted) if isinstance(converted, Decimal) else converted, None

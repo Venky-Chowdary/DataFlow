@@ -1907,13 +1907,18 @@ def _write_destination_database(
 
     if db_type == "sqlite":
         from connectors.sqlite_writer import write_mapped_rows
+        from services.sync_cursor import is_overwrite_sync
 
         for col in columns:
             ddl_log.append(
                 f"SQLITE COLUMN {col} {ddl_type('sqlite', schema.get(col, 'string'))}"
             )
         result = write_mapped_rows(
-            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+            atomic_overwrite=is_overwrite_sync(sync_mode),
+            total_chunks=1,
         )
         if not result.ok:
             raise_writer_failure(result, "SQLite write failed")

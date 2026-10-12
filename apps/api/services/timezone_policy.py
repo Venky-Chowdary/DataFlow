@@ -226,6 +226,15 @@ def declare_zone_on_schema(
             entry.get("samples") or []
         ):
             declared.add(name)
+        elif _untyped_text_token(source_type) and _samples_unanimously_naive_datetimes(
+            entry.get("samples") or []
+        ):
+            # SQLite stores a wall-clock column as TEXT. Declaring
+            # source_timezone is the operator answering the zone question, so
+            # the column is an instant from here on (QA R2-016). Offset-bearing
+            # text is left alone: the offset is already in the value.
+            entry["inferred_type"] = effective_source_type("TIMESTAMP", transform)
+            declared.add(name)
         elif source_type.strip().upper() == "DATE" and all(
             _sample_temporal_polarities(entry.get("samples") or [])
         ):
@@ -258,6 +267,28 @@ def _sample_temporal_polarities(samples: Any) -> tuple[bool, bool]:
 
 def _samples_are_naive_wall_clock(samples: Any) -> bool:
     return _sample_temporal_polarities(samples)[1]
+
+
+def _untyped_text_token(source_type: str) -> bool:
+    token = (source_type or "").strip().upper()
+    if not token or "(" in token:
+        return False
+    return token in {"TEXT", "VARCHAR", "STRING", "CHAR", "CLOB"}
+
+
+def _samples_unanimously_naive_datetimes(samples: Any) -> bool:
+    """True when every non-empty sample is a zoneless datetime."""
+    from connectors.sql_temporal import parse_sql_datetime
+    from services.type_system import temporal_value_has_timezone
+
+    saw = False
+    for sample in samples or []:
+        if sample is None or not str(sample).strip():
+            continue
+        if parse_sql_datetime(sample) is None or temporal_value_has_timezone(sample):
+            return False
+        saw = True
+    return saw
 
 
 def stamp_zone_transform(

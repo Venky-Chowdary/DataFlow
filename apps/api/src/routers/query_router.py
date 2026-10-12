@@ -47,7 +47,10 @@ def _is_safe_sql(raw_query: str) -> bool:
     except ImportError:
         return _is_safe_sql_fallback(raw_query)
 
-    parsed = sqlparse.parse(raw_query.strip())
+    from services.sql_literals import sql_outside_literals
+
+    # A semicolon or DROP inside a quote is not a second statement (QA R2-001/002).
+    parsed = sqlparse.parse(sql_outside_literals(raw_query).strip())
     if not parsed or len(parsed) != 1:
         return False
 
@@ -90,7 +93,51 @@ def _is_safe_sql(raw_query: str) -> bool:
     if _has_side_effect_functions(raw_query):
         return False
 
+    if first_keyword == "PRAGMA" and not _pragma_is_readonly(raw_query):
+        return False
+
     return first_keyword in safe_starts
+
+
+# SQLite PRAGMA is not in the documented read allowlist. Catalog reads the
+# operator already uses (table_info, index_list) stay. An assignment
+# (writable_schema, journal_mode=WAL) is a write and is refused.
+_READONLY_PRAGMAS = frozenset({
+    "table_info",
+    "table_list",
+    "table_xinfo",
+    "index_info",
+    "index_list",
+    "index_xinfo",
+    "database_list",
+    "foreign_key_list",
+    "foreign_key_check",
+    "function_list",
+    "module_list",
+    "pragma_list",
+    "compile_options",
+    "collation_list",
+    "integrity_check",
+    "quick_check",
+})
+
+
+def _pragma_is_readonly(sql: str) -> bool:
+    from services.sql_literals import sql_outside_literals
+
+    code = sql_outside_literals(sql or "")
+    match = re.match(
+        r"\s*PRAGMA\s+(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)",
+        code,
+        re.I,
+    )
+    if not match:
+        return False
+    name = match.group(1).lower()
+    head = code[match.end():].split("(", 1)[0]
+    if "=" in head:
+        return False
+    return name in _READONLY_PRAGMAS
 
 
 # Read-only is a *session* guarantee, not a keyword filter. A SELECT can still
@@ -152,19 +199,25 @@ def _is_safe_sql_fallback(raw_query: str) -> bool:
     """Conservative read-only gate when sqlparse is unavailable."""
     import re
 
+    from services.sql_literals import mask_sql_string_literals
+
     text = (raw_query or "").strip()
     if not text:
         return False
-    # Reject multi-statement payloads.
-    stripped = re.sub(r"--[^\n]*", " ", text)
-    stripped = re.sub(r"/\*.*?\*/", " ", stripped, flags=re.S)
-    if ";" in stripped.rstrip().rstrip(";"):
+    # Reject multi-statement payloads. Literals are masked first so a
+    # semicolon or DROP inside quotes is not a second statement.
+    code, _literals = mask_sql_string_literals(text)
+    code = re.sub(r"--[^\n]*", " ", code)
+    code = re.sub(r"/\*.*?\*/", " ", code, flags=re.S)
+    if ";" in code.rstrip().rstrip(";"):
         return False
-    upper = stripped.upper()
+    upper = code.upper()
     if not re.match(
         r"^\s*(SELECT|WITH|EXPLAIN|SHOW|DESCRIBE|DESC|ANALYZE|PRAGMA|VALUES)\b",
         upper,
     ):
+        return False
+    if upper.lstrip().startswith("PRAGMA") and not _pragma_is_readonly(text):
         return False
     if re.search(
         r"\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE|"
@@ -985,7 +1038,12 @@ def _run_sql_query(connector, body):
 
         with engine.connect() as conn:
             _apply_read_only_session(conn, connector.type)
-            result = conn.execute(text(clean_query), dict(body.params or {}))
+            from services.sql_literals import escape_sqlalchemy_literal_colons
+
+            result = conn.execute(
+                text(escape_sqlalchemy_literal_colons(clean_query)),
+                dict(body.params or {}),
+            )
             columns = _unique_column_names(list(result.keys()))
             raw_desc = getattr(getattr(result, "cursor", None), "description", None)
             description = (

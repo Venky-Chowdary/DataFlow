@@ -545,6 +545,49 @@ def withhold_append_key_constraints(plan: CreateFidelityPlan) -> CreateFidelityP
     return plan
 
 
+_FILE_SOURCE_DIALECTS = frozenset({
+    "csv", "tsv", "file", "upload", "json", "jsonl", "excel", "xlsx",
+    "parquet", "yaml", "yml",
+})
+
+
+def _synthesized_primary_key(
+    *,
+    catalog: SourceSchemaCatalog,
+    dest_cols: list[str],
+    operator_key_columns: list[str] | None,
+    dest_name_for_source: Any,
+) -> list[str]:
+    """PK columns when the source catalog has none.
+
+    An upsert key the operator named is the destination key. A file upload
+    with a single ``id`` / ``*_id`` column is that key too — a real database
+    catalog that truly has no PK is left without one.
+    """
+    resolved: list[str] = []
+    for raw in operator_key_columns or []:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        dest_col = dest_name_for_source(name)
+        if dest_col is None and name in dest_cols:
+            dest_col = name
+        if dest_col and dest_col not in resolved:
+            resolved.append(dest_col)
+    if resolved:
+        return resolved
+    dialect = (catalog.dialect or "").strip().lower()
+    if dialect not in _FILE_SOURCE_DIALECTS:
+        return []
+    candidates = [
+        col for col in dest_cols
+        if col.lower() == "id" or col.lower().endswith("_id")
+    ]
+    if len(candidates) == 1:
+        return candidates
+    return []
+
+
 def resolve_create_fidelity_plan(
     *,
     source_schema_catalog: Any,
@@ -557,6 +600,7 @@ def resolve_create_fidelity_plan(
     dest_schema: str = "",
     dest_tablespaces: set[str] | None = None,
     carry_keys: bool = True,
+    operator_key_columns: list[str] | None = None,
 ) -> CreateFidelityPlan:
     """Build a create-new fidelity plan; always returns a certificate (never silent)."""
     dest = (dest_dialect or "").strip().lower()
@@ -585,6 +629,7 @@ def resolve_create_fidelity_plan(
         dest_table=dest_table,
         dest_schema=dest_schema,
         dest_tablespaces=dest_tablespaces,
+        operator_key_columns=operator_key_columns,
     )
     if not carry_keys:
         plan = withhold_append_key_constraints(plan)
@@ -622,6 +667,7 @@ def plan_create_new_fidelity(
     dest_table: str = "",
     dest_schema: str = "",
     dest_tablespaces: set[str] | None = None,
+    operator_key_columns: list[str] | None = None,
 ) -> CreateFidelityPlan:
     """Plan CREATE TABLE fidelity for mapped columns on dest_dialect."""
     dest = (dest_dialect or "").strip().lower()
@@ -739,14 +785,50 @@ def plan_create_new_fidelity(
             )
         )
     else:
-        report.items.append(
-            SchemaFidelityItem(
-                aspect="primary_key",
-                name="*",
-                status="skipped",
-                reason="No PRIMARY KEY on source.",
-            )
+        synthesized = _synthesized_primary_key(
+            catalog=catalog,
+            dest_cols=dest_cols,
+            operator_key_columns=operator_key_columns,
+            dest_name_for_source=_dest_name_for_source,
         )
+        if synthesized:
+            pk_dest = synthesized
+            quoted = ", ".join(_q(c, dest) for c in pk_dest)
+            table_constraints.append(f"PRIMARY KEY ({quoted})")
+            for col in pk_dest:
+                suffixes.setdefault(col, [])
+                if "NOT NULL" not in suffixes[col]:
+                    suffixes[col].append("NOT NULL")
+                if col not in struct_not_null:
+                    struct_not_null.append(col)
+            why = (
+                "Operator upsert key"
+                if operator_key_columns
+                else "File identity column"
+            )
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=",".join(pk_dest),
+                    status="carried",
+                    reason=(
+                        "Source catalog has no PRIMARY KEY. "
+                        f"{why} {','.join(pk_dest)} is the destination "
+                        "PRIMARY KEY and NOT NULL."
+                    ),
+                    source_detail=",".join(pk_dest),
+                    dest_ddl=f"PRIMARY KEY ({quoted})",
+                )
+            )
+        else:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name="*",
+                    status="skipped",
+                    reason="No PRIMARY KEY on source.",
+                )
+            )
 
     # --- CARRY: NOT NULL ---
     nn_carried = 0
@@ -1104,7 +1186,12 @@ def plan_create_new_fidelity(
         post_create_sql=post_sql,
         dest_columns=dest_cols,
         column_renames=renames,
-        primary_key=list(pk_dest) if len(pk_dest) == len(catalog.primary_key) else [],
+        primary_key=(
+            list(pk_dest)
+            if (catalog.primary_key and len(pk_dest) == len(catalog.primary_key))
+            or (not catalog.primary_key and bool(pk_dest))
+            else []
+        ),
         unique_constraints=struct_unique,
         check_predicates=struct_checks,
         not_null_columns=struct_not_null,
