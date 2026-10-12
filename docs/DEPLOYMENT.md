@@ -54,6 +54,7 @@ Optional:
 | `DATAFLOW_TRAINING` | `off` | Disable background ML training |
 | `DATAFLOW_AUTO_INSTALL_DRIVERS` | `0` | Drivers baked in Docker image |
 | `DATAFLOW_ENABLE_DOCS` | `0` | Hide `/docs` |
+| `DATAFLOW_EXPOSE_ERROR_DETAIL` | `0` | Debug-only: add redacted, truncated exception detail to safe API errors. Never enable in production. |
 | `DATAFLOW_SEED_DEMO` | `0` | No demo connectors |
 | `DATAFLOW_RBAC_UNRULED_ROUTES` | `deny` | `deny` rejects authenticated requests without a reviewed public exception or explicit permission rule; `allow_and_log` temporarily restores method-based fallback permissions and warns/audits. Invalid values fail closed. |
 

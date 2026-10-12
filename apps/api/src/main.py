@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
+from services.safe_errors import public_error
 from services.audit_coverage import AuditAccessMiddleware
 from services.tracing import sanitize_correlation_id
 from services.platform_config import (
@@ -452,11 +453,24 @@ async def add_timing_header(request: Request, call_next):
         # message reaches the client.  Duck-type ``exceptions`` to stay portable.
         if len(getattr(exc, "exceptions", [])) == 1:
             exc = exc.exceptions[0]
-        logger.exception("Unhandled error on %s", request.url.path)
-        detail = str(exc) if not is_production() else "An unexpected error occurred"
+        route_template = getattr(request.scope.get("route"), "path", None)
+        safe_fields = {"method": request.method}
+        if route_template:
+            safe_fields["route_template"] = route_template
+        detail, correlation_id = public_error(
+            exc,
+            event="http.request.unhandled",
+            public_message="An unexpected error occurred.",
+            status_code=500,
+            **safe_fields,
+        )
         response = JSONResponse(
             status_code=500,
-            content={"error": "Internal Server Error", "detail": detail},
+            content={
+                "error": "Internal Server Error",
+                "detail": detail,
+                "correlation_id": correlation_id,
+            },
             headers={"X-Correlation-ID": correlation_id},
         )
     process_time = time.time() - start_time
@@ -664,14 +678,25 @@ async def connector_store_error_handler(request: Request, exc: ConnectorStoreErr
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.exception("Unhandled error on %s", request.url.path)
-    detail = str(exc) if not is_production() else "An unexpected error occurred"
+    route_template = getattr(request.scope.get("route"), "path", None)
+    safe_fields = {"method": request.method}
+    if route_template:
+        safe_fields["route_template"] = route_template
+    detail, correlation_id = public_error(
+        exc,
+        event="http.request.unhandled",
+        public_message="An unexpected error occurred.",
+        status_code=500,
+        **safe_fields,
+    )
     return JSONResponse(
         status_code=500,
         content={
             "error": "Internal Server Error",
             "detail": detail,
+            "correlation_id": correlation_id,
         },
+        headers={"X-Correlation-ID": correlation_id},
     )
 
 
