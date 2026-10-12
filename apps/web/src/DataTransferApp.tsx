@@ -133,6 +133,7 @@ function AppShell({
   const [editingConnector, setEditingConnector] = useState<Connector | null>(null);
   const [copilotOpen, setCopilotOpen] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [mobileShell, setMobileShell] = useState(() => window.matchMedia("(max-width: 1023px)").matches);
   const [sidebarNavCompact, setSidebarNavCompact] = useState(() => loadSidebarNavCompact());
   const [searchQuery, setSearchQuery] = useState("");
   const [searchFocus, setSearchFocus] = useState<SearchNavigateTarget | null>(null);
@@ -145,6 +146,10 @@ function AppShell({
   /** Jobs → Studio deep-link (Validate / repair proposal / seeded mappings). */
   const [transferStudioIntent, setTransferStudioIntent] = useState<(JobsStudioIntent & { token: number }) | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const mobileNavRef = useRef<HTMLElement>(null);
+  const mobileNavButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileNavWasOpenRef = useRef(false);
+  const mobileNavFocusFrameRef = useRef<number | null>(null);
   /** Keep heavy workspaces mounted after first visit so wizard/query/pilot state is not wiped on nav. */
   const [mountedScreens, setMountedScreens] = useState<Set<Screen>>(() => new Set([screen]));
   const connectorsGen = useRef(0);
@@ -373,12 +378,49 @@ function AppShell({
 
   useEffect(() => {
     const onResize = () => {
+      setMobileShell(window.innerWidth < 1024);
       if (window.innerWidth >= 1024) setMobileNavOpen(false); // matches --df-bp-lg / CSS 1023 overlay shell
       if (window.innerWidth < 1280) setCopilotOpen(false);
     };
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
   }, []);
+
+  useEffect(() => {
+    if (!mobileShell || !mobileNavOpen) {
+      if (mobileShell && mobileNavWasOpenRef.current) mobileNavButtonRef.current?.focus();
+      mobileNavWasOpenRef.current = false;
+      return;
+    }
+
+    mobileNavWasOpenRef.current = true;
+    mobileNavFocusFrameRef.current = window.requestAnimationFrame(() => {
+      mobileNavFocusFrameRef.current = null;
+      const candidates = mobileNavRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
+      );
+      const firstVisible = candidates && [...candidates].find((candidate) => {
+        const style = window.getComputedStyle(candidate);
+        return style.display !== "none"
+          && style.visibility !== "hidden"
+          && candidate.getClientRects().length > 0;
+      });
+      firstVisible?.focus({ preventScroll: true });
+    });
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setMobileNavOpen(false);
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      if (mobileNavFocusFrameRef.current !== null) {
+        window.cancelAnimationFrame(mobileNavFocusFrameRef.current);
+        mobileNavFocusFrameRef.current = null;
+      }
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [mobileNavOpen, mobileShell]);
 
   // Soft poll — avoid hammering the API during Transfer Studio introspect/map.
   useEffect(() => {
@@ -519,7 +561,14 @@ function AppShell({
         <div className="df2-overlay" onClick={() => setMobileNavOpen(false)} role="presentation" />
       )}
 
-      <aside className={`df2-sidebar ${mobileNavOpen ? "open" : ""}`} aria-label="Main navigation">
+      <aside
+        ref={mobileNavRef}
+        id="df2-sidebar-navigation"
+        className={`df2-sidebar ${mobileNavOpen ? "open" : ""}`}
+        aria-label="Main navigation"
+        aria-hidden={mobileShell ? !mobileNavOpen : undefined}
+        inert={mobileShell && !mobileNavOpen}
+      >
         <div className="df2-sidebar-brand">
           <BrandWordmark
             markSize={sidebarNavCompact ? 32 : 34}
@@ -637,6 +686,9 @@ function AppShell({
               className="df2-mobile-menu"
               onClick={() => setMobileNavOpen((o) => !o)}
               aria-label="Open navigation"
+              aria-expanded={mobileNavOpen}
+              aria-controls="df2-sidebar-navigation"
+              ref={mobileNavButtonRef}
             >
               <DtIcon name="menu" size={20} />
             </button>
@@ -681,7 +733,7 @@ function AppShell({
             {screen !== "pilot" && (
               <Button
                 variant="ghost"
-                className={copilotOpen ? "active" : ""}
+                className={`df2-topbar-pilot ${copilotOpen ? "active" : ""}`}
                 onClick={() => setCopilotOpen((o) => !o)}
                 aria-label="Toggle Datawrap Pilot"
                 leadingIcon={<DtIcon name="sparkle" size={16} />}
@@ -692,9 +744,13 @@ function AppShell({
             {screen !== "pilot" && (
               <Button
                 variant="primary"
+                className="df2-topbar-new-transfer"
                 onClick={openFreshTransfer}
+                aria-label="New transfer"
+                leadingIcon={<DtIcon name="plus" size={16} />}
               >
                 <span className="df2-topbar-btn-text">New transfer</span>
+                <span className="df2-topbar-btn-text-short" aria-hidden="true">New</span>
               </Button>
             )}
           </div>

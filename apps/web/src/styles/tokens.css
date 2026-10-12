@@ -179,6 +179,12 @@
 
   --df-header-height: 60px;
   --df-sidebar-width: 252px;
+  --df-mobile-nav-max-width: 280px;
+  --df-mobile-nav-gutter: 16px;
+  --df-mobile-nav-offset: 8px;
+  --df-mobile-nav-duration: var(--df-dur);
+  --df-mobile-nav-overlay-z: 55;
+  --df-mobile-nav-z: 60;
   --df-content-max: none;
   --df-rail-width: 360px;
   --dt-copilot-rail-width: 360px;
@@ -211,6 +217,8 @@
      retunes --df-control-height; this alias follows. */
   --df-tab-height: var(--df-control-height);
   --df-icon-btn-size: 28px;
+  --df-stepper-mobile-node: 18px;
+  --df-stepper-mobile-height: 32px;
   --df-chip-height: 28px;
   --df-inline-action-h: 24px;
   --df-min-target: 24px;
