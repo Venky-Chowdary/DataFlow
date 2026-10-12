@@ -323,6 +323,17 @@ def _isolate_file_backed_test_stores(monkeypatch, tmp_path, request):
         monkeypatch.setattr(team_store, "data_dir", lambda: tmp_path)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mcp_rate_limit_buckets():
+    from services.mcp_rate_limit import reset_mcp_rate_limits
+
+    reset_mcp_rate_limits()
+    try:
+        yield
+    finally:
+        reset_mcp_rate_limits()
+
+
 def _is_mongo_reachable() -> bool:
     try:
         socket.create_connection(("localhost", 27017), timeout=1.0).close()

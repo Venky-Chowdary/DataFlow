@@ -19,6 +19,18 @@ import pytest
 from services.platform_config import data_dir
 
 
+def test_drained_mcp_streamable_bucket_is_reset_before_next_test(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_MCP_RATE_LIMIT", "1")
+    monkeypatch.setenv("DATAFLOW_MCP_RATE_BURST", "30")
+    monkeypatch.setenv("DATAFLOW_MCP_RATE_QPS", "0.000001")
+
+    from services.mcp_rate_limit import check_mcp_rate_limit
+
+    for _ in range(31):
+        outcome = check_mcp_rate_limit("mcp-streamable")
+    assert outcome["allowed"] is False
+
+
 def _digest(path: Path) -> bytes | None:
     if not path.exists():
         return None
