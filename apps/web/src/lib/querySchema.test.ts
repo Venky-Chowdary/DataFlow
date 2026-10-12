@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { QuerySchemaObjectInfo } from "./api";
 import {
+  columnCaption,
+  filterCatalogNodes,
+  filterSchemaObjects,
   firstExpanded,
   matchesObjectName,
   mergeExpandedObject,
@@ -174,5 +177,34 @@ describe("firstExpanded", () => {
   it("returns undefined when nothing was introspected", () => {
     assert.equal(firstExpanded([obj({ name: "a" })]), undefined);
     assert.equal(firstExpanded([]), undefined);
+  });
+});
+
+describe("schema filter", () => {
+  it("matches an object or a loaded column and does not rewrite types", () => {
+    const objects: SchemaObject[] = [
+      { name: "customers", columns: [{ name: "email", type: "text", nullable: false, primaryKey: true }] },
+      { name: "orders", columns: [{ name: "amount", type: "numeric" }] },
+    ];
+    assert.equal(filterSchemaObjects(objects, "mail").length, 1);
+    assert.equal(filterSchemaObjects(objects, "mail")[0].name, "customers");
+    assert.equal(filterSchemaObjects(objects, "").length, 2);
+    assert.equal(
+      columnCaption({ name: "email", type: "text", nullable: false, primaryKey: true }),
+      "text · primary key · NOT NULL",
+    );
+    assert.equal(columnCaption({ name: "notes", type: "" }).startsWith("unknown"), true);
+  });
+
+  it("keeps a database when one of its schemas matches", () => {
+    const nodes = filterCatalogNodes(
+      [{ kind: "database", name: "studio_src", children: [
+        { kind: "schema", name: "public" },
+        { kind: "schema", name: "sales" },
+      ] }],
+      "sales",
+    );
+    assert.equal(nodes[0].children?.length, 1);
+    assert.equal(nodes[0].children?.[0].name, "sales");
   });
 });

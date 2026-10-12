@@ -1,6 +1,6 @@
 import type { EditableMapping } from "./mapping";
 import { mappingRequiresRiskAck } from "./mapping";
-import { applyLocalTransform } from "./localTransform";
+import { applyLocalTransform, UntrustedLocalTransform } from "./localTransform";
 import { GATE_CATALOG } from "./preflightGates";
 import type { NumberLocale } from "./numberLocale";
 import { ambiguousDateColumns, type DateLocale } from "./dateLocale";
@@ -173,6 +173,7 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   }
 
   let transformOk = true;
+  let untrusted: string | null = null;
   for (const m of input.mappings) {
     for (const row of rows.slice(0, 20)) {
       try {
@@ -181,15 +182,23 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
           m.transform === "none" ? undefined : m.transform,
           input.numberLocale,
         );
-      } catch {
-        transformOk = false;
+      } catch (err) {
+        if (err instanceof UntrustedLocalTransform) {
+          untrusted = err.message;
+        } else {
+          transformOk = false;
+        }
         break;
       }
     }
-    if (!transformOk) break;
+    if (!transformOk || untrusted) break;
   }
   if (!transformOk) {
     block("g5_dry_run", "A transform failed on sample rows.", {
+      kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
+    });
+  } else if (untrusted) {
+    block("g5_dry_run", untrusted, {
       kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
     });
   } else {

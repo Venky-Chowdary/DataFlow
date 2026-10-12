@@ -1,5 +1,5 @@
 import type { EditableMapping } from "./mapping";
-import { applyLocalTransform } from "./localTransform";
+import { applyLocalTransform, requiresServerPreview } from "./localTransform";
 import type { NumberLocale } from "./numberLocale";
 import type { TransferResult } from "./types";
 
@@ -58,6 +58,15 @@ export interface LocalFileExportInput {
 
 /** Export mapped rows in the browser when the transfer API is offline. */
 export function runLocalFileExport(input: LocalFileExportInput): TransferResult {
+  const serverOnly = input.mappings.find((mapping) => requiresServerPreview(mapping.transform));
+  if (serverOnly) {
+    return {
+      success: false,
+      records_transferred: 0,
+      error: `${serverOnly.transform} cannot be applied in the browser. Run the transfer so the server computes it.`,
+      event_log: [`export refused · ${serverOnly.transform} is a server transform`],
+    };
+  }
   const mapped = input.rows.map((row) => mapRow(row, input.mappings, input.numberLocale));
   const { blob, ext } = serializeRows(mapped, input.format);
   const base = (input.outputBasename || input.sourceFilename.replace(/\.[^/.]+$/, "") || "export").replace(/[^\w.-]+/g, "_");

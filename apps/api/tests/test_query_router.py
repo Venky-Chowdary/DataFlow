@@ -467,6 +467,26 @@ def test_schema_expands_requested_object_columns(test_client, tmp_path, monkeypa
     assert data["type_source"] == "connector_introspection"
 
 
+def test_schemas_returns_one_configured_node(test_client, tmp_path, monkeypatch):
+    """A connector that does not list schemas still returns one honest node."""
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Catalog SQLite", _typed_sqlite_db(tmp_path))
+    response = test_client.post("/api/v1/query/schemas", json={"connector_id": conn.id})
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["nodes"]
+    assert data["listed_live"] is False
+    assert data["nodes"][0]["kind"] in {"database", "schema"}
+
+
+def test_schema_reports_truncation_flag(test_client, tmp_path, monkeypatch):
+    _isolated_store(monkeypatch, tmp_path)
+    conn = _sqlite_connector("Truncation SQLite", _typed_sqlite_db(tmp_path))
+    response = test_client.post("/api/v1/query/schema", json={"connector_id": conn.id})
+    assert response.status_code == 200, response.text
+    assert response.json()["objects_truncated"] is False
+
+
 def test_schema_rejects_unknown_connector(test_client, tmp_path, monkeypatch):
     _isolated_store(monkeypatch, tmp_path)
     response = test_client.post("/api/v1/query/schema", json={"connector_id": "nope"})

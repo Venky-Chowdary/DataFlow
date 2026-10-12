@@ -39,6 +39,8 @@ class WorkspaceSettingsBody(BaseModel):
     org_name: str | None = Field(default=None, max_length=128)
     timezone: str | None = Field(default=None, max_length=64)
     retention_days: int | None = Field(default=None, ge=1, le=3650)
+    studio_schema_browser: bool | None = None
+    studio_canvas: bool | None = None
 
 
 class TenantCreateBody(BaseModel):
@@ -154,6 +156,8 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
         org_name=body.org_name,
         timezone=body.timezone,
         retention_days=body.retention_days,
+        studio_schema_browser=body.studio_schema_browser,
+        studio_canvas=body.studio_canvas,
         actor=actor,
     )
     append_audit_event(
@@ -165,6 +169,8 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
             "org_name": updated["org_name"],
             "timezone": updated["timezone"],
             "retention_days": updated["retention_days"],
+            "studio_schema_browser": updated["studio_schema_browser"],
+            "studio_canvas": updated["studio_canvas"],
         },
     )
     return updated

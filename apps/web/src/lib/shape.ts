@@ -616,6 +616,35 @@ export function operationsByFamily(operations: ShapeOperation[]): { family: stri
     }));
 }
 
+/**
+ * The wire a completed draft becomes. The form and the canvas both call this
+ * so a required field cannot be enforced in one and skipped in the other.
+ */
+export function stepFromDraft(
+  operation: ShapeOperation,
+  column: string,
+  options: Record<string, unknown>,
+  label: string,
+  policy: string,
+): { step: ShapeStepWire | null; error: string } {
+  const missing = missingRequired(operation, column, options);
+  if (missing) return { step: null, error: missing };
+  const step: ShapeStepWire = { op: operation.op, options: draftOptionsForWire(options) };
+  if (operation.needs_column) step.column = column;
+  if (label.trim()) step.label = label.trim();
+  if (policy && policy !== "refuse") step.on_error = policy;
+  return { step, error: "" };
+}
+
+/** Always-visible sample caption. The preview is not the population. */
+export function samplePopulationBanner(shown: number, population?: number): string {
+  const sample = Math.max(0, shown).toLocaleString();
+  if (population == null || population <= shown) {
+    return `${sample} sampled row(s). Validate checks the population.`;
+  }
+  return `${sample} of ${population.toLocaleString()} sampled rows. Validate checks the population.`;
+}
+
 export function sortSuggestions(suggestions: ShapeSuggestion[]): ShapeSuggestion[] {
   return suggestions.slice().sort((a, b) => {
     const bySeverity = suggestionRank(a.severity) - suggestionRank(b.severity);

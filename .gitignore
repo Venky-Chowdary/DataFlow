@@ -12,6 +12,8 @@ venv/
 !.env.example
 *.egg-info/
 .pytest_cache/
+apps/web/test-results/
+apps/web/playwright-report/
 .coverage
 apps/api/uploads/
 packages/ml/data/

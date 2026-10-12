@@ -16,11 +16,29 @@
   --dt-flow-particle: var(--df-brand);
   --df-brand: #0d9488;
   --df-brand-hover: #0f766e;
-  /* Logo palette — the mark in packages/design-system brand/mark.ts */
+  /* Logo palette — copied from packages/design-system brand/mark.ts.
+     Logo SVG/PNG files are not edited from this stylesheet. */
   --df-logo-tile: #0a3d3a;
   --df-logo-ink: #0f766e;
   --df-logo-arrow: #2dd4bf;
   --df-logo-strap: #f59e0b;
+  /* Names the studio surfaces use. --df-brand stays the legacy action teal
+     so existing screens keep their fill until a dedicated visual change. */
+  --df-brand-tile: #0A3D3A;
+  --df-brand-text: #0F766E;
+  --df-brand-arrow: #2DD4BF;
+  --df-attention: #F59E0B;
+  --df-on-tile: #F8FAFC;
+  --df-on-attention: #0A3D3A;
+  --df-success-text: #047857;
+  --df-warning-text: #92400E;
+  --df-info-text: #0369a1;
+  --df-series-1: #0A3D3A;
+  --df-series-2: #0F766E;
+  --df-series-3: #2DD4BF;
+  --df-series-4: #F59E0B;
+  --df-series-5: #475569;
+  --df-series-6: #dc2626;
   --df-brand-strong: #115e59;
   --df-brand-deep: #0f766e;
   --df-brand-bright: #14b8a6;
@@ -613,6 +631,10 @@ html.df2-theme-dark:has(.df2-app),
   --df-text-muted: #8a97a8;
   --df-brand-strong: #5eead4;
   --df-brand-hover: #2dd4bf;
+  --df-brand-text: #5eead4;
+  --df-success-text: #6ee7b7;
+  --df-warning-text: #fcd34d;
+  --df-info-text: #7dd3fc;
   --df-brand-muted: rgba(13, 148, 136, 0.16);
   --df-brand-soft: rgba(20, 184, 166, 0.22);
   --df-brand-subtle: rgba(13, 148, 136, 0.12);

@@ -7,8 +7,8 @@
  * already listed.
  */
 
-import type { QuerySchemaObjectInfo } from "./api";
-import type { SchemaObject } from "./sqlIntel";
+import type { QueryCatalogNodeInfo, QuerySchemaObjectInfo } from "./api";
+import type { SchemaColumn, SchemaObject } from "./sqlIntel";
 
 export function toSchemaObject(o: QuerySchemaObjectInfo): SchemaObject {
   return {
@@ -60,6 +60,36 @@ export function mergeExpandedObject(
     };
   });
   return hit ? next : prev;
+}
+
+/** Keep an object when its name or a loaded column matches. */
+export function filterSchemaObjects(objects: SchemaObject[], query: string): SchemaObject[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return objects;
+  return objects.filter((object) => (
+    object.name.toLowerCase().includes(needle)
+    || (object.columns ?? []).some((column) => column.name.toLowerCase().includes(needle))
+  ));
+}
+
+export function filterCatalogNodes(nodes: QueryCatalogNodeInfo[], query: string): QueryCatalogNodeInfo[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return nodes;
+  return nodes.flatMap((node) => {
+    const children = filterCatalogNodes(node.children ?? [], query);
+    if (node.name.toLowerCase().includes(needle) || children.length > 0) {
+      return [{ ...node, children }];
+    }
+    return [];
+  });
+}
+
+/** Column metadata the browser is allowed to show. Types are not rewritten. */
+export function columnCaption(column: SchemaColumn): string {
+  const parts = [column.type || "unknown"];
+  if (column.primaryKey) parts.push("primary key");
+  if (column.nullable === false) parts.push("NOT NULL");
+  return parts.join(" · ");
 }
 
 /** First object in a schema response that actually carries columns. */

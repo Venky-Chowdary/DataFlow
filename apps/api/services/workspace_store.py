@@ -15,6 +15,10 @@ _DEFAULTS: dict[str, Any] = {
     "org_name": "Datawrap",
     "timezone": "UTC",
     "retention_days": 90,
+    # Studio surfaces. Absent or false keeps the wizard. Both must be set
+    # here and in the operator's browser before a new surface renders.
+    "studio_schema_browser": False,
+    "studio_canvas": False,
 }
 
 
@@ -47,6 +51,8 @@ def get_workspace_settings() -> dict[str, Any]:
         "org_name": str(raw.get("org_name") or _DEFAULTS["org_name"]),
         "timezone": str(raw.get("timezone") or _DEFAULTS["timezone"]),
         "retention_days": int(raw.get("retention_days") or _DEFAULTS["retention_days"]),
+        "studio_schema_browser": bool(raw.get("studio_schema_browser")),
+        "studio_canvas": bool(raw.get("studio_canvas")),
         "updated_at": raw.get("updated_at"),
         "updated_by": raw.get("updated_by"),
     }
@@ -57,6 +63,8 @@ def update_workspace_settings(
     org_name: str | None = None,
     timezone: str | None = None,
     retention_days: int | None = None,
+    studio_schema_browser: bool | None = None,
+    studio_canvas: bool | None = None,
     actor: str | None = None,
 ) -> dict[str, Any]:
     data = _load_raw()
@@ -66,6 +74,10 @@ def update_workspace_settings(
         data["timezone"] = timezone.strip()[:64] or _DEFAULTS["timezone"]
     if retention_days is not None:
         data["retention_days"] = max(1, min(3650, int(retention_days)))
+    if studio_schema_browser is not None:
+        data["studio_schema_browser"] = bool(studio_schema_browser)
+    if studio_canvas is not None:
+        data["studio_canvas"] = bool(studio_canvas)
     data["updated_at"] = _now()
     if actor:
         data["updated_by"] = actor

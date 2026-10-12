@@ -262,11 +262,28 @@ class QuerySchemaResult(BaseModel):
     objects: list[QuerySchemaObject] = Field(default_factory=list)
     message: str = ""
     warnings: list[str] = Field(default_factory=list)
+    objects_truncated: bool = False
     # Whatever the connector's own introspection reported. Deliberately not
     # called "ddl": catalog-backed engines return declared types, while
     # dynamically typed sources (SQLite, Mongo, CSV) return value-inferred
     # ones, and this endpoint must not present the second as the first.
     type_source: str = "connector_introspection"
+
+
+class QueryCatalogNode(BaseModel):
+    kind: str
+    name: str
+    children: list["QueryCatalogNode"] = Field(default_factory=list)
+
+
+class QuerySchemasResult(BaseModel):
+    connected: bool
+    connector_type: str = ""
+    database: str = ""
+    schema_name: str = ""
+    nodes: list[QueryCatalogNode] = Field(default_factory=list)
+    listed_live: bool = False
+    message: str = ""
 
 
 class QueryExportResult(BaseModel):
@@ -543,7 +560,45 @@ async def query_schema(
         # Advisory-key honesty notes (BigQuery/Redshift/Snowflake do not
         # enforce PKs) must reach the console, not die at the adapter edge.
         warnings=[str(w) for w in (info.get("warnings") or []) if w],
+        objects_truncated=bool(info.get("objects_truncated")),
     )
+
+
+@router.post("/schemas", response_model=QuerySchemasResult)
+async def query_schemas(
+    body: QuerySchemaRequest,
+    request: Request,
+    x_workspace_id: str | None = Header(None, alias="X-Workspace-Id"),
+):
+    """Databases and schemas this connector can name.
+
+    Snowflake asks the account. Other engines return the configured database
+    and schema as one node. A connector that names neither still returns one
+    node so the browser is not an empty catalog.
+    """
+    workspace_id = x_workspace_id or ""
+    _check_workspace_read(request, workspace_id)
+
+    from services.connector_probe import endpoint_from_saved_connector
+    from services.query_catalog import build_catalog_tree, live_schema_names
+
+    endpoint = endpoint_from_saved_connector(
+        body.connector_id,
+        schema=body.schema_name,
+        database=body.database,
+        workspace_id=workspace_id,
+    )
+    if endpoint is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    live = live_schema_names(endpoint)
+    tree = build_catalog_tree(
+        connector_type=str(getattr(endpoint, "format", "") or ""),
+        database=body.database or str(getattr(endpoint, "database", "") or ""),
+        schema=body.schema_name or str(getattr(endpoint, "schema", "") or ""),
+        live_schemas=live,
+    )
+    return QuerySchemasResult(**tree)
 
 
 def _object_matches(listed: str, requested: str) -> bool:

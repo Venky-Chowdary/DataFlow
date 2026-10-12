@@ -3139,6 +3139,8 @@ export async function fetchWorkspaceSettings(): Promise<{
   org_name: string;
   timezone: string;
   retention_days: number;
+  studio_schema_browser?: boolean;
+  studio_canvas?: boolean;
   updated_at?: string | null;
   updated_by?: string | null;
 }> {
@@ -3156,10 +3158,14 @@ export async function updateWorkspaceSettings(body: {
   org_name?: string;
   timezone?: string;
   retention_days?: number;
+  studio_schema_browser?: boolean;
+  studio_canvas?: boolean;
 }): Promise<{
   org_name: string;
   timezone: string;
   retention_days: number;
+  studio_schema_browser?: boolean;
+  studio_canvas?: boolean;
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/settings`, {
     method: "PATCH",
@@ -3751,6 +3757,23 @@ export interface QuerySchemaResult {
   message?: string;
   warnings?: string[];
   type_source?: string;
+  objects_truncated?: boolean;
+}
+
+export interface QueryCatalogNodeInfo {
+  kind: "database" | "schema" | string;
+  name: string;
+  children?: QueryCatalogNodeInfo[];
+}
+
+export interface QuerySchemasResult {
+  connected: boolean;
+  connector_type?: string;
+  database?: string;
+  schema_name?: string;
+  nodes: QueryCatalogNodeInfo[];
+  listed_live: boolean;
+  message?: string;
 }
 
 export interface QueryExportResult {
@@ -3833,6 +3856,22 @@ export async function fetchQuerySchema(payload: {
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Schema introspection failed"));
+  return res.json();
+}
+
+/** Databases and schemas the connector can name. Objects stay on `/query/schema`. */
+export async function fetchQuerySchemas(payload: {
+  connector_id: string;
+  database?: string;
+  schema_name?: string;
+}): Promise<QuerySchemasResult> {
+  const res = await apiFetch(`${API_BASE}/query/schemas`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Schema catalog failed"));
   return res.json();
 }
 
