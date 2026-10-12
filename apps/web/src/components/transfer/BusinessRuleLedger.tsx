@@ -10,6 +10,7 @@ import {
   ruleCensus,
   ruleConfidenceLabel,
   ruleEdgeLabel,
+  ruleMixSummary,
   ruleReportSummary,
   ruleReviewHint,
   ruleStatusLabel,
@@ -106,7 +107,7 @@ export function BusinessRuleLedger({
         <span className="df2-rule-census-note">rule coverage {census.coveragePercent}%</span>
       </div>
       <p className="df2-rule-ledger-how">
-        {census.mapping} mapping · {census.validation} validation · {census.namedMapping} named mapping · {census.namedValidation} named validation.
+        {ruleMixSummary(report)}.
         {" "}
         {census.review || census.conflict
           ? "Executed and validated counts land on Proof after the run."

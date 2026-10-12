@@ -12,6 +12,7 @@ import {
   namedRuleDisplay,
   proofRuleClaim,
   ruleCensus,
+  ruleMixSummary,
   ruleEdgeLabel,
   ruleReportSummary,
   ruleReviewHint,
@@ -107,7 +108,8 @@ describe("mergeBusinessRules", () => {
   it("summarises unused dest columns as not written", () => {
     assert.match(ruleReportSummary(report), /2 executable/);
     assert.match(ruleReportSummary(report), /1 dest column\(s\) unused/);
-    assert.match(ruleReportSummary(report), /3 total · 3 mapping · 0 validation/);
+    assert.match(ruleMixSummary(report), /^3 rules: 3 mapping, 0 validation$/);
+    assert.match(ruleReportSummary(report), /^3 rules: 3 mapping, 0 validation/);
     const census = ruleCensus(report);
     assert.equal(census.total, 3);
     assert.equal(census.mapping, 3);
@@ -295,7 +297,7 @@ describe("mergeBusinessRules", () => {
     const status = next.find((m) => m.source === "status")!;
     assert.deepEqual(status.codeCrosswalk, { A: "ACTIVE" });
     assert.equal(Object.prototype.hasOwnProperty.call(status.codeCrosswalk || {}, "OTHER"), false);
-    assert.match(ruleReportSummary(named), /1 named mapping/);
+    assert.doesNotMatch(ruleReportSummary(named), /named mapping|named validation/);
   });
 
   it("applies a named IANA zone instead of a zoneless assume_timezone", () => {

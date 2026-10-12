@@ -419,10 +419,10 @@ export function TransferTransformStep({
             </p>
           </div>
           <div className="df2-xform-head-side">
-            {preview ? (
+            {preview?.recipe.recipe_hash ? (
               <span className="df2-xform-identity" title="Pinned at approval and re-checked before Execute">
                 <DtIcon name="shield" size={14} />
-                recipe {preview.recipe.recipe_hash}
+                Transform ID {preview.recipe.recipe_hash}
               </span>
             ) : (
               <span className="df2-xform-identity is-empty">

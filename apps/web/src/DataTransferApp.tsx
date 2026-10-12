@@ -657,6 +657,7 @@ function AppShell({
               className="df2-user-row"
               onClick={() => setScreen("settings")}
               title={userEmail || "Account settings"}
+              aria-label={userEmail || "Account settings"}
             >
               <span className="df2-user-avatar" aria-hidden>{userInitial}</span>
               <span className="df2-user-meta">

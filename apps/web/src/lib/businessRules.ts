@@ -433,6 +433,11 @@ export function ruleCensus(report: RuleCompileReport): RuleCensus {
   };
 }
 
+export function ruleMixSummary(report: RuleCompileReport): string {
+  const census = ruleCensus(report);
+  return `${census.total} rules: ${census.mapping} mapping, ${census.validation} validation`;
+}
+
 export function compiledExpression(rule: CompiledRule): string {
   if (rule.resolved_rule) return rule.resolved_rule;
   const options = rule.shape_step?.options && typeof rule.shape_step.options === "object"
@@ -467,19 +472,14 @@ export function ruleReportSummary(report: RuleCompileReport): string {
   const inferred = (report.header_roles || []).some((item) => item.method !== "alias")
     ? " · headers inferred from file + schema"
     : "";
-  const named = [
-    census.namedMapping ? `${census.namedMapping} named mapping` : "",
-    census.namedValidation ? `${census.namedValidation} named validation` : "",
-  ].filter(Boolean).join(" · ");
-  const namedBit = named ? ` · ${named}` : "";
   const projection = report.projection?.length
     ? ` · ${report.projection.length} source table(s) projected`
     : "";
   const coverage = ` · rule coverage ${census.coveragePercent}%`;
   return (
-    `${census.total} total · ${census.mapping} mapping · ${census.validation} validation · `
+    `${ruleMixSummary(report)} · `
     + `${census.executable} executable · ${census.review} review · ${census.conflict} conflict`
-    + `${coverage}${unused}${unmapped}${truncated}${inferred}${namedBit}${projection}`
+    + `${coverage}${unused}${unmapped}${truncated}${inferred}${projection}`
   );
 }
 

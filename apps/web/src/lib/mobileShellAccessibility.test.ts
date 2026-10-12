@@ -8,6 +8,7 @@ const webRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
 const shellCss = readFileSync(join(webRoot, "styles/app-styles.css"), "utf8");
 const stepperCss = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+const transferStudioCss = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
 const tokensCss = readFileSync(join(webRoot, "styles/tokens.css"), "utf8");
 
 describe("responsive app shell accessibility", () => {
@@ -38,6 +39,7 @@ describe("responsive app shell accessibility", () => {
 
   it("uses a compact six-step row with the route below it", () => {
     assert.match(stepperCss, /grid-template-columns: repeat\(6, minmax\(0, 1fr\)\)/);
+    assert.match(transferStudioCss, /\.df2-page-transfer-studio \.df2-transfer-studio-chrome-row\s*\{\s*display: grid;\s*grid-template-columns: minmax\(0, 1fr\)/);
     assert.match(stepperCss, /df2-transfer-studio-chrome-row \.df2-route-bar\s*\{[\s\S]*?order: 2/);
     assert.match(stepperCss, /df2-wizard-label-short\s*\{[\s\S]*?display: inline !important/);
     assert.match(tokensCss, /--df-stepper-mobile-height: 32px/);

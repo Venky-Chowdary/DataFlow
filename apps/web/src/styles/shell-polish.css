@@ -317,6 +317,11 @@
   display: block;
   font-size: 11px;
   color: var(--df-text-muted, #64748b);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .df2-user-actions {
@@ -3219,7 +3224,8 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-column-transform {
-  min-width: 110px;
+  min-width: 150px;
+  max-width: 100%;
   font-size: 12px;
   padding: 4px 8px;
 }
@@ -6262,4 +6268,3 @@ textarea.df2-pilot-composer textarea {
     grid-template-columns: 1fr;
   }
 }
-

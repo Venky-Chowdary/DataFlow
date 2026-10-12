@@ -804,8 +804,8 @@ export function ColumnReviewPanel({
               <th className="df2-column-th-type" style={{ width: "8%" }}>Type</th>
               <th className="df2-column-th-arrow" aria-hidden style={{ width: "4%" }}>→</th>
               <th className="df2-column-th-destination" style={{ width: showTransforms ? "15%" : "18%" }}>Destination</th>
-              {showTransforms && <th className="df2-column-th-transform" style={{ width: "11%" }}>Transform</th>}
-              <th className="df2-column-th-reason" style={{ width: showTransforms ? "20%" : "23%" }}>Why</th>
+              {showTransforms && <th className="df2-column-th-transform" style={{ width: "15%" }}>Transform</th>}
+              <th className="df2-column-th-reason" style={{ width: showTransforms ? "16%" : "23%" }}>Why</th>
               <th className="df2-column-th-confidence" style={{ width: showTransforms ? "8%" : "10%" }}>Confidence</th>
               <th className="df2-column-th-status" style={{ width: showTransforms ? "9%" : "11%" }}>Status</th>
             </tr>
@@ -813,6 +813,9 @@ export function ColumnReviewPanel({
           <tbody>
             {pageItems.map(({ mapping: m, index }) => {
               const omitted = isIntentionalOmit(m);
+              const heldBusinessRule = Boolean(
+                m.businessRule && m.businessRule.status === "needs_confirmation",
+              );
               const riskOpen = mappingRequiresRiskAck(m) && !m.riskAcknowledged && !omitted;
               const tier = confidenceClass(m.confidence, confidenceThreshold, m.approved, riskOpen);
               const ready = isMappingReady(m, confidenceThreshold);
@@ -912,8 +915,12 @@ export function ColumnReviewPanel({
                   </td>
                   <td className="df2-column-sample">
                     <div className="df2-column-sample-stack">
-                      <span title={m.sample}>
-                        {m.sample ? (m.sample.length > 40 ? `${m.sample.slice(0, 40)}…` : m.sample) : "—"}
+                      <span
+                        className="df2-column-sample-value"
+                        title={m.sample}
+                        aria-label={m.sample ? `Sample value for ${m.source}: ${m.sample}` : undefined}
+                      >
+                        {m.sample || "—"}
                       </span>
                       {(() => {
                         const strip = formatColumnProfileStrip(m.columnProfile);
@@ -1066,7 +1073,7 @@ export function ColumnReviewPanel({
                         <label className="df2-column-omit-block" title="G20: every distinct source code in the population must have a target. One unmapped code blocks. A=A is explicit identity — nothing passes through by default.">
                           <span className="df2-column-omit-target">Code crosswalk</span>
                           <textarea
-                            className="df2-input"
+                            className="df2-input df2-column-crosswalk-input"
                             rows={3}
                             placeholder={"OLD=NEW\nA=active\n# comments allowed"}
                             value={formatCodeCrosswalk(m.codeCrosswalk)}
@@ -1409,6 +1416,12 @@ export function ColumnReviewPanel({
                           type="button"
                           className={`df2-btn df2-btn-sm${mappingAckTier(m) === "accept_risk" ? " df2-btn-danger" : ""}`}
                           onClick={() => approveOne(index)}
+                          aria-label={
+                            heldBusinessRule
+                              ? `Approve mapping for ${m.source}; the held workbook rule stays not applied`
+                              : undefined
+                          }
+                          aria-describedby={heldBusinessRule ? `df2-held-rule-${index}` : undefined}
                           disabled={
                             mappingRequiresRiskAck(m) && !policyBySource[m.source]
                           }
@@ -1426,10 +1439,19 @@ export function ColumnReviewPanel({
                               : undefined
                           }
                         >
-                          {isFalseFriendReview(m)
+                          {heldBusinessRule
+                            ? "Approve mapping"
+                            : isFalseFriendReview(m)
                             ? mappingReviewKindMeta(classifyMappingReview(m) || "generic").confirmLabel
                             : mappingAckLabel(m)}
                         </button>
+                        {heldBusinessRule && (
+                          <span id={`df2-held-rule-${index}`} className="df2-column-approval-help">
+                            {m.businessRule?.ruleId
+                              ? `Held workbook rule ${m.businessRule.ruleId} stays not applied.`
+                              : "Held workbook rule stays not applied."}
+                          </span>
+                        )}
                       </div>
                     )}
                   </td>

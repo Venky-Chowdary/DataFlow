@@ -24,6 +24,7 @@ import {
 import { EngineStageTicker } from "../EngineStageTicker";
 import type { ValidateProgress } from "../../lib/engineProgress";
 import {
+  buildBlockingGateSummaries,
   buildDisplayBlockers,
   buildExecutiveSummary,
   rankAndDedupeSuggestedActions,
@@ -1155,7 +1156,8 @@ export function ValidateDashboard({
     gateByKey.set(gate.id, gate);
     gateByKey.set(metaForGate(gate.id).key, gate);
   }
-  const blockedCount = (preflight?.gates ?? []).filter((g) => g.status === "block").length;
+  const blockingGateSummaries = buildBlockingGateSummaries(preflight);
+  const blockedCount = blockingGateSummaries.length;
   const skippedCount = (preflight?.gates ?? []).filter((g) => g.status === "skip").length;
   /** Prefer live engine gates so PENDING cards aren't shown for rules that never ran. */
   const displayGates: GateMeta[] = running
@@ -1696,16 +1698,9 @@ export function ValidateDashboard({
             <span className="df2-vd-count ok"><strong>{passedCount}</strong> passed</span>
             <span
               className="df2-vd-count block"
-              title={
-                displayBlockers.length > 0 && displayBlockers.length !== blockedCount
-                  ? `${displayBlockers.length} root cause(s) · ${blockedCount} gate check(s)`
-                  : undefined
-              }
+              title={blockedCount > 0 ? `${blockedCount} distinct blocking gate(s)` : undefined}
             >
-              <strong>{displayBlockers.length > 0 ? displayBlockers.length : blockedCount}</strong>
-              {displayBlockers.length > 0
-                ? " root cause(s)"
-                : " blocked"}
+              <strong>{blockedCount}</strong> blocked gate(s)
             </span>
             <span
               className="df2-vd-count skip"
@@ -3290,7 +3285,7 @@ export function ValidateDashboard({
           <div className="df2-vd-blockers-head">
             <DtIcon name="alert" size={15} />
             <strong>Fix before Run</strong>
-            <span>{displayBlockers.length}</span>
+            <span>{blockedCount}</span>
           </div>
           <p className="df2-vd-blocker-precaution">
             Schema mismatches, bad data, and type hazards are blocked here on purpose.

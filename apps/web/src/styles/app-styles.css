@@ -1426,9 +1426,9 @@ html:has(.df2-app) #root {
   }
 
   .df2-app .df2-topbar-actions .df2-topbar-new-transfer {
-    width: auto !important;
+    width: max-content !important;
     min-width: 0 !important;
-    max-width: none !important;
+    max-width: max-content !important;
     flex: 0 0 auto !important;
     padding-right: 9px !important;
     padding-left: 9px !important;
@@ -1439,14 +1439,17 @@ html:has(.df2-app) #root {
   }
 
   .df2-app .df2-topbar-actions .df2-topbar-btn-text-short {
-    display: inline-flex;
+    display: inline-flex !important;
+    font-size: 12px;
+    line-height: 1;
+    white-space: nowrap;
   }
 
   .df2-app .df2-topbar-actions .df2-topbar-pilot {
-    width: var(--df-btn-height);
-    min-width: var(--df-btn-height);
-    max-width: var(--df-btn-height);
-    flex: 0 0 var(--df-btn-height);
+    width: var(--df-icon-btn-size) !important;
+    min-width: var(--df-icon-btn-size) !important;
+    max-width: var(--df-icon-btn-size) !important;
+    flex: 0 0 var(--df-icon-btn-size) !important;
     justify-content: center;
     padding-right: 0 !important;
     padding-left: 0 !important;
