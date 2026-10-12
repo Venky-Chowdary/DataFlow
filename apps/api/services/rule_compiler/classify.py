@@ -359,11 +359,17 @@ _LOOKUP_HINT = re.compile(
     re.I,
 )
 _DATE_TOKEN = re.compile(r"^(?:Y{2,4}|M{1,2}|D{1,2}|H{1,2}|S{1,2})$", re.I)
+_EXCEL_FN_NAMES = frozenset(
+    {
+        "UPPER", "LOWER", "TRIM", "PROPER", "CONCATENATE", "CONCAT", "TEXTJOIN",
+        "SUBSTITUTE", "REPLACE", "LEFT", "RIGHT", "MID", "ABS", "ROUND",
+        "IF", "IFERROR", "VLOOKUP", "XLOOKUP", "LEN", "LENGTH", "VALUE",
+        "TEXT", "DATEVALUE", "TO_DATE", "TO_NUMBER", "TO_CHAR", "CAST",
+        "COALESCE", "IFNULL", "NVL", "NULLIF",
+    }
+)
 _EXCEL_FN = re.compile(
-    r"^=?\s*(?P<fn>UPPER|LOWER|TRIM|PROPER|CONCATENATE|CONCAT|TEXTJOIN|"
-    r"SUBSTITUTE|REPLACE|LEFT|RIGHT|MID|ABS|ROUND|IF|IFERROR|VLOOKUP|XLOOKUP|"
-    r"LEN|LENGTH|VALUE|TEXT|DATEVALUE|TO_DATE|TO_NUMBER|TO_CHAR|"
-    r"CAST|COALESCE|IFNULL|NVL|NULLIF)\s*\(",
+    r"^=?\s*(?P<fn>" + "|".join(sorted(_EXCEL_FN_NAMES)) + r")\s*\(",
     re.I,
 )
 _CAST_SQL = re.compile(
@@ -1692,6 +1698,24 @@ def formula_prefix(text: str) -> str:
     return original[0]
 
 
+def _is_closed_arithmetic(body: str) -> bool:
+    """Whole-body parse through the closed shape_expr grammar — no leftover
+    tokens, no function calls. ``=name*12+HYPERLINK("x")`` fails here, where
+    an unanchored regex match would drop the payload."""
+    body = (body or "").strip()
+    if not re.match(r"^[A-Za-z_]", body):
+        return False
+    if re.search(r"[A-Za-z_][\w.]*\s*\(", body):
+        return False
+    try:
+        from services.shape_expr import compile_expression
+
+        compile_expression(body)
+        return True
+    except Exception:
+        return False
+
+
 def _formula_review(text: str, flags: dict[str, Any]) -> dict[str, Any]:
     label = formula_prefix(text)
     named = re.match(r"^=\s*([A-Za-z][A-Za-z0-9_.]*)\s*\(", (text or "").strip())
@@ -2146,11 +2170,18 @@ def _excel_formula(raw: str) -> dict[str, Any] | None:
         text = text[1:].strip()
     match = _EXCEL_FN.match("=" + text if not text.startswith("=") else text)
     if not match:
-        # ``=A2*12`` / ``=salary*12``
-        derive = _DERIVE.search(text)
-        if derive and re.match(r"^[A-Za-z_]", text):
-            expr = derive.group("expr").replace("×", "*").replace("x", "*").replace("X", "*")
-            return {"kind": "derive", "plane": "shape", "confidence": 0.94, "expression": re.sub(r"\s+", " ", expr)}
+        # ``=A2*12`` / ``=salary*12`` — derive applies only when the WHOLE
+        # body parses as the closed arithmetic grammar (identifiers, numeric
+        # literals, operators, parens). An unanchored match that drops a
+        # trailing payload is a partial application and must not apply.
+        body = text.replace("×", "*").replace("x", "*").replace("X", "*")
+        if _is_closed_arithmetic(body):
+            return {
+                "kind": "derive",
+                "plane": "shape",
+                "confidence": 0.94,
+                "expression": re.sub(r"\s+", " ", body.strip()),
+            }
         return None
     fn = match.group("fn").upper()
     inner = text[text.find("(") + 1: text.rfind(")")] if "(" in text else ""

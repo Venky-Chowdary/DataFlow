@@ -20,6 +20,7 @@ from typing import Any
 
 from .classify import (
     _CLOSED_FORMULA_KINDS,
+    _EXCEL_FN_NAMES,
     classify_rule,
     formula_prefix,
     named_rule_ref,
@@ -1746,7 +1747,18 @@ def _compile_row(
     # to the closed forms `_excel_formula` owns. Everything else is review —
     # never executable, never enforced at Run, no matter which classifier
     # reached it.
-    if formula_prefix(rule_text) and kind not in _CLOSED_FORMULA_KINDS:
+    formula_unsafe = False
+    if formula_prefix(rule_text):
+        body = rule_text.strip()
+        if "|" in body or "!" in body:
+            formula_unsafe = True  # DDE / cross-sheet refs
+        if re.search(r"[A-Za-z_][\w.]*\s*\(", body):
+            for name in re.findall(r"([A-Za-z_][\w.]*)\s*\(", body):
+                if name.upper() not in _EXCEL_FN_NAMES:
+                    formula_unsafe = True  # unknown function call
+        if ("\"" in body or "&" in body) and kind != "concat":
+            formula_unsafe = True
+    if formula_unsafe or (formula_prefix(rule_text) and kind not in _CLOSED_FORMULA_KINDS):
         status = "needs_confirmation"
         named = re.match(r"^=\s*([A-Za-z][A-Za-z0-9_.]*)\s*\(", rule_text.strip())
         label = named.group(1).upper() if named else formula_prefix(rule_text)
