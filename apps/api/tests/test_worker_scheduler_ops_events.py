@@ -173,14 +173,17 @@ def test_transfer_scheduler_lifecycle_and_held_lease(monkeypatch, caplog):
             return False
 
     monkeypatch.setattr(transfer_scheduler, "_executor", None)
-    monkeypatch.setattr(transfer_scheduler, "_shutdown", False)
     monkeypatch.setattr(transfer_scheduler, "_started", threading.Event())
     monkeypatch.setattr(transfer_scheduler, "_ensure_executor", lambda: object())
     monkeypatch.setattr(transfer_scheduler, "_lease_store", _Lease())
-    with caplog.at_level("INFO"):
-        transfer_scheduler.start()
-        assert transfer_scheduler.submit("already-held-event", lambda: None).result() is None
-        transfer_scheduler.shutdown(wait=False)
+    transfer_scheduler._shutdown = False
+    try:
+        with caplog.at_level("INFO"):
+            transfer_scheduler.start()
+            assert transfer_scheduler.submit("already-held-event", lambda: None).result() is None
+            transfer_scheduler.shutdown(wait=False)
+    finally:
+        transfer_scheduler._shutdown = False
     assert _events(caplog, "scheduler.service.start")
     assert _events(caplog, "scheduler.service.stop")
     skipped, = _events(caplog, "schedule.run.skip")
