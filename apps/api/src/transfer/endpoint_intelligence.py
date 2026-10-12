@@ -1169,6 +1169,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
 
         if fmt == "dynamodb":
             from connectors.dynamodb_reader import (
+                describe_table_key_contract_or_empty,
                 describe_table_schema,
                 estimate_item_count,
                 read_all_paginated,
@@ -1181,8 +1182,13 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             if table:
                 try:
                     names, schema_map = describe_table_schema(cfg, table)
+                    key_schema, index_attributes = (
+                        describe_table_key_contract_or_empty(cfg, table)
+                    )
                     out["columns"] = names
                     out["schema"] = schema_map
+                    out["dynamo_key_schema"] = key_schema
+                    out["dynamo_index_attributes"] = index_attributes
                     out["row_estimate"] = estimate_item_count(cfg, table)
                     out["table_exists"] = True
                 except Exception as exc:

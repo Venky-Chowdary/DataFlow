@@ -3081,7 +3081,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
     try:
         from connectors.dynamodb_reader import (
             DDB_NULL_SENTINEL,
-            describe_table_key_contract,
+            describe_table_key_contract_or_empty,
             describe_table_schema,
             estimate_item_count,
             list_tables,
@@ -3098,12 +3098,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "region": kwargs.get("region") or "",
         }
         names, types = describe_table_schema(cfg, table)
-        key_schema = []
-        index_attributes = {}
-        try:
-            key_schema, index_attributes = describe_table_key_contract(cfg, table)
-        except Exception:
-            logger.debug("DynamoDB key schema describe failed for %s", table, exc_info=True)
+        key_schema, index_attributes = describe_table_key_contract_or_empty(cfg, table)
         # Sample real items — union every attribute (sparse keys) + native types.
         try:
             from connectors.dynamodb_reader import read_table_batch

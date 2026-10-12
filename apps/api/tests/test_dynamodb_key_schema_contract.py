@@ -717,7 +717,7 @@ def test_writer_logs_once_per_key_contract_violation(caplog):
     assert {record.phase for record in records} == {"execute"}
 
 
-def _dynamo_preflight(mappings, *, destination_table=""):
+def _dynamo_preflight(mappings, *, destination_table="", dynamo_key_schema=None):
     from services.preflight_service import run_file_preflight
 
     return run_file_preflight(
@@ -732,17 +732,145 @@ def _dynamo_preflight(mappings, *, destination_table=""):
         destination_db_type="dynamodb",
         destination_column_types={"id": "DECIMAL"},
         destination_pk_columns=["id"],
-        destination_dynamo_key_schema=[
-            {"name": "id", "key_type": "HASH", "attr_type": "DECIMAL", "scalar": "N"}
-        ],
+        destination_dynamo_key_schema=(
+            [{"name": "id", "key_type": "HASH", "attr_type": "DECIMAL", "scalar": "N"}]
+            if dynamo_key_schema is None
+            else dynamo_key_schema
+        ),
         destination_dynamo_index_attributes={},
         source_kind="file",
         sample_rows=[{"id": "1", "amount": "2.5"}],
     )
 
 
+def _introspect_dynamodb_key_contract(monkeypatch, *, describe_contract):
+    from types import SimpleNamespace
+
+    from connectors import dynamodb_reader
+    from src.transfer import endpoint_intelligence
+    from src.transfer.models import EndpointConfig
+
+    cfg = {
+        "type": "dynamodb",
+        "host": "localhost",
+        "port": 8000,
+        "database": "items",
+        "region": "us-east-1",
+        "endpoint_url": "http://localhost",
+    }
+    monkeypatch.setattr(endpoint_intelligence, "resolve_connector_config", lambda _endpoint: cfg)
+    monkeypatch.setattr(
+        dynamodb_reader,
+        "describe_table_schema",
+        lambda _cfg, _table: (["id"], {"id": "DECIMAL"}),
+    )
+    monkeypatch.setattr(
+        dynamodb_reader, "describe_table_key_contract", describe_contract
+    )
+    monkeypatch.setattr(dynamodb_reader, "estimate_item_count", lambda _cfg, _table: 1)
+    monkeypatch.setattr(
+        dynamodb_reader,
+        "read_all_paginated",
+        lambda _cfg, _table, limit: SimpleNamespace(
+            headers=["id"], rows=[["1"]], total_rows=1
+        ),
+    )
+    monkeypatch.setattr(
+        "connectors.dynamodb.test_dynamodb",
+        lambda **_kwargs: SimpleNamespace(
+            ok=True, tables=["items"], message="Connected", error=""
+        ),
+    )
+    return endpoint_intelligence.introspect_endpoint(
+        EndpointConfig(kind="database", format="dynamodb", table="items")
+    )
+
+
 def _g6(result):
     return next(gate for gate in result["gates"] if gate["id"] == "g6_target_ddl")
+
+
+def test_execute_preflight_forwards_dynamodb_key_schema(monkeypatch):
+    from types import SimpleNamespace
+
+    import services.preflight_service as preflight_service
+    from src.transfer.engine import _destination_filler_metadata
+    from src.transfer.engine_preflight import _execute_preflight_parity_kwargs
+    from src.transfer.models import EndpointConfig
+
+    key_schema = [
+        {"name": "id", "key_type": "HASH", "attr_type": "DECIMAL", "scalar": "N"}
+    ]
+    monkeypatch.setattr(
+        preflight_service,
+        "inspect_destination_for_preflight",
+        lambda **_kwargs: {
+            "dynamo_key_schema": key_schema,
+            "primary_key_columns": ["id"],
+            "table_exists": True,
+            "can_create_table": False,
+            "can_write": True,
+        },
+    )
+    request = SimpleNamespace(
+        destination=EndpointConfig(kind="database", format="dynamodb", table="items"),
+        stream_contracts=[],
+    )
+
+    parity = _execute_preflight_parity_kwargs(request, destination_connected=True)
+    filler = _destination_filler_metadata(request.destination.extra)
+
+    assert "destination_dynamo_key_schema" not in parity
+    assert filler["destination_dynamo_key_schema"] == key_schema
+    assert filler["destination_dynamo_index_attributes"] == {}
+    assert request.destination.extra["dynamo_key_schema"] == key_schema
+
+
+def test_dynamodb_introspection_retains_described_key_contract(monkeypatch):
+    key_schema = [
+        {"name": "id", "key_type": "HASH", "attr_type": "DECIMAL", "scalar": "N"}
+    ]
+    index_attributes = {"email-index": "S"}
+    out = _introspect_dynamodb_key_contract(
+        monkeypatch,
+        describe_contract=lambda _cfg, _table: (key_schema, index_attributes),
+    )
+
+    assert out["dynamo_key_schema"] == key_schema
+    assert out["dynamo_index_attributes"] == index_attributes
+
+
+def test_dynamodb_describe_failure_still_blocks_g6(monkeypatch, caplog):
+    import logging
+
+    def fail_describe(_cfg, _table):
+        raise RuntimeError("DescribeTable unavailable")
+
+    with caplog.at_level(logging.WARNING, logger="connectors.dynamodb_reader"):
+        info = _introspect_dynamodb_key_contract(
+            monkeypatch, describe_contract=fail_describe
+        )
+    result = _dynamo_preflight(
+        [{"source": "id", "target": "id"}],
+        destination_table="items",
+        dynamo_key_schema=info.get("dynamo_key_schema") or [],
+    )
+
+    assert info["dynamo_key_schema"] == []
+    assert info["dynamo_index_attributes"] == {}
+    assert _g6(result)["status"] == "block"
+    assert _g6(result)["details"]["rule_id"] == "g6_target_ddl.dynamo_key_contract"
+    assert "table items" in caplog.text
+
+
+def test_dynamo_preflight_still_refuses_when_key_schema_is_unavailable():
+    result = _dynamo_preflight(
+        [{"source": "id", "target": "id"}],
+        dynamo_key_schema=[],
+    )
+
+    assert _g6(result)["status"] == "block"
+    assert _g6(result)["details"]["rule_id"] == "g6_target_ddl.dynamo_key_contract"
 
 
 def test_validate_blocks_existing_dynamodb_table_when_hash_key_is_not_mapped():

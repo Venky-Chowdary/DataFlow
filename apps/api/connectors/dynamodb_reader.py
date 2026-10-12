@@ -251,6 +251,21 @@ def describe_table_key_contract(
     return keys, dict(schema.index_attributes)
 
 
+def describe_table_key_contract_or_empty(
+    cfg: dict[str, Any], table: str
+) -> tuple[list[dict[str, str]], dict[str, str]]:
+    """Describe HASH/RANGE and index contracts, failing closed when unavailable."""
+    try:
+        return describe_table_key_contract(cfg, table)
+    except Exception:
+        logger.warning(
+            "DynamoDB key contract describe failed for table %s",
+            table,
+            exc_info=True,
+        )
+        return [], {}
+
+
 def describe_table_schema(cfg: dict[str, Any], table: str) -> tuple[list[str], dict[str, str]]:
     """Return column names and types from KeySchema + AttrDefs + **sample union**."""
     client = boto3_client("dynamodb", cfg)
