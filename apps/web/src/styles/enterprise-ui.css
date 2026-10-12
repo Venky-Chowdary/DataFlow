@@ -2668,7 +2668,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
     gap: 10px;
   }
   .df2-pipeline-row-cadence,
-  .df2-pipeline-row-sync {
+  .df2-pipeline-row-sync,
+  .df2-pipeline-rows-head-cadence,
+  .df2-pipeline-rows-head-sync {
     display: none;
   }
   .df2-pipeline-rows-head-name {
@@ -4803,7 +4805,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  border: 1px solid #a7f3d0;
+  border: 1px solid var(--df-success-border);
   border-radius: 10px;
   background: var(--df-success-bg);
 }
@@ -4819,7 +4821,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-run-readiness-score {
   font-size: 12px;
   font-weight: 700;
-  color: #047857;
+  color: var(--df-success);
+  font-variant-numeric: tabular-nums;
 }
 
 .df2-run-readiness-route {
@@ -4838,7 +4841,10 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-run-readiness p {
-  display: none;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--df-text-secondary);
 }
 
 .df2-run-ready-body {
