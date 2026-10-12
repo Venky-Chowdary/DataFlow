@@ -12,6 +12,13 @@ test("a refusal names the action, the role, and the permission", () => {
   assert.ok(!sentence.startsWith("Permission denied"));
 });
 
+test("a surface can name its own action without dropping the permission", () => {
+  const sentence = refusalSentence("connector.write", "viewer", "sign or change contracts");
+  assert.match(sentence, /sign or change contracts/);
+  assert.doesNotMatch(sentence, /add or change connections/);
+  assert.match(sentence, /\(needs connector\.write\)/);
+});
+
 test("an unknown permission still reads as a sentence", () => {
   const sentence = refusalSentence("some.future.permission", "");
   assert.match(sentence, /You don't have permission to do this/);

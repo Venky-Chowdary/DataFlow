@@ -20,6 +20,7 @@ import {
   nextPilotResultId,
   pilotActionChipLabel,
   runPilotConfirm,
+  uniquePilotPrompts,
 } from "../lib/pilotChat";
 import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
@@ -75,7 +76,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
 
   useEffect(() => {
     if ((open || variant === "rail") && prompts.length === 0) {
-      fetchCopilotPrompts().then(setPrompts).catch(() => {});
+      fetchCopilotPrompts().then((list) => setPrompts(uniquePilotPrompts(list))).catch(() => {});
     }
   }, [open, variant, prompts.length]);
 
@@ -171,7 +172,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         applyActions(res.suggested_actions, res.tools_used);
       }
       if (res.suggested_prompts?.length) {
-        setPrompts(res.suggested_prompts);
+        setPrompts(uniquePilotPrompts(res.suggested_prompts));
       }
     } catch (error) {
       const detail = formatPilotReachError(error, API_BASE);
@@ -266,7 +267,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
               && !(msg.pending_actions && msg.pending_actions.length > 0)
               && (msg.suggested_prompts?.length || (prompts.length > 0 && messages.length > 2)) && (
               <div className="df2-copilot-suggestions" style={{ marginTop: 8 }}>
-                {(msg.suggested_prompts?.length ? msg.suggested_prompts : prompts).slice(0, 3).map((p) => (
+                {uniquePilotPrompts(msg.suggested_prompts?.length ? msg.suggested_prompts : prompts).slice(0, 3).map((p) => (
                   <button key={p} type="button" onClick={() => send(p)}>{p}</button>
                 ))}
               </div>

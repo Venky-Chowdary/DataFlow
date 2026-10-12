@@ -44,13 +44,19 @@ const PERMISSION_ROLE: Record<string, string> = {
   "iam.manage": "admin",
 };
 
-/** The sentence a refused caller should read. */
-export function refusalSentence(permission: string, role: string): string {
-  const action = PERMISSION_PHRASE[permission] ?? "do this";
+/**
+ * The sentence a refused caller should read.
+ *
+ * `action` overrides the default verb when the same permission gates a
+ * different surface. Contracts use connector.write, but the page must say
+ * "sign or change contracts", not "add or change connections".
+ */
+export function refusalSentence(permission: string, role: string, action?: string): string {
+  const verb = action || PERMISSION_PHRASE[permission] || "do this";
   const who = ROLE_PHRASE[role];
   const needed = PERMISSION_ROLE[permission] ?? "editor";
   return (
-    `You don't have permission to ${action}` +
+    `You don't have permission to ${verb}` +
     (who ? ` — you are ${who} in this workspace` : "") +
     `. Ask a workspace admin for the ${needed} role` +
     (permission ? ` (needs ${permission})` : "") +
