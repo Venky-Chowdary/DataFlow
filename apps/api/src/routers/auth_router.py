@@ -177,9 +177,17 @@ def _pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
-def _redirect_with_token(email: str, expires_at: int | None = None) -> RedirectResponse:
+def _redirect_with_token(
+    email: str,
+    expires_at: int | None = None,
+    *,
+    token: str | None = None,
+) -> RedirectResponse:
     """Return the token in the URL fragment so it is not sent to the server or logged."""
-    token, minted_expires = create_token(str(email))
+    if token is None:
+        token, minted_expires = create_token(str(email))
+    else:
+        minted_expires = int(token.rsplit(":", 3)[1])
     exp = int(expires_at) if expires_at is not None else minted_expires
     params = urlencode(
         {
@@ -549,8 +557,17 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
         )
         email = oidc_client.email_from_claims(claims, sso_type=sso_type)
         require_sso_authorization(email)
-        _audit_sso_success(sso_type, email, resource)
-        return _redirect_with_token(email)
+        token, expires_at = create_token(email)
+        from services.audit_coverage import session_label
+        from src.services.auth_service import token_jti
+
+        _audit_sso_success(
+            sso_type,
+            email,
+            resource,
+            session_id=session_label(token_jti(token)),
+        )
+        return _redirect_with_token(email, expires_at, token=token)
     except oidc_client.OidcError as exc:
         _raise_oidc_failure(exc, sso_type, issuer)
     except SsoStoreUnavailable:
@@ -578,7 +595,13 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
         ) from None
 
 
-def _audit_sso_success(sso_type: str, email: str, resource: str) -> None:
+def _audit_sso_success(
+    sso_type: str,
+    email: str,
+    resource: str,
+    *,
+    session_id: str | None = None,
+) -> None:
     try:
         from services.audit_coverage import record_security_event
 
@@ -587,6 +610,7 @@ def _audit_sso_success(sso_type: str, email: str, resource: str) -> None:
             outcome="succeeded",
             actor=email,
             resource=resource,
+            session_id=session_id,
             details={"provider": sso_type},
         )
     except Exception:
@@ -744,8 +768,17 @@ async def sso_post_callback(sso_type: str, request: Request):
             "/auth/sso/saml/callback",
         )
         raise
-    _audit_sso_success("saml", email, "/auth/sso/saml/callback")
-    return _redirect_with_token(email)
+    token, expires_at = create_token(email)
+    from services.audit_coverage import session_label
+    from src.services.auth_service import token_jti
+
+    _audit_sso_success(
+        "saml",
+        email,
+        "/auth/sso/saml/callback",
+        session_id=session_label(token_jti(token)),
+    )
+    return _redirect_with_token(email, expires_at, token=token)
 
 
 @router.get("/bootstrap")

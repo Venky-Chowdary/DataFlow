@@ -217,3 +217,57 @@ def test_oidc_state_replay_is_rejected(oidc_client_fixture, monkeypatch):
 
     assert first.status_code == 401
     assert second.status_code == 400
+
+
+def test_oidc_callback_and_logout_share_redacted_session_id(
+    oidc_client_fixture, monkeypatch, tmp_path
+):
+    import json
+
+    from services import audit_log
+
+    client, _config, auth_router, sso_state = oidc_client_fixture
+    _seed_callback_state(sso_state)
+    monkeypatch.setattr(auth_router.oidc_client, "discover", lambda _issuer: _metadata())
+    monkeypatch.setattr(
+        auth_router.oidc_client,
+        "validate_id_token",
+        lambda *_args, **_kwargs: {"sub": "oidc-user"},
+    )
+    monkeypatch.setattr(
+        auth_router.oidc_client,
+        "email_from_claims",
+        lambda _claims, **_kwargs: "oidc-user@example.test",
+    )
+    _mock_http(
+        auth_router,
+        monkeypatch,
+        lambda _request: httpx.Response(200, json={"id_token": "id-token"}),
+    )
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(audit_log, "STORE_PATH", audit_path)
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+
+    response = client.get(
+        "/api/v1/auth/sso/oidc/callback",
+        params={"code": "authorization-code", "state": "callback-state"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    token = parse_qs(urlsplit(response.headers["location"]).fragment)["sso_token"][0]
+    logout = client.post(
+        "/api/v1/auth/logout",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert logout.status_code == 200
+
+    from src.services.auth_service import token_jti
+
+    raw_jti = token_jti(token)
+    rows = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    sso_event = next(row for row in rows if row["action"] == "auth.sso.login")
+    logout_event = next(row for row in rows if row["action"] == "auth.logout")
+    assert sso_event["session_id"] == logout_event["session_id"]
+    assert sso_event["session_id"].startswith("ses_")
+    assert raw_jti not in audit_path.read_text()
+    assert token not in audit_path.read_text()

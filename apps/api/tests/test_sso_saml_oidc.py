@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 import types
+import json
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import MagicMock
 
 import pytest
@@ -127,6 +129,51 @@ def test_sso_saml_callback_creates_token(client, monkeypatch, tmp_path):
     assert "sso_token=" in location
     assert "saml-user@example.com" in location
     mock_auth.process_response.assert_called_once_with(request_id="request-id")
+
+
+def test_saml_callback_and_logout_share_redacted_session_id(
+    client, monkeypatch, tmp_path
+):
+    from services import audit_log, integrations_store, sso_state
+    from src.services.auth_service import token_jti
+
+    integrations_store.STORE_PATH.write_text(integrations_store.json.dumps(_saml_cfg()))
+    sso_state.set_state("session-state", "saml", {"request_id": "request-id"})
+    mock_auth = MagicMock()
+    mock_auth.get_errors.return_value = []
+    mock_auth.is_authenticated.return_value = True
+    mock_auth.get_nameid.return_value = "saml-session-user@example.com"
+    mock_auth.get_attributes.return_value = {}
+    mock_auth.get_last_assertion_id.return_value = "session-assertion-id"
+    mock_auth.get_last_assertion_not_on_or_after.return_value = None
+    mock_auth_cls = MagicMock(return_value=mock_auth)
+    _install_fake_onelogin(mock_auth_cls, monkeypatch)
+    audit_path = tmp_path / "audit.jsonl"
+    monkeypatch.setattr(audit_log, "STORE_PATH", audit_path)
+    monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
+
+    response = client.post(
+        "/api/v1/auth/sso/saml/callback",
+        data={"SAMLResponse": "base64-saml-response", "RelayState": "session-state"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    token = parse_qs(urlsplit(response.headers["location"]).fragment)["sso_token"][0]
+    logout = client.post(
+        "/api/v1/auth/logout",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert logout.status_code == 200
+
+    raw_jti = token_jti(token)
+    audit_bytes = audit_path.read_bytes()
+    rows = [json.loads(line) for line in audit_bytes.decode().splitlines()]
+    sso_event = next(row for row in rows if row["action"] == "auth.sso.login")
+    logout_event = next(row for row in rows if row["action"] == "auth.logout")
+    assert sso_event["session_id"] == logout_event["session_id"]
+    assert sso_event["session_id"].startswith("ses_")
+    assert raw_jti.encode() not in audit_bytes
+    assert token.encode() not in audit_bytes
 
 
 def test_sso_saml_callback_rejects_invalid_response(client, monkeypatch, tmp_path):
