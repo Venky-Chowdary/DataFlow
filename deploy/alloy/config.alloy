@@ -83,11 +83,11 @@ otelcol.processor.memory_limiter "default" {
 
 otelcol.receiver.otlp "dataflow" {
   grpc {
-    endpoint = "0.0.0.0:4317"
+    endpoint = "[::]:4317"
   }
 
   http {
-    endpoint = "0.0.0.0:4318"
+    endpoint = "[::]:4318"
   }
 
   output {
