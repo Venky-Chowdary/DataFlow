@@ -70,7 +70,7 @@ _RECORD_ATTRS = frozenset(
 _SCALARS = (str, int, float, bool)
 
 #: Interruptions, not defects: a cancelled task, Ctrl-C, or a closed generator.
-_CANCELLATIONS = (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit)
+CANCELLATION_ERRORS = (asyncio.CancelledError, KeyboardInterrupt, GeneratorExit)
 
 
 def validate_event(event: str, outcome: str) -> None:
@@ -194,7 +194,7 @@ def operation(
     started = time.monotonic()
     try:
         yield result
-    except _CANCELLATIONS as exc:
+    except CANCELLATION_ERRORS as exc:
         emit_event(
             logger,
             f"{prefix}.cancelled",

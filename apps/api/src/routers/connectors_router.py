@@ -31,6 +31,8 @@ from ..transfer.connector_capabilities import resolve_driver_type
 from ..transfer.connector_registry import run_probe
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
+from services.ops_events import emit_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -600,6 +602,11 @@ async def retry_transfer_job(
             rows_committed_known=rows_known,
         )
         if not retry_decision["allowed"] and not force:
+            emit_event(
+                logger, "job.retry.refused", outcome="held", level=logging.INFO,
+                job_id=job_id, workspace_id=job.get("workspace_id") or None,
+                reason="duplicate_risk",
+            )
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -636,6 +643,12 @@ async def retry_transfer_job(
 
         # From-zero: do not copy parent checkpoint / resume_from_job_id.
         background_tasks.add_task(run_transfer_async, new_job_id, xfer_req, resume=False)
+        emit_event(
+            logger, "job.retry.requested", outcome="succeeded",
+            job_id=new_job_id, retry_of=job_id,
+            workspace_id=job.get("workspace_id") or None,
+            duplicate_risk_acknowledged=forced,
+        )
         return {
             "success": True,
             "async": True,
@@ -765,6 +778,11 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
         background_tasks.add_task(
             run_transfer_async, job_id, xfer_req, resume=not restart_full_refresh
         )
+        emit_event(
+            logger, "job.resume.requested", outcome="succeeded",
+            job_id=job_id, workspace_id=job.get("workspace_id") or None,
+            restarted=restart_full_refresh, gap_restart=bool(safety.get("gap_restart")),
+        )
         return {
             "success": True,
             "async": True,
@@ -803,6 +821,11 @@ async def cancel_transfer_job(job_id: str, request: Request):
         if not _can_mutate_job(request, job):
             raise HTTPException(status_code=403, detail="Workspace write access required")
         if job.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
+            emit_event(
+                logger, "job.cancel.requested", outcome="skipped",
+                job_id=job_id, workspace_id=job.get("workspace_id") or None,
+                reason="already_terminal", status=str(job.get("status")),
+            )
             return {"success": True, "job_id": job_id, "status": job.get("status"), "message": "Job already terminal"}
         # Durable intent flag first, status second. The flag is what the worker
         # loop actually consults, and unlike `status` nothing in the progress
@@ -828,6 +851,13 @@ async def cancel_transfer_job(job_id: str, request: Request):
             current = mongo.get_job(job_id) or {}
             actual = str(current.get("status") or job.get("status") or "")
             if actual != "cancelled":
+                emit_event(
+                    logger, "job.cancel.requested", outcome="held",
+                    level=logging.INFO, job_id=job_id,
+                    workspace_id=job.get("workspace_id") or None,
+                    reason="status_not_changed", status=actual or None,
+                    queue_release=str(queue_release.get("queue") or "") or None,
+                )
                 return {
                     "success": False,
                     "job_id": job_id,
@@ -853,6 +883,12 @@ async def cancel_transfer_job(job_id: str, request: Request):
         except Exception as exc:
             logger.warning("CDC slot release on cancel failed for %s: %s", job_id, exc)
             slot_release = {"released": False, "reason": "release_failed"}
+        emit_event(
+            logger, "job.cancel.requested", outcome="succeeded",
+            job_id=job_id, workspace_id=job.get("workspace_id") or None,
+            queue_release=str(queue_release.get("queue") or "") or None,
+            cdc_slot_released=bool(slot_release.get("released")),
+        )
         return {
             "success": True,
             "job_id": job_id,
