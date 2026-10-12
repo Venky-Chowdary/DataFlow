@@ -188,7 +188,7 @@ def test_scim_write_audits_the_scim_token_principal(attribution_app):
     )
 
     assert response.status_code == 201, response.text
-    assert {event["action"] for event in events} == {"http.post"}
+    assert {event["action"] for event in events} == {"scim.user.create"}
     _assert_key_events(
         events,
         kind="scim",

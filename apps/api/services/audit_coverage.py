@@ -86,6 +86,25 @@ def end_request_audit(token: Token[dict[str, Any] | None]) -> None:
     _REQUEST_AUDIT.reset(token)
 
 
+def note_workspace_header(request: Request) -> None:
+    try:
+        from services.workspace_access import (
+            authorized_workspace_id,
+            requested_workspace_id,
+        )
+
+        if not requested_workspace_id(request):
+            return
+        authorized_workspace_id(request)
+        tracker = current_request_audit()
+        if tracker is not None:
+            tracker["workspace_header_rejected"] = bool(
+                getattr(request.state, "workspace_header_rejected", False)
+            )
+    except Exception:
+        return
+
+
 def set_request_principal(principal: dict[str, str]) -> Token[dict[str, str] | None]:
     return _REQUEST_PRINCIPAL.set(dict(principal))
 

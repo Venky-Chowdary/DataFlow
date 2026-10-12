@@ -300,6 +300,49 @@ def test_named_logout_does_not_flag_missing_workspace_header(request_context):
     assert "workspace_header_rejected" not in event["details"]
 
 
+def test_legacy_team_member_audit_captures_rejected_workspace_header(request_context):
+    client = request_context["client"]
+    authorization = _member_authorization(request_context)
+    correlation_id = "legacy-team-member-spoof"
+    response = client.post(
+        f"/api/v1/team/workspaces/{request_context['workspace_id']}/members",
+        headers={
+            "Authorization": authorization,
+            "X-Correlation-ID": correlation_id,
+            "X-Workspace-Id": request_context["other_workspace_id"],
+        },
+        json={"email": "legacy-target@example.test", "role": "viewer"},
+    )
+    assert response.status_code == 200, response.text
+    matching = [
+        event
+        for event in _audit_events(request_context["audit_path"])
+        if event.get("correlation_id") == correlation_id
+    ]
+    assert len(matching) == 1
+    assert matching[0]["action"] == "team.member.add"
+    assert matching[0]["workspace_id"] != request_context["other_workspace_id"]
+    assert matching[0]["details"]["workspace_header_rejected"] is True
+
+    no_header_correlation = "legacy-team-member-no-header"
+    no_header_response = client.post(
+        f"/api/v1/team/workspaces/{request_context['workspace_id']}/members",
+        headers={
+            "Authorization": authorization,
+            "X-Correlation-ID": no_header_correlation,
+        },
+        json={"email": "legacy-target-no-header@example.test", "role": "viewer"},
+    )
+    assert no_header_response.status_code == 200, no_header_response.text
+    no_header_event = next(
+        event
+        for event in _audit_events(request_context["audit_path"])
+        if event.get("correlation_id") == no_header_correlation
+    )
+    assert no_header_event["action"] == "team.member.add"
+    assert "workspace_header_rejected" not in no_header_event["details"]
+
+
 def test_audit_coverage_prefers_sanitized_request_state_correlation_id():
     request = Request(
         {

@@ -125,9 +125,46 @@ def test_security_event_registry_is_valid_and_call_sites_are_literal():
                     continue
                 if not isinstance(node.func, ast.Name) or node.func.id != "record_security_event":
                     continue
+                if (
+                    path in {
+                        _API_ROOT / "services" / "scim_service.py",
+                        _API_ROOT / "src" / "routers" / "auth_router.py",
+                    }
+                    and node.args
+                    and isinstance(node.args[0], ast.Name)
+                    and node.args[0].id == "action"
+                ):
+                    continue
                 assert node.args and isinstance(node.args[0], ast.Constant)
                 assert isinstance(node.args[0].value, str)
                 assert node.args[0].value in registry
+            if path == _API_ROOT / "services" / "scim_service.py":
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    if not isinstance(node.func, ast.Name) or node.func.id != "_update_user":
+                        continue
+                    audit_action = next(
+                        (keyword.value for keyword in node.keywords if keyword.arg == "audit_action"),
+                        None,
+                    )
+                    assert isinstance(audit_action, ast.Constant)
+                    assert audit_action.value in registry
+            if path == _API_ROOT / "src" / "routers" / "auth_router.py":
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    if (
+                        not isinstance(node.func, ast.Name)
+                        or node.func.id != "_record_login_audit"
+                    ):
+                        continue
+                    action = next(
+                        (keyword.value for keyword in node.keywords if keyword.arg == "action"),
+                        None,
+                    )
+                    assert isinstance(action, ast.Constant)
+                    assert action.value in {"auth.login.failure", "auth.login.locked"}
 
 
 def test_unknown_security_event_warns_but_is_still_audited(security_app, caplog):

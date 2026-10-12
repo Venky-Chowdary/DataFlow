@@ -185,9 +185,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     principal_token = audit_coverage.set_request_principal(
                         audit_coverage.request_principal(request)
                     )
+                    audit_coverage.note_workspace_header(request)
                     forbidden = _tenant_bind_forbidden(request)
                     if forbidden is not None:
                         return forbidden
+                else:
+                    from services.audit_coverage import note_workspace_header
+
+                    note_workspace_header(request)
                 return await call_next(request)
 
             path = request.url.path
@@ -207,9 +212,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     principal_token = audit_coverage.set_request_principal(
                         audit_coverage.request_principal(request)
                     )
+                    audit_coverage.note_workspace_header(request)
                     forbidden = _tenant_bind_forbidden(request)
                     if forbidden is not None:
                         return forbidden
+                else:
+                    from services.audit_coverage import note_workspace_header
+
+                    note_workspace_header(request)
                 return await call_next(request)
 
             reason_code = (
@@ -220,6 +230,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             if reason_code:
                 from services import audit_coverage
 
+                audit_coverage.note_workspace_header(request)
                 client_ip = request.client.host if request.client else ""
                 suppressed = audit_coverage._suppressed_since_last(
                     client_ip or "unknown",
@@ -255,6 +266,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             principal_token = audit_coverage.set_request_principal(
                 audit_coverage.request_principal(request)
             )
+            audit_coverage.note_workspace_header(request)
             forbidden = _tenant_bind_forbidden(request)
             if forbidden is not None:
                 return forbidden

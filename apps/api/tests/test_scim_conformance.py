@@ -179,7 +179,6 @@ def test_scim_security_events_are_registered():
 
 
 def test_scim_mutations_write_private_named_events(scim_client, caplog):
-    client = scim_client["client"]
     sentinels = [
         "SCIM_EMAIL_SENTINEL@example.test",
         "SCIM_USERNAME_SENTINEL@example.test",
