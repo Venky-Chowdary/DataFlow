@@ -123,6 +123,258 @@ def _patch_group(scim_client, group_id: str, operation: dict):
     )
 
 
+def _scim_audit_request(scim_client, method: str, path: str, action: str, **kwargs):
+    correlation_id = str(uuid.uuid4())
+    response = scim_client["client"].request(
+        method,
+        path,
+        headers={
+            **_scim_headers(scim_client["scim"]),
+            "X-Correlation-ID": correlation_id,
+        },
+        **kwargs,
+    )
+    events = [
+        event
+        for event in scim_client["modules"]["audit_log"].list_audit_events(limit=500)
+        if event.get("correlation_id") == correlation_id
+    ]
+    assert len(events) == 1, [(event.get("action"), event.get("correlation_id")) for event in events]
+    event = events[0]
+    assert event["action"] == action
+    scim_key = next(
+        record
+        for record in scim_client["modules"]["integrations_store"].load_api_key_records()
+        if record.get("kind") == "scim"
+    )
+    assert event["actor_type"] == "scim"
+    assert event["actor_id"] == scim_key["id"]
+    assert event["created_by"] == "operator@example.test"
+    return response, event
+
+
+def test_scim_security_events_are_registered():
+    from services import audit_coverage, ops_events
+
+    expected = {
+        "scim.user.create",
+        "scim.user.replace",
+        "scim.user.patch",
+        "scim.user.delete",
+        "scim.user.deprovision",
+        "scim.user.deprovision.failed",
+        "scim.user.reactivate",
+        "scim.group.create",
+        "scim.group.replace",
+        "scim.group.patch",
+        "scim.group.delete",
+        "scim.group.role_change",
+        "scim.group.member_add",
+        "scim.group.member_remove",
+    }
+    assert expected <= audit_coverage.SECURITY_EVENTS.keys()
+    for event in expected:
+        outcome = "failed" if event.endswith(".failed") else "succeeded"
+        ops_events.validate_event(event, outcome)
+
+
+def test_scim_mutations_write_private_named_events(scim_client, caplog):
+    client = scim_client["client"]
+    sentinels = [
+        "SCIM_EMAIL_SENTINEL@example.test",
+        "SCIM_USERNAME_SENTINEL@example.test",
+        "SCIM_GIVENNAME_SENTINEL",
+        "SCIM_PHONE_SENTINEL",
+        "SCIM_DISPLAYNAME_SENTINEL",
+    ]
+    user_response, user_event = _scim_audit_request(
+        scim_client,
+        "POST",
+        "/api/v1/scim/v2/Users",
+        "scim.user.create",
+        json={
+            "userName": sentinels[1],
+            "displayName": sentinels[4],
+            "emails": [{"value": sentinels[0]}],
+            "name": {"givenName": sentinels[2]},
+            "phoneNumbers": [{"value": sentinels[3]}],
+        },
+    )
+    assert user_response.status_code == 201, user_response.text
+    user_id = user_response.json()["id"]
+    assert user_event["details"]["user_id"] == user_id
+    assert user_event["details"]["changed_attributes"] == ["displayName", "userName"]
+
+    replacement, replace_event = _scim_audit_request(
+        scim_client,
+        "PUT",
+        f"/api/v1/scim/v2/Users/{user_id}",
+        "scim.user.replace",
+        json={
+            "userName": sentinels[1].lower(),
+            "displayName": "Replacement display",
+            "externalId": "replacement-id",
+        },
+    )
+    assert replacement.status_code == 200, replacement.text
+    assert replace_event["details"]["user_id"] == user_id
+    assert replace_event["details"]["changed_attributes"] == [
+        "displayName",
+        "externalId",
+    ]
+
+    patched, patch_event = _scim_audit_request(
+        scim_client,
+        "PATCH",
+        f"/api/v1/scim/v2/Users/{user_id}",
+        "scim.user.patch",
+        json={
+            "Operations": [
+                {"op": "replace", "path": "externalId", "value": "patched-id"}
+            ]
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    assert patch_event["details"]["user_id"] == user_id
+    assert patch_event["details"]["changed_attributes"] == ["externalId"]
+
+    deactivated, deprovision_event = _scim_audit_request(
+        scim_client,
+        "PATCH",
+        f"/api/v1/scim/v2/Users/{user_id}",
+        "scim.user.deprovision",
+        json={
+            "Operations": [
+                {"op": "replace", "path": "active", "value": False}
+            ]
+        },
+    )
+    assert deactivated.status_code == 200, deactivated.text
+    assert deprovision_event["details"]["user_id"] == user_id
+
+    reactivated, reactivate_event = _scim_audit_request(
+        scim_client,
+        "PATCH",
+        f"/api/v1/scim/v2/Users/{user_id}",
+        "scim.user.reactivate",
+        json={
+            "Operations": [
+                {"op": "replace", "path": "active", "value": True}
+            ]
+        },
+    )
+    assert reactivated.status_code == 200, reactivated.text
+    assert reactivate_event["details"]["user_id"] == user_id
+
+    deleted, delete_event = _scim_audit_request(
+        scim_client,
+        "DELETE",
+        f"/api/v1/scim/v2/Users/{user_id}",
+        "scim.user.delete",
+    )
+    assert deleted.status_code == 204
+    assert delete_event["details"]["user_id"] == user_id
+
+    group_response, group_create_event = _scim_audit_request(
+        scim_client,
+        "POST",
+        "/api/v1/scim/v2/Groups",
+        "scim.group.create",
+        json={"displayName": "SCIM audit group"},
+    )
+    assert group_response.status_code == 201, group_response.text
+    group_id = group_response.json()["id"]
+    assert group_create_event["details"]["group_id"] == group_id
+
+    group_member_response, _group_member_event = _scim_audit_request(
+        scim_client,
+        "POST",
+        "/api/v1/scim/v2/Users",
+        "scim.user.create",
+        json={"userName": "scim-group-member@example.test"},
+    )
+    assert group_member_response.status_code == 201, group_member_response.text
+    group_member_id = group_member_response.json()["id"]
+
+    added_member, add_event = _scim_audit_request(
+        scim_client,
+        "PATCH",
+        f"/api/v1/scim/v2/Groups/{group_id}",
+        "scim.group.member_add",
+        json={
+            "Operations": [
+                {
+                    "op": "add",
+                    "path": "members",
+                    "value": [{"value": group_member_id}],
+                }
+            ]
+        },
+    )
+    assert added_member.status_code == 200, added_member.text
+    assert add_event["details"]["group_id"] == group_id
+    assert add_event["details"]["member_ids_added"] == [group_member_id]
+
+    removed_member, remove_event = _scim_audit_request(
+        scim_client,
+        "PATCH",
+        f"/api/v1/scim/v2/Groups/{group_id}",
+        "scim.group.member_remove",
+        json={
+            "Operations": [
+                {
+                    "op": "remove",
+                    "path": "members",
+                    "value": [group_member_id],
+                }
+            ]
+        },
+    )
+    assert removed_member.status_code == 200, removed_member.text
+    assert remove_event["details"]["group_id"] == group_id
+    assert remove_event["details"]["member_ids_removed"] == [group_member_id]
+
+    replaced_group, group_replace_event = _scim_audit_request(
+        scim_client,
+        "PUT",
+        f"/api/v1/scim/v2/Groups/{group_id}",
+        "scim.group.replace",
+        json={"displayName": "SCIM audit group replaced"},
+    )
+    assert replaced_group.status_code == 200, replaced_group.text
+    assert group_replace_event["details"]["group_id"] == group_id
+
+    patched_group, group_patch_event = _scim_audit_request(
+        scim_client,
+        "PATCH",
+        f"/api/v1/scim/v2/Groups/{group_id}",
+        "scim.group.patch",
+        json={
+            "Operations": [
+                {"op": "replace", "path": "members", "value": []}
+            ]
+        },
+    )
+    assert patched_group.status_code == 200, patched_group.text
+    assert group_patch_event["details"]["group_id"] == group_id
+
+    deleted_group, group_delete_event = _scim_audit_request(
+        scim_client,
+        "DELETE",
+        f"/api/v1/scim/v2/Groups/{group_id}",
+        "scim.group.delete",
+    )
+    assert deleted_group.status_code == 204
+    assert group_delete_event["details"]["group_id"] == group_id
+
+    audit_bytes = scim_client["modules"]["audit_log"].STORE_PATH.read_bytes()
+    audit_text = audit_bytes.decode("utf-8")
+    for sentinel in sentinels:
+        assert sentinel.lower().encode() not in audit_bytes.lower()
+        assert sentinel.lower() not in caplog.text.lower()
+        assert sentinel.lower() not in audit_text.lower()
+
+
 def test_discovery_authentication_and_scope_isolation(scim_client):
     client = scim_client["client"]
     for endpoint in ("ServiceProviderConfig", "ResourceTypes", "Schemas"):
@@ -349,7 +601,7 @@ def test_deprovision_reactivation_and_delete(scim_client, monkeypatch):
         event
         for event in audit_events
         if event.get("action") == "scim.user.deprovision"
-        and event.get("details", {}).get("scim_id") == user_id
+        and event.get("details", {}).get("user_id") == user_id
     ]
     assert len(deprovision) == 1
     assert deprovision[0]["details"]["sessions_revoked"] == 1
@@ -431,15 +683,15 @@ def test_deprovision_retry_completes_after_a_step_fails(scim_client, monkeypatch
     failures = [
         event for event in events
         if event.get("action") == "scim.user.deprovision.failed"
-        and event.get("details", {}).get("scim_id") == user["id"]
+        and event.get("details", {}).get("user_id") == user["id"]
     ]
     successes = [
         event for event in events
         if event.get("action") == "scim.user.deprovision"
-        and event.get("details", {}).get("scim_id") == user["id"]
+        and event.get("details", {}).get("user_id") == user["id"]
     ]
     assert len(failures) == len(successes) == 1
-    assert failures[0]["details"]["step"] == "revoke_sessions"
+    assert failures[0]["reason_code"] == "revoke_sessions"
 
 
 def test_group_role_sync_manual_membership_last_admin_and_restart(scim_client):

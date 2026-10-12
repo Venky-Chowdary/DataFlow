@@ -43,6 +43,20 @@ SECURITY_EVENTS: dict[str, str] = {
     "audit.verify.read": "The audit chain was verified.",
     "audit.verify_pack.read": "An audit proof pack was verified.",
     "audit.secret_scan.read": "Audit events were scanned for sensitive values.",
+    "scim.user.create": "A SCIM user was created.",
+    "scim.user.replace": "A SCIM user was replaced.",
+    "scim.user.patch": "A SCIM user was patched.",
+    "scim.user.delete": "A SCIM user was deleted.",
+    "scim.user.deprovision": "A SCIM user was deprovisioned.",
+    "scim.user.deprovision.failed": "SCIM user deprovisioning failed.",
+    "scim.user.reactivate": "A SCIM user was reactivated.",
+    "scim.group.create": "A SCIM group was created.",
+    "scim.group.replace": "A SCIM group was replaced.",
+    "scim.group.patch": "A SCIM group was patched.",
+    "scim.group.delete": "A SCIM group was deleted.",
+    "scim.group.role_change": "A SCIM group changed a workspace role.",
+    "scim.group.member_add": "Members were added to a SCIM group.",
+    "scim.group.member_remove": "Members were removed from a SCIM group.",
 }
 
 _REQUEST_PRINCIPAL: ContextVar[dict[str, str] | None] = ContextVar(

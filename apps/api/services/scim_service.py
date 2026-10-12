@@ -9,7 +9,7 @@ from contextlib import ExitStack
 from datetime import datetime, timezone
 from typing import Any
 
-from services import auth_sessions, audit_log, integrations_store, scim_store, team_store, user_store
+from services import auth_sessions, integrations_store, scim_store, team_store, user_store
 
 _ERROR_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:Error"
 _LIST_SCHEMA = "urn:ietf:params:scim:api:messages:2.0:ListResponse"
@@ -60,13 +60,64 @@ def _store_call(func, *args, **kwargs):
         _fail(500, "SCIM storage is unavailable")
 
 
-def _audit(action: str, *, actor: str, resource: str, details: dict[str, Any]) -> None:
-    audit_log.append_audit_event(
-        action=action,
+def _audit(
+    action: str,
+    *,
+    actor: str,
+    resource: str,
+    details: dict[str, Any],
+    outcome: str = "succeeded",
+    reason_code: str | None = None,
+) -> None:
+    from services.audit_coverage import record_security_event
+
+    record_security_event(
+        action,
+        outcome=outcome,
         resource=resource,
         actor=actor or "scim",
-        level="info",
+        reason_code=reason_code,
         details=details,
+    )
+
+
+def _user_attributes(payload: dict[str, Any]) -> list[str]:
+    allowed = {"userName", "externalId", "displayName", "active"}
+    return sorted(attribute for attribute in allowed if attribute in payload)
+
+
+def _changed_user_attributes(
+    current: dict[str, Any], updated: dict[str, Any]
+) -> list[str]:
+    fields = {
+        "userName": "userName",
+        "externalId": "externalId",
+        "displayName": "displayName",
+        "active": "active",
+    }
+    return sorted(
+        attribute
+        for attribute, field in fields.items()
+        if current.get(field, True if field == "active" else None)
+        != updated.get(field, True if field == "active" else None)
+    )
+
+
+def _user_resource(user_id: str | None) -> str:
+    return f"scim_user:{user_id}" if user_id else "scim_user"
+
+
+def _group_changed_attributes(
+    current: dict[str, Any], updated: dict[str, Any]
+) -> list[str]:
+    return sorted(
+        attribute
+        for attribute, field in (
+            ("displayName", "displayName"),
+            ("externalId", "externalId"),
+            ("members", "members"),
+        )
+        if current.get(field) != updated.get(field)
     )
 
 
@@ -265,15 +316,34 @@ def create_user(payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
         raise
     if active:
         if account and account.get("status") == "disabled":
-            reactivate_user(user_name, actor=actor)
+            reactivate_user(user_name, actor=actor, record_success=False)
     else:
-        deprovision_user(user_name, actor=actor)
+        deprovision_user(user_name, actor=actor, record_success=False)
         stored_user = {**user, "active": False}
         _store_call(scim_store.update_user, stored_user)
+    _audit(
+        "scim.user.create",
+        actor=actor,
+        resource=_user_resource(user["id"]),
+        details={
+            "user_id": user["id"],
+            "changed_attributes": _user_attributes(payload),
+        },
+    )
     return _resource_user(stored_user)
 
 
 def replace_user(user_id: str, payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    return _update_user(user_id, payload, actor=actor, audit_action="scim.user.replace")
+
+
+def _update_user(
+    user_id: str,
+    payload: dict[str, Any],
+    *,
+    actor: str,
+    audit_action: str,
+) -> dict[str, Any]:
     current = _store_call(scim_store.get_user, user_id)
     if current is None:
         _fail(404, "User not found")
@@ -293,18 +363,36 @@ def replace_user(user_id: str, payload: dict[str, Any], *, actor: str) -> dict[s
         version=str(int(current["meta"].get("version", "1")) + 1),
     )
     account = user_store.get_user(user_name)
+    deprovisioned = False
+    reactivated = False
     if active and (
         current.get("active") is False
         or (account and account.get("status") == "disabled")
     ):
         reactivate_user(user_name, actor=actor)
+        reactivated = True
     elif not active and (
         current.get("active", True) is not False
         or account is None
         or account.get("status") != "disabled"
     ):
         deprovision_user(user_name, actor=actor)
+        deprovisioned = True
     _store_call(scim_store.update_user, updated)
+    changed_attributes = _changed_user_attributes(current, updated)
+    if not (
+        (deprovisioned or reactivated)
+        and set(changed_attributes) <= {"active"}
+    ):
+        _audit(
+            audit_action,
+            actor=actor,
+            resource=_user_resource(user_id),
+            details={
+                "user_id": user_id,
+                "changed_attributes": changed_attributes,
+            },
+        )
     return _resource_user(updated)
 
 
@@ -348,7 +436,12 @@ def patch_user(user_id: str, payload: dict[str, Any], *, actor: str) -> dict[str
         "displayName": changes.get("displayname", current.get("displayName")),
         "active": _bool_value(changes.get("active", current.get("active", True))),
     }
-    return replace_user(user_id, replacement, actor=actor)
+    return _update_user(
+        user_id,
+        replacement,
+        actor=actor,
+        audit_action="scim.user.patch",
+    )
 
 
 def _managed_membership_cleanup(email: str, *, actor: str) -> None:
@@ -369,7 +462,12 @@ def _managed_membership_cleanup(email: str, *, actor: str) -> None:
     _store_call(scim_store.set_managed_memberships, managed)
 
 
-def deprovision_user(email: str, *, actor: str) -> None:
+def deprovision_user(
+    email: str,
+    *,
+    actor: str,
+    record_success: bool = True,
+) -> None:
     normalized = email.strip().lower()
     mapping = _store_call(scim_store.get_user_by_username, normalized)
     if mapping and mapping.get("active") is False:
@@ -397,27 +495,30 @@ def deprovision_user(email: str, *, actor: str) -> None:
             ):
                 if integrations_store.revoke_api_key(str(key["id"])):
                     revoked_ids.append(str(key["id"]))
-        step = "audit_success"
-        audit_log.append_audit_event(
-            action="scim.user.deprovision",
-            resource=f"scim_user:{mapping.get('id') if mapping else normalized}",
-            actor=actor or "scim",
-            level="info",
-            details={
-                "scim_id": mapping.get("id") if mapping else None,
-                "sessions_revoked": sessions_revoked,
-                "revoked_api_key_ids": revoked_ids,
-                "kept_service_accounts": kept_service_accounts,
-            },
-        )
+        if record_success:
+            step = "audit_success"
+            user_id = mapping.get("id") if mapping else None
+            _audit(
+                "scim.user.deprovision",
+                actor=actor,
+                resource=_user_resource(user_id),
+                details={
+                    "user_id": user_id,
+                    "sessions_revoked": sessions_revoked,
+                    "revoked_api_key_ids": revoked_ids,
+                    "kept_service_accounts": kept_service_accounts,
+                },
+            )
     except Exception as exc:
         try:
-            audit_log.append_audit_event(
-                action="scim.user.deprovision.failed",
-                resource=f"scim_user:{mapping.get('id') if mapping else normalized}",
-                actor=actor or "scim",
-                level="error",
-                details={"scim_id": mapping.get("id") if mapping else None, "step": step},
+            user_id = mapping.get("id") if mapping else None
+            _audit(
+                "scim.user.deprovision.failed",
+                outcome="failed",
+                reason_code=step,
+                actor=actor,
+                resource=_user_resource(user_id),
+                details={"user_id": user_id},
             )
         except Exception as audit_exc:
             _LOGGER.warning(
@@ -427,17 +528,24 @@ def deprovision_user(email: str, *, actor: str) -> None:
         raise ScimError(500, None, "User deprovisioning failed") from exc
 
 
-def reactivate_user(email: str, *, actor: str) -> None:
+def reactivate_user(
+    email: str,
+    *,
+    actor: str,
+    record_success: bool = True,
+) -> None:
     normalized = email.strip().lower()
     try:
+        mapping = _store_call(scim_store.get_user_by_username, normalized)
         user_store.update_user(email=normalized, status="active")
-        audit_log.append_audit_event(
-            action="scim.user.reactivate",
-            resource=f"scim_user:{normalized}",
-            actor=actor or "scim",
-            level="info",
-            details={"email": normalized},
-        )
+        if record_success:
+            user_id = mapping.get("id") if mapping else None
+            _audit(
+                "scim.user.reactivate",
+                actor=actor,
+                resource=_user_resource(user_id),
+                details={"user_id": user_id},
+            )
     except Exception as exc:
         raise ScimError(500, None, "User reactivation failed") from exc
 
@@ -446,7 +554,7 @@ def delete_user(user_id: str, *, actor: str) -> None:
     user = _store_call(scim_store.get_user, user_id)
     if user is None:
         _fail(404, "User not found")
-    deprovision_user(user["userName"], actor=actor)
+    deprovision_user(user["userName"], actor=actor, record_success=False)
     _managed_membership_cleanup(user["userName"], actor=actor)
     for group in _store_call(scim_store.list_groups):
         if user_id in group.get("members", []):
@@ -454,6 +562,12 @@ def delete_user(user_id: str, *, actor: str) -> None:
             _store_call(scim_store.update_group, group)
     user_store.delete_user(email=user["userName"])
     _store_call(scim_store.delete_user, user_id)
+    _audit(
+        "scim.user.delete",
+        actor=actor,
+        resource=_user_resource(user_id),
+        details={"user_id": user_id},
+    )
 
 
 def list_groups(*, filter: str | None, start_index: int, count: int) -> dict[str, Any]:
@@ -500,7 +614,20 @@ def create_group(payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
         except ScimError:
             _store_call(scim_store.delete_group, group["id"])
             raise
-    _audit("scim.group.create", actor=actor, resource=f"scim_group:{group['id']}", details={"displayName": name})
+    _audit(
+        "scim.group.create",
+        actor=actor,
+        resource=f"scim_group:{group['id']}",
+        details={
+            "group_id": group["id"],
+            "displayName": name,
+            "changed_attributes": sorted(
+                attribute
+                for attribute in ("displayName", "externalId", "members")
+                if attribute in payload
+            ),
+        },
+    )
     return _resource_group(group)
 
 
@@ -656,7 +783,11 @@ def _apply_group_members_locked(
                         "scim.group.role_change",
                         actor=actor,
                         resource=f"workspace:{workspace_id}",
-                        details={"email": email, "from": role_before, "to": new_role},
+                        details={
+                            "user_id": user_id,
+                            "workspace_id": workspace_id,
+                            "changed_attributes": ["role"],
+                        },
                     )
     except team_store.LastAdminProtected as exc:
         _fail(409, str(exc), "mutability")
@@ -673,20 +804,21 @@ def _apply_group_members_locked(
             "scim.group.member_add",
             actor=actor,
             resource=f"scim_group:{group['id']}",
-            details={"members": added},
+            details={"group_id": group["id"], "member_ids_added": added},
         )
     if removed := sorted(previous - set(proposed)):
         _audit(
             "scim.group.member_remove",
             actor=actor,
             resource=f"scim_group:{group['id']}",
-            details={"members": removed},
+            details={"group_id": group["id"], "member_ids_removed": removed},
         )
     return saved
 
 
 def replace_group(group_id: str, payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
-    group = _store_call(scim_store.get_group, group_id)
+    current = _store_call(scim_store.get_group, group_id)
+    group = dict(current) if current is not None else None
     if group is None:
         _fail(404, "Group not found")
     name = str(payload.get("displayName") or group["displayName"]).strip()
@@ -703,7 +835,17 @@ def replace_group(group_id: str, payload: dict[str, Any], *, actor: str) -> dict
     for user_id in ids:
         if _store_call(scim_store.get_user, user_id) is None:
             _fail(400, f"Unknown SCIM user id: {user_id}", "invalidValue")
-    return _resource_group(_apply_group_members(group, ids, actor=actor))
+    saved = _apply_group_members(group, ids, actor=actor)
+    _audit(
+        "scim.group.replace",
+        actor=actor,
+        resource=f"scim_group:{group_id}",
+        details={
+            "group_id": group_id,
+            "changed_attributes": _group_changed_attributes(current, saved),
+        },
+    )
+    return _resource_group(saved)
 
 
 def patch_group(group_id: str, payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
@@ -750,7 +892,20 @@ def patch_group(group_id: str, payload: dict[str, Any], *, actor: str) -> dict[s
             _fail(400, f"Unknown SCIM user id: {user_id}", "invalidValue")
     if not changed:
         return _resource_group(group)
-    return _resource_group(_apply_group_members(group, members, actor=actor))
+    old_members = set(group.get("members", []))
+    saved = _apply_group_members(group, members, actor=actor)
+    new_members = set(saved.get("members", []))
+    if new_members == old_members:
+        _audit(
+            "scim.group.patch",
+            actor=actor,
+            resource=f"scim_group:{group_id}",
+            details={
+                "group_id": group_id,
+                "changed_attributes": ["members"],
+            },
+        )
+    return _resource_group(saved)
 
 
 def delete_group(group_id: str, *, actor: str) -> None:
@@ -759,6 +914,12 @@ def delete_group(group_id: str, *, actor: str) -> None:
         _fail(404, "Group not found")
     _apply_group_members(group, [], actor=actor)
     _store_call(scim_store.delete_group, group_id)
+    _audit(
+        "scim.group.delete",
+        actor=actor,
+        resource=f"scim_group:{group_id}",
+        details={"group_id": group_id},
+    )
 
 
 def get_group_mappings() -> dict[str, dict[str, str]]:

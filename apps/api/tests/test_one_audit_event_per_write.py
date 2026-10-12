@@ -209,7 +209,9 @@ def test_each_named_write_produces_one_correlated_event(one_event_app):
         json={"userName": "one-event-scim@example.test"},
     )
     assert response.status_code == 201, response.text
-    observed.append(("SCIM user create", correlation_id, "http.post", response.status_code))
+    observed.append(
+        ("SCIM user create", correlation_id, "scim.user.create", response.status_code)
+    )
 
     correlation_id = _correlation_id()
     response = client.post(
