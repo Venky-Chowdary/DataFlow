@@ -29,11 +29,13 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
+import re
 import socket
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator
+from uuid import uuid4
 
 from services.brand_env import getenv_brand
 from services.log_redaction import (
@@ -53,6 +55,20 @@ _TRACER: Any = None
 #: so an API call and the job it started share one operator-visible identity.
 _CORRELATION_ID: ContextVar[str] = ContextVar("df_correlation_id", default="")
 _TRACEPARENT: ContextVar[str] = ContextVar("df_traceparent", default="")
+_CORRELATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+
+
+def sanitize_correlation_id(raw: str | None) -> tuple[str, bool]:
+    """Return a valid request correlation ID and whether the input was rejected."""
+    try:
+        if raw is None or raw == "":
+            return str(uuid4()), False
+        if isinstance(raw, str) and _CORRELATION_ID_PATTERN.fullmatch(raw):
+            return raw, False
+    except Exception:
+        pass
+    return str(uuid4()), True
+
 
 def tracing_enabled() -> bool:
     return getenv_brand("ENABLE_TRACING", "0").lower() in ("1", "true", "yes")

@@ -785,17 +785,31 @@ def _maybe_opportunistic_audit_purge() -> None:
         )
 
 
-def workspace_id_from_request(request: Any) -> str:
-    """Workspace the caller is looking at — header first, then request.state."""
+def requested_workspace_id_from_request(request: Any) -> str:
+    """Workspace scope the caller requested for an authorized read."""
     if request is None:
         return ""
     try:
-        header = request.headers.get("X-Workspace-Id") or request.headers.get("x-workspace-id") or ""
+        from services.workspace_access import requested_workspace_id
+
+        header = requested_workspace_id(request)
     except Exception:
         header = ""
     if str(header).strip():
         return str(header).strip()
     return str(getattr(request.state, "workspace_id", "") or "").strip()
+
+
+def workspace_id_from_request(request: Any) -> str:
+    """Authorized workspace scope for audit and log records."""
+    if request is None:
+        return ""
+    try:
+        from services.workspace_access import authorized_workspace_id
+
+        return authorized_workspace_id(request)
+    except Exception:
+        return ""
 
 
 def actor_from_request(request: Any) -> str:

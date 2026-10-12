@@ -790,12 +790,16 @@ def _record_login_audit(
     try:
         from services.audit_log import append_audit_event
 
+        correlation_id = getattr(request.state, "correlation_id", None)
+        if correlation_id is None:
+            correlation_id = request.headers.get("X-Correlation-ID")
+
         append_audit_event(
             action=action,
             resource="/auth/login",
             actor=actor,
             level=level,
-            correlation_id=request.headers.get("X-Correlation-ID"),
+            correlation_id=correlation_id,
             details={"reason": reason} if reason else {},
         )
     except Exception as exc:

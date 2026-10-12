@@ -34,10 +34,10 @@ def audit_export_honesty() -> dict[str, object]:
 
 
 def _scope(request: Request) -> tuple[str, str]:
-    from services.audit_log import workspace_id_from_request
+    from services.audit_log import requested_workspace_id_from_request
     from services.tenant_store import get_tenant_for_workspace
 
-    workspace_id = workspace_id_from_request(request)
+    workspace_id = requested_workspace_id_from_request(request)
     tenant_id = ""
     if workspace_id:
         tenant = get_tenant_for_workspace(workspace_id)
@@ -390,6 +390,10 @@ async def purge_audit_retention(
     )
     from services.audit_log import actor_from_request, workspace_id_from_request
 
+    correlation_id = getattr(request.state, "correlation_id", None)
+    if correlation_id is None:
+        correlation_id = request.headers.get("X-Correlation-ID")
+
     try:
         result = purge_expired_audit_events(dry_run=dry_run)
     except AuditConfigError as exc:
@@ -400,7 +404,7 @@ async def purge_audit_retention(
         resource=request.url.path,
         actor=actor_from_request(request),
         level="warn" if result["removed"] else "info",
-        correlation_id=request.headers.get("X-Correlation-ID"),
+        correlation_id=correlation_id,
         workspace_id=workspace_id_from_request(request),
         details=result,
     )

@@ -95,9 +95,9 @@ def _matches_route_template(path: str, template: str) -> bool:
 
 
 def _correlation_id(request: Request) -> str | None:
-    value = request.headers.get("X-Correlation-ID") or getattr(
-        request.state, "correlation_id", None
-    )
+    value = getattr(request.state, "correlation_id", None)
+    if value is None:
+        value = request.headers.get("X-Correlation-ID")
     return str(value) if value else None
 
 

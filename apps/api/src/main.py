@@ -9,7 +9,6 @@ import logging
 import os
 from services.brand_env import getenv_brand
 import time
-import uuid
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
@@ -18,6 +17,7 @@ from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
 from services.audit_coverage import AuditAccessMiddleware
+from services.tracing import sanitize_correlation_id
 from services.platform_config import (
     apply_railway_defaults,
     cors_origins,
@@ -347,8 +347,22 @@ def _http_route_template(raw_path: str, template: str | None) -> str | None:
 @app.middleware("http")
 async def add_timing_header(request: Request, call_next):
     start_time = time.time()
-    correlation_id = request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
+    raw_correlation_id = request.headers.get("X-Correlation-ID")
+    correlation_id, correlation_id_rejected = sanitize_correlation_id(raw_correlation_id)
     request.state.correlation_id = correlation_id
+    request.state.correlation_id_rejected = correlation_id_rejected
+    if correlation_id_rejected:
+        from services.ops_events import emit_event
+
+        emit_event(
+            logger,
+            "http.correlation_id.rejected",
+            outcome="failed",
+            correlation_id_rejected=True,
+            length=len(raw_correlation_id or ""),
+            route_path=request.url.path,
+            correlation_id=correlation_id,
+        )
     # Bridge the inbound correlation id (and any W3C traceparent) into the
     # transfer root span so an API call and the job it starts share one
     # operator-visible identity. No-ops when tracing is off.
@@ -465,15 +479,26 @@ async def add_timing_header(request: Request, call_next):
     ):
         try:
             from services.audit_log import append_audit_event
+            from services.workspace_access import authorized_workspace_id
+
             actor = getattr(request.state, "user_email", None) or "anonymous"
+            workspace_id = authorized_workspace_id(request)
+            details = {
+                "status": response.status_code,
+                "ms": round(process_time * 1000, 1),
+            }
+            if getattr(request.state, "correlation_id_rejected", False):
+                details["correlation_id_rejected"] = True
+            if getattr(request.state, "workspace_header_rejected", False):
+                details["workspace_header_rejected"] = True
             append_audit_event(
                 action=f"http.{request.method.lower()}",
                 resource=path,
                 actor=actor,
                 level="error" if response.status_code >= 500 else "info",
                 correlation_id=correlation_id,
-                workspace_id=request.headers.get("X-Workspace-Id") or request.headers.get("x-workspace-id") or "",
-                details={"status": response.status_code, "ms": round(process_time * 1000, 1)},
+                workspace_id=workspace_id,
+                details=details,
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)

@@ -11,6 +11,41 @@ def actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
 
+def requested_workspace_id(request: Request) -> str:
+    """Return the requested header scope without authorizing it."""
+    try:
+        return str(request.headers.get("X-Workspace-Id") or "").strip()
+    except Exception:
+        return ""
+
+
+def authorized_workspace_id(request: Request) -> str:
+    """Return the requested workspace only when the actor may read it."""
+    cache_key = "_authorized_workspace_id_cache"
+    try:
+        state = request.state
+        cached = getattr(state, cache_key, None)
+        if cached is not None:
+            return str(cached)
+
+        workspace_id = requested_workspace_id(request)
+        if can_read_workspace(workspace_id, actor_email(request)):
+            result = workspace_id
+            state.workspace_header_rejected = False
+        else:
+            result = ""
+            state.workspace_header_rejected = True
+        setattr(state, cache_key, result)
+        return result
+    except Exception:
+        try:
+            request.state.workspace_header_rejected = True
+            setattr(request.state, cache_key, "")
+        except Exception:
+            pass
+        return ""
+
+
 def resolve_read_workspace(
     request: Request,
     x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),

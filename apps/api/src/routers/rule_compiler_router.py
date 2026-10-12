@@ -113,10 +113,10 @@ async def import_rule_workbook(
         )
     except RuleIngestError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    from services.audit_log import workspace_id_from_request
+    from services.workspace_access import authorized_workspace_id
     from services.rule_compiler.audit import record_rule_report_compiled
 
-    workspace_id = workspace_id_from_request(request)
+    workspace_id = authorized_workspace_id(request)
     report["audit_event_hash"] = record_rule_report_compiled(
         report=report,
         filename=filename,
