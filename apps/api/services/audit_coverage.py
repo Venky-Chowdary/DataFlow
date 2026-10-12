@@ -27,6 +27,22 @@ SECURITY_EVENTS: dict[str, str] = {
     "auth.logout": "An authenticated session was revoked.",
     "auth.sso.login": "An SSO authentication completed.",
     "system.security_settings.snapshot": "Effective security settings at API startup.",
+    "acl.grant.create": "A resource ACL grant was created.",
+    "acl.grant.revoke": "A resource ACL grant was revoked.",
+    "schedule.definition.create": "A schedule definition was created.",
+    "schedule.definition.update": "A schedule definition was updated.",
+    "schedule.definition.import": "A schedule definition was imported.",
+    "schedule.definition.delete": "A schedule definition was deleted.",
+    "schedule.gitops.apply": "A GitOps manifest was applied to schedules.",
+    "schedule.approval.approved": "A schedule approval request was approved.",
+    "schedule.approval.rejected": "A schedule approval request was rejected.",
+    "schedule.approval.plan_changed": "A schedule approval plan changed.",
+    "schedule.authorization.granted": "Standing schedule authorization was granted.",
+    "schedule.authorization.revoked": "Standing schedule authorization was revoked.",
+    "audit.export.read": "Audit events were exported.",
+    "audit.verify.read": "The audit chain was verified.",
+    "audit.verify_pack.read": "An audit proof pack was verified.",
+    "audit.secret_scan.read": "Audit events were scanned for sensitive values.",
 }
 
 _REQUEST_PRINCIPAL: ContextVar[dict[str, str] | None] = ContextVar(
@@ -144,6 +160,7 @@ def record_security_event(
         else:
             resolved_actor = actor
 
+        trace_id = tracing.current_trace_id() or ""
         if request is not None:
             try:
                 from services.workspace_access import authorized_workspace_id
@@ -164,8 +181,7 @@ def record_security_event(
             )
             workspace_id = workspace_var.get() if workspace_var is not None else ""
             correlation_id = tracing.get_correlation_id()
-            route_template = None
-        trace_id = tracing.current_trace_id()
+            route_template = ""
 
         event_details = dict(details or {})
         if status is not None:

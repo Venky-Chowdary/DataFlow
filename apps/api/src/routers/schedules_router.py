@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from services.acknowledgment_contract import MIN_ACTOR_LEN
+from services.audit_coverage import record_security_event
 from services.cdc_capture_release import release_schedule_cdc_capture
 from services.schedule_approvals import STATUS_OPEN
 from services.schedule_store import (
@@ -425,7 +426,7 @@ async def gitops_apply_manifest(
 
     ws = resolve_write_workspace(request, workspace_id)
     try:
-        return apply_manifest(
+        result = apply_manifest(
             payload,
             dry_run=dry_run,
             require_signed_contracts=require_signed_contracts,
@@ -433,6 +434,40 @@ async def gitops_apply_manifest(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    rows = result.get("results") or result.get("actions") or []
+    successful_schedules = [
+        row for row in rows
+        if row.get("kind") == "PipelineSchedule"
+        and row.get("ok", True)
+        and row.get("action") in {"create", "update", "unchanged"}
+    ]
+    created = sum(1 for row in successful_schedules if row.get("action") == "create")
+    updated = sum(1 for row in successful_schedules if row.get("action") == "update")
+    unchanged = sum(1 for row in successful_schedules if row.get("action") == "unchanged")
+    created_count = result.get("creates")
+    updated_count = result.get("updates")
+    deleted_count = result.get("deletes")
+    unchanged_count = result.get("unchanged")
+    created_count = created_count if isinstance(created_count, int) else created
+    updated_count = updated_count if isinstance(updated_count, int) else updated
+    deleted_count = deleted_count if isinstance(deleted_count, int) else 0
+    unchanged_count = unchanged_count if isinstance(unchanged_count, int) else unchanged
+    schedule_id = successful_schedules[0].get("id") if successful_schedules else None
+    record_security_event(
+        "schedule.gitops.apply",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{schedule_id or 'gitops'}",
+        status=200,
+        details={
+            "created": created_count,
+            "updated": updated_count,
+            "deleted": deleted_count,
+            "unchanged": unchanged_count,
+            "dry_run": bool(dry_run),
+        },
+    )
+    return result
 
 
 @router.get("/", response_model=list[ScheduleSummaryResponse])
@@ -486,6 +521,22 @@ async def create_pipeline_schedule(
         sched = create_schedule(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_security_event(
+        "schedule.definition.create",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{sched.id}",
+        status=201,
+        details={
+            "id": sched.id,
+            "source_connector_id": sched.source_connector_id,
+            "source_table": sched.source_table,
+            "dest_connector_id": sched.dest_connector_id,
+            "dest_table": sched.dest_table,
+            "sync_mode": sched.sync_mode,
+            "enabled": bool(sched.enabled),
+        },
+    )
     return ScheduleResponse.from_schedule(sched)
 
 
@@ -512,6 +563,22 @@ async def patch_pipeline_schedule(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Schedule not found")
+    record_security_event(
+        "schedule.definition.update",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{updated.id}",
+        status=200,
+        details={
+            "id": updated.id,
+            "source_connector_id": updated.source_connector_id,
+            "source_table": updated.source_table,
+            "dest_connector_id": updated.dest_connector_id,
+            "dest_table": updated.dest_table,
+            "sync_mode": updated.sync_mode,
+            "enabled": bool(updated.enabled),
+        },
+    )
     return ScheduleResponse.from_schedule(updated)
 
 
@@ -565,6 +632,22 @@ async def import_pipeline_schedule(
     if not sched:
         raise HTTPException(status_code=500, detail="Schedule imported but not readable")
     assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "")
+    record_security_event(
+        "schedule.definition.import",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{sched.id}",
+        status=201,
+        details={
+            "id": sched.id,
+            "source_connector_id": sched.source_connector_id,
+            "source_table": sched.source_table,
+            "dest_connector_id": sched.dest_connector_id,
+            "dest_table": sched.dest_table,
+            "sync_mode": sched.sync_mode,
+            "enabled": bool(sched.enabled),
+        },
+    )
     return ScheduleResponse.from_schedule(sched)
 
 @router.delete("/{schedule_id}")
@@ -578,6 +661,22 @@ async def remove_pipeline_schedule(
     capture = release_schedule_cdc_capture(sched)
     if not delete_schedule(schedule_id):
         raise HTTPException(status_code=404, detail="Schedule not found")
+    record_security_event(
+        "schedule.definition.delete",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{schedule_id}",
+        status=200,
+        details={
+            "id": sched.id,
+            "source_connector_id": sched.source_connector_id,
+            "source_table": sched.source_table,
+            "dest_connector_id": sched.dest_connector_id,
+            "dest_table": sched.dest_table,
+            "sync_mode": sched.sync_mode,
+            "enabled": bool(sched.enabled),
+        },
+    )
     return {"success": True, "capture_release": capture}
 
 

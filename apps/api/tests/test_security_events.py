@@ -69,6 +69,29 @@ def security_app(monkeypatch, tmp_path):
         }
 
 
+@pytest.fixture
+def domain_security_app(security_app, monkeypatch, tmp_path):
+    from services import integrations_store, resource_acl, schedule_store, team_store
+
+    monkeypatch.setattr(schedule_store, "STORE_PATH", tmp_path / "schedules.json")
+    monkeypatch.setattr(schedule_store, "_mongo_backend", lambda: None)
+    monkeypatch.setattr(resource_acl, "STORE_PATH", tmp_path / "resource_acls.jsonl")
+    workspace = team_store.create_workspace(name="Security events", created_by="admin@x")
+    key = integrations_store.create_api_key(
+        "security events", "admin@x", role="admin"
+    )
+    return {
+        **security_app,
+        "headers": {
+            "Authorization": f"Bearer {key['key']}",
+            "X-Workspace-Id": workspace.id,
+            "X-Correlation-ID": "security-events-correlation",
+        },
+        "workspace_id": workspace.id,
+        "key_id": key["id"],
+    }
+
+
 def _events(context) -> list[dict]:
     path = context["audit_log"].STORE_PATH
     if not path.exists():
@@ -327,3 +350,196 @@ def test_startup_snapshot_is_safe_and_written_once(security_app):
     assert "phase2c-secret-sentinel" not in security_app["audit_log"].STORE_PATH.read_text(
         encoding="utf-8"
     )
+
+
+def test_domain_security_events_include_safe_request_metadata(domain_security_app, caplog):
+    from services.log_redaction import is_sensitive_key
+
+    client = domain_security_app["client"]
+    headers = domain_security_app["headers"]
+    workspace_id = domain_security_app["workspace_id"]
+    assert not is_sensitive_key("principal")
+
+    created_acl = client.post(
+        "/api/v1/resource-acls",
+        headers=headers,
+        json={
+            "resource_type": "schedule",
+            "resource_id": "sched-test",
+            "principal": "group:analytics",
+            "role": "viewer",
+        },
+    )
+    assert created_acl.status_code == 200, created_acl.text
+    grant_id = created_acl.json()["id"]
+    revoked_acl = client.delete(
+        f"/api/v1/resource-acls/{grant_id}", headers=headers
+    )
+    assert revoked_acl.status_code == 200, revoked_acl.text
+
+    schedule_payload = {
+        "name": "Security event schedule",
+        "source_connector_id": "source-1",
+        "source_table": "public.source_table",
+        "dest_connector_id": "destination-1",
+        "dest_table": "public.destination_table",
+    }
+    created_schedule = client.post(
+        "/api/v1/schedules/", headers=headers, json=schedule_payload
+    )
+    assert created_schedule.status_code == 201, created_schedule.text
+    response_correlation_id = created_schedule.headers["X-Correlation-ID"]
+    assert response_correlation_id == "security-events-correlation"
+    schedule = created_schedule.json()
+    schedule_id = schedule["id"]
+    updated_schedule = client.patch(
+        f"/api/v1/schedules/{schedule_id}",
+        headers=headers,
+        json={"enabled": False},
+    )
+    assert updated_schedule.status_code == 200, updated_schedule.text
+
+    manifest_response = client.get(
+        f"/api/v1/schedules/{schedule_id}/export?format=json", headers=headers
+    )
+    assert manifest_response.status_code == 200, manifest_response.text
+    imported_schedule = client.post(
+        "/api/v1/schedules/import",
+        headers=headers,
+        json=manifest_response.json(),
+    )
+    assert imported_schedule.status_code == 201, imported_schedule.text
+    granted = client.post(
+        f"/api/v1/schedules/{schedule_id}/authorization",
+        headers=headers,
+        json={
+            "reason": "Authorize additive schedule drift",
+            "scopes": ["net_additive_drift"],
+        },
+    )
+    assert granted.status_code == 200, granted.text
+    revoked = client.delete(
+        f"/api/v1/schedules/{schedule_id}/authorization?reason=No%20longer%20needed",
+        headers=headers,
+    )
+    assert revoked.status_code == 200, revoked.text
+    from services.schedule_approvals import build_approval_request, open_approval_request
+    from services.schedule_store import get_schedule
+    from services.standing_authorization import binding_from_schedule
+
+    approval = build_approval_request(
+        kind="authorization",
+        code="TEST_APPROVAL",
+        finding="Review the test schedule plan",
+        corrective_action="Approve the safe test plan",
+        binding=binding_from_schedule(get_schedule(schedule_id)),
+    )
+    open_approval_request(schedule_id, approval)
+    approved = client.post(
+        f"/api/v1/schedules/{schedule_id}/approvals/{approval['id']}/approve",
+        headers=headers,
+        json={"reason": "Approve the test schedule plan"},
+    )
+    assert approved.status_code == 200, approved.text
+
+    gitops_response = client.post(
+        "/api/v1/schedules/gitops/apply",
+        headers=headers,
+        json={
+            "kind": "PipelineSchedule",
+            "spec": {
+                **schedule_payload,
+                "name": "GitOps security event schedule",
+            },
+        },
+    )
+    assert gitops_response.status_code == 200, gitops_response.text
+    dry_run_response = client.post(
+        "/api/v1/schedules/gitops/apply?dry_run=true",
+        headers=headers,
+        json={
+            "kind": "PipelineSchedule",
+            "spec": {
+                **schedule_payload,
+                "name": "GitOps security event schedule",
+            },
+        },
+    )
+    assert dry_run_response.status_code == 200, dry_run_response.text
+    deleted_schedule = client.delete(
+        f"/api/v1/schedules/{schedule_id}", headers=headers
+    )
+    assert deleted_schedule.status_code == 200, deleted_schedule.text
+
+    exported = client.get("/api/v1/audit/export?format=json", headers=headers)
+    assert exported.status_code == 200, exported.text
+    verified = client.get("/api/v1/audit/verify", headers=headers)
+    assert verified.status_code == 200, verified.text
+    proof = client.post(
+        "/api/v1/audit/verify-pack", headers=headers, json={"not_a_pack": True}
+    )
+    assert proof.status_code == 200, proof.text
+    scanned = client.get("/api/v1/audit/secret-scan", headers=headers)
+    assert scanned.status_code == 200, scanned.text
+
+    expected = {
+        "acl.grant.create": "/resource-acls",
+        "acl.grant.revoke": "/resource-acls/{grant_id}",
+        "schedule.definition.create": "/schedules/",
+        "schedule.definition.update": "/schedules/{schedule_id}",
+        "schedule.definition.import": "/schedules/import",
+        "schedule.definition.delete": "/schedules/{schedule_id}",
+        "schedule.gitops.apply": "/schedules/gitops/apply",
+        "schedule.approval.approved": "",
+        "schedule.authorization.granted": "",
+        "schedule.authorization.revoked": "",
+        "audit.export.read": "/audit/export",
+        "audit.verify.read": "/audit/verify",
+        "audit.verify_pack.read": "/audit/verify-pack",
+        "audit.secret_scan.read": "/audit/secret-scan",
+    }
+    events = _events(domain_security_app)
+    for name, route in expected.items():
+        matching_events = [row for row in events if row["action"] == name]
+        assert matching_events
+        for event in matching_events:
+            assert event["outcome"] == "succeeded"
+            assert event["actor_type"] == "api_key"
+            assert event["actor_id"] == domain_security_app["key_id"]
+            assert event["auth_method"] == "api_key"
+            assert event["workspace_id"] == workspace_id
+            assert event["route_template"] == route
+            assert "trace_id" in event
+            assert event["details"]["status"] in {200, 201}
+            assert event["correlation_id"] == response_correlation_id
+            assert any(name in record.getMessage() for record in caplog.records)
+
+    assert next(row for row in events if row["action"] == "acl.grant.create")[
+        "details"
+    ]["principal"] == "group:analytics"
+    acl_event = next(row for row in events if row["action"] == "acl.grant.create")
+    assert set(acl_event["details"]) == {
+        "resource_type", "resource_id", "principal", "role", "status"
+    }
+    schedule_event = next(
+        row for row in events if row["action"] == "schedule.definition.create"
+    )
+    assert set(schedule_event["details"]) == {
+        "id", "source_connector_id", "source_table", "dest_connector_id",
+        "dest_table", "sync_mode", "enabled", "status",
+    }
+    gitops_event = next(row for row in events if row["action"] == "schedule.gitops.apply")
+    assert set(gitops_event["details"]) == {
+        "created", "updated", "deleted", "unchanged", "dry_run", "status",
+    }
+    dry_run_event = next(
+        row for row in events
+        if row["action"] == "schedule.gitops.apply" and row["details"]["dry_run"]
+    )
+    assert dry_run_event["details"]["updated"] == 1
+    export_event = next(row for row in events if row["action"] == "audit.export.read")
+    assert export_event["details"]["format"] == "json"
+    assert isinstance(export_event["details"]["row_count"], int)
+    from services.evidence_chain import verify_chain
+
+    assert verify_chain()["verified"] is True

@@ -794,14 +794,28 @@ def _audit(
     actor: str,
     details: dict[str, Any],
 ) -> None:
-    from services.audit_log import append_audit_event
+    from services.audit_coverage import record_security_event
+    from services.logging_config import log_context
 
-    append_audit_event(
-        action=action,
-        resource=f"schedule:{schedule_id}",
-        actor=str(actor or "").strip() or "system",
-        details=details,
-    )
+    schedule = get_schedule(schedule_id)
+    kwargs = {
+        "outcome": "succeeded",
+        "actor": str(actor or "").strip() or "system",
+        "resource": f"schedule:{schedule_id}",
+        "status": 200,
+        "details": details,
+    }
+    with log_context(workspace_id=getattr(schedule, "workspace_id", "") or ""):
+        if action == "schedule.approval.approved":
+            record_security_event("schedule.approval.approved", **kwargs)
+        elif action == "schedule.approval.rejected":
+            record_security_event("schedule.approval.rejected", **kwargs)
+        elif action == "schedule.approval.plan_changed":
+            record_security_event("schedule.approval.plan_changed", **kwargs)
+        elif action == "schedule.authorization.granted":
+            record_security_event("schedule.authorization.granted", **kwargs)
+        elif action == "schedule.authorization.revoked":
+            record_security_event("schedule.authorization.revoked", **kwargs)
 
 
 __all__ = [

@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
+from services.audit_coverage import record_security_event
+
 router = APIRouter(prefix="/audit", tags=["Audit"])
 
 
@@ -185,6 +187,11 @@ async def export_events(
     fmt = (format or "csv").strip().lower()
     if fmt not in ("csv", "json", "ndjson", "cef"):
         raise HTTPException(status_code=400, detail="format must be csv, json, ndjson, or cef")
+    record_security_event(
+        "audit.export.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"format": fmt, "row_count": len(events)},
+    )
     if fmt == "json":
         return JSONResponse(
             {
@@ -300,10 +307,16 @@ async def scan_audit_secrets(
             status_code=400,
             detail="X-Workspace-Id is required for an audit secret scan.",
         )
-    return scan_audit_events_for_secrets(
+    result = scan_audit_events_for_secrets(
         limit=limit,
         workspace_id=workspace_id or None,
     )
+    record_security_event(
+        "audit.secret_scan.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"flagged_count": len(result.get("findings") or [])},
+    )
+    return result
 
 
 @router.get("/verify")
@@ -328,11 +341,20 @@ async def verify_audit_chain(
             detail="X-Workspace-Id is required for chain verification. "
             "The walk is platform-wide; findings named here are this workspace.",
         )
-    return verify_chain(limit=limit, workspace_id=workspace_id)
+    result = verify_chain(limit=limit, workspace_id=workspace_id)
+    record_security_event(
+        "audit.verify.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={
+            "ok": bool(result.get("verified")),
+            "verified_count": result.get("checked", 0),
+        },
+    )
+    return result
 
 
 @router.post("/verify-pack")
-async def verify_proof_pack_against_chain(pack: dict):
+async def verify_proof_pack_against_chain(pack: dict, request: Request):
     """Verify an exported proof pack, and whether the chain still holds its record.
 
     Three separable questions, answered separately: is the pack's own signature
@@ -351,6 +373,11 @@ async def verify_proof_pack_against_chain(pack: dict):
     anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
     digest = pack_body_digest_excluding_anchor(pack)
     chain_record = find_anchor(digest) if anchor.get("anchored") else None
+    record_security_event(
+        "audit.verify_pack.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"ok": bool(result.get("valid"))},
+    )
     return {
         **result,
         "evidence_sha256": digest,
