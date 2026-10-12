@@ -7,6 +7,7 @@ Enterprise-grade data transfer platform with AI-powered semantic analysis.
 import asyncio
 import logging
 import os
+import threading
 from services.brand_env import getenv_brand
 import time
 from contextlib import asynccontextmanager, nullcontext
@@ -64,6 +65,8 @@ from .routers.workspace_router import router as workspace_router
 from .services.rbac import RBACMiddleware
 
 logger = logging.getLogger("dataflow.api")
+_SECURITY_SETTINGS_SNAPSHOT_RECORDED = False
+_SECURITY_SETTINGS_SNAPSHOT_LOCK = threading.Lock()
 
 
 @asynccontextmanager
@@ -94,6 +97,43 @@ async def lifespan(app: FastAPI):
         configure_logging()
     except Exception as le:  # pragma: no cover - logging must never block boot
         print(f"[!] Logging bootstrap warning: {le}")
+    global _SECURITY_SETTINGS_SNAPSHOT_RECORDED
+    with _SECURITY_SETTINGS_SNAPSHOT_LOCK:
+        record_snapshot = not _SECURITY_SETTINGS_SNAPSHOT_RECORDED
+        _SECURITY_SETTINGS_SNAPSHOT_RECORDED = True
+    if record_snapshot:
+        try:
+            from services import audit_log, rbac
+            from services.audit_coverage import record_security_event
+            from services.team_store import require_workspace_isolation
+            from src.services import auth_service as _auth_service
+
+            try:
+                audit_retention_days = audit_log._retention_days()
+            except Exception:
+                audit_retention_days = "invalid"
+            record_security_event(
+                "system.security_settings.snapshot",
+                outcome="succeeded",
+                actor="system",
+                details={
+                    "production": bool(is_production()),
+                    "auth_required": bool(_auth_service.auth_required()),
+                    "workspace_isolation": bool(require_workspace_isolation()),
+                    "rbac_mode": str(rbac.UNRULED_ROUTE_MODE),
+                    "audit_store": (
+                        "mongo" if audit_log._mongo_collection() is not None else "file"
+                    ),
+                    "audit_retention_days": audit_retention_days,
+                    "docs_enabled": bool(docs_enabled()),
+                    "config_error_count": len(config_errors),
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Security settings snapshot failed (%s)",
+                type(exc).__name__,
+            )
     from services.rbac import record_unruled_routes_allowed_startup
 
     record_unruled_routes_allowed_startup()

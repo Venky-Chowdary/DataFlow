@@ -193,6 +193,11 @@ def append_audit_event(
     workspace_id: str | None = None,
     tenant_id: str | None = None,
     principal: dict[str, str] | None = None,
+    outcome: str | None = None,
+    reason_code: str | None = None,
+    session_id: str | None = None,
+    trace_id: str | None = None,
+    route_template: str | None = None,
 ) -> dict[str, Any]:
     """Record a redacted audit event to MongoDB (preferred) or a local JSONL file.
 
@@ -246,6 +251,17 @@ def append_audit_event(
             "workspace_id": ws,
             "tenant_id": tid,
             "details": redacted,
+            **{
+                key: value
+                for key, value in (
+                    ("outcome", outcome),
+                    ("reason_code", reason_code),
+                    ("session_id", session_id),
+                    ("trace_id", trace_id),
+                    ("route_template", route_template),
+                )
+                if value is not None
+            },
             "prev_hash": prev,
             "chain_seq": chain_seq_of(tip) + 1,
             "hash_alg": "HMAC-SHA256",

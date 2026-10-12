@@ -54,14 +54,14 @@ def _is_public_mcp_path(path: str, method: str) -> bool:
     return False
 
 
-def _attach_user(request: Request, token: str) -> bool:
+def _attach_user_reason(request: Request, token: str) -> str | None:
     email = verify_token(token)
     if email:
         from services.user_store import get_user as get_stored_user
 
         stored = get_stored_user(email)
         if stored and stored.get("status") == "disabled":
-            return False
+            return "disabled_user"
         request.state.user_email = email
         user = lookup_user(email)
         if user:
@@ -69,11 +69,11 @@ def _attach_user(request: Request, token: str) -> bool:
         else:
             # Valid token for a user not in the static user list: default to viewer.
             request.state.user = {"email": email, "role": "viewer"}
-        return True
+        return None
 
     from services.integrations_store import verify_workspace_api_key
 
-    key_info = verify_workspace_api_key(token)
+    key_info = verify_workspace_api_key(token) if token.startswith("dfk_") else None
     if key_info:
         request.state.user_email = key_info.get("created_by") or "api-key"
         user = {
@@ -94,18 +94,25 @@ def _attach_user(request: Request, token: str) -> bool:
         request.state.api_key_id = key_info["id"]
         request.state.api_key_created_by = key_info.get("created_by") or ""
         request.state.api_key_auth = True
-        return True
+        return None
+
+    if token.startswith("dfk_"):
+        return "unknown_api_key"
 
     if not request.url.path.startswith("/api/v1/mcp"):
-        return False
+        return "invalid_token"
     from services.mcp_oauth import principal_from_access_token
 
     user = principal_from_access_token(token, user_lookup=lookup_user)
     if not user:
-        return False
+        return "oauth_token_invalid"
     request.state.user_email = user["email"]
     request.state.user = user
-    return True
+    return None
+
+
+def _attach_user(request: Request, token: str) -> bool:
+    return _attach_user_reason(request, token) is None
 
 
 def _tenant_bind_forbidden(request: Request) -> JSONResponse | None:
@@ -118,6 +125,30 @@ def _tenant_bind_forbidden(request: Request) -> JSONResponse | None:
         return None
     if principal_allowed_for_tenant(user, tenant_id):
         return None
+    from services.audit_coverage import (
+        _suppressed_since_last,
+        record_security_event,
+    )
+
+    client_ip = request.client.host if request.client else ""
+    suppressed = _suppressed_since_last(
+        client_ip or "unknown",
+        "authz.tenant_bind.denied:tenant_not_bound",
+        request.url.path,
+    )
+    if suppressed is not None:
+        record_security_event(
+            "authz.tenant_bind.denied",
+            outcome="failed",
+            request=request,
+            resource=request.url.path,
+            reason_code="tenant_not_bound",
+            status=403,
+            details={
+                "suppressed_since_last": suppressed,
+                "client_ip": client_ip,
+            },
+        )
     return JSONResponse(
         status_code=403,
         content={
@@ -147,7 +178,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # setting, and a stale copy means the middleware and the auth service
             # disagree about whether the request needs a token.
             if not _auth_service.auth_required():
-                if token and _attach_user(request, token):
+                if token and _attach_user_reason(request, token) is None:
                     from services import audit_coverage
 
                     principal_context = audit_coverage
@@ -169,7 +200,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             ):
                 # Public routes still attach identity when a Bearer token is present
                 # (MCP tools/call uses this; discovery works without a token).
-                if token and _attach_user(request, token):
+                if token and _attach_user_reason(request, token) is None:
                     from services import audit_coverage
 
                     principal_context = audit_coverage
@@ -181,7 +212,33 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         return forbidden
                 return await call_next(request)
 
-            if not token or not _attach_user(request, token):
+            reason_code = (
+                "missing_credentials"
+                if not token
+                else _attach_user_reason(request, token)
+            )
+            if reason_code:
+                from services import audit_coverage
+
+                client_ip = request.client.host if request.client else ""
+                suppressed = audit_coverage._suppressed_since_last(
+                    client_ip or "unknown",
+                    "auth.request.rejected:" + reason_code,
+                    path,
+                )
+                if suppressed is not None:
+                    audit_coverage.record_security_event(
+                        "auth.request.rejected",
+                        outcome="failed",
+                        request=request,
+                        resource=path,
+                        reason_code=reason_code,
+                        status=401,
+                        details={
+                            "suppressed_since_last": suppressed,
+                            "client_ip": client_ip,
+                        },
+                    )
                 if path == "/api/v1/mcp/tools/call":
                     from services.mcp_oauth import bearer_challenge
 

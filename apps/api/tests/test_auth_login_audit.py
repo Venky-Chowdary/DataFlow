@@ -59,9 +59,11 @@ def test_bad_password_audit_uses_normalized_truncated_actor_and_no_password(logi
     )
     assert response.status_code == 401
 
-    event = next(row for row in _events(login_app) if row["action"] == "auth.login.failure")
+    event = next(row for row in _events(login_app) if row["action"] == "auth.login")
     assert event["actor"] == email.strip().lower()[:254]
     assert len(event["actor"]) == 254
+    assert event["outcome"] == "failed"
+    assert event["reason_code"] == "bad_credentials"
     assert event["details"]["reason"] == "bad_credentials"
     assert password not in login_app["audit_log"].STORE_PATH.read_text(encoding="utf-8")
 
@@ -78,9 +80,12 @@ def test_login_lockout_event_is_written_once(login_app):
     rows = _events(login_app)
     locked = [row for row in rows if row["action"] == "auth.login.locked"]
     assert len(locked) == 1
-    failures = [row for row in rows if row["action"] == "auth.login.failure"]
+    failures = [
+        row for row in rows
+        if row["action"] == "auth.login" and row.get("outcome") == "failed"
+    ]
     assert failures
-    assert any(row["details"]["reason"] == "locked" for row in failures)
+    assert any(row["reason_code"] == "locked" for row in failures)
     assert all(row["actor"] == "admin@example.test" for row in locked + failures)
 
 
@@ -98,8 +103,10 @@ def test_disabled_account_login_audit_has_disabled_reason(login_app):
         json={"email": account["email"], "password": "Disabled-password-123"},
     )
     assert response.status_code == 401
-    event = next(row for row in _events(login_app) if row["action"] == "auth.login.failure")
+    event = next(row for row in _events(login_app) if row["action"] == "auth.login")
     assert event["actor"] == email
+    assert event["outcome"] == "failed"
+    assert event["reason_code"] == "disabled"
     assert event["details"]["reason"] == "disabled"
 
 
@@ -119,7 +126,7 @@ def test_successful_login_survives_audit_failure_with_typed_warning(
     )
     assert response.status_code == 200
     assert any(
-        "Login success audit write failed (OSError)" in record.getMessage()
+        "Sensitive-route audit write failed (OSError)" in record.getMessage()
         for record in caplog.records
     )
 

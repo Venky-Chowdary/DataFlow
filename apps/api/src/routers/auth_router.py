@@ -580,13 +580,13 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
 
 def _audit_sso_success(sso_type: str, email: str, resource: str) -> None:
     try:
-        from services.audit_log import append_audit_event
+        from services.audit_coverage import record_security_event
 
-        append_audit_event(
-            action="auth.sso.login",
-            resource=resource,
+        record_security_event(
+            "auth.sso.login",
+            outcome="succeeded",
             actor=email,
-            level="success",
+            resource=resource,
             details={"provider": sso_type},
         )
     except Exception:
@@ -788,18 +788,29 @@ def _record_login_audit(
     level: str = "warn",
 ) -> None:
     try:
-        from services.audit_log import append_audit_event
+        from services.audit_coverage import record_security_event
 
-        correlation_id = getattr(request.state, "correlation_id", None)
-        if correlation_id is None:
-            correlation_id = request.headers.get("X-Correlation-ID")
+        if action == "auth.login.locked":
+            from services.audit_log import append_audit_event
 
-        append_audit_event(
-            action=action,
+            append_audit_event(
+                action=action,
+                resource="/auth/login",
+                actor=actor,
+                level=level,
+                details={"reason": reason} if reason else {},
+            )
+            return
+
+        record_security_event(
+            "auth.login",
+            outcome="failed",
+            request=request,
             resource="/auth/login",
+            reason_code=reason,
+            status=429 if reason == "locked" else 401,
             actor=actor,
             level=level,
-            correlation_id=correlation_id,
             details={"reason": reason} if reason else {},
         )
     except Exception as exc:
@@ -820,13 +831,18 @@ async def logout(request: Request):
         except Exception as exc:
             logging.getLogger(__name__).warning("logout revoke failed: %s", exc)
     try:
-        from services.audit_log import append_audit_event
+        from services.audit_coverage import record_security_event, session_label
+        from src.services.auth_service import token_jti
 
-        append_audit_event(
-            action="auth.logout",
+        jti = token_jti(token) if token else None
+        record_security_event(
+            "auth.logout",
+            outcome="succeeded",
+            request=request,
             resource="/auth/logout",
+            session_id=session_label(jti) if jti else None,
+            status=200,
             actor=getattr(request.state, "user_email", None) or "anonymous",
-            level="success",
             details={"revoked": revoked},
         )
     except Exception as exc:
@@ -911,13 +927,18 @@ async def login(body: LoginRequest, request: Request):
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
-        from services.audit_log import append_audit_event
+        from services.audit_coverage import record_security_event, session_label
+        from src.services.auth_service import token_jti
 
-        append_audit_event(
-            action="auth.login",
+        jti = token_jti(token)
+        record_security_event(
+            "auth.login",
+            outcome="succeeded",
+            request=request,
             resource="/auth/login",
             actor=user["email"],
-            level="success",
+            session_id=session_label(jti) if jti else None,
+            status=200,
         )
     except Exception as exc:
         logger.warning(
