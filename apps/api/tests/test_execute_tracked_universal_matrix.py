@@ -23,7 +23,12 @@ _API_ROOT = Path(__file__).resolve().parents[2]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from src.transfer.adapters import write_destination_database  # noqa: E402
+from connectors.snowflake_conn import get_connection, normalize_account  # noqa: E402
+from connectors.writer_common import quote_sql_identifier  # noqa: E402
+from src.transfer.adapters import (  # noqa: E402
+    resolve_connector_config,
+    write_destination_database,
+)
 from src.transfer.connector_capabilities import (  # noqa: E402
     default_port,
     driver_available,
@@ -69,6 +74,30 @@ RECORDS = [{"id": "1", "amount": "1000.00"}, {"id": "2", "amount": "2000.50"}]
 COLUMNS = ["id", "amount"]
 SCHEMA = {"id": "INTEGER", "amount": "DECIMAL"}
 MAPPINGS = [{"source": "id", "target": "id"}, {"source": "amount", "target": "amount"}]
+DESTINATION_NUMERIC_SOURCE_OVERRIDES = {
+    "salesforce": {
+        # Salesforce Number fields allow 18 total digits, including decimal places:
+        # https://help.salesforce.com/s/articleView?id=000386249&language=en_US&type=1
+        # Snowflake integer synonyms become NUMBER(38,0); explicit NUMBER(p,s)
+        # retains its precision and scale:
+        # https://docs.snowflake.com/en/sql-reference/data-types-numeric
+        "records": RECORDS,
+        "schema": {"id": "DECIMAL(18,0)", "amount": "DECIMAL(18,2)"},
+        "snowflake_column_types": {
+            "id": "NUMBER(18,0)",
+            "amount": "NUMBER(18,2)",
+        },
+    },
+    "hubspot": {
+        # HubSpot documents numeric properties but no total precision cap; the
+        # route's currency target carrier is DataFlow's DECIMAL(38,2) map.
+        # BigQuery INT64 is emulator-supported and fits its 36 integer digits.
+        # https://developers.hubspot.com/docs/api-reference/latest/crm/properties/guide
+        # apps/api/connectors/hubspot_writer.py:203
+        "records": [{"id": "1", "amount": "1000"}, {"id": "2", "amount": "2000"}],
+        "schema": {"id": "INT64", "amount": "INT64"},
+    },
+}
 
 
 def _is_reachable(host: str, port: int, timeout: float = 1.0) -> bool:
@@ -644,17 +673,93 @@ def _stub_owns_fixture(source: EndpointConfig) -> bool:
     return not caps.get("write") or caps.get("certified_dest") is False
 
 
-def _seed_source(source: EndpointConfig) -> dict[str, Any]:
+def _snowflake_fixture_connection(source: EndpointConfig) -> Any:
+    cfg = resolve_connector_config(source)
+    return get_connection(
+        account=normalize_account(cfg.get("host", "")),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        database=cfg.get("database", ""),
+        schema=(cfg.get("schema") or "PUBLIC").upper(),
+        warehouse=cfg.get("warehouse", ""),
+        connection_string=cfg.get("connection_string", ""),
+        role=cfg.get("role", ""),
+        private_key=str(cfg.get("private_key") or ""),
+        private_key_passphrase=str(cfg.get("password") or ""),
+    )
+
+
+def _seed_source(
+    source: EndpointConfig,
+    *,
+    records: list[dict[str, Any]] = RECORDS,
+    schema: dict[str, str] = SCHEMA,
+    snowflake_column_types: dict[str, str] | None = None,
+) -> dict[str, Any]:
     if _stub_owns_fixture(source):
         return {"seeded_by": "saas_desktop_stub"}
-    rows, _, summary = write_destination_database(
-        source, RECORDS, COLUMNS, SCHEMA, MAPPINGS
-    )
+    if snowflake_column_types is None:
+        rows, _, summary = write_destination_database(
+            source, records, COLUMNS, schema, MAPPINGS
+        )
+    else:
+        if source.kind != "database" or source.format != "snowflake":
+            raise ValueError(
+                "explicit Snowflake fixture types require a Snowflake source"
+            )
+
+        conn = _snowflake_fixture_connection(source)
+        table = quote_sql_identifier(str(source.table).upper())
+        column_defs = ", ".join(
+            f"{quote_sql_identifier(column)} {snowflake_column_types[column]}"
+            for column in COLUMNS
+        )
+        column_names = ", ".join(quote_sql_identifier(column) for column in COLUMNS)
+        placeholders = ", ".join("%s" for _ in COLUMNS)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"CREATE TABLE {table} ({column_defs})")
+                cur.executemany(
+                    f"INSERT INTO {table} ({column_names}) VALUES ({placeholders})",
+                    [tuple(record[column] for column in COLUMNS) for record in records],
+                )
+            conn.commit()
+        finally:
+            conn.close()
+        rows = len(records)
+        summary = {"type": "snowflake", "table": source.table}
     if rows != 2:
         pytest.skip(f"source seed wrote {rows} rows: {summary}")
     if summary.get("error"):
         pytest.skip(f"source seed error: {summary.get('error')}")
     return summary
+
+
+def test_salesforce_snowflake_fixture_preserves_declared_number_precision(
+    tmp_path: Path,
+) -> None:
+    pytest.importorskip("fakesnow")
+    source, _, _ = _build_source(
+        "database", "snowflake", tmp_path, uuid.uuid4().hex[:12]
+    )
+    _seed_source(source, **DESTINATION_NUMERIC_SOURCE_OVERRIDES["salesforce"])
+
+    conn = _snowflake_fixture_connection(source)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DESC TABLE {quote_sql_identifier(str(source.table).upper())}"
+            )
+            described_types = {
+                str(row[0]).lower(): str(row[1]).upper() for row in cur.fetchall()
+            }
+    finally:
+        conn.close()
+
+    assert described_types == {
+        "id": "NUMBER(18,0)",
+        "amount": "NUMBER(18,2)",
+    }
 
 
 ROUTES = sorted(LIVE_MATRIX)
