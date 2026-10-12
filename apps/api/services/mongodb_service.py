@@ -15,11 +15,60 @@ from typing import Any, Optional
 
 from pymongo import MongoClient
 
+from services.job_status import COMPLETED_STATUSES
 from services.job_status import TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
+from services.ops_events import emit_event
 from services.runtime_estimate import append_throughput_mark
 
 
 logger = logging.getLogger(__name__)
+
+#: Holds an operator clears with one decision (approve/confirm/resume): INFO.
+_OPERATOR_HOLD_STATUSES = frozenset(
+    {"needs_approval", "needs_confirmation", "needs_review", "awaiting_approval", "paused"}
+)
+#: Holds that need a fix before the job can proceed: WARNING (``held`` default).
+_BLOCKED_HOLD_STATUSES = frozenset({"blocked"})
+
+
+def _job_status_outcome(status: str) -> tuple[str, int | None]:
+    """Map a job status to an ops_events outcome and optional level override."""
+    key = str(status or "").strip().lower()
+    if key == "failed":
+        return "failed", None
+    if key == "cancelled":
+        return "cancelled", None
+    if key in COMPLETED_STATUSES:
+        return "succeeded", None
+    if key == "retrying":
+        return "retrying", None
+    if key in _OPERATOR_HOLD_STATUSES:
+        return "held", logging.INFO
+    if key in _BLOCKED_HOLD_STATUSES:
+        return "held", None
+    return "started", None
+
+
+def emit_job_status_changed(
+    job_id: str,
+    previous_status: str | None,
+    status: str,
+    workspace_id: str | None = None,
+) -> None:
+    """Emit ``job.status.changed`` for a persisted transition (not progress ticks)."""
+    if str(previous_status or "") == str(status or ""):
+        return
+    outcome, level = _job_status_outcome(status)
+    emit_event(
+        logger,
+        "job.status.changed",
+        outcome=outcome,
+        level=level,
+        job_id=str(job_id),
+        workspace_id=str(workspace_id) if workspace_id else None,
+        from_status=str(previous_status) if previous_status else None,
+        to_status=str(status),
+    )
 
 _CONNECTOR_SECRET_KEYS = (
     "password",
@@ -508,6 +557,7 @@ class MongoDBService:
                     "phase": 1,
                     "throughput_marks": 1,
                     "started_at": 1,
+                    "workspace_id": 1,
                 },
             )
         except Exception:
@@ -693,6 +743,12 @@ class MongoDBService:
                 return False
         ok = result.modified_count > 0 or result.matched_count > 0
         if ok:
+            emit_job_status_changed(
+                job_id,
+                previous_status,
+                status,
+                updates.get("workspace_id") or (prev_doc or {}).get("workspace_id"),
+            )
             try:
                 from services.ops_metrics import record_terminal_job_transition
 
@@ -1524,6 +1580,7 @@ class MemoryMongoDBService:
                 rec["phases"] = phases
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        emit_job_status_changed(job_id, previous_status, status, rec.get("workspace_id"))
         try:
             from services.ops_metrics import record_terminal_job_transition
 
