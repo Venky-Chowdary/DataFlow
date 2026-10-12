@@ -6,6 +6,7 @@ import importlib
 import os
 import sys
 import uuid
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -372,6 +373,138 @@ def test_scim_mutations_write_private_named_events(scim_client, caplog):
         assert sentinel.lower().encode() not in audit_bytes.lower()
         assert sentinel.lower() not in caplog.text.lower()
         assert sentinel.lower() not in audit_text.lower()
+
+
+def test_group_audit_events_carry_request_correlation_and_group_id(scim_client, caplog):
+    client = scim_client["client"]
+    audit_log = scim_client["modules"]["audit_log"]
+    scim_store = scim_client["modules"]["scim_store"]
+    team_store = scim_client["modules"]["team_store"]
+    workspace = team_store.create_workspace(
+        name="SCIM group audit correlation",
+        created_by="operator@example.test",
+    )
+    group_name = "SCIM correlation group"
+    scim_store.set_group_mappings(
+        {group_name.lower(): {"workspace_id": workspace.id, "role": "viewer"}}
+    )
+    sentinels = [
+        "GROUP_AUDIT_EMAIL_ONE@example.test",
+        "GROUP_AUDIT_EMAIL_TWO@example.test",
+        "GROUP_AUDIT_EMAIL_THREE@example.test",
+        "GROUP_AUDIT_GIVENNAME",
+        "GROUP_AUDIT_PHONE",
+    ]
+    members = [
+        _create_user(
+            scim_client,
+            sentinels[index],
+            displayName=f"Private user {index}",
+            name={"givenName": sentinels[3]},
+            phoneNumbers=[{"value": sentinels[4]}],
+        ).json()
+        for index in range(3)
+    ]
+
+    def request_with_events(method, path, expected_status, payload=None):
+        correlation_id = str(uuid.uuid4())
+        request_kwargs = {
+            "headers": {
+                **_scim_headers(scim_client["scim"]),
+                "X-Correlation-ID": correlation_id,
+            }
+        }
+        if payload is not None:
+            request_kwargs["json"] = payload
+        response = client.request(method, path, **request_kwargs)
+        assert response.status_code == expected_status, response.text
+        assert response.headers["X-Correlation-ID"] == correlation_id
+        events = [
+            event
+            for event in audit_log.list_audit_events(limit=500)
+            if event.get("correlation_id") == correlation_id
+        ]
+        return response, correlation_id, events
+
+    def assert_group_events(events, correlation_id, group_id, expected_actions):
+        assert Counter(event["action"] for event in events) == Counter(expected_actions)
+        assert events
+        for event in events:
+            assert event["correlation_id"] == correlation_id
+            assert event["details"]["group_id"] == group_id
+            assert event["actor_type"] == "scim"
+
+    created, create_correlation, create_events = request_with_events(
+        "POST",
+        "/api/v1/scim/v2/Groups",
+        201,
+        {
+            "displayName": group_name,
+            "members": [
+                {"value": members[0]["id"]},
+                {"value": members[1]["id"]},
+            ],
+        },
+    )
+    group_id = created.json()["id"]
+    assert_group_events(
+        create_events,
+        create_correlation,
+        group_id,
+        ["scim.group.create", "scim.group.member_add"],
+    )
+
+    scim_store.set_group_mappings(
+        {group_name.lower(): {"workspace_id": workspace.id, "role": "editor"}}
+    )
+    patched, patch_correlation, patch_events = request_with_events(
+        "PATCH",
+        f"/api/v1/scim/v2/Groups/{group_id}",
+        200,
+        {
+            "Operations": [
+                {
+                    "op": "add",
+                    "path": "members",
+                    "value": [{"value": members[2]["id"]}],
+                },
+                {
+                    "op": "remove",
+                    "path": "members",
+                    "value": [{"value": members[1]["id"]}],
+                },
+            ]
+        },
+    )
+    assert patched.json()["id"] == group_id
+    assert_group_events(
+        patch_events,
+        patch_correlation,
+        group_id,
+        [
+            "scim.group.role_change",
+            "scim.group.member_add",
+            "scim.group.member_remove",
+        ],
+    )
+
+    deleted, delete_correlation, delete_events = request_with_events(
+        "DELETE",
+        f"/api/v1/scim/v2/Groups/{group_id}",
+        204,
+    )
+    assert deleted.status_code == 204
+    assert_group_events(
+        delete_events,
+        delete_correlation,
+        group_id,
+        ["scim.group.member_remove", "scim.group.delete"],
+    )
+
+    audit_bytes = audit_log.STORE_PATH.read_bytes()
+    for sentinel in sentinels:
+        assert sentinel.lower().encode() not in audit_bytes.lower()
+        assert sentinel.lower() not in caplog.text.lower()
 
 
 def test_discovery_authentication_and_scope_isolation(scim_client):

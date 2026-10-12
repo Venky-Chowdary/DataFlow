@@ -784,6 +784,7 @@ def _apply_group_members_locked(
                         actor=actor,
                         resource=f"workspace:{workspace_id}",
                         details={
+                            "group_id": group["id"],
                             "user_id": user_id,
                             "workspace_id": workspace_id,
                             "changed_attributes": ["role"],
