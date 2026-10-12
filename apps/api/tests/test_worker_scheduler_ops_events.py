@@ -172,6 +172,9 @@ def test_transfer_scheduler_lifecycle_and_held_lease(monkeypatch, caplog):
         def acquire(self, *_args, **_kwargs):
             return False
 
+    monkeypatch.setattr(transfer_scheduler, "_executor", None)
+    monkeypatch.setattr(transfer_scheduler, "_shutdown", False)
+    monkeypatch.setattr(transfer_scheduler, "_started", threading.Event())
     monkeypatch.setattr(transfer_scheduler, "_ensure_executor", lambda: object())
     monkeypatch.setattr(transfer_scheduler, "_lease_store", _Lease())
     with caplog.at_level("INFO"):
