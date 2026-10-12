@@ -970,7 +970,7 @@ class TestPostLoadHook:
         # operator could not tell which happened.
         source = Path(__file__).resolve().parents[1] / "src" / "transfer" / "engine.py"
         text = source.read_text(encoding="utf-8")
-        assert text.count("_apply_post_load_transforms(request, dest_summary)") == 3
+        assert text.count("apply_post_load_transforms(request, dest_summary)") == 3
 
     def test_missing_store_is_reported_not_raised(self, monkeypatch):
         from services import post_load_transform
@@ -1090,19 +1090,19 @@ class TestPostLoadHook:
         assert "different destination connector" in out["message"]
 
         # The engine helper must surface this, not drop it as a quiet no-op.
-        from src.transfer.engine import _apply_post_load_transforms
+        from services.post_load_transform import apply_post_load_transforms
 
         class Request:
             destination = Dest()
             workspace_id = ""
 
         dest_summary: dict = {}
-        _apply_post_load_transforms(Request(), dest_summary)
+        apply_post_load_transforms(Request(), dest_summary)
         assert "transformations" in dest_summary
         assert dest_summary["transformations"]["status"] == "skipped"
 
     def test_engine_records_an_unexpected_hook_exception(self, monkeypatch):
-        from src.transfer import engine as engine_mod
+        from services.post_load_transform import apply_post_load_transforms
 
         def boom(**_k):
             raise RuntimeError("unexpected")
@@ -1119,7 +1119,7 @@ class TestPostLoadHook:
             workspace_id = ""
 
         dest_summary: dict = {}
-        engine_mod._apply_post_load_transforms(Request(), dest_summary)
+        apply_post_load_transforms(Request(), dest_summary)
         assert dest_summary["transformations"]["status"] == "failed"
         assert "unexpected" in dest_summary["transformations"]["message"]
 

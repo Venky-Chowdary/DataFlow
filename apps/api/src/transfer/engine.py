@@ -192,7 +192,7 @@ from services.checkpoint_service import (
 )
 from src.transfer.resume_state import resolve_resume_checkpoint
 
-from . import lifecycle_events
+from . import job_submission, lifecycle_events
 
 logger = logging.getLogger("dataflow.transfer")
 
@@ -1029,57 +1029,7 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
 
 
 
-def _apply_post_load_transforms(request: Any, dest_summary: dict[str, Any]) -> None:
-    """Run configured transformation models and fold the result into the summary.
-
-    Called from all three completion paths (buffered, DB-to-DB streaming, file
-    streaming). They are near-identical blocks, and a post-load step wired into
-    only one of them would run after a CSV load but not after a Postgres
-    stream — worse than not running at all, because the operator cannot tell
-    which happened.
-
-    Never raises. The rows are already at the destination by this point, so a
-    transformation failure must be reported inside the summary rather than
-    turning a successful load into a failed job.
-    """
-    try:
-        from services.post_load_transform import run_post_load_transforms
-
-        destination = getattr(request, "destination", None)
-        if destination is None:
-            return
-        landed = str(
-            getattr(destination, "table", "")
-            or getattr(destination, "collection", "")
-            or ""
-        )
-        outcome = run_post_load_transforms(
-            destination=destination,
-            landed_table=landed,
-            workspace_id=str(getattr(request, "workspace_id", "") or ""),
-        )
-        # Surface anything the operator needs to act on. A clean "nothing
-        # configured" skip is omitted so the job summary stays dense; a
-        # mismatch, load failure, or partial run always lands in the summary
-        # so it cannot be mistaken for "nothing was configured".
-        if (
-            outcome.get("ran")
-            or outcome.get("status") in {"failed", "partial"}
-            or (
-                outcome.get("status") == "skipped"
-                and outcome.get("message")
-                and "No transformation project" not in str(outcome.get("message"))
-            )
-        ):
-            dest_summary["transformations"] = outcome
-    except Exception as exc:
-        logger.warning("Post-load transformations skipped: %s", exc, exc_info=exc)
-        dest_summary["transformations"] = {
-            "ran": False,
-            "status": "failed",
-            "projects": [],
-            "message": f"Post-load transformations could not start: {exc}",
-        }
+from services.post_load_transform import apply_post_load_transforms  # noqa: E402
 
 
 # Quarantine durability + rollback plan attachment live in ``job_quarantine``;
@@ -3181,7 +3131,7 @@ class UniversalTransferEngine:
                 already_persisted=_quarantine_persisted,
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
-            _apply_post_load_transforms(request, dest_summary)
+            apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
             _write_success_status(
                 mongo,
@@ -4192,7 +4142,7 @@ class UniversalTransferEngine:
                 already_persisted=_quarantine_persisted,
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
-            _apply_post_load_transforms(request, dest_summary)
+            apply_post_load_transforms(request, dest_summary)
             if effective_sync == "cdc" and isinstance(dest_summary, dict):
                 from services.cdc_catchup import release_finished_cdc_slot
 
@@ -5057,7 +5007,7 @@ class UniversalTransferEngine:
                 already_persisted=_quarantine_persisted,
             )
             _attach_job_rollback_plan(job_id, dest_summary, request)
-            _apply_post_load_transforms(request, dest_summary)
+            apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
             _write_success_status(
                 mongo,
@@ -5217,106 +5167,7 @@ class UniversalTransferEngine:
             reset_active_number_locale(number_token)
 
     def _create_pending_job(self, request: TransferRequest) -> str:
-        self._resolve_saved_connectors(request)
-        # Claim-queue / HA: spill file bytes before Mongo serialize so workers
-        # can hydrate source_path (never mark requires_file_reupload on fresh submit).
-        if request.source.kind == "file":
-            from services.transfer_file_staging import hydrate_file_source, persist_file_source
-
-            hydrate_file_source(request)
-            if request.source_content:
-                persist_file_source(request)
-        mongo = get_mongodb_service()
-        from services.procedure_source import source_read_mode_of
-
-        source_name = (
-            request.source_filename
-            or request.source.table
-            or request.source.collection
-            or "database"
-        )
-        dest_label = (
-            request.destination.collection
-            or request.destination.table
-            or request.destination.database
-            or request.destination.format
-            or "destination"
-        )
-        job_doc: dict[str, Any] = {
-            "source_type": request.source.kind,
-            "source_name": source_name,
-            "name": f"{source_name} → {dest_label}",
-            "name_key": f"{source_name} → {dest_label}".strip().casefold(),
-            "source_format": request.source.format,
-            "source_connector_id": str(getattr(request.source, "connector_id", None) or "").strip() or None,
-            "dest_connector_id": str(getattr(request.destination, "connector_id", None) or "").strip() or None,
-            "destination_type": request.destination.format,
-            "destination_kind": request.destination.kind,
-            "destination_database": request.destination.database or "",
-            "destination_collection": request.destination.collection
-            or request.destination.table
-            or "",
-            "operation": request.operation,
-            "records_processed": 0,
-            "total_rows": 0,
-            "progress_pct": 0,
-            "phase": "queued",
-            "message": "Transfer queued",
-            "workspace_id": request.workspace_id or "",
-            "data_region": request.data_region or "",
-            "transfer_request": transfer_request_to_dict(request),
-            "sync_mode": request.sync_mode,
-            "schema_policy": request.schema_policy,
-            "validation_mode": request.validation_mode,
-            "source_read_mode": source_read_mode_of(request.source),
-            "triggered_by": (request.triggered_by or "").strip(),
-            "retry_of": None,
-        }
-        proof = _mapping_proof_for_request(request)
-        if proof:
-            job_doc["mapping_proof"] = proof
-
-        # Claim the right to run this transfer before the job exists, so a
-        # double submit is told about the in-flight job instead of starting a
-        # second writer against the same destination table.
-        claim = self._claim_idempotency(request, job_doc)
-        request_fields = lifecycle_events.job_requested_fields(request)
-        if claim is not None and claim.duplicate:
-            lifecycle_events.emit_job_requested_skipped(logger, request_fields)
-            raise DuplicateTransferSubmission(claim)
-
-        try:
-            job_id = mongo.create_transfer_job(job_doc)
-        except Exception:
-            # Creating the job failed after we reserved the slot. Free it so the
-            # next submit is not blocked by a claim that points at nothing.
-            if claim is not None:
-                try:
-                    release = getattr(mongo, "release_job_idempotency", None)
-                    if callable(release):
-                        release(claim.key, _PENDING_CLAIM_ID)
-                except Exception as release_exc:
-                    logger.debug(
-                        "idempotency release after create failure skipped: %s",
-                        release_exc,
-                    )
-            raise
-        if claim is not None:
-            # The claim was inserted with a placeholder id because the real one
-            # only exists after the job document is written. Point it at the
-            # job now so a later release, or a duplicate check, names the right
-            # run rather than the placeholder.
-            self._bind_idempotency_claim(claim.key, job_id)
-        try:
-            from services.connector_store import mark_used
-
-            mark_used(job_doc.get("source_connector_id"), job_doc.get("dest_connector_id"))
-        except Exception as used_exc:
-            logger.debug("mark_used after job create skipped: %s", used_exc)
-        lifecycle_events.emit_job_requested_succeeded(
-            logger, str(job_id), bool(job_doc.get("triggered_by")), request_fields
-        )
-        return job_id
+        return job_submission.create_pending_job(self, request)
 
     def _idempotency_key(self, request: TransferRequest) -> str:
         """Full claim key for a request, or '' when the guard is disabled."""
