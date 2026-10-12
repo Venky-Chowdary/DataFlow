@@ -90,12 +90,15 @@ def test_lease_acquire_reports_held_by_other(monkeypatch, caplog):
     b = WorkerLeaseStore("worker-b-event")
     monkeypatch.setattr(a, "_mongo_collection", lambda: None)
     monkeypatch.setattr(b, "_mongo_collection", lambda: None)
-    a.acquire("lease-event")
     with caplog.at_level("INFO"):
+        assert a.acquire("lease-event")
         assert not b.acquire("lease-event")
-    event, = _events(caplog, "job.lease.acquire")
-    assert event.outcome == "skipped"
-    assert event.reason_code == "held_by_other"
+    events = _events(caplog, "job.lease.acquire")
+    assert [(event.outcome, event.worker_id) for event in events] == [
+        ("succeeded", "worker-a-event"),
+        ("skipped", "worker-b-event"),
+    ]
+    assert events[1].reason_code == "held_by_other"
 
 
 def test_heartbeat_failure_emits_heartbeat_and_lost_events(caplog):

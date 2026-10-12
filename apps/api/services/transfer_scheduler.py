@@ -11,7 +11,6 @@ from __future__ import annotations
 import atexit
 import concurrent.futures
 import logging
-import os
 from services.brand_env import getenv_brand
 from services.ops_events import emit_event
 import threading
