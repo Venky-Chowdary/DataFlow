@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -206,10 +207,64 @@ def test_mongo_failure_falls_back_and_counts_named_write(audit_failure_app, monk
     ]
     assert len(failures) == 1
     assert failures[0].action == "acl.grant.create"
+    assert failures[0].stage == "persist"
+    assert failures[0].levelno == logging.ERROR
     assert failures[0].store == "mongo"
     assert failures[0].fallback == "file"
     assert failures[0].correlation_id == correlation_id
     _assert_chain_verifies(audit_failure_app)
+
+
+@pytest.mark.parametrize(
+    ("stage", "patched_name"),
+    [
+        ("chain_read", "_chain_tip"),
+        ("redact", "_redact"),
+        ("hash", "_hmac_event_hash"),
+        ("persist", "_persist_event"),
+    ],
+)
+def test_append_stage_failures_emit_once_without_partial_store_write(
+    audit_failure_app,
+    monkeypatch,
+    caplog,
+    stage,
+    patched_name,
+):
+    audit_log = audit_failure_app["audit_log"]
+    store_path = audit_log.STORE_PATH
+    before = store_path.read_bytes() if store_path.exists() else b""
+
+    def fail_stage(*_args, **_kwargs):
+        raise RuntimeError("SENTINEL_STAGE")
+
+    monkeypatch.setattr(audit_log, patched_name, fail_stage)
+    correlation_id = str(uuid4())
+    with pytest.raises(RuntimeError, match="SENTINEL_STAGE"):
+        audit_log.append_audit_event(
+            action="audit.stage.test",
+            resource="RESOURCE_SENTINEL",
+            correlation_id=correlation_id,
+            details={"value": "DETAIL_SENTINEL"},
+        )
+
+    after = store_path.read_bytes() if store_path.exists() else b""
+    assert after == before
+    failures = [
+        record
+        for record in caplog.records
+        if getattr(record, "event", None) == "audit.write.failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0].action == "audit.stage.test"
+    assert failures[0].stage == stage
+    assert failures[0].levelno == logging.ERROR
+    assert failures[0].store == "file"
+    assert failures[0].fallback == "none"
+    assert failures[0].correlation_id == correlation_id
+    assert "SENTINEL_STAGE" not in caplog.text
+    assert "DETAIL_SENTINEL" not in caplog.text
+    assert "RESOURCE_SENTINEL" not in caplog.text
 
 
 def test_context_derivation_failures_do_not_skip_audit_write(

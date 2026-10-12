@@ -246,51 +246,67 @@ def append_audit_event(
                 actor = f"{actor_type}:{actor_id}"
 
     with _APPEND_LOCK:
-        secret = _platform_hmac_secret()
-        tip = _chain_tip()
-        prev = str(tip.get("event_hash")) if tip and tip.get("event_hash") else None
-        redacted = _redact(details or {})
-        ws = (workspace_id or "").strip()
-        tid = (tenant_id or "").strip()
-        if isinstance(redacted, dict):
-            ws = ws or str(redacted.get("workspace_id") or "").strip()
-            tid = tid or str(redacted.get("tenant_id") or "").strip()
-        event = {
-            "_id": str(uuid.uuid4()),
-            "id": str(uuid.uuid4()),
-            "time": _now(),
-            "actor": actor,
-            **principal_fields,
-            "action": action,
-            "resource": redact_secret_shapes(resource),
-            "level": canonical_level(level),
-            "correlation_id": correlation_id,
-            "workspace_id": ws,
-            "tenant_id": tid,
-            "details": redacted,
-            **{
-                key: value
-                for key, value in (
-                    ("outcome", outcome),
-                    ("reason_code", reason_code),
-                    ("session_id", session_id),
-                    ("trace_id", trace_id),
-                    ("route_template", route_template),
-                )
-                if value is not None
-            },
-            "prev_hash": prev,
-            "chain_seq": chain_seq_of(tip) + 1,
-            "hash_alg": "HMAC-SHA256",
-        }
-        event["event_hash"] = _hmac_event_hash(event, secret)
-
+        stage = "chain_read"
+        event: dict[str, Any] | None = None
         try:
+            secret = _platform_hmac_secret()
+            tip = _chain_tip()
+            prev = str(tip.get("event_hash")) if tip and tip.get("event_hash") else None
+
+            stage = "redact"
+            redacted = _redact(details or {})
+            ws = (workspace_id or "").strip()
+            tid = (tenant_id or "").strip()
+            if isinstance(redacted, dict):
+                ws = ws or str(redacted.get("workspace_id") or "").strip()
+                tid = tid or str(redacted.get("tenant_id") or "").strip()
+            redacted_resource = redact_secret_shapes(resource)
+
+            stage = "hash"
+            event = {
+                "_id": str(uuid.uuid4()),
+                "id": str(uuid.uuid4()),
+                "time": _now(),
+                "actor": actor,
+                **principal_fields,
+                "action": action,
+                "resource": redacted_resource,
+                "level": canonical_level(level),
+                "correlation_id": correlation_id,
+                "workspace_id": ws,
+                "tenant_id": tid,
+                "details": redacted,
+                **{
+                    key: value
+                    for key, value in (
+                        ("outcome", outcome),
+                        ("reason_code", reason_code),
+                        ("session_id", session_id),
+                        ("trace_id", trace_id),
+                        ("route_template", route_template),
+                    )
+                    if value is not None
+                },
+                "prev_hash": prev,
+                "chain_seq": chain_seq_of(tip) + 1,
+                "hash_alg": "HMAC-SHA256",
+            }
+            event["event_hash"] = _hmac_event_hash(event, secret)
+
+            stage = "persist"
             persisted = _persist_event(event)
         except Exception as exc:
+            try:
+                store = "mongo" if _mongo_collection() is not None else "file"
+            except Exception:
+                store = "unknown"
             _emit_audit_write_failed(
-                event,
-                store="file",
+                action=str(event.get("action") if event else action),
+                correlation_id=(
+                    event.get("correlation_id") if event else correlation_id
+                ),
+                stage=stage,
+                store=store,
                 fallback="none",
                 error=exc,
             )
@@ -326,7 +342,14 @@ def _persist_event(event: dict[str, Any]) -> dict[str, Any]:
                 exc,
                 exc_info=exc,
             )
-            _emit_audit_write_failed(event, store="mongo", fallback="file", error=exc)
+            _emit_audit_write_failed(
+                action=str(event.get("action") or ""),
+                correlation_id=event.get("correlation_id"),
+                stage="persist",
+                store="mongo",
+                fallback="file",
+                error=exc,
+            )
             file_tip = _latest_record_from_file()
             event["prev_hash"] = (
                 str(file_tip.get("event_hash")) if file_tip else None
@@ -342,8 +365,10 @@ def _persist_event(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _emit_audit_write_failed(
-    event: dict[str, Any],
     *,
+    action: str,
+    correlation_id: str | None,
+    stage: str,
     store: str,
     fallback: str,
     error: Exception,
@@ -356,10 +381,11 @@ def _emit_audit_write_failed(
             "audit.write.failed",
             outcome="errored",
             error=error,
-            action=str(event.get("action") or ""),
+            action=action,
+            stage=stage,
             store=store,
             fallback=fallback,
-            correlation_id=event.get("correlation_id"),
+            correlation_id=correlation_id,
         )
     except Exception as exc:
         logging.getLogger(__name__).error(
