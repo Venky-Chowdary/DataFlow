@@ -483,20 +483,20 @@ def test_domain_security_events_include_safe_request_metadata(domain_security_ap
     assert scanned.status_code == 200, scanned.text
 
     expected = {
-        "acl.grant.create": "/resource-acls",
-        "acl.grant.revoke": "/resource-acls/{grant_id}",
-        "schedule.definition.create": "/schedules/",
-        "schedule.definition.update": "/schedules/{schedule_id}",
-        "schedule.definition.import": "/schedules/import",
-        "schedule.definition.delete": "/schedules/{schedule_id}",
-        "schedule.gitops.apply": "/schedules/gitops/apply",
+        "acl.grant.create": "/api/v1/resource-acls",
+        "acl.grant.revoke": "/api/v1/resource-acls/{grant_id}",
+        "schedule.definition.create": "/api/v1/schedules",
+        "schedule.definition.update": "/api/v1/schedules/{schedule_id}",
+        "schedule.definition.import": "/api/v1/schedules/import",
+        "schedule.definition.delete": "/api/v1/schedules/{schedule_id}",
+        "schedule.gitops.apply": "/api/v1/schedules/gitops/apply",
         "schedule.approval.approved": "",
         "schedule.authorization.granted": "",
         "schedule.authorization.revoked": "",
-        "audit.export.read": "/audit/export",
-        "audit.verify.read": "/audit/verify",
-        "audit.verify_pack.read": "/audit/verify-pack",
-        "audit.secret_scan.read": "/audit/secret-scan",
+        "audit.export.read": "/api/v1/audit/export",
+        "audit.verify.read": "/api/v1/audit/verify",
+        "audit.verify_pack.read": "/api/v1/audit/verify-pack",
+        "audit.secret_scan.read": "/api/v1/audit/secret-scan",
     }
     events = _events(domain_security_app)
     for name, route in expected.items():
@@ -543,3 +543,21 @@ def test_domain_security_events_include_safe_request_metadata(domain_security_ap
     from services.evidence_chain import verify_chain
 
     assert verify_chain()["verified"] is True
+
+
+def test_real_main_app_route_template_includes_mounted_api_prefix(domain_security_app):
+    client = domain_security_app["client"]
+    headers = {
+        **domain_security_app["headers"],
+        "X-Correlation-ID": "route-template-prefix-check",
+    }
+    response = client.get("/api/v1/audit/export?format=json", headers=headers)
+
+    assert response.status_code == 200, response.text
+    event = next(
+        row
+        for row in _events(domain_security_app)
+        if row["action"] == "audit.export.read"
+        and row["correlation_id"] == "route-template-prefix-check"
+    )
+    assert event["route_template"] == "/api/v1/audit/export"

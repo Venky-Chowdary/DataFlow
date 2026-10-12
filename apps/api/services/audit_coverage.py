@@ -67,6 +67,21 @@ def session_label(jti: str) -> str:
     return "ses_" + sha256(("df-session:" + jti).encode()).hexdigest()[:24]
 
 
+def http_route_template(raw_path: str, template: str | None) -> str | None:
+    if not template:
+        return None
+    if ":path}" in template:
+        return template
+    raw_segments = [segment for segment in raw_path.split("/") if segment]
+    template_segments = [segment for segment in template.split("/") if segment]
+    if template == "/":
+        return "/" + "/".join(raw_segments) if raw_segments else "/"
+    if len(template_segments) > len(raw_segments):
+        return template
+    prefix_segments = raw_segments[: len(raw_segments) - len(template_segments)]
+    return "/" + "/".join(prefix_segments + template_segments)
+
+
 def request_principal(request: Request) -> dict[str, str]:
     state = request.state
     user = getattr(state, "user", None)
@@ -172,7 +187,10 @@ def record_security_event(
             if correlation_id is None:
                 correlation_id = tracing.get_correlation_id()
             route = request.scope.get("route")
-            route_template = str(getattr(route, "path", "") or "")
+            route_template = http_route_template(
+                request.url.path,
+                getattr(route, "path", None),
+            ) or ""
         else:
             from services import logging_config
 

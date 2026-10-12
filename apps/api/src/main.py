@@ -18,7 +18,7 @@ from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
 from services.safe_errors import public_error
-from services.audit_coverage import AuditAccessMiddleware
+from services.audit_coverage import AuditAccessMiddleware, http_route_template
 from services.tracing import sanitize_correlation_id
 from services.platform_config import (
     apply_railway_defaults,
@@ -368,23 +368,6 @@ app.add_middleware(
 )
 
 
-def _http_route_template(raw_path: str, template: str | None) -> str | None:
-    if not template:
-        return None
-    if ":path}" in template:
-        return template
-
-    raw_segments = [segment for segment in raw_path.split("/") if segment]
-    template_segments = [segment for segment in template.split("/") if segment]
-    if template == "/":
-        return "/" + "/".join(raw_segments) if raw_segments else "/"
-    if len(template_segments) > len(raw_segments):
-        return template
-
-    prefix_segments = raw_segments[: len(raw_segments) - len(template_segments)]
-    return "/" + "/".join(prefix_segments + template_segments)
-
-
 @app.middleware("http")
 async def add_timing_header(request: Request, call_next):
     start_time = time.time()
@@ -455,7 +438,7 @@ async def add_timing_header(request: Request, call_next):
                         logger.debug("Could not set HTTP span status attributes: %s", span_exc)
                 raise
             finally:
-                route_template = _http_route_template(
+                route_template = http_route_template(
                     request.url.path,
                     getattr(request.scope.get("route"), "path", None),
                 )
@@ -493,7 +476,10 @@ async def add_timing_header(request: Request, call_next):
         # message reaches the client.  Duck-type ``exceptions`` to stay portable.
         if len(getattr(exc, "exceptions", [])) == 1:
             exc = exc.exceptions[0]
-        route_template = getattr(request.scope.get("route"), "path", None)
+        route_template = http_route_template(
+            request.url.path,
+            getattr(request.scope.get("route"), "path", None),
+        )
         safe_fields = {"method": request.method}
         if route_template:
             safe_fields["route_template"] = route_template
