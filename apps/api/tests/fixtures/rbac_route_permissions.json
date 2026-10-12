@@ -28,6 +28,7 @@
   "GET /api/v1/ai/semantic-types": "ai.use",
   "GET /api/v1/audit/events": "audit.read",
   "GET /api/v1/audit/export": "audit.read",
+  "GET /api/v1/audit/secret-scan": "audit.read",
   "GET /api/v1/audit/tip": "audit.read",
   "GET /api/v1/audit/verify": "audit.read",
   "GET /api/v1/auth/bootstrap": "PUBLIC",

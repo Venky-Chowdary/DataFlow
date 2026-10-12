@@ -16,36 +16,16 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
 import re
-from re import sub
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-SECRET_KEYS: frozenset[str] = frozenset(
-    {
-        "authorization",
-        "password",
-        "connection_string",
-        "api_key",
-        "x_api_key",
-        "proxy_authorization",
-        "cookie",
-        "set_cookie",
-        "service_account",
-        "private_key",
-        "private_key_passphrase",
-        "token",
-        "access_token",
-        "refresh_token",
-        "secret_key",
-        "client_secret",
-    }
-)
+from services.log_redaction import is_sensitive_key
 
 
 def redact_config(cfg: Mapping[str, Any]) -> dict[str, Any]:
     """Copy of ``cfg`` with every known secret value replaced by ``***``."""
     return {
-        k: ("***" if k in SECRET_KEYS and v not in (None, "") else v)
+        k: ("***" if is_sensitive_key(k) and v not in (None, "") else v)
         for k, v in cfg.items()
     }
 
@@ -56,12 +36,10 @@ def redact_url(url: str) -> str:
     if not parsed.query and "@" not in parsed.netloc:
         return str(url)
 
-    secret_keys = {sub(r"[^a-z0-9]", "", key.lower()): key for key in SECRET_KEYS}
     query: list[tuple[str, str]] = []
     for name, value in parse_qsl(parsed.query, keep_blank_values=True):
-        secret_key = secret_keys.get(sub(r"[^a-z0-9]", "", name.lower()))
-        if secret_key:
-            value = str(redact_config({secret_key: value})[secret_key])
+        if is_sensitive_key(name) and value not in (None, ""):
+            value = "***"
         query.append((name, value))
 
     netloc = parsed.netloc

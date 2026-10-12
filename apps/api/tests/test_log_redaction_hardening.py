@@ -7,7 +7,14 @@ from uuid import uuid4
 
 import pytest
 
-from services import audit_log, evidence_chain, log_redaction, otel_logging, tracing
+from services import (
+    audit_log,
+    evidence_chain,
+    log_redaction,
+    otel_logging,
+    secret_config,
+    tracing,
+)
 from services.logging_config import JsonFormatter, TextFormatter
 
 
@@ -182,6 +189,19 @@ def test_sensitive_values_are_redacted_at_top_level_nested_and_in_lists(key):
         ("aws_access_key_id", False),
         ("url_kind", False),
         ("aws_secret_access_key", True),
+        ("secret_params", True),
+        ("password_invalid", True),
+        ("clientSecretMs", True),
+        ("apikeyitems", True),
+        ("token_lens", True),
+        ("token_count", False),
+        ("api_key_id", False),
+        ("secret_name", False),
+        ("tokenType", False),
+        ("key_prefix", False),
+        ("expires_at", False),
+        ("expires at", False),
+        ("url kind", False),
         ("AccountKey", True),
         ("X-Amz-Signature", True),
         ("webhook_url", True),
@@ -278,6 +298,137 @@ def test_numeric_assignment_counts_are_preserved_but_numeric_secrets_are_redacte
     text, expected
 ):
     assert log_redaction.redact_log_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    (
+        ("password=123456", "password=***"),
+        ("pin=4821", "pin=***"),
+        ("otp=999111", "otp=***"),
+        ("secret=42", "secret=***"),
+        ("token=42", "token=***"),
+        ("token_count=5", "token_count=5"),
+        ("prompt_tokens=50", "prompt_tokens=50"),
+        ("has_token=True", "has_token=True"),
+        ("spinner=3", "spinner=3"),
+        ("options=2", "options=2"),
+        ("password=True", "password=True"),
+        ("token=null", "token=null"),
+    ),
+)
+def test_structured_numeric_secret_keys_share_text_redaction_rule(text, expected):
+    assert log_redaction.redact_log_text(text) == expected
+
+
+def test_structured_numeric_secret_values_use_the_shared_key_rule():
+    sensitive_values = {
+        "password": 123456,
+        "pin": 4821,
+        "otp": 999111,
+        "secret": 42,
+        "token": 42,
+    }
+    safe_values = {
+        "token_count": 5,
+        "prompt_tokens": 50,
+        "has_token": True,
+        "spinner": 3,
+        "options": 2,
+        "password_is_set": None,
+    }
+    source = {**sensitive_values, **safe_values}
+    assert log_redaction.redact_log_value("metadata", source) == {
+        **dict.fromkeys(sensitive_values, "***"),
+        **safe_values,
+    }
+    assert audit_log._redact(source) == {
+        **dict.fromkeys(sensitive_values, "[REDACTED]"),
+        **safe_values,
+    }
+    assert tracing.redact_attributes(source) == {
+        **dict.fromkeys(sensitive_values, "***"),
+        **safe_values,
+    }
+
+
+def test_secret_config_delegates_key_sensitivity_and_preserves_legacy_output():
+    sentinel = _sentinel()
+    config = {
+        "aws_secret_access_key": sentinel,
+        "service_account": sentinel,
+        "password": "",
+        "token_count": 5,
+        "schema": "public",
+    }
+
+    assert secret_config.redact_config(config) == {
+        "aws_secret_access_key": "***",
+        "service_account": "***",
+        "password": "",
+        "token_count": 5,
+        "schema": "public",
+    }
+    url = secret_config.redact_url(
+        f"https://example.test/?aws_secret_access_key={sentinel}&token_count=5"
+    )
+    assert sentinel not in url
+    assert "token_count=5" in url
+
+
+@pytest.mark.parametrize(
+    ("template", "expected_prefix"),
+    (
+        ("ghp_{sentinel}", "ghp_***"),
+        ("github_pat_{sentinel}{sentinel}", "github_pat_***"),
+        ("sk_live_{sentinel}", "sk_live_***"),
+        ("rk_test_{sentinel}", "rk_test_***"),
+        ("whsec_{sentinel}", "whsec_***"),
+        ("xoxb-{sentinel}", "xoxb-***"),
+        ("xoxp-{sentinel}", "xoxp-***"),
+        ("AKIA{aws_suffix}", "AKIA***"),
+        ("ASIA{aws_suffix}", "ASIA***"),
+        ("AIza{google_suffix}", "AIza***"),
+        ("https://example.test/?key={sentinel}", "https://example.test/?key=***"),
+        ("https://example.test/?apikey={sentinel}", "https://example.test/?apikey=***"),
+        ("https://example.test/?api_key={sentinel}", "https://example.test/?api_key=***"),
+        (
+            "https://example.test/?access_token={sentinel}",
+            "https://example.test/?access_token=***",
+        ),
+    ),
+)
+def test_vendor_token_shapes_are_redacted(template, expected_prefix):
+    sentinel = _sentinel()
+    rendered = template.format(
+        sentinel=sentinel,
+        aws_suffix=sentinel[:16].upper(),
+        google_suffix=(sentinel * 2)[:35],
+    )
+
+    redacted = log_redaction.redact_secret_shapes(rendered)
+
+    assert sentinel not in redacted
+    assert redacted == expected_prefix
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "ghost_town",
+        "sk_live",
+        "risk_test_case",
+        "xoxo",
+        "AKIAB",
+        "monkey=banana",
+        "/keys?page=2",
+        "skeleton_key",
+        "ASIAN market",
+    ),
+)
+def test_vendor_token_shapes_leave_nonmatching_text_unchanged(text):
+    assert log_redaction.redact_secret_shapes(text) == text
+    assert log_redaction.redact_log_text(text) == text
 
 
 def test_json_formatter_redacts_message_extras_and_exception():

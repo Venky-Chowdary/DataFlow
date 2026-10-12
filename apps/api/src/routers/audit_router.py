@@ -285,6 +285,26 @@ async def get_audit_tip():
     }
 
 
+@router.get("/secret-scan")
+async def scan_audit_secrets(
+    request: Request,
+    limit: int = Query(20000, ge=1, le=20000),
+):
+    from services.audit_log import scan_audit_events_for_secrets
+    from services.team_store import require_workspace_isolation
+
+    workspace_id, _tenant_id = _scope(request)
+    if require_workspace_isolation() and not workspace_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Workspace-Id is required for an audit secret scan.",
+        )
+    return scan_audit_events_for_secrets(
+        limit=limit,
+        workspace_id=workspace_id or None,
+    )
+
+
 @router.get("/verify")
 async def verify_audit_chain(
     request: Request,

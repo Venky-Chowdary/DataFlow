@@ -79,7 +79,7 @@ def _redact(value: Any) -> Any:
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for k, v in value.items():
-            if is_sensitive_key(k) and is_redactable_value(v):
+            if is_sensitive_key(k) and is_redactable_value(v, k):
                 out[k] = "[REDACTED]"
             else:
                 out[k] = _redact(v)
@@ -392,6 +392,52 @@ def list_audit_events(
     if after_seq is not None:
         events.sort(key=chain_seq_of)
     return events[:limit]
+
+
+def scan_audit_events_for_secrets(
+    *, limit: int = 20000, workspace_id: str | None = None
+) -> dict[str, Any]:
+    """Report paths containing legacy unredacted values without changing the store."""
+    events = list_audit_events(limit=limit, workspace_id=workspace_id)
+    findings: list[dict[str, Any]] = []
+
+    for event in events:
+        keys: list[str] = []
+        shapes: list[str] = []
+
+        def inspect(value: Any, path: str) -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    child_path = f"{path}.{key}" if path else str(key)
+                    if (
+                        is_sensitive_key(key)
+                        and child not in ("[REDACTED]", "***")
+                        and is_redactable_value(child, key)
+                    ):
+                        keys.append(child_path)
+                    inspect(child, child_path)
+            elif isinstance(value, (list, tuple)):
+                for index, child in enumerate(value):
+                    inspect(child, f"{path}[{index}]")
+            elif isinstance(value, str) and redact_secret_shapes(value) != value:
+                shapes.append(path)
+
+        inspect(event.get("details"), "details")
+        resource = event.get("resource")
+        if isinstance(resource, str) and redact_secret_shapes(resource) != resource:
+            shapes.append("resource")
+        if keys or shapes:
+            findings.append(
+                {
+                    "id": event.get("id"),
+                    "time": event.get("time"),
+                    "action": event.get("action"),
+                    "keys": keys,
+                    "shapes": shapes,
+                }
+            )
+
+    return {"scanned": len(events), "flagged": len(findings), "events": findings}
 
 
 def _event_hash_of_line(line: str) -> str | None:

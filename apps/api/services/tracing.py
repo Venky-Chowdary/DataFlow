@@ -164,7 +164,7 @@ def redact_attributes(attrs: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     out: dict[str, Any] = {}
     for key, value in attrs.items():
-        if is_sensitive_key(key) and is_redactable_value(value):
+        if is_sensitive_key(key) and is_redactable_value(value, key):
             out[str(key)] = "***"
             continue
         if isinstance(value, str):
