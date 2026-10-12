@@ -26,6 +26,7 @@ from services.workspace_access import (
     assert_resource_workspace,
     resolve_read_workspace,
     resolve_write_workspace,
+    workspace_resource_is_visible,
 )
 
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
@@ -392,6 +393,17 @@ def export_dataflow_manifest(
     return artifact
 
 
+def _record_gitops_scope_denial(request: Request) -> None:
+    from services.audit_coverage import record_authz_denial
+
+    record_authz_denial(
+        request,
+        required_permission="workspace.resource",
+        effective_role=str(getattr(request.state, "effective_role", "") or "member"),
+        reason="cross_workspace",
+    )
+
+
 @router.post("/gitops/plan")
 async def gitops_plan_manifest(
     payload: dict[str, Any],
@@ -399,11 +411,14 @@ async def gitops_plan_manifest(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Dry-run a DatawrapManifest / PipelineSchedule / DataContract YAML body."""
-    from services.gitops_manifest import plan_manifest
+    from services.gitops_manifest import WorkspaceScopeError, plan_manifest
 
-    resolve_read_workspace(request, workspace_id)
+    ws = resolve_read_workspace(request, workspace_id)
     try:
-        return plan_manifest(payload)
+        return plan_manifest(payload, workspace_id=ws)
+    except WorkspaceScopeError as exc:
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -422,7 +437,7 @@ async def gitops_apply_manifest(
     Pass ``require_signed_contracts=true`` for CD/staging: every schedule must
     reference a SIGNED contract.
     """
-    from services.gitops_manifest import apply_manifest
+    from services.gitops_manifest import WorkspaceScopeError, apply_manifest
 
     ws = resolve_write_workspace(request, workspace_id)
     try:
@@ -432,8 +447,17 @@ async def gitops_apply_manifest(
             require_signed_contracts=require_signed_contracts,
             workspace_id=ws,
         )
+    except WorkspaceScopeError as exc:
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if any(
+        "another workspace" in str(item.get("error") or "").lower()
+        for item in result.get("results", [])
+    ):
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace")
     rows = result.get("results") or result.get("actions") or []
     successful_schedules = [
         row for row in rows
@@ -480,12 +504,10 @@ async def list_pipeline_schedules(
     ws = resolve_read_workspace(request, workspace_id)
     schedules = await asyncio.to_thread(list_schedules)
     if ws:
-        from services.team_store import require_workspace_isolation
-
-        if require_workspace_isolation():
-            schedules = [s for s in schedules if s.workspace_id == ws]
-        else:
-            schedules = [s for s in schedules if not s.workspace_id or s.workspace_id == ws]
+        schedules = [
+            s for s in schedules
+            if workspace_resource_is_visible(s.workspace_id, ws)
+        ]
     return [ScheduleSummaryResponse.from_schedule(s) for s in schedules]
 
 

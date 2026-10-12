@@ -75,11 +75,23 @@ def resolve_write_workspace(
     return workspace_id
 
 
+def workspace_resource_is_visible(
+    resource_workspace_id: str | None,
+    workspace_id: str,
+) -> bool:
+    """Workspace-scoped reads never inherit resources from the legacy context."""
+    scope = (workspace_id or "").strip()
+    if not scope:
+        return True
+    return (resource_workspace_id or "").strip() == scope
+
+
 def assert_resource_workspace(request: Request, resource_workspace_id: str | None) -> None:
     """Deny cross-workspace resource access when isolation is on or resource is scoped."""
     rid = (resource_workspace_id or "").strip()
+    scope = (request.headers.get("X-Workspace-Id") or "").strip()
     if not rid:
-        if require_workspace_isolation():
+        if require_workspace_isolation() or scope:
             raise HTTPException(status_code=404, detail="Not found")
         return
     if not can_read_workspace(rid, actor_email(request)):
@@ -88,6 +100,5 @@ def assert_resource_workspace(request: Request, resource_workspace_id: str | Non
     # membership: a user who belongs to two workspaces must not see one
     # workspace's resource while operating in the other. List endpoints already
     # filter by scope, so an id-addressed read has to agree with them.
-    scope = (request.headers.get("X-Workspace-Id") or "").strip()
-    if scope and scope != rid:
+    if scope and not workspace_resource_is_visible(rid, scope):
         raise HTTPException(status_code=404, detail="Not found")
