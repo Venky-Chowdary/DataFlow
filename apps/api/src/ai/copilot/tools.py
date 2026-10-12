@@ -6,9 +6,11 @@ import inspect
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from services.ops_events import emit_event
 from services.value_serializer import json_default
 
 from ..rag.product_docs import (
@@ -43,6 +45,45 @@ class ToolResult:
     success: bool
     output: Any
     error: str = ""
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _tool_executed(
+    result: ToolResult,
+    started: float,
+    *,
+    tool: str | None = None,
+    reason: str | None = None,
+    error: BaseException | None = None,
+    role: str | None = None,
+) -> ToolResult:
+    """Emit ``pilot.tool.executed`` for one dispatch and return ``result``.
+
+    Carries the tool name, a bounded reason and the error class only — never
+    the prompt, the arguments, the output, or the error text.
+    """
+    if result.success:
+        outcome, level = "succeeded", None
+    else:
+        outcome = "failed"
+        # An unhandled exception is a defect (ERROR); a refused or rejected call
+        # is an expected outcome the operator can act on (WARNING).
+        level = None if reason == "exception" else logging.WARNING
+        reason = reason or "tool_reported_failure"
+    emit_event(
+        _logger,
+        "pilot.tool.executed",
+        outcome=outcome,
+        level=level,
+        duration_ms=(time.monotonic() - started) * 1000.0,
+        error=error,
+        tool=tool or result.name,
+        reason=reason,
+        caller_role=role,
+    )
+    return result
 
 
 @dataclass
@@ -1365,35 +1406,65 @@ class DataPilotTools:
             "delete_schedule": self._delete_schedule,
             "update_schedule": self._update_schedule,
         }
+        started = time.monotonic()
         handler = handlers.get(name)
         if not handler:
-            return ToolResult(name=name, success=False, output=None, error=f"Unknown tool: {name}")
+            # The requested name is model/caller text, so it is not logged.
+            return _tool_executed(
+                ToolResult(name=name, success=False, output=None, error=f"Unknown tool: {name}"),
+                started,
+                tool="unknown",
+                reason="unknown_tool",
+            )
         # One chokepoint for permissions: every path into a tool — the
         # deterministic planner, an LLM tool loop, a recovery follow-up — comes
         # through here, so none of them can reach a tool the caller's role does
         # not hold.
         role = current_caller_role()
         if not is_tool_allowed(role, name):
-            return ToolResult(
-                name=name,
-                success=False,
-                output=None,
-                error=denial_message(role, name),
+            return _tool_executed(
+                ToolResult(
+                    name=name,
+                    success=False,
+                    output=None,
+                    error=denial_message(role, name),
+                ),
+                started,
+                reason="permission_denied",
+                role=role,
             )
         try:
             bound, bind_error = _bind_tool_arguments(name, handler, args)
             if bind_error:
-                return ToolResult(name=name, success=False, output=None, error=bind_error)
-            return handler(**bound)
+                return _tool_executed(
+                    ToolResult(name=name, success=False, output=None, error=bind_error),
+                    started,
+                    reason="invalid_arguments",
+                    role=role,
+                )
+            result = handler(**bound)
         except TypeError as e:
-            return ToolResult(
-                name=name,
-                success=False,
-                output=None,
-                error=_tool_argument_error(name, str(e)),
+            return _tool_executed(
+                ToolResult(
+                    name=name,
+                    success=False,
+                    output=None,
+                    error=_tool_argument_error(name, str(e)),
+                ),
+                started,
+                reason="invalid_arguments",
+                error=e,
+                role=role,
             )
         except Exception as e:
-            return ToolResult(name=name, success=False, output=None, error=str(e))
+            return _tool_executed(
+                ToolResult(name=name, success=False, output=None, error=str(e)),
+                started,
+                reason="exception",
+                error=e,
+                role=role,
+            )
+        return _tool_executed(result, started, role=role)
 
     def _list_datasets(self) -> ToolResult:
         datasets = self.analyst.list_datasets()
