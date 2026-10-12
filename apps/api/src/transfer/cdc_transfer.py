@@ -1718,6 +1718,7 @@ def _run_cdc_multi_stream(
     eos = normalize_delivery_guarantee(delivery_guarantee) == "exactly_once"
     dest_wired = dest_fmt in EOS_TXN_WIRED_DESTS
     if (not eos or dest_wired) and can_share_log_reader(src_fmt, len(selected)):
+        shared_progress: dict[str, Any] = {}
         try:
             return _run_cdc_shared_multi_table(
                 source,
@@ -1737,16 +1738,22 @@ def _run_cdc_multi_stream(
                 delivery_guarantee=delivery_guarantee,
                 delivery_pinned=delivery_pinned,
                 workspace_id=workspace_id,
+                progress=shared_progress,
             )
         except Exception as exc:
             from services.cdc_lease import CdcLeaseConflict
+            from services.error_handling import TransferCancelled
 
-            if isinstance(exc, (CdcLeaseConflict, CdcDestinationSessionError)):
+            if isinstance(exc, (CdcLeaseConflict, CdcDestinationSessionError, TransferCancelled)):
                 raise
-            logger.warning(
-                "Shared multi-table CDC reader unavailable (%s); "
-                "falling back to per-table readers",
-                type(exc).__name__,
+            if not _shared_reader_left_no_trace(shared_progress):
+                raise
+            emit_event(
+                logger, "cdc.reader.fallback", outcome="retrying", error=exc,
+                job_id=job_id or None, workspace_id=workspace_id or None,
+                source_type=src_fmt or None, destination_type=dest_fmt or None,
+                table_count=len(selected),
+                reason_code="shared_reader_failed_before_write",
             )
 
     return _run_cdc_multi_stream_sequential(
@@ -1771,6 +1778,19 @@ def _run_cdc_multi_stream(
     )
 
 
+def _shared_reader_left_no_trace(progress: dict[str, Any]) -> bool:
+    """True when a failed shared reader applied nothing and moved no watermark."""
+    if any(int(v or 0) for v in (progress.get("counts") or {}).values()):
+        return False
+    if "cursor_key" not in progress:
+        return True
+    try:
+        return get_watermark(progress["cursor_key"]) == progress.get("watermark_at_entry")
+    except Exception as exc:
+        logger.debug("shared watermark re-read failed: %s", type(exc).__name__)
+        return False
+
+
 def _run_cdc_shared_multi_table(
     source: Any,
     destination: Any,
@@ -1790,8 +1810,13 @@ def _run_cdc_shared_multi_table(
     delivery_guarantee: str = "at_least_once",
     delivery_pinned: bool = False,
     workspace_id: str = "",
+    progress: dict[str, Any] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """One log consumer for N tables (Debezium-class); demux apply per stream.
+
+    ``progress`` (optional) is filled with the shared cursor key, its watermark
+    at entry and the live applied counts, so a caller can tell whether a failed
+    run left a trace before retrying the work elsewhere.
 
     Default semantics are **at-least-once upsert**. Opt-in exactly-once buffers
     demuxed table batches until ``ack_barrier``, then applies them in one dest
@@ -1886,6 +1911,8 @@ def _run_cdc_shared_multi_table(
         dest_database=str(dest_cfg.get("database") or ""),
     )
     shared_wm = get_watermark(shared_key)
+    if progress is not None:
+        progress.update(cursor_key=shared_key, watermark_at_entry=shared_wm)
     if eos_active:
         from connectors.cdc_eos_sql import open_eos_session
 
@@ -2070,6 +2097,8 @@ def _run_cdc_shared_multi_table(
 
     total_rows = 0
     cycle_counts = {"upserts": 0, "deletes": 0}
+    if progress is not None:
+        progress["counts"] = cycle_counts
     stream_health: dict[str, dict[str, Any]] = {
         t: {"name": t, "status": "running", "records_processed": 0} for t in tables
     }

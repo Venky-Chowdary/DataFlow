@@ -515,6 +515,93 @@ def test_shared_reader_fallback_warning_logs_the_class_not_the_message(monkeypat
             backfill_new_fields=False, validation_mode="strict", limit=0,
         )
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
-    text = warning.getMessage()
-    assert "RuntimeError" in text
-    assert "DEADBEEF" not in text and TABLE not in text and not warning.exc_info
+    assert warning.getMessage() == "cdc.reader.fallback"
+    assert warning.error_type == "RuntimeError" and not warning.exc_info
+    for fmt in (JsonFormatter(), TextFormatter()):
+        out = fmt.format(warning)
+        assert "DEADBEEF" not in out and TABLE not in out, out
+
+
+def _live_pg_logical() -> bool:
+    try:
+        from connectors.postgresql_conn import get_connection
+
+        with get_connection(**_LIVE_PG, connection_string="", ssl=False) as conn, conn.cursor() as cur:
+            cur.execute("SHOW wal_level")
+            return cur.fetchone()[0] == "logical"
+    except Exception:
+        return False
+
+
+_LIVE_PG = dict(host="localhost", port=5432, database="dataflow", username="dataflow", password="dataflow")
+
+
+@pytest.mark.skipif(not _live_pg_logical(), reason="PostgreSQL wal_level=logical not reachable on :5432")
+def test_shared_reader_health_failure_reaches_transfer_run_failed_live(capture):
+    """Live PG logical CDC, two tables on the shared reader, through execute_tracked:
+    a health-step failure after the reader closed fails the job and is recorded
+    as ``transfer.run.failed`` — with no extra CDC cycle event."""
+    import uuid
+    from unittest.mock import patch
+
+    from connectors.postgresql_conn import get_connection
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import TransferRequest
+
+    def sql(stmt, params=None):
+        with get_connection(**_LIVE_PG, connection_string="", ssl=False) as conn, conn.cursor() as cur:
+            cur.execute(stmt, params)
+            rows = cur.fetchall() if cur.description else []
+            conn.commit()
+            return rows
+
+    tag = uuid.uuid4().hex[:8]
+    tables = [f"obs_h_{tag}_a", f"obs_h_{tag}_b"]
+    dest_schema = f"obs_hdest_{tag}"
+    maps = [
+        {"source": "id", "target": "id", "source_type": "INTEGER", "target_type": "INTEGER", "confidence": 0.99},
+        {"source": "label", "target": "label", "source_type": "TEXT", "target_type": "TEXT", "confidence": 0.99},
+    ]
+    ep = dict(kind="database", format="postgresql", ssl=False, **_LIVE_PG)
+    boom = RuntimeError(_SECRET_ERR)
+    job_id = "obs-health-" + tag
+    try:
+        sql(f'CREATE SCHEMA "{dest_schema}"')
+        for t in tables:
+            sql(f'CREATE TABLE public."{t}" (id INT PRIMARY KEY, label TEXT)')
+            sql(f"INSERT INTO public.\"{t}\" VALUES (1, 'a'), (2, 'b')")
+        request = TransferRequest(
+            source=EndpointConfig(**ep, schema="public", table=tables[0]),
+            destination=EndpointConfig(**ep, schema=dest_schema, table=""),
+            mappings=maps,
+            sync_mode="cdc",
+            validation_mode="strict",
+            skip_preflight=True,
+            delivery_guarantee="at_least_once",
+            stream_contracts=[
+                {"name": t, "selected": True, "snapshot_mode": "initial", "primary_key": "id",
+                 "sync_mode": "cdc", "mappings": maps}
+                for t in tables
+            ],
+        )
+        with patch("services.row_conservation.record_stream_health", side_effect=boom) as health:
+            result = UniversalTransferEngine().execute_tracked(request, job_id)
+        assert health.called, "the shared reader's health step never ran"
+        assert result.success is False
+        (failed,) = capture.named("transfer.run.failed")
+        assert failed.levelno == logging.ERROR
+        assert failed.job_id == job_id
+        assert capture.named("transfer.run.succeeded") == []
+        assert _SECRET_ERR in (result.error or ""), result.error
+        assert capture.named("cdc.reader.fallback") == []
+        assert capture.named("cdc.cycle.completed") == []
+        _clean(capture.records)
+    finally:
+        for (slot,) in sql(
+            "SELECT slot_name FROM pg_replication_slots WHERE slot_name LIKE %s",
+            (f"%{tag}%",),
+        ):
+            sql("SELECT pg_drop_replication_slot(%s)", (slot,))
+        for t in tables:
+            sql(f'DROP TABLE IF EXISTS public."{t}" CASCADE')
+        sql(f'DROP SCHEMA IF EXISTS "{dest_schema}" CASCADE')
