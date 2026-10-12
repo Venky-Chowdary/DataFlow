@@ -79,11 +79,14 @@ def workspace_resource_is_visible(
     resource_workspace_id: str | None,
     workspace_id: str,
 ) -> bool:
-    """Workspace-scoped reads never inherit resources from the legacy context."""
+    """Apply the same legacy-resource visibility rule across scoped reads."""
     scope = (workspace_id or "").strip()
     if not scope:
         return True
-    return (resource_workspace_id or "").strip() == scope
+    resource_scope = (resource_workspace_id or "").strip()
+    if not resource_scope:
+        return not require_workspace_isolation()
+    return resource_scope == scope
 
 
 def assert_resource_workspace(request: Request, resource_workspace_id: str | None) -> None:
@@ -91,7 +94,7 @@ def assert_resource_workspace(request: Request, resource_workspace_id: str | Non
     rid = (resource_workspace_id or "").strip()
     scope = (request.headers.get("X-Workspace-Id") or "").strip()
     if not rid:
-        if require_workspace_isolation() or scope:
+        if require_workspace_isolation():
             raise HTTPException(status_code=404, detail="Not found")
         return
     if not can_read_workspace(rid, actor_email(request)):

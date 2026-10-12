@@ -453,7 +453,7 @@ async def gitops_apply_manifest(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if any(
-        "another workspace" in str(item.get("error") or "").lower()
+        item.get("error_code") == "cross_workspace"
         for item in result.get("results", [])
     ):
         _record_gitops_scope_denial(request)

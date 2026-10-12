@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import PyMongoError
 from services.runtime_estimate import estimate_for_job_doc
 from services.team_store import can_read_workspace, can_write_workspace
-from services.workspace_access import assert_resource_workspace
+from services.workspace_access import assert_resource_workspace, workspace_resource_is_visible
 from services.value_serializer import json_default
 from services.connector_telemetry import connector_operation, driver_family
 
@@ -355,7 +355,10 @@ async def list_connectors(
         if str(_api_root) not in sys.path:
             sys.path.insert(0, str(_api_root))
         from services.connector_store import connector_ui_status, list_connectors as fs_list, normalize_connector_role
-        items = fs_list(workspace_id=workspace_id)
+        items = [
+            connector for connector in fs_list(workspace_id=workspace_id)
+            if workspace_resource_is_visible(connector.workspace_id, workspace_id)
+        ]
         if items:
             return {
                 "connectors": [
@@ -391,7 +394,7 @@ async def list_connectors(
 
         result = []
         for c in connectors:
-            if workspace_id and c.get("workspace_id") not in (workspace_id, "", None):
+            if not workspace_resource_is_visible(c.get("workspace_id"), workspace_id):
                 continue
             created = c.get("created_at")
             result.append({

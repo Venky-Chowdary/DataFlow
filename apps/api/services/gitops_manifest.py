@@ -513,12 +513,15 @@ def apply_manifest(
                     "reason": f"unsupported kind {kind!r}",
                 })
         except Exception as exc:
-            results.append({
+            result = {
                 "kind": kind or "Unknown",
                 "action": "error",
                 "ok": False,
                 "error": str(exc)[:400],
-            })
+            }
+            if isinstance(exc, WorkspaceScopeError):
+                result["error_code"] = "cross_workspace"
+            results.append(result)
 
     return {
         "dry_run": False,
