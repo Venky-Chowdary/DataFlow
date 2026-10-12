@@ -30,7 +30,9 @@ from services.cdc_exactly_once import (
     decide_eos_apply,
     decide_from_view,
     encode_resume_blob,
+    plan_open_session,
 )
+from services.cdc_snapshot_mode import snapshot_dump_open
 
 
 def test_oracle_eos_applies_later_rs_id_at_same_scn() -> None:
@@ -131,7 +133,7 @@ def test_composite_position_text_and_ordering() -> None:
     )
     oracle_complete = encode_logminer_token(100, table="T", scn_complete=True)
     oracle_incomplete = encode_logminer_token(100, table="T")
-    assert batch_lsn(oracle_legacy) == "scn:100"
+    assert batch_lsn(oracle_legacy) == "scn:99"
     assert batch_lsn(oracle_r1) == "scn:100.p0x1.1.1.0000000003"
     assert batch_lsn(oracle_complete) == "scn:100.c"
     assert batch_lsn(oracle_incomplete) == "scn:100"
@@ -190,6 +192,152 @@ def test_composite_position_text_and_ordering() -> None:
     ) < 0
     assert len(lsn_sort_key(batch_lsn(sqlserver_partial))) == 4
     assert isinstance(lsn_sort_key(batch_lsn(sqlserver_partial))[3], str)
+
+
+def test_oracle_snapshot_position_precedes_streaming_handoff_and_events() -> None:
+    handoff_scn = 500
+    snapshot = encode_logminer_token(
+        handoff_scn, table="T", phase="snapshot"
+    )
+    streaming_handoff = encode_logminer_token(
+        handoff_scn - 1,
+        table="T",
+        phase="streaming",
+        scn_complete=True,
+    )
+    first_event = encode_logminer_token(
+        handoff_scn,
+        table="T",
+        phase="streaming",
+        rs_id="0x1.1.1",
+        ssn=1,
+    )
+
+    assert compare_lsn(batch_lsn(snapshot), batch_lsn(streaming_handoff)) < 0
+    assert compare_lsn(batch_lsn(snapshot), batch_lsn(first_event)) < 0
+
+
+def test_oracle_snapshot_handoff_eos_resume_keeps_streaming_phase() -> None:
+    handoff_scn = 500
+    stream_key = "oracle|db|T"
+    snapshot = encode_logminer_token(
+        handoff_scn, table="T", phase="snapshot"
+    )
+    streaming_handoff = encode_logminer_token(
+        handoff_scn - 1,
+        table="T",
+        phase="streaming",
+        scn_complete=True,
+    )
+    first_event = encode_logminer_token(
+        handoff_scn,
+        table="T",
+        phase="streaming",
+        rs_id="0x1.1.1",
+        ssn=1,
+    )
+    store = InMemoryEosStore()
+    snapshot_result = store.commit_atomic(
+        stream_key=stream_key,
+        incoming_lsn=batch_lsn(snapshot),
+        batch_id="snapshot",
+        apply_fn=lambda: store.upsert_row("1", {"id": "1", "v": "snapshot"}),
+    )
+    assert not snapshot_result.already_committed
+    destination_resume = encode_resume_blob(snapshot)
+
+    handoff_result = store.commit_atomic(
+        stream_key=stream_key,
+        incoming_lsn=batch_lsn(streaming_handoff),
+        batch_id="streaming-handoff",
+        apply_fn=lambda: None,
+    )
+    if not handoff_result.already_committed:
+        destination_resume = encode_resume_blob(streaming_handoff)
+    assert not handoff_result.already_committed
+    destination = DestWmView(
+        committed_lsn=store.watermarks[stream_key].committed_lsn,
+        resume_blob=destination_resume,
+    )
+    opened = plan_open_session(
+        dest=destination,
+        incoming_fence=0,
+        job_resume=snapshot,
+    )
+    assert decode_logminer_token(opened.resume)["phase"] == "streaming"
+    assert not snapshot_dump_open(opened.resume)
+
+    event_result = store.commit_atomic(
+        stream_key=stream_key,
+        incoming_lsn=batch_lsn(first_event),
+        batch_id="insert",
+        apply_fn=lambda: store.upsert_row("2", {"id": "2", "v": "insert"}),
+    )
+    assert not event_result.already_committed
+    destination = DestWmView(
+        committed_lsn=store.watermarks[stream_key].committed_lsn,
+        resume_blob=encode_resume_blob(first_event),
+    )
+    resumed = plan_open_session(
+        dest=destination,
+        incoming_fence=0,
+        job_resume=snapshot,
+    )
+    assert decode_logminer_token(resumed.resume)["phase"] == "streaming"
+    assert not snapshot_dump_open(resumed.resume)
+    assert set(store.rows) == {"1", "2"}
+
+
+def test_legacy_oracle_snapshot_watermark_skips_snapshot_but_applies_streaming_event() -> None:
+    handoff_scn = 500
+    stream_key = "oracle|db|T"
+    store = InMemoryEosStore()
+    legacy = store.commit_atomic(
+        stream_key=stream_key,
+        incoming_lsn=f"scn:{handoff_scn}",
+        batch_id="legacy-snapshot",
+        apply_fn=lambda: None,
+    )
+    assert not legacy.already_committed
+
+    snapshot = encode_logminer_token(
+        handoff_scn, table="T", phase="snapshot"
+    )
+    redelivery = store.commit_atomic(
+        stream_key=stream_key,
+        incoming_lsn=batch_lsn(snapshot),
+        batch_id="snapshot-redelivery",
+        apply_fn=lambda: store.upsert_row("1", {"id": "1", "v": "snapshot"}),
+    )
+    assert redelivery.already_committed
+
+    event = encode_logminer_token(
+        handoff_scn,
+        table="T",
+        phase="streaming",
+        rs_id="0x1.1.1",
+        ssn=1,
+    )
+    streamed = store.commit_atomic(
+        stream_key=stream_key,
+        incoming_lsn=batch_lsn(event),
+        batch_id="streaming-insert",
+        apply_fn=lambda: store.upsert_row("2", {"id": "2", "v": "insert"}),
+    )
+    assert not streamed.already_committed
+    assert set(store.rows) == {"2"}
+
+
+def test_sqlserver_snapshot_position_precedes_streaming_handoff() -> None:
+    handoff_lsn = "0000002e000001d80030"
+    snapshot = encode_mssql_cdc_token(
+        handoff_lsn, table="T", phase="snapshot"
+    )
+    streaming_handoff = encode_mssql_cdc_token(
+        handoff_lsn, table="T", phase="streaming"
+    )
+
+    assert compare_lsn(batch_lsn(snapshot), batch_lsn(streaming_handoff)) < 0
 
 
 @pytest.mark.parametrize("txn_buffer", [False, True], ids=["buffer-off", "buffer-on"])

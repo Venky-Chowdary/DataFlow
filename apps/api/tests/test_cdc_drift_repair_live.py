@@ -972,3 +972,354 @@ def test_cdc_drift_repair_live(route: str, tmp_path: Path, monkeypatch, caplog) 
             except Exception:
                 pass
         cdc_lease_store.reset_store(original_lease_store)
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        pytest.param(
+            "oracle",
+            marks=pytest.mark.skipif(
+                not _oracle_logminer_ready() or not _pg_ready(),
+                reason="Oracle LogMiner and live PostgreSQL environment are required",
+            ),
+            id="oracle-logminer-to-postgresql",
+        ),
+        pytest.param(
+            "sqlserver",
+            marks=pytest.mark.skipif(
+                (getenv_brand("SQLSERVER_ENABLE", "") or "").strip().lower()
+                not in {"1", "true", "yes", "on"}
+                or not _sqlserver_native_ready()
+                or not _pg_ready(),
+                reason="SQL Server native CDC and live PostgreSQL environment are required",
+            ),
+            id="sqlserver-cdc-to-postgresql",
+        ),
+    ],
+)
+def test_snapshot_insert_resume_eos_live(
+    route: str, monkeypatch
+) -> None:
+    mongo = get_mongodb_service()
+    if not isinstance(mongo, MemoryMongoDBService):
+        pytest.skip("The live snapshot proof requires DATAFLOW_JOB_STORE=memory")
+
+    run_id = uuid.uuid4().hex[:10]
+    workspace_id = f"workspace-eossnap-{route}-{run_id}"
+    job_id = f"eossnap-{route}-{run_id}"
+    pg_cfg = _pg_cfg()
+    source_table = (
+        f"EOSSNAP_{run_id.upper()}" if route == "oracle" else f"eossnap_{run_id}"
+    )
+    dest_table = f"eossnap_live_{run_id}"
+    if route == "oracle":
+        raw_source_cfg = _oracle_cfg()
+        source_schema = str(raw_source_cfg["schema"])
+        source_pk, source_value = "ID", "V"
+        source_endpoint = EndpointConfig(
+            kind="database",
+            format="oracle",
+            host=str(raw_source_cfg["host"]),
+            port=int(raw_source_cfg["port"]),
+            database=str(raw_source_cfg["database"]),
+            schema=source_schema,
+            table=source_table,
+            username=str(raw_source_cfg["username"]),
+            password=str(raw_source_cfg["password"]),
+            connection_string=str(raw_source_cfg.get("connection_string") or ""),
+            ssl=bool(raw_source_cfg.get("ssl", False)),
+            extra={
+                key: value
+                for key, value in raw_source_cfg.items()
+                if key
+                not in {
+                    "db_type",
+                    "host",
+                    "port",
+                    "database",
+                    "schema",
+                    "username",
+                    "password",
+                    "connection_string",
+                    "ssl",
+                }
+            },
+        )
+        source_connect_cfg = dict(raw_source_cfg)
+        source_connect_cfg["type"] = "oracle"
+    else:
+        raw_source_cfg = dict(ENGINES["sqlserver"])
+        source_schema = "dbo"
+        source_pk, source_value = "id", "v"
+        source_connect_cfg = {
+            "host": raw_source_cfg["host"],
+            "port": raw_source_cfg["port"],
+            "database": raw_source_cfg["database"],
+            "username": raw_source_cfg["username"],
+            "password": raw_source_cfg["password"],
+            "connection_string": "",
+            "ssl": False,
+            "db_type": "sqlserver",
+        }
+        source_endpoint = EndpointConfig(
+            kind="database",
+            format="sqlserver",
+            host=str(raw_source_cfg["host"]),
+            port=int(raw_source_cfg["port"]),
+            database=str(raw_source_cfg["database"]),
+            schema=source_schema,
+            table=source_table,
+            username=str(raw_source_cfg["username"]),
+            password=str(raw_source_cfg["password"]),
+            extra={"cdc_row_filter": "all update old"},
+        )
+    destination_endpoint = EndpointConfig(
+        kind="database",
+        format="postgresql",
+        host=str(pg_cfg["host"]),
+        port=int(pg_cfg["port"]),
+        database=str(pg_cfg["database"]),
+        schema="public",
+        table=dest_table,
+        username=str(pg_cfg["username"]),
+        password=str(pg_cfg["password"]),
+    )
+    mapping = [
+        {"source": source_pk, "target": "id", "confidence": 1.0},
+        {"source": source_value, "target": "v", "confidence": 1.0},
+    ]
+    request = TransferRequest(
+        source=source_endpoint,
+        destination=destination_endpoint,
+        mappings=mapping,
+        column_types={source_pk: "INTEGER", source_value: "VARCHAR(200)"},
+        skip_preflight=True,
+        sync_mode="cdc",
+        validation_mode="balanced",
+        workspace_id=workspace_id,
+        stream_contracts=[
+            {
+                "name": source_table,
+                "selected": True,
+                "snapshot_mode": "initial",
+                "primary_key": source_pk,
+                "cursor_semantics": "cdc_position",
+                "sync_mode": "cdc",
+            }
+        ],
+        delivery_guarantee="exactly_once",
+    )
+    request.delivery_pinned = True
+    mongo.create_transfer_job(
+        {
+            "_id": job_id,
+            "workspace_id": workspace_id,
+            "status": "pending",
+            "transfer_request": transfer_request_to_dict(request),
+        }
+    )
+    monkeypatch.delenv("DATAFLOW_CDC_ORACLE_TXN_BUFFER", raising=False)
+    original_lease_store = cdc_lease_store.get_store()
+    redis_url = (
+        getenv_brand("CDC_LEASE_REDIS_URL")
+        or getenv_brand("REDIS_URL")
+        or "redis://127.0.0.1:6379/15"
+    )
+    monkeypatch.setenv("DATAFLOW_CDC_LEASE_BACKEND", "redis")
+    monkeypatch.setenv("DATAFLOW_CDC_LEASE_REDIS_URL", redis_url)
+    monkeypatch.setenv("DATAFLOW_CDC_LEASE_REDIS_PREFIX", f"eossnap:{run_id}:")
+    assert cdc_lease_store.configure_store(
+        backend="redis", url=redis_url, prefix=f"eossnap:{run_id}:"
+    ).name == "redis"
+
+    ids = list(range(1, 101))
+    inserted_ids = list(range(101, 151))
+    values = {row_id: f"value-{row_id}" for row_id in ids + inserted_ids}
+    source_reader = None
+    source_table_created = False
+    cursor_key = ""
+    try:
+        if route == "oracle":
+            table_ref = f'"{source_schema}"."{source_table}"'
+            with get_connection(**source_connect_cfg) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"CREATE TABLE {table_ref} "
+                        "(ID NUMBER(10) PRIMARY KEY, V VARCHAR2(200))"
+                    )
+                    source_table_created = True
+                    cur.execute(
+                        f"ALTER TABLE {table_ref} "
+                        "ADD SUPPLEMENTAL LOG DATA (ALL) COLUMNS"
+                    )
+                    cur.executemany(
+                        f"INSERT INTO {table_ref} (ID, V) VALUES (:id, :value)",
+                        [{"id": row_id, "value": values[row_id]} for row_id in ids],
+                    )
+                conn.commit()
+        else:
+            source_reader = SqlServerNativeCdc(
+                source_connect_cfg,
+                table=source_table,
+                primary_key=source_pk,
+                schema=source_schema,
+                cursor_key=f"{job_id}:source",
+                row_filter="all update old",
+            )
+            with source_reader._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"CREATE TABLE dbo.[{source_table}] "
+                        "(id INT NOT NULL PRIMARY KEY, v NVARCHAR(200) NOT NULL)"
+                    )
+                    source_table_created = True
+                    cur.execute(
+                        """
+                        IF NOT EXISTS (
+                            SELECT 1 FROM sys.databases
+                            WHERE name = DB_NAME() AND is_cdc_enabled = 1
+                        )
+                            EXEC sys.sp_cdc_enable_db;
+                        """
+                    )
+                    cur.execute(
+                        f"""
+                        EXEC sys.sp_cdc_enable_table
+                            @source_schema = N'dbo',
+                            @source_name = N'{source_table}',
+                            @role_name = NULL,
+                            @supports_net_changes = 0;
+                        """
+                    )
+                    cur.executemany(
+                        f"INSERT INTO dbo.[{source_table}] (id, v) VALUES (%s, %s)",
+                        [(row_id, values[row_id]) for row_id in ids],
+                    )
+                conn.commit()
+
+        resolved_source_cfg = resolve_connector_config(
+            source_endpoint, workspace_id=workspace_id
+        )
+        resolved_dest_cfg = resolve_connector_config(
+            destination_endpoint, workspace_id=workspace_id
+        )
+        cursor_key = _single_stream_cursor_key(
+            src_type=resolve_driver_type(source_endpoint.format),
+            src_cfg=resolved_source_cfg,
+            table_name=source_table,
+            dest_type=resolve_driver_type(destination_endpoint.format),
+            dest_cfg=resolved_dest_cfg,
+            dest_table=dest_table,
+            stream_name=source_table,
+        )
+        engine = UniversalTransferEngine()
+        result = engine.execute_tracked(request, job_id, resume=False)
+        assert result.success, result.error or result.error_details
+        assert result.destination_summary.get("cdc_delivery") == "exactly_once"
+
+        if route == "oracle":
+            with get_connection(**source_connect_cfg) as conn:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        f"INSERT INTO {table_ref} (ID, V) VALUES (:id, :value)",
+                        [
+                            {"id": row_id, "value": values[row_id]}
+                            for row_id in inserted_ids
+                        ],
+                    )
+                conn.commit()
+        else:
+            with source_reader._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        f"INSERT INTO dbo.[{source_table}] (id, v) VALUES (%s, %s)",
+                        [(row_id, values[row_id]) for row_id in inserted_ids],
+                    )
+                conn.commit()
+            source_reader.force_cdc_scan()
+            initial_watermark = (
+                result.destination_summary.get("cdc") or {}
+            ).get("watermark")
+            handoff_lsn = decode_mssql_cdc_token(initial_watermark)["lsn"]
+            assert handoff_lsn, result.destination_summary
+            _wait_for_cdc_events(
+                source_reader,
+                handoff_lsn,
+                {(2, row_id) for row_id in inserted_ids},
+            )
+
+        result = engine.execute_tracked(request, job_id, resume=True)
+        assert result.success, result.error or result.error_details
+        assert result.destination_summary.get("cdc_delivery") == "exactly_once"
+        with pg_connection(**pg_cfg) as conn:
+            with conn.cursor() as cur:
+                cur.execute(f'SELECT id, v FROM public."{dest_table}" ORDER BY id')
+                destination_rows = cur.fetchall()
+        if route == "oracle":
+            with get_connection(**source_connect_cfg) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT ID, V FROM {table_ref} ORDER BY ID")
+                    source_rows = cur.fetchall()
+        else:
+            with source_reader._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"SELECT id, v FROM dbo.[{source_table}] ORDER BY id"
+                    )
+                    source_rows = cur.fetchall()
+        source_projection = [[int(row[0]), str(row[1])] for row in source_rows]
+        destination_projection = [
+            [int(row[0]), str(row[1])] for row in destination_rows
+        ]
+        assert len(source_projection) == len(destination_projection) == 150
+        source_md5 = hashlib.md5(
+            json.dumps(source_projection, separators=(",", ":")).encode(),
+            usedforsecurity=False,
+        ).hexdigest()
+        destination_md5 = hashlib.md5(
+            json.dumps(destination_projection, separators=(",", ":")).encode(),
+            usedforsecurity=False,
+        ).hexdigest()
+        assert destination_md5 == source_md5
+    finally:
+        try:
+            if route == "oracle" and source_table_created:
+                with get_connection(**source_connect_cfg) as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f'DROP TABLE "{source_schema}"."{source_table}" PURGE'
+                        )
+                    conn.commit()
+            elif route == "sqlserver" and source_table_created:
+                with source_reader._conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"""
+                            EXEC sys.sp_cdc_disable_table
+                                @source_schema = N'dbo',
+                                @source_name = N'{source_table}',
+                                @capture_instance = N'all';
+                            DROP TABLE IF EXISTS dbo.[{source_table}];
+                            """
+                        )
+                    conn.commit()
+        except Exception:
+            pass
+        try:
+            with pg_connection(**pg_cfg) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f'DROP TABLE IF EXISTS public."{dest_table}"')
+                    if cursor_key:
+                        cur.execute(
+                            f'DELETE FROM "{WATERMARK_TABLE}" WHERE stream_key = %s',
+                            (cursor_key,),
+                        )
+                conn.commit()
+        except Exception:
+            pass
+        if cursor_key:
+            clear_watermark(cursor_key)
+        if source_reader is not None:
+            source_reader.close()
+        cdc_lease_store.reset_store(original_lease_store)

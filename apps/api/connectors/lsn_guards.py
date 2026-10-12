@@ -465,7 +465,7 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
 
 
 def extract_cdc_commit_position(resume_token: Any) -> str | None:
-    """Return a composite commit position for streaming Oracle/SQL Server tokens."""
+    """Return a canonical commit position for Oracle/SQL Server resume tokens."""
     if resume_token is None:
         return None
     from services.cdc_resume_tokens import unwrap_resume_token
@@ -480,7 +480,16 @@ def extract_cdc_commit_position(resume_token: Any) -> str | None:
             return nested_position
 
     kind = str(token.get("kind") or "")
-    if str(token.get("phase") or "") != "streaming":
+    phase = str(token.get("phase") or "")
+    if kind == "oracle-logminer" and phase == "snapshot":
+        try:
+            snapshot_scn = int(token.get("scn") or 0)
+        except (TypeError, ValueError):
+            return None
+        if snapshot_scn > 0:
+            # Snapshot SCN H reflects source through H-1, where streaming resumes.
+            return f"scn:{snapshot_scn - 1}"
+    if phase != "streaming":
         return None
     if kind == "oracle-logminer":
         major_lsn = extract_cdc_lsn(token)
