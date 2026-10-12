@@ -71,7 +71,23 @@ _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
         r"record_?id\b",
         r"patient_?id\b",
     ), 0.32),
+    # Compensation is regulated the same way a date of birth is: a load of
+    # full_name + salary must not skip the acknowledgement a birth_date load
+    # already requires (QA RT5-06 / R2-036).
+    "salary": ((
+        r"\bsalary\b",
+        r"compensation",
+        r"\bwage\b",
+        r"pay_?rate",
+    ), 0.4),
 }
+
+# Personal names, not technical surrogates. ``username`` matches the name
+# category via user_name and must stay a medium signal — forcing review on
+# every login column is a different policy.
+_HIGH_RISK_NAME_RE = re.compile(
+    r"(?:^|_)(?:full_?name|first_?name|last_?name|contact_?name|customer_?name|display_?name)(?:_|$)"
+)
 
 
 def _field_hits(name: str) -> list[str]:
@@ -178,7 +194,12 @@ def detect_pii_fields(
             for cat in value_hits
             if cat not in name_hits
         ]
-        if any(cat in {"ssn", "dob", "account"} for cat in categories):
+        personal_name = "name" in categories and bool(
+            _HIGH_RISK_NAME_RE.search(col.lower())
+        )
+        if personal_name or any(
+            cat in {"ssn", "dob", "account", "salary"} for cat in categories
+        ):
             high_risk_fields.append(col)
 
     risk_level = "low"
@@ -221,6 +242,7 @@ def score_compliance_risk(
         "ssn": 0.5,
         "account": 0.4,
         "identifier": 0.28,
+        "salary": 0.4,
     }
 
     total_weight = 0.0
@@ -229,7 +251,7 @@ def score_compliance_risk(
         for category in field_risk.get(col, []):
             weight = weight_by_category.get(category, 0.12)
             total_weight += weight
-            if category in {"ssn", "dob", "account"}:
+            if category in {"ssn", "dob", "account", "salary"}:
                 high_risk_weight += weight
 
     if not sensitive_fields:

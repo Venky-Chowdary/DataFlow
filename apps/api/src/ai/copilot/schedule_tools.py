@@ -83,6 +83,7 @@ def create_schedule(
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
     limit: int = 0,
+    column_transforms: dict[str, Any] | None = None,
 ):
     """Stage a pipeline schedule for explicit Confirm. This creates nothing itself."""
     tool = "create_schedule"
@@ -146,6 +147,7 @@ def create_schedule(
         cursor_semantics=cursor_semantics,
         rule_questions=rule_questions,
         applied_rules=applied_rules,
+        column_transforms=column_transforms,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)

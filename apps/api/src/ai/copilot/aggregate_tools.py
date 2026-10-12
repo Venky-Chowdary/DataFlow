@@ -61,6 +61,49 @@ _NON_NUMERIC_HINTS = (
     "date", "time", "interval", "xml", "enum", "array", "struct", "geography",
 )
 
+# SQLite stores exact money as TEXT (NUMERIC affinity would drop scale).
+# SUM/AVG of those columns is a real total — the engine coerces numeric text.
+_TEXT_MONEY_NAME = re.compile(
+    r"(?:^|_)(?:amt|amount|price|total|qty|quantity|balance|fee|cost|rate|score|value)(?:_|$)",
+    re.I,
+)
+
+
+def _sqlite_text_money(name: str, col_type: str) -> bool:
+    low = (col_type or "").lower()
+    if "text" not in low and "char" not in low:
+        return False
+    return bool(_TEXT_MONEY_NAME.search(name or ""))
+
+
+def _unparsed_filter_warning(where: str, leftover: str) -> str:
+    """Refuse a where-clause tail the predicate parser did not consume.
+
+    ``STS = POSTED' OR '1'='1`` used to run as ``STS = POSTED`` and drop the
+    rest (QA RT5-10). A partial predicate is not applied.
+    """
+    from .predicates import parse_time_window
+
+    text = leftover or ""
+    window = parse_time_window(where or "")
+    if window is not None and window[2]:
+        text = re.sub(re.escape(window[2]), " ", text, count=1, flags=re.I)
+    text = re.sub(
+        r"\b(?:and|or|where|with|the|a|an|please|thanks|in|on|for|of|by|"
+        r"last|past|days?|weeks?|months?|years?)\b",
+        " ",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"[\s,;:.]+", " ", text).strip()
+    if not text or not re.search(r"[A-Za-z_'\"=<>]|--", text):
+        return ""
+    fragment = (leftover or "").strip()
+    return (
+        "Refused the filter because this part is not a complete "
+        f"column = value predicate: {fragment!r}. The query was not run."
+    )
+
 _TEMPORAL_GRAINS = {
     "day": "day", "daily": "day", "date": "day",
     "week": "week", "weekly": "week",
@@ -1070,7 +1113,8 @@ def aggregate_connector_data(
             )
         if metric_key in {"sum", "avg"}:
             col_type = _column_type(columns, measure_col).lower()
-            if col_type and any(hint in col_type for hint in _NON_NUMERIC_HINTS):
+            money_text = ctype == "sqlite" and _sqlite_text_money(measure_col, col_type)
+            if col_type and any(hint in col_type for hint in _NON_NUMERIC_HINTS) and not money_text:
                 numeric = [
                     n
                     for n in names
@@ -1169,7 +1213,7 @@ def aggregate_connector_data(
         )
 
         try:
-            parsed_filters, _ = parse_filters(where)
+            parsed_filters, leftover = parse_filters(where)
             predicates = ground_filters(
                 parsed_filters, columns, resolve_name, _column_type
             )
@@ -1193,6 +1237,9 @@ def aggregate_connector_data(
                         f"Columns: {', '.join(names[:20])}."
                     ),
                 )
+            filter_warning = _unparsed_filter_warning(where, leftover)
+            if filter_warning:
+                return _tool_result(tool, success=False, error=filter_warning)
         except PredicateError as exc:
             return _tool_result(tool, success=False, error=str(exc))
 

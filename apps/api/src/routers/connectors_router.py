@@ -1228,8 +1228,36 @@ def _merge_edited_row_payloads(
     }
     bound: list[tuple[int, dict]] = []
     used: set[int] = set()
+
+    def _mask_preview(value: Any) -> bool:
+        text = str(value or "")
+        return "…" in text or "***" in text
+
     for edit in edits:
         candidates: list[int] = []
+        edit_row = edit.get("row")
+        if edit_row is not None:
+            try:
+                want_row = int(edit_row)
+            except (TypeError, ValueError):
+                want_row = None
+            if want_row is not None:
+                for i, detail in enumerate(open_details):
+                    if i in used:
+                        continue
+                    try:
+                        if int(detail.get("row") or -1) == want_row:
+                            candidates.append(i)
+                    except (TypeError, ValueError):
+                        continue
+        if len(candidates) == 1:
+            idx = candidates[0]
+            used.add(idx)
+            merged = dict(base_records[idx] if idx < len(base_records) else {})
+            merged.update({str(k): v for k, v in edit.items() if k != "row"})
+            bound.append((idx, merged))
+            continue
+        candidates = []
         for i, base in enumerate(base_records):
             if i in used:
                 continue
@@ -1237,8 +1265,14 @@ def _merge_edited_row_payloads(
             if not shared:
                 continue
             qcol = quarantined_cols.get(i) or ""
-            agreeing = [k for k in shared if str(edit[k]) == str(base[k])]
-            disagreeing = [k for k in shared if k not in agreeing and k != qcol]
+            agreeing = [
+                k for k in shared
+                if str(edit[k]) == str(base[k]) and not _mask_preview(base.get(k))
+            ]
+            disagreeing = [
+                k for k in shared
+                if k not in agreeing and k != qcol and not _mask_preview(base.get(k))
+            ]
             if agreeing and not disagreeing:
                 candidates.append(i)
         if not candidates:
@@ -1687,7 +1721,14 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                 "phase": "post_write_failed",
             }
 
-        if rejected > 0:
+        if int(rows_written or 0) == 0 and records:
+            # A replay that lands nothing is not a success (QA R2-061).
+            status = "failed"
+            recon["passed"] = False
+            recon["message"] = (
+                "Quarantined values were not loaded — replay wrote 0 rows."
+            )
+        elif rejected > 0:
             status = "completed_with_quarantine"
         elif not recon.get("passed", True):
             status = "failed"

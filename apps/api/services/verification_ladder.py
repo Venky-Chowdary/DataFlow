@@ -743,6 +743,7 @@ def run_five_layer_verification(
     from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
 
     incomparable = str(checksum_scope or "") == WHOLE_TABLE_NOT_COMPARABLE
+    empty_population = src_n == 0 and tgt_n == 0 and not incomparable
     if incomparable:
         # Whole-table hashes cover rows this job never wrote. Gate-8 already
         # judged the dest-before delta; treating the digest gap as L3 failure
@@ -757,6 +758,22 @@ def run_five_layer_verification(
                 "source_checksum": src_chk,
                 "target_checksum": tgt_chk,
                 "algorithm": "order_independent_sha256_row_fingerprints",
+            },
+        )
+    elif empty_population:
+        # sha256('') matches on both sides of a 0-row run. That is not proof
+        # the population was compared (QA R2-062). L1 still owns the count.
+        l3 = LayerReport(
+            layer="L3",
+            passed=False,
+            population_proof=False,
+            details={
+                "skipped": True,
+                "reason": "empty_population",
+                "source_checksum": src_chk,
+                "target_checksum": tgt_chk,
+                "algorithm": "order_independent_sha256_row_fingerprints",
+                "note": "sha256 of an empty population is not a checksum pass",
             },
         )
     else:
@@ -821,13 +838,23 @@ def run_five_layer_verification(
     # unmeasured (passed, skipped) — it must not veto L3, and it must not
     # mint population_checksum_proof.
     l1_skipped = bool((l1.details or {}).get("skipped"))
-    passed = bool(l1.passed and l3.passed)
+    # L2 is a real miss when aggregates disagree. An empty population skips L3
+    # rather than failing the checksum, so a legitimate 0-row incremental run
+    # still completes when L1 balances (QA R2-066 / RT-02).
+    l2_failed = (not l2.passed) and not bool((l2.details or {}).get("skipped"))
+    if empty_population:
+        passed = bool(l1.passed and not l2_failed)
+    elif incomparable:
+        # Whole-table aggregates cover rows this job did not write.
+        passed = bool(l1.passed and l3.passed)
+    else:
+        passed = bool(l1.passed and l3.passed and not l2_failed)
     expected = int((l1.details or {}).get("expected_rows") or 0)
     extra_dest = bool(allow_extra_rows and tgt_n > expected)
     l3_skipped = bool((l3.details or {}).get("skipped"))
     if l1_skipped:
         assurance = "full_checksum" if l3.passed else "failed"
-    elif incomparable and passed:
+    elif (incomparable or empty_population) and passed:
         assurance = "row_count"
     else:
         assurance = "five_layer" if passed and "L4" in layers and layers["L4"].get("passed") else (
