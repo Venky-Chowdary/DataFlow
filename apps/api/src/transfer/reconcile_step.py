@@ -3169,11 +3169,19 @@ def _endpoint_type(endpoint: Any) -> str | None:
 
 
 def _gate8_verdict(recon: dict[str, Any]) -> tuple[str, str]:
-    """(verdict, outcome): failed fails the job; unproven/unavailable is a hold."""
+    """(verdict, outcome) of the *verification*, checked before ``passed``.
+
+    An unreadable destination or an unproven population also sets
+    ``passed=False`` (fail closed), but nothing was shown wrong — that is a
+    hold, not a mismatch. Only a measured disagreement is ``failed``. The job
+    effect is reported separately as ``job_outcome``.
+    """
+    if recon.get("verification_unavailable"):
+        return "unavailable", "held"
+    if recon.get("unproven"):
+        return "unproven", "held"
     if not recon.get("passed"):
         return "failed", "failed"
-    if recon.get("verification_unavailable") or recon.get("unproven"):
-        return "unproven", "held"
     return "passed", "succeeded"
 
 
@@ -3191,6 +3199,7 @@ def _emit_gate8_verdict(
     emit_event(
         _logger, "gate8.verify.completed", outcome=outcome, duration_ms=duration_ms,
         verdict=verdict,
+        job_outcome="succeeded" if recon.get("passed") else "failed",
         destination_type=_endpoint_type(endpoint),
         validation_mode=validation_mode,
         rows_written=rows_written,

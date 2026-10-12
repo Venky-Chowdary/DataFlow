@@ -77,25 +77,8 @@ def _reconcile(monkeypatch, recon):
     )
 
 
-@pytest.mark.parametrize(
-    "recon, verdict, outcome, level",
-    [
-        ({"passed": True, "source_rows": 1, "target_rows": 1, "checksum_match": True},
-         "passed", "succeeded", logging.INFO),
-        ({"passed": True, "verification_unavailable": True, "source_rows": 1},
-         "unproven", "held", logging.WARNING),
-        ({"passed": False, "source_rows": 2, "target_rows": 1, "message": VALUE},
-         "failed", "failed", logging.ERROR),
-    ],
-)
-def test_gate8_verdict_event(monkeypatch, capture, recon, verdict, outcome, level):
-    result = _reconcile(monkeypatch, recon)
-    assert result["passed"] is recon["passed"]
-    (event,) = capture.named("gate8.verify.completed")
-    assert (event.verdict, event.outcome, event.levelno) == (verdict, outcome, level)
-    assert (event.destination_type, event.rows_written) == ("postgresql", 1)
-    assert event.source_rows == recon.get("source_rows")
-    _clean(capture.records)
+# Verdict classification is proven on real report shapes in
+# tests/test_gate8_verdict_real_shapes.py.
 
 
 def test_gate8_exception_emits_errored_and_reraises(monkeypatch, capture):
