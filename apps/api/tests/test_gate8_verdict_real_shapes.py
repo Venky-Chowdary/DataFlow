@@ -95,7 +95,10 @@ def test_unproven_failed_closed_report_is_a_hold_not_a_failure(capture):
     assert event.job_outcome == "failed"
 
 
-def test_unproven_passing_export_is_a_hold_with_succeeded_job(capture):
+def test_export_unproven_by_design_is_skipped_at_info_not_held(capture):
+    """A file export cannot be read back by design: ``skipped_readback`` is the
+    existing recon signal. The job succeeds; the event must neither claim proof
+    (``succeeded``) nor raise alert noise (WARNING)."""
     recon = run_reconciliation(
         endpoint=EndpointConfig(kind="file_export", format="csv", table="t"),
         records=[{"id": "1"}], columns=["id"], rows_written=1, writer_checksum="abc",
@@ -103,9 +106,45 @@ def test_unproven_passing_export_is_a_hold_with_succeeded_job(capture):
         mappings=[{"source": "id", "target": "id"}],
     )
     assert recon["passed"] is True and recon["unproven"] is True
+    assert recon["skipped_readback"] is True
     (event,) = capture.records
-    assert (event.verdict, event.outcome, event.levelno) == ("unproven", "held", logging.WARNING)
+    assert (event.verdict, event.outcome, event.levelno) == ("unproven", "skipped", logging.INFO)
+    assert event.reason_code == "dest_not_verifiable"
     assert event.job_outcome == "succeeded"
+
+
+def _pgvector(target):
+    with patch(
+        "src.transfer.reconcile_step.resolve_connector_config",
+        return_value={"type": "pgvector", "database": "db", "schema": "public"},
+    ), patch("src.transfer.reconcile_step.verify_target", return_value=target):
+        return run_reconciliation(
+            endpoint=EndpointConfig(kind="database", format="pgvector", database="db", table="t"),
+            records=[{"id": "1"}], columns=["id"], rows_written=1, writer_checksum="abc",
+            dest_summary={"schema": "public", "table": "t", "source_row_count": 1},
+            mappings=[{"source": "id", "target": "id"}], validation_mode="strict",
+        )
+
+
+def test_opaque_vector_dest_with_measured_identity_is_skipped_at_info(capture):
+    recon = _pgvector((1, "abc"))
+    assert recon["passed"] is True and recon["skipped_readback"] is True
+    (event,) = capture.records
+    assert (event.outcome, event.levelno, event.reason_code) == (
+        "skipped", logging.INFO, "dest_not_verifiable",
+    )
+    assert event.job_outcome == "succeeded"
+
+
+def test_unreadable_vector_dest_that_fails_the_job_stays_held(capture):
+    """Same by-design shape, but the identity read failed and the job fails:
+    that is a hold, not an expected skip."""
+    recon = _pgvector((-1, ""))
+    assert recon["passed"] is False and recon["skipped_readback"] is True
+    (event,) = capture.records
+    assert (event.outcome, event.levelno) == ("held", logging.WARNING)
+    assert getattr(event, "reason_code", None) is None
+    assert event.job_outcome == "failed"
 
 
 def test_measured_mismatch_is_failed_at_error(capture):

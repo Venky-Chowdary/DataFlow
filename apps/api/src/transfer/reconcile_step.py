@@ -3168,21 +3168,25 @@ def _endpoint_type(endpoint: Any) -> str | None:
     return str(getattr(endpoint, "format", "") or "") or None
 
 
-def _gate8_verdict(recon: dict[str, Any]) -> tuple[str, str]:
-    """(verdict, outcome) of the *verification*, checked before ``passed``.
+def _gate8_verdict(recon: dict[str, Any]) -> tuple[str, str, str | None]:
+    """(verdict, outcome, reason_code) of the *verification*, checked before ``passed``.
 
     An unreadable destination or an unproven population also sets
     ``passed=False`` (fail closed), but nothing was shown wrong — that is a
-    hold, not a mismatch. Only a measured disagreement is ``failed``. The job
-    effect is reported separately as ``job_outcome``.
+    hold, not a mismatch. A passing job whose destination has no read-back by
+    design (``skipped_readback``: file/object exports, opaque vector sinks) is
+    an expected ``skipped`` — neither proof nor an alert. Only a measured
+    disagreement is ``failed``. The job effect is reported as ``job_outcome``.
     """
     if recon.get("verification_unavailable"):
-        return "unavailable", "held"
+        return "unavailable", "held", None
+    if recon.get("unproven") and recon.get("passed") and recon.get("skipped_readback"):
+        return "unproven", "skipped", "dest_not_verifiable"
     if recon.get("unproven"):
-        return "unproven", "held"
+        return "unproven", "held", None
     if not recon.get("passed"):
-        return "failed", "failed"
-    return "passed", "succeeded"
+        return "failed", "failed", None
+    return "passed", "succeeded", None
 
 
 def _emit_gate8_verdict(
@@ -3194,11 +3198,12 @@ def _emit_gate8_verdict(
     duration_ms: float,
 ) -> None:
     recon = recon if isinstance(recon, dict) else {}
-    verdict, outcome = _gate8_verdict(recon)
+    verdict, outcome, reason_code = _gate8_verdict(recon)
     rule_checks = [c for c in recon.get("rule_checks") or [] if isinstance(c, dict)]
     emit_event(
         _logger, "gate8.verify.completed", outcome=outcome, duration_ms=duration_ms,
         verdict=verdict,
+        reason_code=reason_code,
         job_outcome="succeeded" if recon.get("passed") else "failed",
         destination_type=_endpoint_type(endpoint),
         validation_mode=validation_mode,
