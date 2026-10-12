@@ -289,6 +289,7 @@ def assert_registry_matches_capabilities() -> None:
 
 _OPERATOR_COPY_PREFIXES = (
     "authentication failed",
+    "kafka sasl:",
     "api authentication failed",
     "snowflake ",
     "that account host is a form placeholder",

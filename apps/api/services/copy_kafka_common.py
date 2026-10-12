@@ -13,8 +13,11 @@ from __future__ import annotations
 
 import logging
 import re
+import socket
 import ssl
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
@@ -130,9 +133,7 @@ def kafka_sasl_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
     when there is no username+password (plaintext / mTLS-less dev brokers).
     """
     extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
-    security = str(
-        cfg.get("security_protocol") or extra.get("security_protocol") or cfg.get("schema") or ""
-    ).upper()
+    security = _configured_security_protocol(cfg)
     username = str(cfg.get("username") or extra.get("username") or "")
     password = str(cfg.get("password") or cfg.get("api_key") or extra.get("password") or "")
     if not (username and password):
@@ -154,6 +155,194 @@ def kafka_sasl_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _configured_security_protocol(cfg: dict[str, Any]) -> str:
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    return str(
+        cfg.get("security_protocol") or extra.get("security_protocol") or cfg.get("schema") or ""
+    ).upper()
+
+
+# kafka-python 3.0.x drops the broker's SaslAuthenticate error frame (it arrives
+# with the connection close), so a wrong password only ever surfaces as a
+# bootstrap timeout. kafka_sasl_check runs one SASL exchange with the library's
+# own request/mechanism classes to classify it. Pinned: re-verify on upgrade.
+KAFKA_SASL_CHECK_KAFKA_PYTHON = ((3, 0), (3, 1))
+_CHECKABLE_MECHANISMS = frozenset({"PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"})
+
+
+@dataclass(frozen=True)
+class KafkaSaslCheck:
+    """outcome: ok | auth_failed | tls_mismatch | mechanism_unsupported | inconclusive."""
+
+    outcome: str
+    message: str
+
+
+class KafkaSaslCheckError(RuntimeError):
+    def __init__(self, check: KafkaSaslCheck):
+        super().__init__(check.message)
+        self.check = check
+
+
+class _TlsPeer(Exception):
+    pass
+
+
+def _kafka_python_supported() -> bool:
+    try:
+        import kafka
+
+        ver = tuple(int(p) for p in str(kafka.__version__).split(".")[:2])
+    except Exception:  # noqa: BLE001 - absent/odd client: skip the check
+        return False
+    lo, hi = KAFKA_SASL_CHECK_KAFKA_PYTHON
+    return lo <= ver < hi
+
+
+def _sasl_round_trip(sock, protocol, request, deadline: float, *, plaintext: bool):
+    protocol.send_request(request)
+    sock.sendall(protocol.send_bytes())
+    first = True
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout()
+        sock.settimeout(remaining)
+        data = sock.recv(65536)
+        if not data:
+            raise ConnectionError("broker closed the connection")
+        # A TLS listener answers plaintext with a TLS record (alert/handshake).
+        if plaintext and first and data[:1] in (b"\x15", b"\x16") and data[1:2] == b"\x03":
+            raise _TlsPeer()
+        first = False
+        responses = protocol.receive_bytes(data)
+        if responses:
+            return responses[0][1]
+
+
+def kafka_sasl_check(cfg: dict[str, Any], timeout: float = 5.0) -> KafkaSaslCheck | None:
+    """Classify a SASL login on one blocking socket in well under ``timeout``.
+
+    None when the check does not apply (no SASL login, a mechanism it cannot
+    run, or an unpinned kafka-python). Messages never carry credentials.
+    """
+    sasl = kafka_sasl_kwargs(cfg)
+    mechanism = str(sasl.get("sasl_mechanism") or "").upper()
+    if not sasl or mechanism not in _CHECKABLE_MECHANISMS or not _kafka_python_supported():
+        return None
+    from kafka.errors import for_code
+    from kafka.net.sasl import get_sasl_mechanism
+    from kafka.protocol.parser import KafkaProtocol
+    from kafka.protocol.sasl import SaslAuthenticateRequest, SaslHandshakeRequest
+
+    from connectors.kafka_reader import _bootstrap
+
+    first = _bootstrap(cfg).split(",")[0].strip()
+    host, _, port_s = first.rpartition(":")
+    host = host or first
+    port = int(port_s) if port_s.isdigit() else 9092
+    where = f"{host}:{port}"
+    protocol_name = sasl["security_protocol"]
+    explicit = _configured_security_protocol(cfg) in {"SASL_SSL", "SASL_PLAINTEXT"}
+    deadline = time.monotonic() + min(float(timeout), 5.0)
+
+    def inconclusive(exc: BaseException) -> KafkaSaslCheck:
+        return KafkaSaslCheck(
+            "inconclusive", f"Kafka SASL: check against {where} was inconclusive ({type(exc).__name__})."
+        )
+
+    try:
+        sock = socket.create_connection((host, port), timeout=max(0.05, deadline - time.monotonic()))
+    except OSError as exc:
+        return inconclusive(exc)
+    try:
+        if protocol_name == "SASL_SSL":
+            try:
+                sock = sasl["ssl_context"].wrap_socket(sock, server_hostname=host)
+            except ssl.SSLCertVerificationError as exc:
+                return inconclusive(exc)
+            except (ssl.SSLError, ConnectionError) as exc:
+                lead = (
+                    "SASL is configured without security_protocol, so SASL_SSL was used"
+                    if not explicit
+                    else "security_protocol=SASL_SSL is set"
+                )
+                return KafkaSaslCheck(
+                    "tls_mismatch",
+                    f"Kafka SASL: broker {where} did not complete a TLS handshake ({type(exc).__name__}): "
+                    f"{lead}. If this listener is plaintext, set security_protocol=SASL_PLAINTEXT.",
+                )
+        parser = KafkaProtocol(client_id="dataflow-sasl-check")
+        plaintext = protocol_name == "SASL_PLAINTEXT"
+        handshake = SaslHandshakeRequest(mechanism=mechanism)
+        handshake.API_VERSION = 1
+        response = _sasl_round_trip(sock, parser, handshake, deadline, plaintext=plaintext)
+        enabled = [str(m) for m in (response.mechanisms or [])]
+        if response.error_code or mechanism not in enabled:
+            return KafkaSaslCheck(
+                "mechanism_unsupported",
+                f"Kafka SASL: broker {where} does not enable mechanism {mechanism}; "
+                f"enabled: {', '.join(enabled) or 'none'}.",
+            )
+        login = get_sasl_mechanism(mechanism)(host=host, **sasl)
+        while not login.is_done():
+            auth = SaslAuthenticateRequest(auth_bytes=login.auth_bytes())
+            auth.API_VERSION = 1
+            response = _sasl_round_trip(sock, parser, auth, deadline, plaintext=False)
+            if response.error_code:
+                return KafkaSaslCheck(
+                    "auth_failed",
+                    f"Kafka SASL: broker {where} rejected the {mechanism} login "
+                    f"({for_code(response.error_code).__name__}): check the username and password.",
+                )
+            login.receive(response.auth_bytes)
+        if not login.is_authenticated():
+            return KafkaSaslCheck(
+                "auth_failed",
+                f"Kafka SASL: broker {where} did not accept the {mechanism} login: "
+                "check the username and password.",
+            )
+        return KafkaSaslCheck("ok", f"Kafka SASL: {mechanism} login accepted by {where}.")
+    except _TlsPeer:
+        return KafkaSaslCheck(
+            "tls_mismatch",
+            f"Kafka SASL: broker {where} answered with TLS, but security_protocol is "
+            f"{protocol_name}: set security_protocol=SASL_SSL.",
+        )
+    except Exception as exc:  # noqa: BLE001 - never classify on an unknown error
+        return inconclusive(exc)
+    finally:
+        sock.close()
+
+
+def _is_bootstrap_failure(exc: BaseException) -> bool:
+    try:
+        import kafka.errors as kerrors
+    except ImportError:
+        return False
+    kinds = tuple(
+        k for k in (getattr(kerrors, "KafkaTimeoutError", None), getattr(kerrors, "NoBrokersAvailable", None))
+        if isinstance(k, type)
+    )
+    return bool(kinds) and isinstance(exc, kinds)
+
+
+@contextmanager
+def kafka_classified_bootstrap(cfg: dict[str, Any]):
+    """Re-raise a bootstrap failure as KafkaSaslCheckError when the SASL check
+    can say why; otherwise the original exception instance, unchanged. The
+    check runs only after a failure, so the happy path pays nothing."""
+    try:
+        yield
+    except Exception as exc:
+        if not _is_bootstrap_failure(exc):
+            raise
+        check = kafka_sasl_check(cfg)
+        if check is None or check.outcome in {"ok", "inconclusive"}:
+            raise
+        raise KafkaSaslCheckError(check) from exc
+
+
 def kafka_dest_count(cfg: dict[str, Any], topic: str) -> int:
     from services.dest_precount import destination_row_count
 
@@ -171,7 +360,8 @@ def kafka_dest_count(cfg: dict[str, Any], topic: str) -> int:
 def kafka_admin(cfg: dict[str, Any]):
     from kafka import KafkaAdminClient
 
-    return KafkaAdminClient(**kafka_client_kwargs(cfg))
+    with kafka_classified_bootstrap(cfg):
+        return KafkaAdminClient(**kafka_client_kwargs(cfg))
 
 
 def kafka_byte_consumer(cfg: dict[str, Any]):
@@ -187,7 +377,8 @@ def kafka_byte_consumer(cfg: dict[str, Any]):
             "value_deserializer": None,
         }
     )
-    return KafkaConsumer(**kwargs)
+    with kafka_classified_bootstrap(cfg):
+        return KafkaConsumer(**kwargs)
 
 
 def kafka_byte_producer(cfg: dict[str, Any]):
@@ -203,7 +394,8 @@ def kafka_byte_producer(cfg: dict[str, Any]):
             "linger_ms": 5,
         }
     )
-    return KafkaProducer(**kwargs)
+    with kafka_classified_bootstrap(cfg):
+        return KafkaProducer(**kwargs)
 
 
 def kafka_dest_can_write(dest_cfg: dict[str, Any]) -> None:

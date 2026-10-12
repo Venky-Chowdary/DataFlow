@@ -68,14 +68,17 @@ def list_topics(cfg: dict[str, Any]) -> list[str]:
     except ImportError as exc:
         raise ImportError("kafka-python is required to list Kafka topics") from exc
 
-    consumer = KafkaConsumer(
-        **_consumer_configs(
-            cfg,
-            consumer_timeout_ms=2000,
-            request_timeout_ms=8000,
-            api_version_auto_timeout_ms=8000,
+    from services.copy_kafka_common import kafka_classified_bootstrap
+
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+                api_version_auto_timeout_ms=8000,
+            )
         )
-    )
     try:
         names = consumer.topics() or set()
     finally:
@@ -300,15 +303,18 @@ def sample_topic_batch(
     registry_url = str(
         cfg.get("schema_registry_url") or cfg.get("registry_url") or ""
     ).strip()
-    consumer = KafkaConsumer(
-        **_consumer_configs(
-            cfg,
-            enable_auto_commit=False,
-            consumer_timeout_ms=2000,
-            request_timeout_ms=8000,
-            value_deserializer=lambda raw: raw if raw is not None else raw,
+    from services.copy_kafka_common import kafka_classified_bootstrap
+
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                enable_auto_commit=False,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+                value_deserializer=lambda raw: raw if raw is not None else raw,
+            )
         )
-    )
     try:
         parts = consumer.partitions_for_topic(topic_name)
         if not parts:

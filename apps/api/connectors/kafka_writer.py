@@ -246,10 +246,11 @@ def _producer(cfg: dict[str, Any], *, schema_id: int | None = None):
         "acks": "all",
         "retries": 3,
     }
-    from services.copy_kafka_common import kafka_sasl_kwargs
+    from services.copy_kafka_common import kafka_classified_bootstrap, kafka_sasl_kwargs
 
     kwargs.update(kafka_sasl_kwargs(cfg))
-    return KafkaProducer(**kwargs)
+    with kafka_classified_bootstrap(cfg):
+        return KafkaProducer(**kwargs)
 
 
 def test_kafka(
@@ -266,17 +267,26 @@ def test_kafka(
     schema: str = "",
     **_kwargs: Any,
 ) -> tuple[bool, str]:
+    cfg = {
+        "host": host,
+        "port": port or 9092,
+        "connection_string": connection_string,
+        "username": username,
+        "password": password or api_key,
+        "api_key": api_key,
+        "schema": schema or ("SASL_SSL" if ssl else ""),
+        "database": database,
+        "security_protocol": str(_kwargs.get("security_protocol") or ""),
+        "sasl_mechanism": str(_kwargs.get("sasl_mechanism") or ""),
+        "extra": _kwargs.get("extra") if isinstance(_kwargs.get("extra"), dict) else {},
+    }
+    from services import copy_kafka_common
+
+    check = copy_kafka_common.kafka_sasl_check(cfg)
+    if check is not None and check.outcome not in {"ok", "inconclusive"}:
+        return False, check.message
     try:
-        producer = _producer({
-            "host": host,
-            "port": port or 9092,
-            "connection_string": connection_string,
-            "username": username,
-            "password": password or api_key,
-            "api_key": api_key,
-            "schema": schema or ("SASL_SSL" if ssl else ""),
-            "database": database,
-        })
+        producer = _producer(cfg)
         producer.close()
         return True, f"Kafka broker reachable at {_bootstrap(host, port or 9092, connection_string)}"
     except Exception as exc:
