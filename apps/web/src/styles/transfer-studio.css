@@ -8129,9 +8129,9 @@ th.df2-type-string .df2-type-badge {
   text-align: right;
 }
 .df2-vd-rule-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
+  align-items: stretch;
   gap: 6px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--df-border);
@@ -8142,9 +8142,12 @@ th.df2-type-string .df2-type-badge {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
-  width: max-content;
-  max-width: 168px;
+  justify-content: space-between;
+  gap: 4px;
+  width: 100%;
+  max-width: none;
+  min-height: 56px;
+  height: 100%;
   margin: 0;
   padding: 7px 8px 6px;
   border: 1px solid var(--df-border);
@@ -8154,12 +8157,29 @@ th.df2-type-string .df2-type-badge {
   font: inherit;
   text-align: left;
   cursor: pointer;
+  box-sizing: border-box;
 }
-.df2-vd-rule-tab:hover { border-color: var(--df-text-tertiary); }
+.df2-vd-rule-tab:hover { border-color: var(--df-logo-ink); }
+.df2-vd-rule-tab.status-pass {
+  background: var(--df-brand-muted);
+  border-color: color-mix(in srgb, var(--df-logo-ink) 32%, var(--df-border));
+}
+.df2-vd-rule-tab.status-warn {
+  background: color-mix(in srgb, var(--df-logo-strap) 14%, var(--df-surface));
+  border-color: color-mix(in srgb, var(--df-logo-strap) 48%, var(--df-border));
+}
+.df2-vd-rule-tab.status-block {
+  background: var(--df-danger-bg);
+  border-color: color-mix(in srgb, var(--df-danger) 40%, var(--df-border));
+}
+.df2-vd-rule-tab.status-running {
+  background: color-mix(in srgb, var(--df-logo-arrow) 16%, var(--df-surface));
+  border-color: color-mix(in srgb, var(--df-logo-arrow) 50%, var(--df-border));
+}
 .df2-vd-rule-tab.is-active {
   background: var(--df-surface);
-  border-color: var(--df-brand);
-  box-shadow: inset 0 0 0 1px var(--df-brand);
+  border-color: var(--df-logo-ink);
+  box-shadow: inset 0 0 0 1px var(--df-logo-ink);
 }
 .df2-vd-rule-tab:focus-visible {
   outline: 2px solid var(--df-brand);
@@ -8176,6 +8196,7 @@ th.df2-type-string .df2-type-badge {
   font-size: 11px;
   font-weight: 600;
   line-height: 1.3;
+  min-height: 2.6em;
   color: var(--df-text-primary);
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -8189,10 +8210,10 @@ th.df2-type-string .df2-type-badge {
   background: var(--df-border);
   flex-shrink: 0;
 }
-.df2-vd-rule-dot.status-pass { background: var(--df-success); }
+.df2-vd-rule-dot.status-pass { background: var(--df-logo-ink); }
 .df2-vd-rule-dot.status-block { background: var(--df-danger); }
-.df2-vd-rule-dot.status-warn { background: var(--df-warning); }
-.df2-vd-rule-dot.status-running { background: var(--df-info); }
+.df2-vd-rule-dot.status-warn { background: var(--df-logo-strap); }
+.df2-vd-rule-dot.status-running { background: var(--df-logo-arrow); }
 .df2-vd-rule-dot.status-skip,
 .df2-vd-rule-dot.status-pending { background: var(--df-text-tertiary); }
 .df2-vd-rule {
