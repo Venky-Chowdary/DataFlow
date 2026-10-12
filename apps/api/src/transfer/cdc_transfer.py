@@ -319,7 +319,8 @@ def _cdc_lag_fields_or_empty(cdc: Any) -> dict[str, Any]:
     """Lag fields for an event on a failure path, where the reader may be broken."""
     try:
         return _cdc_lag_fields(cdc)
-    except Exception:
+    except Exception as exc:
+        logger.debug("cdc lag fields unavailable: %s", type(exc).__name__)
         return {}
 
 

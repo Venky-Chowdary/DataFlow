@@ -400,3 +400,16 @@ def test_single_stream_raising_mid_cycle_emits_counts_so_far_and_reraises(
     event = _assert_failure_event(capture, error, outcome, level)
     assert (event.job_id, event.workspace_id) == ("job-single", "ws-single")
     assert (event.inserts, event.updates, event.deletes) == (2, 1, 1)
+
+
+def test_lag_fields_failure_on_the_error_path_is_logged_at_debug_by_class(monkeypatch, caplog):
+    def broken(_cdc):
+        raise ValueError(_SECRET_ERR)
+
+    monkeypatch.setattr(cdc_transfer, "_cdc_lag_fields", broken)
+    with caplog.at_level(logging.DEBUG, logger=cdc_transfer.logger.name):
+        assert cdc_transfer._cdc_lag_fields_or_empty(object()) == {}
+    (record,) = [r for r in caplog.records if r.name == cdc_transfer.logger.name]
+    assert record.levelno == logging.DEBUG
+    assert "ValueError" in record.getMessage()
+    assert "DEADBEEF" not in record.getMessage() and not record.exc_info
