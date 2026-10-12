@@ -137,3 +137,46 @@ def test_cdc_cycle_event_counts_lag_and_position_kind(capture, src, has_position
     assert (event.lag_seconds, event.lag_bytes, event.position_kind) == (1.5, 128, kind)
     assert event.levelno == logging.INFO
     _clean(capture.records)
+
+
+def _persist_with_source(monkeypatch, source):
+    import services.quarantine_row_contract as contract
+
+    monkeypatch.setattr(dlq, "append_dlq_event", lambda **kw: {"rows": kw["rows"]})
+    monkeypatch.setattr(contract, "normalize_quarantine_rows", lambda rows, **_: list(rows))
+    monkeypatch.setattr(contract, "assert_quarantine_rows_contract", lambda *a, **k: None)
+    dlq.persist_rejected_rows(
+        job_id="job-q2", source=source, rejected_details=[{"row": {"v": VALUE}}],
+    )
+
+
+@pytest.mark.parametrize("source", sorted(dlq._QUARANTINE_SOURCES))
+def test_quarantine_source_literals_are_kept(monkeypatch, capture, source):
+    _persist_with_source(monkeypatch, source)
+    (event,) = capture.named("quarantine.rows.persisted")
+    assert event.source == source
+
+
+@pytest.mark.parametrize("source", [TABLE, f"s3://bucket/{TABLE}.csv", "public.orders"])
+def test_quarantine_source_customer_identifier_becomes_other(monkeypatch, capture, source):
+    _persist_with_source(monkeypatch, source)
+    (event,) = capture.named("quarantine.rows.persisted")
+    assert event.source == "other"
+    _clean(capture.records)
+
+
+def test_every_persist_caller_passes_a_known_source_literal():
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    found = set()
+    for path in list((root / "src").rglob("*.py")) + list((root / "services").rglob("*.py")):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for call in re.finditer(r"persist_rejected_rows\((.*?)\)", text, re.S):
+            m = re.search(r"source=([\"'][^\"']*[\"']|[A-Za-z_][\w.]*)", call.group(1))
+            if m:
+                found.add(m.group(1).strip())
+    assert found, "no persist_rejected_rows(source=...) callers found"
+    for literal in found:
+        assert literal.strip("\"'") in dlq._QUARANTINE_SOURCES, literal

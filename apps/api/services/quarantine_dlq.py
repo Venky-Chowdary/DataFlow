@@ -36,6 +36,29 @@ from services.value_serializer import json_default, json_loads_exact
 logger = logging.getLogger(__name__)
 
 
+# Every ``persist_rejected_rows(source=...)`` caller passes one of these code
+# literals. Anything else (a future caller passing a table/file/object name)
+# is logged as ``other`` so the event can never carry a customer identifier.
+_QUARANTINE_SOURCES = frozenset(
+    {
+        "transfer",
+        "transform",
+        "cdc_batch",
+        "file_stream_batch",
+        "file_stream_batch_abort",
+        "stream_batch",
+        "stream_batch_abort",
+        "buffered_checkpoint",
+        "universal_engine",
+    }
+)
+
+
+def _quarantine_source_kind(source: Any) -> str:
+    value = str(source or "").strip().lower()
+    return value if value in _QUARANTINE_SOURCES else "other"
+
+
 def _quarantine_event(event: str, **fields: Any) -> None:
     from services.ops_events import emit_event
 
@@ -277,7 +300,7 @@ def persist_rejected_rows(
     if not replay:
         _quarantine_event(
             "quarantine.rows.persisted", job_id=jid, workspace_id=workspace_id or None,
-            source=source, rows=0, chunks=0, skipped_contract=skip_n,
+            source=_quarantine_source_kind(source), rows=0, chunks=0, skipped_contract=skip_n,
             skip_audit_chunks=skip_chunks_written,
         )
         return {
@@ -339,7 +362,7 @@ def persist_rejected_rows(
         logger.debug("quarantine lineage emit skipped", exc_info=True)
     _quarantine_event(
         "quarantine.rows.persisted", job_id=jid, workspace_id=workspace_id or None,
-        source=source, rows=len(rows), chunks=len(chunks), skipped_contract=skip_n,
+        source=_quarantine_source_kind(source), rows=len(rows), chunks=len(chunks), skipped_contract=skip_n,
         skip_audit_chunks=skip_chunks_written,
     )
     return out
