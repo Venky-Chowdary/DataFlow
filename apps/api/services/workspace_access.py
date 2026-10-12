@@ -29,6 +29,11 @@ def authorized_workspace_id(request: Request) -> str:
             return str(cached)
 
         workspace_id = requested_workspace_id(request)
+        if not workspace_id:
+            state.workspace_header_rejected = False
+            setattr(state, cache_key, "")
+            return ""
+
         if can_read_workspace(workspace_id, actor_email(request)):
             result = workspace_id
             state.workspace_header_rejected = False

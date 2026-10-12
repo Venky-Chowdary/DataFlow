@@ -273,6 +273,39 @@ def test_generic_audit_never_uses_an_unauthorized_workspace_header(request_conte
     assert "workspace_header_rejected" not in accepted["details"]
 
 
+def test_authorized_workspace_id_does_not_reject_missing_header(request_context, monkeypatch):
+    calls: list[tuple[str, str]] = []
+
+    def can_read(workspace_id: str, email: str) -> bool:
+        calls.append((workspace_id, email))
+        return False
+
+    monkeypatch.setattr(workspace_access, "can_read_workspace", can_read)
+    request = _request_with_workspace("")
+
+    assert workspace_access.authorized_workspace_id(request) == ""
+    assert request.state.workspace_header_rejected is False
+    assert calls == []
+
+
+def test_generic_audit_does_not_flag_missing_workspace_header(request_context):
+    correlation_id = "workspace-header-absent"
+    route = "/api/v1/auth/logout"
+    response = request_context["client"].post(
+        route,
+        headers={"X-Correlation-ID": correlation_id},
+    )
+
+    assert response.status_code == 200
+    event = _generic_http_post(
+        request_context["audit_path"],
+        route=route,
+        correlation_id=correlation_id,
+    )
+    assert event["workspace_id"] == ""
+    assert "workspace_header_rejected" not in event["details"]
+
+
 def test_audit_coverage_prefers_sanitized_request_state_correlation_id():
     request = Request(
         {
