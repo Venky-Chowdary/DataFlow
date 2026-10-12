@@ -428,6 +428,49 @@ def reject_request(
     return {"schedule": updated, "approval": patch["approval_request"]}
 
 
+def close_request_record(
+    request: dict[str, Any],
+    *,
+    actor: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Mark a finding approved without writing the schedule.
+
+    Resume and a later successful run use this so they can keep the cadence
+    ``next_run_at`` already stored. ``resolve_plan_change`` pulls that clock
+    to now, which is the wrong catch-up for a pipeline that already has a slot.
+    """
+    return _resolved(request, status=STATUS_APPROVED, actor=actor, reason=reason)
+
+
+def close_finding_after_successful_run(schedule_id: str) -> None:
+    """A completed run makes the parked refusal stale.
+
+    The cadence stays on the boundary ``mark_schedule_run`` just computed.
+    Leaving the finding open kept ``needs_approval`` after the operator had
+    already proved the pipeline runs, so later beats never fired (QA R2-107).
+    """
+    from services.schedule_store import has_open_approval
+
+    sched = get_schedule(schedule_id)
+    if not sched or not has_open_approval(sched):
+        return
+    request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    update_schedule(
+        schedule_id,
+        {
+            "approval_request": close_request_record(
+                request,
+                actor="system:run-succeeded",
+                reason=(
+                    "A later run completed. The parked refusal no longer "
+                    "describes this pipeline, so the cadence is armed again."
+                ),
+            ),
+        },
+    )
+
+
 def resolve_plan_change(
     schedule_id: str,
     *,

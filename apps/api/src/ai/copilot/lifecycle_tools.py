@@ -1019,7 +1019,11 @@ def update_schedule(
         spec = parse_cadence(cadence_text)
         if not spec.resolved:
             return _tool_result("update_schedule", success=False, output=None, error=spec.question)
-        same_clock = (spec.interval, spec.cron, spec.timezone) == (
+        # A phrase with no zone must not move the pipeline onto UTC.
+        # "every 15 minutes" on an America/New_York schedule did that
+        # (QA TC50 / RT5-09). Name a zone to change it.
+        zone_after = current_tz if spec.timezone_assumed else spec.timezone
+        same_clock = (spec.interval, spec.cron, zone_after) == (
             current_interval,
             current_cron,
             current_tz,
@@ -1029,14 +1033,15 @@ def update_schedule(
             # a previous "0 2 * * *" rather than leave it beside interval=hourly.
             payload["interval"] = spec.interval
             payload["cron"] = spec.cron
-            payload["timezone"] = spec.timezone
+            payload["timezone"] = zone_after
             preview["interval_after"] = spec.interval
             preview["cron_after"] = spec.cron
-            preview["timezone_after"] = spec.timezone
+            preview["timezone_after"] = zone_after
             preview["cadence"] = spec.description
             if spec.timezone_assumed:
                 preview["timezone_note"] = (
-                    "No timezone was given, so this is UTC. Say e.g. “in Asia/Kolkata” to change it."
+                    f"No timezone was named, so {current_tz} stays. "
+                    "Say e.g. “in Asia/Kolkata” to change it."
                 )
             label_bits.append(spec.description)
 

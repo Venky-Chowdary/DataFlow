@@ -1264,6 +1264,32 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
             assert_unique_schedule_name(new_name, exclude_id=schedule_id)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
+        # Resume is the re-arm for a finding no signature can clear
+        # (approvable is false: remap, fix the source, set a key). Pause then
+        # resume used to leave needs_approval set, so the beat kept skipping
+        # and next_run_at stayed in the past (QA R2-107 / R2-108 / R2-109).
+        # An approvable finding stays open — resume must not grant that
+        # authority. A past next_run_at is kept: the beat owns one catch-up.
+        if enabling and "approval_request" not in data:
+            req = merged.get("approval_request")
+            if (
+                isinstance(req, dict)
+                and req
+                and str(req.get("status") or "open").strip().lower() == "open"
+                and not req.get("approvable")
+            ):
+                from services.schedule_approvals import close_request_record
+
+                merged["approval_request"] = close_request_record(
+                    req,
+                    actor="operator:resume",
+                    reason=(
+                        "Pipeline resumed. This finding is closed so the next "
+                        "cadence can run. A refusal that is still true will park again."
+                    ),
+                )
+                if str(merged.get("last_status") or "") == "needs_approval":
+                    merged["last_status"] = "rearmed"
         # A stamp names one route. Carrying it onto an edited destination made
         # every later run — cadence tick and Run now alike — refuse with
         # "content_hash mismatch", with no control anywhere that could clear it.

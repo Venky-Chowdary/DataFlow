@@ -1008,8 +1008,12 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     if _is_success(status):
         _observe_parallel_run(sched, job_doc)
         try:
-            from services.schedule_approvals import close_dest_exists_park_after_success
+            from services.schedule_approvals import (
+                close_dest_exists_park_after_success,
+                close_finding_after_successful_run,
+            )
 
+            close_finding_after_successful_run(schedule_id)
             close_dest_exists_park_after_success(schedule_id)
         except Exception:
             logger.exception(
