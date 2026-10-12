@@ -2394,27 +2394,6 @@ class OracleLogMinerCdc:
             )
         return held_end_scn, held
 
-    def _hold_at_oldest_open_txn(self, end_scn: int) -> int:
-        if self._txn_buffer_enabled:
-            return int(end_scn)
-        oldest = self._probe_oldest_open_txn()
-        if oldest is None:
-            return int(end_scn)
-        start_scn, xid_usn, xid_slot, xid_seq, age_seconds = oldest
-        held_end_scn = min(int(end_scn), start_scn - 1)
-        if held_end_scn >= int(end_scn):
-            return held_end_scn
-
-        self._warn_oldest_open_txn_hold(
-            xid_usn=xid_usn,
-            xid_slot=xid_slot,
-            xid_seq=xid_seq,
-            start_scn=start_scn,
-            age_seconds=age_seconds,
-            held_end_scn=held_end_scn,
-        )
-        return held_end_scn
-
     def _warn_oldest_open_txn_hold(
         self,
         *,

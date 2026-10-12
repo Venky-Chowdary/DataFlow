@@ -360,11 +360,6 @@ def test_single_table_poll_applies_oldest_transaction_hold(
         return 149, True
 
     monkeypatch.setattr(reader, "_buffer_off_window_end", window_end, raising=False)
-    monkeypatch.setattr(
-        reader,
-        "_hold_at_oldest_open_txn",
-        lambda *_a: pytest.fail("single-table poll must use atomic window sampling"),
-    )
     monkeypatch.setattr(reader, "_mining_conn", lambda: conn)
     monkeypatch.setattr(oracle_logminer, "fetch_oldest_available_scn", lambda _cur: 1)
     monkeypatch.setattr(oracle_logminer, "fetch_redo_inventory", lambda _cur: [])
@@ -406,11 +401,6 @@ def test_shared_poll_applies_oldest_transaction_hold(
         return 149, True
 
     monkeypatch.setattr(reader, "_buffer_off_window_end", window_end, raising=False)
-    monkeypatch.setattr(
-        reader,
-        "_hold_at_oldest_open_txn",
-        lambda *_a: pytest.fail("shared poll must use atomic window sampling"),
-    )
     monkeypatch.setattr(reader, "_mining_conn", lambda: conn)
     monkeypatch.setattr(oracle_logminer, "fetch_oldest_available_scn", lambda _cur: 1)
     monkeypatch.setattr(oracle_logminer, "fetch_redo_inventory", lambda _cur: [])
@@ -445,11 +435,6 @@ def test_peek_applies_oldest_transaction_hold(
         return 149, True
 
     monkeypatch.setattr(reader, "_buffer_off_window_end", window_end, raising=False)
-    monkeypatch.setattr(
-        reader,
-        "_hold_at_oldest_open_txn",
-        lambda *_a: pytest.fail("peek must use atomic window sampling"),
-    )
     monkeypatch.setattr(reader, "_mining_conn", lambda: conn)
     monkeypatch.setattr(
         oracle_logminer,
@@ -478,11 +463,6 @@ def test_empty_window_retry_reapplies_oldest_transaction_hold(
         return 149, True
 
     monkeypatch.setattr(reader, "_buffer_off_window_end", window_end, raising=False)
-    monkeypatch.setattr(
-        reader,
-        "_hold_at_oldest_open_txn",
-        lambda *_a: pytest.fail("empty-window retry must use atomic window sampling"),
-    )
     monkeypatch.setattr(reader, "_empty_window_retry_sec", lambda: 1)
     monkeypatch.setattr(oracle_logminer.time, "sleep", lambda _delay: None)
     monkeypatch.setattr(
