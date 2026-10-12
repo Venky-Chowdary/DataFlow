@@ -504,7 +504,18 @@ def run_transfer_policy_gates(
     )
     if snap_gate:
         gates.append(snap_gate)
-    if sync == "cdc" and kind not in {"file", "cloud"}:
+    src_key = str(product or src or "").strip().lower().replace("-", "_")
+    postgresish = src_key in {
+        "postgresql",
+        "postgres",
+        "citus",
+        "cockroach",
+        "cockroachdb",
+        "greenplum",
+        "timescaledb",
+        "neon",
+    }
+    if sync == "cdc" and (kind not in {"file", "cloud"} or postgresish):
         gates.extend(
             _ps._cdc_log_capture_gates(
                 contracts,
@@ -862,10 +873,15 @@ def run_file_preflight(
         # carries no grouping evidence. Assume US rather than refuse the load,
         # and hand the operator the columns it covers so switching to EU is a
         # decision they can see, not a corruption they find later.
-        assumed = assumed_number_locale(sample_rows, columns, number_locale=number_locale)
+        assumed = assumed_number_locale(
+            sample_rows, columns, number_locale=number_locale, column_types=column_types
+        )
         if assumed:
             number_locale_assumed = ambiguous_number_columns(
-                sample_rows, columns, number_locale=number_locale
+                sample_rows,
+                columns,
+                number_locale=number_locale,
+                column_types=column_types,
             )
             number_locale = assumed
             set_active_number_locale(number_locale)
@@ -2591,8 +2607,9 @@ def run_file_preflight(
             else:
                 drift_msg = (
                     f"Schema change detected — policy '{policy}' requires review "
-                    "before Execute (include new columns, ignore for this run, or "
-                    "update the contract)"
+                    "before Execute. Pass schema_drift_acknowledged=true to accept "
+                    "this drift for the run (include new columns, ignore for this "
+                    "run, or update the contract)."
                 )
                 drift_gate = {
                     "id": "schema_drift",

@@ -628,6 +628,18 @@ def _query_cdc_downgrade(exc: BaseException, dialect: str) -> dict[str, str | bo
         if isinstance(exc, LogCaptureUnavailable)
         else classify_log_capture_failure(dialect, str(exc))
     )
+    # PostgreSQL wal_level is not a degradable "server has no log" the way a
+    # MySQL binlog-off install is. Query CDC on a PK then fails and the
+    # root-cause engine titles it "Duplicate identity keys" (R3-H1).
+    detail = str(refusal.detail or "").lower()
+    if str(dialect or "").lower() in {"postgresql", "postgres", "neon"} and (
+        "wal_level" in detail or "logical decoding" in detail
+    ):
+        raise RuntimeError(
+            f"PostgreSQL wal_level is not logical ({refusal.detail}). "
+            "CDC cannot start until the server enables logical decoding "
+            "(wal_level=logical). A cursor poll would miss updates and deletes."
+        ) from exc
     if refusal.fail_closed:
         raise RuntimeError(refusal.message(dialect)) from exc
     logging.getLogger(__name__).warning(

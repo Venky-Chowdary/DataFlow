@@ -40,6 +40,7 @@ _POSTGRES = {
     "cockroachdb",
     "greenplum",
     "timescaledb",
+    "neon",
 }
 _MONGO = {"mongodb", "mongo", "documentdb", "amazon_documentdb"}
 

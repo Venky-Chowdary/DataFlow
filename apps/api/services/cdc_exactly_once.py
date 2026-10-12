@@ -2330,9 +2330,10 @@ def preflight_delivery_gate(
                 "id": "g16_cdc_delivery",
                 "status": "pass",
                 "message": (
-                    "Eligible CDC selects dest-owned exactly-once "
-                    "(apply and watermark commit together). "
-                    "The platform does not claim this for every route."
+                    "This route can commit apply and the watermark together "
+                    "(dest-owned exactly-once) once the source change log is "
+                    "readable. Until that log is readable, delivery stays "
+                    "at-least-once upsert."
                 ),
                 "duration_ms": 0,
                 "details": details,

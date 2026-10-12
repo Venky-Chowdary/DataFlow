@@ -497,6 +497,13 @@ def _is_duplicate_signal(
         return False
     if re.search(r"missing (?:primary key|cursor)", str(message or ""), re.I):
         return False
+    # wal_level=replica and the query-CDC refusal both mention "primary key"
+    # without any duplicate row. Those are capture failures (R3-H1).
+    blob_early = _blob(message, details)
+    if re.search(r"wal_level|logical decoding", blob_early, re.I):
+        return False
+    if re.search(r"poll cursor .+ is the primary key", blob_early, re.I):
+        return False
     if details.get("duplicate_keys") or details.get("identity_duplicates"):
         return True
     blob = _blob(message, details)
