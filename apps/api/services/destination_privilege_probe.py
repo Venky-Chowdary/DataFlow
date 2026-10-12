@@ -2046,28 +2046,24 @@ def _probe_kafka(
             engine="kafka",
         )
 
-    from connectors.kafka_writer import _bootstrap
+    from services.copy_kafka_common import kafka_classified_bootstrap, kafka_client_kwargs
 
-    bootstrap = _bootstrap(host, port, connection_string)
-    kwargs: dict[str, Any] = {
-        "bootstrap_servers": bootstrap.split(","),
+    cfg = {
+        "host": host,
+        "port": port,
+        "connection_string": connection_string,
+        "username": username,
+        "password": password,
+        "security_protocol": security_protocol,
+        "sasl_mechanism": sasl_mechanism,
+    }
+    kwargs = {
+        **kafka_client_kwargs(cfg),
         "client_id": "dataflow-privilege-probe",
         "request_timeout_ms": 15000,
     }
-    from services.copy_kafka_common import kafka_sasl_kwargs
-
-    kwargs.update(
-        kafka_sasl_kwargs(
-            {
-                "username": username,
-                "password": password,
-                "security_protocol": security_protocol,
-                "sasl_mechanism": sasl_mechanism,
-            }
-        )
-    )
-
-    admin = KafkaAdminClient(**kwargs)
+    with kafka_classified_bootstrap(cfg):
+        admin = KafkaAdminClient(**kwargs)
     try:
         exists = table_exists
         listed_topics = False

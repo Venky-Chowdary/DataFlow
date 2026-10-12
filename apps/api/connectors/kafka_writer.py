@@ -228,27 +228,20 @@ def _producer(cfg: dict[str, Any], *, schema_id: int | None = None):
 
     from connectors.confluent_schema_registry import encode_confluent_json
 
-    bootstrap = _bootstrap(
-        str(cfg.get("host") or ""),
-        int(cfg.get("port") or 9092),
-        str(cfg.get("connection_string") or ""),
-    )
-
     def _serialize_value(v: Any) -> bytes:
         if schema_id is not None and schema_id > 0:
             return encode_confluent_json(schema_id, v)
         return json.dumps(v, default=json_default).encode("utf-8")
 
+    from services.copy_kafka_common import kafka_classified_bootstrap, kafka_client_kwargs
+
     kwargs: dict[str, Any] = {
-        "bootstrap_servers": bootstrap.split(","),
+        **kafka_client_kwargs(cfg),
         "value_serializer": _serialize_value,
         "key_serializer": lambda v: v.encode("utf-8") if isinstance(v, str) else v,
         "acks": "all",
         "retries": 3,
     }
-    from services.copy_kafka_common import kafka_classified_bootstrap, kafka_sasl_kwargs
-
-    kwargs.update(kafka_sasl_kwargs(cfg))
     with kafka_classified_bootstrap(cfg):
         return KafkaProducer(**kwargs)
 

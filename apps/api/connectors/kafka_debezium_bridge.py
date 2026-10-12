@@ -143,15 +143,21 @@ class KafkaDebeziumConsumer:
                 "kafka-python is required for the Debezium bridge. "
                 "Install with: pip install kafka-python"
             ) from exc
-        self._consumer = KafkaConsumer(
-            self.config["topic"],
-            bootstrap_servers=self.config.get("bootstrap_servers") or "localhost:9092",
-            group_id=self.config.get("group_id") or "dataflow-debezium",
-            auto_offset_reset=self.config.get("auto_offset_reset") or "earliest",
-            enable_auto_commit=False,
-            # Keep raw bytes so Confluent Schema Registry wire (magic+id+payload) survives.
-            value_deserializer=lambda b: b if b is not None else b,
-        )
+        from connectors.kafka_reader import _consumer_configs
+        from services.copy_kafka_common import kafka_classified_bootstrap
+
+        with kafka_classified_bootstrap(self.config):
+            self._consumer = KafkaConsumer(
+                self.config["topic"],
+                **_consumer_configs(
+                    self.config,
+                    group_id=self.config.get("group_id") or "dataflow-debezium",
+                    auto_offset_reset=self.config.get("auto_offset_reset") or "earliest",
+                    enable_auto_commit=False,
+                    # Keep raw bytes so Confluent Schema Registry wire (magic+id+payload) survives.
+                    value_deserializer=lambda b: b if b is not None else b,
+                ),
+            )
 
     def pending_offsets(self) -> list[dict[str, Any]]:
         """Return next-offset tokens for the current uncommitted poll batch."""

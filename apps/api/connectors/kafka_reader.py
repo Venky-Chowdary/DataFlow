@@ -12,6 +12,7 @@ Crash mid-write redelivers — at-least-once.
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -97,7 +98,7 @@ def _bootstrap(cfg: dict[str, Any]) -> str:
             return cs.replace("bootstrap.servers=", "").strip()
     host = str(cfg.get("host") or cfg.get("bootstrap_servers") or "localhost").strip()
     port = int(cfg.get("port") or 9092)
-    if "," in host:
+    if "," in host or re.search(r"(^[^:]+|\])(:\d+)$", host):
         return host
     return f"{host}:{port}"
 
@@ -196,6 +197,7 @@ def read_topic_batch(
     # Durable commits happen only after destination apply (stream.commit_kafka_offsets).
     # Never commit prior pending offsets here — prefetch can race ahead of sink durability.
     consumer = KafkaDebeziumConsumer({
+        **cfg,
         "topic": topic_name,
         "bootstrap_servers": _bootstrap(cfg),
         "group_id": group_id,

@@ -3874,14 +3874,18 @@ def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
         from kafka import KafkaConsumer, TopicPartition
     except ImportError:
         return None
-    from connectors.kafka_reader import _bootstrap
+    from connectors.kafka_reader import _consumer_configs
+    from services.copy_kafka_common import kafka_classified_bootstrap
 
-    consumer = KafkaConsumer(
-        bootstrap_servers=_bootstrap(cfg),
-        consumer_timeout_ms=2000,
-        request_timeout_ms=8000,
-        enable_auto_commit=False,
-    )
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+                enable_auto_commit=False,
+            )
+        )
     try:
         parts = _kafka_partitions_after_refresh(consumer, topic_name)
         if parts is None:
