@@ -16,6 +16,7 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.failure_retry_policy import DETERMINISTIC
+from services.ops_events import emit_event
 from services.schedule_store import due_schedules
 from services.standing_authorization import (
     CODE_NO_AUTHORIZATION,
@@ -103,6 +104,7 @@ def _acquire_scheduler_lock() -> bool:
     if not svc:
         if requires_distributed_backend():
             logger.error("Scheduler lock unavailable; refuse beat (multi-replica fail-closed)")
+            emit_event(logger, "scheduler.lock.acquire", outcome="failed", reason_code="backend_unavailable")
             return False
         return True
     db = svc.get_database()
@@ -129,12 +131,16 @@ def _acquire_scheduler_lock() -> bool:
             upsert=True,
             return_document=True,
         )
-        return bool(result and result.get("instance") == instance)
+        acquired = bool(result and result.get("instance") == instance)
+        if not acquired:
+            emit_event(logger, "scheduler.lock.acquire", outcome="failed", reason_code="held_by_other")
+        return acquired
     except Exception as exc:
         name = type(exc).__name__
         if "DuplicateKey" in name:
+            emit_event(logger, "scheduler.lock.acquire", outcome="failed", reason_code="race")
             return False
-        logger.exception("Failed to acquire scheduler lock")
+        emit_event(logger, "scheduler.lock.acquire", outcome="errored", reason_code="lock_error", error=exc)
         if requires_distributed_backend():
             return False
         return False
@@ -972,6 +978,19 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
             attempt + 1,
             retry_at.isoformat(),
         )
+        failure_class = decision.get("failure_class") or {}
+        emit_event(
+            logger,
+            "schedule.run.retry",
+            outcome="retrying",
+            schedule_id=schedule_id,
+            attempt=attempt + 1,
+            classification=(
+                str(failure_class.get("kind") or "other")
+                if isinstance(failure_class, dict)
+                else str(failure_class or "other")
+            ),
+        )
         schedule_retry(
             schedule_id,
             retry_at=retry_at,
@@ -998,6 +1017,20 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                 schedule_id,
             )
     else:
+        if not _is_success(status):
+            failure_class = decision.get("failure_class") or {}
+            emit_event(
+                logger,
+                "schedule.run.give_up",
+                outcome="failed",
+                schedule_id=schedule_id,
+                attempt=attempt + 1,
+                classification=(
+                    str(failure_class.get("kind") or "other")
+                    if isinstance(failure_class, dict)
+                    else str(failure_class or "other")
+                ),
+            )
         park = _park_reason(sched, decision, entry)
         if park:
             # This beat's verdict will not change by itself, and the next beat
@@ -1165,6 +1198,7 @@ def _dispatch_transfer(
         # later beat produced another identical failed row — 48 of them in one
         # customer's Jobs list — so this parks on one finding instead.
         logger.warning("Schedule %s skipped — connector missing", schedule_id)
+        emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="connector_missing", schedule_id=schedule_id)
         missing = "source" if not src else "destination"
         _park_on_decision(
             schedule_id,
@@ -1182,7 +1216,7 @@ def _dispatch_transfer(
         request = build_schedule_request(sched, src, dst)
         authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
-        logger.error("Schedule %s refused before any row moved: %s", schedule_id, exc)
+        emit_event(logger, "schedule.run.fire", outcome="held", reason_code="preflight_refused", schedule_id=schedule_id, attempt=attempt + 1, error=exc)
         _park_on_decision(schedule_id, exc, attempt=attempt)
         return None
     engine = get_transfer_engine()
@@ -1209,11 +1243,13 @@ def _dispatch_transfer(
             schedule_id,
             job_id,
         )
+        emit_event(logger, "schedule.run.fire", outcome="started", schedule_id=schedule_id, attempt=attempt + 1, job_id=job_id)
         return job_id
     future.add_done_callback(
         lambda _f, sid=schedule_id, jid=job_id, a=attempt, ts=started_at: _finalize_run(sid, jid, a, ts)
     )
     logger.info("Schedule %s started job %s (attempt %s)", schedule_id, job_id, attempt + 1)
+    emit_event(logger, "schedule.run.fire", outcome="started", schedule_id=schedule_id, attempt=attempt + 1, job_id=job_id)
     return job_id
 
 
@@ -1243,6 +1279,7 @@ def _note_claim_blocked(schedule_id: str, holder: dict | None, detail: str) -> N
         _claim_backoff[schedule_id] = (now + delay, delay, key)
     if prior_key != key:
         logger.info("Schedule %s skipped — %s", schedule_id, detail)
+        emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="already_leased", schedule_id=schedule_id)
     else:
         logger.debug("Schedule %s still blocked — %s", schedule_id, detail)
 
@@ -1286,6 +1323,7 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
     blocked = _append_replay_blocked(sched)
     if blocked:
         logger.info("Schedule %s skipped — append replay would duplicate", schedule_id)
+        emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="append_replay_duplicate", schedule_id=schedule_id)
         if manual:
             raise ScheduleStartError(
                 blocked,

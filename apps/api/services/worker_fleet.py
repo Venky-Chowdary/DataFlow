@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from services.brand_env import getenv_brand
+from services.ops_events import emit_event
 from services.scheduler_mode import api_claim_loop_enabled, claim_queue_enabled
 from services.tracing import submit_in_context
 from services.worker_leases import WorkerLeaseStore, requires_distributed_backend, worker_id
@@ -86,7 +87,15 @@ def enqueue_job(job_id: str, *, payload: dict[str, Any] | None = None) -> bool:
     if coll is None:
         if requires_distributed_backend() and fleet_enabled():
             _logger.error("Fleet enabled but Mongo queue unavailable; refuse enqueue for %s", job_id)
+            emit_event(
+                _logger, "job.queue.enqueue", outcome="failed",
+                job_id=job_id, reason_code="queue_unavailable",
+            )
             return False
+        emit_event(
+            _logger, "job.queue.enqueue", outcome="failed",
+            job_id=job_id, reason_code="queue_unavailable",
+        )
         return False
     body = dict(payload or {})
     workload = _workload_of(body)
@@ -106,9 +115,16 @@ def enqueue_job(job_id: str, *, payload: dict[str, Any] | None = None) -> bool:
             },
             upsert=True,
         )
+        emit_event(
+            _logger, "job.queue.enqueue", outcome="succeeded",
+            job_id=job_id, reason_code="queued",
+        )
         return True
-    except Exception:
-        _logger.exception("Failed to enqueue job %s", job_id)
+    except Exception as exc:
+        emit_event(
+            _logger, "job.queue.enqueue", outcome="errored", job_id=job_id,
+            reason_code="enqueue_error", error=exc,
+        )
         return False
 
 
@@ -208,6 +224,10 @@ def claim_next_job(lease_store: WorkerLeaseStore | None = None, ttl_seconds: int
     """Claim the oldest queued job this worker is allowed to run."""
     coll = _queue_coll()
     if coll is None:
+        emit_event(
+            _logger, "job.claim.acquire", outcome="skipped",
+            job_id="", worker_id=worker_id(), reason_code="queue_unavailable",
+        )
         return None
     store = lease_store or WorkerLeaseStore(worker_id())
     try:
@@ -233,6 +253,10 @@ def claim_next_job(lease_store: WorkerLeaseStore | None = None, ttl_seconds: int
                 return_document=return_doc,
             )
             if not doc:
+                emit_event(
+                    _logger, "job.claim.acquire", outcome="skipped",
+                    job_id="", worker_id=store.worker_id, reason_code="queue_empty",
+                )
                 return None
             job_id = str(doc.get("job_id") or doc.get("_id"))
             if _transfer_job_cancelled(job_id):
@@ -257,11 +281,24 @@ def claim_next_job(lease_store: WorkerLeaseStore | None = None, ttl_seconds: int
                 {"_id": doc["_id"], "status": "claimed", "worker": store.worker_id},
                 {"$set": {"status": "queued", "worker": "", "updated_at": datetime.now(timezone.utc)}},
             )
+            emit_event(
+                _logger, "job.claim.acquire", outcome="skipped",
+                job_id=job_id, worker_id=store.worker_id,
+                reason_code="held_by_other",
+            )
             return None
         _mark_transfer_job_claimed(job_id, store)
+        emit_event(
+            _logger, "job.claim.acquire", outcome="succeeded",
+            job_id=job_id, worker_id=store.worker_id,
+        )
         return job_id
-    except Exception:
-        _logger.exception("claim_next_job failed")
+    except Exception as exc:
+        emit_event(
+            _logger, "job.claim.acquire", outcome="errored",
+            job_id="", worker_id=store.worker_id, reason_code="claim_error",
+            error=exc,
+        )
         return None
 
 
@@ -301,6 +338,9 @@ def reclaim_stale_claims(
     """
     coll = _queue_coll()
     if coll is None:
+        emit_event(
+            _logger, "job.claim.reclaim", outcome="succeeded", reclaimed_count=0,
+        )
         return 0
     store = lease_store or WorkerLeaseStore(worker_id())
     cutoff = datetime.now(timezone.utc).timestamp() - max(30, int(older_than_seconds))
@@ -340,9 +380,16 @@ def reclaim_stale_claims(
                 {"$set": {"status": "queued", "worker": "", "updated_at": datetime.now(timezone.utc)}},
             )
             n += 1
+        emit_event(
+            _logger, "job.claim.reclaim", outcome="succeeded",
+            reclaimed_count=n,
+        )
         return n
-    except Exception:
-        _logger.exception("reclaim_stale_claims failed")
+    except Exception as exc:
+        emit_event(
+            _logger, "job.claim.reclaim", outcome="errored",
+            reclaimed_count=0, error=exc,
+        )
         return 0
 
 
@@ -364,8 +411,11 @@ def _mark_fleet_lease_lost(job_id: str) -> None:
             error="Lease lost to another worker; aborting to prevent dual writes",
             message="Lease lost — cooperative cancel",
         )
-    except Exception:  # noqa: BLE001 - lease loss must still stop the writer
-        _logger.exception("Failed to mark job %s cancelled after lease loss", job_id)
+    except Exception as exc:  # noqa: BLE001 - lease loss must still stop the writer
+        emit_event(
+            _logger, "job.lease.lost", outcome="failed",
+            job_id=job_id, error=exc,
+        )
 
 
 def _run_with_lease_heartbeat(
@@ -449,8 +499,11 @@ def run_fleet_loop(
                     jid,
                     status="cancelled" if _transfer_job_cancelled(jid) else "done",
                 )
-            except Exception:
-                _logger.exception("Fleet handler failed for %s", jid)
+            except Exception as exc:
+                emit_event(
+                    _logger, "job.handler.run", outcome="errored",
+                    job_id=jid, error=exc,
+                )
                 _finish_queue_row(jid, status="failed")
             finally:
                 store.release(jid)
@@ -472,8 +525,11 @@ def run_fleet_loop(
                     job_id,
                     status="cancelled" if _transfer_job_cancelled(job_id) else "done",
                 )
-            except Exception:
-                _logger.exception("Fleet handler failed for %s", job_id)
+            except Exception as exc:
+                emit_event(
+                    _logger, "job.handler.run", outcome="errored",
+                    job_id=job_id, error=exc,
+                )
                 _finish_queue_row(job_id, status="failed")
             finally:
                 store.release(job_id)

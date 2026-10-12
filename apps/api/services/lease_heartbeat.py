@@ -14,6 +14,7 @@ import threading
 from typing import Callable
 
 from services.brand_env import getenv_brand
+from services.ops_events import emit_event
 from services.worker_leases import WorkerLeaseStore
 
 _logger = logging.getLogger(__name__)
@@ -53,11 +54,22 @@ def start_lease_heartbeat(
                     break
                 continue
             _logger.warning("Lease heartbeat failed for job %s", job_id)
+            emit_event(
+                _logger, "job.lease.heartbeat", outcome="failed",
+                job_id=job_id,
+            )
+            emit_event(
+                _logger, "job.lease.lost", outcome="failed",
+                job_id=job_id,
+            )
             if on_lost is not None:
                 try:
                     on_lost()
-                except Exception:  # noqa: BLE001 - lease loss must still stop the beater
-                    _logger.exception("Lease-loss hook failed for job %s", job_id)
+                except Exception as exc:  # noqa: BLE001 - lease loss must still stop the beater
+                    emit_event(
+                        _logger, "job.lease.lost", outcome="failed",
+                        job_id=job_id, error=exc,
+                    )
             break
 
     thread = threading.Thread(target=_beat, name=f"df-lease-{job_id}", daemon=True)

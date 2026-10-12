@@ -19,6 +19,7 @@ from typing import Any, Mapping, Sequence
 
 from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
+from services.ops_events import emit_event
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 
@@ -1626,7 +1627,16 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
             nxt = _parse_ts(s.next_run_at)
             current = _parse_ts(now) or datetime.now(timezone.utc)
             advanced = s.next_run_at
+            missed = 0
             if nxt is None or nxt <= current:
+                if nxt is not None:
+                    missed = count_missed_windows(
+                        cron=s.cron,
+                        interval=s.interval,
+                        tz=s.timezone,
+                        next_run_at=s.next_run_at,
+                        now=current,
+                    )
                 advanced = compute_next_run(
                     s.interval, current, cron=s.cron, tz=s.timezone
                 )
@@ -1643,6 +1653,15 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                         {"kind": "claim_lost", "schedule_id": schedule_id,
                          "schedule_name": s.name, "job_id": "", "running_since": None},
                     )
+                elif missed:
+                    emit_event(
+                        logger,
+                        "schedule.run.skip",
+                        outcome="skipped",
+                        reason_code="misfire",
+                        schedule_id=schedule_id,
+                        missed_count=missed,
+                    )
                 return claimed
             updated = PipelineSchedule.from_dict({
                 **s.to_dict(),
@@ -1654,6 +1673,15 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
             })
             schedules[i] = updated
             _save_all(schedules)
+            if missed:
+                emit_event(
+                    logger,
+                    "schedule.run.skip",
+                    outcome="skipped",
+                    reason_code="misfire",
+                    schedule_id=schedule_id,
+                    missed_count=missed,
+                )
             return updated
         return None
 
@@ -1752,6 +1780,15 @@ def mark_schedule_run(
         updated = PipelineSchedule.from_dict(payload)
         schedules[i] = updated
         _save_all(schedules)
+        if missed:
+            emit_event(
+                logger,
+                "schedule.run.skip",
+                outcome="skipped",
+                reason_code="misfire",
+                schedule_id=schedule_id,
+                missed_count=missed,
+            )
         return updated
     return None
 
@@ -1790,6 +1827,7 @@ def unstick_completion_pinned_schedules(now: datetime | None = None) -> int:
     current = now or datetime.now(timezone.utc)
     schedules = _load_all()
     changed = 0
+    missed_schedules: list[tuple[str, int]] = []
     for i, sched in enumerate(schedules):
         if not _pinned_to_completion(sched, now=current):
             continue
@@ -1800,6 +1838,8 @@ def unstick_completion_pinned_schedules(now: datetime | None = None) -> int:
             next_run_at=sched.next_run_at,
             now=current,
         )
+        if missed:
+            missed_schedules.append((sched.id, missed))
         next_at = compute_next_run(
             sched.interval, current, cron=sched.cron, tz=sched.timezone
         )
@@ -1812,6 +1852,15 @@ def unstick_completion_pinned_schedules(now: datetime | None = None) -> int:
         changed += 1
     if changed:
         _save_all(schedules)
+    for schedule_id, missed in missed_schedules:
+        emit_event(
+            logger,
+            "schedule.run.skip",
+            outcome="skipped",
+            reason_code="misfire",
+            schedule_id=schedule_id,
+            missed_count=missed,
+        )
     return changed
 
 
@@ -1964,6 +2013,21 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
                 # A deterministic refusal waiting on a decision is not a cadence
                 # event: the same inputs would produce the same refusal, so running
                 # it again only buries the finding under identical failures.
+                retry_at = _parse_ts(s.retry_at)
+                next_run_at = _parse_ts(s.next_run_at)
+                is_due = (
+                    retry_at <= current
+                    if retry_at is not None
+                    else next_run_at is None or next_run_at <= current
+                )
+                if is_due:
+                    emit_event(
+                        logger,
+                        "schedule.run.skip",
+                        outcome="skipped",
+                        reason_code="gate_blocked",
+                        schedule_id=s.id,
+                    )
                 continue
             retry_at = _parse_ts(s.retry_at)
             if retry_at is not None:

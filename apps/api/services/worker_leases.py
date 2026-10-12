@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import os
 from services.brand_env import getenv_brand
+from services.ops_events import emit_event
 import socket
 import threading
 import uuid
@@ -161,31 +162,46 @@ class WorkerLeaseStore:
                 if result is not None and result.get("worker_id") == self.worker_id:
                     fence = int(result.get("fence") or next_fence)
                     self._remember_fence(job_id, fence)
+                    emit_event(
+                        _logger, "job.lease.acquire", outcome="succeeded",
+                        job_id=job_id, worker_id=self.worker_id,
+                    )
                     return True
+                emit_event(
+                    _logger, "job.lease.acquire", outcome="skipped",
+                    job_id=job_id, worker_id=self.worker_id,
+                    reason_code="held_by_other",
+                )
                 return False
             except Exception as exc:
                 # DuplicateKey on concurrent upsert = lost race, not ownership.
                 name = type(exc).__name__
                 if "DuplicateKey" in name or "duplicate key" in str(exc).lower():
                     _logger.info("Lease race for job %s (DuplicateKey); not acquired", job_id)
-                    return False
-                if requires_distributed_backend():
-                    _logger.error(
-                        "Mongo lease acquire failed for job %s; fail-closed (no memory fallback): %s",
-                        job_id,
-                        exc,
+                    emit_event(
+                        _logger, "job.lease.acquire", outcome="skipped",
+                        job_id=job_id, worker_id=self.worker_id,
+                        reason_code="race",
                     )
                     return False
-                _logger.warning(
-                    "Mongo lease acquire failed for job %s; single-instance memory fallback: %s",
-                    job_id,
-                    exc,
-                )
+                if requires_distributed_backend():
+                    emit_event(
+                        _logger, "job.lease.acquire", outcome="errored",
+                        job_id=job_id, worker_id=self.worker_id,
+                        reason_code="backend_error", error=exc,
+                    )
+                    return False
+                _logger.warning("Mongo lease acquire failed; using single-instance memory fallback")
 
         if requires_distributed_backend():
             _logger.error(
                 "Distributed coordination required but Mongo lease store unavailable; refuse job %s",
                 job_id,
+            )
+            emit_event(
+                _logger, "job.lease.acquire", outcome="errored",
+                job_id=job_id, worker_id=self.worker_id,
+                reason_code="backend_unavailable",
             )
             return False
 
@@ -200,10 +216,23 @@ class WorkerLeaseStore:
                     "fence": fence,
                 }
                 self._remember_fence(job_id, fence)
+                emit_event(
+                    _logger, "job.lease.acquire", outcome="succeeded",
+                    job_id=job_id, worker_id=self.worker_id,
+                )
                 return True
             if existing.get("worker_id") == self.worker_id:
                 self._remember_fence(job_id, int(existing.get("fence") or 1))
+                emit_event(
+                    _logger, "job.lease.acquire", outcome="succeeded",
+                    job_id=job_id, worker_id=self.worker_id,
+                )
                 return True
+            emit_event(
+                _logger, "job.lease.acquire", outcome="skipped",
+                job_id=job_id, worker_id=self.worker_id,
+                reason_code="held_by_other",
+            )
             return False
 
     def release(self, job_id: str) -> None:
