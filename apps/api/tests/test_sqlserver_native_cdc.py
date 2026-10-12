@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import MagicMock, patch
 
 from connectors.sqlserver_cdc_native import (
@@ -636,3 +637,109 @@ def test_poll_fails_closed_when_resume_before_min_lsn() -> None:
                         raise AssertionError("expected CdcLsnGapError")
                     except CdcLsnGapError:
                         pass
+
+
+def _force_scan_connection(
+    *, scan_error: Exception | None = None, flush_error: Exception | None = None
+):
+    events = []
+    cursor = MagicMock()
+    cursor.__enter__.return_value = cursor
+    cursor.__exit__.return_value = False
+
+    def execute(statement):
+        events.append(("execute", statement))
+        if statement == "EXEC sys.sp_cdc_scan" and scan_error is not None:
+            raise scan_error
+        if statement == "EXEC sys.sp_replflush" and flush_error is not None:
+            raise flush_error
+
+    cursor.execute.side_effect = execute
+    conn = MagicMock()
+    conn.__enter__.return_value = conn
+    conn.__exit__.return_value = False
+    conn.cursor.return_value = cursor
+    conn.commit.side_effect = lambda: events.append(("commit",))
+    conn.invalidate.side_effect = lambda: events.append(("invalidate",))
+    return conn, events
+
+
+def test_force_cdc_scan_releases_log_reader_ownership() -> None:
+    cdc = SqlServerNativeCdc(
+        {"database": "app"},
+        table="orders",
+        primary_key="id",
+        capture_instance="dbo_orders",
+        cursor_key="orders-to-warehouse",
+    )
+    conn, events = _force_scan_connection()
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        cdc.force_cdc_scan()
+
+    assert events == [
+        ("execute", "EXEC sys.sp_cdc_scan"),
+        ("commit",),
+        ("execute", "EXEC sys.sp_replflush"),
+        ("commit",),
+    ]
+
+
+def test_force_cdc_scan_does_not_flush_after_scan_error(caplog) -> None:
+    cdc = SqlServerNativeCdc(
+        {"database": "app"},
+        table="orders",
+        primary_key="id",
+        capture_instance="dbo_orders",
+    )
+    conn, events = _force_scan_connection(
+        scan_error=RuntimeError(22903, "capture agent owns sp_replcmds")
+    )
+    caplog.set_level(logging.DEBUG, logger="connectors.sqlserver_cdc_native")
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        cdc.force_cdc_scan()
+
+    assert events == [("execute", "EXEC sys.sp_cdc_scan")]
+    assert any(
+        record.levelno == logging.DEBUG and "sp_cdc_scan skipped" in record.message
+        for record in caplog.records
+    )
+
+
+def test_force_cdc_scan_invalidates_connection_when_flush_fails(caplog) -> None:
+    cdc = SqlServerNativeCdc(
+        {"database": "app"},
+        table="orders",
+        primary_key="id",
+        capture_instance="dbo_orders",
+        cursor_key="orders-to-warehouse",
+    )
+    conn, events = _force_scan_connection(flush_error=ValueError("flush failed"))
+    caplog.set_level(logging.WARNING, logger="connectors.sqlserver_cdc_native")
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        cdc.force_cdc_scan()
+
+    assert events == [
+        ("execute", "EXEC sys.sp_cdc_scan"),
+        ("commit",),
+        ("execute", "EXEC sys.sp_replflush"),
+        ("invalidate",),
+    ]
+    warning = next(
+        record for record in caplog.records if record.levelno == logging.WARNING
+    )
+    assert "orders-to-warehouse" in warning.message
+    assert "dbo_orders" in warning.message
+    assert "ValueError" in warning.message
+    assert "flush failed" in warning.message
+
+
+def test_mssql_connection_adapter_delegates_invalidate() -> None:
+    from connectors.generic_sql import _MssqlQmarkConnection
+
+    proxy = MagicMock()
+    _MssqlQmarkConnection(proxy).invalidate()
+
+    proxy.invalidate.assert_called_once_with()

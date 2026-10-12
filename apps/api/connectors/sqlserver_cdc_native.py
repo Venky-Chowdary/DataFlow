@@ -1102,12 +1102,51 @@ class SqlServerNativeCdc:
         return self._captures
 
     def force_cdc_scan(self) -> None:
-        """Populate change tables when SQL Agent is unavailable (Docker/CI)."""
+        """Scan and release log-reader ownership so SQL Agent capture isn't locked out."""
         try:
             with self._conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute("EXEC sys.sp_cdc_scan")
-                conn.commit()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("EXEC sys.sp_cdc_scan")
+                    conn.commit()
+                except Exception as exc:
+                    logger.debug("sp_cdc_scan skipped: %s", exc)
+                    return
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("EXEC sys.sp_replflush")
+                    conn.commit()
+                except Exception as exc:
+                    captures = sorted(
+                        {
+                            capture
+                            for capture in (
+                                self.capture_instance,
+                                *self._captures.values(),
+                            )
+                            if capture
+                        }
+                    )
+                    capture_instance = ",".join(captures) or "<unresolved>"
+                    logger.warning(
+                        "sp_replflush failed; invalidating SQL Server CDC connection "
+                        "cursor_key=%s capture_instance=%s exception=%s: %s",
+                        self.cursor_key,
+                        capture_instance,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    try:
+                        conn.invalidate()
+                    except Exception as invalidate_exc:
+                        logger.warning(
+                            "SQL Server CDC connection invalidation failed "
+                            "cursor_key=%s capture_instance=%s exception=%s: %s",
+                            self.cursor_key,
+                            capture_instance,
+                            type(invalidate_exc).__name__,
+                            invalidate_exc,
+                        )
         except Exception as exc:
             logger.debug("sp_cdc_scan skipped: %s", exc)
 
