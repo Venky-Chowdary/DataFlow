@@ -92,6 +92,20 @@ export function applyPilotSafeActions(
  * Typed as a predicate on `suggested` so the caller can render the chips
  * without repeating the emptiness check the guard already made.
  */
+/** Drop blank and repeated suggestions so a prompt is offered once. */
+export function uniquePilotPrompts(prompts: readonly string[] | undefined): string[] {
+  if (!prompts?.length) return [];
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const raw of prompts) {
+    const prompt = raw.trim();
+    if (!prompt || seen.has(prompt)) continue;
+    seen.add(prompt);
+    unique.push(prompt);
+  }
+  return unique;
+}
+
 export function showsFollowUpPrompts(
   index: number,
   total: number,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { pilotActionChipLabel, runPilotConfirm, showsFollowUpPrompts } from "./pilotChat";
+import { pilotActionChipLabel, runPilotConfirm, showsFollowUpPrompts, uniquePilotPrompts } from "./pilotChat";
 import type { CopilotPendingAction } from "./api";
 
 type FetchCall = { url: string; body: Record<string, unknown> };
@@ -56,6 +56,14 @@ function studioAction(overrides: Partial<CopilotPendingAction> = {}): CopilotPen
     ...overrides,
   };
 }
+
+test("repeated pilot prompts collapse to one chip", () => {
+  assert.deepEqual(
+    uniquePilotPrompts(["  Give me a workspace briefing", "Give me a workspace briefing", "", "Show my recent jobs"]),
+    ["Give me a workspace briefing", "Show my recent jobs"],
+  );
+  assert.deepEqual(uniquePilotPrompts(undefined), []);
+});
 
 test("only the newest turn offers follow-up prompts", () => {
   const suggested = ["show my jobs"];

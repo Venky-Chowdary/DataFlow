@@ -191,12 +191,12 @@ function ArchitectureDiagram() {
       >
         <defs>
           <linearGradient id="df2-docs-flow-grad" x1="0%" y1="0%" x2="100%" y2="0%">
-            <stop offset="0%" stopColor="#14b8a6" />
-            <stop offset="55%" stopColor="#0d9488" />
-            <stop offset="100%" stopColor="#0f766e" />
+            <stop offset="0%" stopColor="var(--df-logo-arrow)" />
+            <stop offset="55%" stopColor="var(--df-logo-ink)" />
+            <stop offset="100%" stopColor="var(--df-logo-tile)" />
           </linearGradient>
           <marker id="df2-docs-arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
-            <path d="M0,0 L0,6 L9,3 z" fill="#0d9488" />
+            <path d="M0,0 L0,6 L9,3 z" fill="var(--df-logo-ink)" />
           </marker>
           <filter id="df2-docs-soft" x="-20%" y="-20%" width="140%" height="140%">
             <feDropShadow dx="0" dy="4" stdDeviation="6" floodColor="#0f172a" floodOpacity="0.08" />

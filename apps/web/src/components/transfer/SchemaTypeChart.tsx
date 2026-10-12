@@ -5,22 +5,22 @@ interface SchemaTypeChartProps {
 }
 
 const TYPE_COLORS: Record<string, string> = {
-  string: "#0d9488",
-  varchar: "#0d9488",
-  text: "#0f766e",
-  integer: "#115e59",
-  int: "#115e59",
-  bigint: "#0f766e",
-  decimal: "#14b8a6",
-  numeric: "#14b8a6",
-  float: "#2dd4bf",
-  double: "#2dd4bf",
-  boolean: "#059669",
-  date: "#d97706",
-  timestamp: "#d97706",
-  datetime: "#d97706",
-  json: "#0284c7",
-  unknown: "#94a3b8",
+  string: "var(--df-logo-ink)",
+  varchar: "var(--df-logo-ink)",
+  text: "var(--df-logo-tile)",
+  integer: "var(--df-logo-tile)",
+  int: "var(--df-logo-tile)",
+  bigint: "var(--df-logo-ink)",
+  decimal: "var(--df-logo-arrow)",
+  numeric: "var(--df-logo-arrow)",
+  float: "var(--df-logo-arrow)",
+  double: "var(--df-logo-arrow)",
+  boolean: "var(--df-logo-ink)",
+  date: "var(--df-logo-strap)",
+  timestamp: "var(--df-logo-strap)",
+  datetime: "var(--df-logo-strap)",
+  json: "var(--df-logo-arrow)",
+  unknown: "var(--df-text-tertiary)",
 };
 
 function normalizeType(t: string): string {

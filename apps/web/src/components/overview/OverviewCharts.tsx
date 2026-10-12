@@ -74,12 +74,12 @@ export function ThroughputChart({ series }: ThroughputChartProps) {
       >
         <defs>
           <linearGradient id="df-throughput-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#14b8a6" stopOpacity="0.28" />
-            <stop offset="100%" stopColor="#14b8a6" stopOpacity="0.02" />
+            <stop offset="0%" stopColor="var(--df-logo-arrow)" stopOpacity="0.32" />
+            <stop offset="100%" stopColor="var(--df-logo-ink)" stopOpacity="0.02" />
           </linearGradient>
           <linearGradient id="df-bar-fill" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#0f766e" />
-            <stop offset="100%" stopColor="#134e4a" />
+            <stop offset="0%" stopColor="var(--df-logo-arrow)" />
+            <stop offset="100%" stopColor="var(--df-logo-tile)" />
           </linearGradient>
         </defs>
         {gridLines.map((y, i) => (

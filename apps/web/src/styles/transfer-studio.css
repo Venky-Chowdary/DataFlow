@@ -774,7 +774,7 @@
   border: 1px solid #f59e0b55;
   background: #fef3c740;
   font-size: 14px;
-  color: #92400e;
+  color: var(--df-warning);
 }
 
 .df2-map-health-banner.is-critical {
@@ -812,7 +812,7 @@
   border-radius: 8px;
   border: 1px solid #fde68a;
   background: var(--df-warning-bg);
-  color: #92400e;
+  color: var(--df-warning);
   font-size: 12.5px;
   line-height: 1.4;
 }
@@ -2087,7 +2087,7 @@ button.df2-map-band-chip:hover {
   border-radius: 10px;
   background: var(--df-warning-bg);
   font-size: 13px;
-  color: #92400e;
+  color: var(--df-warning);
 }
 
 .df2-csv-validation-issues {
@@ -4316,14 +4316,14 @@ th.df2-type-string .df2-type-badge {
   gap: 12px;
   padding: 14px 16px;
   border-bottom: 1px solid #fef3c7;
-  color: #92400e;
+  color: var(--df-warning);
 }
 .df2-result-fidelity-head .dt-nav-icon,
 .df2-data-integrity-head .dt-nav-icon { display: inline-flex; color: #d97706; margin-top: 1px; flex-shrink: 0; }
 .df2-result-fidelity-head > div,
 .df2-data-integrity-head > div { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .df2-result-fidelity-head strong,
-.df2-data-integrity-head strong { font-size: 14px; color: #92400e; }
+.df2-data-integrity-head strong { font-size: 14px; color: var(--df-warning); }
 .df2-result-fidelity-head p,
 .df2-data-integrity-head span { margin: 0; font-size: 12.5px; line-height: 1.55; color: #78716c; }
 
@@ -5093,7 +5093,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-preflight-progress .df2-mapping-progress-meta strong {
   flex: 0 0 auto;
-  color: #0ea5e9;
+  color: var(--df-logo-ink);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
@@ -5675,7 +5675,7 @@ th.df2-type-string .df2-type-badge {
   margin: 2px 0 0;
   font-size: 12px;
   line-height: 1.4;
-  color: #92400e;
+  color: var(--df-warning);
   text-align: right;
   overflow-wrap: anywhere;
 }
@@ -5686,7 +5686,7 @@ th.df2-type-string .df2-type-badge {
   border-radius: 10px;
   border: 1px solid #fde68a;
   background: var(--df-warning-bg);
-  color: #92400e;
+  color: var(--df-warning);
   font-size: 12px;
   overflow-wrap: anywhere;
 }
@@ -7171,7 +7171,7 @@ th.df2-type-string .df2-type-badge {
 .df2-theater-v3-alert.warn {
   background: var(--df-warning-bg);
   border-color: #fde68a;
-  color: #92400e;
+  color: var(--df-warning);
 }
 .df2-theater-v3-alert strong { font-size: 13px; }
 
@@ -7346,7 +7346,7 @@ th.df2-type-string .df2-type-badge {
   align-items: baseline;
   margin-bottom: 8px;
 }
-.df2-vd-cell-preview-head strong { font-size: 13px; color: #92400e; }
+.df2-vd-cell-preview-head strong { font-size: 13px; color: var(--df-warning); }
 .df2-vd-cell-preview.is-info .df2-vd-cell-preview-head strong { color: var(--df-info); }
 .df2-vd-cell-preview-head span { font-size: 12px; color: #78350f; }
 .df2-vd-cell-preview.is-info .df2-vd-cell-preview-head span { color: var(--df-info); }
@@ -7743,14 +7743,14 @@ th.df2-type-string .df2-type-badge {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: #92400e;
+  color: var(--df-warning);
 }
-.df2-vd-iso-group-head strong { color: #78350f; }
-.df2-vd-iso-group-head span { color: #a16207; font-size: 12px; }
+.df2-vd-iso-group-head strong { color: var(--df-warning); }
+.df2-vd-iso-group-head span { color: var(--df-logo-strap); font-size: 12px; }
 .df2-vd-iso-group-note {
   margin: 0;
   font-size: 12px;
-  color: #92400e;
+  color: var(--df-warning);
 }
 .df2-vd-iso-issue { border-color: #fde68a !important; background: var(--df-warning-bg) !important; }
 .df2-vd-explain-warnings { margin-top: 8px; }
@@ -7758,14 +7758,14 @@ th.df2-type-string .df2-type-badge {
   margin-top: 12px;
   height: 8px;
   border-radius: 999px;
-  background: #e2e8f0;
+  background: var(--df-border);
   overflow: hidden;
 }
 .df2-vd-progress-fill {
   display: block;
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(90deg, #0ea5e9, #22d3ee);
+  background: linear-gradient(90deg, var(--df-logo-tile), var(--df-logo-arrow));
   transition: width 0.25s ease;
 }
 .df2-vd-progress.is-indeterminate .df2-vd-progress-fill {
@@ -8070,7 +8070,7 @@ th.df2-type-string .df2-type-badge {
   flex-shrink: 0;
 }
 .df2-vd-ring-svg svg { width: 100%; height: 100%; }
-.df2-vd-ring-track { fill: none; stroke: #eef2f7; stroke-width: 8; }
+.df2-vd-ring-track { fill: none; stroke: var(--df-border); stroke-width: 8; }
 .df2-vd-ring-fill {
   fill: none;
   stroke: var(--df-brand-strong);
@@ -8078,9 +8078,9 @@ th.df2-type-string .df2-type-badge {
   stroke-linecap: round;
   transition: stroke-dasharray 0.5s ease;
 }
-.df2-vd-ring.tone-review .df2-vd-ring-fill { stroke: #d97706; }
-.df2-vd-ring.tone-block .df2-vd-ring-fill { stroke: #dc2626; }
-.df2-vd-ring.tone-live .df2-vd-ring-fill { stroke: #0ea5e9; }
+.df2-vd-ring.tone-review .df2-vd-ring-fill { stroke: var(--df-logo-strap); }
+.df2-vd-ring.tone-block .df2-vd-ring-fill { stroke: var(--df-danger); }
+.df2-vd-ring.tone-live .df2-vd-ring-fill { stroke: var(--df-logo-arrow); }
 .df2-vd-ring-val {
   position: absolute;
   inset: 0;
@@ -8129,9 +8129,9 @@ th.df2-type-string .df2-type-badge {
   text-align: right;
 }
 .df2-vd-rule-tabs {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
+  align-items: stretch;
   gap: 6px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--df-border);
@@ -8142,9 +8142,12 @@ th.df2-type-string .df2-type-badge {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 2px;
-  width: max-content;
-  max-width: 168px;
+  justify-content: space-between;
+  gap: 4px;
+  width: 100%;
+  max-width: none;
+  min-height: 56px;
+  height: 100%;
   margin: 0;
   padding: 7px 8px 6px;
   border: 1px solid var(--df-border);
@@ -8154,12 +8157,29 @@ th.df2-type-string .df2-type-badge {
   font: inherit;
   text-align: left;
   cursor: pointer;
+  box-sizing: border-box;
 }
-.df2-vd-rule-tab:hover { border-color: var(--df-text-tertiary); }
+.df2-vd-rule-tab:hover { border-color: var(--df-logo-ink); }
+.df2-vd-rule-tab.status-pass {
+  background: var(--df-brand-muted);
+  border-color: color-mix(in srgb, var(--df-logo-ink) 32%, var(--df-border));
+}
+.df2-vd-rule-tab.status-warn {
+  background: color-mix(in srgb, var(--df-logo-strap) 14%, var(--df-surface));
+  border-color: color-mix(in srgb, var(--df-logo-strap) 48%, var(--df-border));
+}
+.df2-vd-rule-tab.status-block {
+  background: var(--df-danger-bg);
+  border-color: color-mix(in srgb, var(--df-danger) 40%, var(--df-border));
+}
+.df2-vd-rule-tab.status-running {
+  background: color-mix(in srgb, var(--df-logo-arrow) 16%, var(--df-surface));
+  border-color: color-mix(in srgb, var(--df-logo-arrow) 50%, var(--df-border));
+}
 .df2-vd-rule-tab.is-active {
   background: var(--df-surface);
-  border-color: var(--df-brand);
-  box-shadow: inset 0 0 0 1px var(--df-brand);
+  border-color: var(--df-logo-ink);
+  box-shadow: inset 0 0 0 1px var(--df-logo-ink);
 }
 .df2-vd-rule-tab:focus-visible {
   outline: 2px solid var(--df-brand);
@@ -8176,6 +8196,7 @@ th.df2-type-string .df2-type-badge {
   font-size: 11px;
   font-weight: 600;
   line-height: 1.3;
+  min-height: 2.6em;
   color: var(--df-text-primary);
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -8189,10 +8210,10 @@ th.df2-type-string .df2-type-badge {
   background: var(--df-border);
   flex-shrink: 0;
 }
-.df2-vd-rule-dot.status-pass { background: var(--df-success); }
+.df2-vd-rule-dot.status-pass { background: var(--df-logo-ink); }
 .df2-vd-rule-dot.status-block { background: var(--df-danger); }
-.df2-vd-rule-dot.status-warn { background: var(--df-warning); }
-.df2-vd-rule-dot.status-running { background: var(--df-info); }
+.df2-vd-rule-dot.status-warn { background: var(--df-logo-strap); }
+.df2-vd-rule-dot.status-running { background: var(--df-logo-arrow); }
 .df2-vd-rule-dot.status-skip,
 .df2-vd-rule-dot.status-pending { background: var(--df-text-tertiary); }
 .df2-vd-rule {
@@ -8521,7 +8542,7 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-vd-decision-path.is-blocked .df2-vd-decision-path-head {
   border-bottom-color: #fde68a;
-  color: #92400e;
+  color: var(--df-warning);
 }
 .df2-vd-decision-path-head strong { font-size: 13px; flex: 1; }
 .df2-vd-decision-path-badge {
@@ -9154,7 +9175,7 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-map-identity-banner-hint {
   margin-top: 6px !important;
-  color: #92400e;
+  color: var(--df-warning);
 }
 .df2-map-identity-banner-body {
   flex: 1;
@@ -10209,12 +10230,12 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-vd-local-banner .dt-nav-icon { color: var(--df-warning); flex-shrink: 0; margin-top: 2px; }
 .df2-vd-local-banner strong { display: block; font-size: 13px; margin-bottom: 4px; }
-.df2-vd-local-banner p { margin: 0; font-size: 12.5px; line-height: 1.45; color: #92400e; }
+.df2-vd-local-banner p { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--df-warning); }
 .df2-vd-local-banner ul {
   margin: 8px 0 0;
   padding-left: 18px;
   font-size: 12px;
-  color: #92400e;
+  color: var(--df-warning);
 }
 .df2-vd-local-banner li { margin: 2px 0; }
 

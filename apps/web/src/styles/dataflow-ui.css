@@ -377,8 +377,8 @@ body {
   width: 7px;
   height: 7px;
   border-radius: 999px;
-  background: #10b981;
-  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.12);
+  background: var(--df-logo-ink);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--df-logo-ink) 18%, transparent);
 }
 
 .df2-content {
@@ -692,11 +692,11 @@ body {
 }
 
 .df2-ops-card.ok {
-  border-left: 3px solid #10b981;
+  border-left: 3px solid var(--df-logo-ink);
 }
 
 .df2-ops-card.warn {
-  border-left: 3px solid #f59e0b;
+  border-left: 3px solid var(--df-logo-strap);
 }
 
 @media (max-width: 1100px) {
@@ -3937,13 +3937,13 @@ body {
 .df2-preflight-step-msg { font-size: 13px; color: #64748b; margin-top: 2px; overflow-wrap: anywhere; }
 
 .df2-preflight-step.running {
-  background: #f0f9ff;
-  border-left-color: #0ea5e9;
+  background: var(--df-brand-muted);
+  border-left-color: var(--df-logo-arrow);
 }
 
 .df2-preflight-step.running .df2-preflight-marker {
-  background: #e0f2fe;
-  color: #0ea5e9;
+  background: var(--df-brand-soft);
+  color: var(--df-logo-ink);
 }
 
 @keyframes df2-fade-in {

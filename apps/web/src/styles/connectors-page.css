@@ -35,9 +35,16 @@
 .df2-connector-rows-head,
 .df2-connector-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 120px 130px 120px 150px;
+  /* Same tracks for the header and every row. The header's first label
+     spans the status dot, icon, and name so Capability / Last test /
+     Last used sit on the values. */
+  grid-template-columns: 8px 18px minmax(0, 1fr) 156px 140px 120px 112px;
   align-items: center;
-  gap: 12px;
+  gap: var(--df-list-row-gap);
+}
+
+.df2-connector-rows-head-name {
+  grid-column: 1 / 4;
 }
 
 .df2-connector-rows-head {
@@ -55,7 +62,6 @@
 
 /* Compact status-first row */
 .df2-connector-row {
-  grid-template-columns: auto auto minmax(0, 1fr) 140px 150px 130px 132px;
   min-height: var(--df-list-row-min-h);
   padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   gap: var(--df-list-row-gap);
@@ -135,7 +141,8 @@
   font-size: 10px;
   text-transform: none;
   letter-spacing: 0.01em;
-  max-width: 13.5rem;
+  max-width: 100%;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -160,8 +167,12 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
   font-size: var(--df-list-row-meta);
-  color: #64748b;
+  color: var(--df-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .df2-connector-row-signal.ok { color: #059669; }

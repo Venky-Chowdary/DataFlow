@@ -16,6 +16,11 @@
   --dt-flow-particle: var(--df-brand);
   --df-brand: #0d9488;
   --df-brand-hover: #0f766e;
+  /* Logo palette — the mark in packages/design-system brand/mark.ts */
+  --df-logo-tile: #0a3d3a;
+  --df-logo-ink: #0f766e;
+  --df-logo-arrow: #2dd4bf;
+  --df-logo-strap: #f59e0b;
   --df-brand-strong: #115e59;
   --df-brand-deep: #0f766e;
   --df-brand-bright: #14b8a6;
