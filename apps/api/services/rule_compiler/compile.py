@@ -19,7 +19,9 @@ from collections import defaultdict
 from typing import Any
 
 from .classify import (
+    _CLOSED_FORMULA_KINDS,
     classify_rule,
+    formula_prefix,
     named_rule_ref,
     named_rule_targets,
     parse_validate_check,
@@ -1740,6 +1742,20 @@ def _compile_row(
     status = "executable"
     if kind in review_kinds or bind_fail or low_confidence_reason or type_issue or prec_issue or ident_issue or unnamed_zone:
         status = "needs_confirmation"
+    # Formula-injection invariant: a formula-prefixed cell may only compile
+    # to the closed forms `_excel_formula` owns. Everything else is review —
+    # never executable, never enforced at Run, no matter which classifier
+    # reached it.
+    if formula_prefix(rule_text) and kind not in _CLOSED_FORMULA_KINDS:
+        status = "needs_confirmation"
+        named = re.match(r"^=\s*([A-Za-z][A-Za-z0-9_.]*)\s*\(", rule_text.strip())
+        label = named.group(1).upper() if named else formula_prefix(rule_text)
+        issue = (
+            f"Spreadsheet formula {label} is not a supported closed form; "
+            "it was not applied."
+        )
+        if issue not in issues:
+            issues.append(issue)
 
     transform = _KIND_TO_TRANSFORM.get(kind, "none")
     shape_step: dict[str, Any] | None = None

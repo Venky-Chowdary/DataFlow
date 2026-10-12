@@ -1085,6 +1085,8 @@ async def export_job_quarantine(job_id: str, request: Request):
     from services.format_converter import convert_rows
 
     headers = ["row", "column", "target", "value", "reason", "policy", "suggested_transform"]
+    from services.csv_safety import neutralize_formula_cell
+
     rows = [
         [
             str(d.get("row", "")),
@@ -1097,6 +1099,7 @@ async def export_job_quarantine(job_id: str, request: Request):
         ]
         for d in details
     ]
+    rows = [[neutralize_formula_cell(cell) for cell in row] for row in rows]
     content, _ = convert_rows(headers, rows, source_format="csv", target_format="csv")
 
     api_root = Path(__file__).resolve().parents[2]

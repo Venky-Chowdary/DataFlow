@@ -1,4 +1,5 @@
 import type { EditableMapping } from "./mapping";
+import { neutralizeFormulaCell } from "./csvSafety";
 import { applyLocalTransform } from "./localTransform";
 import type { NumberLocale } from "./numberLocale";
 import type { TransferResult } from "./types";
@@ -33,7 +34,7 @@ function serializeRows(rows: Record<string, unknown>[], format: string): { blob:
   const delimiter = fmt === "tsv" ? "\t" : ",";
   const headers = rows.length > 0 ? Object.keys(rows[0]) : [];
   const escape = (v: unknown) => {
-    const s = v == null ? "" : String(v);
+    const s = neutralizeFormulaCell(v);
     if (s.includes(delimiter) || s.includes('"') || s.includes("\n")) {
       return `"${s.replace(/"/g, '""')}"`;
     }
