@@ -1551,14 +1551,14 @@ def _count_dest_duplicates(
 
     from connectors.sql_identifiers import require_safe_identifier
     from services.dest_precount import (
-        _warehouse_sql_engine,
-        _warehouse_sql_table_ref,
+        warehouse_sql_engine,
+        warehouse_sql_table_ref,
     )
 
-    table_ref = _warehouse_sql_table_ref(
+    table_ref = warehouse_sql_table_ref(
         dialect, dest_cfg, str(endpoint.schema or ""), table
     )
-    with _warehouse_sql_engine(dialect, dest_cfg) as engine:
+    with warehouse_sql_engine(dialect, dest_cfg) as engine:
         qcol = engine.dialect.identifier_preparer.quote(
             require_safe_identifier(column, preserve_case=True)
         )

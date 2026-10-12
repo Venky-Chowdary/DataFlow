@@ -1150,7 +1150,7 @@ def destination_key_list(
     return unique
 
 
-def _warehouse_sql_table_ref(
+def warehouse_sql_table_ref(
     dialect: str,
     cfg: Mapping[str, Any],
     schema: str,
@@ -1248,7 +1248,7 @@ def _is_missing_warehouse_column(exc: BaseException, dialect: str) -> bool:
 
 
 @contextmanager
-def _warehouse_sql_engine(db_type: str, cfg: Mapping[str, Any]) -> Iterator[Any]:
+def warehouse_sql_engine(db_type: str, cfg: Mapping[str, Any]) -> Iterator[Any]:
     from connectors.generic_sql import get_sqlalchemy_engine
     from services.engine_pool import release_engine
 
@@ -1274,8 +1274,8 @@ def _warehouse_sql_row_count(
     import sqlalchemy as sa
 
     try:
-        table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
-        with _warehouse_sql_engine(db_type, cfg) as engine:
+        table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+        with warehouse_sql_engine(db_type, cfg) as engine:
             with engine.connect() as conn:
                 n = conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
         return int(n or 0)
@@ -1692,7 +1692,7 @@ def _clickhouse_row_count(
         quote_table_ref(table_name, sch, dialect="clickhouse")
     )
     try:
-        with _warehouse_sql_engine("clickhouse", cfg) as engine:
+        with warehouse_sql_engine("clickhouse", cfg) as engine:
             with engine.connect() as conn:
                 n = conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
         return int(n or 0)
@@ -1727,7 +1727,7 @@ def _clickhouse_key_list(
     col_sql = ", ".join(quote_sql_identifier(c, "`") for c in cols)
     sql = f"SELECT {col_sql} FROM {table_ref}"  # nosec B608
     try:
-        with _warehouse_sql_engine("clickhouse", cfg) as engine:
+        with warehouse_sql_engine("clickhouse", cfg) as engine:
             with engine.connect() as conn:
                 rows = conn.execute(sa.text(sql)).fetchall() or []
     except Exception as exc:
@@ -1825,11 +1825,11 @@ def _warehouse_sql_key_list(
     from services.dialect_profiles import quote_char_for
 
     qchar = quote_char_for(dialect) or '"'
-    table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
     col_sql = ", ".join(quote_sql_identifier(c, qchar) for c in cols)
     sql = f"SELECT {col_sql} FROM {table_ref}"  # nosec B608
     try:
-        with _warehouse_sql_engine(db_type, cfg) as engine:
+        with warehouse_sql_engine(db_type, cfg) as engine:
             with engine.connect() as conn:
                 rows = conn.execute(sa.text(sql)).fetchall() or []
     except Exception as exc:
@@ -1868,13 +1868,13 @@ def _warehouse_sql_key_hits(
     from services.dialect_profiles import quote_char_for
 
     qchar = quote_char_for(dialect) or '"'
-    table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
     qcols = [quote_sql_identifier(c, qchar) for c in cols]
     col_sql = ", ".join(qcols)
     width = len(cols)
     total = 0
     try:
-        with _warehouse_sql_engine(db_type, cfg) as engine:
+        with warehouse_sql_engine(db_type, cfg) as engine:
             with engine.connect() as conn:
                 from services.dest_key_typing import (
                     coerce_key_tuples,
@@ -1948,14 +1948,14 @@ def _warehouse_sql_scd2_populations(
     from services.scd2_engine import IS_CURRENT_COLUMN, scd2_is_current_predicate
 
     qchar = quote_char_for(dialect) or '"'
-    table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
     col = denormalize_result_key(dialect, IS_CURRENT_COLUMN)
     current_q = quote_sql_identifier(col, qchar)
     pred = scd2_is_current_predicate(dialect, current_q)
     history_sql = f"SELECT COUNT(*) FROM {table_ref}"  # nosec B608
     current_sql = f"SELECT COUNT(*) FROM {table_ref} WHERE {pred}"  # nosec B608
     try:
-        with _warehouse_sql_engine(db_type, cfg) as engine:
+        with warehouse_sql_engine(db_type, cfg) as engine:
             with engine.connect() as conn:
                 try:
                     history = conn.execute(sa.text(history_sql)).scalar()

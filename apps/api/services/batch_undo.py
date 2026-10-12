@@ -187,15 +187,15 @@ def _delete_all_rows(
         return True
 
     from services.dialect_profiles import warehouse_sql_quote_dialect
-    from services.dest_precount import _warehouse_sql_engine, _warehouse_sql_table_ref
+    from services.dest_precount import warehouse_sql_engine, warehouse_sql_table_ref
 
     dialect = warehouse_sql_quote_dialect(db_type)
     if dialect not in {"sqlserver", "oracle"}:
         return False
     import sqlalchemy as sa
 
-    ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
-    with _warehouse_sql_engine(db_type, cfg) as engine:
+    ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    with warehouse_sql_engine(db_type, cfg) as engine:
         with engine.begin() as conn:
             conn.execute(sa.text(f"DELETE FROM {ref}"))  # nosec B608
     return True
