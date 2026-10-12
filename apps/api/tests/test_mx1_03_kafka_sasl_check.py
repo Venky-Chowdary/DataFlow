@@ -238,11 +238,47 @@ def test_live_correct_login_passes():
     assert took < 5
 
 
+_LIVE_MECHS = os.environ.get("DATAFLOW_LIVE_KAFKA_SASL_MECHANISMS", "PLAIN").split(",")
+_SCRAM = [m for m in ("SCRAM-SHA-256", "SCRAM-SHA-512") if m in _LIVE_MECHS]
+
+
+def _scram_cfg(mech, **over):
+    env = mech.replace("-", "_")
+    user = os.environ.get(f"DATAFLOW_LIVE_KAFKA_SASL_USER_{env}", "")
+    pw = os.environ.get(f"DATAFLOW_LIVE_KAFKA_SASL_PASSWORD_{env}", "")
+    if not (user and pw):
+        pytest.skip(f"no {mech} credentials configured")
+    return _live_cfg(**{"sasl_mechanism": mech, "username": user, "password": pw, **over})
+
+
 @live
+@pytest.mark.skipif(bool(_SCRAM), reason="broker enables SCRAM")
 def test_live_scram_against_plain_only_broker_is_mechanism_unsupported():
     check = kc.kafka_sasl_check(_live_cfg(sasl_mechanism="SCRAM-SHA-256"))
     assert check.outcome == "mechanism_unsupported"
     assert "SCRAM-SHA-256" in check.message and "PLAIN" in check.message
+
+
+@live
+@pytest.mark.parametrize("mech", _SCRAM or ["SCRAM-SHA-256"])
+def test_live_scram_login_passes(mech):
+    if not _SCRAM:
+        pytest.skip("broker does not enable SCRAM")
+    ok, msg, took = _probe(_scram_cfg(mech))
+    assert ok, msg
+    assert took < 5
+    assert kc.kafka_sasl_check(_scram_cfg(mech)).outcome == "ok"
+
+
+@live
+@pytest.mark.parametrize("mech", _SCRAM or ["SCRAM-SHA-256"])
+def test_live_scram_wrong_password_is_classified_in_under_a_second(mech):
+    if not _SCRAM:
+        pytest.skip("broker does not enable SCRAM")
+    ok, msg, took = _probe(_scram_cfg(mech, password=SENTINEL))
+    assert not ok and took < 1.5, (msg, took)
+    assert msg.startswith("Kafka SASL: broker") and f"rejected the {mech} login" in msg
+    assert SENTINEL not in msg
 
 
 @live
