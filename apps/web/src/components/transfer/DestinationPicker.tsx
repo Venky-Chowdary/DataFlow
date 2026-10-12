@@ -50,10 +50,17 @@ export function DestinationPicker({
   const [connectorQuery, setConnectorQuery] = useState("");
   const [engineQuery, setEngineQuery] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
+  const choseNew = useRef(false);
 
   useEffect(() => {
-    if (connectorId) setTab("saved");
-  }, [connectorId]);
+    if (connectorId) {
+      setTab("saved");
+      return;
+    }
+    // Connectors often arrive after the first paint. Stay on New connection
+    // only when the operator opened it, or when there is nothing saved.
+    if (!choseNew.current && connectors.length > 0) setTab("saved");
+  }, [connectorId, connectors.length]);
 
   const filtered = useMemo(() => {
     const cq = connectorQuery.trim().toLowerCase();
@@ -101,6 +108,7 @@ export function DestinationPicker({
   const moreEnginesVisible = query ? otherEngines : otherEngines.slice(0, 8);
 
   const openNew = () => {
+    choseNew.current = true;
     setTab("new");
     onSelectManual();
   };

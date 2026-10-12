@@ -811,6 +811,7 @@ export function ValidateDashboard({
     if (badDataControlled) onBadDataFixOpenChange?.(open);
     else setInternalBadDataOpen(open);
   };
+  const [pickedGateKey, setPickedGateKey] = useState("");
   const [remediating, setRemediating] = useState(false);
   const [assistExpanded, setAssistExpanded] = useState(true);
   const [revealCellPii, setRevealCellPii] = useState(false);
@@ -1638,6 +1639,17 @@ export function ValidateDashboard({
     );
     onApplyAction?.(action);
   };
+
+  const gateViews = displayGates.map((meta, index) => ({
+    meta,
+    index,
+    ...statusForGate(meta, index),
+  }));
+  const activeGate = gateViews.find((gate) => gate.meta.key === pickedGateKey)
+    ?? gateViews.find((gate) => gate.status === "block")
+    ?? gateViews.find((gate) => gate.status === "warn")
+    ?? gateViews.find((gate) => gate.status === "running")
+    ?? gateViews[0];
 
   return (
     <section className={`df2-vd df2-vd-${heroTone}`} aria-label="Validation dashboard">
@@ -2940,59 +2952,81 @@ export function ValidateDashboard({
           <strong>Validation rules</strong>
           <span>{totalGates} checks enforced before write · threshold {(confidenceThreshold * 100).toFixed(0)}%</span>
         </div>
-        <div className="df2-vd-rules-grid" role="list">
-          {displayGates.map((meta, index) => {
-            const { status, message, issues, durationMs, privilegeProbe, evidenceScope } = statusForGate(meta, index);
-            const scopeCoverage = evidenceScope?.coverage != null ? String(evidenceScope.coverage) : "";
-            const scopeSample = typeof evidenceScope?.sample_rows === "number"
-              ? evidenceScope.sample_rows
-              : null;
-            const scopeCols = typeof evidenceScope?.columns === "number"
-              ? evidenceScope.columns
-              : null;
-            const scopeNote = evidenceScope?.note != null ? String(evidenceScope.note) : "";
-            const showPrivilege = status !== "pending" && Boolean(privilegeProbe && (privilegeProbe.method || privilegeProbe.status));
-            const destExistence = status !== "pending" && /g2_destination|destination/i.test(meta.key)
-              ? (() => {
-                const gate = gateByKey.get(meta.key);
-                const exists = gate?.details?.table_exists;
-                if (exists === true) return "table exists";
-                if (exists === false) return "create-new";
-                if (/unknown|existence/i.test(message || "")) return "existence unknown";
-                return null;
-              })()
-              : null;
-            const showDuration = status !== "pending" && durationMs != null && durationMs > 0;
-            const showScope = status !== "pending" && Boolean(evidenceScope);
+        <div className="df2-vd-rule-tabs" role="tablist" aria-label="Validation rules">
+          {gateViews.map((gate) => {
+            const selected = activeGate?.meta.key === gate.meta.key;
             return (
-              <article
-                key={`${meta.key}-${index}`}
-                className={`df2-vd-rule status-${status}`}
-                role="listitem"
-                data-gate={meta.key}
+              <button
+                key={`${gate.meta.key}-${gate.index}`}
+                type="button"
+                role="tab"
+                id={`df2-vd-tab-${gate.meta.key}`}
+                className={`df2-vd-rule-tab status-${gate.status}${selected ? " is-active" : ""}`}
+                aria-selected={selected}
+                aria-controls="df2-vd-rule-panel"
+                tabIndex={selected ? 0 : -1}
+                onClick={() => setPickedGateKey(gate.meta.key)}
               >
-                <div className="df2-vd-rule-top">
-                  <span className="df2-vd-rule-ident">
-                    <span className="df2-vd-rule-code">{gateDisplayCode(meta.key)}</span>
-                    <span className="df2-vd-rule-icon" aria-hidden>
-                      <DtIcon name={meta.icon} size={14} />
-                    </span>
+                <span className="df2-vd-rule-tab-top">
+                  <span className="df2-vd-rule-code">{gateDisplayCode(gate.meta.key)}</span>
+                  <span className={`df2-vd-rule-dot status-${gate.status}`} aria-hidden />
+                </span>
+                <span className="df2-vd-rule-tab-label">{gate.meta.label}</span>
+                <span className="df2-sr-only">{STATUS_LABEL[gate.status] ?? gate.status}</span>
+              </button>
+            );
+          })}
+        </div>
+        {activeGate && (() => {
+          const { meta, status, message, issues, durationMs, privilegeProbe, evidenceScope } = activeGate;
+          const scopeCoverage = evidenceScope?.coverage != null ? String(evidenceScope.coverage) : "";
+          const scopeSample = typeof evidenceScope?.sample_rows === "number" ? evidenceScope.sample_rows : null;
+          const scopeCols = typeof evidenceScope?.columns === "number" ? evidenceScope.columns : null;
+          const scopeNote = evidenceScope?.note != null ? String(evidenceScope.note) : "";
+          const showPrivilege = status !== "pending" && Boolean(privilegeProbe && (privilegeProbe.method || privilegeProbe.status));
+          const destExistence = status !== "pending" && /g2_destination|destination/i.test(meta.key)
+            ? (() => {
+              const gate = gateByKey.get(meta.key);
+              const exists = gate?.details?.table_exists;
+              if (exists === true) return "table exists";
+              if (exists === false) return "create-new";
+              if (/unknown|existence/i.test(message || "")) return "existence unknown";
+              return null;
+            })()
+            : null;
+          const showDuration = status !== "pending" && durationMs != null && durationMs > 0;
+          const showScope = status !== "pending" && Boolean(evidenceScope);
+          return (
+            <article
+              className={`df2-vd-rule status-${status}`}
+              role="tabpanel"
+              id="df2-vd-rule-panel"
+              aria-labelledby={`df2-vd-tab-${meta.key}`}
+              data-gate={meta.key}
+            >
+              <div className="df2-vd-rule-top">
+                <span className="df2-vd-rule-ident">
+                  <span className="df2-vd-rule-code">{gateDisplayCode(meta.key)}</span>
+                  <span className="df2-vd-rule-icon" aria-hidden>
+                    <DtIcon name={meta.icon} size={14} />
                   </span>
-                  <span className={`df2-vd-rule-status status-${status}`}>
-                    {status === "pass" && <DtIcon name="check" size={11} />}
-                    {status === "block" && <DtIcon name="x" size={11} />}
-                    {status === "warn" && <DtIcon name="alert" size={11} />}
-                    {status === "running" && <Spinner size="sm" label="" />}
-                    {STATUS_LABEL[status] ?? status}
-                  </span>
-                </div>
-                <strong className="df2-vd-rule-label">{meta.label}</strong>
-                <p className="df2-vd-rule-desc" title={meta.rule}>{meta.rule}</p>
-                {status !== "pending" && message ? (
-                  <p className="df2-vd-rule-msg" title={message}>{message}</p>
-                ) : status === "pending" ? (
-                  <p className="df2-vd-rule-msg is-pending-note">Not run yet</p>
-                ) : null}
+                  <strong className="df2-vd-rule-label">{meta.label}</strong>
+                </span>
+                <span className={`df2-vd-rule-status status-${status}`}>
+                  {status === "pass" && <DtIcon name="check" size={11} />}
+                  {status === "block" && <DtIcon name="x" size={11} />}
+                  {status === "warn" && <DtIcon name="alert" size={11} />}
+                  {status === "running" && <Spinner size="sm" label="" />}
+                  {STATUS_LABEL[status] ?? status}
+                </span>
+              </div>
+              <p className="df2-vd-rule-desc">{meta.rule}</p>
+              {status !== "pending" && message ? (
+                <p className="df2-vd-rule-msg">{message}</p>
+              ) : status === "pending" ? (
+                <p className="df2-vd-rule-msg is-pending-note">Not run yet</p>
+              ) : null}
+              {(showScope || showPrivilege || destExistence || showDuration) && (
                 <div className="df2-vd-rule-foot">
                   {showScope && (
                     <p className="df2-vd-rule-scope" title={scopeNote || undefined}>
@@ -3017,24 +3051,14 @@ export function ValidateDashboard({
                   )}
                   {showPrivilege && privilegeProbe && (
                     <div className={`df2-vd-priv-probe status-${privilegeProbe.status || "unknown"}`}>
-                      {privilegeProbe.status && (
-                        <span className="df2-vd-priv-chip">{privilegeProbe.status}</span>
-                      )}
-                      {privilegeProbe.method && (
-                        <span className="df2-vd-priv-method">{privilegeProbe.method}</span>
-                      )}
-                      {privilegeProbe.engine && (
-                        <span className="df2-vd-priv-engine">{privilegeProbe.engine}</span>
-                      )}
+                      {privilegeProbe.status && <span className="df2-vd-priv-chip">{privilegeProbe.status}</span>}
+                      {privilegeProbe.method && <span className="df2-vd-priv-method">{privilegeProbe.method}</span>}
+                      {privilegeProbe.engine && <span className="df2-vd-priv-engine">{privilegeProbe.engine}</span>}
                       {privilegeProbe.can_create_table != null && (
-                        <span className="df2-vd-priv-method">
-                          create={privilegeProbe.can_create_table ? "yes" : "no"}
-                        </span>
+                        <span className="df2-vd-priv-method">create={privilegeProbe.can_create_table ? "yes" : "no"}</span>
                       )}
                       {privilegeProbe.can_write != null && (
-                        <span className="df2-vd-priv-method">
-                          write={privilegeProbe.can_write ? "yes" : "no"}
-                        </span>
+                        <span className="df2-vd-priv-method">write={privilegeProbe.can_write ? "yes" : "no"}</span>
                       )}
                     </div>
                   )}
@@ -3043,22 +3067,20 @@ export function ValidateDashboard({
                       <span className="df2-vd-priv-chip">{destExistence}</span>
                     </div>
                   )}
-                  {showDuration && (
-                    <p className="df2-vd-rule-dur">Engine {formatDuration(durationMs)}</p>
-                  )}
+                  {showDuration && <p className="df2-vd-rule-dur">Engine {formatDuration(durationMs)}</p>}
                 </div>
-                {issues.length > 0 && (
-                  <ul className="df2-vd-rule-issues">
-                    {issues.slice(0, 4).map((issue) => (
-                      <li key={issue}>{issue}</li>
-                    ))}
-                    {issues.length > 4 && <li>+{issues.length - 4} more</li>}
-                  </ul>
-                )}
-              </article>
-            );
-          })}
-        </div>
+              )}
+              {issues.length > 0 && (
+                <ul className="df2-vd-rule-issues">
+                  {issues.slice(0, 4).map((issue) => (
+                    <li key={issue}>{issue}</li>
+                  ))}
+                  {issues.length > 4 && <li>+{issues.length - 4} more</li>}
+                </ul>
+              )}
+            </article>
+          );
+        })()}
       </div>
 
       {reconciliation && (
