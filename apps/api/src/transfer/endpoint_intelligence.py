@@ -54,8 +54,12 @@ def _list_sqlalchemy_tables(
             table="",
         )
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
-        logger.warning("SQL object list failed for %s", fmt, exc_info=True)
-        return False, [], str(exc)
+        logger.warning(
+            "SQL object list failed for %s (%s)", fmt, type(exc).__name__
+        )
+        from .connector_registry import humanize_connection_error
+
+        return False, [], humanize_connection_error(fmt, exc)
     if not isinstance(info, dict) or not info.get("ok"):
         return False, [], str((info or {}).get("error") or "object list failed")
     names: list[str] = []
@@ -434,7 +438,12 @@ def _introspect_endpoint_impl(
                 try:
                     colls = db.list_collection_names()
                 except PyMongoError as list_err:
-                    out["message"] = f"Could not list collections in `{db_name}`: {list_err}"
+                    from .connector_registry import humanize_connection_error
+
+                    out["message"] = (
+                        f"Could not list collections in `{db_name}`: "
+                        f"{humanize_connection_error('mongodb', list_err)}"
+                    )
                     return out
                 out["objects"] = [{"name": c, "type": "collection"} for c in colls[:200]]
                 listed = _object_name_match(colls, requested_coll)

@@ -14,6 +14,7 @@ from typing import Any
 
 from connectors.sdk import list_descriptors
 from services.connector_telemetry import connector_operation, driver_family
+from services.log_redaction import redact_log_text
 
 from .connector_capabilities import _DRIVER_CAPS, default_port, file_source_types
 
@@ -354,7 +355,7 @@ def _with_cause(message: str, raw: str) -> str:
 
 def humanize_connection_error(driver: str, raw: Any) -> str:
     """Convert low-level driver/connection errors into user-friendly messages."""
-    raw_s = str(raw).strip()
+    raw_s = redact_log_text(str(raw)).strip()
     if _already_operator_copy(raw_s):
         return raw_s
     text = raw_s.lower()
@@ -435,7 +436,7 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     if driver == "snowflake":
         from connectors.snowflake_conn import classify_snowflake_connect_error
 
-        classified = classify_snowflake_connect_error(raw)
+        classified = classify_snowflake_connect_error(raw_s)
         if classified:
             return classified
 
@@ -620,7 +621,7 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
         return "SFTP path not found. Check the remote directory and file path."
 
     # Fallback: keep the raw message but prefix it clearly.
-    return f"Connection failed: {raw}"
+    return f"Connection failed: {raw_s}"
 
 
 def probe_file_source(fmt: str, path: str) -> tuple[bool, str]:

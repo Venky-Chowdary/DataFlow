@@ -17,28 +17,6 @@ from services.ops_events import emit_event
 _LOG = logging.getLogger("dataflow.connector")
 
 
-def _emit_secret_undecryptable(
-    connector_id: str,
-    driver: str,
-    affected_field: str,
-) -> None:
-    try:
-        emit_event(
-            _LOG,
-            "connector.secret.undecryptable",
-            outcome="failed",
-            level=logging.ERROR,
-            driver_family=driver,
-            connector_id=connector_id,
-            affected_field=affected_field,
-        )
-    except Exception as exc:
-        try:
-            _LOG.debug("connector telemetry emission failed: %s", type(exc).__name__)
-        except Exception:
-            pass
-
-
 def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
     """Build the exact probe kwargs used by ``POST /connectors/saved/{id}/test``.
 
@@ -110,10 +88,14 @@ def probe_saved_connector(
         password = conn.password or ""
         conn_str = conn.connection_string or ""
         if "[encrypted-secret-unavailable]" in password or "[decryption-failed]" in password:
-            _emit_secret_undecryptable(
-                connector_id,
-                driver_family(conn.type or ""),
-                "password",
+            emit_event(
+                _LOG,
+                "connector.secret.undecryptable",
+                outcome="failed",
+                level=logging.ERROR,
+                driver_family=driver_family(conn.type or ""),
+                connector_id=connector_id,
+                affected_field="password",
             )
             op.failed(category="secret_undecryptable")
             return (
@@ -125,10 +107,14 @@ def probe_saved_connector(
                 {},
             )
         if "[encrypted-secret-unavailable]" in conn_str or "[decryption-failed]" in conn_str:
-            _emit_secret_undecryptable(
-                connector_id,
-                driver_family(conn.type or ""),
-                "connection_string",
+            emit_event(
+                _LOG,
+                "connector.secret.undecryptable",
+                outcome="failed",
+                level=logging.ERROR,
+                driver_family=driver_family(conn.type or ""),
+                connector_id=connector_id,
+                affected_field="connection_string",
             )
             op.failed(category="secret_undecryptable")
             return (
@@ -140,14 +126,14 @@ def probe_saved_connector(
                 {},
             )
 
-        from src.transfer.connector_registry import run_probe
+        from src.transfer.connector_registry import humanize_connection_error, run_probe
 
         cfg = probe_cfg_from_saved(conn)
         try:
             ok, message = run_probe(conn.type or "", cfg)
         except Exception as exc:
             op.errored(exc)
-            return False, f"Connection failed: {exc}", cfg
+            return False, humanize_connection_error(conn.type or "", exc), cfg
         if ok:
             op.succeeded()
         elif not op.outcome:
