@@ -5412,50 +5412,18 @@ def require_physical_types_for_existing_table(
     return None
 
 
-class IdentityInsertSession:
-    """SQL Server session that is allowed to write its own identity values.
-
-    Migrating a table means carrying the *keys*, not letting the destination
-    mint new ones: children reference the source's values. SQL Server refuses
-    an explicit value for an ``IDENTITY`` column unless the session opts in,
-    and the opt-in is per session and per table, so it must be released again —
-    a pooled connection left with ``IDENTITY_INSERT`` ON makes the *next*
-    table's load fail with an error that names the wrong table.
-    """
-
-    def __init__(self, conn: Any, qualified: str) -> None:
-        self._conn = conn
-        self._qualified = qualified
-        self._open = False
-
-    def open(self) -> None:
-        import sqlalchemy as sa
-
-        self._conn.execute(sa.text(f"SET IDENTITY_INSERT {self._qualified} ON"))
-        self._open = True
-
-    def close(self) -> None:
-        if not self._open:
-            return
-        import sqlalchemy as sa
-
-        self._open = False
-        try:
-            self._conn.execute(sa.text(f"SET IDENTITY_INSERT {self._qualified} OFF"))
-        except Exception as exc:  # pragma: no cover - connection already dead
-            logger.warning(
-                "could not release IDENTITY_INSERT on %s: %s", self._qualified, exc
-            )
-
+# SQL Server IDENTITY_INSERT lives in identity_insert (Phase F8 size freeze).
+# sqlserver_identity re-exports the same names for the studio import path.
+from connectors.identity_insert import (  # noqa: E402
+    IdentityInsertSession,
+    begin_identity_insert,
+    sqlserver_identity_columns,
+)
 
 # --------------------------------------------------------------------------- #
 # Exotic-carrier quarantine passes live in their own module (Phase F8 size
 # freeze) and are re-exported here so every existing import keeps working.
 # --------------------------------------------------------------------------- #
-from connectors.sqlserver_identity import (  # noqa: E402
-    begin_identity_insert,
-    sqlserver_identity_columns,
-)
 from connectors.write_quarantine_exotic import (  # noqa: E402
     _specialty_column_kind,  # noqa: F401 — re-exported for existing importers
     quarantine_unfit_binaries,

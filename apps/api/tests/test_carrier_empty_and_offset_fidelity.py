@@ -1,8 +1,11 @@
 """Two fidelity rules the file matrix at 100K found broken (Track B).
 
 1. A carrier that spells NULL separately from ``""`` must keep the empty string
-   the source stated; only delimited carriers (no NULL token in RFC 4180) may
-   read a blank field as absence.
+   the source stated. A delimited blank field is that same present ``""``:
+   RFC 4180 has no NULL token, and dropping the cell before inference made a
+   JSON-looking column reject it at write time. Numeric, temporal, and boolean
+   blanks are still SQL NULL later, when the destination column cannot store
+   text.
 2. A declared offset-bearing timestamp column must keep its offset on export —
    folding it to a naive wire value moves the instant.
 """
@@ -38,10 +41,10 @@ def test_parquet_keeps_explicit_empty_string():
     assert rows[1]["note"] is None
 
 
-def test_delimited_blank_field_is_absence():
+def test_delimited_blank_field_stays_empty_text():
     raw = b"id,note\n1,\n"
     rows = next(iter(_iter_csv_batches(raw, 10)))
-    assert rows[0]["note"] is None
+    assert rows[0]["note"] == ""
 
 
 @pytest.mark.parametrize(

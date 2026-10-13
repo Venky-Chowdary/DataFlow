@@ -640,6 +640,7 @@ def _maybe_attach_verification_ladder(
         MAX_LADDER_ROWS,
         PopulationTooLarge,
         attach_ladder_to_reconcile_report,
+        mappings_rewrite_written_cells,
         read_postgres_rows,
         read_sqlite_rows,
         run_five_layer_verification,
@@ -736,6 +737,7 @@ def _maybe_attach_verification_ladder(
     shaped_run = bool(dest_summary.get("shape_recipe_hash"))
     if source_endpoint is not None and not source_rows and shaped_run:
         return _ladder_declined_for_shape(report, str(dest_summary["shape_recipe_hash"]))
+    source_reread = False
     if source_endpoint is not None and not source_rows:
         from services.procedure_source import is_callable_source
 
@@ -743,6 +745,7 @@ def _maybe_attach_verification_ladder(
             src_type = resolve_driver_type(source_endpoint.format)
             src_cfg = resolve_connector_config(source_endpoint)
             try:
+                source_reread = True
                 if src_type == "sqlite":
                     source_rows = read_sqlite_rows(
                         database=str(src_cfg.get("database") or ""),
@@ -822,6 +825,13 @@ def _maybe_attach_verification_ladder(
         keyed_expected_delta=census.expected_delta if keyed and census else None,
         # maximum: always run L4/L5. strict/balanced: localize only on L3 fail.
         always_localize=str(validation_mode or "").lower() == "maximum",
+        # A table re-read is the pre-image. Crosswalks, masks, and renames
+        # already match on the written-batch checksum; L2 must not veto them.
+        l2_skip_reason=(
+            "source_reread_is_pre_transform"
+            if source_reread and mappings_rewrite_written_cells(mappings)
+            else ""
+        ),
     )
     return attach_ladder_to_reconcile_report(report, ladder)
 

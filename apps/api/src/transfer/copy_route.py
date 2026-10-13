@@ -666,6 +666,14 @@ def _try_copy_fast_path(
 
     src_n = (src_type or "").strip().lower()
     dest_n = (dest_type or "").strip().lower()
+    # pgvector reads through the PostgreSQL wire driver, so the stream passes
+    # src_type=postgresql. Identity COPY still has to see the product family:
+    # otherwise pgvector→pgvector never matches and the load becomes an
+    # embedding upsert (load_method pgvector_upsert) instead of binary COPY.
+    if (getattr(source, "format", "") or "").strip().lower() == "pgvector":
+        src_n = "pgvector"
+    if (getattr(destination, "format", "") or "").strip().lower() == "pgvector":
+        dest_n = "pgvector"
     if src_n in {"postgresql", "postgres"} and dest_n in {"mysql", "mariadb"}:
         mysql_fast = _try_pg_mysql_copy_fast_path(
             source=source,

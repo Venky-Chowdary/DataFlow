@@ -76,6 +76,46 @@ def _sqlite_text_money(name: str, col_type: str) -> bool:
     return bool(_TEXT_MONEY_NAME.search(name or ""))
 
 
+def _absorb_bound_literal(where: str, parsed: Any, leftover: str) -> Any | None:
+    """Bind a quote/semicolon tail as the comparison value.
+
+    ``status = x'; DROP TABLE t; --`` is one literal. The comparison pattern
+    stops at the quote, and refusing the tail never runs the read. Binding the
+    whole remainder keeps the statement out of the SQL text. A second predicate
+    (``OR '1'='1``) is not absorbed — that tail is still refused.
+    """
+    from .predicates import ParsedFilter
+
+    tail = (leftover or "").strip()
+    if not isinstance(parsed, ParsedFilter) or not tail:
+        return None
+    if re.search(r"\b(?:and|or)\b", tail, re.I):
+        return None
+    if not re.match(
+        r"""['";]|--|DROP\b|DELETE\b|INSERT\b|UPDATE\b|ALTER\b|TRUNCATE\b""",
+        tail,
+        re.I,
+    ):
+        return None
+    text = (where or "").strip()
+    matched = re.match(
+        rf"^{re.escape(parsed.column)}\s*(>=|<=|!=|<>|>|=|<)\s*(.+)$",
+        text,
+        re.I | re.S,
+    )
+    if not matched:
+        return None
+    literal = matched.group(2).strip()
+    if not literal:
+        return None
+    return ParsedFilter(
+        column=parsed.column,
+        op=parsed.op,
+        raw_values=[literal],
+        text=text,
+    )
+
+
 def _unparsed_filter_warning(where: str, leftover: str) -> str:
     """Refuse a where-clause tail the predicate parser did not consume.
 
@@ -1214,6 +1254,11 @@ def aggregate_connector_data(
 
         try:
             parsed_filters, leftover = parse_filters(where)
+            if len(parsed_filters) == 1 and (leftover or "").strip():
+                absorbed = _absorb_bound_literal(where, parsed_filters[0], leftover)
+                if absorbed is not None:
+                    parsed_filters = [absorbed]
+                    leftover = ""
             predicates = ground_filters(
                 parsed_filters, columns, resolve_name, _column_type
             )

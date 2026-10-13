@@ -2141,6 +2141,12 @@ async def transfer_data(
 
         workspace_id = _require_write_workspace(request, workspace_id)
 
+        from connectors.sql_identifiers import unsafe_destination_identifier_reason
+
+        ident_err = unsafe_destination_identifier_reason(dest_type, destination_collection)
+        if ident_err:
+            raise HTTPException(status_code=400, detail=ident_err)
+
         content = await file.read()
         src_fmt = FileParser.detect_file_type(file.filename or "upload.csv", content)
         if src_fmt == "unknown":

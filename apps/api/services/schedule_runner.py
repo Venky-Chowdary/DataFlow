@@ -454,14 +454,25 @@ def build_schedule_request(sched, src: dict, dst: dict):
         contract_id=contract_id,
         enforce_contract=bool(contract_id),
         require_signed_contract=require_signed,
-        compliance_acknowledged=acks.compliance,
+        compliance_acknowledged=(
+            acks.compliance
+            or bool(getattr(sched, "compliance_acknowledged", False))
+        ),
         schema_drift_acknowledged=(
             acks.schema_drift
             or bool(getattr(sched, "schema_drift_acknowledged", False))
         ),
         fk_risk_acknowledged=acks.fk_risk,
-        acknowledgment_actor=acks.actor if acks.any_claimed else "",
-        acknowledgment_reason=acks.reason if acks.any_claimed else "",
+        acknowledgment_actor=(
+            acks.actor
+            if acks.any_claimed
+            else str(getattr(sched, "acknowledgment_actor", "") or "")
+        ),
+        acknowledgment_reason=(
+            acks.reason
+            if acks.any_claimed
+            else str(getattr(sched, "acknowledgment_reason", "") or "")
+        ),
     )
 
 

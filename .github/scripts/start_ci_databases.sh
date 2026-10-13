@@ -6,11 +6,14 @@
 #   mongo — single-node replica set rs0 (snapshot read concern, change streams)
 #   gcs   — fake-gcs-server (desktop lab postgresql->gcs execute cell)
 #   adls  — Azurite blob (desktop lab postgresql->adls execute cell)
+#   redis — CDC lease backend. Started here, not as a service container:
+#            a Docker Hub rate-limit on `services:` aborts the job before
+#            checkout and every later step exits 254 (package.json missing).
 #   bigquery — goccy/bigquery-emulator (warehouse SKU proof); re-runnable:
 #              an existing container is replaced with a fresh catalog
 # Emulator greens are labelled emulator_not_customer_tenant by the lab; they
 # are not customer-tenant certificates.
-# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls] [bigquery]
+# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls] [bigquery] [redis]
 set -euo pipefail
 
 MYSQL_IMAGE="${MYSQL_IMAGE:-public.ecr.aws/docker/library/mysql:8.0}"
@@ -18,6 +21,7 @@ MONGO_IMAGE="${MONGO_IMAGE:-public.ecr.aws/docker/library/mongo:7}"
 GCS_IMAGE="${GCS_IMAGE:-docker.io/fsouza/fake-gcs-server:latest}"
 AZURITE_IMAGE="${AZURITE_IMAGE:-mcr.microsoft.com/azure-storage/azurite:latest}"
 BIGQUERY_IMAGE="${BIGQUERY_IMAGE:-ghcr.io/goccy/bigquery-emulator:latest}"
+REDIS_IMAGE="${REDIS_IMAGE:-public.ecr.aws/docker/library/redis:7-alpine}"
 
 wait_for() {  # wait_for <label> <retries> <sleep> <cmd...>
   local label=$1 retries=$2 pause=$3; shift 3
@@ -111,6 +115,16 @@ start_adls() {
     || { docker logs dataflow-ci-azurite || true; exit 1; }
 }
 
+start_redis() {
+  # Service-container pulls have no registry fallback. public.ecr.aws first,
+  # then Docker Hub, with the same backoff as MySQL/Mongo.
+  REDIS_IMAGE=$(pull_image "$REDIS_IMAGE" "docker.io/library/redis:7-alpine")
+  docker rm -f dataflow-ci-redis >/dev/null 2>&1 || true
+  docker run -d --name dataflow-ci-redis -p 6379:6379 "$REDIS_IMAGE"
+  wait_for "Redis" 30 2 docker exec dataflow-ci-redis redis-cli ping \
+    || { docker logs dataflow-ci-redis || true; exit 1; }
+}
+
 start_bigquery() {
   # The emulator is one Go process over a googlesqlite catalog. DROP TABLE on
   # a catalog that has accumulated many tables can panic inside its catalog
@@ -141,6 +155,7 @@ for svc in "$@"; do
     gcs) start_gcs ;;
     adls) start_adls ;;
     bigquery) start_bigquery ;;
+    redis) start_redis ;;
     *) echo "unknown service: $svc" >&2; exit 2 ;;
   esac
 done

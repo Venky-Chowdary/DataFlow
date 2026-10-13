@@ -19,6 +19,10 @@ from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
 from services.safe_errors import public_error
 from services.audit_coverage import AuditAccessMiddleware, http_route_template
+
+# Tests and callers historically import the route-template helper from the
+# app module. Keep that name stable; the implementation lives in audit_coverage.
+_http_route_template = http_route_template
 from services.tracing import sanitize_correlation_id
 from services.platform_config import (
     apply_railway_defaults,

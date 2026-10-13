@@ -787,6 +787,23 @@ def _sqlite_duplicate_key_message(
     return f"duplicate key ({key}){detail}: {exc}"
 
 
+def _sqlite_table_exists(path: str, table: str) -> bool:
+    """True when ``table`` is already in this file. Never creates the file."""
+    from pathlib import Path
+
+    if not path or path == ":memory:" or not Path(path).is_file():
+        return False
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=8)
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone()
+        return row is not None
+    finally:
+        conn.close()
+
+
 def _publish_sqlite_stage(
     conn: Any,
     *,
@@ -918,6 +935,16 @@ def write_mapped_rows(
     stage_batch_idx = int(_kwargs.get("file_batch_idx") or 0)
     stage_total = max(1, int(_kwargs.get("total_chunks") or 1))
     publish_stage = False
+    if atomic_overwrite and stage_batch_idx > 1:
+        stage_candidate = sanitize_identifier(
+            f"{live_table_name}__df_stage", preserve_case=True
+        )
+        # Stream and file batches are 1-based: index 1 is the first chunk of
+        # this attempt, and the stage is supposed to be absent. Only a later
+        # chunk with no stage means the committed prefix is already on the
+        # live table. Publishing a tail-only stage would replace that prefix.
+        if not _sqlite_table_exists(path, stage_candidate):
+            atomic_overwrite = False
     if atomic_overwrite:
         # Readers keep the previous snapshot until the last chunk swaps the
         # stage table in one transaction (QA R2-035).
@@ -1326,7 +1353,9 @@ def write_mapped_rows(
                     )
 
                     try:
-                        recreate_stage = atomic_overwrite and stage_batch_idx == 0
+                        # Index 0 (buffered adapter) and index 1 (first stream
+                        # chunk) both start the stage. A later chunk appends.
+                        recreate_stage = atomic_overwrite and stage_batch_idx <= 1
                         if recreate_stage:
                             cur.execute(f"DROP TABLE IF EXISTS {table_quoted}")
                         fidelity_plan = resolve_create_fidelity_plan(

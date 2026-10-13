@@ -48,7 +48,7 @@ def test_transfer_job_created_with_workspace_id(client, tmp_path):
 
     # Job list scoped to workspace includes the job.
     response = client.get("/api/v1/connectors/jobs", headers={"X-Workspace-Id": ws.id})
-    assert response.status_code == 200
+    assert response.status_code == 200, response.text
     assert job_id in {j["_id"] for j in response.json()["jobs"]}
 
     # Job list without workspace does not include the job.

@@ -343,6 +343,63 @@ def test_schema_change_detected_is_delegable() -> None:
     ) == ()
 
 
+def test_cdc_policy_reads_wal_level_from_the_plan_endpoint() -> None:
+    """plan_transfer passes the connector as source_endpoint. The policy gate
+    must still read wal_level and refuse replica (R3-H1).
+    """
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 5432), timeout=1):
+            pass
+    except OSError:
+        pytest.skip("PostgreSQL 5432 not reachable")
+
+    from services.preflight_service import run_transfer_policy_gates
+
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        source_type="postgresql",
+        source_kind="database",
+        source_table="qa_r3_src",
+        stream_contracts=[{"name": "qa_r3_src", "primary_key": ["id"]}],
+        source_endpoint={
+            "type": "postgresql",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "database": "dataflow",
+            "username": "dataflow",
+            "password": "dataflow",
+        },
+    )
+    import psycopg2
+
+    conn = psycopg2.connect(
+        host="127.0.0.1",
+        port=5432,
+        dbname="dataflow",
+        user="dataflow",
+        password="dataflow",
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SHOW wal_level")
+            level = str(cur.fetchone()[0]).lower()
+    finally:
+        conn.close()
+    wal_blocks = [
+        g
+        for g in gates
+        if g.get("status") == "block" and "wal_level" in str(g.get("message") or "")
+    ]
+    # The probe reads this server. replica/minimal must block and name
+    # wal_level. logical is allowed through that gate (R3-H1).
+    if level == "logical":
+        assert not wal_blocks, wal_blocks
+    else:
+        assert wal_blocks, gates
+
+
 def test_postgres_wal_downgrade_fails_closed() -> None:
     refusal = LogCaptureRefusal(
         CAUSE_SERVER_NOT_CONFIGURED,

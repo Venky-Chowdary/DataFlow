@@ -96,6 +96,10 @@ CLAIM_MAX_RUNTIME = timedelta(hours=4)
 _file_import_attempted = False
 # Same-process Run-now + beat must not both observe running=false.
 _CLAIM_LOCK = threading.Lock()
+# Check-then-insert of a pipeline name. Re-entrant because create can replay
+# onto update while the name is already reserved.
+_NAME_LOCK = threading.RLock()
+_NAME_INDEX_READY = False
 
 
 def _load_schedules_from_file(path=STORE_PATH) -> list[PipelineSchedule]:
@@ -250,6 +254,12 @@ class PipelineSchedule:
     #: Operator accepted additive schema drift when the schedule was staged.
     #: Hard-breaking drift still blocks. Standing authorization can also ack.
     schema_drift_acknowledged: bool = False
+    #: Operator named the PII columns at schedule time. Unattended runs carry
+    #: the same acknowledgement a one-shot Confirm records on the job. Empty
+    #: stays fail-closed: a name column still blocks until someone signs.
+    compliance_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
     #: A pending retry is durable state, not an in-process timer: a redeploy
     #: between attempt 1 and attempt 2 must not drop the retry on the floor.
     retry_at: str | None = None
@@ -381,6 +391,9 @@ class PipelineSchedule:
             last_missed_windows=max(0, int(data.get("last_missed_windows", 0) or 0)),
             claimed_missed_windows=max(0, int(data.get("claimed_missed_windows", 0) or 0)),
             schema_drift_acknowledged=bool(data.get("schema_drift_acknowledged", False)),
+            compliance_acknowledged=bool(data.get("compliance_acknowledged", False)),
+            acknowledgment_actor=str(data.get("acknowledgment_actor") or ""),
+            acknowledgment_reason=str(data.get("acknowledgment_reason") or ""),
             retry_at=data.get("retry_at"),
             retry_attempt=max(0, int(data.get("retry_attempt", 0) or 0)),
             running=bool(data.get("running", False)),
@@ -623,6 +636,7 @@ def _save_one_mongo(coll: Any, sched: PipelineSchedule) -> None:
     payload.pop("_id", None)
     payload.pop("version", None)
     payload["id"] = sched.id
+    payload["name_key"] = schedule_name_key(sched.name)
     loaded_version = int(sched.version or 0)
     base = _base_for(sched.id, loaded_version)
     delta: dict[str, Any] = {}
@@ -642,7 +656,14 @@ def _save_one_mongo(coll: Any, sched: PipelineSchedule) -> None:
                     upsert=True,
                     return_document=True,
                 )
-            except DuplicateKeyError:
+            except DuplicateKeyError as exc:
+                if _name_key_conflict(exc):
+                    _assert_unique_schedule_name_locked(str(payload.get("name") or ""))
+                    raise ValueError(
+                        f"A pipeline named “{str(payload.get('name') or '').strip()}” "
+                        "already exists. Choose a different name or pass that "
+                        "schedule id — duplicate names make run, pause, and delete ambiguous."
+                    ) from exc
                 continue
             if result is not None:
                 _remember_base(_schedule_from_doc(result))
@@ -666,6 +687,13 @@ def _save_one_mongo(coll: Any, sched: PipelineSchedule) -> None:
                 current_version,
             )
             reference = _field_fingerprint(_schedule_from_doc(existing).to_dict())
+        # name_key is a store constraint, not a field on the schedule. The
+        # dataclass fingerprint cannot carry it, so without this it looks like
+        # a change on every save and a partial $set rewrites the document.
+        # The reference stores canonical JSON, the same form _changed_fields
+        # compares against — a raw string never compares equal.
+        if existing.get("name_key") == payload.get("name_key"):
+            reference["name_key"] = _canon(payload["name_key"])
         delta = _changed_fields(payload, reference)
         if not delta:
             return
@@ -703,6 +731,10 @@ def _save_mongo(
     """
     db = svc.get_database()
     coll = db["pipeline_schedules"]
+    try:
+        _ensure_schedule_name_index(coll)
+    except Exception:
+        logger.exception("Schedule name unique index was not created")
     seen = set()
     for s in schedules:
         seen.add(s.id)
@@ -1058,6 +1090,11 @@ def find_studio_replay_target(
     return candidate
 
 
+def schedule_name_key(name: str) -> str:
+    """Case-folded identity used by the unique name constraint."""
+    return (name or "").strip().lower()
+
+
 def assert_unique_schedule_name(name: str, *, exclude_id: str = "") -> None:
     """Refuse a second pipeline with the same name.
 
@@ -1065,15 +1102,24 @@ def assert_unique_schedule_name(name: str, *, exclude_id: str = "") -> None:
     and delete pick one of them with no question. Comparison is
     case-insensitive; the stored spelling is unchanged. Blank names are
     drafts and are not part of this contract.
+
+    Callers that insert or rename hold :data:`_NAME_LOCK` across this check
+    and the following write. Mongo also has a unique index on ``name_key``,
+    so two processes cannot both commit the same name.
     """
-    needle = (name or "").strip().lower()
+    with _NAME_LOCK:
+        _assert_unique_schedule_name_locked(name, exclude_id=exclude_id)
+
+
+def _assert_unique_schedule_name_locked(name: str, *, exclude_id: str = "") -> None:
+    needle = schedule_name_key(name)
     if not needle:
         return
     exclude = (exclude_id or "").strip()
     clashes = [
         s
         for s in _load_all()
-        if (s.name or "").strip().lower() == needle and s.id != exclude
+        if schedule_name_key(s.name) == needle and s.id != exclude
     ]
     if not clashes:
         return
@@ -1083,6 +1129,59 @@ def assert_unique_schedule_name(name: str, *, exclude_id: str = "") -> None:
         "Choose a different name or pass that schedule id — "
         "duplicate names make run, pause, and delete ambiguous."
     )
+
+
+def _name_key_conflict(exc: BaseException) -> bool:
+    details = getattr(exc, "details", None) or {}
+    pattern = details.get("keyPattern") if isinstance(details, dict) else None
+    if isinstance(pattern, dict) and "name_key" in pattern:
+        return True
+    return "name_key" in str(exc)
+
+
+def _ensure_schedule_name_index(coll: Any) -> None:
+    """Unique ``name_key`` so two confirms cannot both insert the same name.
+
+    File and in-memory fakes have no index API. The process lock still covers
+    them; only a real collection can enforce the constraint across processes.
+    """
+    global _NAME_INDEX_READY
+    if _NAME_INDEX_READY:
+        return
+    create = getattr(coll, "create_index", None)
+    if not callable(create):
+        return
+    create(
+        "name_key",
+        unique=True,
+        name="pipeline_schedules_name_key",
+        partialFilterExpression={"name_key": {"$gt": ""}},
+    )
+    _NAME_INDEX_READY = True
+
+
+def _guard_schedule_destination(connector_id: str, table: str) -> None:
+    """Refuse a destination name the writer would silently rename (R4-D10).
+
+    A missing connector has no type yet, so the check waits until the route
+    is known. File and document destinations keep their own name rules.
+    """
+    kind = ""
+    try:
+        from services.connector_store import get_connector
+
+        doc = get_connector(connector_id) or {}
+        if isinstance(doc, dict):
+            kind = str(doc.get("type") or doc.get("format") or "")
+    except Exception:
+        kind = ""
+    if not kind:
+        return
+    from connectors.sql_identifiers import unsafe_destination_identifier_reason
+
+    reason = unsafe_destination_identifier_reason(kind, table)
+    if reason:
+        raise ValueError(reason)
 
 
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
@@ -1127,23 +1226,25 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     if enabled and not rows:
         # Draft is allowed. Enabling an empty-mapping schedule invents _auto_map.
         enabled = False
-    assert_unique_schedule_name(str(payload.get("name") or ""))
-    schedules = _load_all()
-    sched = PipelineSchedule.from_dict({
-        **payload,
-        "id": str(uuid.uuid4()),
-        "interval": interval,
-        "cron": cron,
-        "timezone": tz,
-        "sync_mode": sync_mode,
-        "contract_id": contract_id,
-        "require_signed_contract": require_signed,
-        "enabled": enabled,
-    })
-    sched.next_run_at = next_run_for(sched)
-    schedules.append(sched)
-    _save_all(schedules)
-    return sched
+    with _NAME_LOCK:
+        _assert_unique_schedule_name_locked(str(payload.get("name") or ""))
+        schedules = _load_all()
+        sched = PipelineSchedule.from_dict({
+            **payload,
+            "id": str(uuid.uuid4()),
+            "interval": interval,
+            "cron": cron,
+            "timezone": tz,
+            "sync_mode": sync_mode,
+            "contract_id": contract_id,
+            "require_signed_contract": require_signed,
+            "enabled": enabled,
+        })
+        _guard_schedule_destination(sched.dest_connector_id, sched.dest_table)
+        sched.next_run_at = next_run_for(sched)
+        schedules.append(sched)
+        _save_all(schedules)
+        return sched
 
 
 _VALIDATE_IDENTITY_HASH_KEYS = (
@@ -1230,6 +1331,12 @@ def project_operator_cadence(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule | None:
+    """Update one schedule. The name lock covers the uniqueness check and the write."""
+    with _NAME_LOCK:
+        return _update_schedule_locked(schedule_id, data)
+
+
+def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule | None:
     data = drop_blank_validate_identity(data)
     schedules = _load_all()
     for i, s in enumerate(schedules):
@@ -1263,14 +1370,37 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         _assert_cursor_semantics(merged)
         from services.schedule_mapping_contract import (
             EMPTY_MAPPING_REFUSAL,
+            is_empty_mapping_finding,
             persisted_mapping_rows,
         )
 
         if enabling and not persisted_mapping_rows(merged.get("mappings")):
             raise ValueError(EMPTY_MAPPING_REFUSAL)
+        open_request = merged.get("approval_request")
+        # Persisting the mapping contract is the plan change that closes an
+        # empty-mapping park. Resume-rearm must not run first: it marks the
+        # finding closed, and the plan-change release then has nothing open
+        # to approve, so the schedule stays "rearmed" after the operator did
+        # the work the inbox asked for.
+        mapping_closes_empty = (
+            persisted_mapping_rows(merged.get("mappings"))
+            and isinstance(open_request, dict)
+            and is_empty_mapping_finding(
+                str(open_request.get("code") or ""),
+                str(open_request.get("finding") or ""),
+            )
+        )
         new_name = str(merged.get("name") or "")
-        if new_name.strip().lower() != (s.name or "").strip().lower():
-            assert_unique_schedule_name(new_name, exclude_id=schedule_id)
+        if schedule_name_key(new_name) != schedule_name_key(s.name):
+            _assert_unique_schedule_name_locked(new_name, exclude_id=schedule_id)
+        if (
+            str(merged.get("dest_table") or "") != str(s.dest_table or "")
+            or str(merged.get("dest_connector_id") or "") != str(s.dest_connector_id or "")
+        ):
+            _guard_schedule_destination(
+                str(merged.get("dest_connector_id") or ""),
+                str(merged.get("dest_table") or ""),
+            )
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
         # Resume is the re-arm for a finding no signature can clear
@@ -1279,7 +1409,7 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         # and next_run_at stayed in the past (QA R2-107 / R2-108 / R2-109).
         # An approvable finding stays open — resume must not grant that
         # authority. A past next_run_at is kept: the beat owns one catch-up.
-        if enabling and "approval_request" not in data:
+        if enabling and "approval_request" not in data and not mapping_closes_empty:
             req = merged.get("approval_request")
             if (
                 isinstance(req, dict)

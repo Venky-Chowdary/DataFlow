@@ -143,3 +143,63 @@ def test_l5_displays_transfer_wire_not_native_invent():
     assert hit["source_value"] == "100"
     assert hit["target_value"] == "99"
     assert hit["source_value"] != "1E+2"
+
+
+def test_l2_equates_fingerprint_spellings_and_bool_sums():
+    """SQLite ``0``/``1`` and a ``Z`` timestamp are the same cells as the source wire."""
+    from services.verification_ladder import compare_column_aggregates
+
+    src = compute_column_aggregates(
+        [
+            {"active": "false", "at": "2024-07-04T16:30:00Z", "weight": "1,234.567"},
+            {"active": "true", "at": "2024-07-05T00:00:00Z", "weight": "2"},
+        ],
+        ["active", "at", "weight"],
+    )
+    dst = compute_column_aggregates(
+        [
+            {"active": "0", "at": "2024-07-04T16:30:00+00:00", "weight": "1234.567"},
+            {"active": "1", "at": "2024-07-05T00:00:00+00:00", "weight": "2"},
+        ],
+        ["active", "at", "weight"],
+    )
+    report = compare_column_aggregates(src, dst)
+    assert report.passed, report.details
+    assert src["active"].sum_value == dst["active"].sum_value == "1"
+
+
+def test_l2_skips_when_the_re_read_is_not_the_written_batch():
+    from services.verification_ladder import run_five_layer_verification
+
+    digest = "a" * 64
+    ladder = run_five_layer_verification(
+        source_rows=[{"id": "1", "status": "A"}, {"id": "2", "status": "Z"}],
+        target_rows=[{"id": "1", "status": "active"}],
+        columns=["id", "status"],
+        pk_column="id",
+        source_row_count=2,
+        target_row_count=1,
+        rejected_rows=1,
+        source_checksum=digest,
+        target_checksum=digest,
+        l2_skip_reason="source_reread_is_pre_transform",
+    )
+    assert ladder["passed"] is True, ladder
+    assert ladder["layers"]["L2"]["details"]["skipped"] is True
+    assert ladder["layers"]["L3"]["passed"] is True
+
+
+def test_l2_still_fails_a_written_cell_the_checksum_caught():
+    from services.verification_ladder import run_five_layer_verification
+
+    ladder = run_five_layer_verification(
+        source_rows=[{"id": "1", "status": "active"}],
+        target_rows=[{"id": "1", "status": "closed"}],
+        columns=["id", "status"],
+        pk_column="id",
+        source_checksum="a" * 64,
+        target_checksum="b" * 64,
+    )
+    assert ladder["passed"] is False
+    assert ladder["layers"]["L2"]["passed"] is False
+    assert "status" in ladder["layers"]["L2"]["details"]["mismatched_columns"]

@@ -1385,6 +1385,31 @@ class UniversalTransferEngine:
         # Resolve first: a connector_id reference carries the engine id that
         # create-new invention needs, and an inline format may be empty.
         self._resolve_saved_connectors(request)
+        from connectors.sql_identifiers import unsafe_destination_identifier_reason
+
+        ident_err = unsafe_destination_identifier_reason(
+            str(request.destination.format or ""),
+            str(request.destination.table or request.destination.collection or ""),
+        )
+        if ident_err:
+            try:
+                from services.mongodb_service import get_mongodb_service
+
+                get_mongodb_service().update_job_status(
+                    job_id,
+                    "failed",
+                    phase="validate",
+                    error=ident_err,
+                    message=ident_err,
+                )
+            except Exception:
+                logger.exception("Could not record destination-name refusal on %s", job_id)
+            return TransferResult(
+                success=False,
+                job_id=job_id,
+                error=ident_err,
+                operation=request.operation,
+            )
         if request.source.kind == "file":
             from services.transfer_file_staging import hydrate_file_source
 

@@ -2016,7 +2016,13 @@ def infer_transform_for_mapping(
     if tgt_name.endswith("_id") or tgt_name.endswith("id") or src_col.endswith("_ID"):
         return "trim_id"
     if "qty" in tgt_name or "quantity" in tgt_name:
-        return "integer" if src == "integer" else "decimal"
+        # A text plan stays text. The name alone must not cast 'bad' as an
+        # integer after Map approved VARCHAR (R4-D02).
+        if tgt in {"integer", "bigint"}:
+            return "integer"
+        if tgt in {"decimal", "float", "double"}:
+            return "decimal" if src != "integer" else "integer"
+        return "none"
     # Prefer preserve/identity over trim — operators who want strip choose Trim.
     return "none"
 
@@ -2162,7 +2168,10 @@ def apply_transform(
         bool_as_number = canonical_boolean_as_number(text)
         if bool_as_number is not None:
             return Decimal(bool_as_number), None
-        parsed = _parse_decimal(text, allow_markers=False)
+        # Currency and percent markers are part of an explicit decimal cast.
+        # Inference still refuses to call a marked token an integer (R4-D07);
+        # a bare integer transform stays strict below.
+        parsed = _parse_decimal(text, allow_markers=True)
         if parsed is None:
             return None, strict_decimal_comma_reason(text) or f"Invalid decimal: {text!r}"
         # Return Decimal so bind does not re-apply locale to the canonical

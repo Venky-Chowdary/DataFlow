@@ -158,18 +158,24 @@ def test_secret_scan_endpoint_matches_verify_access_and_scopes_workspace(
     before = _write_events(audit_scan_context["path"], events)
     client = audit_scan_context["client"]
 
+    # The scanner itself does not rewrite history. Each successful scan and
+    # verify then appends its own access event (audit.secret_scan.read /
+    # audit.verify.read) after the read. The next call counts those records.
+    # They are not secret findings, and the foreign workspace stays invisible.
+    expected_scanned = 1
     for role in ("admin", "viewer"):
         key = audit_scan_context[f"{role}_key"]
         headers = _headers(audit_scan_context, key)
         scan = client.get("/api/v1/audit/secret-scan", headers=headers)
         verify = client.get("/api/v1/audit/verify", headers=headers)
 
-        assert scan.status_code == verify.status_code == 200
+        assert scan.status_code == verify.status_code == 200, scan.text
         body = scan.json()
-        assert body["scanned"] == body["flagged"] == 1
+        assert body["scanned"] == expected_scanned and body["flagged"] == 1, body
         assert [event["id"] for event in body["events"]] == ["own-event"]
         assert own_secret not in scan.text
         assert foreign_secret not in scan.text
+        expected_scanned += 2
 
     missing_workspace = _headers(
         audit_scan_context,
@@ -183,4 +189,16 @@ def test_secret_scan_endpoint_matches_verify_access_and_scopes_workspace(
         "/api/v1/audit/verify", headers=missing_workspace
     )
     assert scan_without_workspace.status_code == verify_without_workspace.status_code == 400
-    assert audit_scan_context["path"].read_bytes() == before
+    raw = audit_scan_context["path"].read_bytes()
+    assert raw.startswith(before)
+    appended = [
+        json.loads(line).get("action")
+        for line in raw[len(before):].decode().splitlines()
+        if line.strip()
+    ]
+    assert appended == [
+        "audit.secret_scan.read",
+        "audit.verify.read",
+        "audit.secret_scan.read",
+        "audit.verify.read",
+    ]

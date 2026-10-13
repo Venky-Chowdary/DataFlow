@@ -761,10 +761,12 @@ def _samples_fit_declared_numeric(samples: list[str], logical_type: str) -> bool
             # A leading zero is data (zip codes, account numbers) and no numeric
             # carrier keeps it — this is a text column, whatever it parses as.
             return False
-        # Parse through the write path's own coercion so locale forms
-        # ("1,000.00", "2.000,50") are read exactly as the writer will read
-        # them — a second parser here would disagree with what actually lands.
-        coerced, err = apply_transform(text, "decimal")
+        # The carrier decision judges the number under the marker. The write
+        # path still refuses a bare decimal/integer transform on "$" or "%",
+        # so a currency cell is not silently stored; it is only kept off a
+        # text twin when the destination column is already numeric.
+        probe = marked if marked else text
+        coerced, err = apply_transform(probe, "decimal")
         if err:
             return False
         try:
@@ -998,6 +1000,34 @@ def infer_column(
                 "samples": non_empty[:8],
             }
 
+    # A column the decimal write path can bind is a decimal. Every sample must
+    # parse (so a stray word stays text) and at least one must carry a currency
+    # or percent marker (so a plain integer column is not relabeled). A mixed
+    # money column still qualifies: ``$1,000.00`` next to ``1,234,567`` and
+    # ``1 000 000.89``. classify_value still reports one token as VARCHAR so a
+    # phone or a stray marker is not inferred as an integer (R4-D07). A lone
+    # ``1,234`` does not parse, so it cannot pull the column into DECIMAL.
+    from services.transform_engine import (
+        _numeric_text_has_markers,
+        decimal_wire_value,
+    )
+
+    parsed_decimals = [decimal_wire_value(sample) for sample in non_empty]
+    if all(value is not None for value in parsed_decimals) and any(
+        _numeric_text_has_markers(sample) for sample in non_empty
+    ):
+        notes.append(
+            "every sample is a currency or percent literal the decimal write path binds"
+        )
+        return {
+            "name": field_name or "",
+            "logical_type": "DECIMAL",
+            "semantic_role": "currency",
+            "confidence": 0.9,
+            "notes": notes,
+            "samples": non_empty[:8],
+        }
+
     with _column_date_locale(non_empty):
         counts: Counter[str] = Counter(
             _classify_value(sample, field_name=field_name) for sample in non_empty
@@ -1190,6 +1220,16 @@ def infer_column(
             inferred = "INTEGER"
             role = "numeric"
             notes.append("8-digit values without date-ish name — not DATE")
+
+    # A present empty string is a text value. Dropping it as "no evidence"
+    # left a JSON/ARRAY vote, and the write then rejected ``""`` (CSV/TSV
+    # cannot spell NULL). Widen so the empty cell and the JSON text both land.
+    if inferred in {"JSON", "ARRAY"} and any(
+        isinstance(sample, str) and sample.strip() == "" for sample in (samples or [])
+    ):
+        inferred = "VARCHAR"
+        role = "text"
+        notes.append("empty string is a stored text value — not a JSON/ARRAY column")
 
     confidence = 0.99 if len(types) == 1 and not notes else 0.85
     if role == "string_enum":

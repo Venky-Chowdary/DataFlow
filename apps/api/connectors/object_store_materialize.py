@@ -444,7 +444,7 @@ def materialize_object_store_export(
             meta={},
             abort_error=(
                 f"{kind} export resolved no destination columns — "
-                "refuse an empty-record file"
+                "refuse a 0-column file"
             ),
             rejected_rows=0,
             coerced_null_rows=0,

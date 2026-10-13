@@ -266,8 +266,15 @@ def test_live_engines_close_quarantine_ledger_after_replay():
             assert int(r1.get("rows_written") or 0) >= 1
             assert int(r1.get("rejected") or 0) == 0
 
+            # id is the source text key unless Map stamped an integer.
+            # Comparing with a bare integer fails on VARCHAR (text = integer).
+            id_eq = (
+                "id::text = '2'"
+                if dialect == "postgresql"
+                else "CAST(id AS CHAR) = '2'"
+            )
             age2 = exec_sql(
-                cfg, [f"SELECT age FROM {q(table)} WHERE id = 2"]
+                cfg, [f"SELECT age FROM {q(table)} WHERE {id_eq}"]
             )[0][0][0]
             assert int(age2) == 25, age2
             dest_after_one = exec_sql(cfg, [f"SELECT COUNT(*) FROM {q(table)}"])[0][0][0]
@@ -299,8 +306,13 @@ def test_live_engines_close_quarantine_ledger_after_replay():
             assert r2["success"] is True
             assert int(r2.get("rejected") or 0) == 0
 
+            id_eq4 = (
+                "id::text = '4'"
+                if dialect == "postgresql"
+                else "CAST(id AS CHAR) = '4'"
+            )
             age4 = exec_sql(
-                cfg, [f"SELECT age FROM {q(table)} WHERE id = 4"]
+                cfg, [f"SELECT age FROM {q(table)} WHERE {id_eq4}"]
             )[0][0][0]
             assert int(age4) == 41, age4
             dest_final = exec_sql(cfg, [f"SELECT COUNT(*) FROM {q(table)}"])[0][0][0]

@@ -1548,7 +1548,21 @@ def copy_between_postgres(
             # transaction rolls the whole load back rather than half-applying it.
             indexes_carried: list[str] = []
             if create:
+                from connectors.sql_identifiers import pg_regclass_literal
+
                 for index_name, index_sql in index_plan:
+                    # Schema-fidelity settle emits the same CREATE INDEX at
+                    # CREATE time. Building it again aborts the load with
+                    # DuplicateTable after the rows are already in the
+                    # transaction (pgvector source_id btree is the case that
+                    # always has one).
+                    dst_cur.execute(
+                        "SELECT to_regclass(%s)",
+                        (pg_regclass_literal(dest_schema or "public", index_name),),
+                    )
+                    if dst_cur.fetchone()[0] is not None:
+                        indexes_carried.append(index_name)
+                        continue
                     dst_cur.execute(index_sql)  # nosec B608 — identifiers quoted by planner
                     indexes_carried.append(index_name)
 

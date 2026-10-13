@@ -153,19 +153,22 @@ def test_eu_locale_dot_thousands_comma_decimal(raw, expected):
 
 
 def test_dollar_cell_disambiguates_without_operator_locale():
-    # The default decimal cast does not strip a currency marker (R4-D07).
+    # A dollar sign picks US grouping. The integer transform still refuses
+    # markers (R4-D07); an explicit decimal or currency cast parses them.
     value, err = apply_transform("$1,234", "decimal")
-    assert value is None
-    assert err
+    assert err is None
+    assert str(value) == "1234"
     parsed, perr = apply_transform("$1,234", "currency")
     assert perr is None
     assert str(parsed) == "1234"
+    refused, rerr = apply_transform("$1,234", "integer")
+    assert refused is None and rerr
 
 
 def test_euro_cell_disambiguates_without_operator_locale():
     value, err = apply_transform("€1.234", "decimal")
-    assert value is None
-    assert err
+    assert err is None
+    assert str(value) == "1234"
     parsed, perr = apply_transform("€1.234", "currency")
     assert perr is None
     assert str(parsed) == "1234"

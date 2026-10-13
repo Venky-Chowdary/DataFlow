@@ -1248,6 +1248,13 @@ class MongoDBService:
         return out
 
 
+def _created_sort_stamp(value: Any) -> str:
+    """One comparable stamp. Memory jobs mix datetime and ISO strings."""
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value or "")
+
+
 class MemoryMongoDBService:
     """In-memory fallback for tests and DATAFLOW_JOB_STORE=memory.
 
@@ -1369,7 +1376,7 @@ class MemoryMongoDBService:
     def list_connectors(self) -> list[dict]:
         items = sorted(
             self._connectors.values(),
-            key=lambda c: c.get("created_at") or "",
+            key=lambda c: _created_sort_stamp(c.get("created_at")),
             reverse=True,
         )
         out = []
@@ -1700,7 +1707,7 @@ class MemoryMongoDBService:
 
         items = sorted(
             self._jobs.values(),
-            key=lambda j: j.get("created_at") or "",
+            key=lambda j: _created_sort_stamp(j.get("created_at")),
             reverse=True,
         )
         if workspace_id is not None:

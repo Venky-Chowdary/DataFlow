@@ -1595,7 +1595,11 @@ class PostgreSqlChangeStreamCdc:
         """Return ``(lsn, payload)`` rows from streaming transport or peek SQL."""
         transport = self._ensure_streaming_transport()
         if transport is not None:
-            changes = transport.poll(limit=self.batch_size)
+            # Changes committed before this poll are already in WAL. Wait until
+            # the stream has sent through that head so the first COMMIT does
+            # not hide the update and delete behind it.
+            target = self._current_wal_lsn_text()
+            changes = transport.poll(limit=self.batch_size, through_lsn=target or None)
             if changes:
                 return [(c.lsn, c.payload) for c in changes]
             # Empty poll — still valid; do not fall through to peek on the same

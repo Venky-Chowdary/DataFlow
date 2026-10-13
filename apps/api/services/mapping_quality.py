@@ -523,6 +523,10 @@ def apply_confidence_class(
         expression = "(" in str(classification.get("source_expr") or "")
         same_declared = bool(classification.get("type_same_declared"))
         hard_loss = conv in {"narrowing", "lossy", "incompatible"}
+        # Widening is a real capacity change. same_declared must not lift it
+        # into the identity band or every create-new score collapses to 0.93.
+        if conv in {"widening", "lossless"} and not hard_loss:
+            return round(min(0.90, max(conf, 0.86)), 3)
         # round(x*1.18, 2) is a SQL expression classified as a cast and sat
         # under the 0.85 floor (R3-M3). A declared same-type projection is
         # the same case. A real text→numeric cast is not lifted.
@@ -533,8 +537,6 @@ def apply_confidence_class(
             if role in {"categorical", "market_segment"}:
                 return round(min(0.88, max(conf, 0.82)), 3)
             return round(min(IDENTITY_PASSTHROUGH_CONF_CAP, max(conf, 0.91)), 3)
-        if conv in {"widening", "lossless"}:
-            return round(min(0.90, max(conf, 0.86)), 3)
         if conv in {"representation", "normalization"}:
             return round(min(0.89, max(conf, 0.82)), 3)
         return round(min(conf, IDENTITY_PASSTHROUGH_CONF_CAP), 3)

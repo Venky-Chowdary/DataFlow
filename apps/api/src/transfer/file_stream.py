@@ -405,10 +405,7 @@ def peek_file_source(
             if not headers:
                 raise ValueError("CSV file has no header row")
             total = count_csv_rows(raw, options=read_options)
-            sample = [
-                dict(zip(headers, (_csv_empty_to_none(c) for c in row)))
-                for row in rows[:100]
-            ]
+            sample = [dict(zip(headers, row)) for row in rows[:100]]
             schema = FileParser.infer_schema(sample)
             return headers, schema, total, sample
 
@@ -435,7 +432,7 @@ def peek_file_source(
             for row in rows:
                 total += 1
                 if len(preview_rows) < 100:
-                    preview_rows.append([_csv_empty_to_none(c) for c in row])
+                    preview_rows.append(list(row))
         sample = [dict(zip(headers, row)) for row in preview_rows]
         schema = FileParser.infer_schema(sample)
         return headers, schema, total, sample
@@ -689,17 +686,6 @@ def peek_file_source(
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 
-def _csv_empty_to_none(value: Any) -> Any:
-    """Delimited carriers cannot spell NULL — RFC 4180 has no such token, so an
-    empty field is absence.
-
-    Self-describing carriers (JSON, JSONL, Parquet, ORC, Avro, XML) do spell NULL
-    separately and are read verbatim: their ``""`` is a value. Blank cells bound
-    for *typed* columns are still nulled downstream by ``empty_cells_as_null``.
-    """
-    return None if value == "" else value
-
-
 def _parse_jsonl_object(line: str, line_no: int) -> dict:
     """One JSONL object. Numbers use json_loads_exact, not stdlib float()."""
     from services.value_serializer import json_loads_exact
@@ -739,9 +725,7 @@ def _iter_csv_batches(
             record = row_to_record(
                 headers, row, source_label="CSV row", missing=None
             )
-            batch.append(
-                {k: _csv_empty_to_none(v) for k, v in record.items()}
-            )
+            batch.append(record)
             if len(batch) >= chunk_size:
                 yield batch
                 batch = []
@@ -1824,9 +1808,18 @@ def stream_file_to_database(
     )
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
     # Snowflake file loads reuse one warehouse session (same as DB stream) — serial.
+    # PostgreSQL overwrite is one transaction: TRUNCATE and every insert commit
+    # together (R4-D06). A worker pool opens a connection per batch, and each
+    # of those connections truncates then commits its own slice, so the last
+    # batch is the only one a reader still sees. The database stream already
+    # forces one connection; file chunks must do the same or a shaped CSV
+    # lands as the last page only.
+    pg_overwrite_one_txn = dest_type in ("postgresql", "redshift") and bool(
+        (getattr(destination, "extra", None) or {}).get("pg_overwrite_in_transaction")
+    )
     # Public TCP proxies (Railway, Neon, etc.) drop when multiple bulk writers share
     # the same host — force a single writer connection for those destinations.
-    if dest_type in ("sqlite", "snowflake"):
+    if dest_type in ("sqlite", "snowflake") or pg_overwrite_one_txn:
         max_workers = 1
     else:
         try:

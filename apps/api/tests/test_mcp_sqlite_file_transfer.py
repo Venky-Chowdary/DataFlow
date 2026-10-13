@@ -367,7 +367,15 @@ def test_mcp_loads_tsv_json_and_jsonl_then_pauses_and_deletes_the_schedule(mcp_c
     assert saved["ok"] is True, saved
 
     _load(client, "sample_payments.tsv", "payments_tsv")
-    _load(client, "sample_hr", "hr")
+    _load(
+        client,
+        "sample_hr",
+        "hr",
+        pii_acknowledgement={
+            "approved_by": "qe",
+            "reason": "Fixture load of employee names the compliance gate named.",
+        },
+    )
 
     refused, reason = _call(
         client,
@@ -456,6 +464,10 @@ def test_mcp_loads_tsv_json_and_jsonl_then_pauses_and_deletes_the_schedule(mcp_c
             "dest_table": "hr_wh",
             "sync_mode": "full_refresh_append",
             "cadence": "daily at 02:00 UTC",
+            "pii_acknowledgement": {
+                "approved_by": "qe",
+                "reason": "Nightly copy of the employee names already acknowledged.",
+            },
         },
     )
     created = _mcp(client, "confirm_action", {"ack_id": scheduled["ack_id"], "reason": "qe"})

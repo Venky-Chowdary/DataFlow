@@ -481,6 +481,9 @@ def _build_widen_ddl(
         return f"ALTER TABLE {table_ref} ALTER COLUMN {col_q} TYPE {new_type}{using}"
 
     if dialect in ("mysql", "mariadb"):
+        # MySQL MODIFY replaces the whole column. Restate nullability and the
+        # default or a fractional-second widen silently drops NOT NULL and
+        # CURRENT_TIMESTAMP (a PG ``now()`` carried onto DATETIME(6)).
         return f"ALTER TABLE {table_ref} MODIFY COLUMN {col_q} {new_type}"
 
     if dialect in ("sqlserver", "mssql"):
@@ -657,6 +660,63 @@ def _fetch_existing_columns(
     return {}
 
 
+def _mysql_preserved_column_clause(
+    cursor: Any,
+    schema: str | None,
+    table_name: str,
+    column: str,
+) -> str:
+    """Nullability, default, and ON UPDATE to restate on a MySQL MODIFY.
+
+    ``MODIFY COLUMN col <type>`` replaces the column definition. Omitting
+    ``NOT NULL`` and ``DEFAULT`` drops them. A row that is not an
+    information_schema nullability probe (callers' test doubles) adds nothing.
+    """
+    try:
+        cursor.execute(
+            """SELECT is_nullable, column_default, extra
+               FROM information_schema.columns
+               WHERE table_schema = COALESCE(NULLIF(%s, ''), DATABASE())
+                 AND table_name = %s AND column_name = %s""",
+            (schema or "", table_name, column),
+        )
+        rows = cursor.fetchall()
+    except Exception as exc:  # noqa: BLE001 — widen still changes the type
+        logger.debug("MySQL column attribute probe failed: %s", exc)
+        return ""
+    if not rows:
+        return ""
+    row = rows[0]
+    if not row or len(row) < 3:
+        return ""
+    nullable, default, extra = row[0], row[1], row[2]
+    flag = str(nullable or "").strip().upper()
+    if flag not in {"YES", "NO"}:
+        return ""
+    parts: list[str] = []
+    if flag == "NO":
+        parts.append("NOT NULL")
+    extra_s = str(extra or "")
+    if default is not None and str(default).strip() != "":
+        expr = str(default).strip()
+        if "DEFAULT_GENERATED" in extra_s.upper():
+            if re.fullmatch(r"[A-Za-z0-9_(). ]+", expr):
+                parts.append(f"DEFAULT {expr}")
+        else:
+            literal = expr.replace("'", "''")
+            parts.append(f"DEFAULT '{literal}'")
+    on_update = re.search(
+        r"on update\s+current_timestamp(?:\(\d+\))?",
+        extra_s,
+        flags=re.IGNORECASE,
+    )
+    if on_update:
+        parts.append(on_update.group(0))
+    if re.search(r"auto_increment", extra_s, flags=re.IGNORECASE):
+        parts.append("AUTO_INCREMENT")
+    return (" " + " ".join(parts)) if parts else ""
+
+
 def widen_existing_columns_native(
     cursor: Any,
     dialect: str,
@@ -750,6 +810,10 @@ def widen_existing_columns_native(
             # Session-level lock timeouts are now configured by each driver's
             # connection guard (e.g. apply_postgres_session_guards / apply_mysql_session_guards)
             # so ALTER COLUMN cannot hang forever on a contended table lock.
+            if dialect in ("mysql", "mariadb"):
+                ddl += _mysql_preserved_column_clause(
+                    cursor, schema, table_name, col
+                )
             cursor.execute(ddl)
             log.append(ddl)
             logger.debug(

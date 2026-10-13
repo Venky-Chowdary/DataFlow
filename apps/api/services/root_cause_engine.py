@@ -1656,15 +1656,28 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
     # at all: earlier code minted a phantom "Duplicate identity keys" root that
     # hid the real message (QA T11/T08); removing that left a bare blocker with
     # no remediation. Give the operator the contract root with the actual fix.
+    def _g9_contract_blocker(blocker: dict) -> bool:
+        if str(blocker.get("id") or "") != "g9_sync_contract":
+            return False
+        if re.search(
+            r"missing (?:primary key|cursor)|sync mode contract incomplete",
+            str(blocker.get("message") or ""),
+            re.I,
+        ):
+            return True
+        # A cursor that cannot capture updates is the same incomplete contract.
+        # Matching only "missing cursor" left that block with no root (the
+        # operator saw the gate and no fix).
+        details = blocker.get("details") if isinstance(blocker.get("details"), dict) else {}
+        return any(
+            isinstance(verdict, dict) and verdict.get("status") == "block"
+            for verdict in details.get("cursor_semantics") or []
+        )
+
     contract_blockers = [
         b
         for b in [*blockers, *[g for g in gates if g.get("status") == "block"]]
-        if str(b.get("id") or "") == "g9_sync_contract"
-        and re.search(
-            r"missing (?:primary key|cursor)|sync mode contract incomplete",
-            str(b.get("message") or ""),
-            re.I,
-        )
+        if _g9_contract_blocker(b)
     ]
     if contract_blockers:
         absorbed = sorted(

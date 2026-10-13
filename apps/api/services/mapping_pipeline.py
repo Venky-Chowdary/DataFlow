@@ -519,6 +519,12 @@ def _repair_unparseable_numeric_targets(
                     and not _is_create_new_mapping(m)
                     and tgt.lower() in {t.lower() for t in tgt_by}
                 )
+                if existing_dest_column and src.lower() == tgt.lower():
+                    # The destination already has this column. A non-numeric
+                    # sample is a row to quarantine, not a reason to ADD a
+                    # ``qty_text`` twin beside ``qty INTEGER`` (R4-D08).
+                    out.append(m)
+                    continue
                 if not existing_dest_column:
                     # Nothing to sit beside: the column is created by this run, so
                     # widen its own type instead of inventing a ``*_text`` twin the
@@ -818,7 +824,11 @@ def run_mapping_pipeline(
 
     if source_samples and source_columns:
         from services.data_profiler import merge_profiler_schema, profile_dataset
-        from services.value_serializer import evidence_samples, is_null_evidence
+        from services.value_serializer import (
+            SQL_NULL_SENTINEL,
+            evidence_samples,
+            is_null_evidence,
+        )
 
         # Type evidence must drop NULL (a sentinel is not a VARCHAR token).
         # The column profile must not: stripping first reported null_rate=0.0
@@ -830,6 +840,18 @@ def run_mapping_pipeline(
                 continue
             empty = sum(1 for v in seq if is_null_evidence(v))
             observed_null_rate[col] = round(empty / len(seq), 3)
+        # A present ``""`` is text, not missing evidence. Stripping it before
+        # the profiler let a JSON-looking column forget the empty cell and
+        # then reject that cell at write time. The SQL-null sentinel is not
+        # that cell: JSON ``null`` must stay a JSON column.
+        present_empty_text = {
+            col
+            for col, vals in source_samples.items()
+            if any(
+                isinstance(v, str) and v != SQL_NULL_SENTINEL and not str(v).strip()
+                for v in (vals or [])
+            )
+        }
         source_samples = {
             col: evidence_samples(vals) for col, vals in source_samples.items()
         }
@@ -929,6 +951,10 @@ def run_mapping_pipeline(
                         merged_schema[name] = declared
                         continue
                     declared_source_types[name] = str(upgraded)
+            for name in present_empty_text:
+                if normalize_logical_type(merged_schema.get(name)) in {"json", "array"}:
+                    merged_schema[name] = "VARCHAR"
+                    declared_source_types[name] = "VARCHAR"
             source_schemas = [
                 {
                     **s,
@@ -1625,9 +1651,21 @@ def run_mapping_pipeline(
         enriched_mappings = fixed
     # Reassert pending-Studio honesty after sample/quality boosts — never leave
     # invented preserve @ 0.99 when dest schema was never loaded.
+    from services.type_system import destination_is_file_export
+
     fixed_pending: list[dict] = []
     for m in enriched_mappings:
         row = dict(m)
+        # An object store with no catalog read is not a proven type match.
+        # Create-new still plans a carrier; calling that preserve invented a
+        # fidelity verdict the destination never confirmed.
+        if (
+            destination_table_exists is None
+            and destination_is_file_export(destination_db_type)
+            and str(row.get("fidelity") or "") == "preserve"
+        ):
+            row["fidelity"] = FIDELITY_DEST_TYPE_UNREAD
+            row["fidelity_reason"] = DEST_TYPE_UNREAD_REASON
         if str(row.get("assignment_strategy") or "") == "pending_dest_schema":
             row["target_type"] = ""
             row["create_new"] = False

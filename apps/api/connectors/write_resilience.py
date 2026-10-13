@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import logging
 import os
-from services.brand_env import getenv_brand
+import threading
 import time
+
+from services.brand_env import getenv_brand
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -220,6 +222,86 @@ def should_retry_connection_lost(
     return attempt < chunk_reconnect_attempts(proxy=proxy)
 
 
+class PgOverwriteTransaction:
+    """One PostgreSQL full-refresh overwrite, held until the load finishes.
+
+    TRUNCATE and the inserts that follow it commit together. Readers stay on
+    the previous table until :meth:`finish`. The state lives on this object,
+    registered by connection, and is never written onto the driver connection.
+    """
+
+    def __init__(self) -> None:
+        self.active = False
+        self.truncated = False
+        self.job_id = ""
+
+    def begin(self, *, job_id: str = "") -> None:
+        """Hold every commit until :meth:`finish`. Safe to call on each batch."""
+        self.active = True
+        if job_id and not self.job_id:
+            self.job_id = str(job_id)
+
+    def note_truncated(self) -> None:
+        """Emptying is done for this load: an existing table was truncated, or
+        this run is creating the table and must not truncate its own rows.
+        """
+        self.truncated = True
+        self.active = True
+
+    def finish(self, conn: Any, *, success: bool) -> None:
+        if conn is None or not self.active:
+            unbind_overwrite_transaction(conn)
+            return
+        try:
+            if success:
+                conn.commit()
+                if self.job_id:
+                    try:
+                        from services.auto_create_lifecycle import (
+                            mark_auto_create_committed,
+                        )
+
+                        mark_auto_create_committed(self.job_id)
+                    except Exception:
+                        logger.debug("auto_create commit mark skipped", exc_info=True)
+            else:
+                conn.rollback()
+        except Exception as exc:
+            logger.warning(
+                "PostgreSQL overwrite transaction finish failed: %s", exc, exc_info=exc
+            )
+        finally:
+            self.active = False
+            self.truncated = False
+            self.job_id = ""
+            unbind_overwrite_transaction(conn)
+
+
+_OVERWRITE_TXNS: dict[int, PgOverwriteTransaction] = {}
+_OVERWRITE_LOCK = threading.Lock()
+
+
+def bind_overwrite_transaction(conn: Any, txn: PgOverwriteTransaction) -> None:
+    if conn is None:
+        return
+    with _OVERWRITE_LOCK:
+        _OVERWRITE_TXNS[id(conn)] = txn
+
+
+def overwrite_transaction_for(conn: Any) -> PgOverwriteTransaction | None:
+    if conn is None:
+        return None
+    with _OVERWRITE_LOCK:
+        return _OVERWRITE_TXNS.get(id(conn))
+
+
+def unbind_overwrite_transaction(conn: Any) -> None:
+    if conn is None:
+        return
+    with _OVERWRITE_LOCK:
+        _OVERWRITE_TXNS.pop(id(conn), None)
+
+
 def finish_held_overwrite(conn: Any, *, success: bool) -> None:
     """Commit or roll back a PostgreSQL overwrite that deferred its commits.
 
@@ -228,19 +310,10 @@ def finish_held_overwrite(conn: Any, *, success: bool) -> None:
     stream holds the connection across batches and closes it at the end; a
     close without this commit would roll the whole overwrite back.
     """
-    if conn is None or not getattr(conn, "_df_overwrite_txn", False):
+    txn = overwrite_transaction_for(conn)
+    if txn is None:
         return
-    try:
-        if success:
-            conn.commit()
-        else:
-            conn.rollback()
-    except Exception as exc:
-        logger.warning("PostgreSQL overwrite transaction finish failed: %s", exc, exc_info=exc)
-    try:
-        conn._df_overwrite_txn = False
-    except Exception:
-        pass
+    txn.finish(conn, success=success)
 
 
 def close_quietly(conn: Any) -> None:

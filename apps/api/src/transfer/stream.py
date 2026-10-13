@@ -2412,7 +2412,15 @@ def _stream_database_transfer_impl(
     # Snowflake reuses one connection for the job — must stay serial.
     # Iceberg catalog commits are snapshot-isolated; concurrent writers conflict.
     # Public TCP proxies drop under concurrent bulk writers — force one connection.
-    if dest_type in ("sqlite", "snowflake", "iceberg"):
+    # PostgreSQL overwrite is one transaction: TRUNCATE and every insert
+    # commit together (R4-D06). A worker pool opens a connection per batch,
+    # and each of those connections truncates then commits its own slice, so
+    # the last batch is the only one a reader still sees. Wide rows shrink
+    # the chunk to one row and that is how a 3-row LOB copy landed as 1.
+    pg_overwrite_one_txn = dest_type in ("postgresql", "redshift") and bool(
+        (getattr(destination, "extra", None) or {}).get("pg_overwrite_in_transaction")
+    )
+    if dest_type in ("sqlite", "snowflake", "iceberg") or pg_overwrite_one_txn:
         max_workers = 1
     else:
         try:
