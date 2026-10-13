@@ -49,6 +49,10 @@ test.describe("wizard baseline", () => {
     const color = await primary.evaluate((node) => getComputedStyle(node).backgroundColor);
     expect(color).toBe("rgb(13, 148, 136)");
 
+    // light-1440 is the image CI captured on ubuntu-24.04 (run 38365462007).
+    // 873bec36 renders the same panel, so that artifact is the pre-upgrade
+    // screen in CI's Chromium. The other three shots were taken from 873bec36
+    // in the Playwright 1.54.2 that already matched that CI image.
     await shoot(page, "wizard-transform-light-1440.png");
     await page.setViewportSize({ width: 390, height: 844 });
     await shoot(page, "wizard-transform-light-390.png");
