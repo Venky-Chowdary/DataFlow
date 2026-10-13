@@ -1808,9 +1808,18 @@ def stream_file_to_database(
     )
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
     # Snowflake file loads reuse one warehouse session (same as DB stream) — serial.
+    # PostgreSQL overwrite is one transaction: TRUNCATE and every insert commit
+    # together (R4-D06). A worker pool opens a connection per batch, and each
+    # of those connections truncates then commits its own slice, so the last
+    # batch is the only one a reader still sees. The database stream already
+    # forces one connection; file chunks must do the same or a shaped CSV
+    # lands as the last page only.
+    pg_overwrite_one_txn = dest_type in ("postgresql", "redshift") and bool(
+        (getattr(destination, "extra", None) or {}).get("pg_overwrite_in_transaction")
+    )
     # Public TCP proxies (Railway, Neon, etc.) drop when multiple bulk writers share
     # the same host — force a single writer connection for those destinations.
-    if dest_type in ("sqlite", "snowflake"):
+    if dest_type in ("sqlite", "snowflake") or pg_overwrite_one_txn:
         max_workers = 1
     else:
         try:
