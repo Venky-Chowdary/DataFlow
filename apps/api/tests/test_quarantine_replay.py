@@ -164,9 +164,13 @@ def test_quarantine_replay_empty_uses_stored_details(tmp_path: Path):
     )
     assert replay.status_code == 200, replay.text
     body = replay.json()
-    assert body["success"] is True
+    # Empty body replays the stored quarantine row. The value is still not an
+    # integer, so nothing lands. A replay that writes 0 rows is not a success
+    # (QA R2-061) — the attempt is still recorded.
     assert body["rows_attempted"] >= 1
     assert body["job_id"] != job_id
+    assert body["success"] is False
+    assert int(body.get("rows_written") or 0) == 0
 
 
 def test_quarantine_replay_no_details_400(tmp_path: Path):
