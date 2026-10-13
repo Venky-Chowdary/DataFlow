@@ -407,6 +407,17 @@ async def _run_lifecycle_confirm(
 
 
 @router.post("/confirm")
+def lifecycle_confirm_succeeded(result: dict) -> tuple[bool, dict]:
+    """``applied: false`` means the confirm changed nothing (R4-D11)."""
+    applied = result.get("applied") if isinstance(result, dict) else None
+    if applied is False:
+        out = dict(result)
+        if not out.get("status"):
+            out["status"] = "not_applied"
+        return False, out
+    return True, result if isinstance(result, dict) else {}
+
+
 async def copilot_confirm(
     request: ConfirmActionRequest,
     http_request: Request,
@@ -692,7 +703,11 @@ async def copilot_confirm(
             reason=request.reason or "confirmed",
             result=result,
         )
-        return {"ok": True, "idempotent": False, "kind": kind, **result}
+        # Confirm itself succeeded, but a CDC prepare that changed nothing
+        # (role is not superuser, wal_level stayed replica) is not "ok"
+        # (R4-D11). Other lifecycle results omit ``applied``.
+        ok, result = lifecycle_confirm_succeeded(result)
+        return {"ok": ok, "idempotent": False, "kind": kind, **result}
 
     ledger.release_claim(ack_id)
     raise HTTPException(status_code=400, detail=f"Unsupported approval kind: {kind}")

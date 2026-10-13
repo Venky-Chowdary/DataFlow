@@ -820,6 +820,15 @@ TOOL_DEFINITIONS: list[dict] = [
                         "not only on quarantine replay."
                     ),
                 },
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Accept additive schema drift for this schedule. "
+                        "Hard-breaking changes (type change, narrowing, NOT NULL) "
+                        "still block. The same flag on plan_transfer and start_transfer "
+                        "accepts drift for a manual run."
+                    ),
+                },
             },
             "required": ["cadence"],
         },
@@ -1863,13 +1872,22 @@ class DataPilotTools:
                     "create_connector readable-object check skipped: %s", exc
                 )
         preview_host, preview_port, url_password = _preview_endpoint(draft)
+        preview_type = str(draft.get("type") or "").strip().lower().replace("-", "_")
+        preview_user = draft.get("username") or ""
+        if preview_type in {
+            "s3", "amazon_s3", "aws_s3", "minio", "s3_compatible",
+            "gcs", "google_cloud_storage", "adls", "azure_blob_storage",
+            "azure_data_lake", "azure_data_lake_storage",
+        }:
+            # S3 stores the access key id in username. The preview must not echo it.
+            preview_user = ""
         safe_preview = {
             "name": draft["name"],
             "type": draft["type"],
             "host": preview_host,
             "port": preview_port,
             "database": draft.get("database") or "",
-            "username": draft.get("username") or "",
+            "username": preview_user,
             "ssl": bool(draft.get("ssl")),
             "auth_mode": draft.get("auth_mode") or "",
             "schema": draft.get("schema") or "",
@@ -3739,6 +3757,7 @@ class DataPilotTools:
         applied_rules: list | None = None,
         limit: int = 0,
         column_transforms: dict | None = None,
+        schema_drift_acknowledged: bool = False,
     ) -> ToolResult:
         from .schedule_tools import create_schedule
 
@@ -3771,6 +3790,7 @@ class DataPilotTools:
             applied_rules=applied_rules,
             limit=limit,
             column_transforms=column_transforms,
+            schema_drift_acknowledged=schema_drift_acknowledged,
         )
 
     def _analyze_result(

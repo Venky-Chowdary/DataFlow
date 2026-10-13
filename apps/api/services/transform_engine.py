@@ -429,6 +429,7 @@ def ambiguous_number_columns(
     rows: list[dict] | None,
     columns: list[str] | None = None,
     number_locale: str = "",
+    column_types: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Columns whose samples fail Auto grouping and look numeric.
 
@@ -437,8 +438,11 @@ def ambiguous_number_columns(
     if _active_number_locale(number_locale) or not rows:
         return []
     cols = columns or (list(rows[0].keys()) if rows and isinstance(rows[0], dict) else [])
+    declared = column_types or {}
     findings: list[dict[str, Any]] = []
     for col in cols:
+        if _declared_text_column(declared, str(col)):
+            continue
         samples: list[str] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -464,10 +468,20 @@ def ambiguous_number_columns(
 NUMBER_LOCALE_DEFAULT = "US"
 
 
+def _declared_text_column(column_types: dict[str, str], column: str) -> bool:
+    raw = str(column_types.get(column) or "").strip()
+    if not raw:
+        return False
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(raw) in {"string", "text"}
+
+
 def assumed_number_locale(
     rows: list[dict] | None,
     columns: list[str] | None = None,
     number_locale: str = "",
+    column_types: dict[str, str] | None = None,
 ) -> str:
     """``US`` when a sample still holds Auto-ambiguous numbers, else ''.
 
@@ -479,7 +493,9 @@ def assumed_number_locale(
     """
     if _active_number_locale(number_locale) or not rows:
         return ""
-    if not ambiguous_number_columns(rows, columns, number_locale=number_locale):
+    if not ambiguous_number_columns(
+        rows, columns, number_locale=number_locale, column_types=column_types
+    ):
         return ""
     return NUMBER_LOCALE_DEFAULT
 
@@ -1076,7 +1092,26 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
     return text
 
 
-def _parse_decimal(value: str) -> str | None:
+def _numeric_text_has_markers(value: str) -> bool:
+    """Percent, currency, or accounting parentheses — not a plain number.
+
+    Grouping (``1,234.56``) and outer whitespace are not markers. Callers that
+    declared ``currency`` / ``percentage`` still parse those shapes; the
+    default integer and decimal transforms do not (R4-D07).
+    """
+    text = unicodedata.normalize("NFKC", value or "").strip()
+    if not text:
+        return False
+    if "%" in text:
+        return True
+    if text.startswith("(") and text.endswith(")"):
+        return True
+    return _CURRENCY_RE.search(text) is not None
+
+
+def _parse_decimal(value: str, *, allow_markers: bool = True) -> str | None:
+    if not allow_markers and _numeric_text_has_markers(value):
+        return None
     text = value.strip()
     # Tuple / point / coordinate strings such as (1,2) or (1, 2) are not numbers.
     if text.startswith("(") and text.endswith(")") and "," in text and "." not in text:
@@ -1135,7 +1170,9 @@ def currency_samples_carry_markers(samples: list[str] | None) -> bool:
 
 
 
-def _parse_integer(value: str) -> int | None:
+def _parse_integer(value: str, *, allow_markers: bool = True) -> int | None:
+    if not allow_markers and _numeric_text_has_markers(value):
+        return None
     plain = value.strip()
     # An unadorned ASCII integer has nothing for NFKC, currency, accounting or
     # separator resolution to change, and its digit count is inside the wire
@@ -1415,6 +1452,12 @@ def _parse_json(value: Any) -> str | None:
             # text, per this codebase's Decimal-to-JSON policy.
             parsed = json_loads_exact(value, parse_constant=_json_reject_nonfinite)
         except json.JSONDecodeError:
+            # ``{bad json`` is a broken document, not a Mongo bare scalar.
+            # Wrapping it as a JSON string rewrote the quarantine ledger and
+            # the next replay saw the wrapped text (R4-D04).
+            stripped = value.strip()
+            if stripped[:1] in "{[":
+                raise ValueError(f"Invalid JSON: {stripped[:120]!r}") from None
             parsed = value  # wrap the raw scalar as a JSON string literal
         except ValueError:
             # Non-finite NaN/Infinity via parse_constant — refuse silent null.
@@ -2106,7 +2149,11 @@ def apply_transform(
     if transform_l in _TYPED_TRANSFORMS:
         low = text.lower()
         if low in NULL_SENTINELS:
-            if transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
+            # JSON literal ``null`` is a value. The missing-cell sentinel
+            # table must not reject it (R4-D03). NaN / Infinity stay rejected.
+            if transform_l == "json" and low == "null":
+                pass
+            elif transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
                 pass  # fall through to typed parsers that reject non-finite
             else:
                 return None, f"Null sentinel {text!r} cannot coerce to {transform_l}"
@@ -2115,7 +2162,7 @@ def apply_transform(
         bool_as_number = canonical_boolean_as_number(text)
         if bool_as_number is not None:
             return Decimal(bool_as_number), None
-        parsed = _parse_decimal(text)
+        parsed = _parse_decimal(text, allow_markers=False)
         if parsed is None:
             return None, strict_decimal_comma_reason(text) or f"Invalid decimal: {text!r}"
         # Return Decimal so bind does not re-apply locale to the canonical
@@ -2132,7 +2179,7 @@ def apply_transform(
         bool_as_number = canonical_boolean_as_number(text)
         if bool_as_number is not None:
             return bool_as_number, None
-        parsed_int = _parse_integer(text)
+        parsed_int = _parse_integer(text, allow_markers=False)
         if parsed_int is None:
             return None, integer_parse_failure_reason(text)
         return parsed_int, None

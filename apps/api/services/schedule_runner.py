@@ -455,7 +455,10 @@ def build_schedule_request(sched, src: dict, dst: dict):
         enforce_contract=bool(contract_id),
         require_signed_contract=require_signed,
         compliance_acknowledged=acks.compliance,
-        schema_drift_acknowledged=acks.schema_drift,
+        schema_drift_acknowledged=(
+            acks.schema_drift
+            or bool(getattr(sched, "schema_drift_acknowledged", False))
+        ),
         fk_risk_acknowledged=acks.fk_risk,
         acknowledgment_actor=acks.actor if acks.any_claimed else "",
         acknowledgment_reason=acks.reason if acks.any_claimed else "",
@@ -1353,8 +1356,8 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
             )
             sched = get_schedule(schedule_id) or sched
 
-    # Concurrency guard: refuse to start when this schedule, another writer
-    # on the same dest object, or the same source→dest pair is already live.
+    # Concurrency guard: refuse to start when this schedule or another writer
+    # on the same dest object is already live.
     from services.schedule_store import (
         describe_claim_holder,
         dispatch_in_flight,
@@ -1489,6 +1492,7 @@ def _run_due_schedules() -> int:
     if not _acquire_scheduler_lock():
         logger.warning("Scheduler lock held by another instance; skipping this beat")
         return 0
+    due_ids: list[str] = []
     try:
         from services.schedule_approvals import release_same_declaration_source_drift
 
@@ -1513,18 +1517,24 @@ def _run_due_schedules() -> int:
         from services.schedule_store import unstick_completion_pinned_schedules
 
         unstick_completion_pinned_schedules()
-        started = 0
         for sched in due_schedules():
             if _claim_backed_off(sched.id):
                 continue
-            try:
-                if _run_schedule(sched.id):
-                    started += 1
-            except Exception:
-                logger.exception("Failed to run schedule %s", sched.id)
-        return started
+            due_ids.append(sched.id)
     finally:
         _release_scheduler_lock()
+    # Preflight and dispatch sit outside the fleet lock. Holding it across
+    # both made the second due schedule wait out the first schedule's
+    # planning (R3-H2: runs started 4–48s late). The per-schedule claim
+    # still prevents a double fire.
+    started = 0
+    for schedule_id in due_ids:
+        try:
+            if _run_schedule(schedule_id):
+                started += 1
+        except Exception:
+            logger.exception("Failed to run schedule %s", schedule_id)
+    return started
 
 
 def _clear_stale_running_schedules() -> None:

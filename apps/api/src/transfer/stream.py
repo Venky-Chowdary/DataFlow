@@ -3097,6 +3097,10 @@ def _stream_database_transfer_impl(
         for state in (sf_conn_state, pg_conn_state):
             conn = state.get("conn")
             if conn is not None:
+                if state is pg_conn_state:
+                    from connectors.write_resilience import finish_held_overwrite
+
+                    finish_held_overwrite(conn, success=row_path_ok)
                 try:
                     conn.close()
                 except Exception as exc:

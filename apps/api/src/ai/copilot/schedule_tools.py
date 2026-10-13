@@ -84,6 +84,7 @@ def create_schedule(
     applied_rules: list[str] | None = None,
     limit: int = 0,
     column_transforms: dict[str, Any] | None = None,
+    schema_drift_acknowledged: bool = False,
 ):
     """Stage a pipeline schedule for explicit Confirm. This creates nothing itself."""
     tool = "create_schedule"
@@ -148,6 +149,7 @@ def create_schedule(
         rule_questions=rule_questions,
         applied_rules=applied_rules,
         column_transforms=column_transforms,
+        schema_drift_acknowledged=bool(schema_drift_acknowledged),
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)
@@ -221,6 +223,14 @@ def create_schedule(
     label_name = (name or "").strip() or _schedule_name(
         source.get("table") or "", destination.get("table") or "", spec
     )
+    try:
+        # Uniqueness used to run only when Confirm wrote the row, so staging
+        # accepted a second pipeline with the same name (R2-SCHED-DUP).
+        from services.schedule_store import assert_unique_schedule_name
+
+        assert_unique_schedule_name(label_name)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
     payload: dict[str, Any] = {
         "name": label_name,
         "source_connector_id": source["connector_id"],
@@ -250,6 +260,7 @@ def create_schedule(
         "procedure_params": source.get("procedure_params") or {},
         "contract_id": str(bound.get("contract_id") or ""),
         "require_signed_contract": bool(bound.get("require_signed_contract", False)),
+        "schema_drift_acknowledged": bool(schema_drift_acknowledged),
         "enabled": True,
     }
     preview: dict[str, Any] = {

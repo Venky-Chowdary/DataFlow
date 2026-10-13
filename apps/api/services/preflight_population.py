@@ -45,7 +45,20 @@ def _cdc_log_capture_gates(
             ),
             mappings=mappings,
         )
-        if not table or not keys:
+        # wal_level is a server property. A PK that Map has not resolved yet
+        # must not skip the probe — Neon (wal_level=replica) then passed
+        # preflight and failed later as "Duplicate identity keys" (R3-H1).
+        postgresish = str(source_type or "").strip().lower().replace("-", "_") in {
+            "postgresql",
+            "postgres",
+            "citus",
+            "cockroach",
+            "cockroachdb",
+            "greenplum",
+            "timescaledb",
+            "neon",
+        }
+        if not table or (not keys and not postgresish):
             continue
         probe = probe_log_capture(
             source_type,

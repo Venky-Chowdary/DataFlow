@@ -1479,6 +1479,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         quarantine_sample_incomplete,
         record_replay,
         replay_row_identity,
+        restore_replay_source_cells,
+        snapshot_quarantine_cells,
         VERDICT_CLOSED,
     )
 
@@ -1531,6 +1533,9 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             ),
         )
     prior_closure = job_quarantine_closure(job) or {}
+    # Snapshot before the write. Transforms and the child quarantine image
+    # must not replace these cells on the parent ledger (R4-D04).
+    source_cell_snaps = snapshot_quarantine_cells(details)
 
     if not record_rows:
         records, columns = _quarantine_details_to_records(details, body.transform_overrides)
@@ -1746,7 +1751,11 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             prior=prior_closure,
         )
         compact = compact_replay_closure(recorded)
-        stamped_findings = list(recorded.get("findings") or [])
+        stamped_findings = restore_replay_source_cells(
+            list(recorded.get("findings") or []),
+            source_cell_snaps,
+            list(dest_summary.get("rejected_details") or []),
+        )
         landed_ids = set(recorded.get("promoted_identities") or [])
 
         promote_meta: dict[str, Any] = {}

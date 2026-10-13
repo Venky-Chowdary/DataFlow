@@ -409,6 +409,13 @@ def build_sync_contract_gate(
             issues.append("CDC requires a database source (not file/cloud)")
         elif src and src not in CDC_CAPABLE_SOURCES:
             issues.append(f"CDC is not supported for source type '{src}'")
+        from services.type_system import destination_is_file_export
+
+        if destination_is_file_export(dest):
+            issues.append(
+                "Object stores have no write-ahead log or replication slot, "
+                "so CDC cannot land there. Use full refresh or incremental append."
+            )
     if missing_cursor:
         issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
     if requires_primary_key and not contracts and not catalog_identity:
@@ -435,7 +442,7 @@ def build_sync_contract_gate(
         return {
             "id": "g9_sync_contract",
             "status": block_status,
-            "message": "Sync mode contract incomplete",
+            "message": issues[0],
             "duration_ms": 0,
             "details": {
                 "issues": issues,

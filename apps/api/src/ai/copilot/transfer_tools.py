@@ -759,6 +759,15 @@ def plan_transfer(
     except AmbiguousConnectorError as exc:
         return _tool_result(tool, success=False, error=exc.message)
 
+    from connectors.sql_identifiers import unsafe_destination_identifier_reason
+
+    ident_err = unsafe_destination_identifier_reason(
+        str(dst_conn.get("type") or dst_conn.get("format") or ""),
+        dst_table,
+    )
+    if ident_err:
+        return _tool_result(tool, success=False, error=ident_err)
+
     if (
         not callable_plan
         and str(src_conn.get("id")) == str(dst_conn.get("id"))

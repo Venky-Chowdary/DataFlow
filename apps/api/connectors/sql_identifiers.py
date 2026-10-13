@@ -11,6 +11,46 @@ import re
 _IDENT_RE = re.compile(r"[^a-zA-Z0-9_]")
 
 
+_PLAIN_SQL_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def unsafe_sql_identifier_reason(name: str) -> str | None:
+    """Refuse a destination name the writer would silently rename.
+
+    A quote or comment in the table name does not inject (the writer
+    replaces illegal characters), but the plan, preview, and job kept the
+    raw string while the table was created under a different spelling
+    (R4-D10). Case-only differences are legal unquoted SQL and are allowed.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return None
+    parts = [part for part in raw.split(".") if part]
+    if parts and all(_PLAIN_SQL_IDENT.fullmatch(part) for part in parts):
+        return None
+    shown = sanitize_identifier(raw.replace(".", "_"))
+    return (
+        f"Destination name {raw!r} is not a plain SQL identifier. "
+        f"The writer would store it as {shown!r}. "
+        "Use that spelling, or a name of letters, digits, and underscores."
+    )
+
+
+def unsafe_destination_identifier_reason(dest_type: str, name: str) -> str | None:
+    """SQL catalogs only. Object keys and document names keep their own rules."""
+    from services.db_type_utils import NO_RELATIONAL_DDL_DESTS, normalize_dest_kind
+    from services.type_system import destination_is_file_export
+
+    kind = normalize_dest_kind(dest_type)
+    if not kind:
+        return None
+    if destination_is_file_export(kind) or kind in NO_RELATIONAL_DDL_DESTS:
+        return None
+    if kind in {"mongodb", "dynamodb", "redis", "elasticsearch", "opensearch", "kafka"}:
+        return None
+    return unsafe_sql_identifier_reason(name)
+
+
 def sanitize_identifier(name: str, preserve_case: bool = False, *, max_len: int = 63) -> str:
     """Make an identifier legal without making two distinct names one.
 

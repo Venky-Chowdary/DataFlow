@@ -2205,7 +2205,10 @@ def write_mapped_rows(
                         sql.SQL(", ").join(sql.Identifier(c) for c in conflict_cols),
                     )
                 )
-        conn.commit()
+        # A deferred overwrite already holds TRUNCATE + inserted rows on this
+        # connection. Committing setup here would publish that prefix (R4-D06).
+        if not getattr(conn, "_df_overwrite_txn", False):
+            conn.commit()
 
     try:
         if connection is not None:
@@ -2262,6 +2265,8 @@ def write_mapped_rows(
                     _run_setup(cur)
                     break
                 except Exception as setup_exc:
+                    if getattr(conn, "_df_overwrite_txn", False):
+                        raise
                     try:
                         conn.rollback()
                     except Exception as exc:
@@ -2487,6 +2492,45 @@ def write_mapped_rows(
                         warnings=transform_errors,
                     )
 
+            if (
+                bool(_kwargs.get("pg_overwrite_in_transaction"))
+                and table_existed
+                and port != 5439
+                and not getattr(conn, "_df_overwrite_truncated", False)
+            ):
+                from connectors.sql_identifiers import quote_table_ref
+                from connectors.table_manager import overwrite_empty_statements
+
+                quoted = quote_table_ref(table_name, schema, dialect="postgresql")
+                truncate_sql, delete_sql = overwrite_empty_statements("postgresql", quoted)
+                try:
+                    if truncate_sql:
+                        cur.execute(truncate_sql)
+                    else:
+                        cur.execute(delete_sql)
+                except Exception as trunc_exc:
+                    # A foreign key can refuse TRUNCATE. Roll back that statement
+                    # only — setup already committed — then delete in place.
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        logger.debug("overwrite truncate rollback failed", exc_info=True)
+                    missing = str(trunc_exc).lower()
+                    if any(
+                        token in missing
+                        for token in ("does not exist", "undefined table", "unknown table", "no such table")
+                    ):
+                        pass
+                    else:
+                        logger.info(
+                            "Overwrite TRUNCATE refused for %s (%s); deleting rows in place",
+                            quoted,
+                            trunc_exc,
+                        )
+                        cur.execute(delete_sql)
+                conn._df_overwrite_truncated = True
+                conn._df_overwrite_txn = True
+
             use_copy = (
                 write_mode == "insert"
                 and not conflict_columns
@@ -2630,7 +2674,8 @@ def write_mapped_rows(
                                 row_end=start + max(landed - 1, 0),
                                 attempt=1,
                             )
-                        conn.commit()
+                        if not getattr(conn, "_df_overwrite_txn", False):
+                            conn.commit()
                         chunk_written = landed
                         break
                     except Exception as chunk_exc:
@@ -2719,11 +2764,17 @@ def write_mapped_rows(
                                         row_end=start + max(chunk_written - 1, 0),
                                         attempt=1,
                                     )
-                                conn.commit()
+                                if not getattr(conn, "_df_overwrite_txn", False):
+                                    conn.commit()
                             except Exception as exc:
                                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                             break
                         attempt += 1
+                        if getattr(conn, "_df_overwrite_txn", False):
+                            # Reconnecting would append onto the pre-truncate
+                            # table. The open transaction rolls back with the
+                            # connection, so the previous rows stay.
+                            raise
                         if not is_connection_lost(chunk_exc) or not should_retry_connection_lost(
                             attempt=attempt, started_at=chunk_started, proxy=proxy_dest
                         ):
@@ -2777,7 +2828,8 @@ def write_mapped_rows(
                                 policy=policy,
                             )
                         )
-                        conn.commit()
+                        if not getattr(conn, "_df_overwrite_txn", False):
+                            conn.commit()
                         written += written_sparse
                         rows_skipped += sparse_skipped
                         write_acc.add_accepted(list(sparse_checksum))
@@ -2867,7 +2919,8 @@ def write_mapped_rows(
                 )
             elif child_flush.get("rows_written"):
                 try:
-                    conn.commit()
+                    if not getattr(conn, "_df_overwrite_txn", False):
+                        conn.commit()
                 except Exception as exc:
                     logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                 for t in child_flush.get("tables") or []:
@@ -2877,6 +2930,18 @@ def write_mapped_rows(
                 cur.close()
             except Exception as exc:
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        overwrite_failed = bool(child_flush_error)
+        if getattr(conn, "_df_overwrite_txn", False) and not overwrite_failed:
+            overwrite_failed = bool(
+                reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
+            )
+        if getattr(conn, "_df_overwrite_txn", False) and (overwrite_failed or close_connection):
+            from connectors.write_resilience import finish_held_overwrite
+
+            # This call owns the socket, or the load already failed. The stream
+            # path leaves a successful transaction open until the last batch.
+            finish_held_overwrite(conn, success=bool(close_connection) and not overwrite_failed)
 
         if close_connection:
             close_quietly(conn)
@@ -2934,6 +2999,10 @@ def write_mapped_rows(
             meta=meta_out,
         )
     except Exception as exc:
+        if getattr(conn, "_df_overwrite_txn", False):
+            from connectors.write_resilience import finish_held_overwrite
+
+            finish_held_overwrite(conn, success=False)
         if close_connection:
             close_quietly(conn)
         return WriteResult(

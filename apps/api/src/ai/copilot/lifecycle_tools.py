@@ -306,9 +306,34 @@ def _job_brief(job: dict[str, Any]) -> dict[str, Any]:
         "destination": str(dst.get("connector_name") or dst.get("name") or dst.get("type") or ""),
         "table": str(src.get("table") or req.get("source_table") or ""),
         "rows_written": job.get("rows_written"),
-        "rejected_rows": job.get("rejected_rows"),
+        "rejected_rows": _open_quarantine_count(job),
         "progress_pct": job.get("progress_pct"),
     }
+
+
+def _open_quarantine_count(job: dict[str, Any]) -> int:
+    """Open findings, not the historical rejected_rows counter (R4-D05).
+
+    A replay that closes some rows used to keep advertising the original
+    count, so the next preview said 6 rejected when 3 were still open.
+    """
+    from services.quarantine_dlq import open_quarantine_details
+
+    stored = [
+        d
+        for d in (
+            job.get("rejected_details")
+            or (job.get("destination_summary") or {}).get("rejected_details")
+            or []
+        )
+        if isinstance(d, dict)
+    ]
+    if stored:
+        return len(open_quarantine_details(stored))
+    try:
+        return int(job.get("rejected_rows") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def resolve_job(job_id: str = "", selector: str = "") -> tuple[dict[str, Any] | None, str]:
@@ -521,6 +546,22 @@ def _job_tool(
         if status not in {"failed", "paused", "cancelled"}:
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} is {status}; only a failed, cancelled or paused job can be resumed from its checkpoint.",
+            )
+        from services.checkpoint_service import Checkpoint, evaluate_resume_safety
+
+        cp_raw = job.get("checkpoint")
+        safety = evaluate_resume_safety(
+            Checkpoint.from_dict(cp_raw) if isinstance(cp_raw, dict) else cp_raw,
+            job=job,
+        )
+        if not safety.get("ok"):
+            reasons = [str(r) for r in (safety.get("reasons") or []) if str(r).strip()]
+            detail = "; ".join(reasons) if reasons else "checkpoint not safe"
+            return _tool_result(
+                tool,
+                success=False,
+                output={"reasons": reasons, "honesty": safety.get("honesty")},
+                error=f"Resume refused — checkpoint not safe: {detail}",
             )
         return _stage(tool, payload={"job_id": jid}, preview=brief,
                       label=f"Resume job {short} from its last checkpoint", destructive=False)

@@ -2326,6 +2326,12 @@ def stream_file_to_database(
                     from services.connector_versions import server_version_from_connection
 
                     dest_server_version = server_version_from_connection(conn)
+                if state is pg_conn_state:
+                    import sys
+
+                    from connectors.write_resilience import finish_held_overwrite
+
+                    finish_held_overwrite(conn, success=sys.exc_info()[0] is None)
                 try:
                     conn.close()
                 except Exception as exc:

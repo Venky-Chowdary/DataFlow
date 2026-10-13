@@ -1276,9 +1276,16 @@ def map_columns(
         # on write, so they are typed from the destination type map exactly as
         # a missing object's are. Waiting left every column "pending stamp" and
         # Validate blocked each one as a fidelity collapse.
+        from services.type_system import destination_is_file_export
+
+        # Object/file exports have no catalog to reload. An unproven key
+        # (head returned neither 200 nor a clear 404) is still create-new:
+        # waiting stamped every column dest_type_unread and blocked preflight
+        # (R3-C1). A SQL catalog that did not load stays pending.
+        file_export = destination_is_file_export(dest_db)
         confirmed_missing = destination_table_exists is False or (
             destination_table_exists is True and destination_schema_is_sampled(dest_db)
-        )
+        ) or (file_export and destination_table_exists is not True)
         for src in source_columns:
             new_name = create_new_target_name(src)
             src_type = src_types.get(src, "VARCHAR")

@@ -23,6 +23,11 @@ _SECRET_KEYS = frozenset({
     "password", "passwd", "pwd", "api_key", "token", "private_key",
     "connection_string", "service_account", "secret",
 })
+_OBJECT_STORE_TYPES = frozenset({
+    "s3", "amazon_s3", "aws_s3", "minio", "s3_compatible",
+    "gcs", "google_cloud_storage", "adls", "azure_blob_storage",
+    "azure_data_lake", "azure_data_lake_storage",
+})
 
 
 def _default_path() -> Path:
@@ -64,11 +69,18 @@ def approval_restage_message(kind: str | None, *, expired: bool) -> str:
     return f"Approval not found or expired. Ask Pilot to {action}."
 
 
+def _object_store_payload(payload: dict[str, Any]) -> bool:
+    kind = str(payload.get("type") or payload.get("format") or payload.get("db_type") or "")
+    return kind.strip().lower().replace("-", "_") in _OBJECT_STORE_TYPES
+
+
 def redact_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Safe client-facing copy — never echo secrets."""
+    hide_access_key = _object_store_payload(payload)
     out: dict[str, Any] = {}
     for k, v in (payload or {}).items():
-        if k.lower() in _SECRET_KEYS:
+        key = k.lower()
+        if key in _SECRET_KEYS or (hide_access_key and key == "username"):
             out[k] = "***" if v else ""
             out[f"has_{k}"] = bool(v)
         elif isinstance(v, dict):

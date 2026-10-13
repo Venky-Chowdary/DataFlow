@@ -194,6 +194,10 @@ def _write_batch(
             preserve_columns=list(
                 (getattr(dest, "extra", None) or {}).get("preserve_columns") or []
             ),
+            pg_overwrite_in_transaction=bool(
+                dest_type == "postgresql"
+                and (getattr(dest, "extra", None) or {}).get("pg_overwrite_in_transaction")
+            ),
             **source_handoff,
             **key_carry,
         )

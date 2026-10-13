@@ -1247,6 +1247,7 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
 
 from .mapping_write_stamp import (  # noqa: E402
     enrich_mappings_with_types as _enrich_mappings_with_types,
+    prefer_approved_column_types as _prefer_approved_column_types,
     schema_for_endpoint as _schema_for_endpoint,
     stamp_additive_mappings_for_write as _stamp_additive_mappings_for_write,
 )
@@ -2118,6 +2119,7 @@ class UniversalTransferEngine:
                 request.destination,
                 sync_mode=request.sync_mode,
             )
+            schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
                     request, columns, schema, sample_rows=records[:100], job_id=job_id
@@ -3484,6 +3486,7 @@ class UniversalTransferEngine:
                 request.destination,
                 sync_mode=request.sync_mode,
             )
+            schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
                     request, columns, schema, sample_rows=sample_rows, job_id=job_id
@@ -4493,6 +4496,7 @@ class UniversalTransferEngine:
                 request.destination,
                 sync_mode=request.sync_mode,
             )
+            schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
                 _engine_module._auto_map(
                     request, columns, schema, sample_rows=sample_rows, job_id=job_id

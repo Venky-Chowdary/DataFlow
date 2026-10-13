@@ -54,9 +54,9 @@ def test_json_to_postgresql_preserves_types(fmt: str, content_fn):
 
     table_name = f"json_pg_{fmt}_{uuid.uuid4().hex[:8]}"
     # JSON can say ``null``, so it is what a null source cell looks like here. An
-    # empty string is a *value* in this format and is asserted as one by
-    # test_json_empty_string_is_a_value_not_a_null below — only a blank CSV cell,
-    # which cannot express the difference, means NULL.
+    # empty string is a *value* and is asserted as one by
+    # test_json_empty_string_is_a_value_not_a_null below. A text CSV cell that
+    # is ``""`` is the same value; numeric and temporal blanks stay NULL.
     rows = [
         {"id": "1", "amount": "1000.00", "note": "hello", "created": "2024-01-15T00:00:00", "active": "true", "meta": '{"k":"v"}', "tags": '["a","b"]'},
         {"id": "2", "amount": "2000.50", "note": None, "created": "2024-02-28T14:30:00", "active": "false", "meta": None, "tags": None},
@@ -133,9 +133,8 @@ def test_json_to_postgresql_preserves_types(fmt: str, content_fn):
 def test_json_empty_string_is_a_value_not_a_null():
     """``""`` in JSON is an empty string, and the destination keeps it as one.
 
-    A blank CSV cell means NULL because CSV cannot say anything else. JSON can:
-    it has ``null``. Normalizing ``""`` to NULL here would erase a distinction
-    the source declared, so the text column stores the empty string.
+    A text column stores ``""``. JSON can also say ``null``. Normalizing ``""``
+    to NULL here would erase a distinction the source declared.
     """
     try:
         with socket.create_connection(("localhost", 5432), timeout=1):

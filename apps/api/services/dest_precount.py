@@ -3444,7 +3444,7 @@ def _object_store_list_keys(
     else:
         return None
 
-    base = normalize_object_base_key(key)
+    base = normalize_object_base_key(key, str(cfg.get("schema") or ""))
     parts_prefix = object_parts_prefix(base)
     try:
         listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []

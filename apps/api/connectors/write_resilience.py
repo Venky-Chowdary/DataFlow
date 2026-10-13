@@ -220,6 +220,29 @@ def should_retry_connection_lost(
     return attempt < chunk_reconnect_attempts(proxy=proxy)
 
 
+def finish_held_overwrite(conn: Any, *, success: bool) -> None:
+    """Commit or roll back a PostgreSQL overwrite that deferred its commits.
+
+    TRUNCATE and the following inserts share one transaction so a reader sees
+    the old table or the new table, not a prefix of the load (R4-D06). The
+    stream holds the connection across batches and closes it at the end; a
+    close without this commit would roll the whole overwrite back.
+    """
+    if conn is None or not getattr(conn, "_df_overwrite_txn", False):
+        return
+    try:
+        if success:
+            conn.commit()
+        else:
+            conn.rollback()
+    except Exception as exc:
+        logger.warning("PostgreSQL overwrite transaction finish failed: %s", exc, exc_info=exc)
+    try:
+        conn._df_overwrite_txn = False
+    except Exception:
+        pass
+
+
 def close_quietly(conn: Any) -> None:
     if conn is None:
         return

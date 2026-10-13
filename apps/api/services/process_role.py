@@ -109,7 +109,24 @@ def ack_backend() -> str:
         return raw
     if multi_replica():
         return "mongo"
+    # A second API process cannot see a pod-local ack file. Approvals then
+    # read as "not found or expired" within a minute (R3-M1). When this
+    # process already holds a real Mongo client, the ledger lives there.
+    # An explicit ACK_BACKEND=file still wins. Do not connect just to decide.
+    if _mongo_client_already_connected():
+        return "mongo"
     return "file"
+
+
+def _mongo_client_already_connected() -> bool:
+    try:
+        from services.mongodb_service import MemoryMongoDBService, _mongodb_service
+    except Exception:
+        return False
+    svc = _mongodb_service
+    if svc is None or isinstance(svc, MemoryMongoDBService):
+        return False
+    return bool(getattr(svc, "client", None))
 
 
 def worker_workloads() -> frozenset[str]:
