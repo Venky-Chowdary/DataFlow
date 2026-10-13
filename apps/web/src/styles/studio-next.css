@@ -67,33 +67,56 @@
   flex-direction: column;
   gap: var(--df-space-3);
   min-height: 0;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   width: 100%;
+  overflow: hidden;
 }
 
-/* The flagged canvas fills the step under the app header.
-   The classic step does not carry .df2-studio-next, so this rule never matches it. */
+/* The flagged canvas fills the studio column it is already given.
+   A 100dvh height ignores the wizard chrome above this step, and the
+   classic sticky footer then covers the canvas. The classic step does
+   not carry .df2-studio-next, so these rules never match it. */
 .df2-xform-step:has(.df2-studio-next) {
   display: flex;
   flex-direction: column;
-  height: calc(100dvh - var(--df-header-height) - var(--df-space-8));
-  max-height: calc(100dvh - var(--df-header-height) - var(--df-space-8));
+  flex: 1 1 auto;
+  height: auto;
+  max-height: 100%;
   min-height: 0;
   overflow: hidden;
 }
 
-.df2-xform.df2-studio-next {
+.df2-xform-step > .df2-xform.df2-studio-next {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+/* Reserve a row for Back / Continue. The classic rule is sticky and
+   paints the bar over whatever is scrolling underneath it. */
+.df2-xform.df2-studio-next > .df2-xform-actions {
+  position: static;
+  bottom: auto;
+  flex: 0 0 auto;
+  margin: 0 -16px -16px;
+}
+
+@media (max-width: 860px) {
+  .df2-xform.df2-studio-next > .df2-xform-actions {
+    bottom: auto;
+    margin: 0 -12px -12px;
+  }
 }
 
 .df2-xform.df2-studio-next .df2-xform-panel:not([hidden]) {
   display: flex;
   flex-direction: column;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .df2-canvas-head,
@@ -131,9 +154,10 @@
 }
 
 .df2-canvas-body {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   align-items: stretch;
+  overflow: hidden;
 }
 
 .df2-canvas-rail {
@@ -153,7 +177,8 @@
   border-radius: var(--df-radius-md);
   padding: var(--df-space-3);
   overflow: auto;
-  max-height: 640px;
+  max-height: none;
+  min-height: 0;
 }
 
 .df2-canvas-rail ul,
@@ -253,28 +278,41 @@
    The old two-column grid is unchanged when this class is absent. */
 .df2-xform-grid.is-canvas {
   display: flex;
-  flex: 1 1 auto;
+  flex-direction: column;
+  flex: 1 1 0;
+  align-items: stretch;
+  align-self: stretch;
   min-height: 0;
+  overflow: hidden;
   grid-template-columns: minmax(0, 1fr);
 }
 
+.df2-xform-grid.is-canvas > .df2-canvas {
+  flex: 1 1 0;
+  align-self: stretch;
+  min-height: 0;
+  height: auto;
+}
+
 .df2-canvas-stage-wrap {
-  flex: 1 1 auto;
-  min-width: 280px;
+  flex: 1 1 0;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
   gap: var(--df-space-2);
+  overflow: hidden;
 }
 
 .df2-canvas-stage {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-width: 0;
-  min-height: 280px;
+  min-height: 0;
   background: var(--df-bg-canvas);
   border: 1px solid var(--df-border);
   border-radius: var(--df-radius-md);
   position: relative;
+  overflow: hidden;
 }
 
 .df2-canvas-stage.is-drop-target {
@@ -299,8 +337,9 @@
 .df2-canvas-dock {
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
-  min-height: 96px;
+  flex: 0 1 auto;
+  min-height: 72px;
+  max-height: 40%;
   overflow: hidden;
   border: 1px solid var(--df-border);
   border-radius: var(--df-radius-md);
@@ -520,21 +559,73 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
 }
 
 @media (max-width: 767px) {
-  .df2-transfer-schema,
-  .df2-canvas-body {
+  .df2-transfer-schema {
     display: flex;
     flex-direction: column;
   }
 
-  .df2-canvas-rail,
-  .df2-canvas-inspector {
-    width: auto;
-    flex: 0 0 auto;
-    max-height: 9rem;
+  /* Keep the stage beside a narrow palette. A full-width stack gives the
+     palette and inspector the height, and the stage collapses to a line
+     that the footer then covers. */
+  .df2-canvas-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--df-space-2);
   }
 
-  .df2-canvas-rail ul.df2-canvas-tiles {
-    grid-template-columns: repeat(6, 36px);
+  .df2-canvas-head-actions {
+    max-width: 100%;
+    min-width: 0;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+
+  .df2-canvas-body {
+    display: grid;
+    grid-template-columns: 112px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    align-items: stretch;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .df2-canvas-rail {
+    grid-column: 1;
+    grid-row: 1;
+    width: auto;
+    flex: none;
+    max-height: none;
+    min-height: 0;
+    height: auto;
+    align-self: stretch;
+    overflow: auto;
+  }
+
+  .df2-canvas-stage-wrap {
+    grid-column: 2;
+    grid-row: 1;
+    flex: none;
+    width: auto;
+    min-width: 0;
+    min-height: 0;
+    height: auto;
+    align-self: stretch;
+    overflow: hidden;
+  }
+
+  .df2-canvas-inspector {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    width: auto;
+    flex: none;
+    max-height: 4.5rem;
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .df2-canvas-dock {
+    max-height: 3.5rem;
+    min-height: 0;
   }
 
   .df2-canvas .react-flow__minimap {

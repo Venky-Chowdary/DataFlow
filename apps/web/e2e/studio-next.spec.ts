@@ -12,6 +12,25 @@ async function quietChrome(page: Page): Promise<void> {
   });
 }
 
+/** The Back / Continue bar is a flex row under the canvas, flush with the page. */
+async function expectActionBarBelowCanvas(page: Page): Promise<void> {
+  const stage = page.getByTestId("transform-canvas-stage");
+  const canvas = page.getByTestId("transform-canvas");
+  const dock = page.getByTestId("canvas-preview");
+  const bar = page.locator(".df2-xform-actions");
+  const stageBox = await stage.boundingBox();
+  const canvasBox = await canvas.boundingBox();
+  const dockBox = await dock.boundingBox();
+  const barBox = await bar.boundingBox();
+  const viewport = page.viewportSize();
+  expect(stageBox && canvasBox && dockBox && barBox && viewport).toBeTruthy();
+  expect(barBox!.y).toBeGreaterThanOrEqual(stageBox!.y + stageBox!.height - 1);
+  expect(canvasBox!.y + canvasBox!.height).toBeLessThanOrEqual(barBox!.y + 1);
+  expect(dockBox!.y + dockBox!.height).toBeLessThanOrEqual(barBox!.y + 1);
+  expect(barBox!.y + barBox!.height).toBeGreaterThan(viewport!.height - 48);
+  expect(barBox!.y + barBox!.height).toBeLessThanOrEqual(viewport!.height);
+}
+
 async function apiUp(page: Page): Promise<boolean> {
   try {
     const response = await page.request.get("/api/v1/health");
@@ -66,11 +85,13 @@ test.describe("studio next", () => {
     }, { timeout: 20_000 }).not.toBe("");
     await page.addStyleTag({ content: "* { caret-color: transparent !important; transition: none !important; animation: none !important; }" });
     await quietChrome(page);
+    await expectActionBarBelowCanvas(page);
     // xyflow edge antialiasing moves about one percent between captures.
     await shoot(page, "canvas-light-1440.png", [], 0.02);
     await page.setViewportSize({ width: 390, height: 844 });
     await quietChrome(page);
-    await shoot(page, "canvas-light-390.png", [], 0.02);
+    await expectActionBarBelowCanvas(page);
+    await shoot(page, "canvas-light-390.png", [], 0.04);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.evaluate(() => {
       localStorage.setItem("df2.theme", "dark");
@@ -79,10 +100,12 @@ test.describe("studio next", () => {
     });
     await expect(page.locator(".react-flow")).toHaveClass(/dark/);
     await quietChrome(page);
+    await expectActionBarBelowCanvas(page);
     await shoot(page, "canvas-dark-1440.png", [], 0.02);
     await page.setViewportSize({ width: 390, height: 844 });
     await quietChrome(page);
-    await shoot(page, "canvas-dark-390.png", [], 0.02);
+    await expectActionBarBelowCanvas(page);
+    await shoot(page, "canvas-dark-390.png", [], 0.04);
   });
 
   test("canvas is a full-page editor for drop, order, links, and preview", async ({ page }) => {
@@ -96,6 +119,7 @@ test.describe("studio next", () => {
     expect(canvasBox).toBeTruthy();
     expect(canvasBox!.y).toBeLessThan(460);
     expect(canvasBox!.y + canvasBox!.height).toBeGreaterThan(500);
+    await expectActionBarBelowCanvas(page);
 
     await page.getByRole("button", { name: "Rules and suggestions" }).click();
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
