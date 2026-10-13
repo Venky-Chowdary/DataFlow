@@ -829,6 +829,15 @@ TOOL_DEFINITIONS: list[dict] = [
                         "accepts drift for a manual run."
                     ),
                 },
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "for this standing route. Requires approved_by and reason. "
+                        "Stored on the schedule so unattended runs carry the same "
+                        "acknowledgement a one-shot Confirm records on the job."
+                    ),
+                },
             },
             "required": ["cadence"],
         },
@@ -3758,6 +3767,7 @@ class DataPilotTools:
         limit: int = 0,
         column_transforms: dict | None = None,
         schema_drift_acknowledged: bool = False,
+        pii_acknowledgement: dict | None = None,
     ) -> ToolResult:
         from .schedule_tools import create_schedule
 
@@ -3791,6 +3801,7 @@ class DataPilotTools:
             limit=limit,
             column_transforms=column_transforms,
             schema_drift_acknowledged=schema_drift_acknowledged,
+            pii_acknowledgement=pii_acknowledgement,
         )
 
     def _analyze_result(

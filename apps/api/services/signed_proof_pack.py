@@ -145,6 +145,14 @@ def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
                 CDC_SOURCE_IMAGE_VALUES,
             }:
                 skip_veto = True
+            # Landed cells matched. The digest gap is the quarantined rows,
+            # which L2 still hashes. That is not a cell failure (R5-003).
+            elif (
+                str(recon.get("assurance_level") or "") == "quarantine_excluded"
+                and l1_ok
+                and l3_ok
+            ):
+                skip_veto = True
         if not skip_veto:
             return _ladder_fail_veto(ladder)
     coverage = str(recon.get("coverage") or "").lower()

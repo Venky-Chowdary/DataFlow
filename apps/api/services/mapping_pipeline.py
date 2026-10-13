@@ -519,6 +519,12 @@ def _repair_unparseable_numeric_targets(
                     and not _is_create_new_mapping(m)
                     and tgt.lower() in {t.lower() for t in tgt_by}
                 )
+                if existing_dest_column and src.lower() == tgt.lower():
+                    # The destination already has this column. A non-numeric
+                    # sample is a row to quarantine, not a reason to ADD a
+                    # ``qty_text`` twin beside ``qty INTEGER`` (R4-D08).
+                    out.append(m)
+                    continue
                 if not existing_dest_column:
                     # Nothing to sit beside: the column is created by this run, so
                     # widen its own type instead of inventing a ``*_text`` twin the

@@ -85,6 +85,7 @@ def create_schedule(
     limit: int = 0,
     column_transforms: dict[str, Any] | None = None,
     schema_drift_acknowledged: bool = False,
+    pii_acknowledgement: dict[str, Any] | None = None,
 ):
     """Stage a pipeline schedule for explicit Confirm. This creates nothing itself."""
     tool = "create_schedule"
@@ -150,6 +151,7 @@ def create_schedule(
         applied_rules=applied_rules,
         column_transforms=column_transforms,
         schema_drift_acknowledged=bool(schema_drift_acknowledged),
+        pii_acknowledgement=pii_acknowledgement,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)
@@ -226,9 +228,18 @@ def create_schedule(
     try:
         # Uniqueness used to run only when Confirm wrote the row, so staging
         # accepted a second pipeline with the same name (R2-SCHED-DUP).
+        # Confirm still takes the store lock and the unique name_key index.
         from services.schedule_store import assert_unique_schedule_name
 
         assert_unique_schedule_name(label_name)
+        from connectors.sql_identifiers import unsafe_destination_identifier_reason
+
+        ident_err = unsafe_destination_identifier_reason(
+            str(destination.get("type") or ""),
+            str(destination.get("table") or ""),
+        )
+        if ident_err:
+            raise ValueError(ident_err)
     except ValueError as exc:
         return _tool_result(tool, success=False, error=str(exc))
     payload: dict[str, Any] = {
@@ -263,6 +274,17 @@ def create_schedule(
         "schema_drift_acknowledged": bool(schema_drift_acknowledged),
         "enabled": True,
     }
+    if pii_acknowledgement:
+        from .transfer_tools import _pii_acknowledgement
+
+        try:
+            pii_ack = _pii_acknowledgement(pii_acknowledgement)
+        except ValueError as exc:
+            return _tool_result(tool, success=False, error=str(exc))
+        if pii_ack:
+            payload["compliance_acknowledged"] = True
+            payload["acknowledgment_actor"] = pii_ack["approved_by"]
+            payload["acknowledgment_reason"] = pii_ack["reason"]
     preview: dict[str, Any] = {
         "name": label_name,
         "source": f"{source['connector_name']}.{source['table']}",

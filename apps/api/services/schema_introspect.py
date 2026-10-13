@@ -3492,12 +3492,18 @@ def _introspect_sqlite(
     if not table:
         return {"ok": False, "error": "SQLite table name is required", "columns": [], "tables": []}
 
-    from connectors.sqlite_common import require_sqlite_source_file
+    # A file the destination writer has not created yet is "table not found",
+    # not a missing source. Connecting here would create an empty database
+    # (R3-H3). Source reads still go through require_sqlite_source_file.
+    from pathlib import Path
 
-    try:
-        require_sqlite_source_file(path)
-    except ValueError as exc:
-        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+    if path != ":memory:" and not Path(path).is_file():
+        return {
+            "ok": False,
+            "error": f"Table `{table}` not found",
+            "columns": [],
+            "tables": [],
+        }
 
     try:
         from connectors.sql_identifiers import quote_sql_identifier

@@ -268,6 +268,19 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     ):
         # QA MX3-12: an empty written set matches itself — not a checksum proof.
         independent_match = False
+    # Quarantine already left the count identity. The source digest still
+    # includes those rows, so the digests differ while the landed cells match.
+    # Forcing passed=False here rolled the good rows back (R5-003).
+    if passed and str(out.get("assurance_level") or "") == "quarantine_excluded":
+        out["phase"] = "post_write_quarantine_excluded"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = "quarantine_excluded"
+        out["assurance_level"] = "quarantine_excluded"
+        out["migration_proven"] = False
+        out["population_proof"] = False
+        out["checksum_match"] = None
+        return out
     # Module 4: always stamp checksum honesty; never invent population RI proof.
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
@@ -1059,6 +1072,38 @@ def reconcile(
                 "soften checksum mismatch."
             )
         mode_label = "strict" if strict_checksum else "balanced"
+        # The row-count identity already removed quarantined rows. The source
+        # digest often still hashes them, so it cannot equal the destination
+        # digest of the rows that landed. A clean key-aligned sample means the
+        # landed cells match; failing here used to roll the good rows back and
+        # leave the table empty (R5-003). A digest already scoped to the
+        # written keys is a real cell disagreement and still fails.
+        if (
+            dropped_rows > 0
+            and sample_ok
+            and checksum_scope != WRITTEN_BATCH_KEYS
+        ):
+            return ReconciliationReport(
+                passed=True,
+                source_rows=source_rows,
+                target_rows=target_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                message=(
+                    f"Landed rows match. {dropped_rows} quarantined row(s) are in "
+                    f"the source digest and not in the destination, so the digests "
+                    f"differ ({source_checksum} vs {target_checksum}) without a "
+                    f"differing cell in the {scope} that were compared. "
+                    "Quarantined rows stay in the ledger for replay."
+                ),
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                sample_compare=sample_compare,
+                checksum_match=None,
+                population_proof=False,
+                assurance_level="quarantine_excluded",
+            )
         if has_extra and checksum_scope != WRITTEN_BATCH_KEYS:
             return append_row_count_report(
                 source_rows=source_rows,

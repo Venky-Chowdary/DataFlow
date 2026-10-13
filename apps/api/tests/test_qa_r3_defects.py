@@ -343,6 +343,40 @@ def test_schema_change_detected_is_delegable() -> None:
     ) == ()
 
 
+def test_cdc_policy_reads_wal_level_from_the_plan_endpoint() -> None:
+    """plan_transfer passes the connector as source_endpoint. The policy gate
+    must still read wal_level and refuse replica (R3-H1).
+    """
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 5432), timeout=1):
+            pass
+    except OSError:
+        pytest.skip("PostgreSQL 5432 not reachable")
+
+    from services.preflight_service import run_transfer_policy_gates
+
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        source_type="postgresql",
+        source_kind="database",
+        source_table="qa_r3_src",
+        stream_contracts=[{"name": "qa_r3_src", "primary_key": ["id"]}],
+        source_endpoint={
+            "type": "postgresql",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "database": "dataflow",
+            "username": "dataflow",
+            "password": "dataflow",
+        },
+    )
+    text = " ".join(str(g.get("message") or "") for g in gates).lower()
+    assert "wal_level" in text
+    assert any(g.get("status") == "block" and "wal_level" in str(g.get("message")) for g in gates)
+
+
 def test_postgres_wal_downgrade_fails_closed() -> None:
     refusal = LogCaptureRefusal(
         CAUSE_SERVER_NOT_CONFIGURED,

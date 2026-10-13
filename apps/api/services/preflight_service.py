@@ -236,6 +236,42 @@ def confidence_threshold_for_mode(validation_mode: str | None) -> float:
         )
 
 
+def _policy_source_config(
+    source_config: dict[str, Any] | None,
+    source_endpoint: Any,
+) -> dict[str, Any] | None:
+    """Connection facts for the CDC log probe.
+
+    ``plan_transfer`` and Studio Validate used to pass the connector only as
+    ``source_endpoint``. The wal_level probe read ``source_config``, got
+    nothing, and a CDC plan on ``wal_level=replica`` stayed safe (R3-H1).
+    """
+    def _connectable(cfg: Any) -> bool:
+        return isinstance(cfg, dict) and bool(
+            cfg.get("host") or cfg.get("connection_string")
+        )
+
+    if _connectable(source_config):
+        return source_config
+    if _connectable(source_endpoint):
+        return source_endpoint
+    if source_endpoint is not None:
+        try:
+            from src.transfer.adapters import resolve_connector_config
+
+            resolved = resolve_connector_config(source_endpoint)
+        except Exception:
+            logger.debug("CDC policy could not read the source endpoint", exc_info=True)
+            resolved = None
+        if isinstance(resolved, dict) and (
+            resolved.get("host") or resolved.get("connection_string") or resolved.get("type")
+        ):
+            return resolved
+    if isinstance(source_endpoint, dict):
+        return source_endpoint
+    return source_config if isinstance(source_config, dict) else None
+
+
 def run_transfer_policy_gates(
     *,
     sync_mode: str = "full_refresh_overwrite",
@@ -280,6 +316,7 @@ def run_transfer_policy_gates(
     validation = (validation_mode or "strict").lower()
     dest = (dest_type or "").strip().lower()
     src = (source_type or "").strip().lower()
+    source_config = _policy_source_config(source_config, source_endpoint)
     product = str((source_config or {}).get("type") or "").strip().lower()
     # A TimescaleDB connector must not pass g9 because a driver alias rewrote
     # the format to postgresql. The product id is the one the operator saved.
@@ -2695,8 +2732,32 @@ def run_file_preflight(
     from services.root_cause_engine import apply_root_causes_to_preflight
     from services.validation_mode_contract import stamp_validation_mode
 
+    # Schema inference runs after the first locale pass and can retype a
+    # declared string column to a number (CSV ``amt`` "1,234" → INTEGER).
+    # The assumption has to see that type: otherwise the column is skipped
+    # as text, then the report demands an explicit locale for the number
+    # the profiler just produced.
+    if not number_locale and sample_rows and columns:
+        assumed_late = assumed_number_locale(
+            sample_rows,
+            columns,
+            number_locale=number_locale,
+            column_types=column_types,
+        )
+        if assumed_late:
+            number_locale_assumed = ambiguous_number_columns(
+                sample_rows,
+                columns,
+                number_locale=number_locale,
+                column_types=column_types,
+            )
+            number_locale = assumed_late
+            set_active_number_locale(number_locale)
     number_findings = ambiguous_number_columns(
-        sample_rows, columns, number_locale=number_locale
+        sample_rows,
+        columns,
+        number_locale=number_locale,
+        column_types=column_types,
     )
     date_findings = ambiguous_date_columns(
         sample_rows, columns, date_locale=date_locale

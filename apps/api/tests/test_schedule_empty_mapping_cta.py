@@ -163,7 +163,9 @@ def test_explicit_replay_schedule_id_wins(temp_store):
 def test_two_empty_drafts_on_same_pair_do_not_hijack(temp_store):
     store = temp_store
     first = _empty_draft(store, source_table="a", dest_table="a")
-    second = _empty_draft(store, source_table="b", dest_table="b")
+    second = _empty_draft(
+        store, name="Crown → Snowflake b", source_table="b", dest_table="b"
+    )
     live = store.create_schedule({
         "name": "Third",
         "source_connector_id": "src-mysql",

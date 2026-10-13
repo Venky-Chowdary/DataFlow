@@ -17,9 +17,20 @@ def test_sqlite(
     schema: str,
     connection_string: str,
     ssl: bool,
+    require_object: bool = True,
 ) -> ConnectResult:
-    """Probe a SQLite database file. ``database`` is the path to the .db file."""
-    del port, username, password, schema, ssl
+    """Probe a SQLite database file. ``database`` is the path to the .db file.
+
+    A missing file whose directory exists is created: that is how a new
+    destination connector is initialized. A missing *source* is refused by
+    ``require_sqlite_source_file`` on the read path, which does not create the
+    file (R3-H3). ``require_object`` is accepted so destination probes can say
+    the object is about to be created; a directory that is not on this server
+    still fails closed.
+    """
+    del port, username, password, schema, ssl, require_object
+    from pathlib import Path
+
     from connectors.sqlite_common import sqlite_file_path
 
     try:
@@ -29,12 +40,18 @@ def test_sqlite(
     if not path:
         return ConnectResult(ok=False, tables=[], error="SQLite path is required (database or connection_string).")
 
-    from connectors.sqlite_common import require_sqlite_source_file
-
-    try:
-        require_sqlite_source_file(path)
-    except ValueError as exc:
-        return ConnectResult(ok=False, tables=[], error=str(exc))
+    if path != ":memory:" and not Path(path).is_file():
+        parent = Path(path).expanduser().parent
+        if not parent.is_dir():
+            return ConnectResult(
+                ok=False,
+                tables=[],
+                error=(
+                    f"SQLite file {path} is not on this server. "
+                    "The directory does not exist on this instance. "
+                    "Put the database on storage this server can write."
+                ),
+            )
 
     try:
         conn = sqlite3.connect(path, timeout=8)

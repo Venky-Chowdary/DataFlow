@@ -267,6 +267,19 @@ def probe_log_capture(
     return LogCaptureProbe(dialect, False, "", refusal.cause, refusal.detail)
 
 
+def _message_with_probe_detail(message: str, detail: str) -> str:
+    """Keep ``wal_level=replica`` in the gate text the plan actually returns.
+
+    The plan projection keeps ``message`` and drops ``details``. A refusal that
+    only said ``server_not_configured`` never named wal_level (R3-H1).
+    """
+    extra = str(detail or "").strip()
+    text = str(message or "").strip()
+    if extra and extra not in text:
+        return f"{text} {extra}"
+    return text
+
+
 def build_log_capture_gate(
     probe: LogCaptureProbe,
     *,
@@ -308,7 +321,7 @@ def build_log_capture_gate(
         return {
             "id": "g9c_cdc_log_capture",
             "status": block_status,
-            "message": refused,
+            "message": _message_with_probe_detail(refused, probe.detail),
             "duration_ms": 0,
             "details": probe.to_dict(),
         }
@@ -317,10 +330,13 @@ def build_log_capture_gate(
     return {
         "id": "g9c_cdc_log_capture",
         "status": block_status,
-        "message": (
-            f"{probe.dialect} does not emit a change log, so CDC cannot start. "
-            "A cursor poll would drop deletes. Enable the change log, or run "
-            "this sync as incremental."
+        "message": _message_with_probe_detail(
+            (
+                f"{probe.dialect} does not emit a change log, so CDC cannot start. "
+                "A cursor poll would drop deletes. Enable the change log, or run "
+                "this sync as incremental."
+            ),
+            probe.detail,
         ),
         "duration_ms": 0,
         "details": {**probe.to_dict(), "cdc_delete_capture": False},

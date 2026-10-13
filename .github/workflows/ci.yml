@@ -298,21 +298,12 @@ jobs:
 
   api-and-web:
     runs-on: ubuntu-latest
-    services:
-      # MySQL and Mongo are started in a step (see start_ci_databases.sh):
-      # service containers cannot take a command line, and the COPY paths
-      # need local_infile=ON and a Mongo replica set (snapshot read concern).
-      # Postgres is started in a step (not as a service) so we can enable
-      # wal_level=logical for CDC integration tests. See Dockerfile.postgres-cdc.
-      redis:
-        image: public.ecr.aws/docker/library/redis:7-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd="redis-cli ping"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=5
+    # No service containers. Redis used to be one; a Docker Hub
+    # "toomanyrequests" pull failed Initialize containers, skipped Checkout,
+    # and every later `npm` step exited 254 because package.json was absent.
+    # MySQL, Mongo, Redis, fake-gcs, and Azurite start in a step so a pull
+    # can fall back to a second registry. Postgres is built from
+    # Dockerfile.postgres-cdc so wal_level=logical is on for CDC tests.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -321,7 +312,7 @@ jobs:
         # fake-gcs / Azurite back the desktop lab's postgresql->gcs / ->adls
         # execute cells (same flags as docker-compose.yml; emulator, not tenant).
         run: |
-          bash .github/scripts/start_ci_databases.sh mysql mongo gcs adls
+          bash .github/scripts/start_ci_databases.sh mysql mongo gcs adls redis
 
       - name: Start Postgres with logical CDC
         run: |

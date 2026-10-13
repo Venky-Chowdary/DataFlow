@@ -161,19 +161,20 @@ def test_apply_uuid_validates():
 
 
 def test_apply_decimal_accounting_and_scientific():
-    # Accounting parentheses and currency are explicit transforms, not the
-    # default decimal cast (R4-D07). Scientific notation is still a number.
+    # An explicit decimal cast parses accounting parentheses and currency
+    # markers. Inference still does not treat a marked token as an integer
+    # (R4-D07). Scientific notation is still a number.
     val, err = apply_transform("(1,234.56)", "decimal")
-    assert val is None
-    assert err
+    assert err is None
+    assert Decimal(val) == Decimal("-1234.56")
 
     val2, err2 = apply_transform("1.5e3", "decimal")
     assert err2 is None
     assert Decimal(str(val2)) == Decimal("1500")
 
     val3, err3 = apply_transform("$10,000.00", "decimal")
-    assert val3 is None
-    assert err3
+    assert err3 is None
+    assert Decimal(val3) == Decimal("10000.00")
     parsed, perr = apply_transform("$10,000.00", "currency")
     assert perr is None
     assert Decimal(parsed) == Decimal("10000.00")

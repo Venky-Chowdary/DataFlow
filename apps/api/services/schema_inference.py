@@ -761,10 +761,12 @@ def _samples_fit_declared_numeric(samples: list[str], logical_type: str) -> bool
             # A leading zero is data (zip codes, account numbers) and no numeric
             # carrier keeps it — this is a text column, whatever it parses as.
             return False
-        # Parse through the write path's own coercion so locale forms
-        # ("1,000.00", "2.000,50") are read exactly as the writer will read
-        # them — a second parser here would disagree with what actually lands.
-        coerced, err = apply_transform(text, "decimal")
+        # The carrier decision judges the number under the marker. The write
+        # path still refuses a bare decimal/integer transform on "$" or "%",
+        # so a currency cell is not silently stored; it is only kept off a
+        # text twin when the destination column is already numeric.
+        probe = marked if marked else text
+        coerced, err = apply_transform(probe, "decimal")
         if err:
             return False
         try:
@@ -997,6 +999,30 @@ def infer_column(
                 "notes": notes,
                 "samples": non_empty[:8],
             }
+
+    # A column of only currency or percent tokens is a decimal the write path
+    # binds. classify_value still reports one token as VARCHAR so a phone or a
+    # stray marker is not inferred as an integer (R4-D07).
+    from services.transform_engine import (
+        _numeric_text_has_markers,
+        decimal_wire_value,
+    )
+
+    if all(
+        _numeric_text_has_markers(sample) and decimal_wire_value(sample) is not None
+        for sample in non_empty
+    ):
+        notes.append(
+            "every sample is a currency or percent literal the decimal write path binds"
+        )
+        return {
+            "name": field_name or "",
+            "logical_type": "DECIMAL",
+            "semantic_role": "currency",
+            "confidence": 0.9,
+            "notes": notes,
+            "samples": non_empty[:8],
+        }
 
     with _column_date_locale(non_empty):
         counts: Counter[str] = Counter(

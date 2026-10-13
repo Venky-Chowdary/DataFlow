@@ -45,7 +45,7 @@ def test_default_numeric_transforms_refuse_markers():
     trimmed, err = apply_transform(" 42 ", "integer")
     assert err is None and trimmed == 42
     money, err = apply_transform("$1,234.50", "decimal")
-    assert money is None and err
+    assert err is None and str(money) == "1234.50"
     plain, err = apply_transform("1,234.56", "decimal")
     assert err is None and str(plain) == "1234.56"
     converted, err = apply_transform("$1,234.50", "currency")
@@ -337,3 +337,75 @@ def test_sqlite_source_refuses_a_missing_file(tmp_path):
     missing = tmp_path / "QA_RT5.db"
     with pytest.raises(ValueError):
         require_sqlite_source_file(str(missing))
+
+
+def test_start_transfer_refuses_an_unsafe_name_even_when_plan_succeeds(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.ai.copilot import transfer_tools as tools
+
+    monkeypatch.setattr(
+        tools,
+        "plan_transfer",
+        lambda **_k: SimpleNamespace(
+            success=True,
+            error="",
+            output={
+                "destination": {
+                    "type": "postgresql",
+                    "table": 'qa_r4_x"; DROP TABLE qa_r3_customers; --',
+                    "connector_id": "d",
+                    "connector_name": "pg",
+                },
+                "source": {
+                    "type": "postgresql",
+                    "table": "payments",
+                    "connector_id": "s",
+                    "connector_name": "pg",
+                },
+                "preflight": {"passed": True},
+                "engine_mappings": [{"source": "id", "target": "id"}],
+            },
+        ),
+    )
+    result = tools.start_transfer(
+        source_connector_id="s",
+        dest_connector_id="d",
+        source_table="payments",
+        dest_table='qa_r4_x"; DROP TABLE qa_r3_customers; --',
+    )
+    assert result.success is False
+    assert "plain SQL identifier" in (result.error or "")
+
+
+def test_engine_refuses_an_unsafe_destination_before_the_load(monkeypatch):
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    recorded: dict = {}
+
+    class Mongo:
+        def update_job_status(self, job_id, status, **kwargs):
+            recorded["job_id"] = job_id
+            recorded["status"] = status
+            recorded.update(kwargs)
+            return True
+
+    monkeypatch.setattr(
+        "services.mongodb_service.get_mongodb_service", lambda: Mongo()
+    )
+    engine = UniversalTransferEngine()
+    monkeypatch.setattr(engine, "_resolve_saved_connectors", lambda _request: None)
+    request = TransferRequest(
+        source=EndpointConfig(kind="database", format="postgresql", table="payments"),
+        destination=EndpointConfig(
+            kind="database",
+            format="postgresql",
+            table='qa_r4_x"; DROP TABLE qa_r3_customers; --',
+        ),
+    )
+    result = engine.execute_tracked(request, "job-ident")
+    assert result.success is False
+    assert "plain SQL identifier" in result.error
+    assert recorded["status"] == "failed"
+    assert recorded["phase"] == "validate"

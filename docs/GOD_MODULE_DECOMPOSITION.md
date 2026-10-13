@@ -149,3 +149,11 @@ raised.
 ### Debt: module-object call prefixes
 
 Some moved helpers call back into the original module through a module-object prefix (`_ts.`, `_engine.`, `_si.`, `_x = sys.modules[__name__]`) and the originals keep lazy `__getattr__` / `# noqa: F401` re-exports. This is temporary. It exists only so existing `monkeypatch.setattr(<original module>, ...)` test seams still intercept the moved code. To remove it, migrate those tests to patch the owning module (`type_coercion`, `engine_destination`, `schema_introspect_enterprise`, ...), then drop the prefixes and the re-exports. New code must import from the owning module.
+
+## Extraction 2026-10-13
+
+| Module | What moved where | Lines |
+| --- | --- | --- |
+| `connectors/writer_common.py` | SQL Server `IDENTITY_INSERT` → `connectors/identity_insert.py` | 5524 → under 5460 (`max_lines` lowered 5520 → 5460) |
+
+`writer_common` re-exports `IdentityInsertSession`, `begin_identity_insert`, and `sqlserver_identity_columns`. Tests patch `connectors.identity_insert`.

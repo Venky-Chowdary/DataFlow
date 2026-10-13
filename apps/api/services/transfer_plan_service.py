@@ -482,6 +482,10 @@ def run_plan_preflight(
                 (source.get("source_read_mode") or (source.get("extra") or {}).get("source_read_mode") or "")
             ),
             source_endpoint=source,
+            source_config=dict(source) if source else None,
+            source_table=source_table,
+            mappings=plan_mappings,
+            catalog_primary_key_columns=list(contract_pk_cols or []) or None,
             destination_endpoint=dest,
         ),
         validation_mode=validation_mode,

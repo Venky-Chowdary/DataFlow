@@ -1498,6 +1498,7 @@ def _run_preflight(
             write_via_staging=bool(write_via_staging),
             source_read_mode=source_read_mode,
             source_endpoint=source_config,
+            source_config=source_config if isinstance(source_config, dict) else None,
             destination_endpoint=dst_conn,
         )
         # These must mirror ``UniversalTransferEngine`` exactly. The source
@@ -1998,6 +1999,19 @@ def start_transfer(
         return _tool_result(tool, success=False, error=planned.error)
 
     plan = planned.output or {}
+    # plan_transfer refuses this too. Checking again here means a caller that
+    # reaches start without that plan gate still cannot stage the raw name
+    # (R4-D10). The writer would otherwise create a different spelling.
+    from connectors.sql_identifiers import unsafe_destination_identifier_reason
+
+    staged_dest = plan.get("destination") if isinstance(plan.get("destination"), dict) else {}
+    ident_err = unsafe_destination_identifier_reason(
+        str(staged_dest.get("type") or ""),
+        str(staged_dest.get("table") or dest_table or ""),
+    )
+    if ident_err:
+        return _tool_result(tool, success=False, error=ident_err)
+
     preflight = plan.get("preflight") or {}
     if not _is_execute_cleared(preflight):
         decision = _transfer_decision(preflight) or ("blocked" if not preflight.get("passed") else "review")
