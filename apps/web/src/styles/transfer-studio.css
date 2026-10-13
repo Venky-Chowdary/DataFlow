@@ -1379,11 +1379,16 @@
   opacity: 0.72;
 }
 .df2-route-bar-placeholder-icon {
-  display: inline-flex;
+  box-sizing: border-box;
+  display: block;
+  flex: 0 0 18px;
   width: 18px;
   height: 18px;
-  color: var(--df-border-strong, #cbd5e1);
-  flex-shrink: 0;
+  min-width: 18px;
+  max-width: 18px;
+  border: 1px solid var(--df-border-strong, #d0d6de);
+  border-radius: 3px;
+  background: transparent;
 }
 .df2-route-bar-endpoint {
   display: flex;
