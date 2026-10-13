@@ -69,6 +69,9 @@ class ColumnAggregate:
     min_value: str | None
     max_value: str | None
     sum_value: str | None  # Decimal text; None when non-numeric
+    # Order-independent Gate-8 cell fingerprints. Min/max wires can spell the
+    # same instant two ways; this is what L2 treats as the value population.
+    value_fingerprint: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -208,6 +211,96 @@ def _cell_text(value: Any) -> str | None:
     return text
 
 
+def _l2_same_value(left: Any, right: Any) -> bool:
+    """True when two L2 aggregates are the same cell under Gate-8 fingerprints.
+
+    The stored wire stays the SQL reader spelling (``true``, ``2024-...Z``,
+    ``1,234.567``). Destinations persist ``1`` / ``+00:00`` / ``1234.567``.
+    Those pairs already share a checksum; treating the spelling as a miss
+    rolled a faithful batch back.
+    """
+    if left == right:
+        return True
+    if left is None or right is None:
+        return False
+    if not isinstance(left, str) or not isinstance(right, str):
+        return False
+    from services.reconciliation import normalize_cell
+
+    return normalize_cell(left) == normalize_cell(right)
+
+
+def _l2_sum_decimal(text: str) -> Decimal | None:
+    """Decimal contribution of one L2 cell.
+
+    Strict bool tokens are ``1``/``0`` on the fingerprint path. Summing the
+    raw ``true``/``false`` wire left the source sum unset while SQLite's
+    ``1``/``0`` summed, and the ladder vetoed a matching checksum.
+    """
+    parsed = _try_decimal(text)
+    if parsed is not None:
+        return parsed
+    from services.transform_engine import _STRICT_BOOL_FALSE, _STRICT_BOOL_TRUE
+
+    lowered = text.strip().lower()
+    if lowered in _STRICT_BOOL_TRUE:
+        return Decimal(1)
+    if lowered in _STRICT_BOOL_FALSE:
+        return Decimal(0)
+    return None
+
+
+_IDENTITY_TRANSFORMS = frozenset({"", "none", "identity", "passthrough"})
+
+
+def mappings_rewrite_written_cells(mappings: list[dict] | None) -> bool:
+    """True when a raw source-table re-read is not the image that was written.
+
+    Renames, crosswalks, and non-identity transforms change the cell. L2 on
+    the pre-image reports every rewritten value as corruption.
+    """
+    for raw in mappings or []:
+        if not isinstance(raw, dict):
+            continue
+        src = str(raw.get("source") or raw.get("source_column") or "").strip()
+        tgt = str(raw.get("target") or raw.get("target_column") or "").strip()
+        if src and tgt and src.casefold() != tgt.casefold():
+            return True
+        transform = str(raw.get("transform") or "none").strip().lower()
+        if transform not in _IDENTITY_TRANSFORMS:
+            return True
+        if raw.get("code_crosswalk") or raw.get("crosswalk"):
+            return True
+    return False
+
+
+def _l2_population_skip_reason(
+    *,
+    source_rows: list[dict[str, Any]],
+    target_rows: list[dict[str, Any]],
+    source_row_count: int,
+    target_row_count: int | None,
+    rejected_rows: int,
+    coerced_null_rows: int,
+    rows_skipped: int,
+) -> str:
+    """Why L2 must not grade this load as the written batch.
+
+    Called only after the written-batch checksums already match. A digest
+    disagreement still keeps L2 so a real cell miss stays a failure.
+    """
+    held_out = max(int(rejected_rows), 0) - max(int(coerced_null_rows), 0)
+    omitted = held_out + max(int(rows_skipped), 0)
+    written = max(int(source_row_count) - omitted, 0)
+    if omitted > 0 and len(source_rows) > written:
+        return "source_includes_rows_that_did_not_land"
+    if target_row_count is not None and len(target_rows) != int(target_row_count):
+        return "dest_population_is_not_this_batch"
+    if int(coerced_null_rows) > 0:
+        return "coerced_nulls_follow_the_checksum_not_the_raw_source"
+    return ""
+
+
 def _try_decimal(text: str | None) -> Decimal | None:
     if text is None:
         return None
@@ -251,6 +344,8 @@ def compute_column_aggregates(
     sums: dict[str, Decimal | None] = {c: Decimal(0) for c in columns}
     sum_ok = {c: True for c in columns}
     distinct: dict[str, set[str]] = {c: set() for c in columns}
+    fingerprints: dict[str, list[str]] = {c: [] for c in columns}
+    from services.reconciliation import normalize_cell
 
     for rec in rows:
         if not isinstance(rec, dict):
@@ -263,12 +358,13 @@ def compute_column_aggregates(
                 continue
             non_null[col] += 1
             distinct[col].add(text)
+            fingerprints[col].append(normalize_cell(text))
             if mins[col] is None or _wire_less(text, mins[col]):
                 mins[col] = text
             if maxs[col] is None or _wire_less(maxs[col], text):
                 maxs[col] = text
             if sum_ok[col]:
-                d = _try_decimal(text)
+                d = _l2_sum_decimal(text)
                 if d is None:
                     sum_ok[col] = False
                     sums[col] = None
@@ -277,6 +373,12 @@ def compute_column_aggregates(
 
     out: dict[str, ColumnAggregate] = {}
     for col in columns:
+        fps = fingerprints[col]
+        fps.sort()
+        digest = hashlib.sha256()
+        for fp in fps:
+            digest.update(fp.encode("utf-8"))
+            digest.update(b"\n")
         out[col] = ColumnAggregate(
             column=col,
             null_count=nulls[col],
@@ -285,6 +387,7 @@ def compute_column_aggregates(
             min_value=mins[col],
             max_value=maxs[col],
             sum_value=None if not sum_ok[col] or sums[col] is None else format(sums[col], "f"),
+            value_fingerprint=digest.hexdigest(),
         )
     return out
 
@@ -302,13 +405,23 @@ def compare_column_aggregates(
         if s is None or t is None:
             mismatched.append({"column": col, "reason": "missing_side"})
             continue
+        # Same cells under the checksum contract. Storage spelling
+        # (``true``/``1``, ``Z``/``+00:00``, ``1,234.567``/``1234.567``)
+        # is not a second failure mode.
+        if (
+            s.null_count == t.null_count
+            and s.non_null_count == t.non_null_count
+            and s.value_fingerprint
+            and s.value_fingerprint == t.value_fingerprint
+        ):
+            continue
         diffs: dict[str, Any] = {}
         for field_name in ("null_count", "non_null_count", "min_value", "max_value", "sum_value"):
-            if getattr(s, field_name) != getattr(t, field_name):
-                diffs[field_name] = {
-                    "source": getattr(s, field_name),
-                    "target": getattr(t, field_name),
-                }
+            left = getattr(s, field_name)
+            right = getattr(t, field_name)
+            same = left == right if field_name.endswith("_count") else _l2_same_value(left, right)
+            if not same:
+                diffs[field_name] = {"source": left, "target": right}
         if diffs:
             mismatched.append({"column": col, "diffs": diffs})
     return LayerReport(
@@ -685,6 +798,7 @@ def run_five_layer_verification(
     target_rows_before: int | None = None,
     keyed_cardinality: bool = False,
     keyed_expected_delta: int | None = None,
+    l2_skip_reason: str = "",
 ) -> dict[str, Any]:
     """Execute L1–L5 on two in-memory populations (SQL-loaded or buffered).
 
@@ -805,6 +919,35 @@ def run_five_layer_verification(
                 "algorithm": "order_independent_sha256_row_fingerprints",
             },
         )
+
+    # L2 graded a different population than the digest (quarantine, history,
+    # coercion, or a pre-transform re-read). When the written-batch checksums
+    # match, that profile is not a cell failure and must not roll the load back.
+    checksums_agree = bool(src_chk and tgt_chk and src_chk == tgt_chk) and not empty_digest
+    if checksums_agree:
+        reason = (l2_skip_reason or "").strip() or _l2_population_skip_reason(
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_row_count=src_n,
+            target_row_count=target_row_count,
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+        )
+        if reason:
+            l2 = LayerReport(
+                layer="L2",
+                passed=True,
+                population_proof=False,
+                details={
+                    "skipped": True,
+                    "reason": reason,
+                    "note": (
+                        "Written-batch checksums match. This L2 load is not "
+                        "that batch, so it is not a fidelity failure."
+                    ),
+                },
+            )
 
     layers = {
         "L1": l1.to_dict(),
