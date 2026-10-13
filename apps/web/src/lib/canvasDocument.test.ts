@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   classifyChainLink,
+  draftWithDefaults,
+  insertIndexAtPoint,
   insertIndexForDrop,
   layoutFor,
   planCards,
   reorderByDrag,
+  spliceIndexAtPoint,
   stepsToFlow,
   stepsWithoutPlanOps,
 } from "./canvasDocument.js";
@@ -62,6 +65,7 @@ describe("canvas document", () => {
     assert.match(classifyChainLink(3, 0, 0).reason, /itself/);
     assert.match(classifyChainLink(3, 2, 0).reason, /forward/);
     assert.match(classifyChainLink(3, 0, 2).reason, /one chain/);
+    assert.match(classifyChainLink(3, 0, 2).reason, /one input and one output/);
     assert.match(classifyChainLink(3, -1, 0).reason, /not on this recipe/);
     assert.equal(insertIndexForDrop(0, 400), 0);
     assert.equal(insertIndexForDrop(3, 0), 0);
@@ -103,6 +107,26 @@ describe("canvas document", () => {
     const ids = new Set(flow.edges.map((edge) => `${edge.source}>${edge.target}`));
     assert.equal(ids.size, 99);
     assert.equal(layoutFor(100).length, 100);
+  });
+
+  it("places a drop on an edge between two nodes and defaults a column step", () => {
+    const positions = layoutFor(2);
+    const gap = { x: positions[0].x + 40, y: positions[0].y + 100 };
+    assert.equal(spliceIndexAtPoint(positions, gap), 1);
+    assert.equal(insertIndexAtPoint(2, gap, positions), 1);
+    assert.equal(spliceIndexAtPoint(positions, { x: 48, y: 10 }), null);
+    assert.equal(insertIndexAtPoint(0, { x: 10, y: 10 }, []), 0);
+    const moved = reorderByDrag(
+      [{ op: "trim", column: "a" }, { op: "trim", column: "b" }, { op: "lower", column: "a" }],
+      2,
+      1,
+    );
+    assert.deepEqual(moved.map((step) => step.op), ["trim", "lower", "trim"]);
+    assert.deepEqual(draftWithDefaults(trim, ["email", "name"]), { column: "email", options: {} });
+    const filterDraft = draftWithDefaults(filter, ["email"]);
+    assert.equal(filterDraft.column, "");
+    assert.equal(filterDraft.options.keep, false);
+    assert.equal(filterDraft.options.condition, undefined);
   });
 });
 

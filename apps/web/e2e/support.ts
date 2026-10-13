@@ -22,18 +22,24 @@ export async function reachTransform(page: Page): Promise<void> {
   await expect(page.getByRole("heading", { name: "Transform", exact: true })).toBeVisible();
 }
 
-export async function shoot(page: Page, name: string): Promise<void> {
+export async function shoot(
+  page: Page,
+  name: string,
+  extraMask: ReturnType<Page["locator"]>[] = [],
+  maxDiffPixelRatio?: number,
+): Promise<void> {
   const panel = page.locator(".df2-xform");
   await panel.evaluate((node) => {
     node.scrollTop = 0;
   });
-  const mask = [page.locator(".dt-toast"), page.locator(".df2-xform-identity")];
+  const mask = [page.locator(".dt-toast"), page.locator(".df2-xform-identity"), ...extraMask];
+  const options = maxDiffPixelRatio == null ? { mask } : { mask, maxDiffPixelRatio };
   const width = page.viewportSize()?.width ?? 1440;
   // Element screenshots of the scroll host come back blank under 500px.
   // The viewport shot is the one that shows the step.
   if (width < 500) {
-    await expect(page).toHaveScreenshot(name, { mask });
+    await expect(page).toHaveScreenshot(name, options);
     return;
   }
-  await expect(panel).toHaveScreenshot(name, { mask });
+  await expect(panel).toHaveScreenshot(name, options);
 }

@@ -7,6 +7,7 @@
 
 import {
   describeStep,
+  fieldsFor,
   type ShapeOperation,
   type ShapeStepWire,
 } from "./shape";
@@ -132,12 +133,12 @@ export function classifyChainLink(
   if (targetIndex < sourceIndex) {
     return {
       ok: false,
-      reason: "Data moves forward. Connect an earlier step's output to a later step.",
+      reason: "Each step has one input and one output. Data moves forward. Connect an earlier step's output to a later step.",
     };
   }
   return {
     ok: false,
-    reason: "This recipe is one chain. Drag a node to reorder, or drop a step between two steps. A skip would leave the steps in between unconnected.",
+    reason: "Each step has one input and one output. This recipe is one chain. Drag a node to reorder, or drop a step between two steps. A skip would leave the steps in between unconnected.",
   };
 }
 
@@ -170,6 +171,68 @@ export function insertIndexForDrop(stepCount: number, localY: number, pitch = LA
   if (stepCount <= 0) return 0;
   const index = Math.round(Math.max(0, localY) / pitch);
   return Math.max(0, Math.min(stepCount, index));
+}
+
+/** Node box the chain layout and the edge-hit test share. */
+export const NODE_WIDTH = 200;
+export const NODE_BODY = 88;
+
+export interface FlowPoint {
+  x: number;
+  y: number;
+}
+
+/**
+ * Insert index when the pointer sits in the gap between two consecutive nodes.
+ * Null when the point is on a node or in empty space.
+ */
+export function spliceIndexAtPoint(positions: FlowPoint[], point: FlowPoint): number | null {
+  for (let index = 0; index < positions.length - 1; index += 1) {
+    const above = positions[index];
+    const below = positions[index + 1];
+    const gapTop = above.y + NODE_BODY;
+    const gapBottom = below.y;
+    if (gapBottom <= gapTop) continue;
+    const left = Math.min(above.x, below.x) - 32;
+    const right = Math.max(above.x, below.x) + NODE_WIDTH + 32;
+    if (point.y >= gapTop && point.y <= gapBottom && point.x >= left && point.x <= right) {
+      return index + 1;
+    }
+  }
+  return null;
+}
+
+/** Chain index for a flow-space drop. An edge hit wins over a Y sort. */
+export function insertIndexAtPoint(stepCount: number, point: FlowPoint, positions: FlowPoint[]): number {
+  const spliced = spliceIndexAtPoint(positions, point);
+  if (spliced != null) return spliced;
+  if (stepCount <= 0 || positions.length === 0) return 0;
+  let index = 0;
+  for (const position of positions) {
+    if (point.y > position.y + NODE_BODY / 2) index += 1;
+  }
+  return Math.max(0, Math.min(stepCount, index));
+}
+
+/**
+ * Defaults the inspector can open on. A required text or expression stays
+ * blank — the engine does not invent a predicate.
+ */
+export function draftWithDefaults(
+  operation: ShapeOperation,
+  columns: string[],
+): { column: string; options: Record<string, unknown> } {
+  const options: Record<string, unknown> = {};
+  for (const field of fieldsFor(operation)) {
+    if (field.kind === "boolean") options[field.name] = false;
+    else if (field.kind === "choice" && field.choices && field.choices.length > 0) {
+      options[field.name] = field.choices[0];
+    } else if (field.kind === "number" && field.required) options[field.name] = 0;
+  }
+  return {
+    column: operation.needs_column ? (columns[0] ?? "") : "",
+    options,
+  };
 }
 
 /** One icon per family. The palette and the node share this map. */

@@ -66,7 +66,34 @@
   display: flex;
   flex-direction: column;
   gap: var(--df-space-3);
-  min-height: 560px;
+  min-height: 0;
+  flex: 1 1 auto;
+  width: 100%;
+}
+
+/* The flagged canvas fills the step under the app header.
+   The classic step does not carry .df2-studio-next, so this rule never matches it. */
+.df2-xform-step:has(.df2-studio-next) {
+  display: flex;
+  flex-direction: column;
+  height: calc(100dvh - var(--df-header-height) - var(--df-space-8));
+  max-height: calc(100dvh - var(--df-header-height) - var(--df-space-8));
+  min-height: 0;
+  overflow: hidden;
+}
+
+.df2-xform.df2-studio-next {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.df2-xform.df2-studio-next .df2-xform-panel:not([hidden]) {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .df2-canvas-head,
@@ -104,14 +131,23 @@
 }
 
 .df2-canvas-body {
-  min-height: 480px;
+  flex: 1 1 auto;
+  min-height: 0;
   align-items: stretch;
+}
+
+.df2-canvas-rail {
+  width: 120px;
+  flex: 0 0 120px;
+}
+
+.df2-canvas-inspector {
+  width: 280px;
+  flex: 0 0 280px;
 }
 
 .df2-canvas-rail,
 .df2-canvas-inspector {
-  width: 240px;
-  flex: 0 0 240px;
   background: var(--df-surface);
   border: 1px solid var(--df-border-strong);
   border-radius: var(--df-radius-md);
@@ -130,27 +166,45 @@
   gap: var(--df-space-2);
 }
 
-.df2-canvas-tiles {
-  display: flex;
-  flex-direction: column;
+.df2-canvas-rail ul.df2-canvas-tiles {
+  display: grid;
+  grid-template-columns: repeat(2, 36px);
   gap: var(--df-space-2);
 }
 
 .df2-canvas-op {
+  position: relative;
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr);
-  align-items: center;
-  gap: var(--df-space-2);
-  width: 100%;
-  text-align: left;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
   background: var(--df-surface);
   border: 1px solid var(--df-border);
   border-radius: var(--df-radius-md);
   color: var(--df-text-primary);
-  padding: var(--df-space-2);
-  font: inherit;
-  font-size: var(--df-fs-sm);
   cursor: grab;
+}
+
+.df2-canvas-op:hover::after,
+.df2-canvas-op:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: calc(100% + var(--df-space-2));
+  top: 0;
+  z-index: 6;
+  width: max-content;
+  max-width: 220px;
+  padding: var(--df-space-1) var(--df-space-2);
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-sm);
+  box-shadow: var(--df-shadow-xs);
+  font-size: var(--df-fs-xs);
+  line-height: 1.3;
+  text-align: left;
+  pointer-events: none;
 }
 
 .df2-canvas-op-icon,
@@ -195,36 +249,108 @@
   font-size: var(--df-fs-sm);
 }
 
-/* The canvas is the step body. Suggested repairs stay above it.
+/* The canvas is the step body. Rules and suggestions live in the toolbar drawer.
    The old two-column grid is unchanged when this class is absent. */
 .df2-xform-grid.is-canvas {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
   grid-template-columns: minmax(0, 1fr);
 }
 
 .df2-canvas-stage-wrap {
   flex: 1 1 auto;
   min-width: 280px;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: var(--df-space-2);
-  min-height: 560px;
 }
 
 .df2-canvas-stage {
   flex: 1 1 auto;
   min-width: 0;
-  height: 560px;
-  min-height: 560px;
+  min-height: 280px;
   background: var(--df-bg-canvas);
   border: 1px solid var(--df-border);
   border-radius: var(--df-radius-md);
   position: relative;
 }
 
-.df2-canvas-link-refusal {
+.df2-canvas-stage.is-drop-target {
+  outline: 2px solid var(--df-brand-tile);
+  outline-offset: -2px;
+}
+
+.df2-canvas-link-refusal,
+.df2-canvas-link-note {
   margin: 0;
-  color: var(--df-warning-text);
   font-size: var(--df-fs-sm);
+}
+
+.df2-canvas-link-refusal {
+  color: var(--df-warning-text);
+}
+
+.df2-canvas-link-note {
+  color: var(--df-text-secondary);
+}
+
+.df2-canvas-dock {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  min-height: 96px;
+  overflow: hidden;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+}
+
+.df2-canvas-dock-grip {
+  height: 8px;
+  flex: 0 0 8px;
+  cursor: ns-resize;
+  background: var(--df-border);
+}
+
+.df2-canvas-dock-grip:focus-visible {
+  outline: 2px solid var(--df-brand-tile);
+  outline-offset: -2px;
+}
+
+.df2-canvas-dock-body {
+  overflow: auto;
+  padding: var(--df-space-2) var(--df-space-3);
+}
+
+.df2-canvas-dock-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--df-space-3);
+}
+
+.df2-canvas-dock-head p,
+.df2-canvas-dock-body .df2-label-hint {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+}
+
+.df2-canvas-dock table {
+  width: 100%;
+  margin-top: var(--df-space-2);
+  border-collapse: collapse;
+  font-size: var(--df-fs-xs);
+}
+
+.df2-canvas-dock th,
+.df2-canvas-dock td {
+  text-align: left;
+  padding: var(--df-space-1) var(--df-space-2);
+  border-bottom: 1px solid var(--df-border);
+  color: var(--df-text-primary);
+  white-space: nowrap;
 }
 
 .df2-canvas-preview,
@@ -256,8 +382,8 @@
 
 .df2-canvas-stage .react-flow {
   width: 100%;
-  height: 560px;
-  min-height: 560px;
+  height: 100%;
+  min-height: 280px;
   background: var(--df-bg-canvas);
 }
 
@@ -403,8 +529,12 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
   .df2-canvas-rail,
   .df2-canvas-inspector {
     width: auto;
-    flex-basis: auto;
-    max-height: none;
+    flex: 0 0 auto;
+    max-height: 9rem;
+  }
+
+  .df2-canvas-rail ul.df2-canvas-tiles {
+    grid-template-columns: repeat(6, 36px);
   }
 
   .df2-canvas .react-flow__minimap {

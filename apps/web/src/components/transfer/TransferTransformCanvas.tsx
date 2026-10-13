@@ -1,18 +1,20 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { DtIcon } from "../DtIcon";
 import { Dialog } from "../ui/Dialog";
+import { Drawer } from "../ui/Drawer";
 import { StudioPicker } from "../ui/StudioPicker";
 import { ShapeStepFields } from "./ShapeStepFields";
 import { StudioCommandPalette } from "./StudioCommandPalette";
 import { checkShapeExpression } from "../../lib/api";
 import { paletteActions } from "../../lib/canvasPalette";
 import {
+  draftWithDefaults,
   familyIcon,
-  insertIndexForDrop,
   planCards,
   reorderByDrag,
   stepsToFlow,
   stepsWithoutPlanOps,
+  type FlowPoint,
   type PendingStepModel,
 } from "../../lib/canvasDocument";
 import {
@@ -54,6 +56,13 @@ interface TransferTransformCanvasProps {
   onContinue: () => void;
   canContinue: boolean;
   onOpenSchema: () => void;
+  /** Business rules, suggestions, and the rule ledger. Same elements as the classic step. */
+  rules?: ReactNode;
+  repairs?: ReactNode;
+  ledger?: ReactNode;
+  previewColumns: string[];
+  previewRows: Record<string, unknown>[];
+  previewStatus: string;
 }
 
 const SHORTCUTS: { keys: string; action: string }[] = [
@@ -92,6 +101,12 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     onContinue,
     canContinue,
     onOpenSchema,
+    rules,
+    repairs,
+    ledger,
+    previewColumns,
+    previewRows,
+    previewStatus,
   } = props;
   const stackRef = useRef(createUndoStack(steps));
   const filterRef = useRef<HTMLInputElement>(null);
@@ -109,7 +124,12 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const [templateExpression, setTemplateExpression] = useState("");
   const [templateFormat, setTemplateFormat] = useState("%Y-%m-%d");
   const [pendingAt, setPendingAt] = useState<number | null>(null);
+  const [placed, setPlaced] = useState<{ index: number; x: number; y: number } | null>(null);
   const [linkRefusal, setLinkRefusal] = useState("");
+  const [linkNote, setLinkNote] = useState("");
+  const [rulesOpen, setRulesOpen] = useState(false);
+  const [templatesOpen, setTemplatesOpen] = useState(false);
+  const [dockHeight, setDockHeight] = useState(168);
   const expressionGen = useRef(0);
   const draftIndex = useRef<number | null>(null);
   const canEdit = canPlan && !syncRefused;
@@ -132,6 +152,14 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     stackRef.current = direction === "undo" ? undo(stackRef.current) : redo(stackRef.current);
     onChangeSteps(stackRef.current.present);
     setSelected(null);
+    setPendingAt(null);
+    setPlaced(null);
+    setLinkRefusal("");
+    setLinkNote("");
+  };
+
+  const focusInspector = () => {
+    window.setTimeout(() => document.getElementById("canvas-inspector")?.focus(), 0);
   };
 
   const names = columns.map((column) => column.name);
@@ -173,31 +201,38 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     if (draftIndex.current == null) setDraftOp("");
   };
 
-  const beginAdd = (op: string, atIndex = steps.length) => {
+  const beginAdd = (op: string, atIndex = steps.length, atPoint?: FlowPoint) => {
     if (!canEdit) return;
     const operation = catalog?.operations.find((item) => item.op === op);
+    if (!operation) return;
+    const defaults = draftWithDefaults(operation, names);
+    const at = Math.max(0, Math.min(steps.length, atIndex));
     draftIndex.current = null;
-    setSelected(null);
     setDraftOp(op);
-    setDraftColumn("");
-    setDraftOptions({});
+    setDraftColumn(defaults.column);
+    setDraftOptions(defaults.options);
     setDraftLabel("");
     setDraftPolicy("refuse");
     setExpressionError("");
     setFormError("");
     setLinkRefusal("");
-    if (!operation) return;
-    const built = stepFromDraft(operation, "", {}, "", "refuse");
+    setLinkNote("");
+    const built = stepFromDraft(operation, defaults.column, defaults.options, "", "refuse");
+    if (atPoint) setPlaced({ index: built.step ? at : -1, x: atPoint.x, y: atPoint.y });
+    else setPlaced(null);
     if (built.step) {
       const next = steps.slice();
-      const at = Math.max(0, Math.min(steps.length, atIndex));
       next.splice(at, 0, built.step);
       setPendingAt(null);
-      commit(next);
+      draftIndex.current = at;
       setSelected(at);
+      commit(next);
+      focusInspector();
       return;
     }
-    setPendingAt(Math.max(0, Math.min(steps.length, atIndex)));
+    setSelected(null);
+    setPendingAt(at);
+    focusInspector();
   };
 
   const validateExpression = async (text: string) => {
@@ -359,6 +394,12 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           </p>
         </div>
         <div className="df2-canvas-head-actions">
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setRulesOpen(true)}>
+            Rules and suggestions
+          </button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setTemplatesOpen(true)}>
+            Templates
+          </button>
           <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => applyStack("undo")} aria-label="Undo">
             Undo
           </button>
@@ -397,47 +438,28 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                       className="df2-canvas-op"
                       draggable={canEdit}
                       disabled={!canEdit}
-                      onDragStart={(event) => event.dataTransfer.setData("application/x-df-op", operation.op)}
+                      title={operation.summary}
+                      aria-label={operation.summary}
+                      data-tip={operation.summary}
+                      data-op={operation.op}
+                      onDragStart={(event) => {
+                        event.dataTransfer.setData("application/x-df-op", operation.op);
+                        event.dataTransfer.effectAllowed = "copy";
+                      }}
                       onClick={() => beginAdd(operation.op)}
                     >
                       <span className="df2-canvas-op-icon" aria-hidden>
                         <DtIcon name={familyIcon(operation.family || "cleanse")} size={16} chrome="product" />
                       </span>
-                      <span>{operation.summary}</span>
                     </button>
                   </li>
                 ))}
               </ul>
             </section>
           ))}
-          <section>
-            <h4>Templates</h4>
-            <label className="df2-label" htmlFor="canvas-date-format">Date format</label>
-            <input
-              id="canvas-date-format"
-              className="df2-input df2-input-sm"
-              value={templateFormat}
-              onChange={(event) => setTemplateFormat(event.target.value)}
-              aria-label="Explicit date format"
-            />
-            <label className="df2-label" htmlFor="canvas-divert">Divert condition</label>
-            <input
-              id="canvas-divert"
-              className="df2-input df2-input-sm"
-              value={templateExpression}
-              onChange={(event) => setTemplateExpression(event.target.value)}
-              placeholder="[status] = 'void'"
-              aria-label="Divert condition"
-            />
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-trim")}>Trim text columns</button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-drop")}>Drop empty columns</button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-dates")}>Parse dates</button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-divert")}>Divert rows</button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-hash")}>Hash identity key</button>
-          </section>
           {cards.length > 0 && (
             <details className="df2-canvas-sql">
-              <summary>Warehouse SQL</summary>
+              <summary>Warehouse SQL (runs after load)</summary>
               <p className="df2-label-hint">These run after the load. They are not steps on this canvas.</p>
               <ul>
                 {cards.map((card) => (
@@ -453,41 +475,41 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
         </aside>
 
         <div className="df2-canvas-stage-wrap">
-          <div
-            className="df2-canvas-stage"
-            onDragOver={(event) => {
-              if (canEdit) event.preventDefault();
-            }}
-            onDrop={(event) => {
-              event.preventDefault();
-              const op = event.dataTransfer.getData("application/x-df-op");
-              if (!op) return;
-              const bounds = event.currentTarget.getBoundingClientRect();
-              beginAdd(op, insertIndexForDrop(steps.length, event.clientY - bounds.top));
-            }}
-          >
-            <Suspense fallback={<p className="df2-label-hint" role="status" aria-busy="true">Loading the canvas…</p>}>
-              <TransformFlow
-                nodes={flow.nodes}
-                edges={flow.edges}
-                pending={pending}
-                onSelect={loadStep}
-                onReorder={(from, to) => {
-                  if (!canEdit) return;
-                  setPendingAt(null);
-                  commit(reorderByDrag(steps, from, to));
-                }}
-                onInvalidLink={setLinkRefusal}
-              />
-            </Suspense>
-          </div>
+          <Suspense fallback={<p className="df2-label-hint" role="status" aria-busy="true">Loading the canvas…</p>}>
+            <TransformFlow
+              nodes={flow.nodes}
+              edges={flow.edges}
+              pending={pending}
+              placed={placed}
+              onSelect={loadStep}
+              onReorder={(from, to) => {
+                if (!canEdit) return;
+                setPendingAt(null);
+                setPlaced(null);
+                commit(reorderByDrag(steps, from, to));
+              }}
+              onInvalidLink={(reason) => {
+                setLinkNote("");
+                setLinkRefusal(reason);
+              }}
+              onAcceptLink={(message) => {
+                setLinkRefusal("");
+                setLinkNote(message);
+              }}
+              onDropOp={(op, at, index) => beginAdd(op, index, at)}
+            />
+          </Suspense>
+          {linkNote && <p className="df2-canvas-link-note" role="status">{linkNote}</p>}
           {linkRefusal && <p className="df2-canvas-link-refusal" role="alert">{linkRefusal}</p>}
-          <details className="df2-canvas-preview">
-            <summary>Sample preview</summary>
-            <p role="status">{previewBanner}</p>
-            {effectSummary && <p className="df2-label-hint">{effectSummary}</p>}
-            <button type="button" className="df2-btn df2-btn-sm" onClick={onRunPreview}>Run preview</button>
-          </details>
+          <PreviewDock
+            height={dockHeight}
+            onHeight={setDockHeight}
+            status={previewStatus || previewBanner}
+            effect={effectSummary}
+            columns={previewColumns}
+            rows={previewRows}
+            onRunPreview={onRunPreview}
+          />
         </div>
 
         <aside className="df2-canvas-inspector" id="canvas-inspector" tabIndex={-1} aria-label="Step inspector">
@@ -546,6 +568,48 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
         </aside>
       </div>
 
+      <Drawer
+        open={rulesOpen}
+        onClose={() => setRulesOpen(false)}
+        title="Rules and suggestions"
+        subtitle="The same cards as the classic editor."
+      >
+        {rules}
+        {repairs}
+        {ledger}
+      </Drawer>
+      <Dialog
+        open={templatesOpen}
+        onClose={() => setTemplatesOpen(false)}
+        title="Templates"
+        subtitle="Recipes made of several steps. They also appear in the command menu."
+        size="md"
+      >
+        <label className="df2-label" htmlFor="canvas-date-format">Date format</label>
+        <input
+          id="canvas-date-format"
+          className="df2-input df2-input-sm"
+          value={templateFormat}
+          onChange={(event) => setTemplateFormat(event.target.value)}
+          aria-label="Explicit date format"
+        />
+        <label className="df2-label" htmlFor="canvas-divert">Divert condition</label>
+        <input
+          id="canvas-divert"
+          className="df2-input df2-input-sm"
+          value={templateExpression}
+          onChange={(event) => setTemplateExpression(event.target.value)}
+          placeholder="[status] = 'void'"
+          aria-label="Divert condition"
+        />
+        <div className="df2-canvas-inspector-actions">
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-trim")}>Trim text columns</button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-drop")}>Drop empty columns</button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-dates")}>Parse dates</button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-divert")}>Divert rows</button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-hash")}>Hash identity key</button>
+        </div>
+      </Dialog>
       <StudioCommandPalette
         open={paletteOpen}
         actions={actions}
@@ -559,6 +623,87 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           ))}
         </ul>
       </Dialog>
+    </div>
+  );
+}
+
+function cellText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "boolean") return value ? "true" : "false";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function PreviewDock({
+  height,
+  onHeight,
+  status,
+  effect,
+  columns,
+  rows,
+  onRunPreview,
+}: {
+  height: number;
+  onHeight: (height: number) => void;
+  status: string;
+  effect: string;
+  columns: string[];
+  rows: Record<string, unknown>[];
+  onRunPreview: () => void;
+}) {
+  const shown = columns.slice(0, 6);
+  const gripDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startH = height;
+    const move = (next: PointerEvent) => {
+      onHeight(Math.min(420, Math.max(96, startH + (startY - next.clientY))));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+  return (
+    <div className="df2-canvas-dock" style={{ height }} data-testid="canvas-preview">
+      <div
+        className="df2-canvas-dock-grip"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize preview"
+        aria-valuemin={96}
+        aria-valuemax={420}
+        aria-valuenow={height}
+        tabIndex={0}
+        onPointerDown={gripDown}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowUp") onHeight(Math.min(420, height + 24));
+          if (event.key === "ArrowDown") onHeight(Math.max(96, height - 24));
+        }}
+      />
+      <div className="df2-canvas-dock-body">
+        <div className="df2-canvas-dock-head">
+          <p data-testid="canvas-preview-status" role="status">{status}</p>
+          <button type="button" className="df2-btn df2-btn-sm" onClick={onRunPreview}>Run preview</button>
+        </div>
+        {effect && <p className="df2-label-hint">{effect}</p>}
+        {rows.length > 0 && shown.length > 0 && (
+          <table>
+            <thead>
+              <tr>{shown.map((column) => <th key={column}>{column}</th>)}</tr>
+            </thead>
+            <tbody>
+              {rows.slice(0, 8).map((row, index) => (
+                <tr key={index}>
+                  {shown.map((column) => <td key={column}>{cellText(row[column])}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }

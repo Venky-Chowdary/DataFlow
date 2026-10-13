@@ -5,6 +5,8 @@ import { TransformColumnChart } from "../../components/transfer/TransformColumnC
 import { TransformGuidePanel } from "../../components/transfer/TransformGuidePanel";
 import { TransformStepBuilder } from "../../components/transfer/TransformStepBuilder";
 import { TransferTransformCanvas } from "../../components/transfer/TransferTransformCanvas";
+import { StudioFlagBanner } from "../../components/transfer/StudioFlagBanner";
+import { RulesImportCard, SuggestionsCard } from "../../components/transfer/TransformPrepCards";
 import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
 import { Dialog } from "../../components/ui/Dialog";
 import { fetchShapeCatalog, importBusinessRules, previewShapeRecipe, profileShapeSource } from "../../lib/api";
@@ -85,6 +87,11 @@ interface TransferTransformStepProps {
   canvasEnabled?: boolean;
   /** Return to the source step so the operator can open the schema tree. */
   onOpenSchema?: () => void;
+  /** Workspace settings could not be read. Empty when the read succeeded. */
+  studioFlagsError?: string;
+  /** Workspace canvas is on and this browser has not opted in. */
+  canvasOptIn?: boolean;
+  onOptInCanvas?: () => void;
 }
 
 const PREVIEW_ROWS = 12;
@@ -93,13 +100,6 @@ const NO_ROWS: Record<string, unknown>[] = [];
 
 function isTransportTimeout(message: string): boolean {
   return /timed out|abort|504|network/i.test(message);
-}
-
-/** Severity → the badge class the rest of the studio already uses. */
-function severityClass(severity: string): string {
-  if (severity === "blocking") return "df2-badge df2-badge-error";
-  if (severity === "decision") return "df2-badge df2-badge-warn";
-  return "df2-badge";
 }
 
 function cellText(value: unknown): string {
@@ -143,6 +143,9 @@ export function TransferTransformStep({
   onProgramHash,
   canvasEnabled = false,
   onOpenSchema,
+  studioFlagsError = "",
+  canvasOptIn = false,
+  onOptInCanvas,
 }: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
@@ -416,6 +419,12 @@ export function TransferTransformStep({
 
   return (
     <section className={canvasEnabled ? "df2-xform df2-studio-next" : "df2-xform"} aria-labelledby="xform-title">
+      <StudioFlagBanner
+        error={studioFlagsError}
+        optIn={canvasOptIn}
+        onOptIn={onOptInCanvas ?? (() => {})}
+        kind="canvas"
+      />
       <header className="df2-xform-head">
         <div className="df2-xform-head-row">
           <div className="df2-xform-head-copy">
@@ -591,89 +600,27 @@ export function TransferTransformStep({
         className="df2-xform-panel"
       >
       <h2 id="xform-prepare-label" className="df2-sr-only">Rules and transforms</h2>
-      {onApplyRules ? <div className="df2-rule-import">
-        <div className="df2-rule-import-copy">
-          <strong>Business rules</strong>
-          <p>
-            Upload the mapping workbook (Excel, CSV, TSV or JSON). Rules that
-            can run exactly are compiled into steps here; everything else waits
-            for your review.
-          </p>
-          <details className="df2-rule-import-detail">
-            <summary>What this upload does</summary>
-            <p>
-              Headers are inferred from the file and the schemas you already
-              selected — not a fixed column list. Closed-form rows compile onto
-              this recipe and Map. Destination names land on Map — this catalog
-              stays the pre-load image (source names plus derived columns).
-              Anything we cannot execute stays in review — unused destination
-              columns are not written. Applied rows land on this recipe and Map
-              immediately. Closed-form Validate checks compile as destination
-              contracts — they never write a column. Review is for sentences
-              that are not a closed form or did not bind. A leftover bound
-              rename can be accepted as Direct on Map, or remapped there.
-              {sourceTables.length > 1
-                ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins need you to choose how rows match; they stay in review.`
-                : ""}
-            </p>
-          </details>
-          {ruleReport ? <p className="df2-rule-import-summary">{ruleReport.filename}</p> : null}
-          {ruleError ? <p className="df2-rule-import-error" role="alert">{ruleError}</p> : null}
-        </div>
-        <div className="df2-rule-import-actions">
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".xlsx,.xlsm,.xls,.csv,.tsv,.txt,.json,.ndjson,application/json,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-            hidden
-            onChange={(event) => void onPickRules(event.target.files?.[0])}
-          />
-          <button
-            type="button"
-            className="df2-btn df2-btn-secondary df2-btn-sm"
-            disabled={ruleBusy || !plan.allowed}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            {ruleBusy ? "Reading…" : ruleReport ? "Replace rules file" : "Upload rules"}
-          </button>
-        </div>
-      </div> : null}
+      {!canvasEnabled && onApplyRules ? (
+        <RulesImportCard
+          ruleReport={ruleReport}
+          sourceTables={sourceTables}
+          ruleError={ruleError}
+          fileInputRef={fileInputRef}
+          onPickRules={onPickRules}
+          ruleBusy={ruleBusy}
+          allowed={plan.allowed}
+        />
+      ) : null}
       <div className={canvasEnabled ? "df2-xform-grid is-canvas" : "df2-xform-grid"}>
-        <section className="df2-xform-card" aria-labelledby="xform-decisions-title">
-          <header className="df2-xform-card-head">
-            <h3 id="xform-decisions-title">Suggested repairs</h3>
-          </header>
-          {openSuggestions.length > 0 ? (
-            <ul className="df2-xform-suggestions">
-              {openSuggestions.map((suggestion) => (
-                <li key={suggestion.id}>
-                  <div className="df2-xform-suggestion-head">
-                    <span className={severityClass(suggestion.severity)}>{suggestion.severity}</span>
-                    <strong>{suggestion.title}</strong>
-                  </div>
-                  <p>{suggestion.reason}</p>
-                  <div className="df2-xform-suggestion-foot">
-                    <span>{suggestion.rows_affected.toLocaleString()} sampled row(s) affected</span>
-                    <button
-                      type="button"
-                      className="df2-btn df2-btn-sm"
-                      disabled={!plan.allowed}
-                      title={plan.reason || "Add this step to the recipe"}
-                      onClick={() => applySuggestion(suggestion)}
-                    >
-                      <DtIcon name="plus" size={14} /> Add step
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          ) : profile ? (
-            <p className="df2-xform-empty">
-              <DtIcon name="check" size={16} />
-              Nothing in the sample needs a transform. Validate still re-checks the whole population.
-            </p>
-          ) : null}
-        </section>
+        {!canvasEnabled && (
+          <SuggestionsCard
+            suggestions={openSuggestions}
+            profileReady={Boolean(profile)}
+            allowed={plan.allowed}
+            disabledReason={plan.reason}
+            onAdd={applySuggestion}
+          />
+        )}
 
         {canvasEnabled ? (
           <TransferTransformCanvas
@@ -702,6 +649,38 @@ export function TransferTransformStep({
             onContinue={onContinue}
             canContinue={continueState.enabled}
             onOpenSchema={onOpenSchema ?? onBack}
+            rules={onApplyRules ? (
+              <RulesImportCard
+                ruleReport={ruleReport}
+                sourceTables={sourceTables}
+                ruleError={ruleError}
+                fileInputRef={fileInputRef}
+                onPickRules={onPickRules}
+                ruleBusy={ruleBusy}
+                allowed={plan.allowed}
+              />
+            ) : null}
+            repairs={(
+              <SuggestionsCard
+                suggestions={openSuggestions}
+                profileReady={Boolean(profile)}
+                allowed={plan.allowed}
+                disabledReason={plan.reason}
+                onAdd={applySuggestion}
+              />
+            )}
+            ledger={ruleReport ? <BusinessRuleLedger report={ruleReport} embedded /> : null}
+            previewColumns={columnsAfter}
+            previewRows={afterRows.length ? afterRows : beforeRows}
+            previewStatus={
+              busy
+                ? "Previewing the recipe…"
+                : previewError
+                  ? previewError
+                  : preview?.recipe.recipe_hash
+                    ? `${summarizeEffect(effect) || "Preview matches the recipe."} · ${preview.recipe.recipe_hash}`
+                    : samplePopulationBanner(Math.min(PREVIEW_ROWS, beforeRows.length), rowCount)
+            }
           />
         ) : (
         <section className="df2-xform-card" aria-labelledby="xform-recipe-title">
@@ -853,7 +832,7 @@ export function TransferTransformStep({
           )}
         </section>
         )}
-      {ruleReport ? (
+      {!canvasEnabled && ruleReport ? (
         <BusinessRuleLedger
           report={ruleReport}
           embedded
@@ -867,7 +846,7 @@ export function TransferTransformStep({
         role="tabpanel"
         id="xform-panel-result"
         aria-labelledby="xform-result-label"
-        hidden={canvasEnabled ? false : pane !== "result"}
+        hidden={canvasEnabled ? true : pane !== "result"}
         className="df2-xform-panel"
       >
       <h2 id="xform-result-label" className="df2-sr-only">Transform result</h2>

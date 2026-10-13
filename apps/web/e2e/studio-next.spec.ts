@@ -5,6 +5,13 @@ import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { openStudio, reachTransform, shoot } from "./support";
 
+/** A toast shifts the narrow page. Remove it before the shot; the mask alone does not. */
+async function quietChrome(page: Page): Promise<void> {
+  await page.locator(".dt-toast").evaluateAll((nodes) => {
+    for (const node of nodes) node.remove();
+  });
+}
+
 async function apiUp(page: Page): Promise<boolean> {
   try {
     const response = await page.request.get("/api/v1/health");
@@ -40,35 +47,124 @@ test.describe("studio next", () => {
     });
   });
 
-  test("canvas adds a divert step and undo removes it", async ({ page }) => {
+  test("canvas light and dark stay on the chain layout", async ({ page }) => {
     await openStudio(page);
     await reachTransform(page);
-    await expect(page.getByTestId("transform-canvas")).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Steps, in order" })).toHaveCount(0);
-
-    await page.getByLabel("Divert condition").fill("[status] = 'void'");
-    await page.getByRole("button", { name: "Divert rows" }).click();
+    await page.locator(".df2-canvas-op[data-op='trim']").click();
     await expect(page.locator(".react-flow__node")).toHaveCount(1);
-    await page.getByRole("button", { name: "Undo" }).click();
-    await expect(page.locator(".react-flow__node")).toHaveCount(0);
-
-    const primary = page.locator(".df2-studio-next .df2-btn-primary").first();
-    await expect(primary).toBeVisible();
-    const color = await primary.evaluate((node) => getComputedStyle(node).backgroundColor);
-    expect(color).toBe("rgb(10, 61, 58)");
-
-    await shoot(page, "canvas-light-1440.png");
+    const status = page.getByTestId("canvas-preview-status");
+    let seen = "";
+    await expect.poll(async () => {
+      const text = (await status.innerText()).trim();
+      if (!text || text.startsWith("Previewing")) {
+        seen = "";
+        return "";
+      }
+      if (text === seen) return text;
+      seen = text;
+      return "";
+    }, { timeout: 20_000 }).not.toBe("");
+    await page.addStyleTag({ content: "* { caret-color: transparent !important; transition: none !important; animation: none !important; }" });
+    await quietChrome(page);
+    // xyflow edge antialiasing moves about one percent between captures.
+    await shoot(page, "canvas-light-1440.png", [], 0.02);
     await page.setViewportSize({ width: 390, height: 844 });
-    await shoot(page, "canvas-light-390.png");
+    await quietChrome(page);
+    await shoot(page, "canvas-light-390.png", [], 0.02);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.evaluate(() => {
       localStorage.setItem("df2.theme", "dark");
       document.documentElement.setAttribute("data-theme", "dark");
       document.documentElement.classList.add("df2-theme-dark");
     });
-    await shoot(page, "canvas-dark-1440.png");
+    await expect(page.locator(".react-flow")).toHaveClass(/dark/);
+    await quietChrome(page);
+    await shoot(page, "canvas-dark-1440.png", [], 0.02);
     await page.setViewportSize({ width: 390, height: 844 });
-    await shoot(page, "canvas-dark-390.png");
+    await quietChrome(page);
+    await shoot(page, "canvas-dark-390.png", [], 0.02);
+  });
+
+  test("canvas is a full-page editor for drop, order, links, and preview", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    const canvas = page.getByTestId("transform-canvas");
+    await expect(canvas).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Steps, in order" })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Suggested repairs" })).toHaveCount(0);
+    const canvasBox = await canvas.boundingBox();
+    expect(canvasBox).toBeTruthy();
+    expect(canvasBox!.y).toBeLessThan(460);
+    expect(canvasBox!.y + canvasBox!.height).toBeGreaterThan(500);
+
+    await page.getByRole("button", { name: "Rules and suggestions" }).click();
+    await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
+    await page.getByRole("button", { name: "Close" }).click();
+    await expect(page.getByRole("heading", { name: "Suggested repairs" })).toHaveCount(0);
+
+    const sql = page.locator(".df2-canvas-sql");
+    await expect(sql).toBeVisible();
+    await expect(sql.locator("summary")).toHaveText("Warehouse SQL (runs after load)");
+    await expect(sql).not.toHaveAttribute("open");
+
+    const trim = page.locator(".df2-canvas-op[data-op='trim']");
+    await expect(trim).toBeVisible();
+    const stage = page.getByTestId("transform-canvas-stage");
+    const status = page.getByTestId("canvas-preview-status");
+    await expect(status).toBeVisible();
+    await expect(status).not.toHaveText("Previewing the recipe…", { timeout: 20_000 });
+    const statusBefore = (await status.innerText()).trim();
+
+    const drop = { x: 220, y: 180 };
+    await trim.dragTo(stage, { targetPosition: drop });
+    await expect(page.locator(".react-flow__node")).toHaveCount(1);
+    const stageBox = await stage.boundingBox();
+    const nodeBox = await page.locator(".react-flow__node").first().boundingBox();
+    expect(stageBox && nodeBox).toBeTruthy();
+    expect(Math.abs(nodeBox!.x - (stageBox!.x + drop.x))).toBeLessThan(24);
+    expect(Math.abs(nodeBox!.y - (stageBox!.y + drop.y))).toBeLessThan(24);
+    await expect(page.locator("#canvas-inspector")).toContainText(/Edit step|New step/);
+    await expect(status).not.toHaveText(statusBefore, { timeout: 20_000 });
+
+    const collapse = page.locator(".df2-canvas-op[data-op='collapse_whitespace']");
+    await collapse.click();
+    await expect(page.locator(".react-flow__node")).toHaveCount(2);
+    const moving = await page.locator(".react-flow__node").nth(1).boundingBox();
+    expect(moving).toBeTruthy();
+    await page.mouse.move(moving!.x + 40, moving!.y + 24);
+    await page.mouse.down();
+    await page.mouse.move(moving!.x + 40, moving!.y - 200, { steps: 15 });
+    await page.mouse.up();
+    await expect(page.locator(".df2-canvas-node").nth(0)).toHaveAttribute("data-op", "collapse_whitespace");
+
+    const source = page.locator(".react-flow__node").nth(0).locator(".react-flow__handle-bottom");
+    const target = page.locator(".react-flow__node").nth(1).locator(".react-flow__handle-top");
+    await source.dragTo(target);
+    await expect(page.getByText(/Connected step 1 to step 2/)).toBeVisible();
+    await source.dragTo(page.locator(".react-flow__node").nth(0).locator(".react-flow__handle-top"));
+    await expect(page.getByRole("alert").filter({ hasText: /itself/ })).toBeVisible();
+
+    const lower = page.locator(".df2-canvas-op[data-op='absolute']");
+    const liveStage = await stage.boundingBox();
+    const firstBox = await page.locator(".react-flow__node").nth(0).boundingBox();
+    const nextBox = await page.locator(".react-flow__node").nth(1).boundingBox();
+    expect(firstBox && nextBox && liveStage).toBeTruthy();
+    const midX = (firstBox!.x + firstBox!.width / 2) - liveStage!.x;
+    const gap = nextBox!.y - (firstBox!.y + firstBox!.height);
+    const midY = (firstBox!.y + firstBox!.height + Math.max(gap, 8) / 2) - liveStage!.y;
+    await lower.dragTo(stage, { targetPosition: { x: Math.max(24, midX), y: Math.max(24, midY) } });
+    await expect(page.locator(".df2-canvas-node").nth(1)).toHaveAttribute("data-op", "absolute");
+
+    const count = await page.locator(".react-flow__node").count();
+    await page.getByRole("button", { name: "Undo" }).click();
+    await expect(page.locator(".react-flow__node")).toHaveCount(count - 1);
+    await page.getByRole("button", { name: "Redo" }).click();
+    await expect(page.locator(".react-flow__node")).toHaveCount(count);
+
+    const primary = page.locator(".df2-studio-next .df2-btn-primary").first();
+    await expect(primary).toBeVisible();
+    const color = await primary.evaluate((node) => getComputedStyle(node).backgroundColor);
+    expect(color).toBe("rgb(10, 61, 58)");
   });
 
   test("database source shows the configured schema tree", async ({ page }) => {
@@ -110,5 +206,98 @@ conn.commit()
     await expect(browser.getByRole("button", { name: "sales" })).toHaveCount(0);
     await expect(browser.getByText("customers")).toBeVisible();
     await expect(page.getByTestId("transform-canvas")).toHaveCount(0);
+  });
+});
+
+test.describe("studio flags off", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.removeItem("df.studioSchemaBrowser");
+      localStorage.removeItem("df.studioCanvas");
+      localStorage.setItem("df2.theme", "light");
+    });
+    await page.route("**/api/v1/workspace/settings", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          org_name: "Datawrap",
+          timezone: "UTC",
+          retention_days: 90,
+          studio_schema_browser: false,
+          studio_canvas: false,
+        }),
+      });
+    });
+  });
+
+  test("classic transform stays on the step list", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    await expect(page.getByTestId("transform-canvas")).toHaveCount(0);
+    await expect(page.getByTestId("studio-canvas-opt-in")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Steps, in order" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Business rules", exact: true }).or(page.getByText("Business rules", { exact: true }))).toBeVisible();
+    const add = page.getByRole("button", { name: "Add a step" });
+    await expect(add).toBeVisible();
+    await add.click();
+    await expect(page.locator("#xform-op")).toBeVisible();
+    await shoot(page, "classic-transform-light-1440.png");
+  });
+});
+
+test.describe("studio flag opt-in", () => {
+  test("workspace canvas without this browser shows a one-click opt-in", async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.removeItem("df.studioCanvas");
+      localStorage.setItem("df2.theme", "light");
+    });
+    await page.route("**/api/v1/workspace/settings", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          org_name: "Datawrap",
+          timezone: "UTC",
+          retention_days: 90,
+          studio_schema_browser: false,
+          studio_canvas: true,
+        }),
+      });
+    });
+    await openStudio(page);
+    await reachTransform(page);
+    await expect(page.getByTestId("transform-canvas")).toHaveCount(0);
+    await expect(page.getByTestId("studio-canvas-opt-in")).toContainText(/classic editor/);
+    await page.getByRole("button", { name: "Use the recipe canvas" }).click();
+    await expect(page.getByTestId("transform-canvas")).toBeVisible();
+  });
+
+  test("a failed settings read stays on the classic editor and says why", async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem("df.studioCanvas", "1");
+      localStorage.setItem("df2.theme", "light");
+    });
+    await page.route("**/api/v1/workspace/settings", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ detail: "settings down" }) });
+    });
+    await openStudio(page);
+    await reachTransform(page);
+    await expect(page.getByTestId("studio-flags-error")).toBeVisible();
+    await expect(page.getByTestId("transform-canvas")).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Steps, in order" })).toBeVisible();
   });
 });

@@ -18,6 +18,46 @@ export function resolveStudioFlag(input: StudioFlagInput): boolean {
   return input.server === true && input.local === true;
 }
 
+export interface StudioFlagView {
+  schemaBrowser: boolean;
+  canvas: boolean;
+  error: string;
+  /** Workspace asked for the canvas and this browser has not opted in. */
+  canvasOptIn: boolean;
+  schemaOptIn: boolean;
+}
+
+/**
+ * What the page may show. A failed settings read is not permission: both
+ * surfaces stay off, and the error is the thing the operator sees.
+ */
+export function describeStudioFlags(input: {
+  serverSchema: boolean | undefined;
+  serverCanvas: boolean | undefined;
+  localSchema: boolean;
+  localCanvas: boolean;
+  error?: string;
+}): StudioFlagView {
+  if (input.error) {
+    return {
+      schemaBrowser: false,
+      canvas: false,
+      error: input.error,
+      canvasOptIn: false,
+      schemaOptIn: false,
+    };
+  }
+  const serverSchema = input.serverSchema === true;
+  const serverCanvas = input.serverCanvas === true;
+  return {
+    schemaBrowser: resolveStudioFlag({ server: input.serverSchema, local: input.localSchema }),
+    canvas: resolveStudioFlag({ server: input.serverCanvas, local: input.localCanvas }),
+    error: "",
+    canvasOptIn: serverCanvas && input.localCanvas !== true,
+    schemaOptIn: serverSchema && input.localSchema !== true,
+  };
+}
+
 export function readLocalStudioFlag(key: string, storage: Pick<Storage, "getItem"> | null): boolean {
   if (!storage) return false;
   try {

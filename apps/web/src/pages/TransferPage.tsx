@@ -25,6 +25,7 @@ import {
   useSqlInsertTarget,
 } from "../components/transfer/TransferSourceSchemaPanel";
 import { useStudioFlags } from "../lib/useStudioFlags";
+import { StudioFlagBanner } from "../components/transfer/StudioFlagBanner";
 import { Button } from "../components/ui/Button";
 import { HiddenFileInput } from "../components/ui/HiddenFileInput";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
@@ -6812,6 +6813,12 @@ export function TransferPage({
                 )}
               </div>
 
+              <StudioFlagBanner
+                error={studioFlags.error}
+                optIn={studioFlags.schemaOptIn}
+                onOptIn={studioFlags.optInSchema}
+                kind="schema"
+              />
               <TransferSourceSchemaPanel
                 schemaBrowser={studioFlags.schemaBrowser}
                 sourceKind={sourceKind}
@@ -7739,6 +7746,9 @@ export function TransferPage({
               : undefined
           }
           canvasEnabled={studioFlags.canvas}
+          studioFlagsError={studioFlags.error}
+          canvasOptIn={studioFlags.canvasOptIn}
+          onOptInCanvas={studioFlags.optInCanvas}
           onOpenSchema={() => setStep(STEP_SOURCE)}
           onApplyRules={(report) => {
             setBusinessRuleReport(report);
