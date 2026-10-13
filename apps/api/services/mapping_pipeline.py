@@ -1631,9 +1631,21 @@ def run_mapping_pipeline(
         enriched_mappings = fixed
     # Reassert pending-Studio honesty after sample/quality boosts — never leave
     # invented preserve @ 0.99 when dest schema was never loaded.
+    from services.type_system import destination_is_file_export
+
     fixed_pending: list[dict] = []
     for m in enriched_mappings:
         row = dict(m)
+        # An object store with no catalog read is not a proven type match.
+        # Create-new still plans a carrier; calling that preserve invented a
+        # fidelity verdict the destination never confirmed.
+        if (
+            destination_table_exists is None
+            and destination_is_file_export(destination_db_type)
+            and str(row.get("fidelity") or "") == "preserve"
+        ):
+            row["fidelity"] = FIDELITY_DEST_TYPE_UNREAD
+            row["fidelity_reason"] = DEST_TYPE_UNREAD_REASON
         if str(row.get("assignment_strategy") or "") == "pending_dest_schema":
             row["target_type"] = ""
             row["create_new"] = False
