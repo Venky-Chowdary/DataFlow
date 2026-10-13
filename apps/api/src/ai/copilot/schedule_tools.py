@@ -223,6 +223,14 @@ def create_schedule(
     label_name = (name or "").strip() or _schedule_name(
         source.get("table") or "", destination.get("table") or "", spec
     )
+    try:
+        # Uniqueness used to run only when Confirm wrote the row, so staging
+        # accepted a second pipeline with the same name (R2-SCHED-DUP).
+        from services.schedule_store import assert_unique_schedule_name
+
+        assert_unique_schedule_name(label_name)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
     payload: dict[str, Any] = {
         "name": label_name,
         "source_connector_id": source["connector_id"],

@@ -64,13 +64,26 @@ def resolve_object_store_export_format(filename: str) -> str | None:
     return _OBJECT_STORE_EXPORT_FORMATS.get(ext)
 
 
+def _reject_object_key_traversal(key: str) -> None:
+    """Refuse ``..`` segments so a destination key cannot leave its prefix."""
+    parts = [part for part in (key or "").replace("\\", "/").split("/")]
+    if any(part == ".." for part in parts):
+        raise ValueError(
+            f"Object key {key!r} contains a '..' segment. "
+            "Destination keys cannot traverse outside the prefix."
+        )
+
+
 def normalize_object_base_key(table_name: str, schema: str = "") -> str:
     """Canonical object key from table plus an optional connector prefix.
 
     ``schema`` is the object-store prefix (``QA_R3``). It is applied in front
     of the table key and is not dropped when the table is set. A key that
-    already starts with the prefix is left alone.
+    already starts with the prefix is left alone. A ``..`` segment is refused
+    (R4-032) before the key is joined.
     """
+    _reject_object_key_traversal(table_name)
+    _reject_object_key_traversal(schema)
     raw = (table_name or "").strip().lstrip("/")
     prefix = (schema or "").strip().strip("/")
     if prefix and raw and raw != prefix and not raw.startswith(prefix + "/"):
@@ -80,6 +93,7 @@ def normalize_object_base_key(table_name: str, schema: str = "") -> str:
     key = (raw or "exports/dataflow_export.json").strip()
     if not key.lower().endswith(OBJECT_STORE_EXPORT_EXTS):
         key = f"{key.rstrip('/')}/export.json"
+    _reject_object_key_traversal(key)
     return key
 
 
