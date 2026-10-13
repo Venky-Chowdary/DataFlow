@@ -191,11 +191,17 @@ def _validated_shape_recipe(raw: dict | str | None) -> dict:
     if not payload:
         return {}
     try:
-        return ShapeRecipe.parse(payload).to_wire()
+        recipe = ShapeRecipe.parse(payload)
     except ShapeError as exc:
         raise HTTPException(
             status_code=400, detail=redact_log_text(str(exc))
         ) from exc
+    if recipe.set_errors:
+        raise HTTPException(
+            status_code=400,
+            detail=redact_log_text(recipe.set_errors[0].message),
+        )
+    return recipe.to_wire()
 
 
 def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
@@ -298,6 +304,8 @@ class ExecuteTransferRequest(BaseModel):
     shape_recipe: dict = Field(default_factory=dict)
     # The recipe identity Validate approved; a different recipe is refused.
     approved_shape_recipe_hash: str = ""
+    # Set-graph identity. Empty matches a recipe with no set nodes.
+    approved_set_hash: str = ""
 
 
 class MapColumnsRequest(BaseModel):
@@ -954,6 +962,7 @@ async def execute_transfer_json(
         approved_shape_recipe_hash=str(
             body.approved_shape_recipe_hash or ""
         ).strip(),
+        approved_set_hash=str(body.approved_set_hash or "").strip(),
     )
     from services.batch_progress import effective_backfill_new_fields
 
@@ -1158,6 +1167,7 @@ async def run_universal_transfer(
     read_options_json: str = Form(""),
     shape_recipe_json: str = Form(""),
     approved_shape_recipe_hash: str = Form(""),
+    approved_set_hash: str = Form(""),
     priority_column: str = Form(""),
     priority_direction: str = Form("desc"),
     limit: str = Form("0"),
@@ -1316,6 +1326,7 @@ async def run_universal_transfer(
         read_options=_validated_read_options(read_options_json),
         shape_recipe=_validated_shape_recipe(shape_recipe_json),
         approved_shape_recipe_hash=(approved_shape_recipe_hash or "").strip(),
+        approved_set_hash=(approved_set_hash or "").strip(),
         priority_column=priority_column,
         priority_direction=priority_direction,
         limit=int(limit) if limit.isdigit() else 0,

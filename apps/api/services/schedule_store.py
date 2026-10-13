@@ -205,6 +205,7 @@ class PipelineSchedule:
     number_locale: str = ""
     shape_recipe: dict[str, Any] = field(default_factory=dict)
     approved_shape_recipe_hash: str = ""
+    approved_set_hash: str = ""
     approved_decision_artifact_hash: str = ""
     approved_ddl_identity_hash: str = ""
     #: The source shape observed on the last successful run, so a later run can
@@ -353,6 +354,7 @@ class PipelineSchedule:
             if isinstance(data.get("shape_recipe"), dict)
             else {},
             approved_shape_recipe_hash=str(data.get("approved_shape_recipe_hash") or "").strip(),
+            approved_set_hash=str(data.get("approved_set_hash") or "").strip(),
             approved_decision_artifact_hash=str(
                 data.get("approved_decision_artifact_hash") or ""
             ).strip(),
@@ -1249,6 +1251,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
 
 _VALIDATE_IDENTITY_HASH_KEYS = (
     "approved_shape_recipe_hash",
+    "approved_set_hash",
     "approved_decision_artifact_hash",
     "approved_ddl_identity_hash",
 )

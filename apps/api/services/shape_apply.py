@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
+from services.set_graph import block_message, set_hash_refusal
 from services.shape_engine import ShapeEngine, ShapeRowError
 from services.shape_models import ShapeError, ShapeRecipe
 
@@ -103,6 +104,7 @@ class ShapeRunner:
         effect = self._engine.effect
         return {
             "recipe_hash": self.recipe_hash,
+            "set_hash": self.recipe.set_hash,
             "summary": self.recipe.describe(),
             "steps": [s.to_wire() for s in self.recipe.enabled_steps],
             "input_columns": list(self.recipe.input_columns),
@@ -117,16 +119,27 @@ def build_shape_runner(
     *,
     source_columns: Sequence[str] | None = None,
     approved_hash: str = "",
+    approved_set_hash: str = "",
     sample_limit: int = 25,
 ) -> ShapeRunner | None:
     """Parse a recipe payload into a runner, or ``None`` when there is nothing to do.
 
-    ``approved_hash`` is the identity Validate approved. When it is given and the
-    parsed recipe hashes to anything else, this raises instead of running: a run
-    that shapes rows differently from the run that was approved is a different
-    run, whatever the payload claims.
+    ``approved_hash`` is the row-recipe identity Validate approved. When it is
+    given and the parsed recipe hashes to anything else, this raises instead of
+    running: a run that shapes rows differently from the run that was approved
+    is a different run, whatever the payload claims.
+
+    ``approved_set_hash`` is the set-graph identity. Both empty means there is
+    no graph. A graph that cannot run raises before the pass-through return, so
+    a recipe with no row steps and a join is not treated as "do nothing".
     """
     recipe = ShapeRecipe.parse(payload, source_columns=source_columns)
+    blocked = block_message(recipe.set_graph)
+    if blocked:
+        raise ShapeError(blocked)
+    mismatched = set_hash_refusal(recipe.set_hash, approved_set_hash)
+    if mismatched:
+        raise ShapeError(mismatched)
     if not recipe.enabled_steps:
         if approved_hash:
             raise ShapeError(
