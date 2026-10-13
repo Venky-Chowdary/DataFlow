@@ -11,8 +11,8 @@ from __future__ import annotations
 import atexit
 import concurrent.futures
 import logging
-import os
 from services.brand_env import getenv_brand
+from services.ops_events import emit_event
 import threading
 from typing import Any, Callable
 
@@ -50,6 +50,7 @@ def start() -> None:
     _ensure_executor()
     _started.set()
     _logger.info("Transfer scheduler started")
+    emit_event(_logger, "scheduler.service.start", outcome="succeeded")
 
 
 def shutdown(wait: bool = True, log: bool = True) -> None:
@@ -68,6 +69,7 @@ def shutdown(wait: bool = True, log: bool = True) -> None:
         _executor = None
     if log:
         _logger.info("Transfer scheduler shut down")
+        emit_event(_logger, "scheduler.service.stop", outcome="succeeded")
 
 
 def running() -> bool:
@@ -91,6 +93,10 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
     ttl_seconds = int(getenv_brand("WORKER_LEASE_TTL", "60"))
     if not _lease_store.acquire(job_id, ttl_seconds=ttl_seconds):
         _logger.warning("Transfer job %s is already leased by another worker; skipping", job_id)
+        emit_event(
+            _logger, "schedule.run.skip", outcome="skipped",
+            reason_code="already_leased", job_id=job_id,
+        )
         future: concurrent.futures.Future[Any] = concurrent.futures.Future()
         future.set_result(None)
         return future
@@ -124,8 +130,11 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
                 message="Lease lost — cooperative cancel",
                 lease_fence=fence,
             )
-        except Exception:
-            _logger.exception("Failed to mark job %s cancelled after lease loss", job_id)
+        except Exception as exc:
+            emit_event(
+                _logger, "job.lease.lost", outcome="failed",
+                job_id=job_id, error=exc,
+            )
 
     from services.lease_heartbeat import start_lease_heartbeat
 

@@ -257,6 +257,10 @@ _WIRE_NUMBER_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _NUMBER_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
     "number_locale", default=""
 )
+# Strict validation with no declared locale: a decimal comma is a locale guess.
+_STRICT_NUMBER_VAR: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "strict_number_reading", default=False
+)
 
 
 def _active_number_locale(explicit: str = "") -> str:
@@ -290,6 +294,42 @@ def set_active_number_locale(locale: str) -> contextvars.Token[str]:
 def reset_active_number_locale(token: contextvars.Token[str]) -> None:
     """Restore the previous number locale."""
     _NUMBER_LOCALE_VAR.reset(token)
+
+
+def set_strict_number_reading(strict: bool) -> contextvars.Token[bool]:
+    """Refuse decimal-comma guesses (``4,0``) for this run.
+
+    Set for ``validation_mode=strict`` when the operator declared no number
+    locale: ``4,0`` is 4.0 only under EU and not a US number at all, so strict
+    quarantines it instead of picking EU silently (QA MX3-11).
+    """
+    return _STRICT_NUMBER_VAR.set(bool(strict))
+
+
+def reset_strict_number_reading(token: contextvars.Token[bool]) -> None:
+    """Restore the previous strict-number setting."""
+    _STRICT_NUMBER_VAR.reset(token)
+
+
+def strict_decimal_comma_reason(value: Any) -> str:
+    """Why strict refused ``value``, when the only reason is its decimal comma."""
+    text = str(value or "").strip()
+    if not text or "," not in text or not _STRICT_NUMBER_VAR.get():
+        return ""
+    if _parse_decimal(text) is not None:
+        return ""
+    token = _STRICT_NUMBER_VAR.set(False)
+    try:
+        auto = _parse_decimal(text)
+    finally:
+        _STRICT_NUMBER_VAR.reset(token)
+    if auto is None:
+        return ""
+    return (
+        f"'{text}' is a number only if ',' is the decimal separator (EU reads "
+        f"{auto}). Strict validation never guesses a number locale — set number "
+        "locale EU in Destination → Advanced, or fix the source value."
+    )
 
 
 def _implied_number_locale_from_currency(raw: str) -> str:
@@ -360,6 +400,9 @@ def number_locale_ambiguity_reason(value: Any) -> str:
     for any other reason, so a genuinely unparseable cell keeps its own error.
     """
     text = str(value or "").strip()
+    strict_reason = strict_decimal_comma_reason(text)
+    if strict_reason:
+        return strict_reason
     if not text or not _looks_like_grouped_number(text):
         return ""
     if _parse_decimal(text) is not None:
@@ -386,6 +429,7 @@ def ambiguous_number_columns(
     rows: list[dict] | None,
     columns: list[str] | None = None,
     number_locale: str = "",
+    column_types: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Columns whose samples fail Auto grouping and look numeric.
 
@@ -394,8 +438,11 @@ def ambiguous_number_columns(
     if _active_number_locale(number_locale) or not rows:
         return []
     cols = columns or (list(rows[0].keys()) if rows and isinstance(rows[0], dict) else [])
+    declared = column_types or {}
     findings: list[dict[str, Any]] = []
     for col in cols:
+        if _declared_text_column(declared, str(col)):
+            continue
         samples: list[str] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -421,10 +468,20 @@ def ambiguous_number_columns(
 NUMBER_LOCALE_DEFAULT = "US"
 
 
+def _declared_text_column(column_types: dict[str, str], column: str) -> bool:
+    raw = str(column_types.get(column) or "").strip()
+    if not raw:
+        return False
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(raw) in {"string", "text"}
+
+
 def assumed_number_locale(
     rows: list[dict] | None,
     columns: list[str] | None = None,
     number_locale: str = "",
+    column_types: dict[str, str] | None = None,
 ) -> str:
     """``US`` when a sample still holds Auto-ambiguous numbers, else ''.
 
@@ -436,7 +493,9 @@ def assumed_number_locale(
     """
     if _active_number_locale(number_locale) or not rows:
         return ""
-    if not ambiguous_number_columns(rows, columns, number_locale=number_locale):
+    if not ambiguous_number_columns(
+        rows, columns, number_locale=number_locale, column_types=column_types
+    ):
         return ""
     return NUMBER_LOCALE_DEFAULT
 
@@ -919,6 +978,7 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
         if _WIRE_NUMBER_RE.match(text):
             return text
         locale = ""
+    refuse_comma_decimal = not locale and _STRICT_NUMBER_VAR.get()
     # Remove ASCII spaces used as thousands separators (e.g. "1 000 000").
     text = text.replace(" ", "").replace("\t", "")
 
@@ -929,6 +989,8 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
             candidate = text.replace(",", "")
             if candidate.count(".") <= 1:
                 return candidate
+            return None
+        if refuse_comma_decimal:
             return None
         text = text.replace(".", "")
         last_comma = text.rfind(",")
@@ -962,6 +1024,8 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
             and all(len(part) == 3 for part in parts[1:])
         ):
             return "".join(parts)
+        if refuse_comma_decimal:
+            return None
         if (
             len(parts) >= 2
             and all(len(part) == 3 for part in parts[1:-1])
@@ -1028,7 +1092,26 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
     return text
 
 
-def _parse_decimal(value: str) -> str | None:
+def _numeric_text_has_markers(value: str) -> bool:
+    """Percent, currency, or accounting parentheses — not a plain number.
+
+    Grouping (``1,234.56``) and outer whitespace are not markers. Callers that
+    declared ``currency`` / ``percentage`` still parse those shapes; the
+    default integer and decimal transforms do not (R4-D07).
+    """
+    text = unicodedata.normalize("NFKC", value or "").strip()
+    if not text:
+        return False
+    if "%" in text:
+        return True
+    if text.startswith("(") and text.endswith(")"):
+        return True
+    return _CURRENCY_RE.search(text) is not None
+
+
+def _parse_decimal(value: str, *, allow_markers: bool = True) -> str | None:
+    if not allow_markers and _numeric_text_has_markers(value):
+        return None
     text = value.strip()
     # Tuple / point / coordinate strings such as (1,2) or (1, 2) are not numbers.
     if text.startswith("(") and text.endswith(")") and "," in text and "." not in text:
@@ -1087,7 +1170,9 @@ def currency_samples_carry_markers(samples: list[str] | None) -> bool:
 
 
 
-def _parse_integer(value: str) -> int | None:
+def _parse_integer(value: str, *, allow_markers: bool = True) -> int | None:
+    if not allow_markers and _numeric_text_has_markers(value):
+        return None
     plain = value.strip()
     # An unadorned ASCII integer has nothing for NFKC, currency, accounting or
     # separator resolution to change, and its digit count is inside the wire
@@ -1246,6 +1331,11 @@ def integer_parse_failure_reason(value: str) -> str:
 # truth (Airbyte-class); refuse — operator must remap or transform.
 _STRICT_BOOL_TRUE = frozenset({"true", "t", "1"})
 _STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
+# The boolean *transform* accepts the words operators type. Inference and
+# numeric coercion stay on the strict set so a Y/N text column is not retargeted
+# as BOOLEAN and then rejected, and so "yes" does not become 1 in an integer.
+_TRANSFORM_BOOL_TRUE = _STRICT_BOOL_TRUE | frozenset({"yes", "y", "on"})
+_TRANSFORM_BOOL_FALSE = _STRICT_BOOL_FALSE | frozenset({"no", "n", "off"})
 
 #: Every token the write path can actually coerce to a boolean. A column typed
 #: BOOLEAN off ``Y``/``N`` samples is rejected here on every row ("Invalid
@@ -1264,12 +1354,34 @@ CANONICAL_BOOLEAN_SAMPLE_PATTERN = (
 
 
 def _parse_boolean(value: str) -> bool | None:
+    """Canonical boolean wire only: true/false/1/0/t/f.
+
+    Informal yes/on/y must not become TRUE here. Inference, bind, and an
+    unrequested boolean cast all use this parser so a text column of answers
+    is not rewritten as a flag.
+    """
     text = value.strip().lower()
     if text in NULL_SENTINELS:
         return None
     if text in _STRICT_BOOL_TRUE:
         return True
     if text in _STRICT_BOOL_FALSE:
+        return False
+    return None
+
+
+def _parse_operator_boolean(value: str) -> bool | None:
+    """Boolean cast the operator asked for (replay ``transform_overrides``).
+
+    yes/y/on and no/n/off are part of that cast. They stay refused on the
+    canonical parser so a guessed boolean column cannot invent TRUE.
+    """
+    text = value.strip().lower()
+    if text in NULL_SENTINELS:
+        return None
+    if text in _TRANSFORM_BOOL_TRUE:
+        return True
+    if text in _TRANSFORM_BOOL_FALSE:
         return False
     return None
 
@@ -1340,6 +1452,12 @@ def _parse_json(value: Any) -> str | None:
             # text, per this codebase's Decimal-to-JSON policy.
             parsed = json_loads_exact(value, parse_constant=_json_reject_nonfinite)
         except json.JSONDecodeError:
+            # ``{bad json`` is a broken document, not a Mongo bare scalar.
+            # Wrapping it as a JSON string rewrote the quarantine ledger and
+            # the next replay saw the wrapped text (R4-D04).
+            stripped = value.strip()
+            if stripped[:1] in "{[":
+                raise ValueError(f"Invalid JSON: {stripped[:120]!r}") from None
             parsed = value  # wrap the raw scalar as a JSON string literal
         except ValueError:
             # Non-finite NaN/Infinity via parse_constant — refuse silent null.
@@ -1431,8 +1549,9 @@ def _hash_pii(value: str) -> str:
         # Fail closed — never hash with a shared public default (would be reversible
         # across tenants that ship the same binary).
         raise ValueError(
-            "hash_pii requires DATAFLOW_PII_HASH_KEY (or DATAFLOW_SECRET) — "
-            "refusing insecure default key"
+            "hash_pii is not configured. Set DATAFLOW_PII_HASH_KEY to an HMAC "
+            "secret and retry this replay. No row was hashed, and a shared "
+            "default key is refused because it would be reversible across tenants."
         )
     digest = hmac.new(
         secret.encode("utf-8"),
@@ -1511,6 +1630,41 @@ KNOWN_TRANSFORMS = frozenset({
     "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
     "strip_controls", "normalize_unicode",
 })
+
+def transform_override_refusal(
+    overrides: dict[str, str],
+    mapped_sources: list[str] | None = None,
+) -> str:
+    """Why a replay ``transform_overrides`` map is refused; ``""`` when it is valid.
+
+    An override the engine does not know (``"null"``), or one naming a column
+    the job never mapped, was staged and then silently ignored — the replay
+    re-ran the original cast (QA MX3-15). UI aliases are resolved first.
+    """
+    from services.transform_resolver import UI_TO_ENGINE
+
+    mapped = {str(c).strip().lower() for c in mapped_sources or [] if str(c).strip()}
+    for column, transform in (overrides or {}).items():
+        name = str(transform or "").strip()
+        engine = str(UI_TO_ENGINE.get(name, UI_TO_ENGINE.get(name.lower(), name))).lower()
+        if engine not in KNOWN_TRANSFORMS:
+            hint = (
+                " To write NULL, send the edited row with that cell set to null."
+                if name.lower() in {"null", "none_null", "set_null", "nullify"}
+                else ""
+            )
+            return (
+                f"transform_overrides[{column!r}] = {name!r} is not a transform the "
+                f"engine applies. Use one of: {', '.join(sorted(KNOWN_TRANSFORMS))}.{hint}"
+            )
+        if mapped and str(column).strip().lower() not in mapped:
+            return (
+                f"transform_overrides names column {column!r}, which this job does not "
+                f"map (mapped source columns: {', '.join(sorted(mapped))}). The override "
+                "would be ignored."
+            )
+    return ""
+
 
 #: Rename-only transforms — must not mutate wire (no strip). Trim is opt-in.
 _IDENTITY_TRANSFORMS = frozenset({
@@ -1932,7 +2086,12 @@ def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
     return _format_datetime(first), None
 
 
-def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
+def apply_transform(
+    raw: str | None,
+    transform: str,
+    *,
+    accept_informal_boolean: bool = False,
+) -> tuple[Any, str | None]:
     """Returns (value, error).
 
     Explicit SQL/Dynamo NULL sentinels → None. Empty string is preserved for
@@ -1990,7 +2149,11 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     if transform_l in _TYPED_TRANSFORMS:
         low = text.lower()
         if low in NULL_SENTINELS:
-            if transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
+            # JSON literal ``null`` is a value. The missing-cell sentinel
+            # table must not reject it (R4-D03). NaN / Infinity stay rejected.
+            if transform_l == "json" and low == "null":
+                pass
+            elif transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
                 pass  # fall through to typed parsers that reject non-finite
             else:
                 return None, f"Null sentinel {text!r} cannot coerce to {transform_l}"
@@ -1999,9 +2162,9 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         bool_as_number = canonical_boolean_as_number(text)
         if bool_as_number is not None:
             return Decimal(bool_as_number), None
-        parsed = _parse_decimal(text)
+        parsed = _parse_decimal(text, allow_markers=False)
         if parsed is None:
-            return None, f"Invalid decimal: {text!r}"
+            return None, strict_decimal_comma_reason(text) or f"Invalid decimal: {text!r}"
         # Return Decimal so bind does not re-apply locale to the canonical
         # spelling (EU ``1,234`` → ``1.234`` must not become thousands 1234).
         # Extreme scientific stays a short string (never expand 1e1000000).
@@ -2016,13 +2179,17 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         bool_as_number = canonical_boolean_as_number(text)
         if bool_as_number is not None:
             return bool_as_number, None
-        parsed_int = _parse_integer(text)
+        parsed_int = _parse_integer(text, allow_markers=False)
         if parsed_int is None:
             return None, integer_parse_failure_reason(text)
         return parsed_int, None
 
     if transform == "boolean":
-        parsed_bool = _parse_boolean(text)
+        parsed_bool = (
+            _parse_operator_boolean(text)
+            if accept_informal_boolean
+            else _parse_boolean(text)
+        )
         if parsed_bool is None:
             return None, f"Invalid boolean: {text!r}"
         return parsed_bool, None
@@ -2076,8 +2243,10 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return parsed_binary, None
 
     if transform in {"trim", "trim_id"}:
-        cleaned = re.sub(r"\s+", " ", text)
-        return cleaned, None
+        # Strip the ends only. Collapsing internal runs rewrote '  pad  '
+        # into ' pad ' on a normal load (QA R2-019). collapse_whitespace is
+        # the explicit shape operation for that.
+        return text.strip(), None
 
     if transform == "strip_controls":
         cleaned = _strip_format_controls(text)
@@ -2172,7 +2341,10 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
 
                     _b64.b64decode(out, validate=True)
                 except Exception:
-                    return None, f"Invalid base64: {text!r}"
+                    return None, (
+                        f"Invalid base64: {text!r}. This transform decodes an "
+                        "existing base64 or hex payload; it does not encode plain text."
+                    )
                 return out, None
             return out, None
         return str(converted) if isinstance(converted, Decimal) else converted, None

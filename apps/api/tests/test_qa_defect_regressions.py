@@ -124,12 +124,12 @@ def test_procedure_url_uses_format_when_type_was_not_stamped():
 
 def test_declared_zone_clears_naive_mysql_timestamp_into_timestamptz():
     from services.coercion_probe import analyze_coercion
-    from src.ai.copilot.transfer_tools import (
-        _declare_zone_on_schema,
-        _stamp_zone_transform,
+    from services.timezone_policy import (
+        declare_zone_on_schema,
+        stamp_zone_transform,
     )
 
-    rows, declared = _declare_zone_on_schema(
+    rows, declared = declare_zone_on_schema(
         [
             {
                 "name": "created_at",
@@ -141,7 +141,7 @@ def test_declared_zone_clears_naive_mysql_timestamp_into_timestamptz():
     )
     assert "created_at" in declared
     assert rows[0]["inferred_type"] == "TIMESTAMPTZ"
-    mappings = _stamp_zone_transform(
+    mappings = stamp_zone_transform(
         [{"source": "created_at", "target": "created_at", "transform": "none"}],
         "America/New_York",
         declared,

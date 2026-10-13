@@ -23,7 +23,6 @@ if str(_API_ROOT) not in sys.path:
 
 from services.create_new_risk_stamp import (  # noqa: E402
     apply_create_new_risk_stamps,
-    create_new_risk_locks_review,
 )
 from services.timezone_policy import (  # noqa: E402
     instant_range_would_cap,

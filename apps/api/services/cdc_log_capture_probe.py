@@ -40,6 +40,7 @@ _POSTGRES = {
     "cockroachdb",
     "greenplum",
     "timescaledb",
+    "neon",
 }
 _MONGO = {"mongodb", "mongo", "documentdb", "amazon_documentdb"}
 
@@ -84,6 +85,49 @@ def _try_reader(cls: Any, cfg: dict[str, Any], **kwargs: Any) -> tuple[bool | No
                 _logger.debug("CDC probe reader close: %s", exc)
 
 
+def _probe_postgres_wal_level(cfg: dict[str, Any] | None) -> LogCaptureProbe:
+    """Read-only ``SHOW wal_level``; ``logical`` stays undecided for the slot probe."""
+    if not cfg or not (cfg.get("host") or cfg.get("connection_string")):
+        return LogCaptureProbe(dialect="postgresql", available=None)
+    from connectors.postgresql_conn import get_connection
+    from services.cdc_host_prereq import _show
+
+    try:
+        conn = get_connection(
+            host=str(cfg.get("host") or "localhost"),
+            port=int(cfg.get("port") or 5432),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or cfg.get("user") or ""),
+            password=str(cfg.get("password") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl")),
+        )
+    except Exception as exc:  # noqa: BLE001 — connectivity has its own gate
+        _logger.info("CDC wal_level probe could not connect to PostgreSQL: %s", exc)
+        return LogCaptureProbe(dialect="postgresql", available=None)
+    try:
+        with conn.cursor() as cur:
+            level = _show(cur, "wal_level").lower()
+    except Exception as exc:  # noqa: BLE001 — e.g. a Postgres-wire engine without wal_level
+        _logger.warning("CDC wal_level probe could not read wal_level: %s", exc)
+        return LogCaptureProbe(dialect="postgresql", available=None)
+    finally:
+        conn.close()
+    if level == "logical":
+        return LogCaptureProbe(dialect="postgresql", available=None)
+    _logger.warning(
+        "PostgreSQL source %s:%s has wal_level=%s; CDC preflight blocks before Confirm",
+        cfg.get("host"), cfg.get("port"), level or "unknown",
+    )
+    return LogCaptureProbe(
+        "postgresql",
+        False,
+        "pgoutput",
+        CAUSE_SERVER_NOT_CONFIGURED,
+        f"wal_level={level or 'unknown'} — logical decoding is off on this server",
+    )
+
+
 def probe_log_capture(
     source_type: str,
     cfg: dict[str, Any] | None,
@@ -99,10 +143,11 @@ def probe_log_capture(
     undecided probe never blocks.
     """
     kind = str(source_type or "").strip().lower().replace("-", "_")
-    # Postgres capture is the slot probe. This gate must not invent a second
-    # pass or a second block for it.
+    # Slot attach/retention stays with the slot probe; this gate only refuses
+    # a server that cannot decode WAL at all. The slot probe needs a stored
+    # LSN, so a first CDC run on wal_level=replica passed Validate (MX3-05).
     if kind in _POSTGRES:
-        return LogCaptureProbe(dialect="postgresql", available=None)
+        return _probe_postgres_wal_level(cfg)
     if kind in _MONGO:
         if not cfg or not table:
             return LogCaptureProbe(dialect="mongodb", available=None)
@@ -172,8 +217,44 @@ def probe_log_capture(
     from connectors.oracle_change_stream import OracleFlashbackCdc
     from connectors.oracle_logminer import OracleLogMinerCdc
 
-    logminer, _ = _try_reader(OracleLogMinerCdc, cfg, schema=schema, **common)
+    logminer, reader = _try_reader(OracleLogMinerCdc, cfg, schema=schema, **common)
     if logminer:
+        from connectors.oracle_logminer_txn import oracle_txn_buffer_enabled
+
+        if not oracle_txn_buffer_enabled():
+            try:
+                reader._ensure_open_txn_detection()
+            except Exception as exc:  # noqa: BLE001 — unsafe opt-out must block preflight
+                message = str(exc)
+                classification_text = message
+                grant_object = ""
+                if "ORA-00942" in message.upper() or "ORA-01031" in message.upper():
+                    view = (
+                        "GV$INSTANCE"
+                        if "GV$INSTANCE" in message.upper()
+                        else "V$TRANSACTION"
+                    )
+                    grant_object = (
+                        "GV_$INSTANCE" if view == "GV$INSTANCE" else "V_$TRANSACTION"
+                    )
+                    classification_text = (
+                        f"insufficient privilege to inspect {view}: {message}"
+                    )
+                refusal = classify_log_capture_failure("oracle", classification_text)
+                detail = refusal.detail
+                if grant_object and f"SELECT ON {grant_object}" not in detail.upper():
+                    detail += (
+                        f". DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires SELECT ON "
+                        f"{grant_object} (for example, GRANT SELECT ON "
+                        f"{grant_object} TO <cdc user>)."
+                    )
+                return LogCaptureProbe(
+                    dialect,
+                    False,
+                    "logminer",
+                    refusal.cause,
+                    detail,
+                )
         return LogCaptureProbe(dialect, True, "logminer")
     flashback, _ = _try_reader(OracleFlashbackCdc, cfg, schema=schema, **common)
     if flashback:

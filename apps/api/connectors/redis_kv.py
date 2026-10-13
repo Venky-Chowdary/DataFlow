@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+
 from connectors.base import ConnectResult
+
+_logger = logging.getLogger(__name__)
 
 
 def test_redis(
@@ -32,32 +36,22 @@ def test_redis(
             driver="none",
         )
 
+    from connectors import redis_reader
+
+    tls = bool(ssl) or connection_string.strip().lower().startswith("rediss://")
     try:
-        if connection_string.strip():
-            from connectors.url_authority import parse_url_authority, rebuild_url
-
-            raw = connection_string.strip()
-            parsed = parse_url_authority(raw)
-            if parsed.host and (username or password):
-                raw = rebuild_url(
-                    parsed,
-                    user=username or parsed.user,
-                    password=password or parsed.password,
-                )
-            client = redis.from_url(raw, socket_timeout=8)
-        else:
-            from connectors.redis_reader import redis_dial_endpoint
-
-            dial_host, dial_port = redis_dial_endpoint(host or "", port or 6379)
-            client = redis.Redis(
-                host=dial_host,
-                port=dial_port,
-                db=int(database) if database.isdigit() else 0,
-                username=username or None,
-                password=password or None,
-                ssl=ssl,
-                socket_timeout=8,
-            )
+        client = redis_reader._redis_client(
+            {
+                "host": host,
+                "port": port or 6379,
+                "database": database,
+                "username": username,
+                "password": password,
+                "connection_string": connection_string,
+                "ssl": ssl,
+            },
+            socket_timeout=8,
+        )
         client.ping()
         from connectors.redis_reader import redis_prefix_inventory
 
@@ -75,5 +69,17 @@ def test_redis(
             ),
             driver="redis-py",
         )
+    except redis.exceptions.TimeoutError as exc:
+        where = f"{host}:{port or 6379}" if host else "the Redis server"
+        if tls:
+            error = (
+                f"Redis TLS handshake with {where} timed out ({exc}). The server "
+                "may not accept TLS: if it is a plaintext Redis, set ssl=false "
+                "on the connector."
+            )
+        else:
+            error = f"Redis at {where} did not answer in time ({exc})."
+        _logger.warning("Redis probe timed out: endpoint=%s tls=%s", where, tls)
+        return ConnectResult(ok=False, tables=[], error=error, driver="redis-py")
     except Exception as exc:
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="redis-py")

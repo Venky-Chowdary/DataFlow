@@ -85,7 +85,7 @@ _STRING_TRANSFORMS: frozenset[str] = {
     "trim", "trim_id", "upper", "lower", "uuid", "hash_pii", "mask_pii", "redact",
     "none",
     "date", "datetime", "json", "binary", "decimal",
-    "phone", "email", "url", "iban", "postal",
+    "phone", "email", "url", "iban", "postal", "time",
     "currency", "percentage", "base64", "strip_controls", "normalize_unicode",
 }
 
@@ -181,6 +181,11 @@ def resolve_transform(
     raw = mapping.get("transform")
     if raw in UI_TO_ENGINE:
         raw = UI_TO_ENGINE[raw]
+    # Replay / Map sent this transform on purpose. Do not replace it with an
+    # inferred cast: that turned a valid IBAN, time, or id into NULL when the
+    # guessed carrier could not parse the token.
+    if mapping.get("transform_override") and raw not in {None, "", "none", "null"}:
+        return str(raw)
     # Intentional omit never participates in row projection / type coercion.
     if str(raw or "").lower() in {"omit", "intentional_omit", "drop", "exclude"}:
         return "omit"

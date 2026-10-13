@@ -66,6 +66,24 @@ def tune_sqlite_connection(dbapi_conn: sqlite3.Connection) -> None:
         cur.close()
 
 
+def require_sqlite_source_file(path: str) -> None:
+    """Refuse a source open that would create an empty database.
+
+    ``sqlite3.connect`` creates a missing file. A worker on another instance
+    then saw ``/tmp/QA_RT5.db`` as 0 tables and the original data was gone
+    (R3-H3). Destination writers may still create a new file.
+    """
+    if not path or path == ":memory:":
+        return
+    if Path(path).is_file():
+        return
+    raise ValueError(
+        f"SQLite file {path} is not on this server. "
+        "A path under /tmp exists only on the instance that created it. "
+        "Put the database on storage this server can read and point the connector there."
+    )
+
+
 def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
     """Resolve the filesystem path to a SQLite database.
 

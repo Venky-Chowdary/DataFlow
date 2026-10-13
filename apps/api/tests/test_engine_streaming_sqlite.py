@@ -150,6 +150,7 @@ def test_engine_stream_sqlite_to_sqlite_resume_from_checkpoint():
             skip_preflight=True,
         )
 
+        assert engine_mod._sdk_source_descriptor_for_format(source.format or "") is None
         engine = UniversalTransferEngine()
         result = engine.execute_tracked(request, "000000000000000000000000", resume=True)
         assert result.success is True

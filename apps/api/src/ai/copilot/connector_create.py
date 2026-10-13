@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 from urllib.parse import unquote, urlparse
 
 from connectors.sql_dsn import parse_sql_url
+
+_logger = logging.getLogger(__name__)
 
 
 # Longer tokens first. ``postgres`` must not swallow ``postgresql``, and
@@ -45,11 +48,30 @@ _TYPE_ALIASES = {
 
 
 def normalize_connector_type(raw: str) -> str:
-    t = (raw or "").strip().lower().replace("_", " ")
-    t = _TYPE_ALIASES.get(t, t.replace(" ", ""))
-    if t == "postgres":
-        t = "postgresql"
-    return t
+    """Canonical connector type for an operator/tool spelling.
+
+    Registered driver ids keep their underscores (``generic_sql``,
+    ``rest_api``, ``google_sheets``); collapsing them to ``genericsql`` made
+    every probe/read/write lookup answer "Unsupported connector type".
+    """
+    spaced = re.sub(r"[\s_\-]+", " ", (raw or "").strip().lower()).strip()
+    if not spaced:
+        return ""
+    if spaced in _TYPE_ALIASES:
+        return _TYPE_ALIASES[spaced]
+    from src.transfer.connector_capabilities import get_capabilities, resolve_driver_type
+
+    snake = spaced.replace(" ", "_")
+    collapsed = spaced.replace(" ", "")
+    for candidate in dict.fromkeys((snake, collapsed)):
+        if get_capabilities(resolve_driver_type(candidate)).get("test"):
+            return candidate
+    _logger.info(
+        "Connector type %r is not a registered driver; keeping %r for the probe to report",
+        raw,
+        snake,
+    )
+    return snake
 
 
 def parse_mongodb_url(url: str) -> dict[str, Any]:
@@ -454,7 +476,7 @@ def _path_connector_complete(draft: dict[str, Any]) -> tuple[bool, str]:
     return True, ""
 
 
-def probe_failure_advice(connector_type: str) -> str:
+def probe_failure_advice(connector_type: str, *, host: str = "", connection_string: str = "") -> str:
     """What to fix after a failed probe. SQL is host/port; warehouses are not."""
     from src.transfer.connector_capabilities import CATALOG_ID_ALIASES
 
@@ -464,10 +486,14 @@ def probe_failure_advice(connector_type: str) -> str:
         return "Fix the service_account JSON key and the project id, then ask again."
     if driver == "s3":
         return "Fix the endpoint, bucket, and access keys, then ask again."
-    return (
-        "Fix host/port/user/password (use the public proxy if this is Railway), "
-        "then ask again."
+    from connectors.sql_dsn import uses_railway_internal
+    from connectors.write_resilience import is_public_proxy_host
+
+    railway = uses_railway_internal(host, connection_string) or is_public_proxy_host(
+        host or connection_string
     )
+    hint = " (use the public proxy if this is Railway)" if railway else ""
+    return f"Fix host/port/user/password{hint}, then ask again."
 
 
 def draft_is_complete(draft: dict[str, Any]) -> tuple[bool, str]:

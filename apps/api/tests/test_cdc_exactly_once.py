@@ -37,6 +37,7 @@ from services.cdc_exactly_once import (  # noqa: E402
     REASON_BUNDLE_LSN,
     REASON_CHECKSUM,
     REASON_DEST_NOT_TXN,
+    REASON_DEST_NOT_WIRED,
     REASON_NO_LSN,
     REASON_NOT_CDC,
     REASON_OK,
@@ -532,6 +533,58 @@ def test_decide_idle_heartbeat_at_committed_lsn_is_not_a_conflict() -> None:
     assert action == "already_committed"
 
 
+def test_equal_position_empty_batch_is_already_committed_and_logs_debug(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level("DEBUG", logger="services.cdc_exactly_once"):
+        action, _fence = decide_eos_apply(
+            incoming_lsn="0/10",
+            dest_lsn="0/10",
+            incoming_checksum="empty-poll",
+            dest_checksum="committed-update",
+            change=ChangeBatch(),
+        )
+
+    assert action == "already_committed"
+    assert any("empty heartbeat" in record.message for record in caplog.records)
+
+
+def test_equal_position_nonempty_rejected_batch_still_checks_checksum() -> None:
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        decide_eos_apply(
+            incoming_lsn="0/10",
+            dest_lsn="0/10",
+            incoming_checksum="rejected-payload",
+            dest_checksum="committed-payload",
+            change=ChangeBatch(rejected=[{"id": "1", "reason": "invalid"}]),
+        )
+
+    assert exc.value.reason == REASON_CHECKSUM
+
+
+def test_equal_position_nonempty_batch_still_checks_checksum() -> None:
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        decide_eos_apply(
+            incoming_lsn="0/10",
+            dest_lsn="0/10",
+            incoming_checksum="updated-payload",
+            dest_checksum="committed-payload",
+            change=ChangeBatch(updates=[{"id": "1", "value": "changed"}]),
+        )
+
+    assert exc.value.reason == REASON_CHECKSUM
+
+
+def test_newer_position_empty_batch_still_applies() -> None:
+    action, _fence = decide_eos_apply(
+        incoming_lsn="0/20",
+        dest_lsn="0/10",
+        change=ChangeBatch(),
+    )
+
+    assert action == "apply"
+
+
 def test_decide_same_lsn_payload_mismatch_refuses() -> None:
     with pytest.raises(ExactlyOnceRouteError) as exc:
         decide_eos_apply(
@@ -905,6 +958,138 @@ def test_sqlalchemy_eos_partial_update_keeps_dest_column() -> None:
         assert extra == "keep"
 
 
+@pytest.mark.parametrize("dest_type", ["sqlite", "generic_sql"])
+def test_eos_mixed_case_partial_update_keeps_unmentioned_target(
+    dest_type: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_mixed_partial.db")
+        dest_cfg = (
+            {"database": path}
+            if dest_type == "sqlite"
+            else {"type": "sqlite", "database": path}
+        )
+        mappings = [
+            {"source": "ID", "target": "id", "confidence": 1.0},
+            {"source": "AMOUNT", "target": "amount", "confidence": 1.0},
+            {"source": "note", "target": "note", "confidence": 1.0},
+        ]
+        types = {"ID": "string", "AMOUNT": "string", "note": "string"}
+        stream_key = f"{dest_type}|eos|mixed-partial"
+        apply_change_batch_exactly_once(
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=_batch(
+                "0/10",
+                inserts=[{"ID": "1", "AMOUNT": "10.00", "note": "first"}],
+            ),
+            mappings=mappings,
+            column_types=types,
+            headers=["ID", "AMOUNT", "note"],
+            pk_target_cols=["id"],
+            cursor_key=stream_key,
+        )
+        rows, _ck, _summary, _deleted = apply_change_batch_exactly_once(
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=_batch("0/20", updates=[{"ID": "1", "note": "second"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["ID", "AMOUNT", "note"],
+            pk_target_cols=["id"],
+            cursor_key=stream_key,
+        )
+
+        with sqlite3.connect(path) as conn:
+            amount, note = conn.execute(
+                "SELECT amount, note FROM orders WHERE id = ?", ("1",)
+            ).fetchone()
+
+        assert rows == 1
+        assert amount == "10.00"
+        assert note == "second"
+
+
+@pytest.mark.parametrize("dest_type", ["sqlite", "generic_sql"])
+def test_eos_same_source_and_target_column_still_updates(dest_type: str) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_same_case.db")
+        dest_cfg = (
+            {"database": path}
+            if dest_type == "sqlite"
+            else {"type": "sqlite", "database": path}
+        )
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "amount", "target": "amount", "confidence": 1.0},
+        ]
+        types = {"id": "string", "amount": "string"}
+        stream_key = f"{dest_type}|eos|same-case"
+        for lsn, amount, operation in (
+            ("0/10", "10.00", "inserts"),
+            ("0/20", "99.00", "updates"),
+        ):
+            apply_change_batch_exactly_once(
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                dest_table="orders",
+                change=_batch(
+                    lsn,
+                    **{operation: [{"id": "1", "amount": amount}]},
+                ),
+                mappings=mappings,
+                column_types=types,
+                headers=["id", "amount"],
+                pk_target_cols=["id"],
+                cursor_key=stream_key,
+            )
+
+        with sqlite3.connect(path) as conn:
+            amount = conn.execute(
+                "SELECT amount FROM orders WHERE id = ?", ("1",)
+            ).fetchone()[0]
+
+        assert amount == "99.00"
+
+
+@pytest.mark.parametrize("dest_type", ["sqlite", "generic_sql"])
+def test_eos_case_variant_keys_for_one_target_fail_closed(
+    dest_type: str,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_ambiguous_case.db")
+        dest_cfg = (
+            {"database": path}
+            if dest_type == "sqlite"
+            else {"type": "sqlite", "database": path}
+        )
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "AMOUNT", "target": "amount", "confidence": 1.0},
+        ]
+        with pytest.raises(ExactlyOnceRouteError) as exc_info:
+            apply_change_batch_exactly_once(
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                dest_table="orders",
+                change=_batch(
+                    "0/10",
+                    inserts=[{"id": "1", "AMOUNT": "99.00", "amount": "10.00"}],
+                ),
+                mappings=mappings,
+                column_types={"id": "string", "AMOUNT": "string"},
+                headers=["id", "AMOUNT"],
+                pk_target_cols=["id"],
+                cursor_key=f"{dest_type}|eos|ambiguous-case",
+            )
+
+        assert "AMOUNT" in str(exc_info.value)
+        assert "amount" in str(exc_info.value)
+        assert exc_info.value.reason == "exactly_once_ambiguous_column_mapping"
+
+
 def test_sqlite_eos_crash_before_watermark_then_retry() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = str(Path(tmp) / "eos.db")
@@ -1002,6 +1187,115 @@ def test_sqlalchemy_sqlite_eos_apply_and_redelivery() -> None:
         assert summary2["eos_already_committed"] is True
         assert rows2 == 0
         assert sa_dest_engine_count(dest_cfg, "lines", "generic_sql") == 1
+
+
+def test_sa_blank_resume_blob_failure_rolls_back_committed_lsn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from sqlalchemy import event
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from connectors.cdc_eos_sa import sa_blank_eos_resume, sa_dest_watermark_lsn
+    from connectors.generic_sql import _engine
+
+    dest_cfg = {"type": "sqlite", "database": str(tmp_path / "blank_failure.db")}
+    cursor_key = "sa|eos|blank-failure"
+    apply_change_batch_exactly_once(
+        dest_type="generic_sql",
+        dest_cfg=dest_cfg,
+        dest_table="lines",
+        change=_batch("0/360", inserts=[{"id": "1", "v": "before"}]),
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "v", "target": "v"},
+        ],
+        column_types={"id": "string", "v": "string"},
+        headers=["id", "v"],
+        pk_target_cols=["id"],
+        cursor_key=cursor_key,
+    )
+    engine = _engine(dest_cfg)
+
+    def fail_blob_update(_conn, _cursor, statement, _parameters, _context, _many):
+        if "SET resume_blob = ''" in statement:
+            raise SQLAlchemyError("forced resume_blob update failure")
+
+    event.listen(engine, "before_cursor_execute", fail_blob_update)
+    try:
+        with pytest.raises(SQLAlchemyError, match="resume_blob"):
+            sa_blank_eos_resume(
+                dest_cfg, cursor_key, "generic_sql", lsn="0/360"
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", fail_blob_update)
+
+    assert sa_dest_watermark_lsn(dest_cfg, cursor_key, "generic_sql") == "0/360"
+
+
+def test_retired_sa_lsn_stays_unresumable_when_post_drop_blank_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from connectors.cdc_eos_sa import sa_dest_watermark_lsn
+    from connectors.cdc_eos_sql import open_eos_session
+    from services import cdc_slot_resume
+    from services.cdc_catchup import release_finished_cdc_slot
+
+    dest_cfg = {"type": "sqlite", "database": str(tmp_path / "retired_sa.db")}
+    cursor_key = "sa|eos|retired"
+    slot = "df_sa_retired"
+    apply_change_batch_exactly_once(
+        dest_type="generic_sql",
+        dest_cfg=dest_cfg,
+        dest_table="lines",
+        change=_batch("0/370", inserts=[{"id": "1", "v": "before"}]),
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "v", "target": "v"},
+        ],
+        column_types={"id": "string", "v": "string"},
+        headers=["id", "v"],
+        pk_target_cols=["id"],
+        cursor_key=cursor_key,
+    )
+    monkeypatch.setattr(cdc_slot_resume, "STORE_PATH", tmp_path / "retired.json")
+    monkeypatch.setattr(cdc_slot_resume, "_mongo_retired", lambda: None)
+    monkeypatch.setattr(
+        "services.cdc_catchup._schedule_owns_slot", lambda *_a, **_k: False
+    )
+    monkeypatch.setattr(
+        "connectors.postgresql_change_stream.release_pg_capture",
+        lambda *_a, **_k: {"slot": "dropped", "slot_name": slot},
+    )
+    monkeypatch.setattr(
+        "connectors.cdc_eos_sa.sa_blank_eos_resume",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("blank failed")),
+    )
+
+    result = release_finished_cdc_slot(
+        {
+            "cdc_slot_name": slot,
+            "cursor_key": cursor_key,
+            "cursor_value": f"lsn=0/370|slot={slot}",
+        },
+        reason="failed",
+        source_cfg={"type": "postgresql"},
+        job_id="job-retired-sa",
+        worker_closed=True,
+        dest_type="generic_sql",
+        dest_cfg=dest_cfg,
+    )
+
+    assert result["released"] is True
+    assert sa_dest_watermark_lsn(dest_cfg, cursor_key, "generic_sql") == "0/370"
+    opened = open_eos_session(
+        dest_type="generic_sql",
+        dest_cfg=dest_cfg,
+        stream_key=cursor_key,
+        incoming_fence=0,
+        job_resume=f"lsn=0/370|slot={slot}",
+    )
+    assert opened.dest_lsn is None
+    assert opened.resume in {None, ""}
 
 
 def test_sqlalchemy_eos_crash_before_watermark_then_retry() -> None:
@@ -1819,7 +2113,7 @@ def test_named_matrix_artifact_matches_measured() -> None:
             "sync_mode": "cdc",
             "has_pk": True,
             "expect_eligible": False,
-            "expect_reason": REASON_DEST_NOT_TXN,
+            "expect_reason": REASON_DEST_NOT_WIRED,
         },
         {
             "id": "kafka_not_txn",

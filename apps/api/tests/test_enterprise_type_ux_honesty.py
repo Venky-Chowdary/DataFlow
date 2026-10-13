@@ -105,10 +105,17 @@ def _mysql_create_new_row(inferred_type: str) -> dict:
 
 
 def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
-    """Nanoseconds above MySQL's microsecond ceiling do not demand a contract."""
+    """Declared nanoseconds into MySQL's microsecond carrier drop three digits.
+
+    DATETIME(6) is still the right carrier (no 2038 cap), but a source that
+    declares ``(9)`` loses real digits, so the drop needs the Risk Contract.
+    """
     row = _mysql_create_new_row("TIMESTAMPTZ(9)")
     assert row["target_type"].upper().startswith("DATETIME(6)"), row["target_type"]
-    assert row.get("requires_risk_contract") is False
+    assert row.get("requires_risk_contract") is True
+    kinds = {r.get("kind") for r in row.get("create_new_risks") or []}
+    assert "precision_collapse" in kinds
+    assert "instant_range_cap" not in kinds
 
 
 def test_create_new_mysql_timestamptz_keeps_the_instant_and_names_its_ceiling():

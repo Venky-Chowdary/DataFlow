@@ -21,6 +21,7 @@ from services.team_store import (
     MemberAlreadyExists,
     MemberNotFound,
     PermissionDenied,
+    TeamStoreBusy,
     TeamStoreError,
     WorkspaceNotFound,
     add_workspace_member,
@@ -125,6 +126,7 @@ _TEAM_ERROR_STATUS: dict[type[TeamStoreError], int] = {
     WorkspaceNotFound: 404,
     MemberNotFound: 404,
     PermissionDenied: 403,
+    TeamStoreBusy: 503,
     # A state conflict, not malformed input: the request is well-formed and would
     # be accepted once another admin exists.
     LastAdminProtected: 409,
@@ -192,7 +194,7 @@ async def post_user(body: UserCreateBody, request: Request):
             "platform_role": user["role"],
             "workspace_id": body.workspace_id,
             "workspace_role": body.workspace_role if body.workspace_id else "",
-            "password_issued": issued is not None,
+            "password_issued_present": issued is not None,
         },
     )
     return {"user": user, "membership": membership, "temporary_password": issued}

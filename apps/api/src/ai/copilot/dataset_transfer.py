@@ -12,6 +12,10 @@ import logging
 from typing import Any
 
 from services.dataset_file import assert_dataset_file
+from services.timezone_policy import (
+    apply_declared_source_timezone,
+    validate_source_timezone,
+)
 
 from .query_tools import _tool_result
 
@@ -63,117 +67,6 @@ def _column_dicts(parsed_columns: list[Any], sample_rows: list[dict[str, Any]]) 
             "samples": samples,
         })
     return rows
-
-
-def _declared_zone(source_timezone: str) -> tuple[str, str]:
-    """An explicit IANA zone, or a question when the name is not one.
-
-    Empty input is not a zone. The caller leaves the column alone. A bad name
-    is a refusal: guessing UTC would move the naive wall-clock values.
-    """
-    zone = (source_timezone or "").strip()
-    if not zone:
-        return "", ""
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-    try:
-        ZoneInfo(zone)
-    except (ZoneInfoNotFoundError, ValueError, KeyError):
-        return "", (
-            f"I don't recognise the timezone “{zone}”. "
-            "Give me an IANA name such as UTC or America/New_York."
-        )
-    return zone, ""
-
-
-def _columns_with_naive_instants(
-    src_rows: list[dict[str, Any]],
-    mappings: list[dict[str, Any]],
-) -> set[str]:
-    """Instant columns that still contain a wall-clock sample.
-
-    Inference may already have promoted the column to TIMESTAMPTZ because the
-    name is temporal and one sample carried an offset. The other samples are
-    still naive, and writing them as TIMESTAMPTZ would invent UTC. The
-    operator's declared zone is what attaches an offset to those samples only.
-    """
-    from services.schema_inference import _classify_value
-    from services.type_system import datetime_timezone_polarity
-
-    by_name = {str(row.get("name") or ""): row for row in src_rows}
-    found: set[str] = set()
-    for mapping in mappings:
-        if not isinstance(mapping, dict):
-            continue
-        source = str(mapping.get("source") or "").strip()
-        if not source:
-            continue
-        source_type = str(
-            mapping.get("source_type") or by_name.get(source, {}).get("inferred_type") or ""
-        )
-        if datetime_timezone_polarity(source_type) not in {"ntz", "tz", "ltz"}:
-            continue
-        samples = list(by_name.get(source, {}).get("samples") or [])
-        if any(_classify_value(str(sample), field_name=source) == "TIMESTAMP" for sample in samples):
-            found.add(source)
-    return found
-
-
-def _apply_declared_source_zone(
-    src_rows: list[dict[str, Any]],
-    mappings: list[dict[str, Any]],
-    zone: str,
-    dest_db: str,
-) -> list[dict[str, Any]]:
-    """Attach ``assume_timezone`` to instant columns that still have naive samples.
-
-    A value that already carries an offset is left alone by the transform.
-    A zoneless declared type becomes an instant, and a create-new destination
-    is restamped from that instant so Validate and the writer agree.
-    """
-    from services.decision_kernel.type_invent import (
-        create_new_mapping_target_type,
-        materialize_dest_ddl,
-    )
-    from services.timezone_policy import effective_source_type
-    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
-    from services.type_system import datetime_timezone_polarity
-
-    from .transfer_tools import _stamp_zone_transform
-
-    columns = _columns_with_naive_instants(src_rows, mappings)
-    if not columns:
-        return mappings
-    stamped = _stamp_zone_transform(mappings, zone, columns)
-    transform = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
-    out: list[dict[str, Any]] = []
-    upgraded: dict[str, str] = {}
-    for mapping in stamped:
-        entry = dict(mapping)
-        source = str(entry.get("source") or "")
-        if source not in columns:
-            out.append(entry)
-            continue
-        source_type = str(entry.get("source_type") or "")
-        if datetime_timezone_polarity(source_type) == "ntz":
-            source_type = effective_source_type(source_type, transform)
-            entry["source_type"] = source_type
-            if entry.get("create_new") or not str(entry.get("target_type") or "").strip():
-                target = create_new_mapping_target_type(
-                    source_type, dest_db, source_db=""
-                )
-                if target:
-                    entry["target_type"] = target
-                    native = materialize_dest_ddl(dest_db, target)
-                    if native:
-                        entry["dest_native_type"] = native
-        upgraded[source] = str(entry.get("source_type") or "")
-        out.append(entry)
-    for row in src_rows:
-        typed = upgraded.get(str(row.get("name") or ""))
-        if typed:
-            row["inferred_type"] = typed
-    return out
 
 
 def _blocked(preflight: dict[str, Any]) -> str:
@@ -233,19 +126,54 @@ def stage_dataset_transfer(
     contract_id: str = "",
     require_signed_contract: Any = None,
     source_timezone: str = "",
+    pii_acknowledgement: dict[str, Any] | None = None,
 ) -> Any:
     """Stage a file→connector transfer. Returns a tool result. Does not write."""
     tool = "start_dataset_transfer"
     hint = (dataset_name or "").strip()
     if not hint:
         return _tool_result(tool, success=False, error="Which uploaded file should I move?")
-    zone, zone_error = _declared_zone(source_timezone)
+    zone, zone_error = validate_source_timezone(source_timezone)
     if zone_error:
         return _tool_result(tool, success=False, error=zone_error)
+    from .transfer_tools import _pii_acknowledgement
+
+    try:
+        pii_ack = _pii_acknowledgement(pii_acknowledgement)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
 
     from .data_analyst import get_data_analyst
 
-    schema = get_data_analyst().resolve_dataset(hint)
+    analyst = get_data_analyst()
+    feeder = getattr(analyst, "feeder", None)
+    schemas = list(feeder.feed_all() or []) if feeder is not None and hasattr(feeder, "feed_all") else []
+    if schemas:
+        from services.dataset_resolve import exact_datasets
+
+        matches = exact_datasets(schemas, hint)
+        shapes = {
+            (
+                (getattr(s, "file_type", "") or "").lower(),
+                tuple(getattr(s, "columns", []) or []),
+            )
+            for s in matches
+        }
+        if len(matches) > 1 and len(shapes) > 1:
+            listed = ", ".join(
+                f"{getattr(s, 'name', '')}.{getattr(s, 'file_type', '') or 'file'} "
+                f"({len(getattr(s, 'columns', []) or [])} columns)"
+                for s in matches
+            )
+            return _tool_result(
+                tool,
+                success=False,
+                error=(
+                    f"More than one dataset is named {hint}. "
+                    f"Name the file: {listed}."
+                ),
+            )
+    schema = analyst.resolve_dataset(hint)
     if schema is None or getattr(schema, "source", "") != "upload" or not getattr(schema, "path", ""):
         found = getattr(schema, "name", "") if schema is not None else ""
         if found and getattr(schema, "source", "") != "upload":
@@ -357,7 +285,7 @@ def stage_dataset_transfer(
             row["inferred_type"] = stamped
     dest_db = str(dst_info.get("db_type") or dst_conn.get("type") or "")
     if zone:
-        mappings = _apply_declared_source_zone(src_rows, mappings, zone, dest_db)
+        mappings = apply_declared_source_timezone(src_rows, mappings, zone, dest_db)
 
     preflight = _run_preflight(
         src_conn={"id": "", "name": schema.name, "type": file_type, "schema": ""},
@@ -376,14 +304,22 @@ def stage_dataset_transfer(
         dest_exists=dest_exists,
         source_kind="file",
         known_row_count=int(getattr(parsed, "row_count", 0) or 0),
+        pii_ack=pii_ack,
     )
     if not _is_execute_cleared(preflight):
+        # The decision reason names what holds Confirm (e.g. which columns a
+        # PII review flagged and how to acknowledge it) — never refuse blind.
+        reason = str(
+            ((preflight.get("proof_bundle") or {}).get("transfer_decision") or {}).get("reason")
+            or ""
+        ).strip()
         return _tool_result(
             tool,
             success=False,
             output={"preflight": preflight, "dataset": schema.name},
             error=_blocked(preflight) if not preflight.get("passed") else (
                 "Preflight is not approve — Confirm is blocked until Studio Execute would unlock."
+                + (f" Reason: {reason}" if reason else "")
             ),
         )
 
@@ -418,6 +354,11 @@ def stage_dataset_transfer(
     except ValueError as exc:
         return _tool_result(tool, success=False, error=str(exc))
     payload["skip_preflight"] = False
+    if pii_ack:
+        # Execute re-runs Validate: the same ack and its trail ride on the job.
+        payload["compliance_acknowledged"] = True
+        payload["acknowledgment_actor"] = pii_ack["approved_by"]
+        payload["acknowledgment_reason"] = pii_ack["reason"]
 
     preview = {
         "dataset": schema.name,
@@ -428,6 +369,8 @@ def stage_dataset_transfer(
         "mappings": len(mappings),
         "preflight_run_id": preflight.get("run_id") or "",
     }
+    if pii_ack:
+        preview["pii_acknowledgement"] = dict(pii_ack)
     from .ack_ledger import get_ack_ledger
 
     ack_id = get_ack_ledger().put(kind="start_transfer", payload=payload, preview=preview)

@@ -89,7 +89,7 @@ def test_mcp_streamable_initialize(client: TestClient):
     )
     assert response.status_code == 200, response.text
     data = response.json()
-    assert data["result"]["protocolVersion"]
+    assert data["result"]["protocolVersion"] == "2024-11-05"
     assert data["result"]["capabilities"]["tools"] is not None
     assert response.headers.get("mcp-session-id")
 

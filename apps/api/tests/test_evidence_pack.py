@@ -28,6 +28,16 @@ def test_evidence_catalog_meets_all_claim_floors(tmp_path: Path) -> None:
     )
 
 
+def test_create_new_risk_measure_uses_a_measured_mysql_precision_collapse() -> None:
+    from services.evidence_pack import measure_create_new_type_risk
+
+    measured = measure_create_new_type_risk()
+    assert measured["source_type"] == "DECIMAL(80,40)"
+    assert measured["target_type"] == "TEXT"
+    assert measured["risk_kinds"] == ["precision_collapse"]
+    assert measured["requires_review"] is True
+
+
 def test_evidence_forbidden_300_plus_without_inventory() -> None:
     """Never allow an affirmative '300+' type claim when measured aliases < 300."""
     from services.evidence_pack import CLAIM_REGISTRY, measure_native_types

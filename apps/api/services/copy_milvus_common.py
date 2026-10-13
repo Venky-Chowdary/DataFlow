@@ -13,7 +13,7 @@ import json
 from typing import Any
 
 from services.copy_fast_path import FastPathUnavailable, skip_complete_identity_copy
-from services.value_serializer import json_default, load_http_json, sanitize_json_value
+from services.value_serializer import json_default, sanitize_json_value
 
 from connectors.milvus_writer import (
     _MILVUS_QUERY_WINDOW,

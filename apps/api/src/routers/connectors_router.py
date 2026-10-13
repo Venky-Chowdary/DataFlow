@@ -6,7 +6,6 @@ Manage connector configurations and data transfers
 import asyncio
 import json
 import logging
-import os
 from typing import Any, Optional
 
 from fastapi import (
@@ -24,7 +23,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import PyMongoError
 from services.runtime_estimate import estimate_for_job_doc
 from services.team_store import can_read_workspace, can_write_workspace
+from services.workspace_access import assert_resource_workspace, workspace_resource_is_visible
 from services.value_serializer import json_default
+from services.connector_telemetry import connector_operation, driver_family
 
 from ..services.file_parser import FileParser
 from ..services.mongodb_service import get_mongodb_service
@@ -32,6 +33,8 @@ from ..transfer.connector_capabilities import resolve_driver_type
 from ..transfer.connector_registry import run_probe
 
 router = APIRouter(prefix="/connectors", tags=["Connectors"])
+from services.ops_events import emit_event
+
 logger = logging.getLogger(__name__)
 
 
@@ -137,12 +140,22 @@ class TransferRequest(BaseModel):
 
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest):
+    with connector_operation(
+        "probe",
+        driver_family="unknown",
+        surface="connectors_test",
+    ) as op:
+        return await _test_connection_impl(request, op)
+
+
+async def _test_connection_impl(request: TestConnectionRequest, op):
     """Test a connector configuration before saving"""
     from ..transfer.connector_capabilities import file_source_types
     from ..transfer.connector_registry import humanize_connection_error, probe_file_source
 
     try:
         driver = resolve_driver_type(request.type)
+        op.update(driver_family=driver_family(driver))
         # Resolve catalog twins (excel_workbook → excel) before the file-source
         # check. Checking the raw tile id skipped probe_file_source and claimed
         # "No connectivity probe" for Excel/CSV upload aliases.
@@ -182,6 +195,7 @@ async def test_connection(request: TestConnectionRequest):
             private_key=getattr(request, "private_key", None) or "",
         )
         if auth_error:
+            op.failed(category="auth_config")
             return {
                 "success": False,
                 "message": auth_error,
@@ -237,6 +251,7 @@ async def test_connection(request: TestConnectionRequest):
         return payload
 
     except Exception as e:
+        op.errored(e)
         return {
             "success": False,
             "message": humanize_connection_error(resolve_driver_type(request.type or ""), e),
@@ -339,8 +354,11 @@ async def list_connectors(
         _api_root = Path(__file__).resolve().parents[2]
         if str(_api_root) not in sys.path:
             sys.path.insert(0, str(_api_root))
-        from services.connector_store import connector_ui_status, list_connectors as fs_list
-        items = fs_list(workspace_id=workspace_id)
+        from services.connector_store import connector_ui_status, list_connectors as fs_list, normalize_connector_role
+        items = [
+            connector for connector in fs_list(workspace_id=workspace_id)
+            if workspace_resource_is_visible(connector.workspace_id, workspace_id)
+        ]
         if items:
             return {
                 "connectors": [
@@ -357,7 +375,9 @@ async def list_connectors(
                         "last_tested_at": c.last_tested_at,
                         "last_transfer_ok_at": c.last_transfer_ok_at,
                         "workspace_id": c.workspace_id or "",
-                        "role": getattr(c, "role", None) or "both",
+                        "role": normalize_connector_role(
+                            getattr(c, "type", "") or "", getattr(c, "role", None)
+                        ),
                     }
                     for c in items
                 ],
@@ -367,14 +387,14 @@ async def list_connectors(
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     try:
-        from services.connector_store import connector_ui_status
+        from services.connector_store import connector_ui_status, normalize_connector_role
 
         mongo = get_mongodb_service()
         connectors = mongo.list_connectors()
 
         result = []
         for c in connectors:
-            if workspace_id and c.get("workspace_id") not in (workspace_id, "", None):
+            if not workspace_resource_is_visible(c.get("workspace_id"), workspace_id):
                 continue
             created = c.get("created_at")
             result.append({
@@ -390,7 +410,9 @@ async def list_connectors(
                 "last_tested_at": c.get("last_tested_at"),
                 "last_transfer_ok_at": c.get("last_transfer_ok_at"),
                 "workspace_id": c.get("workspace_id", ""),
-                "role": c.get("role") or "both",
+                "role": normalize_connector_role(
+                    str(c.get("type") or ""), c.get("role")
+                ),
             })
 
         return {"connectors": result, "count": len(result)}
@@ -597,6 +619,11 @@ async def retry_transfer_job(
             rows_committed_known=rows_known,
         )
         if not retry_decision["allowed"] and not force:
+            emit_event(
+                logger, "job.retry.refused", outcome="held", level=logging.INFO,
+                job_id=job_id, workspace_id=job.get("workspace_id") or None,
+                reason="duplicate_risk",
+            )
             raise HTTPException(
                 status_code=409,
                 detail={
@@ -633,6 +660,12 @@ async def retry_transfer_job(
 
         # From-zero: do not copy parent checkpoint / resume_from_job_id.
         background_tasks.add_task(run_transfer_async, new_job_id, xfer_req, resume=False)
+        emit_event(
+            logger, "job.retry.requested", outcome="succeeded",
+            job_id=new_job_id, retry_of=job_id,
+            workspace_id=job.get("workspace_id") or None,
+            duplicate_risk_acknowledged=forced,
+        )
         return {
             "success": True,
             "async": True,
@@ -762,6 +795,11 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
         background_tasks.add_task(
             run_transfer_async, job_id, xfer_req, resume=not restart_full_refresh
         )
+        emit_event(
+            logger, "job.resume.requested", outcome="succeeded",
+            job_id=job_id, workspace_id=job.get("workspace_id") or None,
+            restarted=restart_full_refresh, gap_restart=bool(safety.get("gap_restart")),
+        )
         return {
             "success": True,
             "async": True,
@@ -800,6 +838,11 @@ async def cancel_transfer_job(job_id: str, request: Request):
         if not _can_mutate_job(request, job):
             raise HTTPException(status_code=403, detail="Workspace write access required")
         if job.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
+            emit_event(
+                logger, "job.cancel.requested", outcome="skipped",
+                job_id=job_id, workspace_id=job.get("workspace_id") or None,
+                reason="already_terminal", status=str(job.get("status")),
+            )
             return {"success": True, "job_id": job_id, "status": job.get("status"), "message": "Job already terminal"}
         # Durable intent flag first, status second. The flag is what the worker
         # loop actually consults, and unlike `status` nothing in the progress
@@ -825,6 +868,13 @@ async def cancel_transfer_job(job_id: str, request: Request):
             current = mongo.get_job(job_id) or {}
             actual = str(current.get("status") or job.get("status") or "")
             if actual != "cancelled":
+                emit_event(
+                    logger, "job.cancel.requested", outcome="held",
+                    level=logging.INFO, job_id=job_id,
+                    workspace_id=job.get("workspace_id") or None,
+                    reason="status_not_changed", status=actual or None,
+                    queue_release=str(queue_release.get("queue") or "") or None,
+                )
                 return {
                     "success": False,
                     "job_id": job_id,
@@ -837,11 +887,9 @@ async def cancel_transfer_job(job_id: str, request: Request):
                     "cancel_requested": True,
                     "queue_release": queue_release,
                 }
-        # The worker drops the slot after it closes the replication connection.
-        # While that worker still holds the CDC lease, peek mode leaves the
-        # slot inactive between polls — this call then refuses to drop it.
-        # A worker that has already exited has no live lease, and this call
-        # drops the idle slot.
+        # A cancelled one-shot keeps its slot so the next run resumes from the
+        # log (release_finished_cdc_slot, E3-006); the response names it so the
+        # operator can drop an abandoned route's slot by hand.
         slot_release: dict[str, Any] = {"released": False, "reason": "not_attempted"}
         try:
             from services.cdc_catchup import release_finished_cdc_slot
@@ -852,6 +900,12 @@ async def cancel_transfer_job(job_id: str, request: Request):
         except Exception as exc:
             logger.warning("CDC slot release on cancel failed for %s: %s", job_id, exc)
             slot_release = {"released": False, "reason": "release_failed"}
+        emit_event(
+            logger, "job.cancel.requested", outcome="succeeded",
+            job_id=job_id, workspace_id=job.get("workspace_id") or None,
+            queue_release=str(queue_release.get("queue") or "") or None,
+            cdc_slot_released=bool(slot_release.get("released")),
+        )
         return {
             "success": True,
             "job_id": job_id,
@@ -1084,6 +1138,8 @@ async def export_job_quarantine(job_id: str, request: Request):
     from services.format_converter import convert_rows
 
     headers = ["row", "column", "target", "value", "reason", "policy", "suggested_transform"]
+    from services.csv_safety import neutralize_formula_cell
+
     rows = [
         [
             str(d.get("row", "")),
@@ -1096,6 +1152,7 @@ async def export_job_quarantine(job_id: str, request: Request):
         ]
         for d in details
     ]
+    rows = [[neutralize_formula_cell(cell) for cell in row] for row in rows]
     content, _ = convert_rows(headers, rows, source_format="csv", target_format="csv")
 
     api_root = Path(__file__).resolve().parents[2]
@@ -1118,6 +1175,134 @@ class QuarantineReplayRequest(BaseModel):
 
     rows: list[dict] = Field(default_factory=list, description="Edited rejected_details; empty = all quarantine rows")
     transform_overrides: dict = Field(default_factory=dict, description="Optional per-column transform overrides keyed by source column")
+
+
+_QUARANTINE_DETAIL_KEYS = frozenset({
+    "column", "value", "values", "source_values", "row", "reason",
+    "failure_reason", "policy", "retry_status", "source_pk", "cell",
+    "transform", "gate", "target", "quarantine",
+})
+
+
+def _is_record_payload_row(d: Any) -> bool:
+    """An edited *row payload* carries cell columns only — no finding keys.
+
+    ``{id: 4, flt: '4.0'}`` is a replacement row; ``{row: 2, column: 'flt',
+    value: 'not-a-number'}`` is a finding scrap. The endpoint used to feed
+    both through the detail path and lose every payload cell (QA Q05).
+    """
+    return isinstance(d, dict) and bool(d) and not any(
+        k in d for k in _QUARANTINE_DETAIL_KEYS
+    )
+
+
+def _merge_edited_row_payloads(
+    open_details: list[dict],
+    base_records: list[dict],
+    edits: list[dict],
+    *,
+    job_id: str = "",
+) -> tuple[list[dict], list[dict]]:
+    """Bind each edited row payload to the open finding it remediates.
+
+    The edit replaces cells in the stored row — an edit like
+    ``{id: 4, flt: '4.0'}`` is not a complete record by itself, so replaying
+    it raw would write NULLs for every unmapped field. Binding: a base
+    record is a candidate when at least one shared cell agrees and no
+    shared cell disagrees *outside* the finding's quarantined column —
+    the quarantined cell is exactly what the edit is allowed to change.
+    Zero or ambiguous candidates refuse: writing the wrong row is worse
+    than asking the operator to be more specific.
+    """
+    if len(base_records) != len(open_details):
+        # Details grouped by row can collapse — rebuild 1:1 so each edit
+        # binds to exactly one finding.
+        rebuilt: list[dict] = []
+        for d in open_details:
+            recs, _cols = _quarantine_details_to_records([d])
+            rebuilt.append(recs[0] if recs else {})
+        base_records = rebuilt
+    quarantined_cols = {
+        i: str(d.get("column") or d.get("target") or "").strip()
+        for i, d in enumerate(open_details)
+    }
+    bound: list[tuple[int, dict]] = []
+    used: set[int] = set()
+
+    def _mask_preview(value: Any) -> bool:
+        text = str(value or "")
+        return "…" in text or "***" in text
+
+    for edit in edits:
+        candidates: list[int] = []
+        edit_row = edit.get("row")
+        if edit_row is not None:
+            try:
+                want_row = int(edit_row)
+            except (TypeError, ValueError):
+                want_row = None
+            if want_row is not None:
+                for i, detail in enumerate(open_details):
+                    if i in used:
+                        continue
+                    try:
+                        if int(detail.get("row") or -1) == want_row:
+                            candidates.append(i)
+                    except (TypeError, ValueError):
+                        continue
+        if len(candidates) == 1:
+            idx = candidates[0]
+            used.add(idx)
+            merged = dict(base_records[idx] if idx < len(base_records) else {})
+            merged.update({str(k): v for k, v in edit.items() if k != "row"})
+            bound.append((idx, merged))
+            continue
+        candidates = []
+        for i, base in enumerate(base_records):
+            if i in used:
+                continue
+            shared = [k for k in edit if k in base]
+            if not shared:
+                continue
+            qcol = quarantined_cols.get(i) or ""
+            agreeing = [
+                k for k in shared
+                if str(edit[k]) == str(base[k]) and not _mask_preview(base.get(k))
+            ]
+            disagreeing = [
+                k for k in shared
+                if k not in agreeing and k != qcol and not _mask_preview(base.get(k))
+            ]
+            if agreeing and not disagreeing:
+                candidates.append(i)
+        if not candidates:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Edited row does not match any open quarantine finding — "
+                    "keep the unchanged cells from get_job's quarantined row "
+                    "so the edit binds to exactly one finding."
+                ),
+            )
+        if len(candidates) > 1:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Edited row matches {len(candidates)} open findings — "
+                    "include the finding's ``row`` index or enough unchanged "
+                    "cells to make the match unique."
+                ),
+            )
+        idx = candidates[0]
+        used.add(idx)
+        merged = dict(base_records[idx])
+        merged.update({str(k): v for k, v in edit.items()})
+        bound.append((idx, merged))
+    # Replay only the bound findings — unedited open rows stay open.
+    return (
+        [merged for _, merged in bound],
+        [open_details[i] for i, _ in bound],
+    )
 
 
 def _quarantine_details_to_records(details: list[dict], transform_overrides: Optional[dict] = None) -> tuple[list[dict], list[str]]:
@@ -1294,10 +1479,17 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         quarantine_sample_incomplete,
         record_replay,
         replay_row_identity,
+        restore_replay_source_cells,
+        snapshot_quarantine_cells,
         VERDICT_CLOSED,
     )
 
-    hydrated = merge_job_quarantine(job)
+    from services.quarantine_dlq import MaskedQuarantineReplayError, canonical_replay_details
+
+    try:
+        hydrated = canonical_replay_details(job)
+    except MaskedQuarantineReplayError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     durable = hydrated or list(stored_details)
     incomplete = quarantine_sample_incomplete(job, durable)
     if incomplete:
@@ -1308,11 +1500,26 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         for d in durable
         if str(d.get("retry_status") or "").lower() == "promoted"
     }
+    record_rows = False
     if body.rows:
-        details = [
-            d for d in body.rows
-            if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
-        ]
+        raw_rows = [d for d in body.rows if isinstance(d, dict)]
+        if raw_rows and all(_is_record_payload_row(d) for d in raw_rows):
+            # The operator sent edited *row payloads* — {id: 4, flt: '4.0'} —
+            # not quarantine-detail scrap. Bind each edit to the open finding
+            # it remediates and merge over the stored cells (QA Q05). Only
+            # bound findings join the replay attempt — unedited rows stay open.
+            record_rows = True
+            open_details = open_quarantine_details(durable)
+            base_records, _ = _quarantine_details_to_records(open_details)
+            records, details = _merge_edited_row_payloads(
+                open_details, base_records, raw_rows, job_id=job_id
+            )
+            columns = list(dict.fromkeys(k for r in records for k in r))
+        else:
+            details = [
+                d for d in body.rows
+                if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
+            ]
     else:
         details = open_quarantine_details(durable)
     if not details:
@@ -1326,8 +1533,12 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             ),
         )
     prior_closure = job_quarantine_closure(job) or {}
+    # Snapshot before the write. Transforms and the child quarantine image
+    # must not replace these cells on the parent ledger (R4-D04).
+    source_cell_snaps = snapshot_quarantine_cells(details)
 
-    records, columns = _quarantine_details_to_records(details, body.transform_overrides)
+    if not record_rows:
+        records, columns = _quarantine_details_to_records(details, body.transform_overrides)
     if not records:
         raise HTTPException(
             status_code=400,
@@ -1341,10 +1552,20 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     transfer_req = transfer_request_from_dict(payload)
     mappings = list(transfer_req.mappings or [])
     if body.transform_overrides:
+        from services.transform_engine import transform_override_refusal
+
+        refusal = transform_override_refusal(
+            dict(body.transform_overrides),
+            [str(m.get("source") or m.get("source_column") or "") for m in mappings] or columns,
+        )
+        if refusal:
+            logger.warning("Quarantine replay of job %s refused: %s", job_id, refusal)
+            raise HTTPException(status_code=400, detail=refusal)
         for m in mappings:
             src = m.get("source") or m.get("source_column") or ""
             if src in body.transform_overrides:
                 m["transform"] = body.transform_overrides[src]
+                m["transform_override"] = True
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
@@ -1505,7 +1726,14 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                 "phase": "post_write_failed",
             }
 
-        if rejected > 0:
+        if int(rows_written or 0) == 0 and records:
+            # A replay that lands nothing is not a success (QA R2-061).
+            status = "failed"
+            recon["passed"] = False
+            recon["message"] = (
+                "Quarantined values were not loaded — replay wrote 0 rows."
+            )
+        elif rejected > 0:
             status = "completed_with_quarantine"
         elif not recon.get("passed", True):
             status = "failed"
@@ -1523,7 +1751,11 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             prior=prior_closure,
         )
         compact = compact_replay_closure(recorded)
-        stamped_findings = list(recorded.get("findings") or [])
+        stamped_findings = restore_replay_source_cells(
+            list(recorded.get("findings") or []),
+            source_cell_snaps,
+            list(dest_summary.get("rejected_details") or []),
+        )
         landed_ids = set(recorded.get("promoted_identities") or [])
 
         promote_meta: dict[str, Any] = {}
@@ -1552,7 +1784,13 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                         "reason": "partial promote needs _df_qid on each finding",
                     }
             except Exception as exc:
+                logger.warning(
+                    "quarantine replay %s: DLQ promote stamp failed: %s", job_id, exc, exc_info=exc
+                )
                 promote_meta = {"error": str(exc)[:300]}
+        from services.quarantine_dlq import closure_with_promotion_outcome
+
+        compact = closure_with_promotion_outcome(compact, promote_meta, job_id=job_id)
         phase = "completed" if status != "failed" else "failed"
         mongo.update_job_status(
             child_job_id,
@@ -1660,6 +1898,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                 "durable_count": compact.get("durable_count"),
                 "next_action": compact.get("next_action") or "",
                 "note": compact.get("note") or "",
+                "promotion_error": compact.get("promotion_error") or "",
                 "migration_proven": False,
             },
         }
@@ -1715,7 +1954,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
 
 
 @router.get("/{connector_id}")
-async def get_connector(connector_id: str):
+async def get_connector(connector_id: str, request: Request):
     """Get a specific connector"""
     try:
         from services.mongodb_service import redact_connector_secrets
@@ -1726,6 +1965,7 @@ async def get_connector(connector_id: str):
         if not connector:
             raise HTTPException(status_code=404, detail="Connector not found")
 
+        assert_resource_workspace(request, str(connector.get("workspace_id") or ""))
         return redact_connector_secrets(connector)
 
     except HTTPException:
@@ -1735,10 +1975,14 @@ async def get_connector(connector_id: str):
 
 
 @router.delete("/{connector_id}")
-async def delete_connector(connector_id: str):
+async def delete_connector(connector_id: str, request: Request):
     """Delete a connector"""
     try:
         mongo = get_mongodb_service()
+        connector = mongo.get_connector(connector_id)
+        if not connector:
+            raise HTTPException(status_code=404, detail="Connector not found")
+        assert_resource_workspace(request, str(connector.get("workspace_id") or ""))
         success = mongo.delete_connector(connector_id)
 
         if not success:

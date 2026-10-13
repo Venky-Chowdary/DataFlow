@@ -9,6 +9,7 @@ catalog.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,11 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import url2pathname
 
 _WINDOWS = os.name == "nt"
+logger = logging.getLogger(__name__)
+
+
+class IcebergCatalogError(RuntimeError):
+    """Catalog metadata could not be checked safely."""
 
 PY_IO_IMPL = "py-io-impl"
 LOCAL_URI_FILE_IO = "connectors.iceberg_pyarrow_io.LocalUriPyArrowFileIO"
@@ -196,6 +202,15 @@ def _sql_props(connection_string: str, warehouse: str, extra: dict[str, Any]) ->
     return f"sqlite:///{db_path.resolve()}", props
 
 
+def _forward_storage_properties(
+    props: dict[str, Any], extra: dict[str, Any], *, overwrite: bool
+) -> None:
+    for key, value in extra.items():
+        if key.startswith("s3.") or key.startswith("client."):
+            if overwrite or key not in props:
+                props[key] = value
+
+
 def _rest_props(connection_string: str, warehouse: str, endpoint: Any, extra: dict[str, Any]) -> dict[str, Any]:
     """Build REST catalog properties from connection string + endpoint fields."""
     cs = (connection_string or "").strip()
@@ -236,6 +251,10 @@ def _rest_props(connection_string: str, warehouse: str, endpoint: Any, extra: di
     for key, value in extra.items():
         if key.startswith("rest.") and key not in props:
             props[key] = value
+    _forward_storage_properties(props, extra, overwrite=False)
+    region = _get_value(endpoint, "region") or extra.get("region") or ""
+    if region:
+        props.setdefault("client.region", region)
 
     return props
 
@@ -261,10 +280,7 @@ def _glue_props(warehouse: str, endpoint: Any, extra: dict[str, Any]) -> dict[st
     ):
         if key in extra:
             props[key] = extra[key]
-    # Allow s3.* properties to flow through for the file IO.
-    for key, value in extra.items():
-        if key.startswith("s3.") or key.startswith("client."):
-            props[key] = value
+    _forward_storage_properties(props, extra, overwrite=True)
     return props
 
 
@@ -281,6 +297,14 @@ def parse_iceberg_catalog_config(endpoint: Any) -> dict[str, Any]:
         connection_string: str
     """
     extra = _ensure_dict(_get_value(endpoint, "extra"))
+    if isinstance(endpoint, dict):
+        flattened_storage = {
+            key: value
+            for key, value in endpoint.items()
+            if isinstance(key, str)
+            and (key.startswith("s3.") or key.startswith("client."))
+        }
+        extra = {**flattened_storage, **extra}
     connection_string = _get_value(endpoint, "connection_string")
     # The "database" field is commonly used as the warehouse/catalog path when no
     # explicit warehouse/connection_string is provided (legacy filesystem CoW tests
@@ -313,6 +337,8 @@ def parse_iceberg_catalog_config(endpoint: Any) -> dict[str, Any]:
             properties["warehouse"] = warehouse
     elif catalog_type == "glue":
         properties = _glue_props(warehouse, endpoint, extra)
+
+    _forward_storage_properties(properties, extra, overwrite=False)
 
     if str(properties.get("warehouse", "")).lower().startswith("file:"):
         # A local warehouse is addressed through the URI-aware file IO, which is
@@ -397,30 +423,33 @@ def _namespace_exists(catalog: Any, namespace: tuple[str, ...]) -> bool:
     from pyiceberg.exceptions import NoSuchNamespaceError
 
     try:
-        catalog.list_namespaces()  # Some catalogs support listing all
-        return namespace in catalog.list_namespaces(namespace[:-1] if len(namespace) > 1 else ())
-    except Exception:
-        try:
-            catalog.load_namespace_properties(namespace)
-            return True
-        except NoSuchNamespaceError:
-            return False
-        except Exception:
-            return False
+        catalog.load_namespace_properties(namespace)
+        return True
+    except NoSuchNamespaceError:
+        return False
+    except Exception as exc:
+        logger.error(
+            "Iceberg namespace check failed namespace=%s error=%s",
+            ".".join(namespace),
+            type(exc).__name__,
+        )
+        raise IcebergCatalogError(
+            f"Unable to check Iceberg namespace {namespace!r}: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
 
 
 def ensure_namespace(catalog: Any, namespace: tuple[str, ...]) -> None:
     """Create parent namespaces recursively if they do not exist."""
+    from pyiceberg.exceptions import NamespaceAlreadyExistsError
+
     for i in range(1, len(namespace) + 1):
         ns = namespace[:i]
         if not _namespace_exists(catalog, ns):
             try:
                 catalog.create_namespace(ns)
-            except Exception as exc:
-                if "AlreadyExists" in type(exc).__name__:
-                    pass
-                else:
-                    raise
+            except NamespaceAlreadyExistsError:
+                pass
 
 
 def load_table(

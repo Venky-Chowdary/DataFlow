@@ -186,6 +186,228 @@ def declared_source_column_types(
     return out
 
 
+def validate_source_timezone(source_timezone: object) -> tuple[str, str]:
+    """Return a valid declared IANA zone, or an actionable request error."""
+    zone = str(source_timezone or "").strip()
+    if not zone:
+        return "", ""
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(zone)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return "", (
+            f"Invalid source_timezone {zone!r}; provide an IANA name such as "
+            "UTC or America/New_York."
+        )
+    return zone, ""
+
+
+def declare_zone_on_schema(
+    source_rows: list[dict[str, Any]],
+    zone: str,
+) -> tuple[list[dict[str, Any]], set[str]]:
+    """Apply a declared source zone to zoneless temporal schema rows."""
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+    from services.type_system import datetime_timezone_polarity
+
+    declared: set[str] = set()
+    out: list[dict[str, Any]] = []
+    transform = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
+    for row in source_rows:
+        entry = dict(row)
+        name = str(entry.get("name") or "")
+        source_type = str(entry.get("inferred_type") or "")
+        polarity = datetime_timezone_polarity(source_type) if source_type else None
+        if polarity == "ntz":
+            entry["inferred_type"] = effective_source_type(source_type, transform)
+            declared.add(name)
+        elif polarity in {"tz", "ltz"} and _samples_are_naive_wall_clock(
+            entry.get("samples") or []
+        ):
+            declared.add(name)
+        elif _untyped_text_token(source_type) and _samples_unanimously_naive_datetimes(
+            entry.get("samples") or []
+        ):
+            # SQLite stores a wall-clock column as TEXT. Declaring
+            # source_timezone is the operator answering the zone question, so
+            # the column is an instant from here on (QA R2-016). Offset-bearing
+            # text is left alone: the offset is already in the value.
+            entry["inferred_type"] = effective_source_type("TIMESTAMP", transform)
+            declared.add(name)
+        elif source_type.strip().upper() == "DATE" and all(
+            _sample_temporal_polarities(entry.get("samples") or [])
+        ):
+            entry["inferred_type"] = "TIMESTAMPTZ"
+            declared.add(name)
+        out.append(entry)
+    return out, declared
+
+
+def _sample_temporal_polarities(samples: Any) -> tuple[bool, bool]:
+    from connectors.sql_temporal import parse_sql_date, parse_sql_datetime
+    from services.type_system import temporal_value_has_timezone
+
+    has_aware = False
+    has_naive = False
+    for sample in samples or []:
+        if sample is None or not str(sample).strip():
+            continue
+        if (
+            parse_sql_datetime(sample) is None
+            and parse_sql_date(sample) is None
+        ):
+            continue
+        if temporal_value_has_timezone(sample):
+            has_aware = True
+        else:
+            has_naive = True
+    return has_aware, has_naive
+
+
+def _samples_are_naive_wall_clock(samples: Any) -> bool:
+    return _sample_temporal_polarities(samples)[1]
+
+
+def _untyped_text_token(source_type: str) -> bool:
+    token = (source_type or "").strip().upper()
+    if not token or "(" in token:
+        return False
+    return token in {"TEXT", "VARCHAR", "STRING", "CHAR", "CLOB"}
+
+
+def _samples_unanimously_naive_datetimes(samples: Any) -> bool:
+    """True when every non-empty sample is a zoneless datetime."""
+    from connectors.sql_temporal import parse_sql_datetime
+    from services.type_system import temporal_value_has_timezone
+
+    saw = False
+    for sample in samples or []:
+        if sample is None or not str(sample).strip():
+            continue
+        if parse_sql_datetime(sample) is None or temporal_value_has_timezone(sample):
+            return False
+        saw = True
+    return saw
+
+
+def stamp_zone_transform(
+    mappings: list[dict[str, Any]],
+    zone: str,
+    columns: set[str],
+) -> list[dict[str, Any]]:
+    """Attach a declared zone without replacing operator-chosen transforms."""
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+
+    out: list[dict[str, Any]] = []
+    for mapping in mappings:
+        entry = dict(mapping)
+        existing = str(entry.get("transform") or "").strip().lower()
+        already_typed = existing not in {
+            "", "none", "identity", "datetime", "date", "timestamp"
+        }
+        if str(entry.get("source") or "") in columns and not already_typed:
+            entry["transform"] = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
+        out.append(entry)
+    return out
+
+
+def columns_with_naive_instants(
+    source_rows: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+) -> set[str]:
+    """Find mapped temporal columns with at least one zoneless instant sample."""
+    from services.schema_inference import classify_value
+    from services.type_system import datetime_timezone_polarity
+
+    by_name = {str(row.get("name") or ""): row for row in source_rows}
+    found: set[str] = set()
+    for mapping in mappings:
+        if not isinstance(mapping, dict):
+            continue
+        source = str(mapping.get("source") or "").strip()
+        if not source:
+            continue
+        source_type = str(
+            by_name.get(source, {}).get("inferred_type")
+            or mapping.get("source_type")
+            or ""
+        )
+        if datetime_timezone_polarity(source_type) not in {"ntz", "tz", "ltz"}:
+            continue
+        samples = list(by_name.get(source, {}).get("samples") or [])
+        if any(
+            classify_value(str(sample), field_name=source) in {"DATE", "TIMESTAMP"}
+            for sample in samples
+        ):
+            found.add(source)
+    return found
+
+
+def apply_declared_source_timezone(
+    source_rows: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    zone: str,
+    destination_db: str,
+) -> list[dict[str, Any]]:
+    """Stamp mapping transforms and effective carriers from the shared declaration."""
+    from services.decision_kernel.type_invent import (
+        create_new_mapping_target_type,
+        materialize_dest_ddl,
+    )
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+    from services.type_system import datetime_timezone_polarity
+
+    columns = columns_with_naive_instants(source_rows, mappings)
+    if not columns:
+        return mappings
+    stamped = stamp_zone_transform(mappings, zone, columns)
+    transform = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
+    out: list[dict[str, Any]] = []
+    upgraded: dict[str, str] = {}
+    for mapping in stamped:
+        entry = dict(mapping)
+        source = str(entry.get("source") or "")
+        if source not in columns:
+            out.append(entry)
+            continue
+        source_type = str(
+            next(
+                (
+                    row.get("inferred_type")
+                    for row in source_rows
+                    if str(row.get("name") or "") == source
+                ),
+                "",
+            )
+            or entry.get("source_type")
+            or ""
+        )
+        if source_type:
+            entry["source_type"] = source_type
+        if datetime_timezone_polarity(source_type) == "ntz":
+            source_type = effective_source_type(source_type, transform)
+            entry["source_type"] = source_type
+            if entry.get("create_new") or not str(
+                entry.get("target_type") or ""
+            ).strip():
+                target_type = create_new_mapping_target_type(
+                    source_type, destination_db, source_db=""
+                )
+                if target_type:
+                    entry["target_type"] = target_type
+                    native = materialize_dest_ddl(destination_db, target_type)
+                    if native:
+                        entry["dest_native_type"] = native
+        upgraded[source] = str(entry.get("source_type") or "")
+        out.append(entry)
+    for row in source_rows:
+        typed = upgraded.get(str(row.get("name") or ""))
+        if typed:
+            row["inferred_type"] = typed
+    return out
+
+
 def resolve_timezone_policy(
     source_type: str,
     target_type: str,

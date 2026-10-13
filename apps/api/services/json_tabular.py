@@ -270,7 +270,7 @@ def iter_json_record_dicts(
     prefix = detect_ijson_records_prefix(head) if head else None
     if prefix:
         try:
-            import ijson
+            import ijson  # noqa: F401  # optional dependency availability check
         except ImportError:
             prefix = None
 

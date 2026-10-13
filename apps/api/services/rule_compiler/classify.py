@@ -106,7 +106,14 @@ _VALIDATE_TWO_LETTER = re.compile(
     re.I,
 )
 _VALIDATE_IN_SET = re.compile(
-    r"^must\s+be\s+(?:one\s+of\s+)?(?P<body>.+)$",
+    r"^must\s+be\s+(?:(?:one\s+of|in)\s+)?\(?\s*(?P<body>.+?)\s*\)?\s*$",
+    re.I,
+)
+_BARE_IN_SET = re.compile(
+    r"^(?:(?:in\s+)?\(\s*(?P<body1>[A-Za-z0-9_.\-'\"]+"
+    r"(?:\s*(?:,|\bor\b)\s*[A-Za-z0-9_.\-'\"]+)+)\s*\)"
+    r"|(?P<body2>[A-Za-z0-9_.\-'\"]+"
+    r"(?:\s*(?:,|\bor\b)\s*[A-Za-z0-9_.\-'\"]+)+))$",
     re.I,
 )
 _TWO_LETTER_PATTERN = r"^[A-Za-z]{2}$"
@@ -352,11 +359,17 @@ _LOOKUP_HINT = re.compile(
     re.I,
 )
 _DATE_TOKEN = re.compile(r"^(?:Y{2,4}|M{1,2}|D{1,2}|H{1,2}|S{1,2})$", re.I)
+_EXCEL_FN_NAMES = frozenset(
+    {
+        "UPPER", "LOWER", "TRIM", "PROPER", "CONCATENATE", "CONCAT", "TEXTJOIN",
+        "SUBSTITUTE", "REPLACE", "LEFT", "RIGHT", "MID", "ABS", "ROUND",
+        "IF", "IFERROR", "VLOOKUP", "XLOOKUP", "LEN", "LENGTH", "VALUE",
+        "TEXT", "DATEVALUE", "TO_DATE", "TO_NUMBER", "TO_CHAR", "CAST",
+        "COALESCE", "IFNULL", "NVL", "NULLIF",
+    }
+)
 _EXCEL_FN = re.compile(
-    r"^=?\s*(?P<fn>UPPER|LOWER|TRIM|PROPER|CONCATENATE|CONCAT|TEXTJOIN|"
-    r"SUBSTITUTE|REPLACE|LEFT|RIGHT|MID|ABS|ROUND|IF|IFERROR|VLOOKUP|XLOOKUP|"
-    r"LEN|LENGTH|VALUE|TEXT|DATEVALUE|TO_DATE|TO_NUMBER|TO_CHAR|"
-    r"CAST|COALESCE|IFNULL|NVL|NULLIF)\s*\(",
+    r"^=?\s*(?P<fn>" + "|".join(sorted(_EXCEL_FN_NAMES)) + r")\s*\(",
     re.I,
 )
 _CAST_SQL = re.compile(
@@ -674,9 +687,14 @@ def parse_validate_check(text: str) -> dict[str, Any] | None:
                 "was not invented."
             ),
         }
-    listed = _VALIDATE_IN_SET.match(raw)
+    listed = _VALIDATE_IN_SET.match(raw) or _BARE_IN_SET.match(raw)
     if listed:
-        body = (listed.group("body") or "").strip()
+        body = (
+            listed.groupdict().get("body")
+            or listed.groupdict().get("body1")
+            or listed.groupdict().get("body2")
+            or ""
+        ).strip().strip("()")
         if "," in body or re.search(r"\bor\b", body, re.I):
             values = [
                 part.strip().strip("\"'")
@@ -688,9 +706,12 @@ def parse_validate_check(text: str) -> dict[str, Any] | None:
                 "the", "valid", "an", "in", "on", "for", "to", "and",
                 "customer", "value", "values", "field", "column",
             }
+            # A token is prose only when it is not all-uppercase in the
+            # original text — US, IN, GB, OR are codes, not the stopword
+            # "in"/"or". Lowercase prose still rejects the list.
             if (
                 len(values) >= 2
-                and not any(item.lower() in prose for item in values)
+                and not any(item.lower() in prose and not item.isupper() for item in values)
             ):
                 return {
                     "kind": "contract",
@@ -1630,6 +1651,88 @@ def parse_row_policy(text: str) -> dict[str, Any] | None:
     return {"kind": "filter", "plane": "shape", "confidence": 0.9, "condition": pred, "keep": keep}
 
 
+_FORMULA_PREFIXES = frozenset("=+-@\t\r")
+
+# Kinds `_excel_formula` can produce — the only closed forms a `=`-prefixed
+# cell may compile to. Anything else formula-prefixed is review, never
+# executable (OWASP formula injection must not fall through to later
+# classifiers).
+_CLOSED_FORMULA_KINDS = frozenset(
+    {
+        "derive",
+        "case_upper",
+        "case_lower",
+        "trim",
+        "title",
+        "concat",
+        "replace",
+        "substr",
+        "absolute",
+        "round",
+        "join",
+        "cast_number",
+        "date",
+    }
+)
+
+
+def formula_prefix(text: str) -> str:
+    """OWASP spreadsheet-formula prefix on the ORIGINAL cell text, or ``""``.
+
+    Checked before any strip — a leading tab or CR is invisible once the
+    cell is stripped. A ``-`` followed by whitespace then a letter is a
+    workbook bullet (``- trim spaces``), not a formula — unless the cell
+    also carries injection punctuation (``| ! ( =``).
+    """
+    original = text or ""
+    if len(original) < 2 or original[0] not in _FORMULA_PREFIXES:
+        return ""
+    if original[0] == "-":
+        rest = original[1:]
+        if (
+            rest[:1].isspace()
+            and rest.lstrip()[:1].isalpha()
+            and not any(ch in original for ch in "|!(=")
+        ):
+            return ""
+    return original[0]
+
+
+def _is_closed_arithmetic(body: str) -> bool:
+    """Whole-body parse through the closed shape_expr grammar — no leftover
+    tokens, no function calls. ``=name*12+HYPERLINK("x")`` fails here, where
+    an unanchored regex match would drop the payload."""
+    body = (body or "").strip()
+    if not re.match(r"^[A-Za-z_]", body):
+        return False
+    if re.search(r"[A-Za-z_][\w.]*\s*\(", body):
+        return False
+    try:
+        from services.shape_expr import compile_expression
+
+        compile_expression(body)
+        return True
+    except Exception:
+        return False
+
+
+def _formula_review(text: str, flags: dict[str, Any]) -> dict[str, Any]:
+    label = formula_prefix(text)
+    named = re.match(r"^=\s*([A-Za-z][A-Za-z0-9_.]*)\s*\(", (text or "").strip())
+    if named:
+        label = named.group(1).upper()
+    return {
+        "kind": "unknown",
+        "plane": "review",
+        "confidence": 0.0,
+        "reason": (
+            f"Spreadsheet formula {label} is not a supported closed form; "
+            "it was not applied."
+        ),
+        **(flags or {}),
+    }
+
+
 def _balanced_call(text: str) -> tuple[str, str] | None:
     """Inner args and leftover after the first balanced ``fn(...)``."""
     raw = (text or "").strip()
@@ -2067,11 +2170,18 @@ def _excel_formula(raw: str) -> dict[str, Any] | None:
         text = text[1:].strip()
     match = _EXCEL_FN.match("=" + text if not text.startswith("=") else text)
     if not match:
-        # ``=A2*12`` / ``=salary*12``
-        derive = _DERIVE.search(text)
-        if derive and re.match(r"^[A-Za-z_]", text):
-            expr = derive.group("expr").replace("×", "*").replace("x", "*").replace("X", "*")
-            return {"kind": "derive", "plane": "shape", "confidence": 0.94, "expression": re.sub(r"\s+", " ", expr)}
+        # ``=A2*12`` / ``=salary*12`` — derive applies only when the WHOLE
+        # body parses as the closed arithmetic grammar (identifiers, numeric
+        # literals, operators, parens). An unanchored match that drops a
+        # trailing payload is a partial application and must not apply.
+        body = text.replace("×", "*").replace("x", "*").replace("X", "*")
+        if _is_closed_arithmetic(body):
+            return {
+                "kind": "derive",
+                "plane": "shape",
+                "confidence": 0.94,
+                "expression": re.sub(r"\s+", " ", body.strip()),
+            }
         return None
     fn = match.group("fn").upper()
     inner = text[text.find("(") + 1: text.rfind(")")] if "(" in text else ""
@@ -2370,7 +2480,8 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             **flags,
         }
 
-    if raw.startswith("=") or _EXCEL_FN.match(raw):
+    prefix = formula_prefix(text)
+    if prefix == "=" or (not prefix and _EXCEL_FN.match(raw)):
         parsed_call = _balanced_call(raw)
         if parsed_call and parsed_call[1]:
             return _leftover_review(flags)
@@ -2386,6 +2497,11 @@ def classify_rule(text: str, *, atomic: bool = False) -> dict[str, Any]:
             excel["extras"] = extras
             excel.update(flags)
             return excel
+        if prefix:
+            return _formula_review(text, flags)
+    elif prefix:
+        # + - @ \t \r — never falls through to the general classifiers.
+        return _formula_review(text, flags)
 
     clock = volatile_reason(raw)
     if clock:

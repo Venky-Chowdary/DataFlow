@@ -15,14 +15,12 @@ from datetime import date
 from decimal import Decimal
 from typing import Any
 
-from .example_phrases import example_connector_name as _example_connector
-from .example_phrases import example_table_name as _example_table
 from .schema_tools import AmbiguousConnectorError, _safe_connector, list_connector_objects
 
 _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2}$")
 _DEFAULT_SAMPLE = 25
 _MAX_SAMPLE = 100
-_MAX_QUERY_ROWS = 200
+_MAX_QUERY_ROWS = 10_000
 # Name resolution reads the inventory to decide whether a table exists, so it
 # asks for far more than a chat reply would ever print. Enterprise schemas with
 # thousands of objects are ordinary.
@@ -641,7 +639,9 @@ def run_connector_query(
 
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
     cid = str(conn.get("id") or conn.get("_id") or "")
-    limit = max(1, min(int(limit or _MAX_QUERY_ROWS), _MAX_QUERY_ROWS))
+    requested = int(limit or 1000)
+    limit = max(1, min(requested, _MAX_QUERY_ROWS))
+    clipped = requested > limit
 
     try:
         from services.connector_store import get_connector
@@ -678,25 +678,40 @@ def run_connector_query(
                     listed = list_connector_objects(connector_id=cid, connector_name="")
                     table_names = _object_names_from_list(listed)
                     columns: list[Any] = []
-                    # Prefer explicit collection/table hint; else first FROM ident if known.
-                    table_hint = (collection or "").strip()
-                    if not table_hint:
-                        m = re.search(
-                            r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)",
+                    # Introspect every FROM/JOIN relation, not just the first:
+                    # joins and post-introspect queries (R24) need columns from
+                    # each referenced table in the allow-list. The collection
+                    # hint still wins when the operator names one.
+                    table_hints: list[str] = []
+                    hint = (collection or "").strip()
+                    if hint:
+                        table_hints.append(hint)
+                    table_hints.extend(
+                        m.group(1)
+                        for m in re.finditer(
+                            r"\b(?:from|join)\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)",
                             sql,
                             re.I,
                         )
-                        if m:
-                            table_hint = m.group(1)
-                    if table_hint:
+                    )
+                    seen_hints: set[str] = set()
+                    for table_hint in table_hints:
+                        key = table_hint.lower()
+                        if key in seen_hints:
+                            continue
+                        seen_hints.add(key)
                         try:
                             sch = introspect_connector_table(
                                 conn, table_hint, purpose="source"
                             )
-                            columns = list(sch.get("columns") or [])
+                            columns.extend(list(sch.get("columns") or []))
                         except Exception as exc:
                             _LOG = logging.getLogger(__name__)
-                            _LOG.info("copilot sql guard introspect skipped: %s", exc)
+                            _LOG.info(
+                                "copilot sql guard introspect skipped for %s: %s",
+                                table_hint,
+                                exc,
+                            )
                     allowed = schema_allowlist(columns, table_names)
                     assert_identifiers_allowed(sql, allowed=allowed)
                 except ValueError as exc:
@@ -712,7 +727,7 @@ def run_connector_query(
             "query": sql,
             "collection": collection or None,
             "limit": limit,
-            "truncated": truncated,
+            "truncated": bool(truncated) or len(rows) >= limit or clipped,
         }
         result_id = _store_result(
             rows=rows,

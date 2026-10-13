@@ -244,6 +244,16 @@ export function Gate8ProofCard({
   const appendId = gate8AppendIdentity(report);
   const showAppendIdentity = Boolean((appendDelta || keyedBatch) && appendId.destBefore != null);
   const mismatches = report.sample_compare?.mismatches ?? [];
+  const ruleFindings: string[] = [
+    ...(report.rule_checks ?? [])
+      .filter((c) => c.status === "failed")
+      .map((c) =>
+        `Business rule ${c.rule_id || "unknown"}: ${Number(c.duplicates ?? 0)} duplicate value(s) in ${c.column || "?"} after load`,
+      ),
+    ...(report.unverified_rules ?? []).map((u) =>
+      `Business rule ${u.rule_id || "unknown"} not verified: ${u.reason || "unverified"}`,
+    ),
+  ];
   const sampleSkipped = Boolean(report.sample_compare?.skipped);
   const declinedReason = gate8SampleDeclinedReason(report);
   const sampleError = String(report.sample_compare?.error || "").trim();
@@ -603,6 +613,17 @@ export function Gate8ProofCard({
           {mismatches.length > 8 && (
             <p className="df2-gate8-proof-more">+{mismatches.length - 8} more in exported proof</p>
           )}
+        </div>
+      )}
+
+      {ruleFindings.length > 0 && (
+        <div className="df2-gate8-proof-mismatches" aria-label="Business rule checks">
+          <strong>Business rule checks</strong>
+          <ul>
+            {ruleFindings.map((f, i) => (
+              <li key={i}>{f}</li>
+            ))}
+          </ul>
         </div>
       )}
 

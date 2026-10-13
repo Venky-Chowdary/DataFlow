@@ -19,6 +19,7 @@ import {
   scheduleConfirmBlocksRun,
   schedulePreviewFromPayload,
 } from "../../lib/pilotScheduleConfirm";
+import { destructiveActionButtonLabel } from "../../lib/pilotConfirm";
 import { formatSchemaPolicyLabel, formatValidationModeLabel } from "../../lib/transferConstants";
 import type {
   CopilotPendingAction,
@@ -467,7 +468,7 @@ export function PilotConfirmCard({ action, busy, onConfirm, onCancel }: Props) {
           onClick={onConfirm}
         >
           {destructive
-            ? "Overwrite & run"
+            ? destructiveActionButtonLabel(action.type)
             : isTransfer
               ? "Run transfer"
               : isSchedule

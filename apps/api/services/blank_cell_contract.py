@@ -78,7 +78,25 @@ def typed_blank_stores_sql_null(
     """
     if not empty_cells_as_null or not is_spreadsheet_blank(raw):
         return False
+    # A text column's empty string is a stored value. Numeric, temporal,
+    # boolean, uuid, and binary blanks stay SQL NULL. An untyped spreadsheet
+    # blank stays NULL so a phone column with no declared type still does.
+    if _target_is_text(mapping):
+        return False
     return not _target_not_null(mapping, target, dest_nullability)
+
+
+def _target_is_text(mapping: dict[str, Any] | None) -> bool:
+    declared = str(
+        (mapping or {}).get("target_type")
+        or (mapping or {}).get("dest_type")
+        or ""
+    ).strip()
+    if not declared:
+        return False
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(declared) in {"string", "text"}
 
 
 def nullable_typed_blank_is_absence(

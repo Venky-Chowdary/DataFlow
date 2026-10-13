@@ -4,17 +4,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import heapq
 import json
 import logging
-import os
 from services.brand_env import getenv_brand
 import re
-import struct
-import tempfile
 import uuid
+import sys
 from contextlib import contextmanager, suppress
-from itertools import chain
 from dataclasses import asdict, dataclass
 from datetime import date as _date
 from datetime import datetime as _datetime
@@ -22,7 +18,7 @@ from datetime import time as _time
 from datetime import timezone
 from decimal import Decimal, InvalidOperation, Overflow, localcontext
 from functools import lru_cache
-from typing import Any, Callable, Final, Iterable, Iterator
+from typing import Any, Final, Iterable, Iterator
 
 from connectors.sql_identifiers import quote_sql_identifier
 from services.decision_kernel.findings import (
@@ -44,6 +40,8 @@ from services.reconcile_coverage import (
     is_writer_ack_only,
     row_count_scope_stamp,
 )
+
+_reconciliation = sys.modules[__name__]
 from services.transform_engine import (
     _DATE_LIKE_RE,
     _STRICT_BOOL_FALSE,
@@ -262,6 +260,14 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     tgt = str(out.get("target_checksum") or "").strip()
     msg = str(out.get("message") or "").lower()
     independent_match = bool(src and tgt and src == tgt)
+    if (
+        independent_match
+        and src == EMPTY_POPULATION_DIGEST
+        and str(out.get("checksum_scope") or "") == WRITTEN_BATCH_KEYS
+        and int(out.get("rejected_rows") or 0)
+    ):
+        # QA MX3-12: an empty written set matches itself — not a checksum proof.
+        independent_match = False
     # Module 4: always stamp checksum honesty; never invent population RI proof.
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
@@ -1089,6 +1095,35 @@ def reconcile(
             population_proof=False,
             assurance_level="none",
         )
+    if checksum_scope == WRITTEN_BATCH_KEYS and expected_rows == 0 and rejected_rows:
+        # QA MX3-12: two digests of the empty written set always match. That is
+        # no evidence — a replay that re-rejected every row reported
+        # full_checksum while its own L1-L5 ladder failed.
+        logger.warning(
+            "Gate-8: keyed run wrote 0 rows and rejected %d — no fidelity claim",
+            rejected_rows,
+        )
+        return ReconciliationReport(
+            passed=False,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"Nothing was verified: this run wrote 0 row(s) and rejected "
+                f"{rejected_rows}. The destination still holds {target_rows} "
+                "row(s) from earlier runs. Fix the rejected values and replay."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=None,
+            population_proof=False,
+            assurance_level="none",
+            checksum_scope=checksum_scope,
+            target_rows_before=target_rows_before,
+        )
     if coerced_null_rows:
         # Row counts and checksums can still match here because the SAME failed
         # coercion is applied when re-reading the source for its checksum. That
@@ -1707,201 +1742,8 @@ def verify_qdrant_collection(
         return -1, ""
 
 
-def verify_weaviate_class(
-    *,
-    host: str = "",
-    port: int = 8080,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    ssl: bool = False,
-    api_key: str = "",
-    class_name: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-    written_ids: list[str] | None = None,
-) -> tuple[int, str]:
-    """Independent Weaviate aggregate + object list for Gate-8."""
-    try:
-        from connectors.weaviate_writer import (
-            _base_url,
-            _class_name,
-            _headers,
-            _requests_session,
-        )
-
-        key = api_key or password or username or ""
-        base_url = _base_url(host, port, ssl, connection_string)
-        cls = _class_name(class_name)
-        session = _requests_session()
-        hdrs = _headers(key)
-        id_cap = int(limit) if limit and int(limit) > 0 else 500
-        ids = [str(x) for x in (written_ids or []) if x is not None][:id_cap]
-        dict_rows: list[dict[str, Any]] = []
-        if ids:
-            for oid in ids:
-                resp = session.get(
-                    f"{base_url}/v1/objects/{cls}/{oid}",
-                    headers=hdrs,
-                    timeout=15,
-                )
-                if resp.status_code not in {200, 201}:
-                    # Older Weaviate: /v1/objects/{uuid}
-                    resp = session.get(
-                        f"{base_url}/v1/objects/{oid}",
-                        headers=hdrs,
-                        timeout=15,
-                    )
-                if resp.status_code not in {200, 201}:
-                    continue
-                obj = load_http_json(resp) or {}
-                if not isinstance(obj, dict):
-                    continue
-                props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
-                dict_rows.append({"id": obj.get("id") or oid, **props})
-        if not dict_rows:
-            agg = session.get(
-                f"{base_url}/v1/objects",
-                params={"class": cls, "limit": max(1, int(limit or 100) or 100)},
-                headers=hdrs,
-                timeout=30,
-            )
-            if agg.status_code not in {200, 201}:
-                return -1, ""
-            body = load_http_json(agg) or {}
-            objects = body.get("objects") or []
-            count = int(body.get("totalResults") or len(objects))
-            for obj in objects:
-                if not isinstance(obj, dict):
-                    continue
-                props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
-                dict_rows.append({"id": obj.get("id"), **props})
-        else:
-            count = len(dict_rows)
-            # Prefer class cardinality when list endpoint works.
-            try:
-                agg = session.get(
-                    f"{base_url}/v1/objects",
-                    params={"class": cls, "limit": 1},
-                    headers=hdrs,
-                    timeout=15,
-                )
-                if agg.status_code in {200, 201}:
-                    count = int((agg.json() or {}).get("totalResults") or count)
-            except Exception:
-                pass
-        columns = target_columns or (
-            sorted({k for r in dict_rows for k in r}) if dict_rows else ["id"]
-        )
-        return count, canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="weaviate",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("Weaviate reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
 
 
-def verify_milvus_collection(
-    *,
-    host: str = "",
-    port: int = 19530,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    ssl: bool = False,
-    api_key: str = "",
-    database: str = "",
-    collection: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-    written_ids: list[str] | None = None,
-) -> tuple[int, str]:
-    """Independent Milvus get_collection_stats + query for Gate-8."""
-    try:
-        from connectors.milvus_writer import (
-            _auth_token,
-            _base_url,
-            _collection_name,
-            _headers,
-            _ok_response,
-            _requests_session,
-        )
-
-        coll = _collection_name(collection)
-        db_name = (database or "").strip()
-        if db_name.lower() in {"", "test_db", "default", "public"}:
-            db_name = ""
-        token = _auth_token(api_key=api_key, username=username, password=password)
-        base_url = _base_url(host, port, ssl, connection_string)
-        session = _requests_session()
-        hdrs = _headers(token)
-        stats_payload: dict[str, Any] = {"collectionName": coll}
-        if db_name:
-            stats_payload["dbName"] = db_name
-        stats = session.post(
-            f"{base_url}/v2/vectordb/collections/get_stats",
-            data=json.dumps(stats_payload),
-            headers=hdrs,
-            timeout=30,
-        )
-        body = stats.json() if stats.content else {}
-        if not _ok_response(body if isinstance(body, dict) else {}, stats.status_code):
-            return -1, ""
-        data = body.get("data") if isinstance(body, dict) else {}
-        count = int(
-            (data or {}).get("rowCount")
-            or (data or {}).get("row_count")
-            or (data or {}).get("row_num")
-            or 0
-        )
-        id_cap = int(limit) if limit and int(limit) > 0 else 500
-        ids = [str(x) for x in (written_ids or []) if x is not None][:id_cap]
-        query_payload: dict[str, Any] = {
-            "collectionName": coll,
-            "outputFields": ["id", "content", "source_id", "chunk_index"],
-            "limit": max(1, id_cap if ids else int(limit or 100) or 100),
-        }
-        if ids:
-            # Prefer keyed filter when writer stamped identities.
-            quoted = ", ".join(json.dumps(i) for i in ids)
-            query_payload["filter"] = f"id in [{quoted}]"
-        else:
-            query_payload["filter"] = ""
-        if db_name:
-            query_payload["dbName"] = db_name
-        query = session.post(
-            f"{base_url}/v2/vectordb/entities/query",
-            data=json.dumps(query_payload),
-            headers=hdrs,
-            timeout=30,
-        )
-        qbody = load_http_json(query) if query.content else {}
-        dict_rows: list[dict[str, Any]] = []
-        if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
-            rows = qbody.get("data") if isinstance(qbody, dict) else []
-            if isinstance(rows, list):
-                for row in rows:
-                    if isinstance(row, dict):
-                        dict_rows.append({k: v for k, v in row.items() if k != "vector"})
-        columns = target_columns or (
-            sorted({k for r in dict_rows for k in r}) if dict_rows else ["id"]
-        )
-        return count, canonical_checksum_from_iter(
-            dict_rows,
-            columns,
-            limit=limit,
-            dest_db_type="milvus",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("Milvus reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
 
 
 def verify_mysql_table(
@@ -3289,104 +3131,6 @@ def verify_redis_prefix(
         return -1, ""
 
 
-def verify_elasticsearch_index(
-    *,
-    host: str = "",
-    port: int = 9200,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    ssl: bool = False,
-    api_key: str = "",
-    index: str,
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent Elasticsearch search read-back for Gate-8."""
-    try:
-        from connectors.elasticsearch_reader import read_index_batch
-
-        cfg = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "ssl": ssl,
-            "api_key": api_key,
-        }
-        # A single 500-hit page was hashed against the source's whole-table
-        # digest, so strict reconcile reported a checksum mismatch for every
-        # index holding more than 500 documents even when all rows landed
-        # intact. ``limit=0`` means the whole population, so page the index
-        # with ``search_after`` until it is exhausted.
-        page = max(int(limit or 0), 0) or _ES_RECONCILE_PAGE
-        page = min(page, _ES_RECONCILE_PAGE)
-        headers: list[str] = []
-
-        def _row_iter() -> Iterator[dict[str, Any]]:
-            nonlocal headers
-            cursor: list | None = None
-            seen = 0
-            while True:
-                batch, cursor = read_index_batch(
-                    cfg=cfg,
-                    index=index,
-                    columns=target_columns,
-                    limit=page,
-                    search_after=cursor,
-                )
-                if not headers:
-                    headers = list(batch.headers or target_columns or [])
-                rows = list(batch.rows or [])
-                for row in rows:
-                    if isinstance(row, dict):
-                        yield row
-                    elif headers:
-                        yield {
-                            headers[i]: row[i] if i < len(row) else None
-                            for i in range(len(headers))
-                        }
-                seen += len(rows)
-                if not rows or cursor is None:
-                    return
-                if limit and seen >= int(limit):
-                    return
-
-        # ``columns`` must be known before hashing; the first page settles the
-        # headers, and ``target_columns`` already carries the mapped projection.
-        rows_iter = _row_iter()
-        first = next(rows_iter, None)
-        columns = list(target_columns or []) or (
-            headers or (sorted(first.keys()) if isinstance(first, dict) else [])
-        )
-        replay: Iterator[dict[str, Any]] = (
-            chain([first], rows_iter) if first is not None else iter(())
-        )
-        checksum = canonical_checksum_from_iter(
-            replay,
-            columns,
-            limit=limit,
-            dest_db_type="elasticsearch",
-            dest_types=dest_types,
-        )
-        count = 0
-        try:
-            from connectors.elasticsearch_reader import _client
-
-            es = _client(cfg)
-            try:
-                count = int(es.count(index=index).get("count", 0))
-            finally:
-                es.close()
-        except Exception as exc:
-            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-            return -1, ""
-        return count, checksum
-    except Exception as exc:
-        logger.warning("Elasticsearch reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
 
 
 def verify_snowflake_table(
@@ -3768,7 +3512,7 @@ def verify_target(
             pk_column=pk,
         )
     elif db_type in {"elasticsearch", "opensearch", "elastic"}:
-        count, chk = verify_elasticsearch_index(
+        count, chk = _reconciliation.verify_elasticsearch_index(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 9200),
             username=dest.get("username", ""),
@@ -4073,7 +3817,7 @@ def verify_target(
             written_ids=ids,
         )
     elif db_type == "weaviate":
-        count, chk = verify_weaviate_class(
+        count, chk = _reconciliation.verify_weaviate_class(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 8080),
             username=dest.get("username", ""),
@@ -4088,7 +3832,7 @@ def verify_target(
             written_ids=ids,
         )
     elif db_type == "milvus":
-        count, chk = verify_milvus_collection(
+        count, chk = _reconciliation.verify_milvus_collection(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 19530),
             username=dest.get("username", ""),
@@ -5011,9 +4755,69 @@ def sample_compare_rows(
     mismatches: list[dict[str, str]] = []
     compared = 0
     rows_compared = 0
+    rows_excluded_quarantined = 0
     keyed = bool(sort_key and target_by_key)
     # Only reachable when the caller vouched for pairing; see ``rows_are_paired``.
     target_paired = list(target_dicts) if not keyed else []
+
+    def _row_write_refused(src: Any) -> bool:
+        # Replay the write pipeline on every mapped cell — transform → code
+        # crosswalk → rule contracts, the same order as
+        # writer_common._convert_mapped_cell (mirrored, not imported: that
+        # module imports this one). A row the writer refused is quarantined
+        # at write, so it must not enter the comparison — its absence from
+        # the destination read-back is expected, and a stale row still
+        # holding its key is not corruption evidence.
+        if not isinstance(src, dict):
+            return False
+        for m in mappings:
+            src_col = str(m.get("source") or "")
+            tgt_col = str(m.get("target") or "")
+            if not src_col or not tgt_col:
+                continue
+            if src_col not in src:
+                # Sparse documents may legitimately lack a column — keep the
+                # old behaviour (the cell compares as NULL) rather than
+                # excluding the row and hiding corruption evidence.
+                continue
+            raw_src = src.get(src_col)
+            if is_missing_sentinel(raw_src):
+                continue
+            transform = m.get("transform")
+            if not transform or str(transform).strip().lower() in {
+                "",
+                "none",
+                "identity",
+                "passthrough",
+            }:
+                try:
+                    from services.transform_resolver import resolve_transform
+
+                    transform = resolve_transform(
+                        m,
+                        column_types={},
+                        dest_types=dest_types,
+                    )
+                except Exception:
+                    transform = m.get("transform")
+            try:
+                converted, err = apply_transform(raw_src, transform or "none")
+            except Exception:
+                err = "transform_failed"
+            if not err and declared_crosswalk(m) is not None:
+                _xval, xerr = apply_code_crosswalk(converted, m)
+                if xerr:
+                    err = xerr
+            if not err and isinstance(m.get("rule_contracts"), list):
+                from services.rule_compiler.apply import evaluate_contract
+
+                for contract in m["rule_contracts"]:
+                    if evaluate_contract(converted, contract, missing=False):
+                        err = "business rule refused"
+                        break
+            if err:
+                return True
+        return False
 
     def _result(*, passed: bool) -> dict[str, Any]:
         # ``compared`` counts *cells*, and every operator-facing line rendered it
@@ -5025,12 +4829,16 @@ def sample_compare_rows(
             "compared": compared,
             "cells_compared": compared,
             "rows_compared": rows_compared,
+            "rows_excluded_quarantined": rows_excluded_quarantined,
             "mismatches": mismatches,
             "sample_seed": sample_seed,
             "alignment": "keyed" if keyed else "paired_by_caller",
         }
 
     for idx, src in enumerate(source_sorted):
+        if _row_write_refused(src):
+            rows_excluded_quarantined += 1
+            continue
         if keyed:
             key = normalize_cell(src.get(source_sort_key) if source_sort_key else None)
             if not key and sort_key:
@@ -5089,12 +4897,23 @@ def sample_compare_rows(
             # Same order as writer_common: transform, then the declared
             # crosswalk. Comparing the source token to the rewritten dest cell
             # as identity is a false Gate-8 failure of a correct conversion.
-            if declared_crosswalk(m) is not None:
+            rule_contracts = m.get("rule_contracts")
+            if declared_crosswalk(m) is not None or rule_contracts:
                 converted, err = apply_transform(raw_src, transform or "none")
-                if not err:
+                if not err and declared_crosswalk(m) is not None:
                     converted, xwalk_err = apply_code_crosswalk(converted, m)
                     if xwalk_err:
                         converted = None
+                if not err and isinstance(rule_contracts, list):
+                    # Rows a rule contract rejects are quarantined at write —
+                    # never in the dest image. Fingerprint the value the
+                    # writer saw; a failing row must not read as a Gate-8 miss.
+                    from services.rule_compiler.apply import evaluate_contract
+
+                    for contract in rule_contracts:
+                        if evaluate_contract(converted, contract, missing=False):
+                            converted = None
+                            break
                 src_val = _fingerprint(
                     converted, transform=None, tgt_col=tgt_col
                 )
@@ -5162,3 +4981,21 @@ def read_target_sample(
         sort_key=sort_key,
         key_values=key_values,
     )
+
+_VECTOR_VERIFY_EXPORTS = frozenset(
+    {
+        "verify_elasticsearch_index",
+        "verify_milvus_collection",
+        "verify_weaviate_class",
+    }
+)
+
+
+def __getattr__(name: str):
+    if name in _VECTOR_VERIFY_EXPORTS:
+        from services import reconciliation_vector_verify
+
+        value = getattr(reconciliation_vector_verify, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

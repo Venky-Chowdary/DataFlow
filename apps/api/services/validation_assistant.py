@@ -80,13 +80,29 @@ def slim_preflight_for_explain(preflight: dict[str, Any] | None) -> dict[str, An
             "table_exists": col.get("table_exists"),
         })
     blockers: list[dict[str, Any]] = []
+    mapping_review_columns: set[str] = set()
     for raw in pf.get("blockers") or []:
         if not isinstance(raw, dict):
             continue
+        gate_id = str(raw.get("id") or raw.get("gate") or "")
         details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
         issues_detail = details.get("issues_detail") if isinstance(details.get("issues_detail"), list) else []
+        if gate_id in {"g4_mapping_confidence", "g4_mapping"}:
+            for key in ("affected_columns", "columns"):
+                mapping_review_columns.update(
+                    str(value).strip()
+                    for value in details.get(key, [])
+                    if isinstance(value, str) and value.strip()
+                )
+            mapping_review_columns.update(
+                str(column).strip()
+                for detail in issues_detail
+                if isinstance(detail, dict)
+                for column in (detail.get("source"), detail.get("column"))
+                if isinstance(column, str) and column.strip()
+            )
         blockers.append({
-            "id": raw.get("id") or raw.get("gate"),
+            "id": gate_id or None,
             "gate": raw.get("gate") or raw.get("id"),
             "message": raw.get("message", ""),
             "guidance": raw.get("guidance") or {},
@@ -100,10 +116,24 @@ def slim_preflight_for_explain(preflight: dict[str, Any] | None) -> dict[str, An
                 ],
             },
         })
+    for root in pf.get("root_causes") or []:
+        if not isinstance(root, dict):
+            continue
+        impacted = root.get("impacted_gates") or []
+        if root.get("kind") != "mapping_confidence" and not any(
+            gate in {"g4_mapping_confidence", "g4_mapping"} for gate in impacted
+        ):
+            continue
+        mapping_review_columns.update(
+            str(column).strip()
+            for column in root.get("affected_columns") or []
+            if isinstance(column, str) and column.strip()
+        )
     return {
         "passed": bool(pf.get("passed")),
         "run_id": pf.get("run_id"),
         "blockers": blockers,
+        "mapping_review_columns": sorted(mapping_review_columns),
         "coercion_report": {"columns": coercion_cols} if coercion_cols else {},
         "population_fit": {
             "evidence": pop.get("evidence"),
@@ -735,7 +765,29 @@ def explain_validation(
     if not passed and use_llm:
         narrative, provider = _llm_narrative(deterministic, issues)
 
-    hard_count = sum(1 for i in issues if i["severity"] != "warning")
+    blocking_gate_ids = {
+        str(issue.get("gate") or "").strip() or "general"
+        for issue in issues
+        if issue["severity"] != "warning"
+    }
+    hard_count = len(blocking_gate_ids)
+    attention_columns = {
+        str(column).strip()
+        for column in preflight.get("mapping_review_columns") or []
+        if isinstance(column, str) and column.strip()
+    }
+    attention_columns.update(
+        str(fix.get("column") or "").strip()
+        for fix in column_fixes
+        if str(fix.get("column") or "").strip()
+    )
+    for issue in issues:
+        if issue.get("gate") in {"g4_mapping_confidence", "g4_mapping"}:
+            attention_columns.update(
+                str(column).strip()
+                for column in issue.get("columns") or []
+                if isinstance(column, str) and column.strip()
+            )
     approved = passed and decision == "approve"
     summary = (
         "Validation passed — safe to run."
@@ -743,7 +795,10 @@ def explain_validation(
         else (
             "Validation review-grade — not safe to run until decision is approve."
             if passed
-            else f"Validation blocked: {hard_count} issue(s), {len(column_fixes)} column(s) need attention."
+            else (
+                f"Validation blocked: {hard_count} blocking gate(s), "
+                f"{len(attention_columns)} column(s) need attention."
+            )
         )
     )
 

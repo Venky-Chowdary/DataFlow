@@ -213,11 +213,31 @@ def test_duplicate_pk_in_source_is_owned_by_data_integrity_not_g6():
         destination_db_type="postgresql",
         validation_mode="strict",
         sync_mode="full_refresh_overwrite",
+        # The source PK, declared the way production passes it.
+        contract_primary_key="order_id",
     )
     assert not report["passed"]
     dup = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), {})
     assert dup.get("blocks_transfer") is True
     assert any("duplicate" in str(i).lower() for i in dup.get("issues", []))
+
+
+def test_inferred_only_duplicate_pk_on_overwrite_heap_warns_not_blocks():
+    """Same inputs as the source-PK case without a declared key: warn only."""
+    from services.data_integrity import run_integrity_audit
+
+    report = run_integrity_audit(
+        source_columns=["order_id"],
+        mappings=[{"source": "order_id", "target": "order_id", "confidence": 1.0}],
+        sample_rows=[{"order_id": "1"}, {"order_id": "1"}],
+        destination_db_type="postgresql",
+        validation_mode="strict",
+        sync_mode="full_refresh_overwrite",
+    )
+    dup = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), {})
+    assert dup.get("blocks_transfer") is False, dup
+    blob = " ".join(str(w) for w in dup.get("warnings") or [])
+    assert "duplicate" in blob.lower() and "1×2" in blob, dup
 
 
 def test_passes_when_target_column_case_differs():

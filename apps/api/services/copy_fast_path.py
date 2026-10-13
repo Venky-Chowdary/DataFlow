@@ -1379,9 +1379,11 @@ def copy_between_postgres(
                     ) from exc
                 create = True
             else:
+                from connectors.sql_identifiers import pg_regclass_literal
+
                 dst_cur.execute(
                     "SELECT to_regclass(%s)",
-                    (f"{dest_schema or 'public'}.{dest_table}",),
+                    (pg_regclass_literal(dest_schema or "public", dest_table),),
                 )
                 create = dst_cur.fetchone()[0] is None
             if create:

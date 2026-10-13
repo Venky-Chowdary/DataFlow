@@ -58,7 +58,7 @@ function upsertContract(list: DataContractSummary[], next: DataContractSummary):
 export function ContractsPage({ active = true }: { active?: boolean }) {
   const { toast } = useToast();
   /** Signing, deprecating and resetting a breaker are writes (connector.write). */
-  const contractWrite = useWriteGate(PERMISSIONS.connectorWrite);
+  const contractWrite = useWriteGate(PERMISSIONS.connectorWrite, "sign or change contracts");
   const toastRef = useRef(toast);
   toastRef.current = toast;
 

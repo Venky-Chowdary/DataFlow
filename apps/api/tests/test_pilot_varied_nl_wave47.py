@@ -85,7 +85,7 @@ def varied_nl_scenarios() -> list[NLCase]:
     add("tables", [
         f"can you pull the table list from {c}?",
         f"what tables exist on {c}",
-        f"show me everything available on PostgresVenkat",
+        "show me everything available on PostgresVenkat",
         f"i forgot — which tables do we have on {c}?",
     ], "list_connector_objects")
     add("schema", [

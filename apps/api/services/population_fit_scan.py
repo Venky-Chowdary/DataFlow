@@ -205,8 +205,8 @@ class FitScanReport:
     #: Columns whose declared source type cannot exceed the destination carrier,
     #: so no value scan is needed to decide them.
     safe_by_declaration: tuple[str, ...] = field(default=())
-    #: Why a population walk stopped early: ``row`` or ``time``. Empty when
-    #: the walk finished or never started.
+    #: Why a population walk stopped early: ``row``, ``time`` or ``walk``.
+    #: Empty when the walk finished or never started.
     truncated_reason: str = ""
     #: Wall-clock of this walk. Studio hero must not sum other gates as 10ms
     #: after a multi-second 1M scan.
@@ -215,6 +215,8 @@ class FitScanReport:
     envelope_rows_scanned: int = 0
     #: True when that cheap continuation exhausted the iterator.
     envelope_complete: bool = False
+    max_observed_widths: tuple[tuple[str, int], ...] = ()
+    probe_error: str = ""
 
     @property
     def scanned_population(self) -> bool:
@@ -248,6 +250,8 @@ class FitScanReport:
             "duration_ms": self.duration_ms,
             "envelope_rows_scanned": self.envelope_rows_scanned,
             "envelope_complete": self.envelope_complete,
+            "max_observed_widths": dict(self.max_observed_widths),
+            "probe_error": self.probe_error,
             "note": self.note,
         }
 
@@ -392,16 +396,23 @@ def _scannable_transform(
     binds through — so Validate never screens a column with a rule the write
     does not use. A native path resolves to ``none`` and costs nothing.
     """
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
     from services.transform_resolver import resolve_transform
 
-    resolved = str(
+    raw = str(
         resolve_transform(
             dict(mapping),
             column_types=dict(source_types),
             dest_types=dict(dest_types),
         )
         or ""
-    ).strip().lower()
+    ).strip()
+    resolved = raw.lower()
+    # A declared source zone is the write's own transform for a naive column:
+    # screening the raw wall-clock against TIMESTAMPTZ forecast holdouts the
+    # write never makes (MX2-01). The zone name keeps its IANA case.
+    if resolved.startswith(ASSUME_TIMEZONE_PREFIX):
+        return raw
     return resolved if resolved in _SCANNABLE_TRANSFORMS else ""
 
 
@@ -975,6 +986,7 @@ def scan_rows(
     env_int: dict[int, int] = {}
     env_scale: dict[int, int] = {}
     env_str_len: dict[int, int] = {}
+    max_observed_widths: dict[int, int] = {}
     env_int_frac: dict[int, bool] = {}
     witnesses: dict[int, list[Any]] = {}
     scanned = 0
@@ -1071,6 +1083,13 @@ def scan_rows(
                 and not _is_year_carrier(bounded[idx].target_type)
             ):
                 continue
+            if bounded[idx].carrier == CARRIER_STRING:
+                text = present_cell_text(value)
+                if text is None:
+                    text = str(value or "")
+                max_observed_widths[idx] = max(
+                    max_observed_widths.get(idx, 0), len(text)
+                )
             if bounded[idx].carrier in {CARRIER_DECIMAL, CARRIER_INTEGER} or (
                 bounded[idx].carrier == CARRIER_TYPED
                 and bounded[idx].transform
@@ -1502,6 +1521,10 @@ def scan_rows(
         duration_ms=duration_ms,
         envelope_rows_scanned=envelope_rows_scanned,
         envelope_complete=envelope_complete and not envelope_truncated,
+        max_observed_widths=tuple(
+            (bounded[idx].target.casefold(), width)
+            for idx, width in sorted(max_observed_widths.items())
+        ),
     )
 
 
@@ -1566,6 +1589,23 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
     held_out = report.held_out_findings
     details: dict[str, Any] = report.to_dict()
     duration_ms = int(report.duration_ms or 0)
+
+    probe_error = str(report.probe_error or "").strip()
+    if probe_error or report.truncated_reason == "walk":
+        error = probe_error or "source population walk did not complete"
+        details["probe_failed"] = True
+        details["probe_error"] = error
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": (
+                f"Population probe failed: {error}. The source population was "
+                "not fully scanned, so bounded destination-carrier fit is "
+                "unproven. Retry Validate after the source is reachable."
+            ),
+            "duration_ms": duration_ms,
+            "details": details,
+        }
 
     if not report.targets:
         safe = len(report.safe_by_declaration)

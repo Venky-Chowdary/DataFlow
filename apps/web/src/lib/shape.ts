@@ -524,9 +524,14 @@ export function continueTransformState(input: {
   busy: boolean;
   previewMatchesSteps: boolean;
   syncMode?: string;
+  /** Compiled business rules awaiting Map — CTA must not say "without transforming". */
+  ruleCount?: number;
 }): ContinueTransformState {
   const hasRecipe = enabledShapeSteps(input.steps).length > 0;
-  const label = hasRecipe ? "Continue with this transform" : "Continue without transforming";
+  const hasRules = (input.ruleCount ?? 0) > 0;
+  const label = hasRecipe
+    ? "Continue with this transform"
+    : hasRules ? "Continue to Map" : "Continue without transforming";
   if (hasRecipe && preloadTransformRefused(input.syncMode)) {
     return {
       enabled: false,

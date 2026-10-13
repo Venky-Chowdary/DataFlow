@@ -203,19 +203,23 @@ def _daily(hour: int | None, minute: int, tz: str, assumed: bool) -> CadenceSpec
 def _weekly(
     dow: int | None, hour: int | None, minute: int, tz: str, assumed: bool
 ) -> CadenceSpec:
-    if dow is None or hour is None:
+    if dow is None:
         return CadenceSpec(
             interval="weekly",
             timezone=tz,
             description="every 7 days, starting at the first run",
             timezone_assumed=assumed,
         )
+    # "weekly on Monday" with no time anchors to the start of that weekday —
+    # dropping the named day onto a rolling 7-day preset ran it on whatever
+    # day it was created (QA S10).
+    anchored = hour if hour is not None else 0
     day = next(name for name, i in _WEEKDAYS.items() if i == dow and len(name) > 3)
     return CadenceSpec(
         interval="weekly",
-        cron=f"{minute} {hour} * * {dow}",
+        cron=f"{minute} {anchored} * * {dow}",
         timezone=tz,
-        description=f"every {day} at {_clock(hour, minute)} {tz}",
+        description=f"every {day} at {_clock(anchored, minute)} {tz}",
         timezone_assumed=assumed,
     )
 
@@ -228,7 +232,7 @@ def _every_n(unit: str, count: int, tz: str, assumed: bool) -> CadenceSpec:
                 "minutes. For anything longer, say hourly, daily or weekly."
             )
         return CadenceSpec(
-            interval="hourly",
+            interval="cron",
             cron=f"*/{count} * * * *",
             timezone=tz,
             description=f"every {count} minute(s)",
@@ -241,7 +245,7 @@ def _every_n(unit: str, count: int, tz: str, assumed: bool) -> CadenceSpec:
                 "For a daily run, say daily and the time."
             )
         return CadenceSpec(
-            interval="hourly",
+            interval="cron",
             cron=f"0 */{count} * * *",
             timezone=tz,
             description=f"every {count} hour(s) on the hour",
@@ -289,7 +293,7 @@ def _bare_cron(raw: str, tz: str, assumed: bool) -> CadenceSpec | None:
     except CronError:
         return None
     return CadenceSpec(
-        interval="daily",
+        interval="cron",
         cron=text,
         timezone=tz,
         description=f"cron “{text}” ({tz})",
@@ -335,7 +339,7 @@ def parse_cadence(text: str) -> CadenceSpec:
         except CronError as exc:
             return _ask(f"I cannot schedule cron “{expr}”: {exc}")
         return CadenceSpec(
-            interval="daily",
+            interval="cron",
             cron=expr,
             timezone=tz,
             description=f"cron “{expr}” ({tz})",
@@ -365,7 +369,7 @@ def parse_cadence(text: str) -> CadenceSpec:
                 "months. Pick day 1–28, or say “last day” is not supported yet."
             )
         return CadenceSpec(
-            interval="daily",
+            interval="cron",
             cron=f"{minute} {hour} {dom} * *",
             timezone=tz,
             description=f"on day {dom} of every month at {_clock(hour, minute)} {tz}",
@@ -411,7 +415,7 @@ def parse_cadence(text: str) -> CadenceSpec:
                 "Without a time this would be stored as every 7 days."
             )
         return CadenceSpec(
-            interval="daily",
+            interval="cron",
             cron=f"{minute} {hour} * * 1-5",
             timezone=tz,
             description=f"weekdays at {_clock(hour, minute)} {tz}",

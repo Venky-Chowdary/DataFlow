@@ -203,6 +203,14 @@ import {
   sameSchemaMap,
 } from "../lib/destSchemaIdentity";
 import {
+  createDestinationSchemaProbe,
+  destinationSchemaProbeKey,
+  INLINE_DESTINATION_PROBE_DEBOUNCE_MS,
+  isInlineDestinationConfigured,
+  type DestinationProbeEndpoint,
+  type DestinationSchemaProbeController,
+} from "../lib/destinationSchemaProbe";
+import {
   SourceReadWindowPanel,
   offersReadWindow,
 } from "../components/transfer/SourceReadWindowPanel";
@@ -391,6 +399,8 @@ export function TransferPage({
   });
   const sourceIntrospectGenRef = useRef(0);
   const destSchemaGenRef = useRef(0);
+  const destSchemaIdentityRef = useRef("");
+  const inlineDestinationProbeRef = useRef<DestinationSchemaProbeController<void> | null>(null);
   /** Last destination identity whose probe failed — throttles automatic re-probes. */
   const destProbeFailureRef = useRef<{ key: string; at: number } | null>(null);
   /**
@@ -460,8 +470,19 @@ export function TransferPage({
   const [vectorEmbeddingColumn, setVectorEmbeddingColumn] = useState("");
   const [vectorMetadataColumns, setVectorMetadataColumns] = useState("");
   const [vectorEmbeddingModel, setVectorEmbeddingModel] = useState("");
+  const [vectorEmbeddingApiKey, setVectorEmbeddingApiKey] = useState("");
+  const [vectorEmbeddingBaseUrl, setVectorEmbeddingBaseUrl] = useState("");
+  const [vectorEmbeddingEndpoint, setVectorEmbeddingEndpoint] = useState("");
   const [vectorChunkSize, setVectorChunkSize] = useState(512);
   const [vectorChunkOverlap, setVectorChunkOverlap] = useState(50);
+  const [vectorChunkStrategy, setVectorChunkStrategy] = useState<
+    "recursive" | "fixed" | "token" | "markdown"
+  >("recursive");
+  const [vectorChunkUnit, setVectorChunkUnit] = useState<"chars" | "tokens">("chars");
+  const [vectorTextTemplate, setVectorTextTemplate] = useState("");
+  const [vectorSkipUnchanged, setVectorSkipUnchanged] = useState(true);
+  const [vectorIndex, setVectorIndex] = useState<"none" | "hnsw">("none");
+  const [vectorStorage, setVectorStorage] = useState<"vector" | "halfvec">("vector");
   const [vectorExcludePiiColumns, setVectorExcludePiiColumns] = useState("");
   const [vectorRoutingFields, setVectorRoutingFields] = useState<VectorFieldRouting[]>([]);
   const [vectorRoutingLoading, setVectorRoutingLoading] = useState(false);
@@ -690,8 +711,17 @@ export function TransferPage({
                   }
                 : {}),
               ...(vectorEmbeddingModel ? { embedding_model: vectorEmbeddingModel } : {}),
+              ...(vectorEmbeddingBaseUrl ? { embedding_base_url: vectorEmbeddingBaseUrl } : {}),
+              ...(vectorEmbeddingEndpoint ? { embedding_endpoint: vectorEmbeddingEndpoint } : {}),
               chunk_size: vectorChunkSize,
               chunk_overlap: vectorChunkOverlap,
+              chunk_strategy: vectorChunkStrategy,
+              chunk_unit: vectorChunkUnit,
+              ...(vectorTextTemplate ? { text_template: vectorTextTemplate } : {}),
+              vector_skip_unchanged: vectorSkipUnchanged,
+              ...(destDriverType === "pgvector"
+                ? { vector_index: vectorIndex, vector_storage: vectorStorage }
+                : {}),
               durable_embedding_cache: vectorDurableCache,
             }
           : {}),
@@ -1490,7 +1520,7 @@ export function TransferPage({
    * must not close over a stale render's copy, so it is reached through a ref.
    */
   const loadDestSchemaRef = useRef<
-    ((opts?: { force?: boolean }) => Promise<{
+    ((opts?: { force?: boolean; endpoint?: DestinationProbeEndpoint }) => Promise<{
       columns: string[];
       schema: Record<string, string>;
       tableExists: boolean | null;
@@ -1561,7 +1591,7 @@ export function TransferPage({
       if (
         existsForMap == null
         && destKindMode === "database"
-        && Boolean(connectorId)
+        && (Boolean(connectorId) || isInlineDestinationConfigured(buildDestinationEndpoint()))
         && Boolean(targetCollection.trim())
       ) {
         try {
@@ -1836,14 +1866,25 @@ export function TransferPage({
     if (!sameSchemaMap(destSchemaMap, schema)) setDestSchemaMap(schema);
   };
 
-  const loadDestinationSchema = async (opts?: { force?: boolean }): Promise<{
+  const currentDestinationEndpoint = buildDestinationEndpoint();
+  const currentDestinationProbeKey = destinationSchemaProbeKey(currentDestinationEndpoint, connectorId);
+  destSchemaIdentityRef.current = currentDestinationProbeKey;
+
+  const loadDestinationSchema = async (opts?: {
+    force?: boolean;
+    endpoint?: DestinationProbeEndpoint;
+  }): Promise<{
     columns: string[];
     schema: Record<string, string>;
     tableExists: boolean | null;
     connected: boolean | null;
     message: string;
   }> => {
-    if (destKindMode !== "database" || !connectorId) {
+    const endpoint = opts?.endpoint ?? buildDestinationEndpoint();
+    if (
+      destKindMode !== "database"
+      || (!connectorId && !isInlineDestinationConfigured(endpoint))
+    ) {
       return {
         columns: destColumns,
         schema: destSchemaMap,
@@ -1852,7 +1893,16 @@ export function TransferPage({
         message: "",
       };
     }
-    const tableKey = `${connectorId}|${destType}|${targetDb}|${destSchema}|${targetCollection.trim()}`;
+    const tableKey = destinationSchemaProbeKey(endpoint, connectorId);
+    if (tableKey !== destSchemaIdentityRef.current) {
+      return {
+        columns: destColumns,
+        schema: destSchemaMap,
+        tableExists: destTableExists,
+        connected: null,
+        message: "",
+      };
+    }
     if (
       !opts?.force
       && shouldSkipAutoDestProbe(destProbeFailureRef.current, tableKey, Date.now())
@@ -1874,14 +1924,14 @@ export function TransferPage({
       const { destination } = await introspectTransferEndpoints(
         {
           source: { kind: "file", format: "csv" },
-          destination: buildDestinationEndpoint(),
+          destination: { ...endpoint },
         },
         // A warehouse can cold-start for minutes; an unreachable OLTP host must not
         // hold "Reading destination…" for three minutes with no way back. Bound the
         // wait so the operator reaches the unknown-destination state and can retry.
         { timeoutMs: DEST_PROBE_TIMEOUT_MS[destProbeSpeedClass(destType)] },
       );
-      if (gen !== destSchemaGenRef.current) {
+      if (gen !== destSchemaGenRef.current || tableKey !== destSchemaIdentityRef.current) {
         return {
           columns: destColumns,
           schema: destSchemaMap,
@@ -1994,7 +2044,7 @@ export function TransferPage({
         message: (destination.message as string) || "",
       };
     } catch (e) {
-      if (gen !== destSchemaGenRef.current) {
+      if (gen !== destSchemaGenRef.current || tableKey !== destSchemaIdentityRef.current) {
         return {
           columns: destColumns,
           schema: destSchemaMap,
@@ -2007,6 +2057,7 @@ export function TransferPage({
       // panel does not blank out. A different table has no schema of its own —
       // showing the previous table's DDL for it is a false read.
       destProbeFailureRef.current = { key: tableKey, at: Date.now() };
+      console.error("Destination schema introspection failed:", e);
       const sameTable = destSchemaTableKeyRef.current === tableKey;
       const keptColumns = sameTable ? destColumns : [];
       const keptSchema = sameTable ? destSchemaMap : {};
@@ -2037,6 +2088,14 @@ export function TransferPage({
     }
   };
   loadDestSchemaRef.current = loadDestinationSchema;
+  if (!inlineDestinationProbeRef.current) {
+    inlineDestinationProbeRef.current = createDestinationSchemaProbe<void>({
+      delayMs: INLINE_DESTINATION_PROBE_DEBOUNCE_MS,
+      load: async (endpoint) => {
+        await loadDestSchemaRef.current?.({ endpoint });
+      },
+    });
+  }
 
   useEffect(() => {
     if (!analysis?.columns.length || step !== STEP_MAP || analyzing) return;
@@ -2055,19 +2114,32 @@ export function TransferPage({
   }, [validationMode, step, destColumns, destSchemaMap, destTableExists, destKindMode, analyzing]);
 
   useEffect(() => {
-    if (destKindMode !== "database" || !connectorId) return;
+    if (
+      destKindMode !== "database"
+      || (!connectorId && !isInlineDestinationConfigured(currentDestinationEndpoint))
+    ) {
+      inlineDestinationProbeRef.current?.cancel();
+      return;
+    }
     // Load object list as soon as a connector is chosen; refine when table is set.
     if (step !== STEP_DESTINATION && step !== STEP_MAP && step !== STEP_VALIDATE) return;
+    if (!connectorId) {
+      void inlineDestinationProbeRef.current?.schedule(currentDestinationEndpoint);
+      return () => inlineDestinationProbeRef.current?.cancel();
+    }
     const t = window.setTimeout(() => { void loadDestinationSchema(); }, 350);
     return () => window.clearTimeout(t);
-  }, [step, destKindMode, targetCollection, connectorId, destType, targetDb, destHost, destPort, destSchema, destWarehouse]);
+  }, [step, destKindMode, connectorId, currentDestinationProbeKey]);
 
   // An unreachable destination is re-checked on a fixed cadence, not as fast as
   // Map can re-render: the operator gets automatic recovery when the host comes
   // back, and a host that stays down costs four probes a minute instead of
   // twenty. Reload and Validate still probe on demand.
   useEffect(() => {
-    if (destKindMode !== "database" || !connectorId) return;
+    if (
+      destKindMode !== "database"
+      || (!connectorId && !isInlineDestinationConfigured(currentDestinationEndpoint))
+    ) return;
     if (step !== STEP_DESTINATION && step !== STEP_MAP) return;
     if (destConnected !== false || destSchemaLoading) return;
     const t = window.setTimeout(() => {
@@ -2076,7 +2148,7 @@ export function TransferPage({
       });
     }, DEST_PROBE_FAILURE_COOLDOWN_MS);
     return () => window.clearTimeout(t);
-  }, [step, destKindMode, connectorId, destConnected, destSchemaLoading, destProbeRetryTick]);
+  }, [step, destKindMode, connectorId, currentDestinationProbeKey, destConnected, destSchemaLoading, destProbeRetryTick]);
 
   useEffect(() => {
     if (cursorCandidate && (!cursorField || !currentSourceColumns.includes(cursorField))) {
@@ -5301,8 +5373,22 @@ export function TransferPage({
               .filter(Boolean);
             if (excludePii.length) extra.exclude_pii_columns = excludePii;
             if (vectorEmbeddingModel) extra.embedding_model = vectorEmbeddingModel;
+            if (vectorEmbeddingApiKey) {
+              extra.embedding_api_key = vectorEmbeddingApiKey;
+              setVectorEmbeddingApiKey("");
+            }
+            if (vectorEmbeddingBaseUrl) extra.embedding_base_url = vectorEmbeddingBaseUrl;
+            if (vectorEmbeddingEndpoint) extra.embedding_endpoint = vectorEmbeddingEndpoint;
             extra.chunk_size = vectorChunkSize;
             extra.chunk_overlap = vectorChunkOverlap;
+            extra.chunk_strategy = vectorChunkStrategy;
+            extra.chunk_unit = vectorChunkUnit;
+            if (vectorTextTemplate) extra.text_template = vectorTextTemplate;
+            extra.vector_skip_unchanged = vectorSkipUnchanged;
+            if (destDriverType === "pgvector") {
+              extra.vector_index = vectorIndex;
+              extra.vector_storage = vectorStorage;
+            }
             extra.durable_embedding_cache = vectorDurableCache;
           }
           return Object.keys(extra).length ? extra : undefined;
@@ -7607,7 +7693,6 @@ export function TransferPage({
           onContinue={() => void goToMapping()}
           syncMode={syncMode}
           ruleReport={businessRuleReport}
-          onAcceptRuleDirect={acceptWorkbookRuleAsDirect}
           sourceTable={primarySourceStream || sourceTable}
           destTable={targetCollection}
           sourceTables={multiStreamNames.length ? multiStreamNames : undefined}
@@ -8327,18 +8412,37 @@ export function TransferPage({
           destDriverType === "pinecone" ||
           destDriverType === "milvus"
         }
+        showPgvectorOptions={destDriverType === "pgvector"}
         vectorContentColumn={vectorContentColumn}
         vectorEmbeddingColumn={vectorEmbeddingColumn}
         vectorMetadataColumns={vectorMetadataColumns}
         vectorEmbeddingModel={vectorEmbeddingModel}
         vectorChunkSize={vectorChunkSize}
         vectorChunkOverlap={vectorChunkOverlap}
+        vectorChunkStrategy={vectorChunkStrategy}
+        vectorChunkUnit={vectorChunkUnit}
+        vectorTextTemplate={vectorTextTemplate}
+        vectorSkipUnchanged={vectorSkipUnchanged}
+        vectorIndex={vectorIndex}
+        vectorStorage={vectorStorage}
+        vectorEmbeddingApiKey={vectorEmbeddingApiKey}
+        vectorEmbeddingBaseUrl={vectorEmbeddingBaseUrl}
+        vectorEmbeddingEndpoint={vectorEmbeddingEndpoint}
         onVectorContentColumnChange={setVectorContentColumn}
         onVectorEmbeddingColumnChange={setVectorEmbeddingColumn}
         onVectorMetadataColumnsChange={setVectorMetadataColumns}
         onVectorEmbeddingModelChange={setVectorEmbeddingModel}
         onVectorChunkSizeChange={setVectorChunkSize}
         onVectorChunkOverlapChange={setVectorChunkOverlap}
+        onVectorChunkStrategyChange={setVectorChunkStrategy}
+        onVectorChunkUnitChange={setVectorChunkUnit}
+        onVectorTextTemplateChange={setVectorTextTemplate}
+        onVectorSkipUnchangedChange={setVectorSkipUnchanged}
+        onVectorIndexChange={setVectorIndex}
+        onVectorStorageChange={setVectorStorage}
+        onVectorEmbeddingApiKeyChange={setVectorEmbeddingApiKey}
+        onVectorEmbeddingBaseUrlChange={setVectorEmbeddingBaseUrl}
+        onVectorEmbeddingEndpointChange={setVectorEmbeddingEndpoint}
         vectorRoutingFields={vectorRoutingFields}
         vectorRoutingLoading={vectorRoutingLoading}
         vectorExcludePiiColumns={vectorExcludePiiColumns}

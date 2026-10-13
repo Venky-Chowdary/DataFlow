@@ -29,11 +29,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .query_tools import _MAX_QUERY_ROWS, _quote_ident, _store_result, _tool_result
+from .query_tools import _quote_ident, _store_result, _tool_result
 from .schema_tools import (
     AmbiguousConnectorError,
-    _endpoint_from_connector,
-    _normalize_columns,
     _safe_connector,
 )
 
@@ -62,6 +60,49 @@ _NON_NUMERIC_HINTS = (
     "char", "text", "uuid", "json", "bool", "blob", "binary", "bytea",
     "date", "time", "interval", "xml", "enum", "array", "struct", "geography",
 )
+
+# SQLite stores exact money as TEXT (NUMERIC affinity would drop scale).
+# SUM/AVG of those columns is a real total — the engine coerces numeric text.
+_TEXT_MONEY_NAME = re.compile(
+    r"(?:^|_)(?:amt|amount|price|total|qty|quantity|balance|fee|cost|rate|score|value)(?:_|$)",
+    re.I,
+)
+
+
+def _sqlite_text_money(name: str, col_type: str) -> bool:
+    low = (col_type or "").lower()
+    if "text" not in low and "char" not in low:
+        return False
+    return bool(_TEXT_MONEY_NAME.search(name or ""))
+
+
+def _unparsed_filter_warning(where: str, leftover: str) -> str:
+    """Refuse a where-clause tail the predicate parser did not consume.
+
+    ``STS = POSTED' OR '1'='1`` used to run as ``STS = POSTED`` and drop the
+    rest (QA RT5-10). A partial predicate is not applied.
+    """
+    from .predicates import parse_time_window
+
+    text = leftover or ""
+    window = parse_time_window(where or "")
+    if window is not None and window[2]:
+        text = re.sub(re.escape(window[2]), " ", text, count=1, flags=re.I)
+    text = re.sub(
+        r"\b(?:and|or|where|with|the|a|an|please|thanks|in|on|for|of|by|"
+        r"last|past|days?|weeks?|months?|years?)\b",
+        " ",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"[\s,;:.]+", " ", text).strip()
+    if not text or not re.search(r"[A-Za-z_'\"=<>]|--", text):
+        return ""
+    fragment = (leftover or "").strip()
+    return (
+        "Refused the filter because this part is not a complete "
+        f"column = value predicate: {fragment!r}. The query was not run."
+    )
 
 _TEMPORAL_GRAINS = {
     "day": "day", "daily": "day", "date": "day",
@@ -1072,7 +1113,8 @@ def aggregate_connector_data(
             )
         if metric_key in {"sum", "avg"}:
             col_type = _column_type(columns, measure_col).lower()
-            if col_type and any(hint in col_type for hint in _NON_NUMERIC_HINTS):
+            money_text = ctype == "sqlite" and _sqlite_text_money(measure_col, col_type)
+            if col_type and any(hint in col_type for hint in _NON_NUMERIC_HINTS) and not money_text:
                 numeric = [
                     n
                     for n in names
@@ -1093,7 +1135,38 @@ def aggregate_connector_data(
     grain = ""
     if group_by:
         wanted = group_by.strip()
-        dim_col = resolve_name(wanted, names)
+        # "year of Hire_Date" / "monthly by created_at" — grain + column.
+        # Without this, resolve_name fuzzy-matched the tail to Hire_Date and
+        # grouped by raw day values, returning 20 single-row buckets as an
+        # exact year answer (QA R13).
+        grain_hint = re.match(
+            r"(?i)^(year|years|yearly|annual|annually|quarter|quarterly|"
+            r"month|months|monthly|week|weeks|weekly|day|days|daily|date|"
+            r"hour|hours|hourly)\b[\s._-]*(?:of|by|in|per|each)?\s+(.+)$",
+            wanted,
+        )
+        if grain_hint:
+            candidate = grain_hint.group(2).strip()
+            resolved = resolve_name(candidate, names)
+            if resolved and _is_temporal(_column_type(columns, resolved)):
+                grain = _TEMPORAL_GRAINS.get(grain_hint.group(1).lower(), "")
+                dim_col = resolved
+            elif resolved:
+                # "year of status" — a real column but not a date. Refusing
+                # here matters: letting the whole phrase fuzzy-resolve to
+                # `status` grouped by the wrong thing while claiming a grain
+                # (same silent-wrong-answer class as R13).
+                return _tool_result(
+                    tool,
+                    success=False,
+                    error=(
+                        f"'{resolved}' is not a date column — "
+                        f"'{grain_hint.group(1).lower()} of {candidate}' "
+                        "needs a date/timestamp column to bucket."
+                    ),
+                )
+        if not grain_hint:
+            dim_col = resolve_name(wanted, names)
         if not dim_col:
             # "by month" is a time grain, not a column — find the date column.
             grain = _TEMPORAL_GRAINS.get(wanted.lower(), "")
@@ -1140,7 +1213,7 @@ def aggregate_connector_data(
         )
 
         try:
-            parsed_filters, _ = parse_filters(where)
+            parsed_filters, leftover = parse_filters(where)
             predicates = ground_filters(
                 parsed_filters, columns, resolve_name, _column_type
             )
@@ -1164,6 +1237,9 @@ def aggregate_connector_data(
                         f"Columns: {', '.join(names[:20])}."
                     ),
                 )
+            filter_warning = _unparsed_filter_warning(where, leftover)
+            if filter_warning:
+                return _tool_result(tool, success=False, error=filter_warning)
         except PredicateError as exc:
             return _tool_result(tool, success=False, error=str(exc))
 
@@ -1325,6 +1401,92 @@ def aggregate_connector_data(
 #: partially and presented as the whole inventory.
 _MAX_RANKED_TABLES = 40
 
+#: Exact counts beyond the displayed ``limit`` — the catalog estimate can
+#: mis-rank near the cut, so a few boundary candidates are counted too and the
+#: real counts re-sort them.
+_RANK_MARGIN = 5
+
+
+def _estimate_table_row_counts(conn: dict[str, Any], names: list[str]) -> dict[str, int]:
+    """Bulk catalog row estimates — one query, never per-table COUNT(*).
+
+    ``pg_class.reltuples`` / ``information_schema.tables.table_rows`` are
+    planner estimates, not counts; they exist to shortlist which tables get
+    the exact COUNT so ``limit`` bounds the work instead of only trimming
+    the output (QA C12/C14 — 70 exact counts on million-row tables timed
+    out the request). Engines without cheap stats return ``{}`` and the
+    caller falls back to the bounded exact-count loop.
+    """
+    ctype = str(conn.get("type") or conn.get("format") or "").lower()
+    try:
+        from .schema_tools import _endpoint_from_connector
+        from src.transfer.adapters import resolve_connector_config
+
+        endpoint = _endpoint_from_connector(conn)
+        cfg = resolve_connector_config(endpoint)
+    except Exception:
+        return {}
+    wanted = {str(n).strip() for n in names if str(n).strip()}
+    if not wanted:
+        return {}
+    sql = ""
+    family = ""
+    if ctype in {"postgresql", "postgres", "pg", "redshift", "greenplum", "cockroachdb", "timescaledb", "yugabytedb"}:
+        family = "postgresql"
+        sql = (
+            "SELECT c.relname, n.nspname, c.reltuples::bigint "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE c.relkind IN ('r','p') AND n.nspname NOT IN ('pg_catalog','information_schema')"
+        )
+    elif ctype in {"mysql", "mariadb", "singlestore", "tidb"}:
+        family = "mysql"
+        sql = (
+            "SELECT table_name, table_schema, table_rows "
+            "FROM information_schema.tables WHERE table_type = 'BASE TABLE'"
+        )
+    if not sql:
+        return {}
+    try:
+        from services.column_profile import _connect
+
+        db = _connect(family, cfg)
+        try:
+            cur = db.cursor()
+            cur.execute(sql)
+            raw = cur.fetchall() or []
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    except Exception:
+        return {}
+    from connectors.sql_identifiers import split_qualified_table
+
+    stored: dict[tuple[str | None, str], int] = {}
+    for relname, nsp, est in raw:
+        try:
+            n = int(est)
+        except (TypeError, ValueError):
+            continue
+        # reltuples -1 means never analyzed — that is "no estimate", not 0.
+        if n < 0:
+            continue
+        stored[(str(nsp or ""), str(relname or ""))] = n
+    out: dict[str, int] = {}
+    for name in wanted:
+        sch, tbl = split_qualified_table(name, str(cfg.get("schema") or "") or None)
+        hit = stored.get((sch or "", tbl))
+        if hit is None and sch:
+            hit = stored.get(("", tbl))
+        if hit is None:
+            hits = [v for (s, t), v in stored.items() if t == tbl]
+            if len(hits) == 1:
+                hit = hits[0]
+        if hit is not None:
+            out[name] = hit
+    return out
+
 
 def rank_connector_tables(
     connector_id: str = "",
@@ -1368,7 +1530,32 @@ def rank_connector_tables(
             ),
         )
 
-    considered = names[:_MAX_RANKED_TABLES]
+    ascending = str(order or "desc").strip().lower() in {"asc", "ascending", "up"}
+    shown = max(1, int(limit or 10))
+
+    # ``limit`` must bound the *work*, not just the output (QA C12/C14):
+    # exact-counting every object is one COUNT(*) per table and timed out on
+    # warehouses with million-row tables. A bulk catalog estimate shortlists
+    # limit+margin candidates; those alone get the exact COUNT and the real
+    # counts re-sort. Engines without cheap stats keep the bounded loop.
+    estimates = _estimate_table_row_counts(conn, names)
+    if estimates:
+        pool = list(names[:_MAX_RANKED_TABLES])
+        est_ranked = sorted(
+            (n for n in pool if n in estimates),
+            key=lambda n: estimates[n],
+            reverse=not ascending,
+        )
+        # Objects with no estimate (views, never-analyzed tables) cannot be
+        # ranked by catalog — they join the count set within the same bound.
+        unestimated = [n for n in pool if n not in estimates]
+        considered = (
+            est_ranked[: shown + _RANK_MARGIN]
+            + unestimated[: shown + _RANK_MARGIN]
+        )
+    else:
+        considered = names[:_MAX_RANKED_TABLES]
+
     ranked: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     for name in considered:
@@ -1390,9 +1577,7 @@ def rank_connector_tables(
         except (TypeError, ValueError):
             skipped.append({"table": name, "error": f"non-numeric count {value!r}"})
 
-    ascending = str(order or "desc").strip().lower() in {"asc", "ascending", "up"}
     ranked.sort(key=lambda r: r["rows"], reverse=not ascending)
-    shown = max(1, int(limit or 10))
     return _tool_result(
         tool,
         success=True,
@@ -1408,6 +1593,9 @@ def rank_connector_tables(
             "total_rows": sum(r["rows"] for r in ranked),
             "skipped": skipped,
             "truncated": len(names) > len(considered) or bool(info.get("truncated")),
+            # The shortlist came from catalog estimates; every reported row
+            # count is still an exact COUNT(*).
+            "shortlisted_by": "catalog_estimate" if estimates else "all_tables",
             "exact": True,
             "read_only": True,
         },

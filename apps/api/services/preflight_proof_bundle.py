@@ -100,6 +100,29 @@ def _build_preview_reconciliation(
     }
 
 
+def _compliance_review_message(compliance: dict[str, Any]) -> str:
+    """Name the columns, categories and rule behind a PII review hold."""
+    high = set(compliance.get("high_risk_fields") or [])
+    parts: list[str] = []
+    for finding in compliance.get("findings") or []:
+        col = str(finding.get("column") or "")
+        if not col or (high and col not in high):
+            continue
+        why = ", ".join(
+            f"{e.get('category')} by {str(e.get('rule') or '').replace('_', ' ')}"
+            for e in finding.get("evidence") or []
+        ) or ", ".join(finding.get("categories") or [])
+        parts.append(f"{col} ({why})")
+    listed = "; ".join(parts[:6]) + (f" (+{len(parts) - 6} more)" if len(parts) > 6 else "")
+    return (
+        "PII/compliance review required"
+        + (f" — {listed}" if listed else "")
+        + f" (risk {float(compliance.get('risk_score') or 0.0):.2f}). Acknowledge with "
+        "pii_acknowledgement {approved_by, reason} (API: compliance_acknowledged + "
+        "acknowledgment_actor/acknowledgment_reason)."
+    )
+
+
 def build_preflight_proof_bundle(
     *,
     columns: list[str],
@@ -151,8 +174,9 @@ def build_preflight_proof_bundle(
     blockers: list[str] = []
     compliance_blockers: list[str] = []
     if compliance.get("requires_review") and not compliance_acknowledged:
-        compliance_blockers.append("PII/compliance review required")
-        blockers.append("PII/compliance review required")
+        message = _compliance_review_message(compliance)
+        compliance_blockers.append(message)
+        blockers.append(message)
     elif compliance.get("requires_review") and compliance_acknowledged:
         compliance["review_status"] = "acknowledged"
     # Preview reconciliation must never block as a failed post-write proof.

@@ -35,6 +35,9 @@ class EngineSample:
     #: The read succeeded and the source returned no row at all (before any
     #: row filter) — a measured empty population, not a missing sample.
     measured_empty: bool = False
+    #: Execute's own reader raised. The source is not readable — distinct from
+    #: a row filter that matched nothing, which is a data fact, not a failure.
+    read_failed: bool = False
 
 
 def peek_population_empty(population: Any) -> tuple[Any, bool]:
@@ -124,6 +127,7 @@ def engine_sample_rows(
         return EngineSample(
             unavailable_reason=f"source sample read failed: {exc}"[:400],
             attempted=True,
+            read_failed=True,
         )
     rows = [dict(r) for r in (records or [])[:limit] if isinstance(r, Mapping)]
     if not rows:

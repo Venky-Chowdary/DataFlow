@@ -3,6 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Gate8ProofCard } from "./Gate8ProofCard.tsx";
 
@@ -62,5 +63,33 @@ describe("Gate8ProofCard last stream", () => {
     assert.match(html, />Match</);
     assert.doesNotMatch(html, /Last stream source/);
     assert.doesNotMatch(html, /Match \(last stream\)/);
+  });
+});
+
+describe("Gate8ProofCard business rule checks", () => {
+  it("renders failed and unverified rule findings", () => {
+    const html = renderToStaticMarkup(
+      <Gate8ProofCard
+        report={{
+          passed: false,
+          message: "Reconciliation did not verify",
+          rule_checks: [
+            {
+              rule_id: "uniq-email",
+              type: "unique",
+              column: "email",
+              status: "failed",
+              duplicates: 1,
+            },
+          ],
+          unverified_rules: [
+            { rule_id: "uniq-order", reason: "unsupported_destination" },
+          ],
+        }}
+      />,
+    );
+    assert.match(html, /Business rule checks/);
+    assert.match(html, /Business rule uniq-email: 1 duplicate value\(s\) in email after load/);
+    assert.match(html, /Business rule uniq-order not verified: unsupported_destination/);
   });
 });

@@ -1023,6 +1023,11 @@ export async function confirmCopilotAction(payload: {
   preflight_run_id?: string;
   /** run_schedule */
   schedule_id?: string;
+  /** studio_remediation */
+  remediation_kind?: "open_bad_data_fix" | "quarantine_and_rerun";
+  run_id?: string;
+  label?: string;
+  destructive?: boolean;
 }> {
   const res = await apiFetch(`${API_BASE}/copilot/confirm`, {
     method: "POST",
@@ -3118,9 +3123,11 @@ export async function fetchMcpLogs(limit = 50): Promise<Array<{
   time: string;
   tool: string;
   client: string;
+  actor?: string | null;
   status: string;
   ms: number;
-  error?: string | null;
+  error_type?: string | null;
+  error_kind?: string | null;
 }>> {
   const res = await apiFetch(`${API_BASE}/mcp/logs?limit=${limit}`);
   if (!res.ok) return [];
@@ -3215,8 +3222,10 @@ export async function fetchAuditEvents(limit = 50, level?: string): Promise<Arra
   return data.events ?? [];
 }
 
+export type AuditExportFormat = "csv" | "json" | "ndjson" | "cef";
+
 /** Server-side tenant-scoped audit download (not the last 100 table rows). */
-export async function exportAuditLog(format: "csv" | "json" = "csv"): Promise<Blob> {
+export async function exportAuditLog(format: AuditExportFormat = "csv"): Promise<Blob> {
   const params = new URLSearchParams({ format, limit: "5000" });
   const res = await apiFetch(`${API_BASE}/audit/export?${params}`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export audit log"));
@@ -3380,10 +3389,20 @@ export type WorkspaceApiKeyRole = "viewer" | "operator" | "editor" | "admin";
 
 export type WorkspaceApiKeyLifetime = "7d" | "30d" | "60d" | "90d" | "365d" | "never";
 
+export type AuditRetentionPurgeResult = {
+  removed: number;
+  would_remove?: number;
+  oldest_kept_time: string | null;
+  legal_hold: boolean;
+  retention_days: number | null;
+  dry_run: boolean;
+};
+
 export type WorkspaceApiKey = {
   id: string;
   name: string;
   prefix: string;
+  kind?: string;
   role?: WorkspaceApiKeyRole | string;
   created_at?: string;
   created_by?: string;
@@ -3417,6 +3436,95 @@ export async function createWorkspaceApiKey(
 export async function revokeWorkspaceApiKey(keyId: string): Promise<void> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys/${keyId}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke API key"));
+}
+
+export type ServiceAccount = WorkspaceApiKey & {
+  scopes?: string[];
+  kind: "service_account" | "scim" | string;
+};
+
+export type ServiceAccountWithSecret = ServiceAccount & { key: string };
+
+export async function fetchServiceAccounts(): Promise<ServiceAccount[]> {
+  const res = await apiFetch(`${API_BASE}/iam/service-accounts`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to list service accounts"));
+  return res.json();
+}
+
+export async function createServiceAccount(input: {
+  name: string;
+  role: WorkspaceApiKeyRole;
+  scopes: string[];
+  expires_in: WorkspaceApiKeyLifetime;
+}): Promise<ServiceAccountWithSecret> {
+  const res = await apiFetch(`${API_BASE}/iam/service-accounts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create service account"));
+  return res.json();
+}
+
+export async function revokeServiceAccount(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/iam/service-accounts/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke service account"));
+}
+
+export async function rotateApiKey(
+  id: string,
+  overlapSeconds: number,
+): Promise<ServiceAccountWithSecret> {
+  const res = await apiFetch(`${API_BASE}/iam/api-keys/${encodeURIComponent(id)}/rotate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ overlap_seconds: overlapSeconds }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to rotate API key"));
+  return res.json();
+}
+
+export async function createScimToken(input: {
+  name: string;
+  expires_in: WorkspaceApiKeyLifetime;
+}): Promise<ServiceAccountWithSecret> {
+  const res = await apiFetch(`${API_BASE}/iam/scim-token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create SCIM token"));
+  return res.json();
+}
+
+export type ScimGroupMapping = { workspace_id: string; role: string };
+export type ScimGroupMappings = Record<string, ScimGroupMapping>;
+
+export async function fetchScimGroupMappings(): Promise<{ mappings: ScimGroupMappings }> {
+  const res = await apiFetch(`${API_BASE}/iam/scim/group-mappings`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load SCIM group mappings"));
+  return res.json();
+}
+
+export async function saveScimGroupMappings(
+  mappings: ScimGroupMappings,
+): Promise<{ mappings: ScimGroupMappings }> {
+  const res = await apiFetch(`${API_BASE}/iam/scim/group-mappings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mappings }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to save SCIM group mappings"));
+  return res.json();
+}
+
+export async function purgeAuditRetention(dryRun: boolean): Promise<AuditRetentionPurgeResult> {
+  const params = new URLSearchParams({ dry_run: String(dryRun) });
+  const res = await apiFetch(`${API_BASE}/audit/retention/purge?${params}`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to purge audit retention"));
+  return res.json();
 }
 
 export type WorkspaceRole = "admin" | "editor" | "viewer";
@@ -4620,6 +4728,7 @@ export interface CdcSnapshotSignal {
   chunk_size?: number;
   last_pk?: string;
   rows_snapshotted?: number;
+  row_filter?: Record<string, unknown> | null;
   created_at?: number;
   updated_at?: number;
   error?: string;
@@ -4652,7 +4761,12 @@ export async function listJobCdcSnapshots(
 
 export async function requestJobCdcSnapshot(
   jobId: string,
-  body?: { table?: string; primary_key?: string; chunk_size?: number },
+  body?: {
+    table?: string;
+    primary_key?: string;
+    chunk_size?: number;
+    row_filter?: Record<string, unknown> | unknown[] | null;
+  },
 ): Promise<CdcSnapshotSignal> {
   const res = await apiFetch(
     `${API_BASE}/transfer/${encodeURIComponent(jobId)}/cdc/snapshots`,
@@ -4867,4 +4981,3 @@ export async function exportTransformProjectDbt(projectId: string): Promise<{
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export dbt pack"));
   return res.json();
 }
-

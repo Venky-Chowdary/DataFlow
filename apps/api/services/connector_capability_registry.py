@@ -55,11 +55,11 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "tier": TIER_HIGHEST,
         "pattern": "batch",
         "supports_cdc": True,
-        # F4: supports_streaming=False until START_REPLICATION is default + lag-proven.
-        # Opt-in transport: DATAFLOW_CDC_PG_TRANSPORT=streaming (falls back to peek).
-        "supports_streaming": False,
-        "cdc_transport_default": "peek",
-        "cdc_streaming_status": "planned_opt_in",
+        # F4: START_REPLICATION is the default (auto) with peek fallback; proven by
+        # tests/test_cdc_postgres_streaming_transport_live.py. DATAFLOW_CDC_PG_TRANSPORT=peek opts out.
+        "supports_streaming": True,
+        "cdc_transport_default": "auto",
+        "cdc_streaming_status": "default_with_peek_fallback",
         "bulk_export_status": "implemented_pg_copy",
         "supports_upsert": True,
         "supports_append": True,
@@ -130,12 +130,31 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
-        "cdc_prerequisites": "Prefer LogMiner CDC when privileges allow; Flashback Query is the fallback. Query-based CDC requires a monotonic cursor column.",
+        "cdc_prerequisites": (
+            "Oracle LogMiner transaction buffering is enabled by default. Setting "
+            "DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires SELECT ON V_$TRANSACTION "
+            "and SELECT ON GV_$INSTANCE, and refuses on RAC because V$TRANSACTION "
+            "is instance-local. Any open transaction on any table or schema holds "
+            "the buffer-off SCN window at the oldest transaction until it ends; "
+            "the throttled hold WARNING is the only signal. CURRENT_SCN and "
+            "V$TRANSACTION are sampled in one statement, but the views are not "
+            "guaranteed to be read atomically, leaving a narrow residual; buffering "
+            "is the safe default. RAC behavior is not live-verified. Prefer LogMiner "
+            "CDC when privileges allow; Flashback Query is the fallback. Query-based "
+            "CDC requires a monotonic cursor column. Oracle LOB values are read by "
+            "primary key at capture time; final state converges, though between two "
+            "changes a row may briefly carry a LOB value newer than its other "
+            "columns. LOB CDC requires a primary key."
+        ),
         "common_issues": [
             "Table names may be case-sensitive. Use uppercase unless quoted.",
             "NUMBER with no precision maps to a wide decimal.",
             "Upsert prefers native MERGE with NULL-safe PK match (PTT/GTT stage); falls back to delete+insert. Still at-least-once.",
             "LogMiner needs supplemental logging.",
+            "DATAFLOW_CDC_ORACLE_TXN_BUFFER=0 requires SELECT ON V_$TRANSACTION and SELECT ON GV_$INSTANCE; it refuses on RAC.",
+            "Any open transaction on any table or schema holds the buffer-off window until it ends; the throttled hold WARNING is the only signal.",
+            "The head and oldest transaction are sampled in one statement, but V$DATABASE and V$TRANSACTION are not guaranteed to be read atomically; a narrow residual remains. Buffering stays on by default.",
+            "RAC behavior is not live-verified.",
         ],
         "recommended_batch_size": 2000,
     },
@@ -316,7 +335,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "common_issues": [
-            "The partition key must have a consistent type (S/N/B). Datawrap infers the key type from the source sample.",
+            "DynamoDB AttributeDefinitions cover table and index keys only; ordinary item attributes are schemaless and may be absent.",
+            "Every HASH/RANGE key and mapped GSI/LSI key must use its declared S/N/B scalar type and exact attribute name.",
             "DynamoDB items cannot exceed 400 KB including attribute names.",
         ],
         "recommended_batch_size": 25,
@@ -768,12 +788,27 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "pattern": "batch",
         "supports_cdc": False,
         "supports_streaming": False,
-        "supports_upsert": True,
-        "supports_append": True,
+        "supports_upsert": False,
+        "supports_append": False,
         "supports_overwrite": False,
         "supports_merge": False,
         "requires_schema": False,
         "pagination": "cursor",
+        "dest_certification_note": (
+            "The reverse-ETL writer exists in connectors/stripe.py, but the "
+            "destination role is not certified until a production SKU execute "
+            "plus destination COUNT on a named Stripe object."
+        ),
+        "capability_downgrades": [
+            {
+                "fields": ["supports_upsert", "supports_append"],
+                "reason": (
+                    "The reverse-ETL writer exists in connectors/stripe.py, but "
+                    "the destination role is not certified until a production SKU "
+                    "execute plus destination COUNT on a named Stripe object."
+                ),
+            }
+        ],
         "rate_limit_notes": (
             "Stripe list APIs cap at 100 objects per page and rate-limit per account; "
             "starting_after is page walking, not an incremental cursor."
@@ -924,17 +959,16 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,
-        # Overwrite/replace stay Copy-on-Write. Upserts and CDC/leftover
-        # deletes write v2 equality-delete files. Dest COUNT applies v2
-        # position/equality and v3 deletion-vector-v1.
-        "write_strategy": "merge-on-read-upserts-deletes, copy-on-write-overwrite",
+        # Filesystem writes use v2 equality deletes; catalog writes use
+        # copy-on-write. Overwrite/replace remain copy-on-write.
+        "write_strategy": "filesystem-equality-delete, catalog-copy-on-write",
         "supports_merge_on_read": True,
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
         "common_issues": [
             "Schema evolution is supported but should be declared explicitly.",
-            "Upserts write Iceberg v2 equality-delete files plus a new data file at the same snapshot sequence. CDC/leftover deletes write equality deletes. Overwrite/replace stay copy-on-write.",
+            "Filesystem upserts and deletes use Iceberg v2 equality-delete files; catalog writes use copy-on-write. Overwrite/replace stay copy-on-write.",
         ],
         "recommended_batch_size": 10000,
     },
@@ -1049,7 +1083,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "transfer_ready": True,
         "tier": TIER_HIGH,
         "pattern": "batch",
-        "supports_cdc": False,
+        "supports_cdc": True,
         "supports_streaming": False,
         "supports_upsert": True,
         "supports_append": True,
@@ -1060,14 +1094,19 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "Vector dimension must be declared — refuse inventing 1536.",
             "Rides PostgreSQL driver; extension must be installed on the target.",
+            "CDC: at-least-once; deletes by document key; no LSN guard.",
         ],
         "recommended_batch_size": 500,
+        "supports_lsn_guard": False,
+        "cdc_prerequisites": (
+            "At-least-once; deletes by document key; no LSN guard."
+        ),
     },
     "qdrant": {
         "transfer_ready": True,
         "tier": TIER_HIGH,
         "pattern": "batch",
-        "supports_cdc": False,
+        "supports_cdc": True,
         "supports_streaming": False,
         "supports_upsert": True,
         "supports_append": True,
@@ -1075,9 +1114,15 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": False,
         "requires_schema": False,
         "supports_binary": True,
-        "common_issues": ["Point id + vector required; payload schema is soft."],
+        "common_issues": [
+            "Point id + vector required; payload schema is soft.",
+            "CDC: at-least-once; deletes by document key; no LSN guard.",
+        ],
         "recommended_batch_size": 500,
         "supports_lsn_guard": False,
+        "cdc_prerequisites": (
+            "At-least-once; deletes by document key; no LSN guard."
+        ),
     },
     "weaviate": {
         "transfer_ready": True,
@@ -1258,6 +1303,23 @@ def get_connector_capability(key: str) -> dict[str, Any]:
             cap["supports_append"] = False
             cap["supports_overwrite"] = False
             cap["supports_merge"] = False
+        from services.connector_truth_audit import write_mode_downgrade_reason
+
+        write_flags = (
+            "supports_upsert",
+            "supports_append",
+            "supports_overwrite",
+            "supports_merge",
+        )
+        originally_true = [flag for flag in write_flags if cap.get(flag)]
+        if originally_true:
+            reason = write_mode_downgrade_reason(normalized, driver, caps)
+            if reason:
+                cap["capability_downgrades"] = [
+                    {"fields": originally_true, "reason": reason}
+                ]
+                for flag in write_flags:
+                    cap[flag] = False
         cap["driver_type"] = driver
         cap["driver_capabilities"] = caps
     except Exception:

@@ -29,6 +29,9 @@ REST_URI = os.environ.get("DATAFLOW_ICEBERG_REST_URI", "http://127.0.0.1:8181").
 REST_WAREHOUSE = os.environ.get(
     "DATAFLOW_ICEBERG_REST_WAREHOUSE", "file:///tmp/iceberg-rest-wh"
 )
+S3_ENDPOINT = os.environ.get("DATAFLOW_ICEBERG_S3_ENDPOINT", "http://127.0.0.1:9000")
+MINIO_USER = os.environ.get("MINIO_ROOT_USER", "dataflow")
+MINIO_PASSWORD = os.environ.get("MINIO_ROOT_PASSWORD", "dataflowsecret")
 
 
 def _rest_reachable() -> bool:
@@ -76,7 +79,19 @@ def _iceberg_cfg(table: str) -> dict:
         "warehouse": REST_WAREHOUSE,
         "table": table,
         "schema": "default",
-        "extra": {"catalog_type": "rest", "warehouse": REST_WAREHOUSE},
+        "extra": _iceberg_extra(),
+    }
+
+
+def _iceberg_extra() -> dict:
+    return {
+        "catalog_type": "rest",
+        "warehouse": REST_WAREHOUSE,
+        "s3.endpoint": S3_ENDPOINT,
+        "s3.access-key-id": MINIO_USER,
+        "s3.secret-access-key": MINIO_PASSWORD,
+        "s3.path-style-access": "true",
+        "s3.region": "us-east-1",
     }
 
 
@@ -269,20 +284,64 @@ def test_live_pg_iceberg_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_postgres_to_iceberg(
-            source_cfg=_pg_cfg(),
-            source_schema="public",
-            source_table=src,
-            dest_cfg=_iceberg_cfg(dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            iceberg_ddls=["long", "string"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
-        assert second.target_rows == 800
+        with pytest.raises(FastPathUnavailable) as exc_info:
+            copy_postgres_to_iceberg(
+                source_cfg=_pg_cfg(),
+                source_schema="public",
+                source_table=src,
+                dest_cfg=_iceberg_cfg(dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                iceberg_ddls=["long", "string"],
+                replace_destination=False,
+            )
+        assert dest in str(exc_info.value)
         assert _dest_count(dest) == 800
+        from services.million_row_proof import ensure_memory_job_store_if_mongo_down
+        from services.mongodb_service import get_mongodb_service
+        from src.transfer.models import EndpointConfig
+        from src.transfer.stream import stream_database_transfer
+
+        ensure_memory_job_store_if_mongo_down()
+        job_id = f"pg-ice-skip-{tag}"
+        get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+        source = EndpointConfig.from_dict(
+            "database",
+            {
+                **_pg_cfg(),
+                "format": "postgresql",
+                "table": src,
+            },
+        )
+        destination = EndpointConfig.from_dict(
+            "database",
+            {
+                **_iceberg_cfg(dest),
+                "format": "iceberg",
+                "extra": _iceberg_extra(),
+            },
+        )
+        transferred, _ddl, summary, _columns = stream_database_transfer(
+            source,
+            destination,
+            [
+                {"source": "id", "target": "id", "type": "BIGINT", "transform": "none"},
+                {
+                    "source": "label",
+                    "target": "label",
+                    "type": "VARCHAR(32)",
+                    "transform": "none",
+                },
+            ],
+            {"id": "BIGINT", "label": "VARCHAR(32)"},
+            sync_mode="full_refresh_append",
+            job_id=job_id,
+        )
+        assert transferred == 800
+        assert summary.get("copy_fast_path") == "declined"
+        assert "COPY fast path declined:" in summary.get("copy_decline_reason", "")
+        assert "continuing on the row path" in summary.get("copy_decline_reason", "")
+        assert _dest_count(dest) == 1600
     finally:
         with pg.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS public."{src}"')
@@ -319,11 +378,11 @@ def test_live_pg_iceberg_occupied_mismatch_declines():
             column_types={"id": "BIGINT", "label": "VARCHAR(32)"},
             write_mode="append",
             create_table=True,
-            extra={"catalog_type": "rest", "warehouse": REST_WAREHOUSE},
+            extra=_iceberg_extra(),
         )
         assert written.ok, written.error
         assert _dest_count(dest) == 2
-        with pytest.raises(FastPathUnavailable, match="occupied Iceberg dest"):
+        with pytest.raises(FastPathUnavailable) as exc_info:
             copy_postgres_to_iceberg(
                 source_cfg=_pg_cfg(),
                 source_schema="public",
@@ -334,6 +393,7 @@ def test_live_pg_iceberg_occupied_mismatch_declines():
                 iceberg_ddls=["long", "string"],
                 replace_destination=False,
             )
+        assert dest in str(exc_info.value)
         assert _dest_count(dest) == 2
     finally:
         with pg.cursor() as cur:
@@ -371,7 +431,7 @@ def test_live_pg_iceberg_overwrite_replaces_snapshot():
             column_types={"id": "BIGINT", "label": "VARCHAR(32)"},
             write_mode="append",
             create_table=True,
-            extra={"catalog_type": "rest", "warehouse": REST_WAREHOUSE},
+            extra=_iceberg_extra(),
         )
         assert written.ok, written.error
         result = copy_postgres_to_iceberg(
@@ -466,7 +526,7 @@ def test_live_pg_iceberg_stream_load_method(monkeypatch):
                 "warehouse": REST_WAREHOUSE,
                 "table": dest,
                 "schema": "default",
-                "extra": {"catalog_type": "rest", "warehouse": REST_WAREHOUSE},
+                "extra": _iceberg_extra(),
             },
         )
         mappings = [

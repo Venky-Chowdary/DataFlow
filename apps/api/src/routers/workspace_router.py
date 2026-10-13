@@ -351,6 +351,14 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
     from services.integrations_store import create_api_key
 
     actor = _actor(request)
+    from src.routers.iam_router import enforce_grant_bounds
+
+    enforce_grant_bounds(
+        request,
+        route="POST /api/v1/workspace/api-keys",
+        target_role=body.role,
+        target_scopes=None,
+    )
     try:
         created = create_api_key(
             body.name, actor, role=body.role, expires_in=body.expires_in

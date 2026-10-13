@@ -332,6 +332,7 @@ def analyze_coercion(
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
+    proven_width_narrowings: Any = None,
 ) -> dict[str, Any]:
     """Predict per-value write coercion for each mapping against sampled rows.
 
@@ -818,6 +819,7 @@ def analyze_coercion(
         # Measured cells decide a code-page sink. An unread column stays a
         # collapse; an ASCII zip code into Latin-1 VARCHAR does not.
         code_page_population = observed_values or None
+        target = str(m.get("target") or src)
         fidelity_collapse = bool(
             is_precision_collapse_coercion(
                 src_type,
@@ -825,6 +827,9 @@ def analyze_coercion(
                 dest_db=dest_db_type,
                 dest_table_exists=table_exists,
                 population=code_page_population,
+                source=src,
+                target=target,
+                proven=proven_width_narrowings,
             )
             or is_lossy_coercion(
                 src_type,
@@ -832,6 +837,9 @@ def analyze_coercion(
                 dest_db=dest_db_type,
                 dest_table_exists=table_exists,
                 population=code_page_population,
+                source=src,
+                target=target,
+                proven=proven_width_narrowings,
             )
             or is_nested_shape_collapse(src_type, tgt_type, dest_db=dest_db_type)
         )

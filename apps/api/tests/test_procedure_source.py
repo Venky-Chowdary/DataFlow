@@ -15,6 +15,7 @@ from services.procedure_source import (
     is_callable_source,
     map_callable_result,
     parse_callable_source,
+    peek_callable_schema,
     source_read_mode_of,
 )
 
@@ -261,6 +262,27 @@ def test_cdc_refused_on_procedure_source() -> None:
     blockers = [g for g in gates if g["status"] == "block" and g["id"] == "g9_sync_contract"]
     assert blockers
     assert "snapshot" in str(blockers[0]["details"]).lower() or "CALL" in str(blockers[0]["details"])
+
+
+def test_peek_schema_text_column_of_digits_stays_varchar() -> None:
+    """QA T16 — a VARCHAR column of numeric strings was auto-retyped
+    NUMERIC(19,5) on sample-fit and the mapping then blocked as a fidelity
+    risk. The DBAPI's own Python types are declared evidence: a ``str``
+    value can only come from a text column, a ``Decimal`` only from exact
+    numeric."""
+    from decimal import Decimal
+
+    schema, _intel = peek_callable_schema(
+        ["id", "price_text", "amount", "when_col"],
+        [
+            [1, "1200.00", Decimal("1234.56789"), "2024-01-01"],
+            [2, "999.99", Decimal("99999.00001"), "2024-02-02"],
+        ],
+    )
+    assert schema["price_text"] == "VARCHAR"
+    assert schema["when_col"] == "VARCHAR"
+    assert "DECIMAL" in schema["amount"].upper() or "NUMERIC" in schema["amount"].upper()
+    assert schema["id"] == "INTEGER"
 
 
 def test_source_read_mode_from_extra() -> None:

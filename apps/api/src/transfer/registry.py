@@ -294,9 +294,11 @@ def _live_catalog_ids() -> list[str]:
 def get_capabilities() -> dict:
     from .connector_capabilities import (
         _source_only_ready,
+        dest_live_driver_types,
         dest_ready,
         manifest_summary,
         resolve_driver_type,
+        source_live_driver_types,
         source_ready,
         transfer_live_driver_types,
     )
@@ -304,42 +306,54 @@ def get_capabilities() -> dict:
         get_capabilities as _caps,
     )
 
-    combos = []
+    def _category(fmt: str) -> str:
+        """Catalog class of a route endpoint — 'database' is the engine kind,
+        not the driver's class: ADLS is cloud_storage and HubSpot is saas, and
+        capabilities must not read both as databases (QA D08)."""
+        try:
+            from services.catalog_service import get_connector_by_id
+
+            entry = get_connector_by_id(str(fmt or "").lower()) or {}
+            return str(entry.get("category") or "") or "database"
+        except Exception:
+            return "database"
+
+    def _combo(sk: str, sf: str, dk: str, df: str, op: str) -> dict:
+        return {
+            "source_kind": sk,
+            "source_format": sf,
+            "source_category": _category(sf),
+            "dest_kind": dk,
+            "dest_format": df,
+            "dest_category": _category(df),
+            "operation": op,
+            "status": "live",
+        }
+
+    combos: list[dict] = []
+    seen_combos: set[tuple[str, str, str, str]] = set()
+
+    def _add(sk: str, sf: str, dk: str, df: str, op: str) -> None:
+        key = (sk, sf.lower(), dk, df.lower())
+        if key in seen_combos:
+            return
+        seen_combos.add(key)
+        combos.append(_combo(sk, sf, dk, df, op))
+
     for sk, sf, dk, df in sorted(LIVE_MATRIX):
         op = "upload" if sk == "file" and dk == "database" else (
             "migration" if sk == "database" and dk == "database" else (
                 "convert" if sk == "file" and dk == "file_export" else "dump"
             )
         )
-        combos.append({
-            "source_kind": sk,
-            "source_format": sf,
-            "dest_kind": dk,
-            "dest_format": df,
-            "operation": op,
-            "status": "live",
-        })
+        _add(sk, sf, dk, df, op)
     # Add source-only SaaS routes (source → database / file_export) so the UI can
     # advertise and validate them without bloating the seedable route matrix.
     for src in _source_only_driver_types():
         for dst in LIVE_DEST_DATABASES:
-            combos.append({
-                "source_kind": "database",
-                "source_format": src,
-                "dest_kind": "database",
-                "dest_format": dst,
-                "operation": "migration",
-                "status": "live",
-            })
+            _add("database", src, "database", dst, "migration")
         for dst_fmt in LIVE_DEST_FILE_FORMATS:
-            combos.append({
-                "source_kind": "database",
-                "source_format": src,
-                "dest_kind": "file_export",
-                "dest_format": dst_fmt,
-                "operation": "dump",
-                "status": "live",
-            })
+            _add("database", src, "file_export", dst_fmt, "dump")
 
     summary = manifest_summary()
     live_catalog = _live_catalog_ids()
@@ -400,6 +414,10 @@ def get_capabilities() -> dict:
         "source_databases": source_dbs,
         "transfer_live_drivers": drivers,
         "transfer_live_count": summary["transfer_live_count"],
+        # Reconcile with search_connectors' source_live/dest_live — different
+        # bases (driver types vs catalog ids) read as a count bug (QA D08).
+        "source_live_count": len(source_live_driver_types()),
+        "dest_live_count": len(dest_live_driver_types()),
         "unique_transfer_drivers": len(drivers),
         "production_sku_routes": len(PRODUCTION_SKU),
         "production_sku_sold": sku_sold,
@@ -408,7 +426,9 @@ def get_capabilities() -> dict:
         "customer_handover_sold": sku_handover,
         "connect_only_count": summary["connect_only_count"],
         "live_route_combinations": summary["live_route_combinations"],
-        "operations": ["upload", "migration", "convert", "dump", "transfer"],
+        # Derived, never static — a listed operation with zero combos is a
+        # phantom capability (QA D08: 'transfer' had 0 combinations).
+        "operations": sorted({c["operation"] for c in combos}),
         "auto_ddl": True,
         "ocr": ocr_status,
         "embedding_cache": embedding_cache_status,

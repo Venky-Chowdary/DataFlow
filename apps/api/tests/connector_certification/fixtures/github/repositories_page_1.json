@@ -1,0 +1,14 @@
+[
+  {
+    "id": 8801,
+    "name": "fixture-repository",
+    "full_name": "fixture-owner/fixture-repository",
+    "private": false,
+    "html_url": "https://github.com/fixture-owner/fixture-repository",
+    "updated_at": "2026-01-01T00:00:00Z",
+    "owner": {
+      "login": "fixture-owner",
+      "id": 8800
+    }
+  }
+]

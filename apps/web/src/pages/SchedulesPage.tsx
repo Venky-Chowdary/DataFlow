@@ -700,8 +700,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           <div className="df2-pipeline-rows" role="list" aria-label="Schedules">
             <div className="df2-pipeline-rows-head" aria-hidden>
               <span className="df2-pipeline-rows-head-name">Schedule</span>
-              <span>Cadence</span>
-              <span>Mode</span>
+              <span className="df2-pipeline-rows-head-cadence">Cadence</span>
+              <span className="df2-pipeline-rows-head-sync">Mode</span>
               <span>Last run</span>
               <span>Status</span>
               <span />

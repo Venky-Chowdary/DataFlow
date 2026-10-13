@@ -38,6 +38,64 @@ def pytest_configure(config):
         "markers",
         "fake_mongo: leftover MERGE uses an in-memory collection (no live Mongo)",
     )
+    config.addinivalue_line("markers", "live: optional live vendor smoke test")
+
+
+@pytest.fixture(autouse=True)
+def _oracle_transaction_detection_grant_for_opt_out_live_tests(request):
+    module_name = Path(str(request.node.path)).stem
+    supported_modules = {
+        "test_cdc_oracle_ddl_schema_history",
+        "test_cdc_oracle_logminer_lob_live",
+        "test_cdc_oracle_logminer_transfer_e2e",
+        "test_cdc_poll_reconnects_live",
+        "test_oracle_logminer_log_files",
+    }
+    if module_name not in supported_modules:
+        yield
+        return
+
+    callspec = getattr(request.node, "callspec", None)
+    params = getattr(callspec, "params", {})
+    always_opt_out = (
+        module_name == "test_cdc_oracle_ddl_schema_history"
+        and request.node.name == "test_oracle_logminer_records_live_ddl_without_emitting_it_as_data"
+    ) or (
+        module_name == "test_oracle_logminer_log_files"
+        and request.node.name.startswith(
+            (
+                "test_live_mid_mine_failure_ends_session_and_retry_has_no_loss_or_duplicates",
+                "test_live_archived_online_sequence_registers_without_ora_01289",
+            )
+        )
+    )
+    if params.get("txn_buffer") is not False and not always_opt_out:
+        yield
+        return
+
+    from test_cdc_oracle_logminer_transfer_e2e import (
+        _oracle_cfg,
+        _oracle_logminer_ready,
+    )
+    from test_cdc_oracle_logminer_txn_live import (
+        _oracle_v_transaction_grant_count,
+        _oracle_v_transaction_grant_user,
+        _set_oracle_v_transaction_grant,
+    )
+
+    if not _oracle_logminer_ready():
+        yield
+        return
+
+    user = _oracle_v_transaction_grant_user(_oracle_cfg())
+    already_granted = _oracle_v_transaction_grant_count(user) > 0
+    if not already_granted:
+        _set_oracle_v_transaction_grant(user, enabled=True)
+    try:
+        yield
+    finally:
+        if not already_granted:
+            _set_oracle_v_transaction_grant(user, enabled=False)
 
 # fakesnow keeps the emulated warehouse in a DuckDB file, and DuckDB allows a
 # single writer per file. Under `pytest -n` every worker would open the same
@@ -208,6 +266,72 @@ def _isolate_cdc_leases(monkeypatch):
     from services.cdc_lease import configure_store
 
     configure_store(backend="memory")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_file_backed_test_stores(monkeypatch, tmp_path, request):
+    """Keep test persistence out of the developer's default data directory."""
+    from services import audit_log, auth_sessions, mcp_invocation_log
+
+    monkeypatch.setattr(
+        audit_log, "STORE_PATH", tmp_path / "audit_events.jsonl"
+    )
+    monkeypatch.setattr(
+        auth_sessions, "_path", lambda: tmp_path / "auth_sessions.json"
+    )
+    monkeypatch.setenv(
+        "DATAFLOW_AUDIT_ANCHOR_STORE",
+        str(tmp_path / "audit_tip_anchors.jsonl"),
+    )
+    monkeypatch.setattr(
+        mcp_invocation_log, "STORE_PATH", tmp_path / "mcp_invocations.jsonl"
+    )
+
+    test_name = request.node.path.name
+    if test_name.startswith("test_mcp"):
+        from services import contract_store, preflight_run_store, schema_registry
+        from src.ai.copilot import result_store
+
+        monkeypatch.setenv(
+            "DATAFLOW_CONTRACTS_PATH", str(tmp_path / "contracts.json")
+        )
+        monkeypatch.setattr(contract_store, "_store_instance", None)
+        monkeypatch.setenv(
+            "DATAFLOW_PILOT_RESULTS_PATH", str(tmp_path / "pilot_results.json")
+        )
+        monkeypatch.setattr(result_store, "_store", None)
+        monkeypatch.setattr(
+            preflight_run_store, "STORE_PATH", tmp_path / "preflight_runs.jsonl"
+        )
+        monkeypatch.setenv(
+            "DATAFLOW_QUALITY_PROFILES_DIR", str(tmp_path / "quality_profiles")
+        )
+        monkeypatch.setattr(
+            schema_registry,
+            "_SCHEMAS_PATH",
+            tmp_path / "schema_registry_schemas.json",
+        )
+        monkeypatch.setattr(
+            schema_registry,
+            "_LINEAGE_PATH",
+            tmp_path / "schema_registry_lineage.json",
+        )
+
+    if test_name.startswith(("test_mcp", "test_scim")):
+        from services import team_store
+
+        monkeypatch.setattr(team_store, "data_dir", lambda: tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_mcp_rate_limit_buckets():
+    from services.mcp_rate_limit import reset_mcp_rate_limits
+
+    reset_mcp_rate_limits()
+    try:
+        yield
+    finally:
+        reset_mcp_rate_limits()
 
 
 def _is_mongo_reachable() -> bool:

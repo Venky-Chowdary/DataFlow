@@ -633,9 +633,7 @@ def test_csv_mysql_incremental_append_delta_and_noop(monkeypatch, tmp_path):
 
 def test_file_incremental_duckdb_still_uses_row_path(monkeypatch, tmp_path):
     """json/yaml/duckdb stay on the row path; COPY is CSV→SQL-core only."""
-    duckdb = pytest.importorskip(
-        "duckdb", reason="requires the optional DuckDB test dependency"
-    )
+    pytest.importorskip("duckdb", reason="requires the optional DuckDB test dependency")
     _isolate_cursor_store(monkeypatch, tmp_path)
     dest = EndpointConfig(
         kind="database",

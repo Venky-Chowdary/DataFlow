@@ -503,8 +503,13 @@ def decide_keyset_pagination(
     cursor_after: Any,
     snapshot_scan: bool,
     cursor_is_unique: bool = False,
+    callable_source: bool = False,
 ) -> KeysetDecision:
     """Choose seek vs scan vs OFFSET paging — one owner for the whole engine.
+
+    A query-mode / procedure source pages its result spool by row offset;
+    it is never a seek target. Seeking there advanced both the offset and the
+    bookmark, skipping a full page per batch (QA MXD09, caught by Gate-8).
 
     Seeking needs unique evidence: without a declared key a strict ``>`` on a
     tied bookmark skips the peers sharing that value, so no evidence means
@@ -524,7 +529,7 @@ def decide_keyset_pagination(
     instead, and ``seek_refused_reason`` says why.
     """
     order_cols = [c for c in keyset_order_cols if c]
-    capable = str(src_type or "") in KEYSET_CAPABLE_SOURCES
+    capable = str(src_type or "") in KEYSET_CAPABLE_SOURCES and not callable_source
     use_keyset = bool(order_cols) and capable
     if not use_keyset and incremental and keyset_col and capable:
         use_keyset = True

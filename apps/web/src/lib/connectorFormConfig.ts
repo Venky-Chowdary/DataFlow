@@ -473,6 +473,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     saFields.push(
       textarea("serviceAccount", "Service account JSON or file path", {
         rows: 6,
+        sensitive: true,
         placeholder: '{\n  "type": "service_account",\n  ...\n}',
         hint: "Paste the JSON contents from Google Cloud, or enter an absolute path to the key file on the server.",
       }),
@@ -485,6 +486,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     saFields.push(
       textarea("serviceAccount", "Service principal JSON", {
         rows: 4,
+        sensitive: true,
         placeholder: '{\n  "tenantId": "...",\n  "clientId": "...",\n  "clientSecret": "..."\n}',
         hint: "Azure AD application with Storage Blob Data Contributor role.",
       }),
@@ -519,6 +521,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("database", "Index (optional)", { optional: true }),
       textarea("apiKey", "API key", {
         rows: 2,
+        sensitive: true,
         placeholder: "id:api_key or encoded API key",
         hint: "Enter id:secret for key pairs, or the full encoded key from Elastic Cloud.",
       }),
@@ -532,6 +535,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("apiKey", "API key (optional)", {
         rows: 2,
         optional: true,
+        sensitive: true,
         placeholder: "Weaviate API key",
         hint: "Required for Weaviate Cloud; optional for local.",
       }),
@@ -551,6 +555,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       }),
       textarea("apiKey", "API key", {
         rows: 2,
+        sensitive: true,
         placeholder: "pcsk_…",
         hint: "Required. Namespace defaults to the destination table name.",
       })
@@ -563,6 +568,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("apiKey", "API key / token", {
         rows: 2,
         optional: true,
+        sensitive: true,
         placeholder: "root:Milvus or Zilliz Cloud API key",
         hint: "Milvus REST uses Bearer user:pass or a cloud API key.",
       }),
@@ -596,6 +602,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("database", "Object / table (optional)", { optional: true, placeholder: defaultObject[resolved] }),
       textarea("apiKey", resolved === "stripe" ? "Secret key" : isSalesforce ? "Access token (Bearer)" : "API token", {
         rows: 2,
+        sensitive: true,
         placeholder: resolved === "stripe" ? "sk_..." : isSalesforce ? "00D…!AQEA… (session access token)" : "Paste access token",
         hint: isSalesforce
           ? `Paste a Bearer access token (not username/password). ${objectHint}`
@@ -612,6 +619,49 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         })
       );
     }
+  }
+
+  if (resolved === "github") {
+    authModes.push(
+      auth(
+        "pat",
+        "GitHub personal access token",
+        [
+          text("owner", "Repository owner"),
+          text("repo", "Repository"),
+          password("access_token", "Personal access token"),
+        ],
+        (values) =>
+          required(values, "owner", "Repository owner")
+          || required(values, "repo", "Repository")
+          || required(values, "access_token", "Personal access token"),
+      ),
+    );
+  } else if (resolved === "jira") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Jira Cloud API token",
+        [
+          text("site", "Jira site URL", { placeholder: "https://your-domain.atlassian.net" }),
+          text("email", "Atlassian account email"),
+          password("api_token", "API token"),
+        ],
+        (values) =>
+          required(values, "site", "Jira site URL")
+          || required(values, "email", "Atlassian account email")
+          || required(values, "api_token", "API token"),
+      ),
+    );
+  } else if (resolved === "intercom") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Intercom access token",
+        [password("access_token", "Access token")],
+        (values) => required(values, "access_token", "Access token"),
+      ),
+    );
   }
 
   // Build auth modes for each connector
@@ -680,6 +730,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         text("username", "Username"),
         textarea("privateKey", "PKCS#8 private key", {
           rows: 6,
+          sensitive: true,
           placeholder: "-----BEGIN PRIVATE KEY-----",
         }),
         password("password", "Key passphrase (optional)", { optional: true }),
@@ -798,6 +849,8 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
 function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
+  if (resolved === "github") return "pat";
+  if (["jira", "intercom"].includes(resolved)) return "api_key";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";

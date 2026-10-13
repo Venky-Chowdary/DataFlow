@@ -146,6 +146,37 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         "error_confidence": human.get("confidence"),
         "operator_error": human.get("message"),
     }
+    from services.cdc_drift_repair import CdcDriftRequiresFencedRepair
+
+    if isinstance(exc, CdcDriftRequiresFencedRepair):
+        capture_pending = exc.evidence.get("capture_pending") is True
+        message = (
+            (
+                "Source capture is pending; "
+                if capture_pending
+                else ""
+            )
+            + "Re-copy the evidenced keys with the confirmed repair action, then resume. "
+            "This is state convergence / reconciliation, not log replay."
+        )
+        details.update(
+            {
+                "code": "cdc_drift_requires_fenced_repair",
+                "retriable": False,
+                "message": message,
+                "evidence": exc.evidence,
+                "raw": message,
+                "title": "CDC destination drift requires confirmed repair",
+            }
+        )
+        extras.update(
+            {
+                "error_code": "cdc_drift_requires_fenced_repair",
+                "operator_error": message,
+                "cdc_drift_repair": exc.evidence,
+                "cdc_lease_cursor_key": str(exc.evidence.get("cursor_key") or ""),
+            }
+        )
     # A destination that is short of the source image still has the rows on
     # the source. Dropping the replication slot here makes the next resume
     # report slot_missing and the unapplied inserts cannot be read back.
@@ -158,8 +189,40 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
         from services.cdc_lease import CdcLeaseConflict, LeaseStoreError
         from services.cdc_toast import CdcToastIncompleteError
         from services.cdc_transaction_buffer import CdcTxnBufferOverflow
+        from connectors.oracle_logminer import (
+            OracleBufferOffRacUnsupported,
+            OracleInstanceDetectionUnavailable,
+            OracleOpenTxnDetectionUnavailable,
+        )
 
-        if isinstance(exc, CdcStreamBehind):
+        oracle_buffer_off_errors = (
+            OracleOpenTxnDetectionUnavailable,
+            OracleInstanceDetectionUnavailable,
+            OracleBufferOffRacUnsupported,
+        )
+        if isinstance(exc, oracle_buffer_off_errors):
+            code = exc.code
+            details.update(
+                {
+                    "code": code,
+                    "retriable": False,
+                    "raw": str(exc),
+                    "message": str(exc),
+                }
+            )
+            extras.update(
+                {
+                    "error_code": code,
+                    "operator_error": str(exc),
+                }
+            )
+            if isinstance(exc, OracleOpenTxnDetectionUnavailable):
+                extras["oracle_open_txn_detection_unavailable"] = True
+            elif isinstance(exc, OracleInstanceDetectionUnavailable):
+                extras["oracle_instance_detection_unavailable"] = True
+            elif isinstance(exc, OracleBufferOffRacUnsupported):
+                extras["oracle_buffer_off_rac_unsupported"] = True
+        elif isinstance(exc, CdcStreamBehind):
             details["code"] = "cdc_stream_behind"
             details["retriable"] = True
             extras["cdc_stream_behind"] = True
@@ -309,7 +372,7 @@ def _release_failed_cdc_slot(
     try:
         from services.cdc_catchup import release_finished_cdc_slot
 
-        release_finished_cdc_slot(
+        release_result = release_finished_cdc_slot(
             loaded,
             reason="failed",
             schedule_id=schedule_id,
@@ -320,6 +383,34 @@ def _release_failed_cdc_slot(
             dest_type=dest_type,
             dest_cfg=dest_cfg,
         )
+        if release_result.get("dest_resume_blank_failed"):
+            fields = {
+                "dest_resume_blank_failed": True,
+                "dest_resume_blank_error": str(
+                    release_result.get("dest_resume_blank_error") or "unknown"
+                ),
+            }
+            update_fields = getattr(mongo, "update_job_fields", None)
+            if not callable(update_fields):
+                logger.error(
+                    "CDC resume blank failure could not be persisted for job %s "
+                    "(update_job_fields unavailable)",
+                    job_id,
+                )
+            else:
+                try:
+                    if not update_fields(job_id, fields):
+                        logger.error(
+                            "CDC resume blank failure could not be persisted for job %s",
+                            job_id,
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "CDC resume blank failure could not be persisted for job %s "
+                        "(%s)",
+                        job_id,
+                        type(exc).__name__,
+                    )
     except Exception as exc:
         logger.warning("CDC slot release after failure failed for %s: %s", job_id, exc)
 
@@ -453,7 +544,7 @@ def _fail_runtime_job(
     job_id: str,
     exc: Exception,
     *,
-    lineage: Any = None,
+    lineage: Any = None,  # noqa: F811  # preserve public parameter name
     request: Any = None,
     already_persisted: list[int] | None = None,
 ) -> tuple[str, dict[str, Any]]:
@@ -522,6 +613,11 @@ def _fail_runtime_job(
         "error_details": error_details,
         **lease_extras,
     }
+    if lease_extras:
+        status_kwargs["extras"] = {
+            **(prev.get("extras") if isinstance(prev.get("extras"), dict) else {}),
+            **lease_extras,
+        }
     for key, value in capture.items():
         if not str(prev.get(key) or "").strip():
             status_kwargs.setdefault(key, value)
@@ -546,6 +642,20 @@ def _fail_runtime_job(
         status_kwargs["records_processed"] = _records_after_failure(
             prev.get("records_processed"), getattr(exc, "rows_written")
         )
+    if cancelled:
+        from services.job_status import cancel_outcome_for
+
+        outcome = cancel_outcome_for(
+            status_kwargs.get("records_processed", prev.get("records_processed"))
+        )
+        status_kwargs["cancel_outcome"] = outcome
+        if outcome["partial_write"]:
+            logger.warning(
+                "Job %s cancelled after %s row(s) committed; nothing was rolled back",
+                job_id,
+                outcome["rows_committed"],
+            )
+            status_kwargs["message"] = outcome["message"]
     mongo.update_job_status(
         job_id,
         status,
@@ -631,7 +741,7 @@ def _fail_job_preflight(
     job_id: str,
     pf: dict,
     *,
-    lineage,
+    lineage,  # noqa: F811  # preserve public parameter name
     rows_read: int | None = None,
     sync_mode: str = "",
 ) -> tuple[str, dict]:

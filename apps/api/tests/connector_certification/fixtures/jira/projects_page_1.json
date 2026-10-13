@@ -1,0 +1,14 @@
+{
+  "values": [
+    {
+      "id": "2001",
+      "key": "FIX",
+      "name": "Synthetic Fixture Project",
+      "projectTypeKey": "software",
+      "isPrivate": false
+    }
+  ],
+  "startAt": 0,
+  "maxResults": 100,
+  "isLast": false
+}

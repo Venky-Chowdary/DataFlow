@@ -26,14 +26,23 @@ request to the job it started.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
-from services.brand_env import getenv_brand
 import re
+import socket
 import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any, Iterator
+from uuid import uuid4
+
+from services.brand_env import getenv_brand
+from services.log_redaction import (
+    is_redactable_value,
+    is_sensitive_key,
+    redact_log_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +55,19 @@ _TRACER: Any = None
 #: so an API call and the job it started share one operator-visible identity.
 _CORRELATION_ID: ContextVar[str] = ContextVar("df_correlation_id", default="")
 _TRACEPARENT: ContextVar[str] = ContextVar("df_traceparent", default="")
+_CORRELATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
-_SECRET_KEYS = re.compile(
-    r"(password|passwd|secret|token|api[_-]?key|private[_-]?key|authorization|credential)",
-    re.IGNORECASE,
-)
+
+def sanitize_correlation_id(raw: str | None) -> tuple[str, bool]:
+    """Return a valid request correlation ID and whether the input was rejected."""
+    try:
+        if raw is None or raw == "":
+            return str(uuid4()), False
+        if isinstance(raw, str) and _CORRELATION_ID_PATTERN.fullmatch(raw):
+            return raw, False
+    except Exception:
+        pass
+    return str(uuid4()), True
 
 
 def tracing_enabled() -> bool:
@@ -63,6 +80,67 @@ def otlp_endpoint() -> str:
         or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
         or ""
     ).strip()
+
+
+def otlp_protocol() -> str:
+    return (os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL") or "http/protobuf").strip().lower()
+
+
+def otlp_http_signal_endpoint(signal: str) -> str:
+    endpoint = otlp_endpoint().rstrip("/")
+    if not endpoint:
+        return ""
+    for known in ("traces", "metrics", "logs"):
+        suffix = f"/v1/{known}"
+        if endpoint.endswith(suffix):
+            return f"{endpoint[:-len(suffix)]}/v1/{signal}"
+    return f"{endpoint}/v1/{signal}"
+
+
+def _service_instance_id() -> str:
+    return (
+        getenv_brand("SERVICE_INSTANCE_ID")
+        or os.getenv("OTEL_SERVICE_INSTANCE_ID")
+        or os.getenv("RAILWAY_REPLICA_ID")
+        or os.getenv("RAILWAY_DEPLOYMENT_ID")
+        or os.getenv("HOSTNAME")
+        or "local"
+    )
+
+
+def telemetry_resource() -> Any:
+    from opentelemetry.sdk.resources import Resource
+
+    environment = (
+        getenv_brand("ENVIRONMENT")
+        or getenv_brand("ENV")
+        or os.getenv("RAILWAY_ENVIRONMENT_NAME")
+        or "development"
+    )
+    instance_id = _service_instance_id()
+    try:
+        host_name = socket.gethostname()
+    except OSError:
+        host_name = ""
+    service_version = (
+        getenv_brand("SERVICE_VERSION")
+        or os.getenv("OTEL_SERVICE_VERSION")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or "development"
+    )
+    return Resource.create(
+        {
+            "service.name": getenv_brand("SERVICE_NAME", "dataflow-api"),
+            "service.namespace": getenv_brand("SERVICE_NAMESPACE", "dataflow"),
+            "service.instance.id": instance_id,
+            "service.version": service_version,
+            "grafana.host.id": instance_id,
+            "host.name": host_name or instance_id,
+            "deployment.environment.name": environment,
+            # Pre-1.27 semconv key; Grafana Application Observability still filters on it.
+            "deployment.environment": environment,
+        }
+    )
 
 
 def set_correlation_id(value: str | None) -> None:
@@ -102,10 +180,12 @@ def redact_attributes(attrs: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     out: dict[str, Any] = {}
     for key, value in attrs.items():
-        if _SECRET_KEYS.search(str(key)):
+        if is_sensitive_key(key) and is_redactable_value(value, key):
             out[str(key)] = "***"
             continue
-        if isinstance(value, (str, int, float, bool)) or value is None:
+        if isinstance(value, str):
+            out[str(key)] = redact_log_text(value)
+        elif isinstance(value, (int, float, bool)) or value is None:
             out[str(key)] = value
         else:
             # Nested structures are almost always endpoint configs; never
@@ -134,13 +214,26 @@ def start_span(
 
     span_kind = _span_kind(kind)
     try:
-        with tracer.start_as_current_span(name, kind=span_kind, attributes=attrs) as span:
-            yield span
+        cm = tracer.start_as_current_span(name, kind=span_kind, attributes=attrs)
+        span = cm.__enter__()
     except Exception as exc:
-        # Tracing must never break a transfer. Log once and yield a no-op so
-        # the caller's ``with`` block still runs.
         logger.debug("tracing span %s failed open: %s", name, exc, exc_info=exc)
         yield _NoopSpan()
+        return
+
+    try:
+        yield span
+    except BaseException as exc:
+        try:
+            cm.__exit__(type(exc), exc, exc.__traceback__)
+        except Exception as exit_exc:
+            logger.debug("tracing span %s exit failed: %s", name, exit_exc, exc_info=exit_exc)
+        raise
+    else:
+        try:
+            cm.__exit__(None, None, None)
+        except Exception as exit_exc:
+            logger.debug("tracing span %s exit failed: %s", name, exit_exc, exc_info=exit_exc)
 
 
 def set_span_error(span: Any, exc: BaseException) -> None:
@@ -214,6 +307,14 @@ def detach_context(token: Any) -> None:
         logger.debug("detach_context failed: %s", exc)
 
 
+def submit_in_context(executor: Any, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+    """Submit with a fresh copy of the caller's contextvars
+    (OTel context, correlation id, job id).
+    """
+    ctx = contextvars.copy_context()
+    return executor.submit(ctx.run, fn, *args, **kwargs)
+
+
 def ensure_provider() -> bool:
     """Initialize the global TracerProvider once. Safe to call repeatedly."""
     global _PROVIDER_READY, _TRACER
@@ -227,7 +328,6 @@ def ensure_provider() -> bool:
         _PROVIDER_READY = True
         try:
             from opentelemetry import trace
-            from opentelemetry.sdk.resources import Resource
             from opentelemetry.sdk.trace import TracerProvider
             from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
         except ImportError:
@@ -239,35 +339,39 @@ def ensure_provider() -> bool:
             return False
 
         service_name = getenv_brand("SERVICE_NAME", "dataflow-api")
-        resource = Resource.create(
-            {
-                "service.name": service_name,
-                "service.namespace": "dataflow",
-            }
-        )
+        resource = telemetry_resource()
         provider = TracerProvider(resource=resource)
 
         endpoint = otlp_endpoint()
         exporter: Any = None
         if endpoint:
-            try:
-                from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
-                    OTLPSpanExporter,
-                )
+            protocol = otlp_protocol()
+            if protocol in {"grpc", "grpc/protobuf"}:
+                try:
+                    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                        OTLPSpanExporter,
+                    )
 
-                exporter = OTLPSpanExporter(endpoint=endpoint, insecure=_otlp_insecure())
-            except ImportError:
+                    exporter = OTLPSpanExporter(
+                        endpoint=endpoint,
+                        insecure=_otlp_insecure(),
+                    )
+                except ImportError:
+                    logger.warning(
+                        "OTLP gRPC tracing requested but the gRPC exporter is not installed"
+                    )
+            else:
                 try:
                     from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
                         OTLPSpanExporter as HttpExporter,
                     )
 
-                    exporter = HttpExporter(endpoint=endpoint)
+                    exporter = HttpExporter(
+                        endpoint=otlp_http_signal_endpoint("traces"),
+                    )
                 except ImportError:
                     logger.warning(
-                        "OTLP endpoint configured (%s) but no OTLP exporter "
-                        "package is installed; falling back to console exporter.",
-                        endpoint,
+                        "OTLP HTTP endpoint configured but the HTTP exporter is not installed"
                     )
         if exporter is None and getenv_brand("TRACE_CONSOLE", "0").lower() in (
             "1",
@@ -326,6 +430,12 @@ def reset_for_tests() -> None:
 
 
 class _NoopSpan:
+    def update_name(self, *_a: Any, **_k: Any) -> None:
+        return None
+
+    def set_attributes(self, *_a: Any, **_k: Any) -> None:
+        return None
+
     def set_attribute(self, *_a: Any, **_k: Any) -> None:
         return None
 

@@ -208,6 +208,14 @@ def inspect_destination_for_preflight(
     cols = info.get("columns") or list(schema.keys())
     out["columns"] = cols
     out["column_types"] = schema
+    out["dynamo_key_schema"] = [
+        dict(row)
+        for row in (info.get("dynamo_key_schema") or [])
+        if isinstance(row, dict)
+    ]
+    out["dynamo_index_attributes"] = dict(
+        info.get("dynamo_index_attributes") or {}
+    )
     out["column_nullability"] = {
         str(k): bool(v) for k, v in dict(info.get("schema_nullability") or {}).items()
     }

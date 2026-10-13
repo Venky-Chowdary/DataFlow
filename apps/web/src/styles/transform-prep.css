@@ -350,9 +350,14 @@
   display: grid;
   grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
   gap: 14px;
-  /* Stretch, not start: the two cards hold lists of different length, and a
-   * ragged pair leaves a tall empty column beside the longer one. */
-  align-items: stretch;
+  /* Each card is only as tall as its list. Stretching the short card
+     left a blank interior beside the longer one. */
+  align-items: start;
+}
+
+.df2-xform .df2-xform-grid > .df2-xform-card {
+  align-self: start;
+  height: auto;
 }
 
 /* The rule ledger is the third grid child. It reads across both cards. */

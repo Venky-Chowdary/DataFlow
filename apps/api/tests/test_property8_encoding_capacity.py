@@ -242,7 +242,7 @@ def test_pg_emoji_lands_on_mariadb_utf8mb4_as_four_utf8_bytes():
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    f"""
+                    """
                     SELECT CHARACTER_SET_NAME FROM information_schema.columns
                      WHERE table_schema = DATABASE()
                        AND table_name = %s AND column_name = 'txt'

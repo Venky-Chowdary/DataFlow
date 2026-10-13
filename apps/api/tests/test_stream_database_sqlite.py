@@ -233,6 +233,38 @@ def test_stream_sqlite_multibatch_source_count_is_committed_offset(monkeypatch):
         assert summary.get("source_row_count_source") == "committed_offset"
 
 
+def test_stream_sqlite_non_procedure_chunk_uses_batch_writer(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAFLOW_SQLITE_SQLITE_COPY", "0")
+    src = _make_source(2, tmp_path, text_booleans=False)
+    dst = tmp_path / "dst.db"
+    source = EndpointConfig(
+        kind="database", format="sqlite", database=str(src), table="orders"
+    )
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(dst), table="orders_out"
+    )
+
+    rows_written, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ],
+        {"id": "integer", "amount": "decimal", "active": "boolean"},
+        job_id="000000000000000000000002",
+        checkpoint_service=CheckpointService(_FakeMongo()),
+    )
+
+    assert rows_written == 2
+    assert summary.get("load_method") != "attach_insert_select_sqlite"
+    conn = sqlite3.connect(dst)
+    count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+    conn.close()
+    assert count == 2
+
+
 def test_stream_sqlite_to_sqlite_resume_from_checkpoint():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)

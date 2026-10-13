@@ -51,6 +51,7 @@ import { clampPercent } from "../lib/progressRing";
 import { nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
+import { EmbeddingUsageSummary } from "../components/transfer/EmbeddingUsageSummary";
 import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
 import { ReplaySafetyCard } from "../components/transfer/ReplaySafetyCard";
 import { TransformationsCard } from "../components/transfer/TransformationsCard";
@@ -1748,6 +1749,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
               </div>
             )}
           </dl>
+          <EmbeddingUsageSummary destinationSummary={destSummary} />
           <PhaseProfileCard
             scopeNote={
               multiStream

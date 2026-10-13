@@ -10,7 +10,6 @@ Default discovery order matches this product's local pair first
 
 from __future__ import annotations
 
-import json
 import os
 import socket
 from datetime import datetime, timezone

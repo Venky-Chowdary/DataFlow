@@ -354,7 +354,7 @@ def test_adls_introspect_dispatch_is_implemented():
 
     from src.transfer import endpoint_intelligence as ei
 
-    src = inspect.getsource(ei.introspect_endpoint)
+    src = inspect.getsource(ei._introspect_endpoint_impl)
     sample = inspect.getsource(ei._attach_db_sample)
     assert 'if fmt == "adls"' in src
     assert 'if fmt == "adls"' in sample
@@ -370,4 +370,3 @@ def test_ensure_postgis_installs_inside_docker_not_host_socket():
     assert "publish=5432" in src
     assert "docker" in src
     assert "CREATE EXTENSION IF NOT EXISTS postgis" in src
-

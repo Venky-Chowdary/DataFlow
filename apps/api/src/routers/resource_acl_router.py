@@ -7,6 +7,7 @@ from typing import Literal
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from services.audit_coverage import record_security_event
 from services.resource_acl import (
     ACL_ROLES,
     RESOURCE_TYPES,
@@ -94,6 +95,19 @@ def upsert_resource_acl(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_security_event(
+        "acl.grant.create",
+        outcome="succeeded",
+        request=request,
+        resource=f"acl:{grant.id}",
+        status=200,
+        details={
+            "resource_type": grant.resource_type,
+            "resource_id": grant.resource_id,
+            "principal": grant.principal,
+            "role": grant.role,
+        },
+    )
     return grant.to_dict()
 
 
@@ -104,6 +118,24 @@ def delete_resource_acl(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     ws = _require_admin_or_workspace_write(request, workspace_id)
+    grant = next(
+        (item for item in list_grants(tenant_id=ws) if item.id == grant_id),
+        None,
+    )
     if not revoke_grant(grant_id, tenant_id=ws):
         raise HTTPException(status_code=404, detail="Grant not found")
+    if grant is not None:
+        record_security_event(
+            "acl.grant.revoke",
+            outcome="succeeded",
+            request=request,
+            resource=f"acl:{grant_id}",
+            status=200,
+            details={
+                "resource_type": grant.resource_type,
+                "resource_id": grant.resource_id,
+                "principal": grant.principal,
+                "role": grant.role,
+            },
+        )
     return {"ok": True, "id": grant_id}

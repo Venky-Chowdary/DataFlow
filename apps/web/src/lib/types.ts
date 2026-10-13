@@ -502,6 +502,20 @@ export interface Gate8ReconciliationPayload {
     cells_compared?: number;
     rows_compared?: number;
   };
+  /** Post-load business-rule checks (e.g. unique contracts). */
+  rule_checks?: {
+    rule_id?: string;
+    type?: string;
+    column?: string;
+    status?: "passed" | "failed" | "unverified";
+    duplicates?: number;
+    reason?: string;
+  }[];
+  /** Rule checks that could not be verified — the run stays unproven. */
+  unverified_rules?: {
+    rule_id?: string;
+    reason?: string;
+  }[];
   /** Why two digests disagree when no sampled cell does. */
   mismatch_class?: string;
   digest_basis?: Record<string, unknown>;
@@ -1751,6 +1765,9 @@ export const CONNECTOR_CATALOG = [
   { id: "hubspot", label: "HubSpot", port: 443 },
   { id: "stripe", label: "Stripe", port: 443 },
   { id: "shopify", label: "Shopify", port: 443 },
+  { id: "github", label: "GitHub", port: 443, sourceOnly: true },
+  { id: "jira", label: "Jira Cloud", port: 443, sourceOnly: true },
+  { id: "intercom", label: "Intercom", port: 443, sourceOnly: true },
   { id: "rest_api", label: "REST / OpenAPI", port: 443 },
   { id: "graphql", label: "GraphQL", port: 443 },
 ] as const;

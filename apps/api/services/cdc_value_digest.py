@@ -51,8 +51,14 @@ def _identity_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, st
     """``(source, dest)`` when every mapped column is a pure carry.
 
     A transform is supposed to change the value. Comparing those cells
-    would fail a correct route, so the scan is declined.
+    would fail a correct route, so the scan is declined. A typed cast the
+    plan stamps (``integer``, ``datetime``…) only carries the value into the
+    destination type, and ``canonical_checksum`` renders both sides in that
+    type, so it is compared; a cast that did change a cell still leaves a
+    source fingerprint missing.
     """
+    from services.decision_kernel.findings import TYPED_CAST_TRANSFORMS
+
     if not mappings:
         return None
     pairs: list[tuple[str, str]] = []
@@ -66,7 +72,7 @@ def _identity_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, st
         transform = str(raw.get("transform") or "").strip().lower()
         if not source or not target:
             return None
-        if transform not in _IDENTITY_TRANSFORMS:
+        if transform not in _IDENTITY_TRANSFORMS and transform not in TYPED_CAST_TRANSFORMS:
             return None
         pairs.append((source, target))
     return pairs or None

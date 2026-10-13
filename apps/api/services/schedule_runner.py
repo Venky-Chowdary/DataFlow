@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import functools
 import logging
 import os
 import re
-from services.brand_env import getenv_brand
 import socket
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from services.schedule_store import due_schedules
+from services.brand_env import getenv_brand
 from services.failure_retry_policy import DETERMINISTIC
+from services.ops_events import emit_event
+from services.schedule_store import due_schedules
 from services.standing_authorization import (
     CODE_NO_AUTHORIZATION,
     SCOPE_NET_ADDITIVE_DRIFT,
@@ -100,6 +104,7 @@ def _acquire_scheduler_lock() -> bool:
     if not svc:
         if requires_distributed_backend():
             logger.error("Scheduler lock unavailable; refuse beat (multi-replica fail-closed)")
+            emit_event(logger, "scheduler.lock.acquire", outcome="failed", reason_code="backend_unavailable")
             return False
         return True
     db = svc.get_database()
@@ -126,12 +131,16 @@ def _acquire_scheduler_lock() -> bool:
             upsert=True,
             return_document=True,
         )
-        return bool(result and result.get("instance") == instance)
+        acquired = bool(result and result.get("instance") == instance)
+        if not acquired:
+            emit_event(logger, "scheduler.lock.acquire", outcome="failed", reason_code="held_by_other")
+        return acquired
     except Exception as exc:
         name = type(exc).__name__
         if "DuplicateKey" in name:
+            emit_event(logger, "scheduler.lock.acquire", outcome="failed", reason_code="race")
             return False
-        logger.exception("Failed to acquire scheduler lock")
+        emit_event(logger, "scheduler.lock.acquire", outcome="errored", reason_code="lock_error", error=exc)
         if requires_distributed_backend():
             return False
         return False
@@ -446,7 +455,10 @@ def build_schedule_request(sched, src: dict, dst: dict):
         enforce_contract=bool(contract_id),
         require_signed_contract=require_signed,
         compliance_acknowledged=acks.compliance,
-        schema_drift_acknowledged=acks.schema_drift,
+        schema_drift_acknowledged=(
+            acks.schema_drift
+            or bool(getattr(sched, "schema_drift_acknowledged", False))
+        ),
         fk_risk_acknowledged=acks.fk_risk,
         acknowledgment_actor=acks.actor if acks.any_claimed else "",
         acknowledgment_reason=acks.reason if acks.any_claimed else "",
@@ -931,10 +943,15 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     sched = get_schedule(schedule_id)
     if not sched:
         return
-    if job_id and sched.last_job_id == job_id and not sched.running:
-        return
     job_doc = _job_doc(job_id)
     status = (job_doc or {}).get("status") or "failed"
+    if (
+        job_id
+        and sched.last_job_id == job_id
+        and not sched.running
+        and _is_success(status) == _is_success(sched.last_status)
+    ):
+        return
     entry = _run_entry(job_id, status, attempt, started_at, job_doc)
 
     from services.execution_engine_contract import committed_rows_of
@@ -964,6 +981,19 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
             attempt + 1,
             retry_at.isoformat(),
         )
+        failure_class = decision.get("failure_class") or {}
+        emit_event(
+            logger,
+            "schedule.run.retry",
+            outcome="retrying",
+            schedule_id=schedule_id,
+            attempt=attempt + 1,
+            classification=(
+                str(failure_class.get("kind") or "other")
+                if isinstance(failure_class, dict)
+                else str(failure_class or "other")
+            ),
+        )
         schedule_retry(
             schedule_id,
             retry_at=retry_at,
@@ -981,8 +1011,12 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     if _is_success(status):
         _observe_parallel_run(sched, job_doc)
         try:
-            from services.schedule_approvals import close_dest_exists_park_after_success
+            from services.schedule_approvals import (
+                close_dest_exists_park_after_success,
+                close_finding_after_successful_run,
+            )
 
+            close_finding_after_successful_run(schedule_id)
             close_dest_exists_park_after_success(schedule_id)
         except Exception:
             logger.exception(
@@ -990,6 +1024,20 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                 schedule_id,
             )
     else:
+        if not _is_success(status):
+            failure_class = decision.get("failure_class") or {}
+            emit_event(
+                logger,
+                "schedule.run.give_up",
+                outcome="failed",
+                schedule_id=schedule_id,
+                attempt=attempt + 1,
+                classification=(
+                    str(failure_class.get("kind") or "other")
+                    if isinstance(failure_class, dict)
+                    else str(failure_class or "other")
+                ),
+            )
         park = _park_reason(sched, decision, entry)
         if park:
             # This beat's verdict will not change by itself, and the next beat
@@ -1157,6 +1205,7 @@ def _dispatch_transfer(
         # later beat produced another identical failed row — 48 of them in one
         # customer's Jobs list — so this parks on one finding instead.
         logger.warning("Schedule %s skipped — connector missing", schedule_id)
+        emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="connector_missing", schedule_id=schedule_id)
         missing = "source" if not src else "destination"
         _park_on_decision(
             schedule_id,
@@ -1174,7 +1223,7 @@ def _dispatch_transfer(
         request = build_schedule_request(sched, src, dst)
         authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
-        logger.error("Schedule %s refused before any row moved: %s", schedule_id, exc)
+        emit_event(logger, "schedule.run.fire", outcome="held", reason_code="preflight_refused", schedule_id=schedule_id, attempt=attempt + 1, error=exc)
         _park_on_decision(schedule_id, exc, attempt=attempt)
         return None
     engine = get_transfer_engine()
@@ -1201,12 +1250,58 @@ def _dispatch_transfer(
             schedule_id,
             job_id,
         )
+        emit_event(logger, "schedule.run.fire", outcome="started", schedule_id=schedule_id, attempt=attempt + 1, job_id=job_id)
         return job_id
     future.add_done_callback(
         lambda _f, sid=schedule_id, jid=job_id, a=attempt, ts=started_at: _finalize_run(sid, jid, a, ts)
     )
     logger.info("Schedule %s started job %s (attempt %s)", schedule_id, job_id, attempt + 1)
+    emit_event(logger, "schedule.run.fire", outcome="started", schedule_id=schedule_id, attempt=attempt + 1, job_id=job_id)
     return job_id
+
+
+#: A blocked schedule stays due, and the beat wakes every second for an
+#: already-due schedule. Without backoff the same "already in progress" line
+#: was logged every beat, forever (QA MX3-24 log). Retry 5s → 60s.
+_CLAIM_BACKOFF_MIN_S = 5.0
+_CLAIM_BACKOFF_MAX_S = 60.0
+_claim_backoff: dict[str, tuple[float, float, str]] = {}
+_claim_backoff_lock = threading.Lock()
+
+
+def _note_claim_blocked(schedule_id: str, holder: dict | None, detail: str) -> None:
+    import time as _time
+
+    key = "|".join(
+        str((holder or {}).get(k) or "") for k in ("kind", "schedule_id", "job_id")
+    )
+    now = _time.monotonic()
+    with _claim_backoff_lock:
+        _until, delay, prior_key = _claim_backoff.get(schedule_id, (0.0, 0.0, ""))
+        delay = (
+            min(_CLAIM_BACKOFF_MAX_S, max(_CLAIM_BACKOFF_MIN_S, delay * 2))
+            if prior_key == key
+            else _CLAIM_BACKOFF_MIN_S
+        )
+        _claim_backoff[schedule_id] = (now + delay, delay, key)
+    if prior_key != key:
+        logger.info("Schedule %s skipped — %s", schedule_id, detail)
+        emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="already_leased", schedule_id=schedule_id)
+    else:
+        logger.debug("Schedule %s still blocked — %s", schedule_id, detail)
+
+
+def _clear_claim_backoff(schedule_id: str) -> None:
+    with _claim_backoff_lock:
+        _claim_backoff.pop(schedule_id, None)
+
+
+def _claim_backed_off(schedule_id: str) -> bool:
+    import time as _time
+
+    with _claim_backoff_lock:
+        entry = _claim_backoff.get(schedule_id)
+    return bool(entry and _time.monotonic() < entry[0])
 
 
 def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
@@ -1235,6 +1330,7 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
     blocked = _append_replay_blocked(sched)
     if blocked:
         logger.info("Schedule %s skipped — append replay would duplicate", schedule_id)
+        emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="append_replay_duplicate", schedule_id=schedule_id)
         if manual:
             raise ScheduleStartError(
                 blocked,
@@ -1260,26 +1356,46 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
             )
             sched = get_schedule(schedule_id) or sched
 
-    # Concurrency guard: refuse to start when this schedule, another writer
-    # on the same dest object, or the same source→dest pair is already live.
+    # Concurrency guard: refuse to start when this schedule or another writer
+    # on the same dest object is already live.
+    from services.schedule_store import (
+        describe_claim_holder,
+        dispatch_in_flight,
+        last_claim_refusal,
+    )
+
     if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
-        logger.info("Schedule %s skipped — a run is already in progress", schedule_id)
+        holder = last_claim_refusal(schedule_id)
+        detail = describe_claim_holder(holder)
+        _note_claim_blocked(schedule_id, holder, detail)
         if manual:
             raise ScheduleStartError(
-                "A run is already in progress for this schedule, the same "
-                "destination table, or the same source→destination pair.",
+                detail,
                 http_status=409,
                 code="already_running",
             )
         return None
+    _clear_claim_backoff(schedule_id)
 
     # A parked retry resumes its own attempt count; the budget is per run, not
     # per beat, or a schedule that fails every time retries forever.
-    job_id = _dispatch_transfer(
-        schedule_id,
-        attempt=sched.retry_attempt if sched.retry_at else 0,
-        allow_paused=manual,
-    )
+    try:
+        with dispatch_in_flight(schedule_id):
+            job_id = _dispatch_transfer(
+                schedule_id,
+                attempt=sched.retry_attempt if sched.retry_at else 0,
+                allow_paused=manual,
+            )
+    except Exception:
+        # Nothing was submitted, so nothing is writing. Holding the claim for
+        # the unbound grace made every beat skip the schedule and Run now
+        # answer "already in progress" with no running job (QA MX3-24).
+        logger.exception(
+            "Schedule %s dispatch raised after its claim was taken; releasing the claim",
+            schedule_id,
+        )
+        clear_schedule_running(schedule_id)
+        raise
     if job_id is None:
         # Fail-closed paths (missing connector / contract) already call
         # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.
@@ -1339,13 +1455,28 @@ def _finalize_finished_schedule_claims() -> None:
     The next beat used to skip that schedule forever, and Run now answered
     that a run was still in progress.
     """
-    from services.schedule_store import _load_all, _parse_ts
+    from services.schedule_store import (
+        _is_running_stale,
+        _job_is_live,
+        _load_all,
+        _parse_ts,
+        clear_schedule_running,
+    )
 
     for sched in _load_all():
-        if not sched.running or not str(sched.running_job_id or "").strip():
+        if not sched.running:
             continue
-        from services.schedule_store import _job_is_live
-
+        if not str(sched.running_job_id or "").strip():
+            # Claim taken, job never bound (dispatch died in between). Nothing
+            # is writing; release it once the unbound grace has passed.
+            if _is_running_stale(sched):
+                logger.warning(
+                    "Schedule %s released an unbound claim from %s (no job was created)",
+                    sched.id,
+                    sched.running_started_at,
+                )
+                clear_schedule_running(sched.id)
+            continue
         if _job_is_live(sched.running_job_id) is not False:
             continue
         started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
@@ -1361,6 +1492,7 @@ def _run_due_schedules() -> int:
     if not _acquire_scheduler_lock():
         logger.warning("Scheduler lock held by another instance; skipping this beat")
         return 0
+    due_ids: list[str] = []
     try:
         from services.schedule_approvals import release_same_declaration_source_drift
 
@@ -1374,19 +1506,35 @@ def _run_due_schedules() -> int:
         release_create_new_dest_exists_false_refuse()
         _release_superseded_queued_claims()
         _finalize_finished_schedule_claims()
+        try:
+            from services.cdc_capture_release import retry_pending_capture_releases
+
+            # A schedule delete that could not drop its source slot (QA S14)
+            # keeps retrying here, so WAL is not retained forever on a client DB.
+            retry_pending_capture_releases()
+        except Exception:  # noqa: BLE001 — cleanup must never stop the beat
+            logger.exception("Pending CDC capture release retry failed")
         from services.schedule_store import unstick_completion_pinned_schedules
 
         unstick_completion_pinned_schedules()
-        started = 0
         for sched in due_schedules():
-            try:
-                if _run_schedule(sched.id):
-                    started += 1
-            except Exception:
-                logger.exception("Failed to run schedule %s", sched.id)
-        return started
+            if _claim_backed_off(sched.id):
+                continue
+            due_ids.append(sched.id)
     finally:
         _release_scheduler_lock()
+    # Preflight and dispatch sit outside the fleet lock. Holding it across
+    # both made the second due schedule wait out the first schedule's
+    # planning (R3-H2: runs started 4–48s late). The per-schedule claim
+    # still prevents a double fire.
+    started = 0
+    for schedule_id in due_ids:
+        try:
+            if _run_schedule(schedule_id):
+                started += 1
+        except Exception:
+            logger.exception("Failed to run schedule %s", schedule_id)
+    return started
 
 
 def _clear_stale_running_schedules() -> None:
@@ -1444,7 +1592,8 @@ async def run_schedule_loop() -> None:
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
     try:
         await asyncio.get_running_loop().run_in_executor(
-            _executor, _clear_stale_running_schedules
+            _executor,
+            functools.partial(contextvars.copy_context().run, _clear_stale_running_schedules),
         )
     except Exception:  # noqa: BLE001 — a bad document must not kill the loop
         logger.exception(
@@ -1454,7 +1603,8 @@ async def run_schedule_loop() -> None:
         from services.schedule_store import import_file_schedules_into_mongo
 
         imported = await asyncio.get_running_loop().run_in_executor(
-            _executor, import_file_schedules_into_mongo
+            _executor,
+            functools.partial(contextvars.copy_context().run, import_file_schedules_into_mongo),
         )
         if imported:
             logger.info("Imported %s schedule(s) from schedules.json into MongoDB", imported)
@@ -1462,7 +1612,10 @@ async def run_schedule_loop() -> None:
         logger.exception("Schedule file→Mongo import failed")
     while True:
         try:
-            count = await asyncio.get_running_loop().run_in_executor(_executor, _run_due_schedules)
+            count = await asyncio.get_running_loop().run_in_executor(
+                _executor,
+                functools.partial(contextvars.copy_context().run, _run_due_schedules),
+            )
             if count:
                 logger.info("Scheduler started %s pipeline run(s)", count)
         except Exception:
@@ -1473,7 +1626,10 @@ async def run_schedule_loop() -> None:
 
             wait = float(
                 await asyncio.get_running_loop().run_in_executor(
-                    _executor, seconds_until_next_schedule
+                    _executor,
+                    functools.partial(
+                        contextvars.copy_context().run, seconds_until_next_schedule
+                    ),
                 )
             )
         except Exception:  # noqa: BLE001 — a bad store falls back to the poll cap

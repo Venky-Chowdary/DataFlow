@@ -37,15 +37,22 @@ def assert_dataset_file(path: str | Path) -> Path:
         resolved = raw.resolve()
     except OSError as exc:
         raise ValueError("Uploaded file is not on disk.") from exc
-    if not resolved.is_file():
-        raise ValueError("Uploaded file is not on disk.")
-    if is_transfer_staging_file(resolved.name):
-        raise ValueError("That file belongs to one transfer, not to the dataset catalog.")
+    # Sandbox first: an ack naming a path outside the upload tree is refused
+    # for that reason whether or not the file exists — existence is never a
+    # hint about which directories are legal to read.
+    inside_root = False
     for root in dataset_roots():
         try:
             root_resolved = root.resolve()
         except OSError:
             continue
         if resolved == root_resolved or root_resolved in resolved.parents:
-            return resolved
-    raise ValueError("That file is outside the upload directory.")
+            inside_root = True
+            break
+    if not inside_root:
+        raise ValueError("That file is outside the upload directory.")
+    if is_transfer_staging_file(resolved.name):
+        raise ValueError("That file belongs to one transfer, not to the dataset catalog.")
+    if not resolved.is_file():
+        raise ValueError("Uploaded file is not on disk.")
+    return resolved

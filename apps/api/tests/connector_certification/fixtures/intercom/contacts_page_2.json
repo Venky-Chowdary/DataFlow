@@ -1,0 +1,14 @@
+{
+  "data": [
+    {
+      "id": "4003",
+      "email": "contact-three@example.test",
+      "name": "Synthetic Contact Three",
+      "created_at": 1767225800,
+      "updated_at": 1767225900
+    }
+  ],
+  "pages": {
+    "next": null
+  }
+}

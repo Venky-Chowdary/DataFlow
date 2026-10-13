@@ -10,11 +10,12 @@
  * workbook (`fname → first_name`) replace those identity fallbacks.
  */
 
-import type { EditableMapping, MappingBusinessRule, MappingTransform } from "./mapping";
+import type { EditableMapping, MappingBusinessRule, MappingTransform, RuleContractWire } from "./mapping";
 import { applyDeclaredSourceZone, applyTransformChange } from "./mapping";
 import type { ShapeStepWire } from "./shape";
 
 export interface CompiledRule {
+  rule_id?: string;
   source_table?: string;
   source_column: string;
   map_source?: string;
@@ -28,6 +29,8 @@ export interface CompiledRule {
   plane: string;
   confidence: number;
   contract?: { type: string; value?: string; values?: string[]; op?: string; pattern?: string } | null;
+  enforced_at_execute?: boolean;
+  enforced_post_load?: boolean;
   transform?: string;
   engine_transform?: string;
   timezone?: string;
@@ -52,6 +55,7 @@ export interface RuleCoverage {
   conflict: number;
   writes: number;
   validations: number;
+  contracts_enforced_at_execute?: number;
   percent: number;
 }
 
@@ -66,6 +70,9 @@ export interface HeaderRoleEvidence {
 
 export interface RuleCompileReport {
   filename: string;
+  compiler_version?: string;
+  input_sha256?: string;
+  report_fingerprint?: string;
   rule_count: number;
   buckets: {
     executable: number;
@@ -122,10 +129,25 @@ export function proofRuleClaim(report: RuleCompileReport): string {
   const executable = report.coverage?.executable ?? report.buckets?.executable ?? 0;
   const review = report.coverage?.review ?? report.buckets?.needs_confirmation ?? 0;
   const conflict = report.coverage?.conflict ?? report.buckets?.conflict ?? 0;
+  const rules = report.rules || [];
+  const validateOnly = rules.filter((rule) => rule.status === "executable"
+    && rule.kind === "contract"
+    && !rule.enforced_at_execute && !rule.enforced_post_load).length;
+  const postLoad = rules.filter((rule) => rule.status === "executable"
+    && rule.kind === "contract"
+    && !rule.enforced_at_execute && rule.enforced_post_load).length;
+  const enforced = Math.max(0, executable - validateOnly);
+  const parts = [
+    validateOnly
+      ? `${validateOnly} validation rule(s) are checked at Validate only, not enforced at Run`
+      : "",
+    postLoad ? `${postLoad} rule(s) are checked after load` : "",
+  ].filter(Boolean);
+  const suffix = parts.length ? `; ${parts.join("; ")}` : "";
   if (review || conflict) {
-    return `Migration compiled ${executable} executable business rule(s); review remains`;
+    return `Migration compiled ${enforced} executable business rule(s); review remains${suffix}`;
   }
-  return `Migration verified against ${executable} business rules`;
+  return `Migration verified against ${enforced} business rules${suffix}`;
 }
 
 function coverageFromRules(rules: CompiledRule[]): RuleCoverage {
@@ -157,6 +179,7 @@ export function ruleToEvidence(rule: CompiledRule): MappingBusinessRule {
     sheet: rule.provenance?.sheet,
     row: rule.provenance?.row,
     issues: rule.issues,
+    ruleId: rule.rule_id || undefined,
   };
 }
 
@@ -177,10 +200,19 @@ function destIsOperatorLocked(mapping: EditableMapping, dest: string): boolean {
 function applyOne(mapping: EditableMapping, rule: CompiledRule): EditableMapping {
   const evidence = ruleToEvidence(rule);
   const transform = asTransform(rule.transform);
+  // An executable row whose transform this path cannot run must not silently
+  // degrade to a direct copy — it stays on the review plane.
+  const unknownTransform = Boolean(
+    rule.status === "executable"
+    && (rule.transform || "").trim()
+    && rule.transform !== "none"
+    && transform === "none",
+  );
   const lockedDest = destIsOperatorLocked(mapping, rule.dest_column);
   if (lockedDest) {
     return {
       ...mapping,
+      approved: false,
       businessRule: { ...evidence, status: "conflict" },
       requiresReview: true,
       reason: `Workbook dest “${rule.dest_column}” conflicts with locked “${mapping.target}”.`,
@@ -188,14 +220,23 @@ function applyOne(mapping: EditableMapping, rule: CompiledRule): EditableMapping
   }
   let next: EditableMapping = {
     ...mapping,
+    approved: rule.status === "executable" ? mapping.approved : false,
     target: rule.status === "executable" && rule.dest_column
       ? rule.dest_column
       : mapping.target,
-    businessRule: evidence,
+    businessRule: unknownTransform
+      ? {
+          ...evidence,
+          issues: [
+            ...(evidence.issues || []),
+            `Transform "${rule.transform}" is not executable on this path`,
+          ],
+        }
+      : evidence,
     reason: rule.rule_text
       ? `${rule.kind_label}: ${rule.rule_text}`
       : rule.kind_label,
-    requiresReview: rule.status !== "executable" || mapping.requiresReview,
+    requiresReview: rule.status !== "executable" || unknownTransform || mapping.requiresReview,
   };
   if (rule.status === "executable" && rule.code_crosswalk) {
     next = { ...next, codeCrosswalk: { ...rule.code_crosswalk } };
@@ -209,10 +250,64 @@ function applyOne(mapping: EditableMapping, rule: CompiledRule): EditableMapping
   } else if (rule.status === "executable" && transform && transform !== "none") {
     next = applyTransformChange(next, transform);
   }
-  if (rule.status === "executable" && rule.confidence >= 0.9 && next.target) {
+  if (
+    rule.status === "executable" && !unknownTransform
+    && rule.confidence >= 0.9 && next.target
+  ) {
     next = { ...next, approved: true, requiresReview: false };
   }
   return next;
+}
+
+/** Rule-contract payload the writer evaluates per cell at Execute. */
+function ruleContractWire(rule: CompiledRule): RuleContractWire {
+  const contract = rule.contract || { type: "" };
+  return {
+    rule_id: rule.rule_id || "",
+    type: contract.type || "",
+    value: contract.value,
+    values: contract.values,
+    op: contract.op,
+    pattern: contract.pattern,
+    rule_text: rule.rule_text || "",
+  };
+}
+
+/**
+ * Attach execute-enforced contracts to the mapping that writes their dest.
+ * A contract with no dest binds by source column. One that matches nothing
+ * stays a Validate-only row — never smuggled onto an unrelated write.
+ */
+function attachRuleContracts(
+  next: EditableMapping[],
+  report: RuleCompileReport,
+  tableFold: string,
+): void {
+  for (const rule of report.rules) {
+    if (rule.kind !== "contract") continue;
+    if (
+      rule.status !== "executable"
+      || !(rule.enforced_at_execute || rule.enforced_post_load)
+    ) continue;
+    if (tableFold) {
+      const ruleTable = (rule.source_table || "").trim().toLowerCase();
+      if (ruleTable && ruleTable !== tableFold) continue;
+    }
+    const dest = (rule.dest_column || "").trim().toLowerCase();
+    const source = (rule.map_source || rule.source_column || "").trim().toLowerCase();
+    const idx = next.findIndex((m) => (
+      dest
+        ? (m.target || "").trim().toLowerCase() === dest
+        : source && (m.source || "").trim().toLowerCase() === source
+    ));
+    if (idx < 0) continue;
+    const existing = next[idx].ruleContracts || [];
+    if (existing.some((c) => c.rule_id === (rule.rule_id || ""))) continue;
+    next[idx] = {
+      ...next[idx],
+      ruleContracts: [...existing, ruleContractWire(rule)],
+    };
+  }
 }
 
 export function mergeBusinessRules(
@@ -284,6 +379,21 @@ export function mergeBusinessRules(
     }
     next[idx] = applyOne(existing, rule);
   }
+  attachRuleContracts(next, report, tableFold);
+  // Stamp the compile-report fingerprint on every carried rule so the Execute
+  // wire links back to the business_rules.compiled audit event.
+  const fingerprint = (report.report_fingerprint || "").trim();
+  if (fingerprint) {
+    for (let i = 0; i < next.length; i += 1) {
+      const br = next[i].businessRule;
+      if (br && !br.reportFingerprint) {
+        next[i] = {
+          ...next[i],
+          businessRule: { ...br, reportFingerprint: fingerprint },
+        };
+      }
+    }
+  }
   return next;
 }
 
@@ -323,6 +433,11 @@ export function ruleCensus(report: RuleCompileReport): RuleCensus {
   };
 }
 
+export function ruleMixSummary(report: RuleCompileReport): string {
+  const census = ruleCensus(report);
+  return `${census.total} rules: ${census.mapping} mapping, ${census.validation} validation`;
+}
+
 export function compiledExpression(rule: CompiledRule): string {
   if (rule.resolved_rule) return rule.resolved_rule;
   const options = rule.shape_step?.options && typeof rule.shape_step.options === "object"
@@ -357,19 +472,14 @@ export function ruleReportSummary(report: RuleCompileReport): string {
   const inferred = (report.header_roles || []).some((item) => item.method !== "alias")
     ? " · headers inferred from file + schema"
     : "";
-  const named = [
-    census.namedMapping ? `${census.namedMapping} named mapping` : "",
-    census.namedValidation ? `${census.namedValidation} named validation` : "",
-  ].filter(Boolean).join(" · ");
-  const namedBit = named ? ` · ${named}` : "";
   const projection = report.projection?.length
     ? ` · ${report.projection.length} source table(s) projected`
     : "";
   const coverage = ` · rule coverage ${census.coveragePercent}%`;
   return (
-    `${census.total} total · ${census.mapping} mapping · ${census.validation} validation · `
+    `${ruleMixSummary(report)} · `
     + `${census.executable} executable · ${census.review} review · ${census.conflict} conflict`
-    + `${coverage}${unused}${unmapped}${truncated}${inferred}${namedBit}${projection}`
+    + `${coverage}${unused}${unmapped}${truncated}${inferred}${projection}`
   );
 }
 
@@ -409,7 +519,7 @@ export function mergeCompiledShapeSteps(
 }
 
 export function ruleStatusLabel(status: string): string {
-  if (status === "executable") return "Applied";
+  if (status === "executable") return "Ready";
   if (status === "conflict") return "Conflict";
   return "Needs review";
 }
@@ -430,21 +540,63 @@ export function ruleConfidenceLabel(confidence: number): string {
 
 const VALIDATION_DEST = /^v\d+$/i;
 const SOURCE_MISSING = /source column .+ is not on the selected source/i;
+const DIRECT_KINDS = new Set(["direct", "rename", "passthrough"]);
+const IDENTITY_TRANSFORMS = new Set(["", "none", "identity"]);
+const REVIEW_CONFIDENCE = /confidence|low[- ]confidence|fuzzy/i;
 
 /**
- * A review row the operator may accept as Direct: both columns bound, the
- * dest is not a validation id, and the compiler did not refuse the source.
- * Contracts and joins stay review — accepting them would invent a write.
+ * A review row the operator may accept as Direct — only when the compiled
+ * meaning really is a rename/passthrough: a direct-ish kind, an identity
+ * transform, both columns bound, and no issue beyond review confidence.
+ * Anything the compiler could not parse (unknown, contract, lookup, …)
+ * stays review — accepting it would invent a write.
  */
 export function canAcceptAsDirect(rule: CompiledRule): boolean {
   if (rule.status !== "needs_confirmation") return false;
-  if (rule.kind === "contract" || rule.kind === "join") return false;
+  if (!DIRECT_KINDS.has((rule.kind || "").toLowerCase())) return false;
+  if (!IDENTITY_TRANSFORMS.has((rule.transform || "").toLowerCase())) return false;
   const source = (rule.source_column || "").trim();
   const dest = (rule.dest_column || "").trim();
   if (!source || !dest) return false;
   if (VALIDATION_DEST.test(dest)) return false;
   if ((rule.issues || []).some((issue) => SOURCE_MISSING.test(issue))) return false;
+  if ((rule.issues || []).some((issue) => !REVIEW_CONFIDENCE.test(issue))) return false;
   return true;
+}
+
+export function ruleEdgeLabel(rule: CompiledRule): string {
+  if (rule.kind === "contract") {
+    return rule.dest_column || rule.source_column || "—";
+  }
+  return `${rule.source_column || "—"} → ${rule.dest_column || "—"}`;
+}
+
+export function ruleReviewHint(rule: CompiledRule, canAcceptHere: boolean): string {
+  if (rule.kind === "contract" && rule.status === "executable") {
+    return "Checked on the destination during the write; not a Transform step.";
+  }
+  if (rule.kind === "contract") {
+    return "Validate contract — confirm the column binding. This is not a Transform write.";
+  }
+  if (rule.kind === "join") {
+    return "Joins need you to choose how rows match; they stay in review.";
+  }
+  if (canAcceptAsDirect(rule)) {
+    if (!canAcceptHere) {
+      return "Clear rename / passthrough the compiler left for you. Accept it as Direct on Map, or remap there.";
+    }
+    return "Clear rename / passthrough the compiler left for you. Accept as Direct to put it on Map, or leave it and remap there.";
+  }
+  if (
+    DIRECT_KINDS.has((rule.kind || "").toLowerCase())
+    && (rule.issues || []).some((issue) => /is not on the selected (source|destination)/i.test(issue))
+  ) {
+    return "A column this rule names is not on the selected source or destination. Remap it on Map, or fix the workbook and re-upload.";
+  }
+  if (rule.status !== "executable") {
+    return "Not compiled — rewrite this rule in a supported form, or add an explicit Transform step, then re-upload.";
+  }
+  return "The compiler will not invent an algorithm from this sentence. Confirm or remap on Map.";
 }
 
 /** Operator accept: the pair is a rename / passthrough. No invented transform. */

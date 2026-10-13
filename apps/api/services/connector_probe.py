@@ -7,9 +7,14 @@ call the same ``run_probe(type, cfg)`` with the same decrypted secrets.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from services.connector_auth import engine_login_role
+from services.connector_telemetry import connector_operation, driver_family
+from services.ops_events import emit_event
+
+_LOG = logging.getLogger("dataflow.connector")
 
 
 def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
@@ -60,6 +65,7 @@ def probe_saved_connector(
     connector_id: str,
     *,
     workspace_id: str | None = None,
+    surface: str = "saved_connector",
 ) -> tuple[bool, str, dict[str, Any]]:
     """Live connectivity probe identical to Connectors Test for a saved id.
 
@@ -69,38 +75,70 @@ def probe_saved_connector(
     from services.connector_store import get_connector
 
     conn = get_connector(connector_id, workspace_id=workspace_id)
-    if not conn:
-        return False, f"Connector '{connector_id}' not found", {}
+    with connector_operation(
+        "probe",
+        driver_family=driver_family(getattr(conn, "type", "") if conn else ""),
+        surface=surface,
+        connector_id=connector_id,
+    ) as op:
+        if not conn:
+            op.failed(category="not_found")
+            return False, f"Connector '{connector_id}' not found", {}
 
-    password = conn.password or ""
-    conn_str = conn.connection_string or ""
-    if "[encrypted-secret-unavailable]" in password or "[decryption-failed]" in password:
-        return (
-            False,
-            (
-                "Saved credentials cannot be decrypted. Re-enter the password or "
-                "connection string on the Connectors page, then Test again."
-            ),
-            {},
-        )
-    if "[encrypted-secret-unavailable]" in conn_str or "[decryption-failed]" in conn_str:
-        return (
-            False,
-            (
-                "Saved connection string cannot be decrypted. Re-enter it on the "
-                "Connectors page, then Test again."
-            ),
-            {},
-        )
+        password = conn.password or ""
+        conn_str = conn.connection_string or ""
+        if "[encrypted-secret-unavailable]" in password or "[decryption-failed]" in password:
+            emit_event(
+                _LOG,
+                "connector.secret.undecryptable",
+                outcome="failed",
+                level=logging.ERROR,
+                driver_family=driver_family(conn.type or ""),
+                connector_id=connector_id,
+                affected_field="password",
+            )
+            op.failed(category="secret_undecryptable")
+            return (
+                False,
+                (
+                    "Saved credentials cannot be decrypted. Re-enter the password or "
+                    "connection string on the Connectors page, then Test again."
+                ),
+                {},
+            )
+        if "[encrypted-secret-unavailable]" in conn_str or "[decryption-failed]" in conn_str:
+            emit_event(
+                _LOG,
+                "connector.secret.undecryptable",
+                outcome="failed",
+                level=logging.ERROR,
+                driver_family=driver_family(conn.type or ""),
+                connector_id=connector_id,
+                affected_field="connection_string",
+            )
+            op.failed(category="secret_undecryptable")
+            return (
+                False,
+                (
+                    "Saved connection string cannot be decrypted. Re-enter it on the "
+                    "Connectors page, then Test again."
+                ),
+                {},
+            )
 
-    from src.transfer.connector_registry import run_probe
+        from src.transfer.connector_registry import humanize_connection_error, run_probe
 
-    cfg = probe_cfg_from_saved(conn)
-    try:
-        ok, message = run_probe(conn.type or "", cfg)
-    except Exception as exc:
-        return False, f"Connection failed: {exc}", cfg
-    return ok, message, cfg
+        cfg = probe_cfg_from_saved(conn)
+        try:
+            ok, message = run_probe(conn.type or "", cfg)
+        except Exception as exc:
+            op.errored(exc)
+            return False, humanize_connection_error(conn.type or "", exc), cfg
+        if ok:
+            op.succeeded()
+        elif not op.outcome:
+            op.failed(category="probe_failed")
+        return ok, message, cfg
 
 
 def endpoint_from_saved_connector(

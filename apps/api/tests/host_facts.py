@@ -8,6 +8,7 @@ not fail a product assertion that is actually a host fact.
 from __future__ import annotations
 
 import os
+import socket
 from collections.abc import Iterable
 from typing import Any
 
@@ -61,6 +62,36 @@ def require_pgvector() -> None:
     """Skip the calling test when this host cannot install or use pgvector."""
     if not pgvector_extension_available():
         pytest.skip(PGVECTOR_SKIP_REASON)
+
+
+def drop_pg_table(table: str, schema: str = "public") -> None:
+    """Drop a test table, tolerating only an unreachable PostgreSQL endpoint."""
+    import psycopg2
+    from psycopg2 import sql
+
+    kwargs = _pg_connect_kwargs()
+    try:
+        conn = psycopg2.connect(**kwargs)
+    except psycopg2.OperationalError:
+        try:
+            with socket.create_connection(
+                (kwargs["host"], kwargs["port"]), timeout=1
+            ):
+                pass
+        except OSError:
+            return
+        raise
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                sql.SQL("DROP TABLE IF EXISTS {}.{}").format(
+                    sql.Identifier(schema), sql.Identifier(table)
+                )
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def listed_mysql_collations(cur: Any, names: Iterable[str]) -> set[str]:

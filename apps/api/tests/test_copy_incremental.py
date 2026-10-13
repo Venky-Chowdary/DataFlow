@@ -110,7 +110,9 @@ def test_sqlite_cursor_predicate_matches_lexicographic():
         watermark="2024-06-01 00:00:00\x1f42",
         pk_column="id",
     )
-    assert '("updated_at", "id") >' in sql
+    # A date-time watermark compares on the separator-normalized cell (MX3-04).
+    assert sql.startswith('((CASE WHEN "updated_at" GLOB')
+    assert ', "id") >' in sql
     assert "'2024-06-01 00:00:00'" in sql
     assert "'42'" in sql
     empty = sqlite_cursor_predicate_sql(

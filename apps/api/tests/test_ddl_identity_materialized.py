@@ -77,6 +77,106 @@ def test_narrowed_column_still_refused():
         assert_ddl_identity(approved, narrowed, dest_db="mysql")
 
 
+def test_same_run_precision_enrichment_updates_the_ddl_proof():
+    from src.transfer.engine_identity import _enforce_ddl_identity
+
+    preflight_maps = [
+        {"source": "amount", "target": "amount", "target_type": "DECIMAL"},
+        {"source": "id", "target": "id", "target_type": "DECIMAL"},
+    ]
+    execute_maps = [
+        {"source": "amount", "target": "amount", "target_type": "DECIMAL(38,2)"},
+        {"source": "id", "target": "id", "target_type": "DECIMAL(38,0)"},
+    ]
+    proof = {
+        "proof_bundle": {
+            "ddl_identity": ddl_identity_report(preflight_maps, dest_db="s3")
+        }
+    }
+
+    assert _enforce_ddl_identity(
+        proof,
+        execute_maps,
+        dest_db="s3",
+        preflight_mappings=execute_maps,
+    ) is None
+    assert {
+        row["target"]: row["materialized_ddl"]
+        for row in proof["proof_bundle"]["ddl_identity"]["columns"]
+    } == {"amount": "DECIMAL(38,2)", "id": "DECIMAL(38,0)"}
+    approved_hash = proof["proof_bundle"]["ddl_identity"]["ddl_identity_hash"]
+    edited_maps = [
+        dict(mapping, target_type="DECIMAL(38,3)")
+        if mapping["target"] == "amount"
+        else dict(mapping)
+        for mapping in execute_maps
+    ]
+    assert _enforce_ddl_identity(
+        proof,
+        edited_maps,
+        dest_db="s3",
+        approved_ddl_identity_hash=approved_hash,
+    )
+
+
+def test_same_run_precision_enrichment_updates_the_decision_artifact():
+    from services.decision_kernel import build_artifact_from_mappings
+    from src.transfer.engine_identity import _enforce_decision_artifact
+
+    preflight_maps = [
+        {"source": "amount", "target": "amount", "target_type": "DECIMAL"},
+        {"source": "id", "target": "id", "target_type": "DECIMAL"},
+    ]
+    execute_maps = [
+        {"source": "amount", "target": "amount", "target_type": "DECIMAL(38,2)"},
+        {"source": "id", "target": "id", "target_type": "DECIMAL(38,0)"},
+    ]
+    artifact = build_artifact_from_mappings(
+        preflight_maps,
+        dest_db="s3",
+        source_fingerprint="source-schema",
+        dest_fingerprint="destination-schema",
+    ).to_dict()
+    proof = {
+        "proof_bundle": {
+            "decision_artifact": artifact,
+            "decision_artifact_hash": artifact["content_hash"],
+        }
+    }
+
+    error, execute_artifact = _enforce_decision_artifact(
+        proof,
+        execute_maps,
+        dest_db="s3",
+        source_fingerprint="source-schema",
+        dest_fingerprint="destination-schema",
+        source_format="dynamodb",
+    )
+    assert error is None, error
+    assert execute_artifact
+    assert execute_artifact["ddl"]["ddl_identity_hash"] == (
+        approved_mapping_ddl_fingerprint(execute_maps, dest_db="s3")
+    )
+
+    edited_maps = [
+        dict(mapping, target_type="DECIMAL(38,3)")
+        if mapping["target"] == "amount"
+        else dict(mapping)
+        for mapping in execute_maps
+    ]
+    error, _ = _enforce_decision_artifact(
+        proof,
+        edited_maps,
+        dest_db="s3",
+        approved_decision_artifact_hash=execute_artifact["content_hash"],
+        decision_artifact=execute_artifact,
+        source_fingerprint="source-schema",
+        dest_fingerprint="destination-schema",
+        source_format="dynamodb",
+    )
+    assert error and "DDL identity diverged" in error
+
+
 def test_added_column_still_refused():
     approved = approved_mapping_ddl_fingerprint(OPERATOR_MAPS, dest_db="mysql")
     extra = [*OPERATOR_MAPS, {"source": "ssn", "target": "ssn", "target_type": "TEXT"}]
@@ -115,6 +215,7 @@ def test_unstamped_column_never_equals_a_stamped_one():
     assert approved_mapping_ddl_fingerprint(
         unstamped, dest_db="mysql"
     ) != approved_mapping_ddl_fingerprint(OPERATOR_MAPS, dest_db="mysql")
+
 
 
 def test_report_carries_columns_for_the_execute_diff():

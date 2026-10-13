@@ -8,7 +8,6 @@ from __future__ import annotations
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 def test_dynamo_empty_probe_keyschema_seed_contract():

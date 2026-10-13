@@ -23,6 +23,7 @@ import {
   pilotActionChipLabel,
   runPilotConfirm,
   showsFollowUpPrompts,
+  uniquePilotPrompts,
 } from "../lib/pilotChat";
 import { useStudioActions } from "../lib/StudioActionsContext";
 import { API_BASE, Screen } from "../lib/types";
@@ -85,7 +86,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
   const anyCloudReady = engineUsesProvider;
 
   useEffect(() => {
-    fetchCopilotPrompts().then(setPrompts).catch(() => {});
+    fetchCopilotPrompts().then((list) => setPrompts(uniquePilotPrompts(list))).catch(() => {});
     fetchModelCapabilities()
       .then(setModelCapabilities)
       .catch(() => setModelCapabilities(null));
@@ -233,7 +234,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       if (!(res.pending_actions && res.pending_actions.length > 0)) {
         applySafeActions(res.suggested_actions, res.tools_used);
       }
-      if (res.suggested_prompts?.length) setPrompts(res.suggested_prompts);
+      if (res.suggested_prompts?.length) setPrompts(uniquePilotPrompts(res.suggested_prompts));
     } catch (error) {
       setPilotOnline(false);
       const detail = formatPilotReachError(error, API_BASE);
@@ -466,7 +467,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 <>
                   <p className="df2-section-label">Suggested prompts</p>
                   <div className="df2-pilot-quick">
-                    {prompts.slice(0, 4).map((p) => (
+                    {uniquePilotPrompts(prompts).slice(0, 4).map((p) => (
                       <button key={p} type="button" onClick={() => send(p)}>{p}</button>
                     ))}
                   </div>
@@ -512,7 +513,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                   })}
                   {showsFollowUpPrompts(i, session.messages.length, msg.suggested_prompts) && (
                     <div className="df2-pilot-followups">
-                      {msg.suggested_prompts.map((p) => (
+                      {uniquePilotPrompts(msg.suggested_prompts).map((p) => (
                         <button key={p} type="button" className="df2-pilot-followup" onClick={() => send(p)} disabled={loading}>
                           {p}
                         </button>

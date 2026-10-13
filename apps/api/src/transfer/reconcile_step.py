@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import Any
 
 from connectors.writer_common import (
@@ -11,9 +12,11 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy_for_validation_mode,
 )
+from services.ops_events import emit_event
 from services.dest_precount import (
     OVERWRITE_SOURCE_KEYS_KEY,
     PRECOUNT_KEY,
+    destination_row_count,
     VECTOR_IDENTITY_ENGINES,
     records_to_key_tuples,
     stamp_artifact_census,
@@ -56,6 +59,51 @@ from services.reconciliation import (
 from .adapters import records_to_matrix, resolve_connector_config
 from .adapters_introspect import _introspect_table_schema_rich
 from .models import EndpointConfig
+
+_logger = logging.getLogger(__name__)
+
+
+class _SampleReadExhausted(TargetSampleUnavailable):
+    """A Gate-8 destination read that still failed after bounded retries."""
+
+    def __init__(self, cause: TargetSampleUnavailable, *, attempts: int, transient: bool) -> None:
+        self.attempts = attempts
+        self.transient = transient
+        super().__init__(f"{cause} (after {attempts} attempt(s))")
+
+
+def _read_target_sample_retrying(purpose: str, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+    """``read_target_sample`` with backoff for transient faults (QA MX2-15).
+
+    Post-write verification runs after rows are committed; one dropped
+    connection must not decide the job. Deterministic failures (grants,
+    missing objects) are not retried. Exhausted reads raise
+    :class:`_SampleReadExhausted` so callers still fail closed.
+    """
+    from services.error_handling import RetryBudget, classify_error, with_retry
+
+    budget = RetryBudget()
+
+    def _on_transient(exc: Exception, delay: float) -> None:
+        _logger.warning(
+            "Gate-8 %s read failed transiently (attempt %d/%d); retrying in %.1fs: %s",
+            purpose, budget.attempts_made, budget.max_attempts, delay, exc,
+        )
+
+    try:
+        return with_retry(
+            lambda: read_target_sample(*args, **kwargs),
+            budget=budget,
+            on_transient=_on_transient,
+        )
+    except TargetSampleUnavailable as exc:
+        transient = bool(classify_error(exc).get("retriable"))
+        attempts = max(1, budget.attempts_made)
+        _logger.error(
+            "Gate-8 %s read unavailable after %d attempt(s) (transient=%s, table=%s): %s",
+            purpose, attempts, transient, kwargs.get("table_name"), exc,
+        )
+        raise _SampleReadExhausted(exc, attempts=attempts, transient=transient) from exc
 
 
 def _finalize_reconcile(
@@ -368,6 +416,15 @@ def _source_key_values(
         if len(values) >= limit:
             break
     return values
+
+
+def _measured_count(measured: Any, fallback: int) -> int:
+    """The measured count when one exists (including 0), else ``fallback``."""
+    if isinstance(measured, bool):
+        return int(fallback)
+    if isinstance(measured, int) and measured >= 0:
+        return measured
+    return int(fallback)
 
 
 def _as_count(value: Any) -> int:
@@ -745,8 +802,12 @@ def _maybe_attach_verification_ladder(
         target_rows=target_rows,
         columns=target_cols,
         pk_column=pk_column,
-        source_row_count=int(report.get("source_rows") or len(source_rows)),
-        target_row_count=int(report.get("target_rows") or len(target_rows)),
+        # A measured 0 is a count, not a missing one. ``report["source_rows"] or
+        # len(...)`` replaced a quiet incremental poll's reader count (0) with a
+        # whole-table re-read, so L1 expected every existing row to be new and
+        # failed the steady state of every incremental schedule (QA ACC-02).
+        source_row_count=_measured_count(report.get("source_rows"), len(source_rows)),
+        target_row_count=_measured_count(report.get("target_rows"), len(target_rows)),
         rejected_rows=int(report.get("rejected_rows") or 0),
         coerced_null_rows=int(report.get("coerced_null_rows") or 0),
         rows_skipped=int(report.get("rows_skipped") or 0),
@@ -921,6 +982,45 @@ def _referential_integrity_evidence(
     return evidence
 
 
+def _classify_ri_anomaly_origin(
+    evidence: dict[str, Any],
+    source_endpoint: EndpointConfig,
+    schema_state: dict[str, Any],
+) -> None:
+    """Say whether destination orphans were already orphans in the source.
+
+    ``source``: the source child rows reference parents the source lacks — the
+    copy is faithful and the data is wrong. ``destination``: the source holds
+    every parent, so the destination parent set is incomplete. A source scan
+    that did not complete is ``undetermined``, never either answer.
+    """
+    evidence["anomaly_origin"] = "undetermined"
+    try:
+        from services.population_orphan_probe import probe_population_fk_orphans
+
+        src_cfg = resolve_connector_config(source_endpoint)
+        src_table = str(source_endpoint.table or src_cfg.get("table") or "")
+        foreign_keys, _unparsed = _source_foreign_keys(schema_state)
+        scan = probe_population_fk_orphans(
+            child_table=src_table,
+            mappings=[],
+            foreign_keys=foreign_keys,
+            source_config=src_cfg,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "source orphan classification failed: %s", exc, exc_info=exc
+        )
+        evidence["anomaly_origin_reason"] = f"source orphan scan failed: {exc}"
+        return
+    if not scan.get("ran") or not scan.get("complete"):
+        evidence["anomaly_origin_reason"] = str(scan.get("note") or "source scan incomplete")
+        return
+    source_orphans = int(scan.get("orphan_count") or 0)
+    evidence["source_orphan_rows"] = source_orphans
+    evidence["anomaly_origin"] = "source" if source_orphans > 0 else "destination"
+
+
 def _apply_n5_gate8_extensions(
     stamped: dict[str, Any],
     n5_ctx: dict[str, Any],
@@ -953,6 +1053,7 @@ def _apply_n5_gate8_extensions(
         out,
         evidence=ri if isinstance(ri, dict) else None,
         has_relationships=asked,
+        quarantined_orphans=int(n5_ctx.get("orphan_fk_rows") or 0),
     )
 
 
@@ -977,6 +1078,47 @@ def _writer_supplied_engine_digests(
         return None
     rows = summary.get("rows_written")
     return source, target, int(rows or 0)
+
+
+def _with_reread_dest_count(
+    paired: tuple[str, str, int],
+    *,
+    db_type: str,
+    cfg: dict[str, Any],
+    schema: str,
+    table_name: str,
+    rows_before: int | None,
+) -> tuple[str, str, int]:
+    """Writer digest pair with the destination COUNT(*) re-read, not the batch.
+
+    The pair's row count is the writer's ``rows_written`` — the batch. Into an
+    occupied destination (incremental run 2+, append) that is not the
+    population: L1 graded ``batch - target_rows_before == batch`` and failed
+    every correct second run, and a quiet poll (batch 0) missed the no-op proof
+    (QA RT-02). When the count cannot be re-read and the destination already
+    held rows, the population is reported unmeasured (-1, the
+    ``verify_target`` convention) so Gate-8 fails closed.
+    """
+    source, target, batch = paired
+    measured = destination_row_count(
+        db_type, cfg, schema=schema, table_name=table_name
+    )
+    if measured is not None:
+        if rows_before and int(measured) != int(batch):
+            _logger.info(
+                "gate8: writer digest pair for %s — batch %d, destination COUNT(*) "
+                "%d (held %d before)",
+                table_name, int(batch), int(measured), int(rows_before),
+            )
+        return source, target, int(measured)
+    if rows_before:
+        _logger.warning(
+            "gate8: destination COUNT(*) re-read unavailable for %s (%s) after a "
+            "write into %d existing row(s); population left unmeasured",
+            table_name, db_type, int(rows_before),
+        )
+        return source, target, -1
+    return paired
 
 
 _COUNT_PROOF_TOKEN = re.compile(r"^(?:dest_count|pk_join_count):(\d+)$")
@@ -1381,7 +1523,161 @@ def _engine_population_digests(
     return source_digest.checksum, dest_digest.checksum, dest_digest.row_count
 
 
-def run_reconciliation(
+def _unique_check_dialect(db_type: str) -> str | None:
+    """Identifier dialect for post-load rule checks, or ``None`` when the
+    destination is not a SQL engine the shared warehouse helper serves
+    (SQLite/Postgres/MySQL/MariaDB plus every ``warehouse_sql_quote_dialect``
+    family: MSSQL, Oracle, Snowflake, BigQuery, DuckDB, Databricks, Redshift)."""
+    from services.dest_precount import count_dialect
+    from services.dialect_profiles import warehouse_sql_quote_dialect
+
+    db = count_dialect(str(db_type or ""))
+    if db == "mariadb":
+        db = "mysql"
+    if db in {"sqlite", "postgresql", "mysql", "clickhouse"}:
+        return db
+    return warehouse_sql_quote_dialect(db)
+
+
+def _count_dest_duplicates(
+    dialect: str,
+    dest_cfg: dict[str, Any],
+    *,
+    endpoint: EndpointConfig,
+    table: str,
+    column: str,
+) -> int:
+    """``COUNT(*) - COUNT(DISTINCT col) WHERE col IS NOT NULL`` on the dest,
+    through the canonical warehouse-SQL engine + table-ref helpers."""
+    import sqlalchemy as sa
+
+    from connectors.sql_identifiers import require_safe_identifier
+    from services.dest_precount import (
+        warehouse_sql_engine,
+        warehouse_sql_table_ref,
+    )
+
+    table_ref = warehouse_sql_table_ref(
+        dialect, dest_cfg, str(endpoint.schema or ""), table
+    )
+    with warehouse_sql_engine(dialect, dest_cfg) as engine:
+        qcol = engine.dialect.identifier_preparer.quote(
+            require_safe_identifier(column, preserve_case=True)
+        )
+        stmt = sa.text(
+            f"SELECT COUNT(*) - COUNT(DISTINCT {qcol}) FROM {table_ref} "
+            f"WHERE {qcol} IS NOT NULL"
+        )
+        with engine.connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)
+
+
+def _run_unique_rule_checks(
+    mappings: list[dict] | None,
+    *,
+    endpoint: EndpointConfig,
+) -> list[dict[str, Any]]:
+    """Post-load population checks for ``unique`` business-rule contracts.
+
+    Runs once per table at Gate-8 for each mapping carrying a unique contract —
+    the writer never sees it (``evaluate_contract`` ignores non-row-local
+    types). Entries name the rule and outcome only, never the values.
+    """
+    contracts: list[tuple[str, dict]] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        target = str(m.get("target") or "").strip()
+        if not target:
+            continue
+        for c in m.get("rule_contracts") or []:
+            if isinstance(c, dict) and str(c.get("type") or "") == "unique":
+                contracts.append((target, c))
+    checks: list[dict[str, Any]] = []
+    if not contracts:
+        return checks
+    from .connector_capabilities import resolve_driver_type
+
+    dest_type = resolve_driver_type(endpoint.format or "")
+    dest_cfg = resolve_connector_config(endpoint)
+    table = str(endpoint.table or dest_cfg.get("table") or "")
+    for target, contract in contracts:
+        entry = {
+            "rule_id": str(contract.get("rule_id") or ""),
+            "type": "unique",
+            "column": target,
+        }
+        dialect = _unique_check_dialect(dest_type)
+        if dialect is None or not table:
+            checks.append(
+                {**entry, "status": "unverified", "reason": "unsupported_destination"}
+            )
+            continue
+        try:
+            duplicates = _count_dest_duplicates(
+                dialect, dest_cfg, endpoint=endpoint, table=table, column=target
+            )
+        except Exception as exc:
+            # Type name only — the exception text may carry values.
+            _logger.warning(
+                "unique rule check failed: error_type=%s", type(exc).__name__
+            )
+            checks.append(
+                {**entry, "status": "unverified", "reason": "count_error"}
+            )
+            continue
+        if duplicates:
+            checks.append({**entry, "status": "failed", "duplicates": duplicates})
+        else:
+            checks.append({**entry, "status": "passed"})
+    return checks
+
+
+def _apply_unique_rule_checks(
+    payload: dict[str, Any],
+    mappings: list[dict] | None,
+    *,
+    endpoint: EndpointConfig,
+    validation_mode: str = "strict",
+) -> None:
+    """Apply post-load unique-contract outcomes onto a recon payload."""
+    rule_checks = _run_unique_rule_checks(mappings, endpoint=endpoint)
+    if not rule_checks:
+        return
+    payload["rule_checks"] = rule_checks
+    failed = [c for c in rule_checks if c.get("status") == "failed"]
+    if failed:
+        payload["passed"] = False
+        detail = "; ".join(
+            f"business rule {c['rule_id']} failed: "
+            f"{c['duplicates']} duplicate value(s) in {c['column']} after load"
+            for c in failed
+        )
+        payload["message"] = f"{payload.get('message') or ''} {detail}".strip()
+    unverified = [c for c in rule_checks if c.get("status") == "unverified"]
+    if unverified:
+        # Same convention as file-export Gate-8: an unverified check must not
+        # read as a green pass — unproven, never migration_proven. Strict
+        # additionally fails the job (balanced completes, still unproven).
+        payload["unverified_rules"] = [
+            {"rule_id": c.get("rule_id"), "reason": c.get("reason") or "unverified"}
+            for c in unverified
+        ]
+        payload["unproven"] = True
+        payload["migration_proven"] = False
+        if str(validation_mode or "").strip().lower() in {"strict", "maximum"}:
+            payload["passed"] = False
+            details = dict(payload.get("details") or {})
+            details["reason"] = "business_rule_unverified"
+            payload["details"] = details
+        note = (
+            f"{len(unverified)} business-rule uniqueness check(s) "
+            "unverified for this destination"
+        )
+        payload["message"] = f"{payload.get('message') or ''} — {note}".strip()
+
+
+def _run_reconciliation_impl(
     *,
     endpoint: EndpointConfig,
     records: list[dict],
@@ -1699,6 +1995,9 @@ def run_reconciliation(
     n5_ctx["dest_schema"] = str(schema or "")
     n5_ctx["dest_table"] = str(table_name or "")
     n5_ctx["rejected_rows"] = rejected_rows
+    n5_ctx["orphan_fk_rows"] = int(
+        (dest_summary or {}).get("orphan_fk_rows") or 0
+    ) if isinstance(dest_summary, dict) else 0
     if source_endpoint is not None and source_endpoint.kind == "database":
         src_cfg = resolve_connector_config(source_endpoint)
         src_type = resolve_driver_type(
@@ -1924,18 +2223,25 @@ def run_reconciliation(
             schema_state=schema_state,
             source_schema=ri_source_schema,
         )
+        if int(ri_state.get("orphan_rows") or 0) > 0 and source_endpoint is not None:
+            _classify_ri_anomaly_origin(ri_state, source_endpoint, schema_state)
         physical_state["referential_integrity"] = ri_state
         n5_ctx["source_has_fks"] = bool(
             ri_state.get("asked") or ri_state.get("relations")
         )
     except Exception as exc:
         logging.getLogger(__name__).warning(
-            "destination referential integrity probe skipped: %s", exc, exc_info=exc
+            "destination referential integrity probe failed: %s", exc, exc_info=exc
         )
+        # A probe that raised proves nothing either way; G22 must not read it
+        # as "no foreign keys declared".
         physical_state["referential_integrity"] = {
             "verified": False,
+            "asked": True,
+            "probe_error": True,
             "reason": f"probe failed: {exc}",
         }
+        n5_ctx["source_has_fks"] = True
 
     # The writer digest of a resumed pass covers the tail it wrote, not the
     # population. Recompute from the full source when the caller re-supplied it;
@@ -2134,7 +2440,14 @@ def run_reconciliation(
     # here would compare two different algorithms and always disagree.
     paired = _writer_supplied_engine_digests(dest_summary)
     if paired is not None and not source_checksum_scope_note:
-        engine_digests = paired
+        engine_digests = _with_reread_dest_count(
+            paired,
+            db_type=db_type,
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            rows_before=rows_before,
+        )
     elif (_engine_digest_enabled() or _cdc_source_image_gate(dest_summary)) and not source_checksum_scope_note:
         engine_digests = _engine_population_digests(
             source_endpoint=source_endpoint,
@@ -2304,7 +2617,8 @@ def run_reconciliation(
         # 21+ as NULL (Mongo→MySQL users with 24 fields: Gate-8 failed on
         # referral_invite_modal_dismissed with source 0 vs invented NULL).
         try:
-            target_sample = read_target_sample(
+            target_sample = _read_target_sample_retrying(
+                "sample compare",
                 db_type,
                 cfg,
                 schema=schema,
@@ -2318,11 +2632,19 @@ def run_reconciliation(
             # A failed read is not "no rows to compare". Skipping Gate-8 here
             # used to report a clean reconcile while the destination was
             # unreachable — the exact silent-pass the proof bar forbids.
+            unavailable = bool(getattr(exc, "transient", False))
             return _finalize({
                 "passed": False,
+                "verification_unavailable": unavailable,
                 "message": (
                     "Gate-8 sample compare unavailable: could not read destination "
                     f"sample ({exc}). Refusing to treat a failed read as fidelity proof."
+                    + (
+                        " The committed rows were kept; re-run verification once the "
+                        "destination is reachable."
+                        if unavailable
+                        else ""
+                    )
                 ),
                 "source_rows": source_rows,
                 "target_rows": target_rows,
@@ -2354,7 +2676,8 @@ def run_reconciliation(
         sort_key = _sort_key_for_columns(target_cols, mapping_dicts)
         if sort_key:
             try:
-                still_present = read_target_sample(
+                still_present = _read_target_sample_retrying(
+                    "delete proof",
                     db_type,
                     cfg,
                     schema=schema,
@@ -2367,6 +2690,7 @@ def run_reconciliation(
             except TargetSampleUnavailable as exc:
                 return _finalize({
                     "passed": False,
+                    "verification_unavailable": bool(getattr(exc, "transient", False)),
                     "message": (
                         "Gate-8 delete proof unavailable: could not read destination "
                         f"keys ({exc}). Refusing to treat a failed read as proof that "
@@ -2790,3 +3114,139 @@ def run_reconciliation(
         keyed_expected_delta=keyed_delta,
     )
     return _finalize(report.to_dict())
+
+
+def run_reconciliation(
+    *,
+    endpoint: EndpointConfig,
+    records: list[dict],
+    columns: list[str],
+    rows_written: int,
+    writer_checksum: str,
+    dest_summary: dict[str, Any],
+    mappings: list[dict] | None = None,
+    source_schema: dict[str, str] | None = None,
+    validation_mode: str = "strict",
+    source_endpoint: EndpointConfig | None = None,
+    source_spool: Any = None,
+) -> dict[str, Any]:
+    """Verify row counts and checksums against the destination.
+
+    Thin wrapper: unique business-rule contracts are enforced post-load exactly
+    once per call — no early-return path inside the impl may skip them.
+    """
+    started = time.monotonic()
+    try:
+        recon = _run_reconciliation_with_rules(
+            endpoint=endpoint,
+            records=records,
+            columns=columns,
+            rows_written=rows_written,
+            writer_checksum=writer_checksum,
+            dest_summary=dest_summary,
+            mappings=mappings,
+            source_schema=source_schema,
+            validation_mode=validation_mode,
+            source_endpoint=source_endpoint,
+            source_spool=source_spool,
+        )
+    except BaseException as exc:
+        emit_event(
+            _logger, "gate8.verify.completed", outcome="errored",
+            duration_ms=(time.monotonic() - started) * 1000.0, error=exc,
+            destination_type=_endpoint_type(endpoint), validation_mode=validation_mode,
+        )
+        raise
+    _emit_gate8_verdict(
+        recon, endpoint=endpoint, validation_mode=validation_mode,
+        rows_written=rows_written, duration_ms=(time.monotonic() - started) * 1000.0,
+    )
+    return recon
+
+
+def _endpoint_type(endpoint: Any) -> str | None:
+    return str(getattr(endpoint, "format", "") or "") or None
+
+
+def _gate8_verdict(recon: dict[str, Any]) -> tuple[str, str, str | None]:
+    """(verdict, outcome, reason_code) of the *verification*, checked before ``passed``.
+
+    An unreadable destination or an unproven population also sets
+    ``passed=False`` (fail closed), but nothing was shown wrong — that is a
+    hold, not a mismatch. A passing job whose destination has no read-back by
+    design (``skipped_readback``: file/object exports, opaque vector sinks) is
+    an expected ``skipped`` — neither proof nor an alert. Only a measured
+    disagreement is ``failed``. The job effect is reported as ``job_outcome``.
+    """
+    if recon.get("verification_unavailable"):
+        return "unavailable", "held", None
+    if recon.get("unproven") and recon.get("passed") and recon.get("skipped_readback"):
+        return "unproven", "skipped", "dest_not_verifiable"
+    if recon.get("unproven"):
+        return "unproven", "held", None
+    if not recon.get("passed"):
+        return "failed", "failed", None
+    return "passed", "succeeded", None
+
+
+def _emit_gate8_verdict(
+    recon: dict[str, Any] | None,
+    *,
+    endpoint: Any,
+    validation_mode: str,
+    rows_written: int,
+    duration_ms: float,
+) -> None:
+    recon = recon if isinstance(recon, dict) else {}
+    verdict, outcome, reason_code = _gate8_verdict(recon)
+    rule_checks = [c for c in recon.get("rule_checks") or [] if isinstance(c, dict)]
+    emit_event(
+        _logger, "gate8.verify.completed", outcome=outcome, duration_ms=duration_ms,
+        verdict=verdict,
+        reason_code=reason_code,
+        job_outcome="succeeded" if recon.get("passed") else "failed",
+        destination_type=_endpoint_type(endpoint),
+        validation_mode=validation_mode,
+        rows_written=rows_written,
+        source_rows=recon.get("source_rows"),
+        target_rows=recon.get("target_rows"),
+        rejected_rows=recon.get("rejected_rows"),
+        checksum_match=recon.get("checksum_match"),
+        verification_unavailable=bool(recon.get("verification_unavailable")),
+        skipped_readback=bool(recon.get("skipped_readback")),
+        rule_checks_failed=sum(1 for c in rule_checks if c.get("status") == "failed"),
+    )
+
+
+def _run_reconciliation_with_rules(
+    *,
+    endpoint: EndpointConfig,
+    records: list[dict],
+    columns: list[str],
+    rows_written: int,
+    writer_checksum: str,
+    dest_summary: dict[str, Any],
+    mappings: list[dict] | None,
+    source_schema: dict[str, str] | None,
+    validation_mode: str,
+    source_endpoint: EndpointConfig | None,
+    source_spool: Any,
+) -> dict[str, Any]:
+    recon = _run_reconciliation_impl(
+        endpoint=endpoint,
+        records=records,
+        columns=columns,
+        rows_written=rows_written,
+        writer_checksum=writer_checksum,
+        dest_summary=dest_summary,
+        mappings=mappings,
+        source_schema=source_schema,
+        validation_mode=validation_mode,
+        source_endpoint=source_endpoint,
+        source_spool=source_spool,
+    )
+    if not (recon or {}).get("rule_checks"):
+        _apply_unique_rule_checks(
+            recon, mappings, endpoint=endpoint, validation_mode=validation_mode
+        )
+    return recon

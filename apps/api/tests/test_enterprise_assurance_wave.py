@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-import pytest
+import ast
+from pathlib import Path
+
 
 
 def test_audit_tip_anchor_stub(tmp_path, monkeypatch):
@@ -71,3 +73,27 @@ def test_parallel_workers_default_ordered_honesty():
     d = ChunkDispatcher(max_workers=2)
     assert d.max_workers == 2
     assert callable(getattr(d, "abort", None))
+
+
+def test_semantic_abbreviations_have_unique_keys_and_vitals_hr_mapping():
+    source_path = (
+        Path(__file__).resolve().parents[1] / "services" / "semantic_abbreviations.py"
+    )
+    module = ast.parse(source_path.read_text(encoding="utf-8"))
+    dictionary = next(
+        node.value
+        for node in module.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "ABBREVIATIONS"
+        and isinstance(node.value, ast.Dict)
+    )
+    keys = [ast.literal_eval(key) for key in dictionary.keys]
+    mapping = dict(zip(keys, (ast.literal_eval(value) for value in dictionary.values)))
+
+    assert len(keys) == len(set(keys))
+    assert mapping["vitals_hr"] == "heart_rate"
+
+    from services.semantic_abbreviations import ABBREVIATIONS
+
+    assert ABBREVIATIONS["vitals_hr"] == "heart_rate"

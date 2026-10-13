@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
+import time
 from services.brand_env import getenv_brand
 import urllib.parse
 import urllib.request
 from typing import Any
 
 from services.egress_guard import egress_url_allowed, host_is_blocked
+from services.ops_events import emit_event
 from services.notification_store import (
     NotificationChannel,
     get_channel_decrypted,
@@ -27,6 +28,9 @@ from services.notification_store import (
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
+
+#: Channel kinds send_to_channel dispatches; anything else logs as "unknown".
+_CHANNEL_KINDS = frozenset({"slack", "teams", "email", "servicenow", "webhook"})
 
 
 def _allowed_url(url: str) -> bool:
@@ -67,7 +71,9 @@ def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None
             body = resp.read().decode("utf-8", errors="ignore")
         return {"ok": True, "status": resp.status, "body": body[:500]}
     except Exception as exc:
-        logger.warning("HTTP POST to %s failed: %s", url, exc)
+        # Slack/Teams webhook URLs carry their secret in the path; the error
+        # text can echo it. The class name is enough to triage.
+        logger.warning("notification HTTP POST failed: %s", type(exc).__name__)
         return {"ok": False, "error": str(exc)}
 
 
@@ -114,7 +120,7 @@ def _send_mailgun(recipients: list[str], subject: str, body: str, from_addr: str
             resp_body = resp.read().decode("utf-8", errors="ignore")
         return {"ok": True, "status": resp.status, "body": resp_body[:500]}
     except Exception as exc:
-        logger.warning("Mailgun send failed: %s", exc)
+        logger.warning("Mailgun send failed: %s", type(exc).__name__)
         return {"ok": False, "error": str(exc)}
 
 
@@ -150,7 +156,7 @@ def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[st
             server.send_message(msg)
         return {"ok": True}
     except Exception as exc:
-        logger.warning("SMTP send failed: %s", exc)
+        logger.warning("SMTP send failed: %s", type(exc).__name__)
         return {"ok": False, "error": str(exc)}
 
 
@@ -313,8 +319,49 @@ def _payload_text(payload: dict[str, Any]) -> str:
 
 
 def send_to_channel(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
+    """Deliver ``payload`` and emit one ``notification.delivery.*`` event.
+
+    The event names the channel kind and id, never the URL, recipients, or
+    error text. A failed delivery is WARNING: it does not fail the job.
+    """
+    kind = str(channel.kind or "")
+    fields = {
+        "channel_kind": kind if kind in _CHANNEL_KINDS else "unknown",
+        "channel_id": channel.id,
+        "workspace_id": channel.workspace_id or None,
+    }
     if not channel.enabled:
+        emit_event(
+            logger, "notification.delivery.skipped", outcome="skipped",
+            reason="channel_disabled", **fields,
+        )
         return {"ok": False, "error": "Channel disabled"}
+    started = time.monotonic()
+    try:
+        result = _dispatch_to_channel(channel, payload)
+    except Exception as exc:
+        emit_event(
+            logger, "notification.delivery.failed", outcome="failed",
+            level=logging.WARNING, error=exc, reason="exception",
+            duration_ms=(time.monotonic() - started) * 1000.0, **fields,
+        )
+        raise
+    status = result.get("status") if isinstance(result, dict) else None
+    ok = bool(isinstance(result, dict) and result.get("ok"))
+    emit_event(
+        logger,
+        "notification.delivery.succeeded" if ok else "notification.delivery.failed",
+        outcome="succeeded" if ok else "failed",
+        level=None if ok else logging.WARNING,
+        duration_ms=(time.monotonic() - started) * 1000.0,
+        http_status=status if isinstance(status, int) else None,
+        reason=None if ok else ("unknown_kind" if fields["channel_kind"] == "unknown" else "not_delivered"),
+        **fields,
+    )
+    return result
+
+
+def _dispatch_to_channel(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
     kind = channel.kind
     if kind == "slack":
         return _send_slack(channel, payload)

@@ -245,6 +245,7 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(step, /pre-load image/);
     assert.match(step, /Destination names land on Map/);
     const ledger = readFileSync(join(webRoot, "components/transfer/BusinessRuleLedger.tsx"), "utf8");
+    const map = readFileSync(join(webRoot, "pages/transfer/TransferMapStep.tsx"), "utf8");
     assert.match(ledger, /header_roles/);
     assert.match(ledger, /How this file was read/);
     assert.match(ledger, /Accept as Direct/);
@@ -258,8 +259,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(ledger, />Interpretation</);
     assert.match(ledger, /matcher/);
     assert.match(ledger, /lookup_coverage/);
-    assert.match(ledger, /named mapping/);
-    assert.match(ledger, /named validation/);
+    assert.match(ledger, /ruleMixSummary\(report\)/);
+    assert.match(map, /ruleMixSummary\(ruleReport\)/);
     assert.match(ledger, /namedRuleDisplay/);
     assert.match(ledger, /proofRuleClaim/);
     assert.match(ledger, /rule coverage/);
@@ -296,8 +297,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(step, /df2-xform-guide-dialog/);
     assert.doesNotMatch(step, /showGuide/);
     assert.doesNotMatch(step, /df2-xform-eyebrow/);
-    // Identity is what Execute is held to, so it is stated where it is approved.
-    assert.match(step, /recipe \{preview\.recipe\.recipe_hash\}/);
+    assert.match(step, /Transform ID \{preview\.recipe\.recipe_hash\}/);
+    assert.doesNotMatch(step, /recipe \{preview\.recipe\.recipe_hash\}/);
     // A refused recipe still has no identity — Map stays locked. A transport
     // timeout on an empty recipe does not (hasRecipe && previewError only).
     assert.match(shape, /if \(input\.preview\?\.refusal\)/);
@@ -311,6 +312,18 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /@media \(max-width: 1280px\)/);
     assert.match(css, /df2-transfer-studio-chrome-row[\s\S]*flex-direction: column/);
     assert.match(css, /validate-rail-primary-fix[\s\S]*width:\s*100%/);
+  });
+
+  it("keeps the Map sort label readable at phone widths", () => {
+    const css = readFileSync(join(webRoot, "styles/column-workbench.css"), "utf8");
+    assert.match(css, /df2-column-workbench-sort\s*\{\s*min-width:\s*128px/);
+  });
+
+  it("keeps held workbook rules separate from mapping approval", () => {
+    const panel = readFileSync(join(webRoot, "components/ColumnReviewPanel.tsx"), "utf8");
+    assert.match(panel, /Approve mapping/);
+    assert.match(panel, /held workbook rule[\s\S]{0,80}not applied/i);
+    assert.match(panel, /businessRule\.status === "needs_confirmation"/);
   });
 
   it("ValidateActionsRail labels review-grade passes as Review-grade, not ready", () => {
@@ -605,6 +618,9 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(xform, /Back to Destination/);
     const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
     assert.match(shape, /Continue without transforming/);
+    // Rules loaded but no shape steps → CTA is "Continue to Map".
+    assert.match(shape, /Continue to Map/);
+    assert.match(xform, /ruleCount: ruleReport\?\.rule_count/);
     assert.match(shape, /Continue with this transform/);
     assert.match(xform, /continueState\.label/);
     assert.match(mapStep, /Continue to Validate →/);

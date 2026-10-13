@@ -211,6 +211,26 @@ class _PineconeSession:
             if self.list_status != 200:
                 return _FakeResp(self.list_status, {})
             return _FakeResp(200, {"vectors": [{"id": i} for i in self.ids], "pagination": {}})
+        if url.endswith("/vectors/fetch"):
+            if self.fetch_status != 200:
+                return _FakeResp(self.fetch_status, {})
+            wanted = [
+                str(value)
+                for key, value in (params or [])
+                if key == "ids"
+            ]
+            return _FakeResp(
+                200,
+                {
+                    "vectors": {
+                        vector_id: {
+                            "id": vector_id,
+                            "metadata": self.metadata.get(vector_id, {}),
+                        }
+                        for vector_id in wanted
+                    }
+                },
+            )
         return _FakeResp(500, {})
 
     def post(self, url, data=None, headers=None, timeout=None):

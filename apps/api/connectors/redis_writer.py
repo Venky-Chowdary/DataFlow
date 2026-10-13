@@ -23,7 +23,6 @@ from connectors.writer_common import (
     gate8_writer_meta,
     resolve_target_columns,
     row_checksum,
-    sanitize_identifier,
     transform_error_policy,
 )
 

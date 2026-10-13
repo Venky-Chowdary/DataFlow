@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
 from contextlib import contextmanager
@@ -153,8 +154,11 @@ def reconcile_phase_heartbeat(
                     message=pulse,
                 )
 
+        # Run under a copy of the caller's context so the pulse's logs keep the
+        # job_id/correlation_id bound by the engine; raw threads start empty.
         thread = threading.Thread(
-            target=_pulse,
+            target=contextvars.copy_context().run,
+            args=(_pulse,),
             name=f"reconcile-heartbeat-{job_id[:8]}",
             daemon=True,
         )

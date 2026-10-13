@@ -1,0 +1,381 @@
+from __future__ import annotations
+
+from typing import Any
+
+from src.transfer import engine as _engine
+from src.transfer.engine import (
+    EndpointConfig,
+    FullRefreshDropFailed,
+    _raise_if_job_cancelled,
+    is_overwrite_sync,
+    logger,
+)
+
+def _destination_schema_probe(
+    destination: EndpointConfig,
+    sync_mode: str = "",
+) -> tuple[dict[str, str], bool | None]:
+    """Return (column_types, table_exists).
+
+    ``table_exists`` is independent of whether columns loaded — a listed table
+    with empty column metadata must not be treated as missing / create-new.
+
+    Overwrite sync still needs a proven existence boolean for preflight DDL
+    gates; stale destination *types* are cleared so recreate is not typed
+    against the old table shape.
+    """
+    if destination.kind != "database":
+        return {}, None
+    try:
+        from .endpoint_intelligence import introspect_endpoint
+
+        # Match Studio Destination/Validate: destination probes stay in the
+        # operator-chosen namespace (no cross-DB/schema "heal").
+        destination.extra = {
+            **(destination.extra or {}),
+            "introspect_purpose": "destination",
+        }
+        info = introspect_endpoint(destination)
+        schema = dict(info.get("schema") or {})
+        nullability = {
+            str(k): bool(v)
+            for k, v in dict(info.get("schema_nullability") or {}).items()
+        }
+        if "table_exists" in info:
+            raw = info.get("table_exists")
+            # Preserve explicit None (unknown) — bool(None) is False and would
+            # dishonestly trigger create-new on Execute after a soft-fail probe.
+            exists = None if raw is None else bool(raw)
+        elif schema:
+            exists = True
+        else:
+            exists = None
+        # Stamp probe SSOT for Map/Validate CTAs. Sticky None is an error;
+        # create-new (exists=False) messages are informational, not failures.
+        probe_err = str(info.get("sample_error") or info.get("error") or "").strip()
+        probe_msg = str(info.get("message") or "").strip()
+        extra = dict(destination.extra or {})
+        if exists is None:
+            detail = probe_err or probe_msg or (
+                "Destination schema unknown — existence not proven (fail-closed)"
+            )
+            extra["schema_probe_error"] = detail[:500]
+            extra["schema_probe_message"] = detail[:500]
+        elif probe_err:
+            extra["schema_probe_error"] = probe_err[:500]
+            extra["schema_probe_message"] = (probe_msg or probe_err)[:500]
+        else:
+            extra.pop("schema_probe_error", None)
+            if str(extra.get("schema_probe_message") or "").startswith(
+                "Destination schema unknown"
+            ):
+                extra.pop("schema_probe_message", None)
+            if probe_msg and exists is False:
+                extra["schema_probe_message"] = probe_msg[:500]
+        # Stamp PK/UNIQUE/FK catalog for Execute preflight SSOT with Validate
+        # (preflight_router passes dest_meta.primary_key_columns / unique_keys).
+        extra["primary_key_columns"] = list(info.get("primary_key_columns") or [])
+        extra["dynamo_key_schema"] = [
+            dict(row)
+            for row in (info.get("dynamo_key_schema") or [])
+            if isinstance(row, dict)
+        ]
+        extra["dynamo_index_attributes"] = dict(
+            info.get("dynamo_index_attributes") or {}
+        )
+        extra["unique_keys"] = list(info.get("unique_keys") or [])
+        extra["foreign_keys"] = list(
+            info.get("foreign_keys") or info.get("destination_foreign_keys") or []
+        )
+        # Create-new overwrite has no dest contract — clear stale types.
+        if is_overwrite_sync(sync_mode) and exists is not True:
+            extra["schema_nullability"] = {}
+            extra["schema_defaults"] = {}
+            extra["identity_columns"] = []
+            extra["generated_columns"] = []
+            extra["schema_carrier_authority"] = {}
+            extra.pop("schema_types", None)
+            destination.extra = extra
+            return {}, exists
+        # Dest-exists overwrite on a relational engine empties rows and keeps
+        # the table, so the live types, nullability and constraints are the
+        # contract. Engines that still DROP+CREATE must not bind the doomed
+        # carrier (a stale VARCHAR(64) refused a TEXT source whose CREATE
+        # would have been LONGTEXT).
+        from services.db_type_utils import dest_schema_is_recreated_on_overwrite
+
+        overwrite_recreates_existing = (
+            is_overwrite_sync(sync_mode)
+            and exists is True
+            and dest_schema_is_recreated_on_overwrite(
+                str(getattr(destination, "format", "") or "")
+            )
+        )
+        # G19 reads this only when the run really replaces the declaration.
+        extra["overwrite_replaced_column_types"] = (
+            dict(schema) if overwrite_recreates_existing else {}
+        )
+        extra["schema_nullability"] = nullability
+        # Sampled vs declared — D1: a page-measured DECIMAL(2,2) is a profile,
+        # not a catalog. Writers and Map both read this stamp.
+        extra["schema_carrier_authority"] = dict(info.get("schema_authority") or {})
+        if overwrite_recreates_existing:
+            extra.pop("schema_types", None)
+        else:
+            extra["schema_types"] = dict(schema)
+        # Who fills a required column when the mapping does not (G14).
+        extra["schema_defaults"] = dict(info.get("schema_defaults") or {})
+        extra["identity_columns"] = list(info.get("identity_columns") or [])
+        extra["generated_columns"] = list(info.get("generated_columns") or [])
+        destination.extra = extra
+        return ({} if overwrite_recreates_existing else schema), exists
+    except Exception as exc:
+        logger.warning(
+            "Destination schema probe failed for %s: %s",
+            getattr(destination, "format", ""),
+            exc,
+            exc_info=exc,
+        )
+        destination.extra = {
+            **(destination.extra or {}),
+            "schema_probe_error": str(exc)[:500],
+            "schema_probe_message": str(exc)[:500],
+            "schema_nullability": {},
+            "schema_defaults": {},
+            "identity_columns": [],
+            "generated_columns": [],
+            "primary_key_columns": [],
+            "unique_keys": [],
+            "foreign_keys": [],
+            "schema_carrier_authority": {},
+            "schema_types": {},
+        }
+        return {}, None
+
+
+def _pin_overwrite_rows_before(
+    destination: EndpointConfig,
+    checkpoint: Any = None,
+    checkpoint_service: Any = None,
+) -> None:
+    """Count the destination before overwrite removes it.
+
+    The stream measures COUNT after the drop, so a table that held rows
+    looks empty and the failure path deletes the replacement. The count
+    taken here is the one undo and Gate-8 must keep.
+    """
+    extra = dict(getattr(destination, "extra", None) or {})
+    pinned = extra.get("overwrite_rows_before")
+    if isinstance(pinned, int):
+        return
+    if checkpoint is not None and getattr(checkpoint, "target_rows_before", None) is not None:
+        extra["overwrite_rows_before"] = int(checkpoint.target_rows_before)
+        destination.extra = extra
+        return
+    counted: int | None = None
+    try:
+        from services.dest_precount import precount_destination
+
+        from .adapters import resolve_connector_config
+
+        raw = precount_destination(destination, resolve_connector_config(destination))
+        if isinstance(raw, int):
+            counted = int(raw)
+    except Exception as exc:  # noqa: BLE001 - a missed count must not skip the overwrite
+        logger.warning("Overwrite pre-count failed: %s", exc, exc_info=exc)
+        return
+    if counted is None:
+        return
+    extra["overwrite_rows_before"] = counted
+    destination.extra = extra
+    if checkpoint is None:
+        return
+    checkpoint.target_rows_before = counted
+    if checkpoint_service is None:
+        return
+    try:
+        checkpoint_service.require_save(checkpoint)
+    except Exception as exc:  # noqa: BLE001 - the in-memory pin still guards this process
+        logger.warning("Overwrite pre-count was not checkpointed: %s", exc, exc_info=exc)
+
+
+def _note_failed_batch_undo(
+    request: Any,
+    dest_summary: Any,
+    message: str,
+    *,
+    recon: dict[str, Any] | None = None,
+) -> str:
+    """Clear a partial SQL batch when this run found the destination empty.
+
+    A MySQL overwrite renamed the previous table aside. Restoring that
+    backup is the rollback. Deleting the replacement after the rename
+    leaves the live name empty and the pre-run rows only in the backup
+    — or gone, if a second start already dropped the backup.
+
+    When verification could not *read* the destination (transient fault
+    after retries), nothing was proven wrong with the committed rows, so
+    they are kept rather than undone (QA MX2-15).
+    """
+    if not isinstance(dest_summary, dict):
+        return message or "Reconciliation failed"
+    if isinstance(recon, dict) and recon.get("verification_unavailable"):
+        note = (
+            "The committed rows were kept: verification could not read the "
+            "destination, which is not evidence the batch is wrong."
+        )
+        logger.warning(
+            "Skipping failed-batch undo for table=%s: verification unavailable",
+            dest_summary.get("table"),
+        )
+        dest_summary["partial_batch_undo"] = "retained"
+        dest_summary["partial_batch_undo_note"] = note
+        base = message or "Reconciliation failed"
+        return base if note in base else f"{base} {note}"
+    destination = getattr(request, "destination", None)
+    extra = dict(getattr(destination, "extra", None) or {})
+    backup_engine = str(extra.get("overwrite_backup_engine") or "")
+    if extra.get("overwrite_backup") and backup_engine in {"mysql", "mongodb"}:
+        backup_name = str(extra.get("overwrite_backup") or "")
+        restored = _engine._settle_overwrite_backup(destination, restore=True)
+        if restored:
+            note = (
+                "The previous destination table was restored. "
+                "This run's replacement was removed."
+            )
+            dest_summary["partial_batch_undo"] = "restored"
+        else:
+            note = (
+                "The previous destination table could not be restored. "
+                f"The backup {backup_name} was left in place."
+            )
+            dest_summary["partial_batch_undo"] = "restore_failed"
+        dest_summary["partial_batch_undo_note"] = note
+        base = message or "Reconciliation failed"
+        if note not in base:
+            return f"{base} {note}"
+        return base
+    from services.batch_undo import undo_failed_batch_if_dest_was_empty
+
+    note = undo_failed_batch_if_dest_was_empty(
+        destination=getattr(request, "destination", None),
+        dest_summary=dest_summary,
+        sync_mode=str(getattr(request, "sync_mode", "") or ""),
+    )
+    base = message or "Reconciliation failed"
+    if note and note not in base:
+        return f"{base} {note}"
+    return base
+
+
+def _remember_preserved_columns(destination: EndpointConfig, kept: list[dict]) -> None:
+    if not kept:
+        return
+    extra = dict(destination.extra or {})
+    extra["preserve_columns"] = kept
+    destination.extra = extra
+
+
+def _drop_destination_table(
+    destination: EndpointConfig,
+    *,
+    mappings: list[dict] | None = None,
+    checkpoint: Any = None,
+    checkpoint_service: Any = None,
+    mongo: Any = None,
+    job_id: str = "",
+) -> bool:
+    """Drop the destination object for full-refresh overwrite sync modes.
+
+    Raises :class:`FullRefreshDropFailed` when a drop was attempted and failed.
+    Swallowing it is the difference between an overwrite and an append: the old
+    rows survive, the new rows land on top, and the job reports success with a
+    doubled destination. A ``full_refresh`` that cannot clear the destination
+    must fail loudly instead of quietly changing its own semantics.
+
+    Returns ``False`` only when the driver has no drop support, which is a
+    genuine "nothing to do" and not an error.
+    """
+    if destination.kind != "database":
+        return False
+
+    _raise_if_job_cancelled(mongo, job_id)
+    _pin_overwrite_rows_before(destination, checkpoint, checkpoint_service)
+
+    from connectors.table_manager import TableDropError, drop_table
+
+    from .adapters import (
+        carry_dest_spelling_across_drop,
+        resolve_connector_config,
+        resolve_dest_table,
+    )
+    from .connector_capabilities import resolve_driver_type
+
+    try:
+        db_type = resolve_driver_type(destination.format)
+        cfg = resolve_connector_config(destination)
+        table_name = resolve_dest_table(db_type, destination)
+        schema = cfg.get("schema")
+    except Exception as exc:
+        # Could not even work out what to drop. Treated as fatal for the same
+        # reason: proceeding would append onto an uncleared table.
+        raise FullRefreshDropFailed(
+            "unknown", f"could not resolve destination for drop: {exc}"
+        ) from exc
+
+    carry_dest_spelling_across_drop(destination, db_type, cfg, table_name, schema)
+    from connectors.table_manager import overwrite_clear_kind
+
+    clear_kind = overwrite_clear_kind(db_type)
+    if clear_kind == "rename_collection":
+        from connectors.table_manager import retire_mongodb_overwrite
+
+        try:
+            backup = retire_mongodb_overwrite(cfg, table_name)
+        except TableDropError as exc:
+            logger.error("full_refresh mongo retire failed for %s: %s", table_name, exc)
+            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+        if backup:
+            extra = dict(destination.extra or {})
+            extra["overwrite_backup"] = backup
+            extra["overwrite_backup_engine"] = "mongodb"
+            destination.extra = extra
+        return True
+    if clear_kind == "empty":
+        from connectors.table_manager import empty_existing_for_overwrite
+
+        # PostgreSQL TRUNCATE is transactional. Doing it here on autocommit
+        # published an empty table, then each chunk commit published a prefix
+        # (R4-D06). The writer truncates inside the load transaction and
+        # commits once. MySQL TRUNCATE auto-commits and stays on this path.
+        if db_type == "postgresql":
+            extra = dict(destination.extra or {})
+            extra["pg_overwrite_in_transaction"] = True
+            destination.extra = extra
+            return True
+        try:
+            empty_existing_for_overwrite(db_type, cfg, table_name, schema)
+        except TableDropError as exc:
+            logger.error("full_refresh empty failed for %s: %s", table_name, exc)
+            raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+        return True
+    if db_type in ("postgresql", "redshift"):
+        try:
+            from connectors.table_manager import postgres_columns_to_keep
+
+            kept = postgres_columns_to_keep(cfg, table_name, schema, mappings)
+            _remember_preserved_columns(destination, kept)
+        except Exception as exc:  # noqa: BLE001 - keep-column read must not block the overwrite
+            logger.warning(
+                "Could not read destination columns to keep on %s: %s",
+                table_name,
+                exc,
+            )
+    try:
+        return drop_table(db_type, cfg, table_name, schema)
+    except TableDropError as exc:
+        logger.error("full_refresh drop failed for %s: %s", table_name, exc)
+        raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+    except Exception as exc:
+        logger.error("full_refresh drop failed for %s: %s", table_name, exc, exc_info=exc)
+        raise FullRefreshDropFailed(table_name, str(exc)) from exc

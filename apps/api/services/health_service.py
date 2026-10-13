@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.cdc_lease_store import resolve_backend_name
 from services.platform_config import data_dir, upload_dir
 
 
@@ -22,6 +23,7 @@ def check_mongodb() -> dict[str, Any]:
 
 def check_storage() -> dict[str, Any]:
     try:
+        lease_backend = resolve_backend_name()
         d = data_dir()
         u = upload_dir()
         test = d / ".health_probe"
@@ -50,6 +52,8 @@ def check_storage() -> dict[str, Any]:
             "writable": True,
             "stores": stores,
             "connector_backend": connector_status.get("backend"),
+            "cdc_lease_backend": lease_backend,
+            "cdc_lease_distributed": lease_backend == "redis",
             "connector_store": connector_status,
         }
     except Exception as exc:

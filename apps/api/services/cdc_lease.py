@@ -165,6 +165,7 @@ def acquire_lease(
     holder_id: str,
     ttl_sec: float | None = None,
     meta: dict[str, Any] | None = None,
+    min_generation: int = 0,
 ) -> CdcLease:
     """Acquire or renew a lease for ``cursor_key`` / ``resource``.
 
@@ -182,6 +183,7 @@ def acquire_lease(
         holder_id=holder,
         ttl_sec=ttl,
         meta=dict(meta or {}),
+        min_generation=int(min_generation),
     )
     return CdcLease.from_dict(raw)
 
@@ -436,6 +438,7 @@ class CdcLeaseGuard:
     job_id: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
     ttl_sec: float | None = None
+    min_generation: int = 0
     _acquired: bool = field(default=False, init=False, repr=False)
     _generation: int = field(default=0, init=False, repr=False)
 
@@ -473,6 +476,7 @@ class CdcLeaseGuard:
             holder_id=self.holder_id,
             ttl_sec=self.ttl_sec,
             meta=meta,
+            min_generation=self.min_generation,
         )
         self._acquired = True
         self._generation = int(lease.generation)

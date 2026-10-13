@@ -373,3 +373,18 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
   });
 });
 
+
+describe("classifyGate8Status unverified business rules", () => {
+  it("passed + unproven is never green", () => {
+    const view = classifyGate8Status({
+      passed: true,
+      unproven: true,
+      unverified_rules: [{ rule_id: "uniq-email", reason: "count_error" }],
+      source_rows: 3,
+      target_rows: 3,
+    } as never);
+    assert.equal(view.tone, "warn");
+    assert.equal(view.fullPass, false);
+    assert.notEqual(view.label, "Passed");
+  });
+});

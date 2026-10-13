@@ -830,7 +830,7 @@ def select_sentences(
             break
         chosen.append(pick)
         pool.remove(pick)
-    chosen = _complete_lists(chosen, candidates)
+    chosen = _complete_lists(chosen, candidates, lead=best)
     # Lead with the sentence that answers, then read in source order. Sorting
     # purely by source order opened "what is quarantine" with "Open Operations →
     # Jobs → Quarantine on the run", because that section ranked first — an
@@ -1134,6 +1134,8 @@ def _lead(pool: Sequence[Candidate]) -> Candidate:
 def _complete_lists(
     chosen: list[Candidate],
     candidates: Sequence[Candidate],
+    *,
+    lead: Candidate | None = None,
 ) -> list[Candidate]:
     """Add the siblings of any selected list item.
 
@@ -1155,13 +1157,35 @@ def _complete_lists(
             and c.section_title == section
             and c.order not in picked
         ]
+        # The lead prose of a list section is flagged list_vouched too —
+        # counting it against the item budget dropped the last card off a
+        # 9-card enumeration (QA K03: G8 vanished from the spoken list).
         already = sum(
-            1 for c in chosen if c.list_vouched and c.section_title == section
+            1
+            for c in chosen
+            if c.list_vouched and c.section_title == section and c is not lead
         )
         for cand in siblings[: max(0, MAX_LIST_ITEMS - already)]:
             out.append(cand)
             picked.add(cand.order)
-    return out
+    # The same enumeration can live in two retrieved sections (the gate list
+    # sits under both "Which preflight gates run" and "Core gates"). Completing
+    # both printed G1–G9 twice — the second copy read like a different list
+    # because one source had them out of order (QA K03). A completed list
+    # item whose text is already spoken adds nothing.
+    seen_text: set[str] = set()
+    return [c for c in out if _mark_once(_item_fingerprint(c.text), seen_text)]
+
+
+def _item_fingerprint(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
+
+
+def _mark_once(text: str, seen: set[str]) -> bool:
+    if text in seen:
+        return False
+    seen.add(text)
+    return True
 
 
 def _complete_procedure(

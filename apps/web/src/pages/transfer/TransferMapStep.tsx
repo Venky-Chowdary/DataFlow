@@ -13,7 +13,7 @@ import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
 import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
 import type { RuleCompileReport } from "../../lib/businessRules";
-import { ruleCensus } from "../../lib/businessRules";
+import { ruleCensus, ruleMixSummary } from "../../lib/businessRules";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
 import { destCatalogExists } from "../../lib/destSchemaIdentity";
@@ -243,7 +243,7 @@ export function TransferMapStep({
   const ruleBannerLine = useMemo(() => {
     if (!ruleReport) return "";
     const census = ruleCensus(ruleReport);
-    return `${census.total} total · ${census.mapping} mapping · ${census.validation} validation · ${census.executable} executable · ${census.review} review · ${census.conflict} conflict`;
+    return `${ruleMixSummary(ruleReport)} · ${census.executable} executable · ${census.review} review · ${census.conflict} conflict`;
   }, [ruleReport]);
 
   const continueToValidate = (
@@ -374,8 +374,10 @@ export function TransferMapStep({
             <div className="df2-rule-map-body">
               <p className="df2-rule-map-kicker">
                 Destination names, write transforms, and lookups land here.
-                Transform kept the pre-load image. Validate contracts never write.
-                Click a rule for provenance — customer document → compiled IR → dest.
+                Transform kept the pre-load image. Validate contracts never write
+                a column — row-level ones quarantine failing rows at Run, and
+                population ones (unique) are checked after load.
+                Click a rule to see where it came from: workbook row → compiled rule → destination column.
               </p>
               {ruleReport.honesty ? (
                 <details className="df2-rule-honesty">

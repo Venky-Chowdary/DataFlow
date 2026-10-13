@@ -139,6 +139,36 @@ def contract_declares_primary_key(contract: dict[str, Any]) -> bool:
     return bool(str(raw or "").strip())
 
 
+def _transfer_destination_config(
+    destination_db_type: str, destination_config: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """The destination as the transfer resolves it, so both build one cursor key.
+
+    The transfer keys its watermark on ``route_endpoint_identity`` of the
+    endpoint after ``resolve_connector_config`` (saved connector merged, host
+    defaulted). Validate received the raw/redacted probe config, built the
+    unscoped key, found no watermark and judged the whole table on every rerun
+    (QA MX3-03: "Append would store a second copy of 10 row(s)").
+    """
+    raw = dict(destination_config or {})
+    try:
+        from src.transfer.adapters import resolve_connector_config
+        from src.transfer.models import EndpointConfig
+
+        endpoint = EndpointConfig.from_dict(
+            "database", {"format": destination_db_type, **raw}
+        )
+        return {**raw, **resolve_connector_config(endpoint)}
+    except (ImportError, KeyError, TypeError, ValueError, AttributeError) as exc:
+        logger.warning(
+            "destination identity for the incremental read scope unresolved "
+            "(type=%s): %s — the gate judges the whole sample",
+            destination_db_type,
+            exc,
+        )
+        return raw
+
+
 def resolve_read_scope(
     *,
     sync_mode: str,
@@ -164,7 +194,7 @@ def resolve_read_scope(
     except Exception:
         source_type = (source_format or "").strip().lower()
     src_cfg = source_config or {}
-    dst_cfg = destination_config or {}
+    dst_cfg = _transfer_destination_config(destination_db_type, destination_config)
     try:
         return resolve_incremental_read_scope(
             sync_mode=sync_mode,
@@ -379,6 +409,13 @@ def build_sync_contract_gate(
             issues.append("CDC requires a database source (not file/cloud)")
         elif src and src not in CDC_CAPABLE_SOURCES:
             issues.append(f"CDC is not supported for source type '{src}'")
+        from services.type_system import destination_is_file_export
+
+        if destination_is_file_export(dest):
+            issues.append(
+                "Object stores have no write-ahead log or replication slot, "
+                "so CDC cannot land there. Use full refresh or incremental append."
+            )
     if missing_cursor:
         issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
     if requires_primary_key and not contracts and not catalog_identity:
@@ -405,7 +442,7 @@ def build_sync_contract_gate(
         return {
             "id": "g9_sync_contract",
             "status": block_status,
-            "message": "Sync mode contract incomplete",
+            "message": issues[0],
             "duration_ms": 0,
             "details": {
                 "issues": issues,

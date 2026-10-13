@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -23,6 +24,8 @@ from services.value_serializer import (
 from services.vectorization import vectorize_records
 
 from connectors.writer_common import WriteResult as _WriteResult
+
+logger = logging.getLogger(__name__)
 
 
 def _requests_session() -> Any:
@@ -44,11 +47,9 @@ def _requests_session() -> Any:
 
 
 def _base_url(host: str, port: int, ssl: bool) -> str:
-    scheme = "https" if ssl else "http"
-    if not host:
-        host = "localhost"
-    port = port or 6333
-    return f"{scheme}://{host}:{port}"
+    from connectors.url_authority import http_service_base_url
+
+    return http_service_base_url(host, port, ssl, 6333)
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -96,6 +97,24 @@ def _qdrant_live_vector_size(collection_info: dict[str, Any]) -> int | None:
                     return int(spec["size"])
                 except (TypeError, ValueError):
                     continue
+    return None
+
+
+def _qdrant_live_vector_distance(collection_info: dict[str, Any]) -> str | None:
+    """Extract the configured distance from GET /collections/{name} JSON."""
+    result = collection_info.get("result") if isinstance(collection_info, dict) else None
+    if not isinstance(result, dict):
+        result = collection_info if isinstance(collection_info, dict) else {}
+    config = result.get("config") if isinstance(result, dict) else None
+    params = (config or {}).get("params") if isinstance(config, dict) else None
+    vectors = (params or {}).get("vectors") if isinstance(params, dict) else None
+    if not isinstance(vectors, dict):
+        return None
+    if vectors.get("distance"):
+        return str(vectors["distance"])
+    for spec in vectors.values():
+        if isinstance(spec, dict) and spec.get("distance"):
+            return str(spec["distance"])
     return None
 
 
@@ -478,10 +497,49 @@ def write_mapped_rows(
     chunk_size: int = 512,
     chunk_overlap: int = 50,
     skip_chunking: bool = False,
+    chunk_strategy: str = "recursive",
+    chunk_unit: str = "chars",
+    chunk_tokenizer: Any = None,
+    text_template: str | None = None,
     durable_embedding_cache: bool | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
     """Write text rows as embedded points into a Qdrant collection."""
+    logger.info(
+        "Vector write target=%s strategy=%s size=%s overlap=%s unit=%s template=%s",
+        table_name or "dataflow_vectors",
+        chunk_strategy,
+        chunk_size,
+        chunk_overlap,
+        chunk_unit,
+        "on" if text_template is not None else "off",
+    )
+    if text_template is not None:
+        from services.vector_template import (
+            TemplateConfigError,
+            _mapped_excluded_fields,
+            _mapped_template_fields,
+            validate_template,
+        )
+
+        try:
+            validate_template(
+                text_template,
+                available_fields=_mapped_template_fields(headers, mappings),
+                excluded_fields=_mapped_excluded_fields(
+                    exclude_pii_columns or (), mappings
+                ),
+            )
+        except TemplateConfigError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=f"Invalid vector text template: {exc}",
+            )
     if importlib.util.find_spec("requests") is None:
         return WriteResult(
             ok=False,
@@ -494,6 +552,11 @@ def write_mapped_rows(
             driver="none",
         )
 
+    from services.vector_sync import (
+        log_stale_cleanup_skipped,
+        stale_cleanup_meta,
+        stale_cleanup_skipped_docs,
+    )
     from connectors.writer_common import (
         prepare_records_for_vector_write,
         require_physical_types_for_existing_table,
@@ -524,6 +587,7 @@ def write_mapped_rows(
 
     collection_existed = False
     cached_live_dim: int | None = None
+    cached_live_distance: str | None = None
     try:
         session = _requests_session()
         hdrs = _headers(api_key)
@@ -553,13 +617,15 @@ def write_mapped_rows(
             cached_live_dim = _qdrant_live_vector_size(
                 info if isinstance(info, dict) else {}
             )
+            cached_live_distance = _qdrant_live_vector_distance(
+                info if isinstance(info, dict) else {}
+            )
             schema_types = _qdrant_live_payload_types(
                 info if isinstance(info, dict) else {}
             )
             # Schemaless collections stay Map-tolerant. Typed payload_schema is
             # the invent cliff — Studio may fill; else require_physical.
             if schema_types:
-                live_payload_types.update(schema_types)
                 mapped_existing = [
                     c
                     for c in mapped_targets
@@ -570,19 +636,8 @@ def write_mapped_rows(
                         or str(c).upper() in schema_types
                     )
                 ]
-                effective = dict(live_payload_types)
-                if isinstance(studio_live, dict):
-                    for c in mapped_existing:
-                        if (
-                            effective.get(c)
-                            or effective.get(str(c).lower())
-                            or effective.get(str(c).upper())
-                        ):
-                            continue
-                        st = str(studio_live.get(c) or "").strip()
-                        if st:
-                            effective[c] = st
                 if mapped_existing:
+                    effective = {**schema_types, **live_payload_types}
                     phys_err = require_physical_types_for_existing_table(
                         table_existed=True,
                         physical=effective,
@@ -599,7 +654,6 @@ def write_mapped_rows(
                             chunks_completed=0,
                             error=phys_err,
                         )
-                live_payload_types = effective
         elif status == 404:
             if not create_table:
                 return WriteResult(
@@ -651,14 +705,26 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="qdrant",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        # Pass Studio/live whenever present — partial Studio fail-closes in
-        # prepare_records (never soft-bind Map invent on create-new).
-        # Schemaless empty collections with no Studio still Map-bind (None).
+        # Qdrant's live payload_schema lists indexed fields, not a complete
+        # destination row schema. Only explicit Studio types constrain mapping.
         destination_column_types=(
             live_payload_types if live_payload_types else None
         ),
     )
     if map_abort:
+        from services.vector_sync import _rejected_doc_keys
+
+        skipped_docs = stale_cleanup_skipped_docs(
+            _rejected_doc_keys(headers, data_rows, pk_cols, mappings, map_rejected),
+            map_rejected,
+        )
+        if skipped_docs:
+            log_stale_cleanup_skipped(
+                "Qdrant",
+                f"collection {table_name or 'dataflow_vectors'}",
+                skipped_docs,
+                "row mapping was rejected",
+            )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -669,8 +735,98 @@ def write_mapped_rows(
             error=map_abort,
             rejected_details=map_rejected,
             rejected_rows=len(map_rejected),
+            meta=stale_cleanup_meta(0, skipped_docs),
         )
+    from services.vectorization import vector_identity_columns
+    from services.vector_sync import (
+        qdrant_read_document_states,
+        vector_dimension_hint,
+        vector_record_key,
+    )
+
+    from services.embedding_providers import (
+        EmbeddingProviderError,
+        EmbeddingUsage,
+        create_embedding_usage,
+        provider_extra_from_options,
+    )
+
+    embedding_extra = provider_extra_from_options(_kwargs)
+    usage = EmbeddingUsage(
+        provider=(embedding_model or "unknown").split("/", 1)[0],
+        model=embedding_model or "unknown",
+    )
+    skip_setting = _kwargs.get("vector_skip_unchanged", True)
+    vector_skip_unchanged = str(skip_setting).strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+    vector_doc_states: dict[str, dict[str, Any]] = {}
+    skip_fingerprint = None
+    identity_columns = vector_identity_columns(pk_cols, mappings, records)
+    if vector_skip_unchanged:
+        source_ids = sorted(
+            {
+                vector_record_key(record, identity_columns)
+                for record in records
+                if vector_record_key(record, identity_columns)
+            }
+        )
+        try:
+            if collection_existed and source_ids:
+                vector_doc_states = qdrant_read_document_states(
+                    {
+                        "host": host,
+                        "port": port,
+                        "ssl": ssl,
+                        "connection_string": connection_string,
+                        "api_key": api_key,
+                    },
+                    collection,
+                    source_ids,
+                )
+            dimension_hint = vector_dimension_hint(
+                embedding_model,
+                embedding_extra,
+                records=records,
+                embedding_column=embedding_column,
+            ) or cached_live_dim
+            distance_hint = cached_live_distance or "Cosine"
+            if dimension_hint:
+                from services.vector_fingerprint import fingerprint_for_write
+
+                skip_fingerprint = fingerprint_for_write(
+                    model=embedding_model,
+                    dimension=int(dimension_hint),
+                    distance=distance_hint,
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                    skip_chunking=skip_chunking,
+                    embedding_column=embedding_column,
+                    chunk_strategy=chunk_strategy,
+                    chunk_unit=chunk_unit,
+                    chunk_tokenizer=(
+                        chunk_tokenizer if isinstance(chunk_tokenizer, str) else None
+                    ),
+                    text_template=text_template,
+                )
+        except Exception as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "Qdrant unchanged-document lookup failed before embedding "
+                    f"({type(exc).__name__})"
+                ),
+                meta={"embedding_usage": usage.to_dict()},
+            )
     try:
+        usage = create_embedding_usage(
+            embedding_model, embedding_extra, embedding_column
+        )
         vector_rows = vectorize_records(
             records,
             content_column=content_column,
@@ -681,7 +837,35 @@ def write_mapped_rows(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             skip_chunking=skip_chunking,
+            chunk_strategy=chunk_strategy,
+            chunk_unit=chunk_unit,
+            chunk_tokenizer=chunk_tokenizer,
+            text_template=text_template,
             durable_embedding_cache=durable_embedding_cache,
+            identity_columns=vector_identity_columns(pk_cols, mappings, records),
+            usage=usage,
+            embedding_extra=embedding_extra,
+            existing_vector_docs=vector_doc_states,
+            doc_fingerprint_digest=(
+                skip_fingerprint.digest if skip_fingerprint is not None else None
+            ),
+            skip_unchanged=vector_skip_unchanged,
+        )
+    except EmbeddingProviderError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"Embedding provider {usage.provider} model {usage.model} "
+                f"failed ({type(exc).__name__}): {exc}"
+            ),
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     except Exception as exc:
         return WriteResult(
@@ -691,16 +875,102 @@ def write_mapped_rows(
             target_schema=schema or "",
             checksum="",
             chunks_completed=0,
-            error=f"Vectorization failed: {exc}",
+            error=f"Vectorization failed ({type(exc).__name__})",
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
+    from services.vector_sync import _rejected_doc_keys
+
+    rejected_source_ids = _rejected_doc_keys(
+        headers, data_rows, pk_cols, mappings, map_rejected
+    )
+    skipped_source_ids = {
+        str(row.get("source_id") or "")
+        for row in vector_rows
+        if row.get("_df_unchanged_skipped") and row.get("source_id")
+    }
+    vector_rows = [
+        row for row in vector_rows if not row.get("_df_unchanged_skipped")
+    ]
+    vector_skip_meta = {
+        "vector_docs_unchanged_skipped": len(skipped_source_ids),
+        "vector_docs_embedded": len(
+            {
+                str(row.get("source_id") or "")
+                for row in vector_rows
+                if row.get("source_id") and row.get("embedding") is not None
+            }
+        ),
+    }
+    if not vector_rows and skipped_source_ids:
+        from services.vector_fingerprint import (
+            VectorFingerprintMismatchError,
+            enforce_fingerprint,
+        )
+
+        verify_session = _requests_session()
+        try:
+            fingerprint_status = enforce_fingerprint(
+                "qdrant",
+                {},
+                collection,
+                skip_fingerprint,
+                session=verify_session,
+                base_url=base_url,
+                headers=_headers(api_key),
+            )
+        except VectorFingerprintMismatchError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                meta={
+                    **vector_skip_meta,
+                    "vector_fingerprint_status": "mismatch",
+                    "vector_fingerprint_digest": skip_fingerprint.digest,
+                    "embedding_usage": usage.to_dict(),
+                },
+            )
+        finally:
+            verify_session.close()
+        return WriteResult(
+            ok=True,
+            rows_written=0,
+            table_name=collection,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={
+                **stale_cleanup_meta(0, 0),
+                **vector_skip_meta,
+                "vector_fingerprint_status": fingerprint_status,
+                "vector_fingerprint_digest": skip_fingerprint.digest,
+                "embedding_usage": usage.to_dict(),
+            },
+        )
     if not vector_rows:
         from connectors.writer_common import refuse_empty_vectorization
 
         empty_err = refuse_empty_vectorization(records=records, data_rows=data_rows)
         if empty_err:
+            skipped_docs = stale_cleanup_skipped_docs(
+                rejected_source_ids, map_rejected
+            )
+            if skipped_docs:
+                log_stale_cleanup_skipped(
+                    "Qdrant",
+                    f"collection {table_name or 'dataflow_vectors'}",
+                    skipped_docs,
+                    "row mapping was rejected",
+                )
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -711,6 +981,20 @@ def write_mapped_rows(
                 error=empty_err,
                 rejected_details=list(map_rejected),
                 rejected_rows=len(map_rejected),
+                meta={
+                    **stale_cleanup_meta(0, skipped_docs),
+                    "embedding_usage": usage.to_dict(),
+                },
+            )
+        skipped_docs = stale_cleanup_skipped_docs(
+            rejected_source_ids, map_rejected
+        )
+        if skipped_docs:
+            log_stale_cleanup_skipped(
+                "Qdrant",
+                f"collection {table_name or 'dataflow_vectors'}",
+                skipped_docs,
+                "row mapping was rejected",
             )
         return WriteResult(
             ok=True,
@@ -722,12 +1006,36 @@ def write_mapped_rows(
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
             warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
 
-    from services.vector_embedding import resolve_embedding_dimension
+    from services.vector_embedding import coerce_embedding, resolve_embedding_dimension
 
     dimension, dim_err = resolve_embedding_dimension(vector_rows, default=None)
     if dimension is None:
+        rejected_source_ids.update(
+            str(row.get("source_id") or "")
+            for row in vector_rows
+            if row.get("source_id")
+            and coerce_embedding(row.get("embedding"))[1]
+        )
+        skipped_docs = stale_cleanup_skipped_docs(
+            rejected_source_ids,
+            (),
+            has_identityless=any(
+                not str(row.get("source_id") or "") for row in vector_rows
+            ),
+        )
+        if skipped_docs:
+            log_stale_cleanup_skipped(
+                "Qdrant",
+                f"collection {table_name or 'dataflow_vectors'}",
+                skipped_docs,
+                "embeddings were rejected",
+            )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -748,11 +1056,37 @@ def write_mapped_rows(
                 }
             ],
             rejected_rows=len(map_rejected) + 1,
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
 
     points, embed_rejected = build_qdrant_points(vector_rows, dimension=dimension)
     rejected = list(map_rejected) + list(embed_rejected)
+    point_ids = {str(point.get("id")) for point in points}
+    for row in vector_rows:
+        source_id = str(row.get("source_id") or "")
+        if not source_id:
+            continue
+        raw_id = str(row.get("id") or "")
+        if not raw_id or str(qdrant_point_id(raw_id)) not in point_ids:
+            rejected_source_ids.add(source_id)
+    skipped_docs = stale_cleanup_skipped_docs(
+        rejected_source_ids,
+        (),
+        has_identityless=any(
+            not str(row.get("source_id") or "") for row in vector_rows
+        ),
+    )
     if not points and rejected:
+        skipped_docs = stale_cleanup_skipped_docs(rejected_source_ids, rejected)
+        log_stale_cleanup_skipped(
+            "Qdrant",
+            f"collection {collection}",
+            skipped_docs,
+            "all chunks were rejected",
+        )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -764,11 +1098,22 @@ def write_mapped_rows(
             or "all embeddings rejected",
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
     from connectors.writer_common import reject_on_strict_policy
 
     strict_error = reject_on_strict_policy(error_policy, rejected, "Qdrant")
     if strict_error:
+        if skipped_docs:
+            log_stale_cleanup_skipped(
+                "Qdrant",
+                f"collection {collection}",
+                skipped_docs,
+                "a chunk was rejected",
+            )
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -779,25 +1124,36 @@ def write_mapped_rows(
             error=strict_error,
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={
+                **stale_cleanup_meta(0, skipped_docs),
+                "embedding_usage": usage.to_dict(),
+            },
         )
 
     collection = table_name or "dataflow_vectors"
     # api_key / base_url already resolved for schema probe above.
     inserted = 0
+    stale_chunks_deleted = 0
+    skipped_docs = 0
+    fingerprint_meta: dict[str, Any] = {"embedding_usage": usage.to_dict()}
+    session = None
     try:
         session = _requests_session()
         hdrs = _headers(api_key)
+        qdrant_distance = "Cosine"
         if collection_existed:
             live_dim = cached_live_dim
-            if live_dim is None:
+            live_distance = cached_live_distance
+            if live_dim is None or live_distance is None:
                 exists = session.get(
                     f"{base_url}/collections/{collection}", headers=hdrs, timeout=10
                 )
                 if exists.status_code == 200:
-                    try:
-                        live_dim = _qdrant_live_vector_size(exists.json())
-                    except Exception:
-                        live_dim = None
+                    live_info = exists.json()
+                    if live_dim is None:
+                        live_dim = _qdrant_live_vector_size(live_info)
+                    if live_distance is None:
+                        live_distance = _qdrant_live_vector_distance(live_info)
             if live_dim is None:
                 return WriteResult(
                     ok=False,
@@ -842,6 +1198,23 @@ def write_mapped_rows(
                     ],
                     rejected_rows=len(rejected) + 1,
                 )
+            if live_distance is None:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection,
+                    target_schema=schema or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Qdrant collection {collection!r} exists but live vector "
+                        "distance was unavailable — refuse to fingerprint an "
+                        "assumed distance. Re-check collection config and retry."
+                    ),
+                    rejected_details=list(rejected),
+                    rejected_rows=len(rejected),
+                )
+            qdrant_distance = live_distance
         elif not create_table:
             raise RuntimeError(
                 f"Qdrant collection '{collection}' is missing and "
@@ -850,6 +1223,74 @@ def write_mapped_rows(
         else:
             _ensure_collection(session, base_url, collection, dimension, hdrs)
 
+        from services.vector_fingerprint import (
+            VectorFingerprintMismatchError,
+            enforce_fingerprint,
+            fingerprint_for_write,
+        )
+
+        incoming_fingerprint = fingerprint_for_write(
+            model=embedding_model,
+            dimension=dimension,
+            distance=qdrant_distance,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            skip_chunking=skip_chunking,
+            embedding_column=embedding_column,
+            chunk_strategy=chunk_strategy,
+            chunk_unit=chunk_unit,
+            chunk_tokenizer=(
+                chunk_tokenizer if isinstance(chunk_tokenizer, str) else None
+            ),
+            text_template=text_template,
+        )
+        try:
+            fingerprint_status = enforce_fingerprint(
+                "qdrant",
+                {},
+                collection,
+                incoming_fingerprint,
+                session=session,
+                base_url=base_url,
+                headers=hdrs,
+            )
+        except VectorFingerprintMismatchError as exc:
+            try:
+                session.close()
+            except Exception as close_exc:
+                logger.warning(
+                    "Failed to close Qdrant session after fingerprint mismatch: %s",
+                    close_exc,
+                )
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                rejected_details=rejected,
+                rejected_rows=len(rejected),
+                meta={
+                    "vector_fingerprint_status": "mismatch",
+                    "vector_fingerprint_digest": incoming_fingerprint.digest,
+                    "embedding_usage": usage.to_dict(),
+                },
+            )
+        fingerprint_meta.update({
+            "vector_fingerprint_status": fingerprint_status,
+            "vector_fingerprint_digest": incoming_fingerprint.digest,
+        })
+        from services.vector_sync import stamp_vector_document_metadata
+
+        stamp_vector_document_metadata(vector_rows, incoming_fingerprint.digest)
+        points, embed_rejected = build_qdrant_points(vector_rows, dimension=dimension)
+        rejected = list(map_rejected) + list(embed_rejected)
+
+        from services.vector_sync import _ensure_qdrant_source_id_index
+
+        _ensure_qdrant_source_id_index(session, base_url, hdrs, collection)
         batch_size = 100
         total = len(points)
         for i in range(0, total, batch_size):
@@ -866,6 +1307,14 @@ def write_mapped_rows(
             if on_checkpoint:
                 on_checkpoint((i // batch_size) + 1, (total + batch_size - 1) // batch_size, inserted)
     except Exception as exc:
+        if session is not None:
+            try:
+                session.close()
+            except Exception as close_exc:
+                logger.warning(
+                    "Failed to close Qdrant session after an upsert error: %s",
+                    close_exc,
+                )
         return WriteResult(
             ok=False,
             rows_written=inserted,
@@ -876,7 +1325,63 @@ def write_mapped_rows(
             error=str(exc),
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta=fingerprint_meta,
         )
+
+    cleanup_keep: dict[str, set[Any]] = {}
+    for point in points:
+        payload = point.get("payload") if isinstance(point.get("payload"), dict) else {}
+        source_id = str(payload.get("source_id") or "")
+        if source_id and source_id not in rejected_source_ids:
+            cleanup_keep.setdefault(source_id, set()).add(point["id"])
+    skipped_docs = stale_cleanup_skipped_docs(
+        rejected_source_ids,
+        (),
+        has_identityless=any(
+            not str((point.get("payload") or {}).get("source_id") or "")
+            for point in points
+        ),
+    )
+    if skipped_docs:
+        log_stale_cleanup_skipped(
+            "Qdrant",
+            f"collection {collection}",
+            skipped_docs,
+            "source identity was absent or a chunk was rejected",
+        )
+    try:
+        from services.vector_sync import qdrant_delete_stale_chunks
+
+        stale_chunks_deleted = qdrant_delete_stale_chunks(
+            session, base_url, hdrs, collection, cleanup_keep
+        )
+    except Exception as exc:
+        logger.error(
+            "Qdrant upsert landed for %s but stale cleanup failed; rerun to converge: %s",
+            collection,
+            exc,
+        )
+        return WriteResult(
+            ok=False,
+            rows_written=inserted,
+            table_name=collection,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=(inserted + 99) // 100,
+            error=(
+                f"Qdrant upsert landed, but stale cleanup failed; "
+                f"a rerun converges: {exc}"
+            ),
+            rejected_details=rejected,
+            rejected_rows=len(rejected),
+            meta={
+                **stale_cleanup_meta(stale_chunks_deleted, skipped_docs),
+                **vector_skip_meta,
+                **fingerprint_meta,
+            },
+        )
+    finally:
+        session.close()
 
     _final_abort = reject_on_strict_policy(error_policy, rejected, "Qdrant")
     if _final_abort:
@@ -891,8 +1396,13 @@ def write_mapped_rows(
             rejected_details=rejected,
             rejected_rows=len(rejected),
             warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
+            meta=fingerprint_meta,
         )
 
+    meta = _qdrant_gate8_meta(points)
+    meta.update(stale_cleanup_meta(stale_chunks_deleted, skipped_docs))
+    meta.update(vector_skip_meta)
+    meta.update(fingerprint_meta)
     return WriteResult(
         ok=True,
         rows_written=inserted,
@@ -903,7 +1413,7 @@ def write_mapped_rows(
         rejected_details=rejected,
         rejected_rows=len(rejected),
         warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
-        meta=_qdrant_gate8_meta(points),
+        meta=meta,
     )
 
 

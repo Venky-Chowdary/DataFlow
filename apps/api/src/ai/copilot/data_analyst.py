@@ -47,6 +47,14 @@ class CopilotDataAnalyst:
             if "synonym" not in (s.name or "").lower()
             and "industry schema" not in (s.name or "").lower()
         ]
+        # Two uploads can share a stem (sample_payments.csv + sample_payments.tsv)
+        # — a name-only inventory makes name-based tools ambiguous (QA D09).
+        # Surface the file identity and flag duplicates so the operator (and
+        # downstream tools) can disambiguate.
+        name_counts: dict[str, int] = {}
+        for s in schemas:
+            key = (s.name or "").strip().lower()
+            name_counts[key] = name_counts.get(key, 0) + 1
         return [
             {
                 "name": s.name,
@@ -56,6 +64,8 @@ class CopilotDataAnalyst:
                 "row_count": s.row_count,
                 "industry": s.industry,
                 "file_type": s.file_type,
+                "file": s.path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1] or "",
+                "duplicate_name": name_counts.get((s.name or "").strip().lower(), 0) > 1,
             }
             for s in schemas
         ]

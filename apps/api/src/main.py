@@ -7,15 +7,19 @@ Enterprise-grade data transfer platform with AI-powered semantic analysis.
 import asyncio
 import logging
 import os
+import threading
 from services.brand_env import getenv_brand
 import time
-import uuid
 from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
+from services.safe_errors import public_error
+from services.audit_coverage import AuditAccessMiddleware, http_route_template
+from services.tracing import sanitize_correlation_id
 from services.platform_config import (
     apply_railway_defaults,
     cors_origins,
@@ -32,6 +36,8 @@ from .middleware.tenant_middleware import TenantMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
 from .routers.auth_router import router as auth_router
+from .routers.iam_router import router as iam_router
+from .routers.scim_router import router as scim_router
 from .routers.automation_router import router as automation_router
 from .routers.catalog_router import router as catalog_router
 from .routers.connectors_router import router as connectors_router
@@ -41,7 +47,7 @@ from .routers.resource_acl_router import router as resource_acl_router
 from .routers.cdc_mapping_review_router import router as cdc_mapping_review_router
 from .routers.transforms_router import router as transforms_router
 from .routers.copilot_router import router as copilot_router
-from .routers.mcp_router import router as mcp_router
+from .routers.mcp_router import oauth_resource_router, router as mcp_router
 from .routers.ops_router import router as ops_router
 from .routers.preflight_router import router as preflight_router
 from .routers.query_router import router as query_router
@@ -59,6 +65,8 @@ from .routers.workspace_router import router as workspace_router
 from .services.rbac import RBACMiddleware
 
 logger = logging.getLogger("dataflow.api")
+_SECURITY_SETTINGS_SNAPSHOT_RECORDED = False
+_SECURITY_SETTINGS_SNAPSHOT_LOCK = threading.Lock()
 
 
 @asynccontextmanager
@@ -89,6 +97,46 @@ async def lifespan(app: FastAPI):
         configure_logging()
     except Exception as le:  # pragma: no cover - logging must never block boot
         print(f"[!] Logging bootstrap warning: {le}")
+    global _SECURITY_SETTINGS_SNAPSHOT_RECORDED
+    with _SECURITY_SETTINGS_SNAPSHOT_LOCK:
+        record_snapshot = not _SECURITY_SETTINGS_SNAPSHOT_RECORDED
+        _SECURITY_SETTINGS_SNAPSHOT_RECORDED = True
+    if record_snapshot:
+        try:
+            from services import audit_log, rbac
+            from services.audit_coverage import record_security_event
+            from services.team_store import require_workspace_isolation
+            from src.services import auth_service as _auth_service
+
+            try:
+                audit_retention_days = audit_log._retention_days()
+            except Exception:
+                audit_retention_days = "invalid"
+            record_security_event(
+                "system.security_settings.snapshot",
+                outcome="succeeded",
+                actor="system",
+                details={
+                    "production": bool(is_production()),
+                    "auth_required": bool(_auth_service.auth_required()),
+                    "workspace_isolation": bool(require_workspace_isolation()),
+                    "rbac_mode": str(rbac.UNRULED_ROUTE_MODE),
+                    "audit_store": (
+                        "mongo" if audit_log._mongo_collection() is not None else "file"
+                    ),
+                    "audit_retention_days": audit_retention_days,
+                    "docs_enabled": bool(docs_enabled()),
+                    "config_error_count": len(config_errors),
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "Security settings snapshot failed (%s)",
+                type(exc).__name__,
+            )
+    from services.rbac import record_unruled_routes_allowed_startup
+
+    record_unruled_routes_allowed_startup()
     os.environ.setdefault("DATAFLOW_VECTOR_STORE_DIR", str(vector_store_dir()))
     try:
         from services.integrations_store import apply_integrations_to_env
@@ -246,6 +294,12 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
     try:
+        from services.otel_logging import shutdown_otel_logging
+
+        shutdown_otel_logging()
+    except Exception as exc:  # noqa: BLE001 - shutdown is best-effort
+        logger.debug("OpenTelemetry log shutdown failed: %s", exc)
+    try:
         from services.tracing import shutdown_tracing
 
         shutdown_tracing()
@@ -276,6 +330,7 @@ _cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 if not _cors_origin_regex and is_railway():
     _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
 
+app.add_middleware(AuditAccessMiddleware)
 app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(TenantMiddleware)
@@ -315,9 +370,38 @@ app.add_middleware(
 
 @app.middleware("http")
 async def add_timing_header(request: Request, call_next):
+    from services.audit_coverage import begin_request_audit, end_request_audit
+
+    token = begin_request_audit()
+    try:
+        return await _add_timing_header_response(request, call_next)
+    finally:
+        end_request_audit(token)
+
+
+async def _add_timing_header_response(request: Request, call_next):
+    from services.audit_coverage import current_request_audit
+
     start_time = time.time()
-    correlation_id = request.headers.get("X-Correlation-ID") or str(uuid.uuid4())
+    raw_correlation_id = request.headers.get("X-Correlation-ID")
+    correlation_id, correlation_id_rejected = sanitize_correlation_id(raw_correlation_id)
     request.state.correlation_id = correlation_id
+    request.state.correlation_id_rejected = correlation_id_rejected
+    tracker = current_request_audit()
+    if tracker is not None:
+        tracker["correlation_id_rejected"] = bool(correlation_id_rejected)
+    if correlation_id_rejected:
+        from services.ops_events import emit_event
+
+        emit_event(
+            logger,
+            "http.correlation_id.rejected",
+            outcome="failed",
+            correlation_id_rejected=True,
+            length=len(raw_correlation_id or ""),
+            route_path=request.url.path,
+            correlation_id=correlation_id,
+        )
     # Bridge the inbound correlation id (and any W3C traceparent) into the
     # transfer root span so an API call and the job it starts share one
     # operator-visible identity. No-ops when tracing is off.
@@ -337,10 +421,12 @@ async def add_timing_header(request: Request, call_next):
 
     span_cm = (
         start_span(
-            f"HTTP {request.method} {request.url.path}",
+            request.method,
             attributes={
+                "http.request.method": request.method,
                 "http.method": request.method,
-                "http.route": request.url.path,
+                "url.path": request.url.path,
+                "url.scheme": request.url.scheme,
                 "dataflow.correlation_id": correlation_id,
             },
             kind="server",
@@ -351,8 +437,46 @@ async def add_timing_header(request: Request, call_next):
 
     trace_id = ""
     try:
-        with span_cm:
-            response = await call_next(request)
+        with span_cm as span:
+            try:
+                response = await call_next(request)
+            except BaseException:
+                if span is not None:
+                    try:
+                        span.set_attributes(
+                            {
+                                "http.response.status_code": 500,
+                                "http.status_code": 500,
+                            }
+                        )
+                    except Exception as span_exc:
+                        logger.debug("Could not set HTTP span status attributes: %s", span_exc)
+                raise
+            finally:
+                route_template = http_route_template(
+                    request.url.path,
+                    getattr(request.scope.get("route"), "path", None),
+                )
+                if route_template and span is not None:
+                    try:
+                        span.update_name(f"{request.method} {route_template}")
+                        span.set_attributes({"http.route": route_template})
+                    except Exception as span_exc:
+                        logger.debug("Could not set HTTP span route: %s", span_exc)
+            if span is not None:
+                try:
+                    span.set_attributes(
+                        {
+                            "http.response.status_code": response.status_code,
+                            "http.status_code": response.status_code,
+                        }
+                    )
+                    if response.status_code >= 500:
+                        from opentelemetry.trace import Status, StatusCode
+
+                        span.set_status(Status(StatusCode.ERROR))
+                except Exception as span_exc:
+                    logger.debug("Could not set HTTP span response status: %s", span_exc)
             try:
                 trace_id = current_trace_id() or ""
             except Exception:
@@ -367,12 +491,40 @@ async def add_timing_header(request: Request, call_next):
         # message reaches the client.  Duck-type ``exceptions`` to stay portable.
         if len(getattr(exc, "exceptions", [])) == 1:
             exc = exc.exceptions[0]
-        logger.exception("Unhandled error on %s", request.url.path)
-        detail = str(exc) if not is_production() else "An unexpected error occurred"
+        route_template = http_route_template(
+            request.url.path,
+            getattr(request.scope.get("route"), "path", None),
+        )
+        safe_fields = {"method": request.method}
+        if route_template:
+            safe_fields["route_template"] = route_template
+        detail, correlation_id = public_error(
+            exc,
+            event="http.request.unhandled",
+            public_message="An unexpected error occurred.",
+            status_code=500,
+            **safe_fields,
+        )
+        logger.error(
+            "http.request.unhandled.traceback",
+            exc_info=exc,
+            extra={
+                "event": "http.request.unhandled.traceback",
+                "correlation_id": correlation_id,
+            },
+        )
         response = JSONResponse(
             status_code=500,
-            content={"error": "Internal Server Error", "detail": detail},
+            content={
+                "error": "Internal Server Error",
+                "detail": detail,
+                "correlation_id": correlation_id,
+            },
             headers={"X-Correlation-ID": correlation_id},
+        )
+    if tracker is not None:
+        tracker["workspace_header_rejected"] = bool(
+            getattr(request.state, "workspace_header_rejected", False)
         )
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = f"{process_time:.4f}s"
@@ -391,18 +543,32 @@ async def add_timing_header(request: Request, call_next):
         request.method != "GET"
         and path.startswith("/api/v1/")
         and "/health" not in path
+        and (tracker is None or tracker.get("named", 0) == 0)
     ):
         try:
             from services.audit_log import append_audit_event
+            from services.audit_coverage import request_principal
+            from services.workspace_access import authorized_workspace_id
+
             actor = getattr(request.state, "user_email", None) or "anonymous"
+            workspace_id = authorized_workspace_id(request)
+            details = {
+                "status": response.status_code,
+                "ms": round(process_time * 1000, 1),
+            }
+            if getattr(request.state, "correlation_id_rejected", False):
+                details["correlation_id_rejected"] = True
+            if getattr(request.state, "workspace_header_rejected", False):
+                details["workspace_header_rejected"] = True
             append_audit_event(
                 action=f"http.{request.method.lower()}",
                 resource=path,
                 actor=actor,
                 level="error" if response.status_code >= 500 else "info",
                 correlation_id=correlation_id,
-                workspace_id=request.headers.get("X-Workspace-Id") or request.headers.get("x-workspace-id") or "",
-                details={"status": response.status_code, "ms": round(process_time * 1000, 1)},
+                workspace_id=workspace_id,
+                details=details,
+                principal=request_principal(request),
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -418,6 +584,7 @@ app.include_router(copilot_router, prefix="/api/v1")
 app.include_router(training_agent_router, prefix="/api/v1")
 app.include_router(transfer_router, prefix="/api/v1")
 app.include_router(mcp_router, prefix="/api/v1")
+app.include_router(oauth_resource_router)
 app.include_router(automation_router, prefix="/api/v1")
 app.include_router(catalog_router, prefix="/api/v1")
 app.include_router(schedules_router, prefix="/api/v1")
@@ -425,6 +592,8 @@ app.include_router(auth_router, prefix="/api/v1")
 # Compatibility mount when VITE_API_BASE omits /api/v1 (hits /auth/login).
 app.include_router(auth_router)
 app.include_router(audit_router, prefix="/api/v1")
+app.include_router(iam_router, prefix="/api/v1")
+app.include_router(scim_router, prefix="/api/v1")
 app.include_router(cdc_mapping_review_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
 app.include_router(team_router, prefix="/api/v1")
@@ -551,16 +720,45 @@ async def duplicate_transfer_handler(
     )
 
 
+@app.exception_handler(ConnectorStoreError)
+async def connector_store_error_handler(request: Request, exc: ConnectorStoreError):
+    """A connector write the configured store refused: say so, never a generic 500."""
+    logger.error("Connector store write refused on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        content={"error": "connector_store_unavailable", "detail": str(exc)},
+    )
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.exception("Unhandled error on %s", request.url.path)
-    detail = str(exc) if not is_production() else "An unexpected error occurred"
+    route_template = getattr(request.scope.get("route"), "path", None)
+    safe_fields = {"method": request.method}
+    if route_template:
+        safe_fields["route_template"] = route_template
+    detail, correlation_id = public_error(
+        exc,
+        event="http.request.unhandled",
+        public_message="An unexpected error occurred.",
+        status_code=500,
+        **safe_fields,
+    )
+    logger.error(
+        "http.request.unhandled.traceback",
+        exc_info=exc,
+        extra={
+            "event": "http.request.unhandled.traceback",
+            "correlation_id": correlation_id,
+        },
+    )
     return JSONResponse(
         status_code=500,
         content={
             "error": "Internal Server Error",
             "detail": detail,
+            "correlation_id": correlation_id,
         },
+        headers={"X-Correlation-ID": correlation_id},
     )
 
 

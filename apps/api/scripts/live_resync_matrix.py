@@ -24,7 +24,6 @@ sys.path.insert(0, "/home/ubuntu/repos/DataFlow/apps/api/scripts")
 
 from live_migration_scenario_matrix import (  # noqa: E402
     DESTS,
-    DST,
     SRC,
     dest_count,
     dest_exec,

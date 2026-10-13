@@ -172,6 +172,14 @@ def effective_backfill_new_fields(
     must ADD COLUMN on an existing destination — otherwise Snowflake fails with
     invalid identifier on names like id_text.
     """
+    policy = (schema_policy or "").strip().lower()
+    # pause_on_change and type_locked forbid silent ADD COLUMN. Implying
+    # backfill from a create-new mapping made every run fail g10 with
+    # "Schema change policy incomplete" before any drift was looked at
+    # (QA R2-080). An explicit toggle still flows through so the gate can
+    # name that conflict.
+    if policy in {"pause_on_change", "type_locked"}:
+        return bool(backfill_new_fields)
     return (
         bool(backfill_new_fields)
         or schema_policy_implies_backfill(schema_policy)

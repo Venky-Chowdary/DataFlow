@@ -159,7 +159,6 @@ def s3_remap_keys(
     src_keys: list[str], src_table: str, dest_table: str
 ) -> list[tuple[str, str]]:
     dest_base = normalize_object_base_key(dest_table)
-    src_base = normalize_object_base_key(src_table)
     if len(src_keys) == 1:
         src_ext = s3_ext(src_keys[0])
         dest_ext = s3_ext(dest_base)

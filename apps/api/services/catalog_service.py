@@ -115,9 +115,11 @@ def search_catalog(
             c for c in connectors
             if q in c["name"].lower() or q in c["id"].lower()
             or q in c.get("category", "").lower()
-            or q in c.get("description", "").lower()
             or q in c.get("driver_type", "").lower()
         ]
+        # Description text is not an identity. SFTP, Excel and CrateDB mention
+        # Postgres in their blurbs and were returned for query=postgres
+        # (QA RT5-13). A product name matches the name, id, or driver only.
 
     if category:
         connectors = [c for c in connectors if c.get("category") == category]

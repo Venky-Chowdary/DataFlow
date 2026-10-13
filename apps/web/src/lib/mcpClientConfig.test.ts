@@ -9,6 +9,9 @@ import {
   claudeMcpSnippet,
   cursorMcpSnippet,
   mcpHttpUrl,
+  mcpLogStatusLabel,
+  mcpLogTone,
+  remoteMcpSnippet,
   vscodeMcpSnippet,
 } from "./mcpClientConfig.ts";
 
@@ -33,4 +36,22 @@ test("client snippets name the real endpoint and require a bearer key", () => {
     assert.doesNotMatch(snippet, /api\.datawrap\.io/);
     assert.doesNotMatch(snippet, /mcp-bridge/);
   }
+});
+
+test("the generic remote snippet carries the absolute URL and a Bearer header", () => {
+  const cfg = JSON.parse(remoteMcpSnippet("https://www.datawrap.io/api/v1/mcp"));
+  assert.equal(cfg.transport, "streamable-http");
+  assert.equal(cfg.url, "https://www.datawrap.io/api/v1/mcp");
+  assert.equal(cfg.headers.Authorization, "Bearer <workspace-api-key>");
+});
+
+test("log status names the reason a call ended", () => {
+  assert.equal(mcpLogStatusLabel("error", "permission_denied"), "Denied");
+  assert.equal(mcpLogStatusLabel("error", "rate_limited"), "Rate limited");
+  assert.equal(mcpLogStatusLabel("ok", null), "OK");
+  assert.equal(mcpLogStatusLabel("error", undefined), "Error");
+  assert.equal(mcpLogStatusLabel("error", "something_new"), "Error");
+  assert.equal(mcpLogTone("error", "permission_denied"), "warn");
+  assert.equal(mcpLogTone("error", "tool_error"), "err");
+  assert.equal(mcpLogTone("ok", "ok"), "ok");
 });

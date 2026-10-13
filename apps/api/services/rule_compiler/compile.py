@@ -12,12 +12,20 @@ artifacts the same way an operator would have typed them.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import re
 from collections import defaultdict
 from typing import Any
 
+from services.ops_events import operation
+
 from .classify import (
+    _CLOSED_FORMULA_KINDS,
+    _EXCEL_FN_NAMES,
     classify_rule,
+    formula_prefix,
     named_rule_ref,
     named_rule_targets,
     parse_validate_check,
@@ -40,6 +48,18 @@ from .roles import GROUNDED_METHODS, ground_workbook_rows
 
 _MAX_SHAPE_STEPS = 100
 _MAX_MACRO_DEPTH = 8
+
+RULE_COMPILER_VERSION = "1"
+
+_CONTRACT_EXECUTE_TYPES = frozenset({"not_null", "contains", "in_set", "compare", "pattern"})
+
+# Population-unique contracts are verified post-load on the destination, not
+# per cell at write.
+_CONTRACT_POST_LOAD_TYPES = frozenset({"unique"})
+
+# An in_lookup that names its values compiles to in_set — capped so a giant
+# reference sheet does not turn into a per-cell set literal at Run.
+_MAX_LOOKUP_VALUES = 10_000
 
 _KIND_TO_TRANSFORM = {
     "trim": "trim",
@@ -374,7 +394,35 @@ def _preload_refused(sync_mode: str) -> bool:
     return (sync_mode or "").strip().lower() in _PRELOAD_REFUSED_SYNCS
 
 
-def compile_rule_workbook(
+_logger = logging.getLogger(__name__)
+
+
+def compile_rule_workbook(filename: str, payload: bytes, **kwargs: Any) -> dict[str, Any]:
+    """Ingest + classify + bind; emits ``rules.compile.succeeded``/``.failed``.
+
+    The event carries counts and the report fingerprint — never the filename,
+    rule text, or column names.
+    """
+    with operation(
+        _logger, "rules.compile", sync_mode=kwargs.get("sync_mode") or None
+    ) as res:
+        report = _compile_rule_workbook(filename, payload, **kwargs)
+        coverage = report.get("coverage") or {}
+        res.update(
+            rule_count=report.get("rule_count"),
+            executable=coverage.get("executable"),
+            review=coverage.get("review"),
+            conflict=coverage.get("conflict"),
+            coverage_percent=coverage.get("percent"),
+            unmapped_source_count=report.get("unmapped_source_count"),
+            unused_dest_count=report.get("unused_dest_count"),
+            truncated_rows=bool(report.get("truncated_rows")),
+            report_fingerprint=report.get("report_fingerprint"),
+        )
+    return report
+
+
+def _compile_rule_workbook(
     filename: str,
     payload: bytes,
     *,
@@ -407,8 +455,11 @@ def compile_rule_workbook(
     kind_by_sheet = {str(item["sheet"] or ""): str(item["kind"] or "") for item in sheet_kinds}
     notes_sheets = {item["sheet"] for item in sheet_kinds if item["kind"] == "notes"}
     validation_sheets = {item["sheet"] for item in sheet_kinds if item["kind"] == "validation"}
-    lookup_pairs = _collect_lookup_pairs(rows, src_cols)
-    orphan_notices = _attach_orphan_enumerations(rows, lookup_pairs, src_cols, dst_cols)
+    lookup_provenance: dict[tuple[str, str], dict[str, Any]] = {}
+    lookup_pairs = _collect_lookup_pairs(rows, src_cols, lookup_provenance)
+    orphan_notices = _attach_orphan_enumerations(
+        rows, lookup_pairs, src_cols, dst_cols, lookup_provenance,
+    )
     named_catalog, catalog_conflicts = _collect_named_catalog(rows)
     compiled: list[dict[str, Any]] = []
     shape_steps: list[dict[str, Any]] = []
@@ -513,16 +564,19 @@ def compile_rule_workbook(
         )
         if already:
             continue
+        source_provenance = lookup_provenance.get(edge, {})
+        synthetic_row = {
+            "source_column": src,
+            "dest_column": dst or src,
+            "rule": "",
+            "lookup_from": next(iter(mapping)),
+            "lookup_to": next(iter(mapping.values())),
+            "_sheet": source_provenance.get("sheet") or "Lookups",
+        }
+        if source_provenance.get("row"):
+            synthetic_row["_row"] = source_provenance["row"]
         synthetic = _compile_row(
-            {
-                "source_column": src,
-                "dest_column": dst or src,
-                "rule": "",
-                "lookup_from": next(iter(mapping)),
-                "lookup_to": next(iter(mapping.values())),
-                "_sheet": "Lookups",
-                "_row": 0,
-            },
+            synthetic_row,
             src_cols=src_cols,
             dst_cols=dst_cols,
             source_table=source_table,
@@ -587,6 +641,11 @@ def compile_rule_workbook(
             dest_table,
         ))
 
+    for item in compiled:
+        item["rule_id"] = _rule_id(item)
+        if item.get("kind") == "contract":
+            item["enforced_at_execute"] = _contract_enforced_at_execute(item)
+            item["enforced_post_load"] = _contract_enforced_post_load(item)
     buckets = {
         "executable": sum(1 for r in compiled if r["status"] == "executable"),
         "needs_confirmation": sum(1 for r in compiled if r["status"] == "needs_confirmation"),
@@ -618,10 +677,36 @@ def compile_rule_workbook(
             1 for r in compiled
             if r["status"] == "executable" and r.get("kind") == "contract"
         ),
+        "contracts_enforced_at_execute": sum(
+            1 for r in compiled
+            if r.get("kind") == "contract" and r.get("enforced_at_execute")
+        ),
         "percent": int(round(100 * buckets["executable"] / detected)) if detected else 0,
     }
+    input_sha = hashlib.sha256(payload).hexdigest()
+    fingerprint = _report_fingerprint(
+        input_sha,
+        compiled,
+        shape_steps,
+        {
+            "source_columns": src_cols,
+            "dest_columns": dst_cols,
+            "source_table": source_table,
+            "dest_table": dest_table,
+            "source_tables": selected_tables,
+            "source_catalog": catalog,
+            "dest_tables": selected_dest_tables,
+            "dest_catalog": dest_cat,
+            "source_types": src_types,
+            "dest_types": dst_types,
+            "sync_mode": sync,
+        },
+    )
     return {
         "filename": filename,
+        "compiler_version": RULE_COMPILER_VERSION,
+        "input_sha256": input_sha,
+        "report_fingerprint": fingerprint,
         "rule_count": detected,
         "buckets": buckets,
         "coverage": coverage,
@@ -732,6 +817,55 @@ def compile_rule_workbook(
     }
 
 
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _rule_id(item: dict[str, Any]) -> str:
+    """Stable per-row identity: provenance + both ends + the spoken rule."""
+    provenance = item.get("provenance") or {}
+    key = {
+        "sheet": provenance.get("sheet") or "",
+        "row": provenance.get("row") or 0,
+        "source_table": item.get("source_table") or "",
+        "source_column": item.get("source_column") or "",
+        "dest_table": item.get("dest_table") or "",
+        "dest_column": item.get("dest_column") or "",
+        "rule_text": item.get("rule_text") or "",
+    }
+    return hashlib.sha256(_canonical_json(key).encode()).hexdigest()[:16]
+
+
+def _contract_enforced_at_execute(item: dict[str, Any]) -> bool:
+    contract = item.get("contract") or {}
+    return str(contract.get("type") or "") in _CONTRACT_EXECUTE_TYPES
+
+
+def _contract_enforced_post_load(item: dict[str, Any]) -> bool:
+    contract = item.get("contract") or {}
+    return str(contract.get("type") or "") in _CONTRACT_POST_LOAD_TYPES
+
+
+def _report_fingerprint(
+    input_sha: str,
+    rules: list[dict[str, Any]],
+    shape_steps: list[dict[str, Any]],
+    schema_args: dict[str, Any],
+) -> str:
+    payload = {
+        "compiler_version": RULE_COMPILER_VERSION,
+        "input_sha256": input_sha,
+        "rules": rules,
+        "shape_steps": shape_steps,
+        "contracts": [
+            item for item in rules
+            if item.get("kind") == "contract" and item.get("contract")
+        ],
+        "schema": schema_args,
+    }
+    return hashlib.sha256(_canonical_json(payload).encode()).hexdigest()
+
+
 def _classify_sheets(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Classify each sheet before compile: mapping / lookup / validation / notes."""
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -801,8 +935,25 @@ def _bind_method_counts(compiled: list[dict[str, Any]]) -> dict[str, int]:
 def _collect_lookup_pairs(
     rows: list[dict[str, Any]],
     src_cols: list[str] | None = None,
+    provenance: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[tuple[str, str], dict[str, str]]:
     pairs: dict[tuple[str, str], dict[str, str]] = defaultdict(dict)
+    def record_source(edge: tuple[str, str], raw: dict[str, Any]) -> None:
+        if provenance is None or edge in provenance:
+            return
+        source: dict[str, Any] = {}
+        sheet = str(raw.get("_sheet") or "").strip()
+        if sheet:
+            source["sheet"] = sheet
+        try:
+            row = int(raw.get("_row") or 0)
+        except (TypeError, ValueError):
+            row = 0
+        if row > 0:
+            source["row"] = row
+        if source:
+            provenance[edge] = source
+
     for raw in rows:
         frm = str(raw.get("lookup_from") or "").strip()
         to = str(raw.get("lookup_to") or "").strip()
@@ -813,14 +964,20 @@ def _collect_lookup_pairs(
         if not src:
             continue
         edge_dst = dst or src
-        pairs[(src, edge_dst)][frm] = to
+        edge = (src, edge_dst)
+        pairs[edge][frm] = to
+        record_source(edge, raw)
         resolved = resolve_name(src, src_cols) if src_cols else ""
         if resolved:
             # Keep the lookup-type label as dest when the sheet did not name one,
             # so STATE vs REGION tables on the same source stay distinct edges.
-            pairs[(resolved, dst or src)][frm] = to
+            resolved_edge = (resolved, dst or src)
+            pairs[resolved_edge][frm] = to
+            record_source(resolved_edge, raw)
             if dst:
-                pairs[(resolved, dst)][frm] = to
+                dest_edge = (resolved, dst)
+                pairs[dest_edge][frm] = to
+                record_source(dest_edge, raw)
     return pairs
 
 
@@ -1209,14 +1366,17 @@ def _attach_orphan_enumerations(
     lookup_pairs: dict[tuple[str, str], dict[str, str]],
     src_cols: list[str],
     dst_cols: list[str],
+    provenance: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> list[str]:
     """Informatica Domains/Enumerations + Clio: compile a named edge, never invent one."""
     orphans: dict[str, dict[str, str]] = defaultdict(dict)
+    orphan_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for raw in rows:
         frm = str(raw.get("lookup_from") or "").strip()
         to = str(raw.get("lookup_to") or "").strip()
         if frm and to and not str(raw.get("source_column") or "").strip():
             orphans[str(raw.get("_sheet") or "")][frm] = to
+            orphan_rows[str(raw.get("_sheet") or "")].append(raw)
     notices: list[str] = []
     for sheet, mapping in orphans.items():
         if not mapping:
@@ -1245,17 +1405,35 @@ def _attach_orphan_enumerations(
             if edge_src:
                 candidates.append((edge_src, edge_dst, spoken_src, spoken_dst))
         unique = {(item[0], item[1]): item for item in candidates}
+        first_row = orphan_rows[sheet][0] if orphan_rows[sheet] else {}
+
+        def add_orphan_edge(edge: tuple[str, str]) -> None:
+            lookup_pairs[edge].update(mapping)
+            if provenance is not None and edge not in provenance:
+                source: dict[str, Any] = {}
+                source_sheet = str(first_row.get("_sheet") or "").strip()
+                if source_sheet:
+                    source["sheet"] = source_sheet
+                try:
+                    source_row = int(first_row.get("_row") or 0)
+                except (TypeError, ValueError):
+                    source_row = 0
+                if source_row > 0:
+                    source["row"] = source_row
+                if source:
+                    provenance[edge] = source
+
         if len(unique) == 1:
             src, dst, spoken_src, spoken_dst = next(iter(unique.values()))
-            lookup_pairs[(src, dst)].update(mapping)
+            add_orphan_edge((src, dst))
             if spoken_src:
-                lookup_pairs[(spoken_src, spoken_dst or spoken_src)].update(mapping)
+                add_orphan_edge((spoken_src, spoken_dst or spoken_src))
             continue
         if not unique:
             pool = [c for c in (dst_cols or src_cols) if c]
             winner, _score = unique_linguistic_match(sheet, pool) if sheet and pool else ("", 0.0)
             if winner:
-                lookup_pairs[(winner, winner)].update(mapping)
+                add_orphan_edge((winner, winner))
                 continue
             notices.append(
                 f"{len(mapping)} code pair(s) on sheet “{sheet or 'Lookups'}” have "
@@ -1398,6 +1576,17 @@ def _refuse_preload_on_history(item: dict[str, Any], sync_mode: str) -> None:
     ]
 
 
+def _rule_provenance(raw: dict[str, Any]) -> dict[str, Any]:
+    provenance: dict[str, Any] = {"sheet": raw.get("_sheet") or ""}
+    try:
+        row = int(raw.get("_row") or 0)
+    except (TypeError, ValueError):
+        row = 0
+    if row > 0:
+        provenance["row"] = row
+    return provenance
+
+
 def _review_notice(text: str, issue: str, source_table: str, dest_table: str) -> dict[str, Any]:
     return {
         "source_table": source_table,
@@ -1419,7 +1608,7 @@ def _review_notice(text: str, issue: str, source_table: str, dest_table: str) ->
         "shape_steps": [],
         "status": "needs_confirmation",
         "issues": [issue],
-        "provenance": {"sheet": "", "row": 0},
+        "provenance": _rule_provenance({}),
     }
 
 
@@ -1646,6 +1835,31 @@ def _compile_row(
     status = "executable"
     if kind in review_kinds or bind_fail or low_confidence_reason or type_issue or prec_issue or ident_issue or unnamed_zone:
         status = "needs_confirmation"
+    # Formula-injection invariant: a formula-prefixed cell may only compile
+    # to the closed forms `_excel_formula` owns. Everything else is review —
+    # never executable, never enforced at Run, no matter which classifier
+    # reached it.
+    formula_unsafe = False
+    if formula_prefix(rule_text):
+        body = rule_text.strip()
+        if "|" in body or "!" in body:
+            formula_unsafe = True  # DDE / cross-sheet refs
+        if re.search(r"[A-Za-z_][\w.]*\s*\(", body):
+            for name in re.findall(r"([A-Za-z_][\w.]*)\s*\(", body):
+                if name.upper() not in _EXCEL_FN_NAMES:
+                    formula_unsafe = True  # unknown function call
+        if ("\"" in body or "&" in body) and kind != "concat":
+            formula_unsafe = True
+    if formula_unsafe or (formula_prefix(rule_text) and kind not in _CLOSED_FORMULA_KINDS):
+        status = "needs_confirmation"
+        named = re.match(r"^=\s*([A-Za-z][A-Za-z0-9_.]*)\s*\(", rule_text.strip())
+        label = named.group(1).upper() if named else formula_prefix(rule_text)
+        issue = (
+            f"Spreadsheet formula {label} is not a supported closed form; "
+            "it was not applied."
+        )
+        if issue not in issues:
+            issues.append(issue)
 
     transform = _KIND_TO_TRANSFORM.get(kind, "none")
     shape_step: dict[str, Any] | None = None
@@ -2112,7 +2326,13 @@ def _compile_row(
                     lookup_pairs, spoken_src, spoken_dst, source_column, dest_column,
                 ) or pairs
             )
-            if values:
+            if len(values) > _MAX_LOOKUP_VALUES:
+                issues.append(
+                    f"reference set exceeds {_MAX_LOOKUP_VALUES} values; "
+                    "not enforceable at Run"
+                )
+                status = "needs_confirmation"
+            elif values:
                 classified["contract"] = {"type": "in_set", "values": values}
                 classified["interpretation"] = "Exist in named lookup"
                 issues = [
@@ -2189,10 +2409,7 @@ def _compile_row(
         "unique": bool(classified.get("unique")),
         "bind_method": src_method or dst_method or "",
         "bind_score": round(min(src_score or 1.0, dst_score or 1.0) if (src_method or dst_method) else 0.0, 3),
-        "provenance": {
-            "sheet": raw.get("_sheet") or "",
-            "row": int(raw.get("_row") or 0),
-        },
+        "provenance": _rule_provenance(raw),
     }
 
 
@@ -2235,10 +2452,7 @@ def _join_review_item(
             "source_query. Confirm the join in Source → query or Operations "
             "Transforms — a guessed grain is how migrations lose or duplicate rows."
         ],
-        "provenance": {
-            "sheet": raw.get("_sheet") or "",
-            "row": int(raw.get("_row") or 0),
-        },
+        "provenance": _rule_provenance(raw),
     }
 
 

@@ -18,7 +18,8 @@ this module before Map / preflight / CREATE TABLE. Rules are fail-safe:
 4. **Widen to VARCHAR/TEXT** on mixed or ambiguous columns — never invent a
    tight type that will fail dry-run on the next unseen value.
 
-Public API: ``infer_type``, ``infer_column``, ``infer_columns_from_rows``.
+Public API: ``classify_value``, ``infer_type``, ``infer_column``,
+``infer_columns_from_rows``.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ from datetime import datetime
 from typing import Any
 
 from services.decimal_observe import observe_source_numeric_samples
+from services.type_lattice import join_logical_types
 from services.transform_engine import (
     CANONICAL_BOOLEAN_TOKENS,
     NULL_SENTINELS,
@@ -487,7 +489,32 @@ def _classify_jsonish(value: str, *, field_name: str | None = None) -> str | Non
     return "JSON"
 
 
-def _classify_value(value: str, *, field_name: str | None = None) -> str:
+def _has_explicit_timezone_suffix(value: str) -> bool:
+    return bool(
+        re.search(r"(Z|[+-]\d{2}:?\d{2})$", value, re.I)
+        or re.search(r"\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2}$", value)
+    )
+
+
+def _refuses_numeric_inference(text: str) -> bool:
+    """True when a token must stay text instead of INTEGER/DECIMAL.
+
+    Leading ``+``, internal whitespace, parentheses, and currency markers are
+    identity data (phone, money text). Stripping them and inferring a number
+    drops the marker and then fails or corrupts the column.
+    """
+    if any(ch.isspace() for ch in text):
+        return True
+    if text[:1] in "+(":
+        return True
+    if "%" in text:
+        return True
+    from services.transform_engine import _CURRENCY_RE
+
+    return _CURRENCY_RE.search(text) is not None
+
+
+def classify_value(value: str, *, field_name: str | None = None) -> str:
     s = value.strip()
     if not s or s.lower() in NULL_SENTINELS:
         return "VARCHAR"
@@ -539,14 +566,14 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
         # pgoutput and some CSV exports use a hours-only offset (``+00``, ``+05``).
         # Requiring four digits classified those instants as text, and the plan
         # then blocked the real timestamptz column as a conversion to TEXT.
-        if re.search(r"(Z|[+-]\d{2}:?\d{2})$", s, re.I) or re.search(
-            r"\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?[+-]\d{2}$", s
-        ):
+        if _has_explicit_timezone_suffix(s):
             return "TIMESTAMPTZ"
         # Excel stores a date-only cell as midnight and serializes it with
-        # T00:00:00. That is a DATE. A real time-of-day stays TIMESTAMP, and
-        # TIMESTAMP → DATE stays lossy.
-        if re.search(r"(?:[T ])00:00:00(?:\.0+)?$", s):
+        # T00:00:00. That is a DATE. A SQL timestamp that happens to be
+        # midnight uses a space (``2026-10-01 00:00:00``). Treating that as
+        # DATE dropped the time and then blocked a later non-midnight row
+        # as lossy (QA R2-018). Only the Excel ``T`` form is a date.
+        if re.search(r"T00:00:00(?:\.0+)?$", s):
             return "DATE"
         return "TIMESTAMP"
 
@@ -557,7 +584,21 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
         except ValueError:
             continue
 
-    decimal_parsed = _parse_decimal(s)
+    # '45%' is a percentage token. Stripping the marker and inferring INTEGER
+    # then blocks the same value as a lossy cast (QA R2-017). Keep the text.
+    if s.rstrip().endswith("%"):
+        return "VARCHAR"
+
+    # Phone numbers, accounting parentheses, and currency are not integers.
+    # ``+1 555 010 0001`` and ``(555) 123-4567`` used to survive marker
+    # stripping and land as BIGINT, which then failed the whole job (R4-D01).
+    # A plain ``42`` (outer whitespace already removed) stays numeric. Long
+    # prose still falls through to TEXT — whitespace only blocks the numeric
+    # carrier, it does not shorten a narrative.
+    if not _refuses_numeric_inference(s):
+        decimal_parsed = _parse_decimal(s)
+    else:
+        decimal_parsed = None
     if decimal_parsed is not None:
         from services.transform_engine import numeric_text_without_markers
 
@@ -582,6 +623,9 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
     if _EMAIL_RE.match(s):
         return "VARCHAR"
     return "VARCHAR"
+
+
+_classify_value = classify_value
 
 
 @contextmanager
@@ -956,7 +1000,7 @@ def infer_column(
 
     with _column_date_locale(non_empty):
         counts: Counter[str] = Counter(
-            _classify_value(s, field_name=field_name) for s in non_empty
+            _classify_value(sample, field_name=field_name) for sample in non_empty
         )
     types = set(counts.keys())
 
@@ -982,8 +1026,13 @@ def infer_column(
         # or when a temporal field name has at least one TZ sample.
         if tz_count > 0 and (tz_count == len(non_empty) or (field_name and _is_timestamp_field_name(field_name))):
             inferred = "TIMESTAMPTZ"
-        elif counts.get("TIMESTAMP", 0) >= counts.get("DATE", 0) and counts.get("TIMESTAMP", 0) >= counts.get("TIME", 0):
-            inferred = "TIMESTAMP"
+        elif counts.get("TIMESTAMP", 0) and (
+            counts.get("TIMESTAMP", 0) + counts.get("DATE", 0) >= counts.get("TIME", 0)
+        ):
+            # DATE and TIMESTAMP join on the lattice; they are not a vote.
+            # Midnight cells classify as DATE, so two of them outvoted one
+            # 14:30 stamp and the column landed as DATE with the time dropped.
+            inferred = join_logical_types("DATE" if counts.get("DATE") else None, "TIMESTAMP")
         elif counts.get("DATE", 0) >= counts.get("TIME", 0):
             inferred = "DATE"
         else:

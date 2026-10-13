@@ -64,7 +64,6 @@ interface TransferTransformStepProps {
    * because both schemas exist here; Map owns the per-column evidence.
    */
   onApplyRules?: (report: RuleCompileReport) => void;
-  onAcceptRuleDirect?: (index: number) => void;
   ruleReport?: RuleCompileReport | null;
   sourceTable?: string;
   destTable?: string;
@@ -127,7 +126,6 @@ export function TransferTransformStep({
   onContinue,
   syncMode,
   onApplyRules,
-  onAcceptRuleDirect,
   ruleReport,
   sourceTable = "",
   destTable = "",
@@ -371,6 +369,7 @@ export function TransferTransformStep({
     busy,
     previewMatchesSteps: previewedStepsKey === stepsKey && preview !== null,
     syncMode,
+    ruleCount: ruleReport?.rule_count ?? 0,
   });
   const preloadRefused = preloadTransformRefused(syncMode);
   const catalogColumns = showAllColumns || attention === 0
@@ -420,10 +419,10 @@ export function TransferTransformStep({
             </p>
           </div>
           <div className="df2-xform-head-side">
-            {preview ? (
+            {preview?.recipe.recipe_hash ? (
               <span className="df2-xform-identity" title="Pinned at approval and re-checked before Execute">
                 <DtIcon name="shield" size={14} />
-                recipe {preview.recipe.recipe_hash}
+                Transform ID {preview.recipe.recipe_hash}
               </span>
             ) : (
               <span className="df2-xform-identity is-empty">
@@ -585,8 +584,9 @@ export function TransferTransformStep({
         <div className="df2-rule-import-copy">
           <strong>Business rules</strong>
           <p>
-            Upload the mapping workbook (Excel, CSV, TSV or JSON). Closed-form
-            rows land on this recipe. Anything else stays in review.
+            Upload the mapping workbook (Excel, CSV, TSV or JSON). Rules that
+            can run exactly are compiled into steps here; everything else waits
+            for your review.
           </p>
           <details className="df2-rule-import-detail">
             <summary>What this upload does</summary>
@@ -598,22 +598,22 @@ export function TransferTransformStep({
               Anything we cannot execute stays in review — unused destination
               columns are not written. Applied rows land on this recipe and Map
               immediately. Closed-form Validate checks compile as destination
-              contracts — they never write. Review is for sentences that are
-              not a closed form or did not bind. Accept as Direct on a leftover
-              bound rename, or continue to Map to remap.
+              contracts — they never write a column. Review is for sentences
+              that are not a closed form or did not bind. A leftover bound
+              rename can be accepted as Direct on Map, or remapped there.
               {sourceTables.length > 1
-                ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins stay in review — this compiler will not invent a grain.`
+                ? ` ${sourceTables.length} source tables are selected (${sourceTables.join(", ")}). Name Source + Column (or Table.column). Joins need you to choose how rows match; they stay in review.`
                 : ""}
             </p>
           </details>
           {ruleReport ? <p className="df2-rule-import-summary">{ruleReport.filename}</p> : null}
-          {ruleError ? <p className="df2-rule-import-error">{ruleError}</p> : null}
+          {ruleError ? <p className="df2-rule-import-error" role="alert">{ruleError}</p> : null}
         </div>
         <div className="df2-rule-import-actions">
           <input
             ref={fileInputRef}
             type="file"
-            accept=".xlsx,.xlsm,.csv,.tsv,.txt,.json,.ndjson,application/json,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            accept=".xlsx,.xlsm,.xls,.csv,.tsv,.txt,.json,.ndjson,application/json,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
             hidden
             onChange={(event) => void onPickRules(event.target.files?.[0])}
           />
@@ -816,7 +816,6 @@ export function TransferTransformStep({
         <BusinessRuleLedger
           report={ruleReport}
           embedded
-          onAcceptDirect={onAcceptRuleDirect}
         />
       ) : null}
       </div>

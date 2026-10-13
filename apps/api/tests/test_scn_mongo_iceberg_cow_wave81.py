@@ -70,7 +70,7 @@ def test_iceberg_capability_honest_copy_on_write():
 
     caps = get_connector_capability("iceberg")
     assert caps.get("write_strategy") == (
-        "merge-on-read-upserts-deletes, copy-on-write-overwrite"
+        "filesystem-equality-delete, catalog-copy-on-write"
     )
     assert caps.get("supports_merge_on_read") is True
     assert caps.get("supports_lsn_guard") is True

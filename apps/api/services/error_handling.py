@@ -119,6 +119,8 @@ RETRIABLE_EXCEPTIONS: set[str] = {
     "lost connection",
     "server has gone away",
     "terminating connection",
+    # pymssql/FreeTDS: the TDS session dropped (tunnel rotation, failover).
+    "dbprocess is dead",
 }
 
 # Non-retriable errors indicate a data or contract problem that will not fix itself.
@@ -1021,38 +1023,62 @@ def retry_after_seconds(error: Exception) -> float | None:
     into a multi-hour stall on large SaaS migrations. Supports both the
     delta-seconds and HTTP-date forms of RFC 9110 ``Retry-After``.
     """
-    headers = getattr(getattr(error, "response", None), "headers", None)
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None)
     if not headers:
         return None
     try:
-        raw = headers.get("Retry-After") or headers.get("retry-after")
-    except Exception:  # noqa: BLE001 - header mapping may be exotic
+        items = list(headers.items())
+    except (AttributeError, TypeError, ValueError):
         return None
-    if raw is None:
-        return None
-    text = str(raw).strip()
-    if not text:
-        return None
-    try:
-        return max(0.0, min(float(text), _RETRY_AFTER_CAP_SECONDS))
-    except ValueError:
-        pass
-    try:
-        from email.utils import parsedate_to_datetime
+    retry_after = next(
+        (value for key, value in items if str(key).lower() == "retry-after"),
+        None,
+    )
+    has_retry_after = any(str(key).lower() == "retry-after" for key, _ in items)
+    if has_retry_after:
+        text = str(retry_after or "").strip()
+        if not text:
+            return None
+        try:
+            return max(0.0, min(float(text), _RETRY_AFTER_CAP_SECONDS))
+        except ValueError:
+            pass
+        try:
+            from email.utils import parsedate_to_datetime
 
-        when = parsedate_to_datetime(text)
-    except Exception:  # noqa: BLE001 - malformed header is not fatal
-        return None
-    if when is None:
-        return None
-    from datetime import datetime, timezone
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if when is None:
+            return None
+        from datetime import datetime, timezone
 
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    delta = (when - datetime.now(timezone.utc)).total_seconds()
-    if delta <= 0:
-        return 0.0
-    return min(delta, _RETRY_AFTER_CAP_SECONDS)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        delta = (when - datetime.now(timezone.utc)).total_seconds()
+        if delta <= 0:
+            return 0.0
+        return min(delta, _RETRY_AFTER_CAP_SECONDS)
+
+    status = getattr(response, "status_code", None)
+    if status not in {429, 403}:
+        return None
+    remaining = next(
+        (value for key, value in items if str(key).lower() == "x-ratelimit-remaining"),
+        None,
+    )
+    if status == 403 and str(remaining).strip() != "0":
+        return None
+    reset = next(
+        (value for key, value in items if str(key).lower() == "x-ratelimit-reset"),
+        None,
+    )
+    try:
+        delta = float(reset) - time.time()
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return max(0.0, min(delta, _RETRY_AFTER_CAP_SECONDS))
 
 
 @dataclass
@@ -1142,7 +1168,24 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
     status_match = re.search(r"\b(4\d\d|5\d\d)\b", text)
     if status_match:
         code = int(status_match.group(1))
-        if code in {408, 429, 500, 502, 503, 504}:
+        response = getattr(error, "response", None)
+        headers = getattr(response, "headers", None)
+        try:
+            remaining = next(
+                (
+                    value
+                    for key, value in headers.items()
+                    if str(key).lower() == "x-ratelimit-remaining"
+                ),
+                None,
+            )
+        except (AttributeError, TypeError, ValueError):
+            remaining = None
+        github_rate_limit = code == 403 and str(remaining).strip() == "0"
+        if github_rate_limit:
+            retriable = True
+            evidence.append("HTTP 403 GitHub rate limit has zero remaining requests")
+        elif code in {408, 429} or 500 <= code <= 599:
             # 500 is retriable only if no contract violation evidence is present
             if code == 500 and any(p in text for p in NON_RETRIABLE_PATTERNS):
                 retriable = False
@@ -1182,6 +1225,9 @@ class AmbiguousWriteOutcome(Exception):
         )
 
 
+_DEFAULT_RETRY_SLEEP = time.sleep
+
+
 def with_retry(
     fn: Callable[[], Any],
     *,
@@ -1189,6 +1235,7 @@ def with_retry(
     on_transient: Callable[[Exception, float], None] | None = None,
     replay_safety: Any | None = None,
     on_replay_blocked: Callable[[Exception, Any], None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> Any:
     """Run a function with bounded retry and backoff.
 
@@ -1201,6 +1248,8 @@ def with_retry(
     Reads and other side-effect-free work pass no verdict and retry as before.
     """
     budget = budget or RetryBudget()
+    if sleep is _DEFAULT_RETRY_SLEEP and time.sleep is not _DEFAULT_RETRY_SLEEP:
+        sleep = time.sleep
     last_error: Exception | None = None
     while budget.has_budget():
         try:
@@ -1225,7 +1274,7 @@ def with_retry(
                 delay = max(delay, server_hint)
             if on_transient:
                 on_transient(exc, delay)
-            time.sleep(delay)
+            sleep(delay)
     raise last_error or RuntimeError("Retry budget exhausted")
 
 

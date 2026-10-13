@@ -438,6 +438,38 @@ class CheckpointService:
 
 
 
+def _cancelled_before_any_commit(job: dict, checkpoint: Any) -> bool:
+    """A cancelled incremental run that provably committed nothing (QA ACC-05).
+
+    The persisted sync cursor only advances on a committed run, so restarting
+    from it re-reads exactly the cancelled delta. Unknown committed counts,
+    non-incremental modes, and any recorded checkpoint progress do not qualify.
+    """
+    if str(job.get("status") or "").strip().lower() != "cancelled":
+        return False
+    request = job.get("transfer_request") or {}
+    sync_mode = (request.get("sync_mode") if isinstance(request, dict) else "") or job.get(
+        "sync_mode"
+    )
+    from services.execution_engine_contract import committed_rows_of
+    from services.sync_cursor import requires_incremental
+
+    if not requires_incremental(str(sync_mode or "")):
+        return False
+    rows, known = committed_rows_of(job)
+    if not known or rows:
+        return False
+    if checkpoint is None:
+        return True
+    cp = checkpoint if isinstance(checkpoint, Checkpoint) else Checkpoint.from_dict(checkpoint)
+    return not (
+        int(cp.chunk_index or 0)
+        or int(cp.rows_processed or 0)
+        or cp.cursor_value is not None
+        or int(cp.offset or 0)
+    )
+
+
 def evaluate_resume_safety(
     checkpoint: "Checkpoint | dict | None",
     *,
@@ -480,6 +512,19 @@ def evaluate_resume_safety(
         out["honesty"] = (
             "Gap recovery is at-least-once upsert of the current source population, "
             "not continuous CDC across the lost window."
+        )
+        return out
+    if _cancelled_before_any_commit(job, checkpoint):
+        out["ok"] = True
+        out["restart_from_watermark"] = True
+        out["warnings"].append(
+            "This incremental run was cancelled before any row committed. Resume "
+            "restarts it from the last committed watermark and re-reads that delta."
+        )
+        logger.info(
+            "Resume allowed for cancelled zero-row incremental job %s — restart "
+            "from the last committed watermark",
+            job.get("job_id") or job.get("_id") or "",
         )
         return out
     if checkpoint is None:

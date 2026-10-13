@@ -118,6 +118,9 @@ class SnapshotSignal:
     # older than the read cannot overwrite them.
     lsn_low: str = ""
     lsn_high: str = ""
+    # Structured filter (services/cdc_snapshot_filter.py) bounding the chunk
+    # reads; None = whole table. Never raw SQL.
+    row_filter: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -140,6 +143,7 @@ class SnapshotSignal:
             gtid_high=str(d.get("gtid_high") or ""),
             lsn_low=str(d.get("lsn_low") or ""),
             lsn_high=str(d.get("lsn_high") or ""),
+            row_filter=d.get("row_filter") or None,
         )
 
 
@@ -292,16 +296,33 @@ def request_incremental_snapshot(
     *,
     primary_key: str | list[str] | None = None,
     chunk_size: int = 1000,
+    row_filter: Any = None,
 ) -> SnapshotSignal:
-    """Enqueue an incremental snapshot for ``table`` on ``source_key``."""
+    """Enqueue an incremental snapshot for ``table`` on ``source_key``.
+
+    ``row_filter`` limits the backfill to matching rows (validated here so a bad
+    filter is a 400 at request time, not a failed signal mid-stream).
+    """
+    from services.cdc_snapshot_filter import describe_snapshot_filter, normalize_snapshot_filter
+
+    spec = normalize_snapshot_filter(row_filter)
     sig = SnapshotSignal(
         id=f"snap_{uuid.uuid4().hex[:12]}",
         source_key=source_key,
         table=table,
         primary_key=_normalize_signal_primary_key(primary_key),
         chunk_size=max(1, min(int(chunk_size), 50_000)),
+        row_filter=spec,
     )
-    return _upsert_signal(sig)
+    saved = _upsert_signal(sig)
+    logging.getLogger(__name__).info(
+        "CDC incremental snapshot requested id=%s source=%s table=%s filter=%s",
+        saved.id,
+        source_key,
+        table,
+        describe_snapshot_filter(spec) or "<whole table>",
+    )
+    return saved
 
 
 def list_signals(source_key: str = "", *, status: str = "") -> list[SnapshotSignal]:

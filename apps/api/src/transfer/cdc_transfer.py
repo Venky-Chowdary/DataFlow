@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 from services.brand_env import getenv_brand
 import time
@@ -43,12 +42,14 @@ from connectors.sqlserver_cdc_native import SqlServerNativeCdc
 from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
 from connectors.table_manager import delete_by_primary_keys
 from connectors.writer_common import DF_LSN_COL, extract_cdc_lsn
+from connectors.lsn_guards import compare_lsn, lsn_family
 from services.cdc_capability import (
     LogCaptureRefusal,
     LogCaptureUnavailable,
     classify_log_capture_failure,
 )
 from services.cdc_catchup import stamp_capture_identity
+from services.ops_events import emit_event
 from services.cdc_effectively_once import gate_cdc_destination
 from services.dest_precount import DestBeforeCensus
 from services.tombstone import (
@@ -233,6 +234,15 @@ def _drain_log_reader(
     return "unknown"
 
 
+def _seed_cdc_lease_from_dest_fence(cdc: Any, fence_epoch: Any) -> None:
+    lease = getattr(cdc, "_lease", None)
+    if lease is not None and hasattr(lease, "min_generation"):
+        lease.min_generation = max(
+            int(getattr(lease, "min_generation", 0) or 0),
+            int(fence_epoch or 0),
+        )
+
+
 def _raise_if_stream_behind(cdc: Any, outcome: str) -> None:
     if outcome != "behind":
         return
@@ -242,6 +252,76 @@ def _raise_if_stream_behind(cdc: Any, outcome: str) -> None:
         behind_message(cdc),
         slot_name=str(getattr(cdc, "slot_name", "") or ""),
     )
+
+
+_CDC_POSITION_KIND = {
+    "postgresql": "lsn",
+    "mysql": "binlog",
+    "mariadb": "binlog",
+    "sqlserver": "lsn",
+    "oracle": "scn",
+    "mongodb": "resume_token",
+}
+
+
+def _emit_cdc_cycle(
+    *,
+    job_id: str,
+    workspace_id: str,
+    src_type: str,
+    dest_type: str,
+    inserts: int | None,
+    updates: int | None,
+    deletes: int,
+    lag_fields: dict[str, Any],
+    delivery: str,
+    has_position: bool,
+    upserts: int | None = None,
+    table_count: int | None = None,
+    error: BaseException | None = None,
+) -> None:
+    """One ``cdc.cycle.completed`` per reader run: counts, lag and the *kind*
+    of position — never the LSN/binlog/token value or any slot/table name.
+
+    The shared multi-table reader has one log position and one lag for all
+    its tables, so it emits once with ``table_count`` and combined
+    ``upserts`` (its apply step does not split inserts from updates).
+
+    A run that raises still emits, with the counts applied so far:
+    ``cancelled`` for a job cancel or interruption, ``errored`` otherwise."""
+    from services.error_handling import TransferCancelled
+    from services.ops_events import CANCELLATION_ERRORS
+
+    if error is None:
+        outcome = "succeeded"
+    elif isinstance(error, (*CANCELLATION_ERRORS, TransferCancelled)):
+        outcome = "cancelled"
+    else:
+        outcome = "errored"
+    emit_event(
+        logger, "cdc.cycle.completed", outcome=outcome, error=error,
+        job_id=job_id or None, workspace_id=workspace_id or None,
+        source_type=src_type or None, destination_type=dest_type or None,
+        inserts=None if inserts is None else int(inserts),
+        updates=None if updates is None else int(updates),
+        upserts=None if upserts is None else int(upserts),
+        deletes=int(deletes or 0), table_count=table_count,
+        lag_seconds=lag_fields.get("cdc_lag_seconds"),
+        lag_bytes=lag_fields.get("replication_lag_bytes"),
+        lag_basis=lag_fields.get("cdc_lag_basis"),
+        position_kind=(_CDC_POSITION_KIND.get(str(src_type or "").lower(), "cursor")
+                       if has_position else "none"),
+        delivery=delivery,
+    )
+
+
+def _cdc_lag_fields_or_empty(cdc: Any) -> dict[str, Any]:
+    """Lag fields for an event on a failure path, where the reader may be broken."""
+    try:
+        return _cdc_lag_fields(cdc)
+    except Exception as exc:
+        logger.debug("cdc lag fields unavailable: %s", type(exc).__name__)
+        return {}
 
 
 def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
@@ -548,6 +628,18 @@ def _query_cdc_downgrade(exc: BaseException, dialect: str) -> dict[str, str | bo
         if isinstance(exc, LogCaptureUnavailable)
         else classify_log_capture_failure(dialect, str(exc))
     )
+    # PostgreSQL wal_level is not a degradable "server has no log" the way a
+    # MySQL binlog-off install is. Query CDC on a PK then fails and the
+    # root-cause engine titles it "Duplicate identity keys" (R3-H1).
+    detail = str(refusal.detail or "").lower()
+    if str(dialect or "").lower() in {"postgresql", "postgres", "neon"} and (
+        "wal_level" in detail or "logical decoding" in detail
+    ):
+        raise RuntimeError(
+            f"PostgreSQL wal_level is not logical ({refusal.detail}). "
+            "CDC cannot start until the server enables logical decoding "
+            "(wal_level=logical). A cursor poll would miss updates and deletes."
+        ) from exc
     if refusal.fail_closed:
         raise RuntimeError(refusal.message(dialect)) from exc
     logging.getLogger(__name__).warning(
@@ -584,6 +676,7 @@ class CdcState:
     watermark: str | None = None
     running_cursor: str | None = None
     rows_written: int = 0
+    rows_skipped: int = 0
     #: Rows the reader handed to the writer (inserts + updates) across every
     #: batch — the run's source population when no source image COUNT exists.
     source_changes_read: int = 0
@@ -907,14 +1000,9 @@ def _stamp_cdc_lsn(
 
 
 def _truthy_cfg(cfg: dict[str, Any] | None, *keys: str) -> bool:
-    raw = cfg or {}
-    for key in keys:
-        val = raw.get(key)
-        if val is True:
-            return True
-        if isinstance(val, str) and val.strip().lower() in {"1", "true", "yes", "on"}:
-            return True
-    return False
+    from services.cdc_exactly_once import cfg_truthy
+
+    return cfg_truthy(cfg, *keys)
 
 
 def _gate_cdc_sink(
@@ -923,7 +1011,11 @@ def _gate_cdc_sink(
     dest_cfg: dict[str, Any] | None,
     has_primary_key: bool,
 ) -> dict[str, Any]:
-    """Fail-fast append-only CDC sinks unless operator opts in."""
+    """Fail-fast append-only CDC sinks unless operator opts in.
+
+    ``require_exactly_once`` on the destination config fails closed unless the
+    sink can commit apply + dest offset in one transaction.
+    """
     return gate_cdc_destination(
         dest_type=dest_type,
         has_primary_key=has_primary_key,
@@ -933,9 +1025,13 @@ def _gate_cdc_sink(
         allow_append_only=_truthy_cfg(
             dest_cfg, "allow_append_only", "cdc_allow_append_only"
         ),
+        require_exactly_once=_truthy_cfg(
+            dest_cfg, "require_exactly_once", "cdc_require_exactly_once"
+        ),
         require_effectively_once=_truthy_cfg(
             dest_cfg, "require_effectively_once", "cdc_require_effectively_once"
         ),
+        dest_cfg=dest_cfg,
     )
 
 
@@ -1103,6 +1199,7 @@ def _apply_change_batch(
     mappings_inherited: bool = False,
     pk_source_cols: list[str] | None = None,
     align_lock: dict[str, Any] | None = None,
+    allow_equal_lsn: bool = False,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
     from services.cdc_exactly_once import (
@@ -1130,6 +1227,7 @@ def _apply_change_batch(
             table=change.table,
             ack_barrier=change.ack_barrier,
             rejected=rejected_details,
+            lookup_columns=change.lookup_columns,
         )
 
     inherit_note = ""
@@ -1185,6 +1283,7 @@ def _apply_change_batch(
     )
     source_headers, target_cols = _source_headers(headers, mappings)
     rows_written = 0
+    rows_skipped = 0
     deleted = 0
     last_checksum = ""
     dest_summary: dict[str, Any] = {}
@@ -1253,6 +1352,7 @@ def _apply_change_batch(
             backfill_new_fields=backfill_new_fields,
             job_id=job_id,
             sync_mode="cdc",
+            allow_equal_lsn=allow_equal_lsn,
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
@@ -1260,6 +1360,7 @@ def _apply_change_batch(
             replay_safety=cdc_replay_safety,
         )
         rows_written += rows
+        rows_skipped += int(dest_summary.get("rows_skipped") or 0)
 
     if change.updates:
         data_rows = _records_to_matrix(change.updates, headers)
@@ -1282,6 +1383,7 @@ def _apply_change_batch(
             backfill_new_fields=backfill_new_fields,
             job_id=job_id,
             sync_mode="cdc",
+            allow_equal_lsn=allow_equal_lsn,
         )
         rows, last_checksum, dest_summary = with_retry(
             write_op,
@@ -1289,6 +1391,7 @@ def _apply_change_batch(
             replay_safety=cdc_replay_safety,
         )
         rows_written += rows
+        rows_skipped += int(dest_summary.get("rows_skipped") or 0)
 
     if change.deletes:
         if not pk_target_cols:
@@ -1334,6 +1437,10 @@ def _apply_change_batch(
                 "azure_synapse_serverless",
                 "iceberg",
                 "apache_iceberg",
+                "pgvector",
+                "qdrant",
+                "weaviate",
+                "pinecone",
             }
             if not supported:
                 raise UnsupportedCdcDeleteError(
@@ -1367,6 +1474,7 @@ def _apply_change_batch(
         dest_summary["exactly_once_active"] = False
         dest_summary["exactly_once_downgrade"] = REASON_NO_LSN
         dest_summary["delivery_semantics"] = DELIVERY_SEMANTICS_ALO
+    dest_summary["rows_skipped"] = rows_skipped
     return rows_written, last_checksum, dest_summary, deleted
 
 
@@ -1387,6 +1495,125 @@ def _stamp_cdc_poll(
         schedule_id=str(schedule_id or ""),
         **kwargs,
     )
+
+
+def cdc_source_type(source: Any) -> str:
+    """CDC source kind — the catalog format, so sqlserver/oracle are not
+    collapsed to generic_sql by driver resolution."""
+    src_driver = resolve_driver_type(getattr(source, "format", "") or "")
+    src_format = (
+        (getattr(source, "format", "") or src_driver or "")
+        .strip()
+        .lower()
+        .replace("-", "_")
+    )
+    if src_format in {"mssql", "sql_server"}:
+        src_format = "sqlserver"
+    src_type = src_format if src_format in {
+        "mongodb",
+        "mysql",
+        "postgresql",
+        "postgres",
+        "sqlserver",
+        "oracle",
+    } else src_driver
+    return "postgresql" if src_type == "postgres" else src_type
+
+
+def _single_stream_cursor_key(
+    *,
+    src_type: str,
+    src_cfg: dict[str, Any],
+    table_name: str,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    stream_name: str,
+) -> str:
+    return build_cursor_key(
+        source_type=src_type,
+        source_database=src_cfg.get("database", ""),
+        source_object=table_name,
+        dest_type=dest_type,
+        dest_database=dest_cfg.get("database", ""),
+        dest_object=dest_table,
+        stream_name=stream_name or "stream",
+    )
+
+
+def cdc_route_cursor_keys(
+    source: Any,
+    destination: Any,
+    stream_contracts: list[dict] | None,
+) -> list[dict[str, Any]]:
+    """Every cursor key a CDC run of this route can have opened capture under.
+
+    Owner of route → slot identity for anything that must *find* the capture
+    later (schedule delete releasing a PostgreSQL slot, QA S14). It derives the
+    keys exactly as the run paths do, so release never depends on the last
+    job document carrying ``cursor_key`` — a failed last attempt does not.
+
+    Multi-table routes return the shared-reader key *and* each per-table key:
+    the shared reader falls back to N sequential readers, each with its own
+    slot. Each entry is ``{"cursor_key", "tables"}`` (tables = the slot's
+    table scope, a string or list, as the reader names it).
+    """
+    import copy
+
+    selected = resolve_selected_sync_contracts(stream_contracts)
+    dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
+    src_cfg = resolve_connector_config(source)
+    dest_cfg = resolve_connector_config(destination)
+    out: list[dict[str, Any]] = []
+
+    def _single(src: Any, dst: Any, contract: Any) -> None:
+        table_name = getattr(src, "table", None) or getattr(src, "collection", None) or ""
+        out.append({
+            "cursor_key": _single_stream_cursor_key(
+                src_type=cdc_source_type(src),
+                src_cfg=src_cfg,
+                table_name=table_name,
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                dest_table=resolve_dest_table(dest_type, dst, table_name),
+                stream_name=(contract.name if contract else "") or "stream",
+            ),
+            "tables": table_name,
+        })
+
+    if len(selected) <= 1:
+        _single(source, destination, selected[0] if selected else None)
+        return out
+    from services.cdc_multi_table import shared_route_cursor_key
+
+    tables = [(c.name or "").strip() for c in selected if (c.name or "").strip()]
+    out.append({
+        "cursor_key": shared_route_cursor_key(
+            engine=resolve_driver_type(getattr(source, "format", "") or ""),
+            database=str(src_cfg.get("database") or ""),
+            tables=tables,
+            dest_type=dest_type,
+            dest_database=str(dest_cfg.get("database") or ""),
+        ),
+        "tables": tables,
+    })
+    for contract in selected:
+        name = (contract.name or "").strip()
+        if not name:
+            continue
+        src = copy.copy(source)
+        dst = copy.copy(destination)
+        if getattr(src, "format", "") == "mongodb" or getattr(source, "collection", None):
+            src.collection = name
+        else:
+            src.table = name
+        if getattr(destination, "table", None) is not None or getattr(destination, "collection", None) is not None:
+            if getattr(dst, "format", "") == "mongodb" or getattr(destination, "collection", None):
+                dst.collection = name
+            else:
+                dst.table = name
+        _single(src, dst, contract)
+    return out
 
 
 def run_cdc_database_transfer(
@@ -1503,6 +1730,7 @@ def _run_cdc_multi_stream(
     eos = normalize_delivery_guarantee(delivery_guarantee) == "exactly_once"
     dest_wired = dest_fmt in EOS_TXN_WIRED_DESTS
     if (not eos or dest_wired) and can_share_log_reader(src_fmt, len(selected)):
+        shared_progress: dict[str, Any] = {}
         try:
             return _run_cdc_shared_multi_table(
                 source,
@@ -1520,16 +1748,24 @@ def _run_cdc_multi_stream(
                 validation_mode=validation_mode,
                 limit=limit,
                 delivery_guarantee=delivery_guarantee,
+                delivery_pinned=delivery_pinned,
+                workspace_id=workspace_id,
+                progress=shared_progress,
             )
         except Exception as exc:
             from services.cdc_lease import CdcLeaseConflict
+            from services.error_handling import TransferCancelled
 
-            if isinstance(exc, (CdcLeaseConflict, CdcDestinationSessionError)):
+            if isinstance(exc, (CdcLeaseConflict, CdcDestinationSessionError, TransferCancelled)):
                 raise
-            logger.warning(
-                "Shared multi-table CDC reader unavailable (%s); "
-                "falling back to per-table readers",
-                exc,
+            if not _shared_reader_left_no_trace(shared_progress):
+                raise
+            emit_event(
+                logger, "cdc.reader.fallback", outcome="retrying", error=exc,
+                job_id=job_id or None, workspace_id=workspace_id or None,
+                source_type=src_fmt or None, destination_type=dest_fmt or None,
+                table_count=len(selected),
+                reason_code="shared_reader_failed_before_write",
             )
 
     return _run_cdc_multi_stream_sequential(
@@ -1554,6 +1790,19 @@ def _run_cdc_multi_stream(
     )
 
 
+def _shared_reader_left_no_trace(progress: dict[str, Any]) -> bool:
+    """True when a failed shared reader applied nothing and moved no watermark."""
+    if any(int(v or 0) for v in (progress.get("counts") or {}).values()):
+        return False
+    if "cursor_key" not in progress:
+        return True
+    try:
+        return get_watermark(progress["cursor_key"]) == progress.get("watermark_at_entry")
+    except Exception as exc:
+        logger.debug("shared watermark re-read failed: %s", type(exc).__name__)
+        return False
+
+
 def _run_cdc_shared_multi_table(
     source: Any,
     destination: Any,
@@ -1571,8 +1820,15 @@ def _run_cdc_shared_multi_table(
     validation_mode: str,
     limit: int,
     delivery_guarantee: str = "at_least_once",
+    delivery_pinned: bool = False,
+    workspace_id: str = "",
+    progress: dict[str, Any] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """One log consumer for N tables (Debezium-class); demux apply per stream.
+
+    ``progress`` (optional) is filled with the shared cursor key, its watermark
+    at entry and the live applied counts, so a caller can tell whether a failed
+    run left a trace before retrying the work elsewhere.
 
     Default semantics are **at-least-once upsert**. Opt-in exactly-once buffers
     demuxed table batches until ``ack_barrier``, then applies them in one dest
@@ -1594,12 +1850,22 @@ def _run_cdc_shared_multi_table(
     )
     from services.cdc_snapshot_mode import snapshot_dump_open
 
-    from services.cdc_exactly_once import PROTOCOL, normalize_delivery_guarantee
+    from services.cdc_exactly_once import (
+        PROTOCOL,
+        apply_require_exactly_once,
+        dest_require_exactly_once,
+        normalize_delivery_guarantee,
+    )
 
     src_type = resolve_driver_type(getattr(source, "format", "") or "")
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
+    delivery_guarantee = apply_require_exactly_once(
+        delivery_guarantee,
+        required=dest_require_exactly_once(destination, dest_cfg),
+        pinned=delivery_pinned,
+    )
     eos_active = normalize_delivery_guarantee(delivery_guarantee) == "exactly_once"
 
     tables = [(c.name or "").strip() for c in selected if (c.name or "").strip()]
@@ -1657,6 +1923,8 @@ def _run_cdc_shared_multi_table(
         dest_database=str(dest_cfg.get("database") or ""),
     )
     shared_wm = get_watermark(shared_key)
+    if progress is not None:
+        progress.update(cursor_key=shared_key, watermark_at_entry=shared_wm)
     if eos_active:
         from connectors.cdc_eos_sql import open_eos_session
 
@@ -1769,6 +2037,9 @@ def _run_cdc_shared_multi_table(
     else:
         raise RuntimeError(f"shared multi-table CDC unsupported for {src_type}")
 
+    if eos_active:
+        _seed_cdc_lease_from_dest_fence(cdc, opened.fence_epoch)
+
     try:
         from services.source_ha_probe import attach_source_ha
 
@@ -1837,6 +2108,9 @@ def _run_cdc_shared_multi_table(
         )
 
     total_rows = 0
+    cycle_counts = {"upserts": 0, "deletes": 0}
+    if progress is not None:
+        progress["counts"] = cycle_counts
     stream_health: dict[str, dict[str, Any]] = {
         t: {"name": t, "status": "running", "records_processed": 0} for t in tables
     }
@@ -2034,6 +2308,8 @@ def _run_cdc_shared_multi_table(
                 )
             chunk_idx += 1
         total_rows += rows_written + deleted
+        cycle_counts["upserts"] += int(rows_written or 0)
+        cycle_counts["deletes"] += int(deleted or 0)
         stream_health[stream]["records_processed"] = (
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
@@ -2180,6 +2456,17 @@ def _run_cdc_shared_multi_table(
                         stop_early=lambda: bool(limit and total_rows >= limit),
                     )
                     _raise_if_stream_behind(cdc, outcome)
+    except BaseException as exc:
+        _emit_cdc_cycle(
+            job_id=job_id, workspace_id=workspace_id, src_type=src_type,
+            dest_type=dest_type, inserts=None, updates=None,
+            upserts=cycle_counts["upserts"], deletes=cycle_counts["deletes"],
+            lag_fields=_cdc_lag_fields_or_empty(cdc),
+            delivery="exactly_once" if eos_active else "at-least-once",
+            has_position=get_watermark(shared_key) is not None, table_count=len(tables),
+            error=exc,
+        )
+        raise
     finally:
         stamp_capture_identity(sys.exc_info()[1], cdc)
         if original_dest_table is not None:
@@ -2216,13 +2503,22 @@ def _run_cdc_shared_multi_table(
             count_source=False,
         )
     lag_fields = _cdc_lag_fields(cdc)
+    shared_watermark = get_watermark(shared_key)
+    _emit_cdc_cycle(
+        job_id=job_id, workspace_id=workspace_id, src_type=src_type,
+        dest_type=dest_type, inserts=None, updates=None,
+        upserts=cycle_counts["upserts"], deletes=cycle_counts["deletes"],
+        lag_fields=lag_fields,
+        delivery="exactly_once" if eos_active else "at-least-once",
+        has_position=shared_watermark is not None, table_count=len(tables),
+    )
     last_summary = dict(last_summary or {})
     last_summary["streams"] = list(stream_health.values())
     last_summary["cursor_key"] = shared_key
     last_summary["cdc"] = {
         "shared_reader": True,
         "tables": tables,
-        "watermark": get_watermark(shared_key),
+        "watermark": shared_watermark,
         "cursor_key": shared_key,
         **lag_fields,
     }
@@ -2486,20 +2782,11 @@ def _run_cdc_single_stream(
     # Driver type is used for generic read/write; CDC source kind uses the
     # catalog format so sqlserver/oracle are not collapsed to generic_sql.
     src_driver = resolve_driver_type(source.format)
-    dest_type = resolve_driver_type(destination.format)
     src_format = (source.format or src_driver or "").strip().lower().replace("-", "_")
     if src_format in {"mssql", "sql_server"}:
         src_format = "sqlserver"
-    src_type = src_format if src_format in {
-        "mongodb",
-        "mysql",
-        "postgresql",
-        "postgres",
-        "sqlserver",
-        "oracle",
-    } else src_driver
-    if src_type == "postgres":
-        src_type = "postgresql"
+    src_type = cdc_source_type(source)
+    dest_type = resolve_driver_type(destination.format)
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
     table_name = source.table or source.collection or ""
@@ -2539,11 +2826,33 @@ def _run_cdc_single_stream(
         DELIVERY_SEMANTICS_ALO,
         DELIVERY_SEMANTICS_EOS,
         PROTOCOL,
+        apply_require_exactly_once,
         assert_requested_cdc_delivery,
         dest_allow_append_only,
+        dest_require_exactly_once,
+        select_route_delivery,
     )
     from services.procedure_source import is_callable_source
 
+    delivery_guarantee = apply_require_exactly_once(
+        delivery_guarantee,
+        required=dest_require_exactly_once(destination, dest_cfg),
+        pinned=delivery_pinned,
+    )
+    if str(delivery_guarantee or "").strip().lower() in {"", "auto", "default"}:
+        delivery_guarantee = select_route_delivery(
+            delivery_guarantee,
+            sync_mode=sync_mode or "cdc",
+            dest_type=dest_type,
+            source_type=src_type,
+            has_primary_key=True,
+            write_mode="upsert",
+            allow_append_only=dest_allow_append_only(destination)
+            or _truthy_cfg(dest_cfg, "allow_append_only", "cdc_allow_append_only"),
+            callable_source=is_callable_source(source),
+            has_lsn_column=True,
+            dest_cfg=dest_cfg,
+        )
     eos_guarantee = assert_requested_cdc_delivery(
         delivery_guarantee,
         sync_mode=sync_mode or "cdc",
@@ -2554,6 +2863,7 @@ def _run_cdc_single_stream(
         allow_append_only=dest_allow_append_only(destination)
         or _truthy_cfg(dest_cfg, "allow_append_only", "cdc_allow_append_only"),
         callable_source=is_callable_source(source),
+        dest_cfg=dest_cfg,
     )
     eos_active = eos_guarantee == "exactly_once"
     if src_type in {"mongodb", "mysql", "postgresql", "sqlserver", "oracle"}:
@@ -2575,13 +2885,13 @@ def _run_cdc_single_stream(
     # Single-column shorthand kept for call sites that still take a string
     # (readers, cursor defaults). Composite deletes/upserts use the list.
     pk_target_col = pk_target_cols[0] if len(pk_target_cols) == 1 else ",".join(pk_target_cols)
-    cursor_key = build_cursor_key(
-        source_type=src_type,
-        source_database=src_cfg.get("database", ""),
-        source_object=table_name,
+    cursor_key = _single_stream_cursor_key(
+        src_type=src_type,
+        src_cfg=src_cfg,
+        table_name=table_name,
         dest_type=dest_type,
-        dest_database=dest_cfg.get("database", ""),
-        dest_object=dest_table,
+        dest_cfg=dest_cfg,
+        dest_table=dest_table,
         stream_name=contract.name if contract else "stream",
     )
     watermark = get_watermark(cursor_key)
@@ -2611,6 +2921,12 @@ def _run_cdc_single_stream(
         stream=table_name,
         allow_unnamed=not checkpoint_bound_to_stream,
     )
+    if (
+        eos_active
+        and isinstance(opened.resume, dict)
+        and watermark == str(opened.resume)
+    ):
+        watermark = opened.resume
 
     from services.multi_stream_plan import reader_columns_for_stream
 
@@ -2931,6 +3247,9 @@ def _run_cdc_single_stream(
             f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
         ]
 
+    if eos_active:
+        _seed_cdc_lease_from_dest_fence(cdc, opened.fence_epoch)
+
     try:
         from services.source_ha_probe import attach_source_ha
 
@@ -2994,14 +3313,18 @@ def _run_cdc_single_stream(
     total_chunks = max(1, int(cp_dict.get("chunk_index") or 0) + 1) if cp_dict else 1
     chunk_idx = int(cp_dict.get("chunk_index") or 0) if cp_dict else 0
 
-    import os
-
     # Continuous CDC: drain snapshot, then poll until idle or budget exhausted.
     max_idle_polls = max(1, int(getenv_brand("CDC_MAX_IDLE_POLLS", "3")))
     max_poll_rounds = max(1, int(getenv_brand("CDC_MAX_POLL_ROUNDS", "50")))
     txn_hold_sleep = float(getenv_brand("CDC_TXN_HOLD_SLEEP_SEC", "0.25"))
 
-    def _apply_and_checkpoint(change: ChangeBatch, *, publish_resume: bool = True) -> bool:
+    def _apply_and_checkpoint(
+        change: ChangeBatch,
+        *,
+        publish_resume: bool = True,
+        allow_equal_lsn: bool = False,
+        result_out: dict[str, int] | None = None,
+    ) -> bool:
         """Apply one batch. A finished page may become the resume cursor.
 
         An offset snapshot page is not a resume position: rows still unread
@@ -3069,11 +3392,13 @@ def _run_cdc_single_stream(
                 mappings_inherited=mappings_inherited,
                 pk_source_cols=pk_source_cols,
                 align_lock=align_lock,
+                allow_equal_lsn=allow_equal_lsn,
                 writer_fence=int(
                     getattr(getattr(cdc, "_lease", None), "generation", 0) or 0
                 ),
             )
         state.rows_written += rows_written
+        state.rows_skipped += int((dest_summary or {}).get("rows_skipped") or 0)
         state.source_changes_read += len(change.inserts) + len(change.updates)
         state.inserts += len(change.inserts)
         state.updates += len(change.updates)
@@ -3085,6 +3410,15 @@ def _run_cdc_single_stream(
                 dest_summary,
                 job_id=str(job_id or ""),
                 destination=destination,
+            )
+        if result_out is not None:
+            result_out.update(
+                {
+                    "written": max(0, int(rows_written or 0)),
+                    "skipped": max(
+                        0, int((dest_summary or {}).get("rows_skipped") or 0)
+                    ),
+                }
             )
         if isinstance(dest_summary, dict) and dest_summary.get("exactly_once_downgrade"):
             eos_active = False
@@ -3391,18 +3725,248 @@ def _run_cdc_single_stream(
                         missing_image = None
             if missing_image:
                 token = unwrap_resume_token(cursor_now)
-                for start in range(0, len(missing_image), 500):
-                    _apply_and_checkpoint(
-                        ChangeBatch(
-                            updates=missing_image[start : start + 500],
-                            resume_token=token,
-                        )
+                if eos_active:
+                    from services.cdc_drift_repair import (
+                        CdcDriftRequiresFencedRepair,
+                        _build_drift_evidence,
                     )
-                ddl_log.append(
-                    f"CDC image repair upserted {len(missing_image)} source row(s) "
-                    "whose cells were not on the destination. At-least-once. "
-                    "Not a replay of the missed binlog event."
-                )
+
+                    initially_flagged = list(missing_image)
+                    pk_fields = [
+                        field.strip()
+                        for field in str(primary_key or "").split(",")
+                        if field.strip()
+                    ]
+                    evidence = _build_drift_evidence(
+                        cursor_key=cursor_key,
+                        source_table=str(table_name or ""),
+                        dest_table=str(dest_table or ""),
+                        pk_fields=pk_fields,
+                        committed_position=token,
+                        rows=missing_image,
+                    )
+                    head_position = None
+                    head_reader = getattr(cdc, "capture_head_position", None)
+                    if callable(head_reader):
+                        try:
+                            head_position = head_reader()
+                        except Exception:
+                            head_position = None
+                    head_position = str(head_position).strip() if head_position else None
+                    reader_position_reader = getattr(
+                        cdc, "capture_reader_position", None
+                    )
+                    try:
+                        reader_position_before = (
+                            reader_position_reader()
+                            if callable(reader_position_reader)
+                            else None
+                        )
+                    except Exception:
+                        reader_position_before = None
+                    reader_position_before = (
+                        str(reader_position_before).strip()
+                        if reader_position_before
+                        else None
+                    )
+                    if head_position:
+                        drain_outcome = _drain_log_reader(
+                            cdc,
+                            _apply_and_checkpoint,
+                            max_idle=max_idle_polls,
+                            max_rounds=max_poll_rounds,
+                            sleep_sec=txn_hold_sleep,
+                            stop_early=lambda: (
+                                callable(reader_position_reader)
+                                and (
+                                    reader_position := reader_position_reader()
+                                )
+                                is not None
+                                and (
+                                    reader_position := str(reader_position).strip()
+                                )
+                                and lsn_family(reader_position)
+                                == lsn_family(head_position)
+                                and compare_lsn(reader_position, head_position) >= 0
+                            ),
+                        )
+                    else:
+                        drain_outcome = _drain_log_reader(
+                            cdc,
+                            _apply_and_checkpoint,
+                            max_idle=max_idle_polls,
+                            max_rounds=max_poll_rounds,
+                            sleep_sec=txn_hold_sleep,
+                        )
+                    from services.cdc_catchup import CdcStreamBehind
+
+                    stream_behind = False
+                    try:
+                        _raise_if_stream_behind(cdc, drain_outcome)
+                    except CdcStreamBehind:
+                        stream_behind = True
+                    try:
+                        reader_position = (
+                            reader_position_reader()
+                            if callable(reader_position_reader)
+                            else None
+                        )
+                    except Exception:
+                        reader_position = None
+                    reader_position = (
+                        str(reader_position).strip() if reader_position else None
+                    )
+                    if stream_behind:
+                        logger.warning(
+                            "CDC drift re-drain ended behind the capture head "
+                            "cursor_key=%s head=%s reader=%s",
+                            cursor_key,
+                            head_position,
+                            reader_position,
+                        )
+                    head_reached = bool(
+                        head_position
+                        and reader_position
+                        and lsn_family(reader_position) == lsn_family(head_position)
+                        and compare_lsn(reader_position, head_position) >= 0
+                    )
+                    post_drain_cursor = (
+                        state.running_cursor
+                        if state.running_cursor is not None
+                        else cursor_now
+                    )
+                    post_drain_token = unwrap_resume_token(post_drain_cursor)
+
+                    identity_rescan_complete = False
+                    try:
+                        rescanned_image = identity_rows_missing_on_dest(
+                            source_type=src_type,
+                            source_cfg=src_cfg,
+                            source_table=str(table_name or ""),
+                            dest_type=dest_type,
+                            dest_cfg=dest_cfg,
+                            dest_table=str(dest_table or ""),
+                            mappings=list(mappings or []),
+                            dest_types=column_types if isinstance(column_types, dict) else None,
+                        )
+                        identity_rescan_complete = rescanned_image is not None
+                    except CdcValueScanIncomplete as exc:
+                        logger.warning("CDC image repair skipped: %s", exc)
+                        rescanned_image = None
+                    rescan_complete = identity_rescan_complete
+                    if not rescanned_image:
+                        pk = str(primary_key or "")
+                        if pk:
+                            try:
+                                rescanned_image = rows_absent_by_primary_key(
+                                    source_type=src_type,
+                                    source_cfg=src_cfg,
+                                    source_table=str(table_name or ""),
+                                    dest_type=dest_type,
+                                    dest_cfg=dest_cfg,
+                                    dest_table=str(dest_table or ""),
+                                    mappings=list(mappings or []),
+                                    primary_key=pk,
+                                )
+                                rescan_complete = rescanned_image is not None
+                            except CdcValueScanIncomplete as exc:
+                                logger.warning("CDC key image repair skipped: %s", exc)
+                                rescanned_image = None
+                                rescan_complete = False
+                    flagged_ids = {
+                        item["key_id"] for item in evidence.get("keys", [])
+                    }
+                    still_drifting = []
+                    if rescan_complete:
+                        for row in rescanned_image or []:
+                            row_evidence = _build_drift_evidence(
+                                cursor_key=cursor_key,
+                                source_table=str(table_name or ""),
+                                dest_table=str(dest_table or ""),
+                                pk_fields=pk_fields,
+                                committed_position=post_drain_token,
+                                rows=[row],
+                            )
+                            if any(
+                                item["key_id"] in flagged_ids
+                                for item in row_evidence.get("keys", [])
+                            ):
+                                still_drifting.append(row)
+                        missing_image = still_drifting
+                    else:
+                        missing_image = initially_flagged
+                    if missing_image:
+                        evidence = _build_drift_evidence(
+                            cursor_key=cursor_key,
+                            source_table=str(table_name or ""),
+                            dest_table=str(dest_table or ""),
+                            pk_fields=pk_fields,
+                            committed_position=post_drain_token,
+                            rows=missing_image,
+                        )
+                        if not rescan_complete:
+                            capture_pending_reason = "rescan_incomplete"
+                        elif stream_behind:
+                            capture_pending_reason = "stream_behind"
+                        elif not head_position:
+                            capture_pending_reason = "head_unavailable"
+                        elif not head_reached:
+                            capture_pending_reason = "head_not_reached"
+                        else:
+                            capture_pending_reason = None
+                        evidence["capture_pending"] = (
+                            stream_behind or not head_reached
+                        )
+                        evidence["capture_pending_reason"] = capture_pending_reason
+                        evidence["capture_head_position"] = head_position
+                        evidence["reader_position_before"] = reader_position_before
+                        evidence["reader_position"] = reader_position
+                    lease_resource = getattr(getattr(cdc, "_lease", None), "resource", "")
+                    if lease_resource:
+                        evidence["cdc_lease_resource"] = str(lease_resource)
+                    if missing_image:
+                        logger.warning(
+                            "CDC image drift requires fenced repair table=%s count=%s key_ids=%s",
+                            str(dest_table or ""),
+                            len(missing_image),
+                            [item["key_id"] for item in evidence["keys"]],
+                        )
+                        raise CdcDriftRequiresFencedRepair(evidence)
+                else:
+                    attempted = len(missing_image)
+                    written = 0
+                    skipped = 0
+                    for start in range(0, len(missing_image), 500):
+                        apply_result: dict[str, int] = {}
+                        _apply_and_checkpoint(
+                            ChangeBatch(
+                                updates=missing_image[start : start + 500],
+                                resume_token=token,
+                            ),
+                            result_out=apply_result,
+                        )
+                        written += apply_result.get("written", 0)
+                        skipped += apply_result.get("skipped", 0)
+                    repair_status = "applied" if skipped == 0 else (
+                        "partial" if written else "repair_not_applied"
+                    )
+                    state.image_repair = {
+                        "attempted": attempted,
+                        "written": written,
+                        "skipped": skipped,
+                        "status": repair_status,
+                    }
+                    if repair_status == "repair_not_applied":
+                        ddl_log.append(
+                            f"CDC image repair not applied for {attempted} row(s): "
+                            "destination _df_lsn guard (repair_not_applied). "
+                            "state convergence / reconciliation, not log replay"
+                        )
+                    else:
+                        ddl_log.append(
+                            f"CDC image repair {repair_status} for {written} of {attempted} row(s); "
+                            f"{skipped} skipped. state convergence / reconciliation, not log replay"
+                        )
 
         final_watermark = state.running_cursor if state.running_cursor is not None else watermark
         lag_fields = _cdc_lag_fields(cdc)
@@ -3425,6 +3989,8 @@ def _run_cdc_single_stream(
             "poll_rounds": max_poll_rounds,
             **lag_fields,
         }
+        if getattr(state, "image_repair", None):
+            summary["cdc"]["image_repair"] = state.image_repair
         summary["cdc_lag_seconds"] = lag_fields.get("cdc_lag_seconds")
         summary["replication_lag_bytes"] = lag_fields.get("replication_lag_bytes")
         summary["cdc_heartbeat_at"] = lag_fields.get("cdc_heartbeat_at")
@@ -3521,7 +4087,25 @@ def _run_cdc_single_stream(
                 _raise_if_stream_behind(cdc, "behind")
         if capture_downgrade:
             summary.update(capture_downgrade)
+        _emit_cdc_cycle(
+            job_id=job_id, workspace_id=workspace_id, src_type=src_type,
+            dest_type=dest_type, inserts=state.inserts, updates=state.updates,
+            deletes=state.deletes, lag_fields=lag_fields,
+            delivery="exactly_once" if eos_active else (
+                lag_fields.get("cdc_delivery") or "at-least-once"
+            ),
+            has_position=final_watermark is not None,
+        )
         return state.rows_written, ddl_log, summary, headers
+    except BaseException as exc:
+        _emit_cdc_cycle(
+            job_id=job_id, workspace_id=workspace_id, src_type=src_type,
+            dest_type=dest_type, inserts=state.inserts, updates=state.updates,
+            deletes=state.deletes, lag_fields=_cdc_lag_fields_or_empty(cdc),
+            delivery="exactly_once" if eos_active else "at-least-once",
+            has_position=state.running_cursor is not None, error=exc,
+        )
+        raise
     finally:
         stamp_capture_identity(sys.exc_info()[1], cdc)
         if hasattr(cdc, "close"):

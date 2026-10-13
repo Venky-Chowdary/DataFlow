@@ -7,10 +7,21 @@ objects. The reader expects either a ``cfg`` dict (the canonical
 
 from __future__ import annotations
 
+import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from connectors.base import ReadBatch
 from services.value_serializer import cell_to_string
+
+logger = logging.getLogger(__name__)
+
+
+class IcebergTimeTravelError(ValueError):
+    pass
+
+
+_TIME_TRAVEL_KEYS = ("snapshot_id", "as_of_timestamp_ms", "as_of")
 
 
 def _stringify(value: Any) -> str:
@@ -42,6 +53,65 @@ def _endpoint_from_cfg_or_kwargs(
         endpoint["table"] = table
     endpoint.setdefault("schema", endpoint.get("schema", ""))
     return endpoint
+
+
+def _time_travel_request(
+    endpoint: dict[str, Any],
+) -> tuple[str, int] | None:
+    extra = endpoint.get("extra")
+    extra = extra if isinstance(extra, dict) else {}
+    options = {
+        key: endpoint[key] if key in endpoint else extra[key]
+        for key in _TIME_TRAVEL_KEYS
+        if key in endpoint or key in extra
+    }
+    if len(options) > 1:
+        raise ValueError(
+            "Iceberg time-travel options are mutually exclusive: "
+            + ", ".join(options)
+        )
+    if not options:
+        return None
+
+    key, value = next(iter(options.items()))
+    if key in {"snapshot_id", "as_of_timestamp_ms"}:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{key} must be an integer")
+        return key, value
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("as_of must be an ISO-8601 timestamp string")
+    try:
+        timestamp = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("as_of must be an ISO-8601 timestamp string") from exc
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return key, int(timestamp.timestamp() * 1000)
+
+
+def _resolve_snapshot_id(tbl: Any, request: tuple[str, int]) -> int:
+    key, value = request
+    snapshots = tbl.snapshots()
+    if key == "snapshot_id":
+        if not any(snapshot.snapshot_id == value for snapshot in snapshots):
+            raise IcebergTimeTravelError(
+                f"snapshot_id {value} does not exist in this Iceberg table"
+            )
+        resolved = value
+    else:
+        eligible = [
+            snapshot for snapshot in snapshots if snapshot.timestamp_ms <= value
+        ]
+        if not eligible:
+            raise IcebergTimeTravelError(
+                f"{key} {value} is earlier than every Iceberg snapshot"
+            )
+        resolved = max(
+            eligible, key=lambda snapshot: (snapshot.timestamp_ms, snapshot.snapshot_id)
+        ).snapshot_id
+    logger.info("Resolved Iceberg time-travel snapshot_id=%s", resolved)
+    return resolved
 
 
 def _filesystem_schema_columns(endpoint: dict[str, Any]) -> list[str]:
@@ -124,6 +194,7 @@ def _read_table(
     columns: list[str] | None,
 ) -> ReadBatch:
     """Read an Iceberg table and return a Datawrap ``ReadBatch``."""
+    time_travel_request = _time_travel_request(endpoint)
     from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
     from connectors.iceberg_writer import resolve_iceberg_write_path
 
@@ -134,6 +205,10 @@ def _read_table(
     config = parse_iceberg_catalog_config(endpoint)
     catalog_type = str(config.get("catalog_type") or "").lower()
     if catalog_type == "filesystem" or write_path == "filesystem":
+        if time_travel_request is not None:
+            raise IcebergTimeTravelError(
+                f"{time_travel_request[0]} is only supported for catalog tables"
+            )
         return _read_filesystem_table(
             endpoint, limit=limit, offset=offset, columns=columns
         )
@@ -147,7 +222,15 @@ def _read_table(
     fetch_limit = limit + offset if offset else limit
     all_columns = [f.name for f in tbl.schema().fields]
     selected = columns if columns else all_columns
-    arrow = tbl.scan(limit=fetch_limit, selected_fields=selected).to_arrow()
+    if time_travel_request is None:
+        arrow = tbl.scan(limit=fetch_limit, selected_fields=selected).to_arrow()
+    else:
+        snapshot_id = _resolve_snapshot_id(tbl, time_travel_request)
+        arrow = tbl.scan(
+            limit=fetch_limit,
+            selected_fields=selected,
+            snapshot_id=snapshot_id,
+        ).to_arrow()
     if offset:
         arrow = arrow.slice(offset)
     if limit and len(arrow) > limit:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from services.column_case import column_type_or_none
@@ -19,6 +20,8 @@ from services.type_system import (
     uuid_carrier_is_dialect_equivalent,
 )
 
+_logger = logging.getLogger(__name__)
+
 
 def validate_mapping_coercions(
     mappings: list[dict],
@@ -32,6 +35,7 @@ def validate_mapping_coercions(
     dest_table_exists: bool | None = None,
     sample_rows: list | None = None,
     samples_by_source: dict | None = None,
+    proven_width_narrowings: dict | None = None,
 ) -> list[dict[str, Any]]:
     """Return structured coercion issues for each mapping pair.
 
@@ -49,10 +53,21 @@ def validate_mapping_coercions(
     Same-logical pairs still run precision-collapse checks (DECIMAL/VARCHAR/TZ
     narrowing) — an early ``continue`` used to green G9 while G3/G6 blocked.
     """
+    from services.timezone_policy import declared_source_column_types
+
+    # A declared source zone (assume_timezone:X) makes a naive column an
+    # instant. G3 already reads types this way; reading the raw TIMESTAMP here
+    # re-blocked the run the operator just answered (MX2-01).
+    declared = declared_source_column_types(source_types, mappings)
+    reprojected = sorted(c for c, t in declared.items() if t != source_types.get(c))
+    if reprojected:
+        _logger.info(
+            "coercion check reads declared source zone for column(s) %s", reprojected,
+        )
+    source_types = declared
     type_locked = (schema_policy or "").lower() == "type_locked"
     mode = (validation_mode or "strict").strip().lower()
     balanced = mode in {"balanced", "review"}
-    floor = max(0.0, min(1.0, float(confidence_floor)))
     issues: list[dict[str, Any]] = []
     # A declared omission has no destination type to coerce into; reading its
     # empty target as "pending Studio/Map stamp" turned the operator's recorded
@@ -117,6 +132,9 @@ def validate_mapping_coercions(
             dest_db=dest_db_type,
             dest_table_exists=dest_table_exists,
             population=population,
+            source=src,
+            target=tgt,
+            proven=proven_width_narrowings,
         )
         lossy = (
             is_lossy_coercion(
@@ -125,6 +143,9 @@ def validate_mapping_coercions(
                 dest_db=dest_db_type,
                 dest_table_exists=dest_table_exists,
                 population=population,
+                source=src,
+                target=tgt,
+                proven=proven_width_narrowings,
             )
             or precision_collapse
         )

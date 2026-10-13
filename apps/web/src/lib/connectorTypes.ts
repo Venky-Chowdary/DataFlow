@@ -230,6 +230,9 @@ export function resolveCatalogIdToType(catalogId: string): string {
   if (TRANSFER_LIVE_TYPES.has(id) || CONNECT_ONLY_TYPES.has(id)) return id;
 
   const direct = CONNECTOR_CATALOG.find((c) => c.id === id);
+  if (direct && "sourceOnly" in direct && direct.sourceOnly) {
+    return direct.id;
+  }
   if (direct && (TRANSFER_LIVE_TYPES.has(direct.id) || CONNECT_ONLY_TYPES.has(direct.id))) {
     return direct.id;
   }

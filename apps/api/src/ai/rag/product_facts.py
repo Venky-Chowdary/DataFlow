@@ -481,12 +481,12 @@ def _resume_section() -> GeneratedSection | None:
 
     text = "\n".join(
         [
-            "An incremental or CDC transfer that fails part-way resumes from "
-            "the committed cursor. A full refresh overwrite or full refresh "
-            "append restarts from the beginning: overwrite replaces the "
-            "destination, and append reads the source again. Each successfully "
-            "committed incremental chunk is checkpointed with the cursor the "
-            "next chunk must read from.",
+            "Where a re-run starts depends on its sync mode: incremental and CDC "
+            "resume from the last committed cursor in the checkpoint and read the next "
+            "chunk. A full refresh overwrite or append re-run restarts from the "
+            "beginning: overwrite replaces the destination, and append reads the "
+            "source again. Each successfully committed incremental chunk is "
+            "checkpointed with the cursor the next chunk must read from.",
             "The checkpoint is the unit of resume: progress is durable per "
             "committed chunk, not per row. Under at-least-once delivery that "
             "means a crash can re-read the chunk in flight, which is why the "
@@ -2653,7 +2653,10 @@ def _preflight_gates_list_section() -> GeneratedSection | None:
             f"{first} through {last} are the {len(ordered)} core preflight gates "
             f"Validate runs before any write; G3 Schema contract is the one "
             f"that blocks a lossy type change. These preflight gates are the "
-            f"named Validate cards. " + " ".join(ordered)
+            # One card per line: the splitter is line-based, so a space-
+            # joined blob read as a single mega-sentence and the answer
+            # pasted the list on top of the Core gates copy (QA K03).
+            f"named Validate cards.\n" + "\n".join(ordered)
         ),
         source_module="preflight.gates · help-preflight#gates",
         category="transfer",

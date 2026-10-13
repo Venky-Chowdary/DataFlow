@@ -244,9 +244,9 @@ def test_mark_run_advances_cursor(temp_store):
 
 def test_concurrency_guard_same_connector_pair(temp_store):
     a = _make(store, name="a")
-    b = _make(store, name="b")  # same src/dst connector pair
+    b = _make(store, name="b")  # same dest table
     assert store.mark_schedule_running(a.id, "inst-1") is not None
-    # Second schedule for the same connector pair is blocked while a is running.
+    # Same destination object is blocked while a is running.
     assert store.mark_schedule_running(b.id, "inst-2") is None
     store.clear_schedule_running(a.id)
     assert store.mark_schedule_running(b.id, "inst-2") is not None
@@ -721,6 +721,37 @@ def test_terminal_job_releases_the_claim_without_waiting(temp_store, monkeypatch
     reclaimed = store.mark_schedule_running(sched.id, "inst-2")
     assert reclaimed is not None
     assert reclaimed.running_instance == "inst-2"
+
+
+def test_lease_lookup_exception_keeps_a_silent_running_claim(temp_store, monkeypatch, caplog):
+    from datetime import timedelta
+
+    from services.schedule_store import CLAIM_MAX_RUNTIME, _is_running_stale
+
+    sched = _make(store)
+    started = datetime.now(timezone.utc) - timedelta(minutes=30)
+    sched.running = True
+    sched.running_job_id = "job-silent"
+    sched.running_started_at = started.isoformat()
+
+    class _Mongo:
+        @staticmethod
+        def get_job(_job_id):
+            return {
+                "status": "running",
+                "updated_at": (datetime.now(timezone.utc) - timedelta(minutes=20)).isoformat(),
+            }
+
+    class _Leases:
+        @staticmethod
+        def is_held(_job_id):
+            raise OSError("lease store unavailable")
+
+    monkeypatch.setattr("services.mongodb_service.get_mongodb_service", lambda: _Mongo())
+    monkeypatch.setattr("services.worker_leases.get_worker_lease_store", lambda: _Leases())
+    assert _is_running_stale(sched) is False
+    assert CLAIM_MAX_RUNTIME > datetime.now(timezone.utc) - started
+    assert "OSError" in caplog.text
 
 
 def test_missed_callback_is_recorded_on_the_next_beat(temp_store, monkeypatch):

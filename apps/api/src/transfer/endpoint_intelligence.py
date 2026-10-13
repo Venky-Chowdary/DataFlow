@@ -21,6 +21,7 @@ from .connector_capabilities import CATALOG_ID_ALIASES, resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
 from services.procedure_source import is_callable_source
+from services.connector_telemetry import connector_operation, driver_family
 
 
 def _list_sqlalchemy_tables(
@@ -53,8 +54,12 @@ def _list_sqlalchemy_tables(
             table="",
         )
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
-        logger.warning("SQL object list failed for %s", fmt, exc_info=True)
-        return False, [], str(exc)
+        logger.warning(
+            "SQL object list failed for %s (%s)", fmt, type(exc).__name__
+        )
+        from .connector_registry import humanize_connection_error
+
+        return False, [], humanize_connection_error(fmt, exc)
     if not isinstance(info, dict) or not info.get("ok"):
         return False, [], str((info or {}).get("error") or "object list failed")
     names: list[str] = []
@@ -74,6 +79,17 @@ def _dest_table_schema_only(endpoint: EndpointConfig) -> bool:
     return purpose == "destination" and bool(
         str(endpoint.table or endpoint.collection or "").strip()
     )
+
+
+def _joined_object_key(endpoint: Any, cfg: dict[str, Any], raw: str) -> str:
+    """Same key the object-store writer will put, including the schema prefix."""
+    from connectors.object_store_common import normalize_object_base_key
+
+    key = str(raw or "").strip()
+    if not key:
+        return ""
+    schema = str(cfg.get("schema") or getattr(endpoint, "schema", "") or "")
+    return normalize_object_base_key(key, schema)
 
 
 def _is_absent_object_error(message: str) -> bool:
@@ -276,6 +292,33 @@ def introspect_endpoint(
     sample_content: bytes | None = None,
     filename: str = "",
 ) -> dict:
+    raw_role = str((endpoint.extra or {}).get("introspect_purpose") or "")
+    role = raw_role if raw_role in {"source", "destination"} else ""
+    with connector_operation(
+        "introspect",
+        driver_family=driver_family(endpoint.format or endpoint.kind),
+        role=role,
+        surface="introspect",
+        connector_id=endpoint.connector_id,
+    ) as op:
+        out = _introspect_endpoint_impl(endpoint, sample_content, filename)
+        if out.get("connected"):
+            op.succeeded(
+                object_count=len(out.get("objects") or []),
+                column_count=len(out.get("columns") or []),
+            )
+        elif endpoint.kind == "file" and not sample_content:
+            op.skipped(category="no_input")
+        else:
+            op.failed(category="not_connected")
+        return out
+
+
+def _introspect_endpoint_impl(
+    endpoint: EndpointConfig,
+    sample_content: bytes | None = None,
+    filename: str = "",
+) -> dict:
     """
     Probe an endpoint: connection health, available tables/collections,
     column schema, and what will be auto-created on write.
@@ -406,7 +449,12 @@ def introspect_endpoint(
                 try:
                     colls = db.list_collection_names()
                 except PyMongoError as list_err:
-                    out["message"] = f"Could not list collections in `{db_name}`: {list_err}"
+                    from .connector_registry import humanize_connection_error
+
+                    out["message"] = (
+                        f"Could not list collections in `{db_name}`: "
+                        f"{humanize_connection_error('mongodb', list_err)}"
+                    )
                     return out
                 out["objects"] = [{"name": c, "type": "collection"} for c in colls[:200]]
                 listed = _object_name_match(colls, requested_coll)
@@ -562,7 +610,11 @@ def introspect_endpoint(
         if key and probe.ok:
             from connectors.s3 import s3_object_exists
 
-            exists = s3_object_exists(cfg, str(cfg.get("database") or ""), str(key))
+            exists = s3_object_exists(
+                cfg,
+                str(cfg.get("database") or ""),
+                _joined_object_key(endpoint, cfg, str(key)),
+            )
             if exists is not None:
                 out["table_exists"] = exists
             _attach_db_sample(out, endpoint)
@@ -586,7 +638,9 @@ def introspect_endpoint(
             from connectors.gcs import gcs_blob_exists
 
             exists = gcs_blob_exists(
-                cfg, str(cfg.get("database") or ""), str(key)
+                cfg,
+                str(cfg.get("database") or ""),
+                _joined_object_key(endpoint, cfg, str(key)),
             )
             if exists is not None:
                 out["table_exists"] = exists
@@ -760,6 +814,15 @@ def introspect_endpoint(
     if fmt in _SAAS_INTROSPECT_DRIVERS:
         return _saas_introspect(out, endpoint, cfg, fmt)
 
+    if fmt == "rest_api":
+        # Reachability + field names come from the canonical describe; typing
+        # stays with the sampled read Map already uses. Stamping the describe's
+        # carriers here made Validate disagree with Map (NUMERIC(6,2) vs TEXT).
+        described = _saas_introspect(out, endpoint, cfg, fmt)
+        described["schema"] = {}
+        described.pop("column_nullability", None)
+        return described
+
     specialty = _specialty_object_list(fmt, cfg)
     if specialty is not None:
         connected, names, kind, message = specialty
@@ -860,10 +923,12 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             # once ``10.01`` is text the stored ``double`` is unrecoverable.
             from services.schema_introspect import (
                 mongodb_bson_column_types,
-                prefer_bson_numeric_carrier,
+                mongodb_bson_homogeneous_date_fields,
+                prefer_bson_source_carrier,
             )
 
             bson_types = mongodb_bson_column_types(records)
+            homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(records)
             # Match Execute path (mongodb_reader): expand nested docs + string
             # matrix via cell_to_string so Map/Validate columns ≡ write headers.
             from services.json_intelligence import expand_mongo_documents
@@ -909,7 +974,11 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 for col in columns
             }
             schema, intel = infer_schema_map(samples_by_field)
-            schema = prefer_bson_numeric_carrier(schema, bson_types)
+            schema = prefer_bson_source_carrier(
+                schema,
+                bson_types,
+                homogeneous_date_fields=homogeneous_date_fields,
+            )
             for col in columns:
                 if col not in schema:
                     schema[col] = "VARCHAR"
@@ -1000,7 +1069,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             from connectors.s3_reader import read_object
 
             bucket = cfg["database"]
-            key = endpoint.table or endpoint.collection or ""
+            key = _joined_object_key(
+                endpoint, cfg, endpoint.table or endpoint.collection or ""
+            )
             if bucket and key:
                 try:
                     batch = read_object(
@@ -1032,7 +1103,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             from connectors.gcs_reader import read_object
 
             bucket = cfg["database"]
-            key = endpoint.table or endpoint.collection or ""
+            key = _joined_object_key(
+                endpoint, cfg, endpoint.table or endpoint.collection or ""
+            )
             if bucket and key:
                 try:
                     batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
@@ -1060,7 +1133,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             from connectors.adls_reader import read_object
 
             bucket = cfg["database"]
-            key = endpoint.table or endpoint.collection or ""
+            key = _joined_object_key(
+                endpoint, cfg, endpoint.table or endpoint.collection or ""
+            )
             if bucket and key:
                 try:
                     batch = read_object(
@@ -1117,6 +1192,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
 
         if fmt == "dynamodb":
             from connectors.dynamodb_reader import (
+                describe_table_key_contract_or_empty,
                 describe_table_schema,
                 estimate_item_count,
                 read_all_paginated,
@@ -1129,8 +1205,13 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             if table:
                 try:
                     names, schema_map = describe_table_schema(cfg, table)
+                    key_schema, index_attributes = (
+                        describe_table_key_contract_or_empty(cfg, table)
+                    )
                     out["columns"] = names
                     out["schema"] = schema_map
+                    out["dynamo_key_schema"] = key_schema
+                    out["dynamo_index_attributes"] = index_attributes
                     out["row_estimate"] = estimate_item_count(cfg, table)
                     out["table_exists"] = True
                 except Exception as exc:
@@ -1603,7 +1684,9 @@ def _attach_callable_source_sample(
         out["columns"] = out.get("columns") or []
         out["schema"] = out.get("schema") or {}
         out["sample_error"] = str(exc)
-        out["message"] = f"Procedure extract failed: {exc}"
+        from services.procedure_source import _operator_extract_error
+
+        out["message"] = _operator_extract_error(exc)
         logger.warning("callable source peek failed for %s: %s", fmt, exc, exc_info=exc)
 
 

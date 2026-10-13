@@ -390,7 +390,6 @@ def read_identity_watermark(
 
     from connectors.generic_sql import get_sqlalchemy_engine
 
-    dialect = _norm(db_type)
     engine = get_sqlalchemy_engine({**cfg, "type": db_type})
     with engine.connect() as conn:
         reflected = _reflect(conn, db_type, schema, table)

@@ -12,6 +12,8 @@ Crash mid-write redelivers — at-least-once.
 from __future__ import annotations
 
 import logging
+import re
+import time
 import sys
 from pathlib import Path
 from typing import Any
@@ -43,7 +45,11 @@ def accepted_kafka_configs(kwargs: dict[str, Any], accepted: set[str] | None) ->
 
 
 def _consumer_configs(cfg: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"bootstrap_servers": _bootstrap(cfg)}
+    # SASL login is mapped once for every kafka-python client; a consumer
+    # without it never authenticates and the broker only "times out" (MX1-03).
+    from services.copy_kafka_common import kafka_client_kwargs
+
+    kwargs: dict[str, Any] = kafka_client_kwargs(cfg)
     kwargs.update(extra)
     try:
         from kafka import KafkaConsumer
@@ -64,14 +70,17 @@ def list_topics(cfg: dict[str, Any]) -> list[str]:
     except ImportError as exc:
         raise ImportError("kafka-python is required to list Kafka topics") from exc
 
-    consumer = KafkaConsumer(
-        **_consumer_configs(
-            cfg,
-            consumer_timeout_ms=2000,
-            request_timeout_ms=8000,
-            api_version_auto_timeout_ms=8000,
+    from services.copy_kafka_common import kafka_classified_bootstrap
+
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+                api_version_auto_timeout_ms=8000,
+            )
         )
-    )
     try:
         names = consumer.topics() or set()
     finally:
@@ -90,7 +99,7 @@ def _bootstrap(cfg: dict[str, Any]) -> str:
             return cs.replace("bootstrap.servers=", "").strip()
     host = str(cfg.get("host") or cfg.get("bootstrap_servers") or "localhost").strip()
     port = int(cfg.get("port") or 9092)
-    if "," in host:
+    if "," in host or re.search(r"(^[^:]+|\])(:\d+)$", host):
         return host
     return f"{host}:{port}"
 
@@ -143,18 +152,28 @@ def commit_kafka_offsets(cfg: dict[str, Any], cursor: dict[str, Any] | None) -> 
         tps_meta[tp] = OffsetAndMetadata(int(item["offset"]), None, -1)
     if not tps_meta:
         return
-    consumer = KafkaConsumer(
-        bootstrap_servers=_bootstrap(cfg),
-        group_id=group_id,
-        enable_auto_commit=False,
-        consumer_timeout_ms=2000,
-        request_timeout_ms=8000,
-    )
+    from services.copy_kafka_common import kafka_classified_bootstrap
+
+    # Same SASL mapping as every other client: a consumer without it never
+    # authenticates and the fail-closed commit fails the job (MX1-03).
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                group_id=group_id,
+                enable_auto_commit=False,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+            )
+        )
     try:
         consumer.assign(tps)
         consumer.commit(tps_meta)
     finally:
         consumer.close()
+
+
+_JOIN_WAIT_S = 15.0
 
 
 def read_topic_batch(
@@ -182,6 +201,7 @@ def read_topic_batch(
     # Durable commits happen only after destination apply (stream.commit_kafka_offsets).
     # Never commit prior pending offsets here — prefetch can race ahead of sink durability.
     consumer = KafkaDebeziumConsumer({
+        **cfg,
         "topic": topic_name,
         "bootstrap_servers": _bootstrap(cfg),
         "group_id": group_id,
@@ -193,8 +213,10 @@ def read_topic_batch(
     try:
         records: list[dict[str, Any]] = []
         polls = 0
+        # Until the group join assigns partitions, an empty poll is not
+        # "caught up": the broker delays a new group's first join (3 s default).
+        join_deadline = time.monotonic() + _JOIN_WAIT_S
         while len(records) < limit and polls < 5:
-            polls += 1
             got = 0
             for row in consumer.poll_rows(
                 max_records=min(limit - len(records), 500),
@@ -204,6 +226,10 @@ def read_topic_batch(
                 got += 1
                 if len(records) >= limit:
                     break
+            if consumer.has_assignment():
+                polls += 1
+            elif time.monotonic() < join_deadline:
+                continue
             if got == 0:
                 break
 
@@ -296,15 +322,18 @@ def sample_topic_batch(
     registry_url = str(
         cfg.get("schema_registry_url") or cfg.get("registry_url") or ""
     ).strip()
-    consumer = KafkaConsumer(
-        **_consumer_configs(
-            cfg,
-            enable_auto_commit=False,
-            consumer_timeout_ms=2000,
-            request_timeout_ms=8000,
-            value_deserializer=lambda raw: raw if raw is not None else raw,
+    from services.copy_kafka_common import kafka_classified_bootstrap
+
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                enable_auto_commit=False,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+                value_deserializer=lambda raw: raw if raw is not None else raw,
+            )
         )
-    )
     try:
         parts = consumer.partitions_for_topic(topic_name)
         if not parts:

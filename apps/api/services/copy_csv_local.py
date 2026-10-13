@@ -30,6 +30,7 @@ then the same mapped COPY. BIFF ``.xls`` and OOXML ``.xlsx`` share the Excel rea
 
 from __future__ import annotations
 
+import base64
 import csv
 import gzip
 import io
@@ -305,6 +306,29 @@ def _project_record(
             continue
         out[col] = _identity_cell(raw.get(key), column=col)
     return out
+
+
+def _sqlite_copy_value(value: Any, logical_type: str) -> Any:
+    from connectors.sqlite_writer import _to_sqlite_value
+
+    return _to_sqlite_value(value, logical_type)
+
+
+def _sqlite_copy_cell_text(
+    value: Any, logical_type: str, *, column: str = ""
+) -> str | None:
+    try:
+        serialized = _sqlite_copy_value(value, logical_type)
+    except (TypeError, ValueError) as exc:
+        raise FastPathUnavailable(
+            f"{(column or 'cell')!r} cannot be encoded by the SQLite row serializer: "
+            f"{exc}"
+        ) from exc
+    if serialized is None:
+        return None
+    if isinstance(serialized, bytes):
+        return base64.b64encode(serialized).decode("ascii")
+    return str(serialized)
 
 
 def _iter_json_records(
@@ -680,12 +704,25 @@ def _write_mapped_csv(
     count = 0
     unbounded = 0
     pending: list[dict[str, str | None]] = []
+    sqlite_dest = (dest_db or "").strip().lower() == "sqlite"
 
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
         written = 0
         for rec in rows:
+            copy_cells = {
+                col: (
+                    _sqlite_copy_cell_text(
+                        rec.get(col),
+                        carriers[index] if index < len(carriers) else "",
+                        column=col,
+                    )
+                    if sqlite_dest
+                    else rec.get(col)
+                )
+                for index, col in enumerate(source_cols)
+            }
             for col, logical, physical in census:
-                cell = rec.get(col)
+                cell = copy_cells.get(col)
                 if not text_cell_copy_safe(
                     cell, logical, physical=physical, dest_db=dest_db
                 ):
@@ -694,7 +731,7 @@ def _write_mapped_csv(
                         f"{physical or logical} COPY-safe; the row path owns its "
                         "validation and quarantine"
                     )
-            writer.writerow([_csv_cell(rec.get(col)) for col in source_cols])
+            writer.writerow([_csv_cell(copy_cells.get(col)) for col in source_cols])
             written += 1
         if fingerprints is not None and rows:
             fingerprints(rows)
@@ -1317,9 +1354,11 @@ def copy_csv_to_postgres_incremental(
         try:
             dest_conn.autocommit = True
             with dest_conn.cursor() as dst_cur:
+                from connectors.sql_identifiers import pg_regclass_literal
+
                 dst_cur.execute(
                     "SELECT to_regclass(%s)",
-                    (f"{dest_schema_n}.{dest_table}",),
+                    (pg_regclass_literal(dest_schema_n, dest_table),),
                 )
                 exists = dst_cur.fetchone()[0] is not None
                 if source_count == 0:

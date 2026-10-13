@@ -47,10 +47,9 @@ def _requests_session() -> Any:
 def _base_url(host: str, port: int, ssl: bool, connection_string: str = "") -> str:
     if connection_string.strip():
         return connection_string.rstrip("/")
-    scheme = "https" if ssl else "http"
-    host = host or "localhost"
-    port = port or 19530
-    return f"{scheme}://{host}:{port}"
+    from connectors.url_authority import http_service_base_url
+
+    return http_service_base_url(host, port, ssl, 19530)
 
 
 def _auth_token(
@@ -233,6 +232,7 @@ def build_milvus_entities(
                 meta["element_type"] if "element_type" in meta else row.get("element_type"),
                 128,
             ),
+            "metadata": sanitize_json_value(meta),
         }
         entities.append(entity)
     return entities, rejected
@@ -463,6 +463,7 @@ def _ensure_collection(
             "dataType": "VarChar",
             "elementTypeParams": {"max_length": 128},
         },
+        {"fieldName": "metadata", "dataType": "JSON"},
     ]
     payload: dict[str, Any] = {
         "collectionName": collection_name,
@@ -495,6 +496,54 @@ def _ensure_collection(
         if _has_collection(session, base_url, headers, collection_name, db_name=db_name):
             return
         raise RuntimeError(f"Milvus create collection failed: {resp.status_code} {body or resp.text}")
+
+
+def _ensure_metadata_field(
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection_name: str,
+    db_name: str = "",
+) -> None:
+    described = _milvus_describe_data(
+        session, base_url, headers, collection_name, db_name=db_name
+    )
+    fields = {
+        str(field.get("fieldName") or field.get("name") or "")
+        for field in described.get("fields") or []
+        if isinstance(field, Mapping)
+    }
+    if "metadata" in fields:
+        return
+    payload: dict[str, Any] = {
+        "collectionName": collection_name,
+        "fieldName": "metadata",
+        "dataType": "JSON",
+        "nullable": True,
+    }
+    if db_name:
+        payload["dbName"] = db_name
+    response = session.post(
+        f"{base_url}/v2/vectordb/collections/fields/add",
+        json=payload,
+        headers=headers,
+        timeout=30,
+    )
+    body = response.json() if response.content else {}
+    if not _ok_response(body if isinstance(body, dict) else {}, response.status_code):
+        described = _milvus_describe_data(
+            session, base_url, headers, collection_name, db_name=db_name
+        )
+        if any(
+            str(field.get("fieldName") or field.get("name") or "") == "metadata"
+            for field in described.get("fields") or []
+            if isinstance(field, Mapping)
+        ):
+            return
+        raise RuntimeError(
+            "Milvus collection is missing the metadata JSON field; upgrade Milvus "
+            "to a version that supports adding nullable fields or create a new collection"
+        )
 
 
 # REST query offset+limit must stay below this (Milvus v2 entities/query).
@@ -704,6 +753,7 @@ def iter_milvus_query_pages(
     pk_name: str,
     pk_type: str,
     output_fields: list[str],
+    filter_expr: str | None = None,
     page_size: int = _MILVUS_QUERY_PAGE,
 ) -> Iterator[list[dict[str, Any]]]:
     """Yield entity pages covering the collection without offset pagination.
@@ -716,6 +766,8 @@ def iter_milvus_query_pages(
     integer = milvus_pk_is_int(pk_type)
     page = max(1, min(int(page_size), _MILVUS_QUERY_PAGE))
     base_filt = milvus_all_pk_filter(ident, pk_type)
+    if filter_expr:
+        base_filt = f"({base_filt}) and ({filter_expr})"
     keyset = _iter_milvus_pk_keyset(
         session=session,
         base_url=base_url,
@@ -742,6 +794,7 @@ def iter_milvus_query_pages(
                 db_name=db_name,
                 pk_name=ident,
                 output_fields=output_fields,
+                base_filter=base_filt,
                 page_size=page,
             )
             return
@@ -816,8 +869,12 @@ def _iter_milvus_int_ranges(
     db_name: str,
     pk_name: str,
     output_fields: list[str],
+    base_filter: str,
     page_size: int,
 ) -> Iterator[list[dict[str, Any]]]:
+    def _window_filter(lo: int, hi: int) -> str:
+        return f"({base_filter}) and ({milvus_pk_range_filter(pk_name, lo, hi)})"
+
     def _count(lo: int, hi: int) -> int:
         return milvus_count_in_filter(
             session=session,
@@ -825,7 +882,7 @@ def _iter_milvus_int_ranges(
             headers=headers,
             collection=collection,
             db_name=db_name,
-            filt=milvus_pk_range_filter(pk_name, lo, hi),
+            filt=_window_filter(lo, hi),
         )
 
     for lo, hi, n in milvus_int_pk_split_windows(
@@ -840,7 +897,7 @@ def _iter_milvus_int_ranges(
             headers=headers,
             collection=collection,
             db_name=db_name,
-            filt=milvus_pk_range_filter(pk_name, lo, hi),
+            filt=_window_filter(lo, hi),
             output_fields=output_fields,
             limit=n,
             order_by_pk=None,
@@ -1069,6 +1126,19 @@ def write_mapped_rows(
         collection_existed = _has_collection(
             session, base_url, hdrs, collection, db_name=db_name
         )
+        if not collection_existed and not create_table:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Milvus collection '{collection}' is missing and "
+                    "create_table is disabled"
+                ),
+            )
         if collection_existed:
             schema_types, cached_live_dim = _milvus_describe_collection(
                 session, base_url, hdrs, collection, db_name=db_name
@@ -1173,18 +1243,58 @@ def write_mapped_rows(
             rejected_details=map_rejected,
             rejected_rows=len(map_rejected),
         )
+    from services.embedding_providers import (
+        EmbeddingProviderError,
+        create_embedding_usage,
+    )
+    from services.vectorization import vector_identity_columns
+    from services.vector_sync import prepare_vector_sync_write
+
+    sync_cfg = {
+        "host": host,
+        "port": port,
+        "database": db_name,
+        "username": username,
+        "password": password,
+        "schema": schema,
+        "ssl": ssl,
+        "connection_string": connection_string,
+        "api_key": api_key,
+    }
+    usage = create_embedding_usage(embedding_model, _kwargs, embedding_column)
     try:
-        vector_rows = vectorize_records(
+        sync_context = prepare_vector_sync_write(
+            "milvus",
+            sync_cfg,
+            collection,
             records,
+            identity_columns=vector_identity_columns(pk_cols, mappings, records),
+            model=embedding_model,
             content_column=content_column,
             embedding_column=embedding_column,
             metadata_columns=metadata_columns,
             exclude_pii_columns=exclude_pii_columns,
-            model=embedding_model,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
             skip_chunking=skip_chunking,
             durable_embedding_cache=durable_embedding_cache,
+            options=_kwargs,
+            usage=usage,
+            vectorizer=vectorize_records,
+        )
+        vector_rows = sync_context["rows"]
+    except EmbeddingProviderError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=collection,
+            target_schema=db_name,
+            checksum="",
+            chunks_completed=0,
+            error=f"Embedding provider {usage.provider} model {usage.model} failed ({type(exc).__name__}): {exc}",
+            rejected_details=list(map_rejected),
+            rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     except Exception as exc:
         return WriteResult(
@@ -1194,12 +1304,52 @@ def write_mapped_rows(
             target_schema=db_name,
             checksum="",
             chunks_completed=0,
-            error=f"Vectorization failed: {exc}",
+            error=f"Vector synchronization preparation failed ({type(exc).__name__})",
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     if not vector_rows:
+        if sync_context["unchanged_skipped"]:
+            try:
+                if sync_context["fingerprint"] is not None:
+                    from services.vector_fingerprint import enforce_fingerprint
+
+                    enforce_fingerprint(
+                        "milvus",
+                        sync_cfg,
+                        collection,
+                        sync_context["fingerprint"],
+                    )
+            except Exception as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection,
+                    target_schema=db_name,
+                    checksum="",
+                    chunks_completed=0,
+                    error=f"Milvus fingerprint enforcement failed ({type(exc).__name__})",
+                    meta={"embedding_usage": usage.to_dict()},
+                )
+            return WriteResult(
+                ok=True,
+                rows_written=0,
+                table_name=collection,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                rejected_details=list(map_rejected),
+                rejected_rows=len(map_rejected),
+                meta={
+                    "embedding_usage": usage.to_dict(),
+                    "vector_docs_unchanged_skipped": sync_context["unchanged_skipped"],
+                    "vector_docs_embedded": 0,
+                    "stale_chunks_deleted": 0,
+                    "vector_stale_cleanup_skipped_docs": 0,
+                },
+            )
         from connectors.writer_common import refuse_empty_vectorization
 
         empty_err = refuse_empty_vectorization(records=records, data_rows=data_rows)
@@ -1214,6 +1364,7 @@ def write_mapped_rows(
                 error=empty_err,
                 rejected_details=list(map_rejected),
                 rejected_rows=len(map_rejected),
+                meta={"embedding_usage": usage.to_dict()},
             )
         return WriteResult(
             ok=True,
@@ -1225,6 +1376,7 @@ def write_mapped_rows(
             rejected_details=list(map_rejected),
             rejected_rows=len(map_rejected),
             warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     from services.vector_embedding import resolve_embedding_dimension
@@ -1251,6 +1403,7 @@ def write_mapped_rows(
                 }
             ],
             rejected_rows=len(map_rejected) + 1,
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     entities, embed_rejected = build_milvus_entities(vector_rows, dimension=dimension)
@@ -1267,6 +1420,7 @@ def write_mapped_rows(
             or "all embeddings rejected",
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
     from connectors.writer_common import reject_on_strict_policy
 
@@ -1282,26 +1436,28 @@ def write_mapped_rows(
             error=strict_error,
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     token = _auth_token(api_key=api_key, username=username, password=password)
     base_url = _base_url(host, port, ssl, connection_string)
     inserted = 0
+    fingerprint_status = "unknown"
+    stale_chunks_deleted = 0
+    stale_cleanup_skipped = 0
     rejected: list[dict[str, Any]] = list(map_rejected)
     try:
         session = _requests_session()
         hdrs = _headers(token)
         if not collection_existed:
-            if not create_table:
-                raise RuntimeError(
-                    f"Milvus collection '{collection}' is missing and "
-                    "create_table is disabled"
-                )
             _ensure_collection(
                 session, base_url, hdrs, collection, dimension, db_name=db_name
             )
             live_dim = None
         else:
+            _ensure_metadata_field(
+                session, base_url, hdrs, collection, db_name=db_name
+            )
             live_dim = cached_live_dim
             if live_dim is None:
                 live_dim = _milvus_live_vector_dim(
@@ -1323,6 +1479,7 @@ def write_mapped_rows(
                     ),
                     rejected_details=list(rejected),
                     rejected_rows=len(rejected),
+                    meta={"embedding_usage": usage.to_dict()},
                 )
             if int(live_dim) != int(dimension):
                 return WriteResult(
@@ -1349,7 +1506,39 @@ def write_mapped_rows(
                         }
                     ],
                     rejected_rows=len(rejected) + 1,
+                    meta={"embedding_usage": usage.to_dict()},
                 )
+
+        incoming_fingerprint = sync_context["fingerprint"]
+        if incoming_fingerprint is None:
+            from services.vector_fingerprint import fingerprint_for_write
+
+            incoming_fingerprint = fingerprint_for_write(
+                model=embedding_model,
+                dimension=dimension,
+                distance="cosine",
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+                skip_chunking=skip_chunking,
+                embedding_column=embedding_column,
+                chunk_strategy=str(_kwargs.get("chunk_strategy") or "recursive"),
+                chunk_unit=str(_kwargs.get("chunk_unit") or "chars"),
+                chunk_tokenizer=(
+                    _kwargs.get("chunk_tokenizer")
+                    if isinstance(_kwargs.get("chunk_tokenizer"), str)
+                    else None
+                ),
+                text_template=(
+                    _kwargs.get("text_template")
+                    if isinstance(_kwargs.get("text_template"), str)
+                    else None
+                ),
+            )
+        from services.vector_fingerprint import enforce_fingerprint
+
+        fingerprint_status = enforce_fingerprint(
+            "milvus", sync_cfg, collection, incoming_fingerprint
+        )
 
         batch_size = 100
         total = len(entities)
@@ -1381,9 +1570,10 @@ def write_mapped_rows(
             target_schema=db_name,
             checksum="",
             chunks_completed=(inserted + 99) // 100,
-            error=str(exc),
+            error=f"Milvus write failed ({type(exc).__name__}): {exc}",
             rejected_details=rejected,
             rejected_rows=len(rejected),
+            meta={"embedding_usage": usage.to_dict()},
         )
 
     _final_abort = reject_on_strict_policy(error_policy, rejected, "Milvus")
@@ -1399,7 +1589,48 @@ def write_mapped_rows(
             rejected_details=rejected,
             rejected_rows=len(rejected),
             warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
+            meta={"embedding_usage": usage.to_dict()},
         )
+
+    keep: dict[str, set[str]] = {}
+    for entity in entities:
+        source_id = str(entity.get("source_id") or "")
+        if source_id:
+            keep.setdefault(source_id, set()).add(str(entity.get("id") or ""))
+    from services.vector_sync import (
+        _rejected_doc_keys,
+        vector_engine_delete_stale_chunks,
+    )
+
+    rejected_source_ids = _rejected_doc_keys(
+        headers, data_rows, pk_cols, mappings, rejected
+    )
+    for source_id in rejected_source_ids | sync_context["unchanged_source_ids"]:
+        keep.pop(source_id, None)
+    if rejected:
+        stale_cleanup_skipped = len(keep)
+    else:
+        try:
+            stale_chunks_deleted = vector_engine_delete_stale_chunks(
+                "milvus", sync_cfg, collection, keep
+            )
+        except Exception as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=inserted,
+                table_name=collection,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=(inserted + 99) // 100,
+                error=f"Milvus stale cleanup failed ({type(exc).__name__})",
+                rejected_details=rejected,
+                rejected_rows=len(rejected),
+                meta={
+                    "embedding_usage": usage.to_dict(),
+                    "vector_docs_unchanged_skipped": sync_context["unchanged_skipped"],
+                    "vector_docs_embedded": sync_context["embedded_docs"],
+                },
+            )
 
     return WriteResult(
         ok=True,
@@ -1411,7 +1642,15 @@ def write_mapped_rows(
         rejected_details=rejected,
         rejected_rows=len(rejected),
         warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
-        meta=_milvus_gate8_meta(entities),
+        meta={
+            **_milvus_gate8_meta(entities),
+            "embedding_usage": usage.to_dict(),
+            "vector_docs_unchanged_skipped": sync_context["unchanged_skipped"],
+            "vector_docs_embedded": sync_context["embedded_docs"],
+            "vector_fingerprint_status": fingerprint_status,
+            "stale_chunks_deleted": stale_chunks_deleted,
+            "vector_stale_cleanup_skipped_docs": stale_cleanup_skipped,
+        },
     )
 
 

@@ -31,6 +31,7 @@ from services.connector_store import (
     update_connector,
 )
 from services.team_store import can_read_workspace, can_write_workspace
+from services.connector_telemetry import connector_operation, driver_family
 
 router = APIRouter(prefix="/connectors/saved", tags=["Saved Connectors"])
 
@@ -327,7 +328,7 @@ def rotate_saved_connector_secrets(
             details={
                 "fields": sorted(k for k in payload if k != "credentials_rotated_at"),
                 "pool_invalidated": pool_invalidated,
-                "credentials_rotated_at": rotated_at,
+                "rotation_timestamp": rotated_at,
             },
         )
     except Exception:
@@ -356,7 +357,17 @@ def test_saved_connector(
 
     from services.connector_probe import probe_saved_connector
 
-    ok, message, cfg = probe_saved_connector(connector_id, workspace_id=workspace_id)
+    with connector_operation(
+        "probe",
+        driver_family=driver_family(conn.type or ""),
+        surface="saved_test",
+        connector_id=connector_id,
+    ):
+        ok, message, cfg = probe_saved_connector(
+            connector_id,
+            workspace_id=workspace_id,
+            surface="saved_test",
+        )
 
     # Persist any auto-resolved auth fields (e.g., MongoDB authSource) so the
     # saved connector works end-to-end without re-entering the connection string.

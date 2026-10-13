@@ -34,6 +34,13 @@ export type PilotConfirmOutcome =
       name: string;
     }
   | {
+      kind: "studio";
+      idempotent: boolean;
+      remediation_kind: "open_bad_data_fix" | "quarantine_and_rerun";
+      run_id?: string;
+      label?: string;
+    }
+  | {
       kind: "lifecycle";
       op: LifecycleOp;
       idempotent: boolean;
@@ -50,6 +57,7 @@ export type LifecycleOp =
   | "retry_job"
   | "resume_job"
   | "replay_quarantine"
+  | "repair_cdc_drift"
   | "delete_connector"
   | "set_schedule_enabled"
   | "delete_schedule"
@@ -60,6 +68,7 @@ export const LIFECYCLE_OPS: readonly LifecycleOp[] = [
   "retry_job",
   "resume_job",
   "replay_quarantine",
+  "repair_cdc_drift",
   "delete_connector",
   "set_schedule_enabled",
   "delete_schedule",
@@ -102,11 +111,47 @@ export function isDestructiveTransfer(action: CopilotPendingAction): boolean {
   );
 }
 
+export function destructiveActionButtonLabel(actionType: string): string {
+  return actionType === "repair_cdc_drift"
+    ? "Repair selected rows"
+    : "Overwrite & run";
+}
+
 export async function confirmPilotPending(
   action: CopilotPendingAction,
 ): Promise<PilotConfirmOutcome> {
   const payload = payloadRecord(action);
   const preview = previewRecord(payload);
+
+  if (action.type === "studio") {
+    const ackId = String(payload.ack_id || "");
+    if (!ackId) {
+      throw new Error(
+        "This Studio approval is missing a server ack_id. Ask Pilot to stage the remediation again.",
+      );
+    }
+    const res = await confirmCopilotAction({
+      ack_id: ackId,
+      actor: "pilot-ui",
+      reason: "operator confirmed studio_remediation",
+    });
+    if (
+      res.kind !== "studio_remediation"
+      || (
+        res.remediation_kind !== "open_bad_data_fix"
+        && res.remediation_kind !== "quarantine_and_rerun"
+      )
+    ) {
+      throw new Error("The server returned an unsupported Studio remediation.");
+    }
+    return {
+      kind: "studio",
+      idempotent: Boolean(res.idempotent),
+      remediation_kind: res.remediation_kind,
+      run_id: res.run_id || undefined,
+      label: res.label || undefined,
+    };
+  }
 
   if (action.type === "create_connector") {
     const ackId = String(payload.ack_id || "");
@@ -238,6 +283,16 @@ export function lifecycleConfirmPrompt(action: CopilotPendingAction): {
       title: `Delete pipeline “${name}”?`,
       message: "The schedule stops firing and is removed. Its past jobs stay in Jobs.",
       confirmLabel: "Delete pipeline",
+    };
+  }
+  if (action.type === "repair_cdc_drift") {
+    const count = Number(preview.key_count || 0);
+    const table = String(preview.table || "the destination table");
+    const position = String(preview.committed_position || "the committed position");
+    return {
+      title: `Re-copy drifted rows from source?`,
+      message: `Re-copy ${count} drifted row(s) into ${table} at ${position}. This is state convergence / reconciliation, not log replay.`,
+      confirmLabel: "Re-copy and reconcile",
     };
   }
   return {

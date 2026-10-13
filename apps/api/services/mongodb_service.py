@@ -15,11 +15,66 @@ from typing import Any, Optional
 
 from pymongo import MongoClient
 
+from services.job_status import COMPLETED_STATUSES
 from services.job_status import TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
+from services.ops_events import emit_event
 from services.runtime_estimate import append_throughput_mark
 
 
 logger = logging.getLogger(__name__)
+
+#: Holds an operator clears with one decision (approve/confirm/resume): INFO.
+_OPERATOR_HOLD_STATUSES = frozenset(
+    {"needs_approval", "needs_confirmation", "needs_review", "awaiting_approval", "paused"}
+)
+#: Holds that need a fix before the job can proceed: WARNING (``held`` default).
+_BLOCKED_HOLD_STATUSES = frozenset({"blocked"})
+
+
+def _job_status_outcome(status: str) -> tuple[str, int | None]:
+    """Map a job status to an ops_events outcome and optional level override."""
+    key = str(status or "").strip().lower()
+    if key == "failed":
+        return "failed", None
+    if key == "cancelled":
+        return "cancelled", None
+    if key in COMPLETED_STATUSES:
+        return "succeeded", None
+    if key == "retrying":
+        return "retrying", None
+    if key in _OPERATOR_HOLD_STATUSES:
+        return "held", logging.INFO
+    if key in _BLOCKED_HOLD_STATUSES:
+        return "held", None
+    return "started", None
+
+
+def emit_job_status_changed(
+    job_id: str,
+    previous_status: str | None,
+    status: str,
+    workspace_id: str | None = None,
+) -> None:
+    """Emit ``job.status.changed`` for a persisted transition (not progress ticks).
+
+    ``from_status`` comes from the read taken before the write, so two racing
+    writers can both report the same prior status; ``from_status_source`` says
+    so rather than paying for a compare-and-swap on every status write.
+    """
+    if str(previous_status or "") == str(status or ""):
+        return
+    outcome, level = _job_status_outcome(status)
+    emit_event(
+        logger,
+        "job.status.changed",
+        outcome=outcome,
+        level=level,
+        job_id=str(job_id),
+        workspace_id=str(workspace_id) if workspace_id else None,
+        from_status=str(previous_status) if previous_status else None,
+        from_status_source="prior_read",
+        to_status=str(status),
+    )
 
 _CONNECTOR_SECRET_KEYS = (
     "password",
@@ -508,6 +563,7 @@ class MongoDBService:
                     "phase": 1,
                     "throughput_marks": 1,
                     "started_at": 1,
+                    "workspace_id": 1,
                 },
             )
         except Exception:
@@ -693,6 +749,12 @@ class MongoDBService:
                 return False
         ok = result.modified_count > 0 or result.matched_count > 0
         if ok:
+            emit_job_status_changed(
+                job_id,
+                previous_status,
+                status,
+                updates.get("workspace_id") or (prev_doc or {}).get("workspace_id"),
+            )
             try:
                 from services.ops_metrics import record_terminal_job_transition
 
@@ -785,6 +847,59 @@ class MongoDBService:
             return False
         return bool(doc.get("cancel_requested")) or doc.get("status") == "cancelled"
 
+    # Same-process fallback claim store. Mongo claims coordinate workers across
+    # processes; without Mongo the schedule runner and a manual submit share
+    # only this registry, and "allow on outage" let a schedule and an ad-hoc
+    # run write the same destination twice (QA DS08).
+    _LOCAL_CLAIMS: dict[str, tuple[str, datetime]] = {}
+    _LOCAL_CLAIMS_LOCK = threading.Lock()
+
+    @classmethod
+    def _local_claim(
+        cls,
+        key: str,
+        job_id: str,
+        expires_at: datetime,
+        status_lookup: Any = None,
+    ) -> tuple[bool, str]:
+        now = datetime.now(timezone.utc)
+        with cls._LOCAL_CLAIMS_LOCK:
+            for k, (_, exp) in list(cls._LOCAL_CLAIMS.items()):
+                if _as_utc(exp) <= now:
+                    cls._LOCAL_CLAIMS.pop(k, None)
+            holder, exp = cls._LOCAL_CLAIMS.get(key, ("", expires_at))
+            # A claim whose job already finished is a normal re-run. The
+            # caller supplies the status lookup — constructing a service here
+            # would pay a connect timeout inside the lock.
+            if holder and callable(status_lookup):
+                try:
+                    holder_status = status_lookup(holder)
+                except Exception:
+                    holder_status = ""
+                if holder_status in TERMINAL_JOB_STATUSES:
+                    holder = ""
+            # Any live holder blocks a new claim — same as the Mongo insert:
+            # claimants all arrive under the shared _PENDING_CLAIM_ID, so an
+            # id-equality pass would admit every second submitter.
+            if holder:
+                return False, holder
+            cls._LOCAL_CLAIMS[key] = (job_id, expires_at)
+            return True, ""
+
+    @classmethod
+    def _local_bind(cls, key: str, from_job_id: str, to_job_id: str) -> None:
+        with cls._LOCAL_CLAIMS_LOCK:
+            entry = cls._LOCAL_CLAIMS.get(key)
+            if entry and entry[0] == from_job_id:
+                cls._LOCAL_CLAIMS[key] = (to_job_id, entry[1])
+
+    @classmethod
+    def _local_release(cls, key: str, job_id: str) -> None:
+        with cls._LOCAL_CLAIMS_LOCK:
+            entry = cls._LOCAL_CLAIMS.get(key)
+            if entry and (not job_id or entry[0] == job_id):
+                cls._LOCAL_CLAIMS.pop(key, None)
+
     def claim_job_idempotency(
         self,
         *,
@@ -809,11 +924,18 @@ class MongoDBService:
 
         if not key or not job_id:
             return True, "", ""
+        expires_at = claim_expiry(ttl_seconds)
         try:
             db = self.get_database()
         except ConnectionError:
-            # Without a shared store there is nothing to coordinate through.
-            # Allow the run rather than blocking all transfers on Mongo.
+            # Without a shared store the same-process registry is the only
+            # coordination: a scheduled beat and a manual run in this process
+            # still must not both write (QA DS08).
+            acquired, holder = self._local_claim(
+                key, job_id, expires_at, self._job_status
+            )
+            if not acquired:
+                return False, holder, self._job_status(holder)
             return True, "", ""
 
         claims = db["job_claims"]
@@ -823,16 +945,24 @@ class MongoDBService:
             "_id": key,
             "job_id": job_id,
             "claimed_at": now,
-            "expires_at": claim_expiry(ttl_seconds),
+            "expires_at": expires_at,
         }
         try:
             claims.insert_one(doc)
+            # Mirror into the local registry so this process keeps deduping
+            # even if the shared store later drops out mid-run.
+            self._LOCAL_CLAIMS[key] = (job_id, expires_at)
             return True, "", ""
         except Exception as exc:
             if not _is_duplicate_key(exc):
-                # A claim store problem must not block data movement; log it and
-                # let the transfer proceed rather than failing closed on infra.
+                # A claim store problem must not block data movement; the
+                # same-process registry still dedupes within this worker.
                 logger.warning("idempotency claim failed for %s: %s", key, exc)
+                acquired, holder = self._local_claim(
+                    key, job_id, expires_at, self._job_status
+                )
+                if not acquired:
+                    return False, holder, self._job_status(holder)
                 return True, "", ""
 
         existing = claims.find_one({"_id": key}) or {}
@@ -872,10 +1002,11 @@ class MongoDBService:
         """
         if not key or not from_job_id or not to_job_id:
             return False
+        self._local_bind(key, from_job_id, to_job_id)
         try:
             db = self.get_database()
         except ConnectionError:
-            return False
+            return True
         try:
             result = db["job_claims"].update_one(
                 {"_id": key, "job_id": from_job_id},
@@ -899,10 +1030,11 @@ class MongoDBService:
         """
         if not key:
             return False
+        self._local_release(key, job_id)
         try:
             db = self.get_database()
         except ConnectionError:
-            return False
+            return True
         query: dict[str, Any] = {"_id": key}
         if job_id:
             query["job_id"] = job_id
@@ -1454,6 +1586,7 @@ class MemoryMongoDBService:
                 rec["phases"] = phases
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        emit_job_status_changed(job_id, previous_status, status, rec.get("workspace_id"))
         try:
             from services.ops_metrics import record_terminal_job_transition
 

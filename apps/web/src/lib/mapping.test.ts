@@ -46,6 +46,52 @@ import { needsMappingReview } from "./columnWorkbench.js";
 import { typeFamily } from "./typeDisplay.js";
 
 describe("transform SSOT round-trip", () => {
+  it("approving a mapping preserves a held business rule as not applied", () => {
+    const mapping: EditableMapping = {
+      source: "email",
+      target: "email",
+      confidence: 0.94,
+      approved: false,
+      inferredType: "VARCHAR",
+      destType: "VARCHAR",
+      businessRule: {
+        kind: "formula",
+        kindLabel: "Review",
+        text: "=HYPERLINK(\"https://example.test\")",
+        status: "needs_confirmation",
+        confidence: 0,
+        ruleId: "V008",
+      },
+    };
+    const approved = approveMappingHonestly(mapping);
+    assert.equal(approved.approved, true);
+    assert.equal(approved.businessRule?.status, "needs_confirmation");
+    assert.equal(approved.businessRule?.ruleId, "V008");
+  });
+
+  it("approving a mapping preserves a held business rule as not applied", () => {
+    const mapping: EditableMapping = {
+      source: "email",
+      target: "email",
+      confidence: 0.94,
+      approved: false,
+      inferredType: "VARCHAR",
+      destType: "VARCHAR",
+      businessRule: {
+        kind: "formula",
+        kindLabel: "Review",
+        text: "=HYPERLINK(\"https://example.test\")",
+        status: "needs_confirmation",
+        confidence: 0,
+        ruleId: "V008",
+      },
+    };
+    const approved = approveMappingHonestly(mapping);
+    assert.equal(approved.approved, true);
+    assert.equal(approved.businessRule?.status, "needs_confirmation");
+    assert.equal(approved.businessRule?.ruleId, "V008");
+  });
+
   it("preserves phone/currency/integer engine transforms through Map edit", () => {
     const editable = editableFromPipelineMappings(
       [

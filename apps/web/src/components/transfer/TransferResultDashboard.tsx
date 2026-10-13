@@ -33,6 +33,7 @@ import { TransformationsCard } from "./TransformationsCard";
 import { hashForScreen } from "../../lib/appNavigation";
 import { cdcDeliveryResultCopy } from "../../lib/cdcExactlyOnce";
 import { DEST_SCALE_PADDING_HONESTY } from "../../lib/decimalScaleHonesty";
+import { EmbeddingUsageSummary } from "./EmbeddingUsageSummary";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -826,6 +827,7 @@ export function TransferResultDashboard({
           </section>
         )}
 
+        <EmbeddingUsageSummary destinationSummary={ds} />
         <RunCarryNotes job={{ destination_summary: ds }} />
         <SchemaFidelityNotes job={{ destination_summary: ds }} />
         <IdentityAlignmentNote job={{ destination_summary: ds }} />

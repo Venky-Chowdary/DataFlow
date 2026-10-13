@@ -12,11 +12,16 @@ import {
   namedRuleDisplay,
   proofRuleClaim,
   ruleCensus,
+  ruleMixSummary,
+  ruleEdgeLabel,
   ruleReportSummary,
+  ruleReviewHint,
+  ruleStatusLabel,
   ruleToEvidence,
   type CompiledRule,
   type RuleCompileReport,
 } from "./businessRules";
+import { buildPreflightMappings } from "./mapping";
 import type { EditableMapping } from "./mapping";
 
 const report: RuleCompileReport = {
@@ -57,12 +62,13 @@ const report: RuleCompileReport = {
       source_column: "mystery",
       dest_column: "segment",
       rule_text: "use the legacy id unless migrated",
-      kind: "unknown",
-      kind_label: "Needs review",
+      kind: "direct",
+      kind_label: "Direct map",
       plane: "review",
-      confidence: 0.35,
+      confidence: 0.62,
+      transform: "none",
       status: "needs_confirmation",
-      issues: ["rule text is not a closed form this compiler can execute"],
+      issues: ["low-confidence binding — confirm the rename"],
       provenance: { sheet: "Rules", row: 4 },
     },
   ],
@@ -102,7 +108,8 @@ describe("mergeBusinessRules", () => {
   it("summarises unused dest columns as not written", () => {
     assert.match(ruleReportSummary(report), /2 executable/);
     assert.match(ruleReportSummary(report), /1 dest column\(s\) unused/);
-    assert.match(ruleReportSummary(report), /3 total · 3 mapping · 0 validation/);
+    assert.match(ruleMixSummary(report), /^3 rules: 3 mapping, 0 validation$/);
+    assert.match(ruleReportSummary(report), /^3 rules: 3 mapping, 0 validation/);
     const census = ruleCensus(report);
     assert.equal(census.total, 3);
     assert.equal(census.mapping, 3);
@@ -290,7 +297,7 @@ describe("mergeBusinessRules", () => {
     const status = next.find((m) => m.source === "status")!;
     assert.deepEqual(status.codeCrosswalk, { A: "ACTIVE" });
     assert.equal(Object.prototype.hasOwnProperty.call(status.codeCrosswalk || {}, "OTHER"), false);
-    assert.match(ruleReportSummary(named), /1 named mapping/);
+    assert.doesNotMatch(ruleReportSummary(named), /named mapping|named validation/);
   });
 
   it("applies a named IANA zone instead of a zoneless assume_timezone", () => {
@@ -417,6 +424,52 @@ describe("operator accept of a review rule", () => {
     assert.equal(canAcceptAsDirect(missing), false);
   });
 
+  it("refuses Accept-as-Direct for an unknown rule with bound columns", () => {
+    const v007: CompiledRule = {
+      ...report.rules[2],
+      kind: "unknown",
+      kind_label: "Needs review",
+      status: "needs_confirmation",
+      issues: ["rule text is not a closed form this compiler can execute"],
+    };
+    assert.equal(canAcceptAsDirect(v007), false);
+    // The hint tells the operator to rewrite or add an explicit step.
+    assert.match(
+      ruleReviewHint(v007, true),
+      /Not compiled — rewrite this rule in a supported form, or add an explicit Transform step/,
+    );
+    // A bound rename still passes.
+    assert.equal(canAcceptAsDirect(report.rules[2]), true);
+    assert.match(ruleReviewHint(report.rules[2], true), /Accept as Direct/);
+  });
+
+  it("tells a direct rule with an unbound column to remap, not rewrite", () => {
+    const missing: CompiledRule = {
+      ...report.rules[2],
+      kind: "direct",
+      status: "needs_confirmation",
+      issues: ["Destination column “phone_no” is not on the selected destination."],
+    };
+    assert.equal(canAcceptAsDirect(missing), false);
+    const hint = ruleReviewHint(missing, true);
+    assert.match(hint, /not on the selected source or destination\. Remap it on Map/);
+    assert.doesNotMatch(hint, /rewrite this rule/);
+  });
+
+  it("labels pre-run executable rules Ready and shows the rule id once", () => {
+    assert.equal(ruleStatusLabel("executable"), "Ready");
+    assert.equal(ruleStatusLabel("conflict"), "Conflict");
+    assert.equal(ruleStatusLabel("needs_confirmation"), "Needs review");
+    const contract: CompiledRule = {
+      ...report.rules[0],
+      kind: "contract",
+      named_rule: "V001",
+      dest_column: "email",
+    };
+    // The df2-rule-id chip already renders the id — the edge must not repeat it.
+    assert.equal(ruleEdgeLabel(contract), "email");
+  });
+
   it("does not merge destination contracts onto Map writes", () => {
     const withContract: RuleCompileReport = {
       ...report,
@@ -444,5 +497,170 @@ describe("operator accept of a review rule", () => {
     const email = next.find((row) => row.source === "email");
     assert.equal(email?.target, "");
     assert.equal(email?.businessRule, undefined);
+  });
+});
+
+describe("rule contracts reach the mapping wire", () => {
+  const contractReport: RuleCompileReport = {
+    ...report,
+    rules: [
+      report.rules[0],
+      {
+        source_column: "fname",
+        dest_column: "first_name",
+        rule_text: "Must not be null",
+        kind: "contract",
+        kind_label: "Validate contract",
+        plane: "validate",
+        confidence: 0.98,
+        status: "executable",
+        contract: { type: "not_null" },
+        enforced_at_execute: true,
+        rule_id: "c1",
+      },
+      {
+        source_column: "fname",
+        dest_column: "first_name",
+        rule_text: "Must be unique",
+        kind: "contract",
+        kind_label: "Validate contract",
+        plane: "validate",
+        confidence: 0.98,
+        status: "executable",
+        contract: { type: "unique" },
+        enforced_at_execute: false,
+        enforced_post_load: true,
+        rule_id: "c2",
+      },
+    ],
+  };
+
+  it("attaches execute- and post-load-enforced contracts, deduped", () => {
+    const next = mergeBusinessRules(seed, contractReport);
+    const fname = next.find((m) => m.source === "fname")!;
+    assert.deepEqual(
+      (fname.ruleContracts || []).map((c) => c.rule_id),
+      ["c1", "c2"],
+    );
+    assert.equal(fname.ruleContracts?.[0].type, "not_null");
+    assert.equal(fname.ruleContracts?.[1].type, "unique");
+    const again = mergeBusinessRules(next, contractReport);
+    assert.equal(again.find((m) => m.source === "fname")!.ruleContracts?.length, 2);
+  });
+
+  it("emits rule_contracts on the preflight wire", () => {
+    const next = mergeBusinessRules(seed, contractReport);
+    const wire = buildPreflightMappings([], next);
+    const fname = wire.find((m) => m.source === "fname")!;
+    assert.deepEqual(
+      (fname.rule_contracts || []).map((c) => c.rule_id),
+      ["c1", "c2"],
+    );
+  });
+
+  it("matches a contract with empty dest by source column; unmatched stays off", () => {
+    const loose: RuleCompileReport = {
+      ...report,
+      rules: [
+        {
+          source_column: "status",
+          dest_column: "",
+          rule_text: "Must be ACTIVE or INACTIVE",
+          kind: "contract",
+          kind_label: "Validate contract",
+          plane: "validate",
+          confidence: 0.98,
+          status: "executable",
+          contract: { type: "in_set", values: ["ACTIVE", "INACTIVE"] },
+          enforced_at_execute: true,
+          rule_id: "c3",
+        },
+        {
+          source_column: "ghost",
+          dest_column: "nowhere",
+          rule_text: "Must not be null",
+          kind: "contract",
+          kind_label: "Validate contract",
+          plane: "validate",
+          confidence: 0.98,
+          status: "executable",
+          contract: { type: "not_null" },
+          enforced_at_execute: true,
+          rule_id: "c4",
+        },
+      ],
+    };
+    const next = mergeBusinessRules(seed, loose);
+    assert.equal(next.find((m) => m.source === "status")!.ruleContracts?.length, 1);
+    assert.equal(next.some((m) => (m.ruleContracts || []).some((c) => c.rule_id === "c4")), false);
+  });
+});
+
+describe("review stays review", () => {
+  it("a non-executable rule on an approved mapping unapproves it on the wire", () => {
+    const approved: EditableMapping[] = [
+      { source: "mystery", target: "segment", confidence: 0.95, approved: true, transform: "none" },
+    ];
+    const next = mergeBusinessRules(approved, report);
+    const mystery = next.find((m) => m.source === "mystery")!;
+    assert.equal(mystery.approved, false);
+    assert.equal(mystery.requiresReview, true);
+    const wire = buildPreflightMappings([], next);
+    assert.equal(wire[0].requires_review, true);
+  });
+
+  it("an executable rule with an unrecognized transform is review, not a direct copy", () => {
+    const weird: RuleCompileReport = {
+      ...report,
+      rules: [
+        {
+          ...report.rules[0],
+          rule_text: "frob the column",
+          transform: "frobnicator",
+          confidence: 0.99,
+        },
+      ],
+    };
+    const next = mergeBusinessRules(seed, weird);
+    const fname = next.find((m) => m.source === "fname")!;
+    assert.equal(fname.approved, false);
+    assert.equal(fname.requiresReview, true);
+    assert.ok((fname.businessRule?.issues || []).length > 0);
+    const wire = buildPreflightMappings([], next);
+    assert.equal(wire.find((m) => m.source === "fname")!.requires_review, true);
+  });
+});
+
+describe("proofRuleClaim counts only what executes", () => {
+  it("validate-only contracts are named, not counted as enforced", () => {
+    const mixed: RuleCompileReport = {
+      ...report,
+      buckets: { executable: 4, needs_confirmation: 0, conflict: 0 },
+      coverage: {
+        detected: 4, executable: 4, review: 0, conflict: 0,
+        writes: 2, validations: 2, contracts_enforced_at_execute: 1, percent: 100,
+      },
+      rules: [
+        report.rules[0],
+        report.rules[1],
+        {
+          source_column: "email", dest_column: "email",
+          rule_text: "Must not be null", kind: "contract", kind_label: "Validate contract",
+          plane: "validate", confidence: 0.98, status: "executable",
+          contract: { type: "not_null" }, enforced_at_execute: true,
+        },
+        {
+          source_column: "cust_id", dest_column: "cust_id",
+          rule_text: "Must be unique", kind: "contract", kind_label: "Validate contract",
+          plane: "validate", confidence: 0.98, status: "executable",
+          contract: { type: "unique" }, enforced_at_execute: false,
+          enforced_post_load: true,
+        },
+      ],
+    };
+    const claim = proofRuleClaim(mixed);
+    assert.match(claim, /4 business rules/);
+    assert.match(claim, /1 rule\(s\) are checked after load/);
+    assert.doesNotMatch(claim, /not enforced at Run/i);
   });
 });

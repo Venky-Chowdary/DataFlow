@@ -1,0 +1,23 @@
+{
+  "data": [
+    {
+      "id": "4001",
+      "email": "contact-one@example.test",
+      "name": "Synthetic Contact One",
+      "created_at": 1767225600,
+      "updated_at": 1767225700
+    },
+    {
+      "id": "4002",
+      "email": "contact-two@example.test",
+      "name": "Synthetic Contact Two",
+      "created_at": 1767225700,
+      "updated_at": 1767225800
+    }
+  ],
+  "pages": {
+    "next": {
+      "starting_after": "synthetic-contact-page-two"
+    }
+  }
+}

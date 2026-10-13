@@ -133,6 +133,24 @@ def test_protected_route_with_bearer_token(auth_env):
     assert response.status_code == 200
 
 
+def test_disabled_stored_account_session_is_not_attached(auth_env, monkeypatch, tmp_path):
+    from services import auth_sessions, user_store
+
+    monkeypatch.setattr(auth_sessions, "_path", lambda: tmp_path / "sessions.json")
+    monkeypatch.setattr(
+        user_store,
+        "get_user",
+        lambda email: {"email": email, "status": "disabled"},
+    )
+    token = _token()
+    client = _app_client(auth_env)
+    response = client.get(
+        "/api/v1/jobs",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 401
+
+
 def test_stream_accepts_token_query_param(auth_env):
     client = _app_client(auth_env)
     response = client.get(f"/api/v1/connectors/jobs/abc/stream?token={_token()}")

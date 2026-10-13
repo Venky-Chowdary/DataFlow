@@ -18,6 +18,7 @@ migration_proven. Not platform exactly-once.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ _logger = logging.getLogger(__name__)
 
 STORE_PATH = data_dir() / "cdc_retired_slot_resumes.json"
 _MAX_RECORDS = 500
+_MAX_OPAQUE_HASHES = 500
 
 
 def _now() -> str:
@@ -73,39 +75,196 @@ def _mongo_retired():  # type: ignore[no-untyped-def]
 
 
 def _load() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     coll = _mongo_retired()
     if coll is not None:
         try:
             docs = list(coll.find({}, {"_id": 0}))
-            if docs:
-                return [doc for doc in docs if isinstance(doc, dict)]
+            rows.extend(
+                doc
+                for doc in docs
+                if isinstance(doc, dict) and doc.get("kind") != "horizon"
+            )
         except Exception as exc:  # noqa: BLE001
             _logger.debug("retired-slot mongo read failed: %s", exc)
-    if not STORE_PATH.exists():
-        return []
     try:
         import json
 
         payload = json.loads(STORE_PATH.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
-        return []
-    rows = payload.get("resumes") if isinstance(payload, dict) else None
-    if not isinstance(rows, list):
-        return []
-    return [row for row in rows if isinstance(row, dict)]
+        payload = {}
+    file_rows = payload.get("resumes") if isinstance(payload, dict) else None
+    if isinstance(file_rows, list):
+        rows.extend(row for row in file_rows if isinstance(row, dict))
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in rows:
+        identity = (
+            str(row.get("lsn") or ""),
+            str(row.get("cursor_key") or ""),
+            str(row.get("slot_name") or ""),
+        )
+        merged[identity] = row
+    return list(merged.values())
 
 
-def _save(rows: list[dict[str, Any]]) -> None:
-    kept = rows[-_MAX_RECORDS:]
+def _merge_horizons(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from connectors.lsn_guards import lsn_family, lsn_sort_key
+    from services.cdc_exactly_once import assert_comparable_lsn
+
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    opaque: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        token = _lsn_of(row.get("lsn"))
+        key = str(row.get("cursor_key") or "").strip()
+        slot = str(row.get("slot_name") or "").strip()[:63]
+        if not key and not slot:
+            continue
+        family = str(row.get("family") or lsn_family(token))
+        if family == "opaque":
+            state = opaque.setdefault(
+                (slot, key), {"hashes": set(), "overflow": False}
+            )
+            hashes = state["hashes"]
+            if row.get("opaque_overflow"):
+                state["overflow"] = True
+            existing_hashes = row.get("opaque_hashes")
+            if not state["overflow"] and isinstance(existing_hashes, list):
+                for value in existing_hashes:
+                    if not isinstance(value, str) or not value or value in hashes:
+                        continue
+                    if len(hashes) >= _MAX_OPAQUE_HASHES:
+                        state["overflow"] = True
+                        break
+                    hashes.add(value)
+            if not state["overflow"] and token:
+                token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+                if token_hash not in hashes:
+                    if len(hashes) >= _MAX_OPAQUE_HASHES:
+                        state["overflow"] = True
+                    else:
+                        hashes.add(token_hash)
+            continue
+        if not token:
+            continue
+        identity = (slot, key, family)
+        current = merged.get(identity)
+        if current is not None:
+            if family == "opaque":
+                continue
+            assert_comparable_lsn(token, str(current["lsn"]))
+            if lsn_sort_key(token) <= lsn_sort_key(current["lsn"]):
+                continue
+        merged[identity] = {
+            "lsn": token,
+            "cursor_key": key,
+            "slot_name": slot,
+            "family": family,
+        }
+    output = list(merged.values())
+    for (slot, key), state in opaque.items():
+        horizon = {
+            "cursor_key": key,
+            "slot_name": slot,
+            "family": "opaque",
+            "opaque_hashes": sorted(state["hashes"]),
+        }
+        if state["overflow"]:
+            horizon["opaque_overflow"] = True
+        output.append(horizon)
+    return output
+
+
+def _load_horizons() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
     coll = _mongo_retired()
     if coll is not None:
         try:
-            coll.delete_many({})
-            if kept:
-                coll.insert_many(kept)
+            rows.extend(
+                doc
+                for doc in coll.find({"kind": "horizon"}, {"_id": 0})
+                if isinstance(doc, dict)
+            )
         except Exception as exc:  # noqa: BLE001
-            _logger.debug("retired-slot mongo write failed: %s", exc)
-    write_json_atomic(STORE_PATH, {"resumes": kept}, indent=2, default=json_default)
+            _logger.debug(
+                "retired-slot mongo horizon read failed (%s)",
+                type(exc).__name__,
+            )
+    try:
+        import json
+
+        payload = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        payload = {}
+    horizons = payload.get("horizons") if isinstance(payload, dict) else None
+    if isinstance(horizons, list):
+        rows.extend(row for row in horizons if isinstance(row, dict))
+    return _merge_horizons(rows)
+
+
+class CdcSlotRetirementError(RuntimeError):
+    def __init__(self, slot_name: str, cause: Exception) -> None:
+        self.slot_name = str(slot_name or "").strip()
+        self.cause = cause
+        super().__init__(
+            "Refusing to drop CDC slot "
+            f"{self.slot_name}: could not durably record its resume LSN(s) "
+            "in the retired-slot store "
+            f"({type(cause).__name__}). The slot is kept so the old position "
+            "stays valid; fix the store and retry the release."
+        )
+
+
+def _save(rows: list[dict[str, Any]]) -> None:
+    evicted = rows[:-_MAX_RECORDS] if _MAX_RECORDS else rows
+    kept = rows[-_MAX_RECORDS:] if _MAX_RECORDS else []
+    horizons = _merge_horizons([*_load_horizons(), *evicted])
+    write_json_atomic(
+        STORE_PATH,
+        {"resumes": kept, "horizons": horizons},
+        indent=2,
+        default=json_default,
+    )
+    coll = _mongo_retired()
+    mongo_error: Exception | None = None
+    if coll is not None:
+        try:
+            for horizon in horizons:
+                selector = {
+                    "kind": "horizon",
+                    "slot_name": horizon["slot_name"],
+                    "cursor_key": horizon["cursor_key"],
+                    "family": horizon["family"],
+                }
+                coll.replace_one(selector, {"kind": "horizon", **horizon}, upsert=True)
+            selectors = []
+            for row in kept:
+                selector = {
+                    "kind": {"$ne": "horizon"},
+                    "lsn": str(row.get("lsn") or ""),
+                    "cursor_key": str(row.get("cursor_key") or ""),
+                    "slot_name": str(row.get("slot_name") or ""),
+                }
+                coll.replace_one(selector, row, upsert=True)
+                selectors.append(
+                    {
+                        "lsn": selector["lsn"],
+                        "cursor_key": selector["cursor_key"],
+                        "slot_name": selector["slot_name"],
+                    }
+                )
+            stale = {"kind": {"$ne": "horizon"}}
+            if selectors:
+                stale["$nor"] = selectors
+            coll.delete_many(stale)
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "retired-slot mongo write failed (%s)", type(exc).__name__
+            )
+            mongo_error = exc
+    if mongo_error is not None:
+        raise mongo_error
 
 
 def retire_slot_lsn(
@@ -167,7 +326,160 @@ def slot_lsn_retired(
             return True
         if slot and row_slot == slot:
             return True
+    from connectors.lsn_guards import lsn_family, lsn_sort_key
+    from services.cdc_exactly_once import assert_comparable_lsn
+
+    family = lsn_family(token)
+    for horizon in _load_horizons():
+        horizon_key = str(horizon.get("cursor_key") or "")
+        horizon_slot = str(horizon.get("slot_name") or "")
+        if key and horizon_key != key:
+            continue
+        if slot and horizon_slot != slot:
+            continue
+        horizon_family = str(
+            horizon.get("family") or lsn_family(horizon.get("lsn") or "")
+        )
+        if horizon_family != family:
+            continue
+        if family == "opaque":
+            if horizon.get("opaque_overflow"):
+                return True
+            token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            if token_hash in horizon.get("opaque_hashes", []):
+                return True
+            continue
+        horizon_lsn = str(horizon.get("lsn") or "")
+        assert_comparable_lsn(token, horizon_lsn)
+        if lsn_sort_key(token) <= lsn_sort_key(horizon_lsn):
+            return True
     return False
+
+
+def _opaque_overflow_slot(
+    lsn: Any, *, cursor_key: str, slot_name: str
+) -> str | None:
+    token = _lsn_of(lsn)
+    if not token:
+        return None
+    from connectors.lsn_guards import lsn_family
+
+    if lsn_family(token) != "opaque":
+        return None
+    key = str(cursor_key or "").strip()
+    slot = str(slot_name or "").strip()[:63]
+    if not key and not slot:
+        return None
+    for horizon in _load_horizons():
+        if str(horizon.get("family") or "") != "opaque":
+            continue
+        horizon_key = str(horizon.get("cursor_key") or "")
+        horizon_slot = str(horizon.get("slot_name") or "")
+        if key and horizon_key != key:
+            continue
+        if slot and horizon_slot != slot:
+            continue
+        if horizon.get("opaque_overflow"):
+            return horizon_slot or slot or "(unknown)"
+    return None
+
+
+def pre_retire_slot_resume(
+    *,
+    slot_name: str,
+    cursor_keys: list[str],
+    job_tokens: list[Any],
+    dest_type: str = "",
+    dest_cfg: dict[str, Any] | None = None,
+) -> tuple[list[str], list[tuple[str, str, str]]]:
+    slot = str(slot_name or "").strip()
+    keys = [str(key).strip() for key in cursor_keys if str(key).strip()]
+    tokens_by_key: dict[str, list[Any]] = {}
+    for key in keys or [""]:
+        tokens_by_key[key] = list(job_tokens or [])
+
+    try:
+        from services.sync_cursor import get_watermark
+
+        for key in keys:
+            tokens_by_key[key].append(get_watermark(key))
+        if dest_cfg is not None and keys:
+            from connectors.cdc_eos_sql import read_route_dest_lsn
+
+            for key in keys:
+                tokens_by_key[key].append(
+                    read_route_dest_lsn(dest_type, dest_cfg, key)
+                )
+    except Exception as exc:  # noqa: BLE001
+        raise CdcSlotRetirementError(slot, exc) from exc
+
+    retired: list[str] = []
+    new_entries: list[tuple[str, str, str]] = []
+    for key, raw_tokens in tokens_by_key.items():
+        for raw in raw_tokens:
+            token = _lsn_of(raw)
+            if not token:
+                continue
+            try:
+                was_retired = slot_lsn_retired(
+                    token, cursor_key=key, slot_name=slot
+                )
+                entry_exists = any(
+                    str(row.get("lsn") or "") == token
+                    and str(row.get("cursor_key") or "") == key
+                    and str(row.get("slot_name") or "") == slot
+                    for row in _load()
+                )
+                if not retire_slot_lsn(
+                    token, cursor_key=key, slot_name=slot
+                ):
+                    raise RuntimeError("retirement write returned false")
+                if not slot_lsn_retired(
+                    token, cursor_key=key, slot_name=slot
+                ):
+                    raise RuntimeError("retirement read-back failed")
+            except Exception as exc:  # noqa: BLE001
+                raise CdcSlotRetirementError(slot, exc) from exc
+            if token not in retired:
+                retired.append(token)
+            if not entry_exists:
+                if not was_retired or any(
+                    str(row.get("lsn") or "") == token
+                    and str(row.get("cursor_key") or "") == key
+                    and str(row.get("slot_name") or "") == slot
+                    for row in _load()
+                ):
+                    entry = (token, key, slot)
+                    if entry not in new_entries:
+                        new_entries.append(entry)
+    return retired, new_entries
+
+
+def unretire_slot_lsns(entries: list[tuple[str, str, str]]) -> None:
+    markers = {
+        (
+            _lsn_of(token) or str(token or "").strip(),
+            str(cursor_key or "").strip(),
+            str(slot_name or "").strip()[:63],
+        )
+        for token, cursor_key, slot_name in entries
+    }
+    markers.discard(("", "", ""))
+    if not markers:
+        return
+    rows = _load()
+    remaining = [
+        row
+        for row in rows
+        if (
+            str(row.get("lsn") or ""),
+            str(row.get("cursor_key") or ""),
+            str(row.get("slot_name") or ""),
+        )
+        not in markers
+    ]
+    if len(remaining) != len(rows):
+        _save(remaining)
 
 
 def resume_token_retired(resume: Any, *, cursor_key: str = "") -> bool:
@@ -186,6 +498,23 @@ def without_retired_slot_resume(
     key = str(cursor_key or "").strip()
     dest_lsn = getattr(view, "committed_lsn", None)
     blob = getattr(view, "resume_blob", None)
+    for raw in (dest_lsn, blob, job_resume):
+        overflow_slot = _opaque_overflow_slot(
+            raw,
+            cursor_key=key,
+            slot_name=_slot_of(raw) or _slot_of(blob),
+        )
+        if overflow_slot:
+            from services.cdc_cursor_gap import CdcSlotGapError
+
+            raise CdcSlotGapError(
+                f"PostgreSQL slot {overflow_slot} has opaque resume-retirement "
+                "history overflow; a fresh snapshot is required before opening "
+                "this cursor.",
+                slot_name=overflow_slot,
+                wal_status="opaque_retirement_overflow",
+                cursor_key=key,
+            )
     if slot_lsn_retired(dest_lsn, cursor_key=key, slot_name=_slot_of(blob)) or slot_lsn_retired(
         blob, cursor_key=key, slot_name=_slot_of(blob)
     ):

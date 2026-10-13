@@ -214,8 +214,6 @@ def test_planned_source_key_does_not_block_a_heap_append(tmp_path: Path) -> None
 
 def test_scheduler_sleeps_until_the_next_due_instant(monkeypatch) -> None:
     """A fixed 60s poll fired 25s late, then 62s late. Sleep until next_run_at."""
-    from datetime import timedelta
-
     import services.schedule_store as store
 
     soon = datetime.now(timezone.utc) + timedelta(seconds=12)

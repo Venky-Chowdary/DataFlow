@@ -191,6 +191,36 @@ def host_key_fingerprint(key: Any) -> str:
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
 
+_SHA256_PIN = re.compile(r"SHA256:([A-Za-z0-9+/]{43})=?", re.IGNORECASE)
+
+
+def normalize_host_key_pin(value: str) -> str:
+    """Canonical ``SHA256:<base64>`` pin an operator may save on a connector.
+
+    The connector boundary takes only the OpenSSH SHA256 fingerprint the
+    refused test printed (``ssh-keygen -lf`` form). Anything else — MD5, a raw
+    key blob, a truncated or decorated value — is refused here, so a pin that
+    can never match (or matches by a weaker rule) is not saved.
+    """
+    token = (value or "").strip()
+    m = _SHA256_PIN.fullmatch(token)
+    digest = b""
+    if m:
+        try:
+            digest = base64.b64decode(m.group(1) + "=", validate=True)
+        except (binascii.Error, ValueError):
+            digest = b""
+    if len(digest) != 32:
+        shown = token if len(token) <= 60 else token[:57] + "..."
+        raise ValueError(
+            f"host_key must be the server's SHA256 fingerprint, exactly "
+            f"SHA256:<43 base64 characters> (as shown by the failed connection "
+            f"test or `ssh-keygen -lf`); got {shown!r}. Verify the fingerprint "
+            "with the server admin and pass it unchanged."
+        )
+    return "SHA256:" + m.group(1)
+
+
 def _pinned_host_key_matches(pinned: str, server_key: Any) -> bool:
     """True when the presented key matches an operator-pinned key or fingerprint."""
     token = (pinned or "").strip()
@@ -274,8 +304,11 @@ def verify_host_key(cfg: SFTPConfig, transport: Any) -> None:
 
     raise RuntimeError(
         f"SFTP host key for {cfg.host}:{cfg.port} is not trusted "
-        f"({server_key.get_name()} {host_key_fingerprint(server_key)}). Pin it "
-        "with DATAFLOW_SFTP_HOST_KEY, add it to a known_hosts file "
+        f"({server_key.get_name()} {host_key_fingerprint(server_key)}). After "
+        "confirming this fingerprint with the server's administrator, approve "
+        f"it for this connector by saving host_key={host_key_fingerprint(server_key)} "
+        "(pins this connector only). Alternatively pin it process-wide with "
+        "DATAFLOW_SFTP_HOST_KEY, add it to a known_hosts file "
         "(DATAFLOW_SFTP_KNOWN_HOSTS), or set "
         "DATAFLOW_SFTP_HOST_KEY_POLICY=insecure_ignore to accept an "
         "unverified transport."

@@ -7,8 +7,10 @@ has the containers) exercises the live connector surface.
 
 from __future__ import annotations
 
+import dataclasses
 import socket
 import sys
+import uuid
 from pathlib import Path
 
 import pytest
@@ -344,7 +346,7 @@ CASES = [
 
 
 @pytest.mark.parametrize("endpoint", CASES)
-def test_write_destination_database_local_emulator(endpoint: EndpointConfig):
+def test_write_destination_database_local_emulator(endpoint: EndpointConfig, request):
     if endpoint.format == "snowflake":
         # snowflake_conn auto-patches local accounts; do not nest fakesnow.patch().
         pytest.importorskip("fakesnow")
@@ -352,8 +354,11 @@ def test_write_destination_database_local_emulator(endpoint: EndpointConfig):
         if not _is_reachable(endpoint.host, endpoint.port):
             pytest.skip(f"{endpoint.format} emulator not reachable on {endpoint.host}:{endpoint.port}")
     if endpoint.format == "pgvector":
-        from tests.host_facts import require_pgvector
+        from tests.host_facts import drop_pg_table, require_pgvector
 
+        table_name = f"payments_pgvector_{uuid.uuid4().hex[:10]}"
+        endpoint = dataclasses.replace(endpoint, table=table_name)
+        request.addfinalizer(lambda: drop_pg_table(table_name))
         require_pgvector()
 
     rows, ddl_log, summary = write_destination_database(

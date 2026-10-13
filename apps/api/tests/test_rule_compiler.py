@@ -142,7 +142,7 @@ def test_json_array_is_accepted():
 
 
 def test_xlsx_roundtrip():
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -162,6 +162,31 @@ def test_xlsx_roundtrip():
     assert report["buckets"]["executable"] == 2
     assert report["rules"][0]["provenance"]["sheet"] == "Rules"
     assert report["rules"][0]["provenance"]["row"] == 2
+
+
+def test_lookup_only_mapping_uses_physical_lookup_sheet_row():
+    pytest.importorskip("openpyxl")
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Lookup_Tables"
+    ws.append(["Lookup_Type", "Source_Value", "Destination_Value"])
+    ws.append(["country_code", "US", "US"])
+    ws.append(["country_code", "IN", "IN"])
+    ws.append(["country_code", "GB", "GB"])
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    report = compile_rule_workbook(
+        "lookup.xlsx",
+        buf.getvalue(),
+        source_columns=["country_code"],
+        dest_columns=["country_code"],
+    )
+
+    rule = next(item for item in report["rules"] if item["source_column"] == "country_code")
+    assert rule["provenance"] == {"sheet": "Lookup_Tables", "row": 2}
 
 
 def test_unbound_source_is_not_executed():
@@ -598,7 +623,7 @@ def test_duplicate_headers_and_notes_sheet_are_not_silent():
     assert "Col" in roles and "Col_2" in roles
     assert report["buckets"]["executable"] == 1
 
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -695,7 +720,7 @@ def test_cleansing_chain_and_lookup_semicolon_are_different():
 
 
 def test_orphan_enumeration_sheet_attaches_to_named_lookup():
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -1758,7 +1783,7 @@ def test_apply_projection_is_table_scoped_and_fail_closed():
 
 def test_sample_workbook_classifies_sheets_and_compiles_closed_forms():
     """The Datawrap sample: identity speech, STATE pairs, dest validation."""
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
     from services.rule_compiler.apply import apply_compiled_projection
 
@@ -1891,7 +1916,7 @@ def test_validation_does_not_hide_unused_dest_or_attach_the_wrong_lookup():
     assert evaluate_contract("", {"type": "not_null"}, missing=False) == "must not be null"
     assert evaluate_contract("NC", {"type": "pattern", "pattern": r"^[A-Za-z]{2}$"}, missing=False) is None
 
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -2016,7 +2041,7 @@ def test_level2_closed_forms_stay_honest_on_join_and_lookup():
         " ".join(r.get("issues") or []) for r in report["rules"] if r.get("kind") == "join"
     ).lower()
 
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     wb = Workbook()
@@ -2128,7 +2153,7 @@ def test_direct_map_speech_copy_write_and_maps_to():
 
 
 def test_validation_severity_is_not_a_source_column():
-    openpyxl = pytest.importorskip("openpyxl")
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     assert canonical_header("Severity") == "severity"
@@ -2429,3 +2454,43 @@ def test_arithmetic_without_a_schema_stays_executable():
     proven = checked["rules"][0]
     assert proven["status"] == "executable"
     assert proven["shape_step"]["options"]["expression"] == "salary * 12"
+
+
+def test_in_lookup_bound_large_reference_set_stays_review():
+    """Over _MAX_LOOKUP_VALUES the in_lookup rule is review-required with the
+    bound named; at/under it compiles to executable in_set.
+
+    Workbook ingest truncates sheets below the bound, so the edge is driven
+    through ``_compile_row`` with a populated lookup edge directly.
+    """
+    from services.rule_compiler.compile import _MAX_LOOKUP_VALUES, _compile_row
+
+    def _rule(n_values: int):
+        return _compile_row(
+            {
+                "source_column": "state_code",
+                "rule": "Must exist in lookup",
+                "action": "QUARANTINE",
+                "rule_name": "V1",
+            },
+            src_cols=["state"],
+            dst_cols=["state_code"],
+            source_table="customers",
+            dest_table="customers",
+            lookup_pairs={
+                ("state", "state_code"): {f"C{i}": f"C{i}" for i in range(n_values)}
+            },
+            sheet_kind="validation",
+        )
+
+    under = _rule(_MAX_LOOKUP_VALUES)
+    assert under["status"] == "executable"
+    assert under["contract"]["type"] == "in_set"
+    assert len(under["contract"]["values"]) == _MAX_LOOKUP_VALUES
+
+    over = _rule(_MAX_LOOKUP_VALUES + 1)
+    assert over["status"] == "needs_confirmation"
+    assert any(
+        f"exceeds {_MAX_LOOKUP_VALUES} values" in item
+        for item in over.get("issues") or []
+    )

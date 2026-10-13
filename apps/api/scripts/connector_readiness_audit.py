@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.util
-import inspect
 import json
 import re
 import sys
@@ -39,13 +38,18 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
+from services.connector_truth_audit import (
+    _NOT_SUPPORTED_FN,  # noqa: F401
+    FILE_FORMATS as _FILE_FORMATS,
+    FILE_FORMAT_PATH as _FILE_FORMAT_PATH,
+    NON_REGISTRY_PATHS as _NON_REGISTRY_PATHS,
+    callable_reality as _callable_reality,
+)
+
 ARTIFACT = _API_ROOT / "data" / "proofs" / "connector_readiness_audit.json"
 LIVE_ARTIFACT = _API_ROOT / "data" / "proofs" / "connector_readiness_live.json"
 MODE_ARTIFACT = _API_ROOT / "data" / "proofs" / "connector_readiness_modes.json"
 
-# Drivers this repo can stand up on a laptop from docker-compose.yml (or with no
-# service at all, for the file/embedded ones). Anything not listed needs a
-# tenant, an account, or a service the compose file does not define.
 LOCAL_SERVICE = {
     "postgresql": "docker compose service `postgres` (PostgreSQL 16, wal_level=logical)",
     "mysql": "docker compose service `mysql` (MySQL 8, ROW binlog + GTID)",
@@ -77,28 +81,6 @@ EMULATOR_SERVICE = {
     "sftp": "any local SSH/SFTP server image",
     "kafka": "no broker in docker-compose.yml",
 }
-
-_NOT_SUPPORTED_FN = re.compile(r"_not_supported$")
-
-#: Drivers the engine reaches through its own explicit branches instead of
-#: ``CONNECTOR_MODULES``: SQLAlchemy engines share one generic adapter, and file
-#: formats are read by the streaming file reader and written by the export
-#: adapter. Classifying these as "no reader/writer" would be as dishonest as
-#: claiming a stub is live, so the audit resolves them here and says which
-#: engine branch owns them.
-_NON_REGISTRY_PATHS: dict[str, tuple[str, str, str, str]] = {
-    "generic_sql": (
-        "connectors.generic_sql", "read_table_batch",
-        "connectors.generic_sql", "write_mapped_rows",
-    ),
-}
-_FILE_FORMAT_PATH = (
-    "src.transfer.file_stream", "iter_source_rows",
-    "src.transfer.adapters", "write_destination_file",
-)
-_FILE_FORMATS = frozenset({
-    "csv", "tsv", "json", "jsonl", "ndjson", "xml", "parquet", "orc", "avro", "excel",
-})
 
 #: Drivers that stand in for many different engines behind one adapter. Proving
 #: one of them (DuckDB over SQLAlchemy, one REST tap) says nothing about the
@@ -152,49 +134,6 @@ def _module_importable(module: str) -> bool:
         return importlib.util.find_spec(module) is not None
     except (ImportError, ModuleNotFoundError, ValueError):
         return False
-
-
-def _callable_reality(module: str | None, fn_name: str) -> dict[str, Any]:
-    """Classify a registry-declared reader/writer entrypoint."""
-    if not module:
-        return {"exists": False, "kind": "absent", "detail": "registry declares no module"}
-    if not fn_name:
-        return {"exists": False, "kind": "absent", "detail": "registry declares no function"}
-    if _NOT_SUPPORTED_FN.search(fn_name):
-        return {
-            "exists": True,
-            "kind": "refusal",
-            "target": f"{module}.{fn_name}",
-            "detail": f"{fn_name} raises an explicit unsupported-role error",
-        }
-    try:
-        mod = importlib.import_module(module)
-    except Exception as exc:
-        return {
-            "exists": False, "kind": "import_error",
-            "target": f"{module}.{fn_name}", "detail": f"{type(exc).__name__}: {exc}"[:200],
-        }
-    fn = getattr(mod, fn_name, None)
-    if fn is None:
-        return {
-            "exists": False, "kind": "missing_function",
-            "target": f"{module}.{fn_name}", "detail": "module has no such attribute",
-        }
-    try:
-        src = inspect.getsource(fn)
-    except (OSError, TypeError):
-        src = ""
-    body = re.sub(r'""".*?"""', "", src, flags=re.S)
-    if "NotImplementedError" in body and body.count("\n") < 12:
-        return {
-            "exists": True, "kind": "stub",
-            "target": f"{module}.{fn_name}", "detail": "body raises NotImplementedError",
-        }
-    return {
-        "exists": True, "kind": "real",
-        "target": f"{module}.{fn_name}",
-        "detail": f"{body.count(chr(10))} source lines",
-    }
 
 
 def _modes(driver: str, cap_row: dict[str, Any], writer_kind: str) -> dict[str, Any]:

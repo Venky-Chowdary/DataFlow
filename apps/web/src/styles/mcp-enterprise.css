@@ -232,6 +232,11 @@
   color: var(--df-success);
 }
 
+.df2-mcp-log-status--warn {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
 .df2-mcp-log-status--err {
   background: var(--df-danger-bg);
   color: var(--df-danger);
@@ -241,4 +246,14 @@
   .df2-mcp-layout {
     grid-template-columns: 1fr;
   }
+}
+
+.df2-mcp-log-actor {
+  display: block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--df-text-muted, #6b7280);
 }

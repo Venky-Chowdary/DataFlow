@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -236,6 +237,12 @@ def _connection_string(cfg: dict[str, Any]) -> str:
 
 def _serialize(value: Any) -> str:
     # BSON null must stay distinct from missing/empty string on SQL sinks.
+    if isinstance(value, datetime):
+        value = (
+            value.replace(tzinfo=timezone.utc)
+            if value.tzinfo is None or value.utcoffset() is None
+            else value.astimezone(timezone.utc)
+        )
     return cell_to_string(value, preserve_sql_null=True)
 
 

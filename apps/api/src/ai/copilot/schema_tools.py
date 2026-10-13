@@ -147,8 +147,34 @@ def _engine_conflict(tokens: set[str], type_l: str) -> bool:
     return not any(e == type_l or e in type_l or type_l in e for e in named)
 
 
-def _match_score(needle: str, label: str, ctype: str = "") -> float:
-    """Rank how well a saved connector matches a user phrase. Higher is better."""
+def _identifier_needle(needle: str) -> bool:
+    """True when the phrase is one saved-connector name, not a dialect or a sentence.
+
+    ``QA_RT5_sqlit`` and ``QA_RT5_delme`` are identifiers. Prefix and token
+    overlap used to bind them to a different live connector — including staging
+    deletion of that connector. A dialect word (``postgres``) or a multi-word
+    phrase (``local postgres``) is still resolved by the copilot rules below.
+    """
+    n = _normalize_needle(needle)
+    if not n or any(ch.isspace() for ch in n):
+        return False
+    if n in _DIALECT_WORDS or n in _FAMILY_WORDS:
+        return False
+    return True
+
+
+def _match_score(
+    needle: str,
+    label: str,
+    ctype: str = "",
+    *,
+    exact_name: bool = False,
+) -> float:
+    """Rank how well a saved connector matches a user phrase. Higher is better.
+
+    ``exact_name`` is the destructive-tool contract: only a full name match
+    counts. A dialect word must not select an instance for delete or update.
+    """
     n = (needle or "").strip().lower()
     label_l = (label or "").strip().lower()
     type_l = (ctype or "").strip().lower()
@@ -156,6 +182,8 @@ def _match_score(needle: str, label: str, ctype: str = "") -> float:
         return 0.0
     if label_l == n:
         return 100.0
+    if exact_name or _identifier_needle(n):
+        return 0.0
     if _engine_conflict(_tokens(n), type_l):
         # Only the exact-name match above may resolve a phrase whose dialect
         # contradicts the saved connector's engine; anything weaker is a guess.
@@ -185,14 +213,25 @@ def _match_score(needle: str, label: str, ctype: str = "") -> float:
     return 0.0
 
 
-def _pick_connector(needle: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    """Pick a clear winner or raise AmbiguousConnectorError — never silent first-match."""
+def _pick_connector(
+    needle: str,
+    candidates: list[dict[str, Any]],
+    *,
+    exact_name: bool = False,
+) -> dict[str, Any]:
+    """Pick a clear winner or raise AmbiguousConnectorError — never silent first-match.
+
+    Identifier needles and destructive tools (``exact_name``) accept only a
+    case-insensitive full name. Two connectors with that same name are an
+    error, not a silent first hit.
+    """
     scored: list[tuple[float, dict[str, Any]]] = []
     for d in candidates:
         score = _match_score(
             needle,
             str(d.get("name") or ""),
             str(d.get("type") or d.get("format") or ""),
+            exact_name=exact_name,
         )
         if score > 0:
             scored.append((score, d))
@@ -200,8 +239,22 @@ def _pick_connector(needle: str, candidates: list[dict[str, Any]]) -> dict[str, 
         raise AmbiguousConnectorError(_no_match_message(needle, candidates))
     scored.sort(key=lambda x: (-x[0], str(x[1].get("name") or "").lower()))
     best_score, best = scored[0]
-    # Exact / near-exact name wins alone
+    # Exact name: more than one saved connector with that label is ambiguous.
     if best_score >= 95.0:
+        ties = [d for score, d in scored if score >= 95.0]
+        if len(ties) > 1:
+            names = []
+            for d in ties[:5]:
+                label = str(d.get("name") or "").strip()
+                cid = str(d.get("id") or d.get("_id") or "").strip()
+                shown = f"{label} ({cid})" if cid else label
+                if shown and shown not in names:
+                    names.append(shown)
+            listed = ", ".join(f"**{n}**" for n in names)
+            raise AmbiguousConnectorError(
+                f"“{needle}” matches {len(ties)} connectors. Pass the connector id. {listed}",
+                candidates=names,
+            )
         return best
     # Clear margin over runner-up
     if len(scored) == 1 or best_score >= scored[1][0] + 12.0:
@@ -261,8 +314,17 @@ def _no_match_message(needle: str, candidates: list[dict[str, Any]]) -> str:
     return f"{head}, and I will not guess which database you meant. {tail}"
 
 
-def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | None:
-    """Resolve a saved connector by id or fuzzy name.
+def _connector_dict(
+    connector_id: str = "",
+    name: str = "",
+    *,
+    exact_name: bool = False,
+) -> dict[str, Any] | None:
+    """Resolve a saved connector by id or name.
+
+    Identifier names match in full (case-insensitive). Phrases and dialect
+    words still use the copilot ranker. ``exact_name`` is required for
+    delete / update / CDC prepare: a dialect word is not an instance.
 
     Raises AmbiguousConnectorError when multiple connectors match equally.
     """
@@ -281,7 +343,7 @@ def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | 
             for c in list_connectors():
                 d = c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
                 pool.append(d)
-            return _pick_connector(needle, pool)
+            return _pick_connector(needle, pool, exact_name=exact_name)
     except AmbiguousConnectorError:
         raise
     except Exception as exc:
@@ -297,7 +359,9 @@ def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | 
                 return found
         if needle:
             pool = list(mongo.list_connectors() or [])
-            return _pick_connector(needle, [c for c in pool if isinstance(c, dict)])
+            return _pick_connector(
+                needle, [c for c in pool if isinstance(c, dict)], exact_name=exact_name
+            )
     except AmbiguousConnectorError:
         raise
     except Exception as exc:
@@ -305,10 +369,16 @@ def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | 
     return None
 
 
-def _safe_connector(connector_id: str = "", name: str = "", tool: str = "schema"):
+def _safe_connector(
+    connector_id: str = "",
+    name: str = "",
+    tool: str = "schema",
+    *,
+    exact_name: bool = False,
+):
     """Resolve connector or return a failed ToolResult (plain-language errors)."""
     try:
-        conn = _connector_dict(connector_id, name)
+        conn = _connector_dict(connector_id, name, exact_name=exact_name)
     except AmbiguousConnectorError as exc:
         return None, _tool_result(tool, success=False, error=exc.message)
     if not conn and not (connector_id or "").strip() and not (name or "").strip():
@@ -374,6 +444,7 @@ def introspect_connector_table(
     table: str = "",
     *,
     purpose: str = "",
+    execute_shape: bool = False,
 ) -> dict[str, Any]:
     """Canonical live schema read for a saved connector.
 
@@ -387,6 +458,11 @@ def introspect_connector_table(
     ``purpose`` is passed to the introspector as ``introspect_purpose`` so
     destination reads can distinguish "table absent" from "cannot connect" —
     the difference between create-new and a hard failure.
+
+    ``execute_shape=True`` (transfer planning) returns the columns the Execute
+    reader will emit — for MongoDB that includes nested ``parent_child``
+    leaves, so the plan maps or omits every column G13 will count at runtime.
+    Query/aggregation callers keep the raw document keys their pipelines use.
     """
     from services.dialect_profiles import normalize_schema
     from services.schema_introspect import introspect_schema
@@ -413,6 +489,7 @@ def introspect_connector_table(
         table=table,
         catalog_type=str(cfg.get("type") or ""),
         auth_source=str(cfg.get("auth_source") or ""),
+        reader_cfg=cfg if execute_shape else None,
     )
     ok = bool(info.get("ok"))
     columns = _normalize_columns(info) if ok else []
@@ -743,9 +820,11 @@ def diff_schemas(
         c["name"]: bool(c.get("nullable", True))
         for c in (dst.output or {}).get("columns") or []
     }
+    # The destination is what exists; the source is what a load brings. A
+    # source-only column is an add, a destination-only column a drop (QA MX3-08).
     classification = classify_schema_change(
-        {"columns": src_map, "nullable": src_null},
         {"columns": dst_map, "nullable": dst_null},
+        {"columns": src_map, "nullable": src_null},
     )
     only_src = sorted(set(src_map) - set(dst_map))
     only_dst = sorted(set(dst_map) - set(src_map))
