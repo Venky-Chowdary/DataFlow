@@ -29,13 +29,6 @@ def test_sqlite(
     if not path:
         return ConnectResult(ok=False, tables=[], error="SQLite path is required (database or connection_string).")
 
-    from connectors.sqlite_common import require_sqlite_source_file
-
-    try:
-        require_sqlite_source_file(path)
-    except ValueError as exc:
-        return ConnectResult(ok=False, tables=[], error=str(exc))
-
     try:
         conn = sqlite3.connect(path, timeout=8)
         with conn:
