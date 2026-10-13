@@ -744,6 +744,10 @@ def run_five_layer_verification(
 
     incomparable = str(checksum_scope or "") == WHOLE_TABLE_NOT_COMPARABLE
     empty_population = src_n == 0 and tgt_n == 0 and not incomparable
+    # sha256('') — a caller checksum of an empty write. Matching digests are
+    # not an L3 pass when the job compared no rows (R4-D05 / R2-062).
+    _empty_input_sha256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    empty_digest = src_chk == _empty_input_sha256 and tgt_chk == _empty_input_sha256
     if incomparable:
         # Whole-table hashes cover rows this job never wrote. Gate-8 already
         # judged the dest-before delta; treating the digest gap as L3 failure
@@ -774,6 +778,20 @@ def run_five_layer_verification(
                 "target_checksum": tgt_chk,
                 "algorithm": "order_independent_sha256_row_fingerprints",
                 "note": "sha256 of an empty population is not a checksum pass",
+            },
+        )
+    elif empty_digest:
+        l3 = LayerReport(
+            layer="L3",
+            passed=False,
+            population_proof=False,
+            details={
+                "skipped": True,
+                "reason": "empty_digest",
+                "source_checksum": src_chk,
+                "target_checksum": tgt_chk,
+                "algorithm": "order_independent_sha256_row_fingerprints",
+                "note": "sha256 of an empty input is not a checksum pass",
             },
         )
     else:

@@ -593,6 +593,71 @@ def open_quarantine_details(
     return [d for d in replay if is_open_retry_status(d.get("retry_status"))]
 
 
+def snapshot_quarantine_cells(
+    details: list[dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Deep copy of the source cells a replay is about to transform.
+
+    A failed replay used to write the transformed image back over the ledger,
+    so the next attempt saw ``1234.50`` instead of ``$1,234.50`` (R4-D04).
+    """
+    import copy
+
+    snaps: dict[str, dict[str, Any]] = {}
+    for detail in details or []:
+        if not isinstance(detail, dict):
+            continue
+        ident = replay_row_identity(detail)
+        snaps[ident] = {
+            "value": copy.deepcopy(detail.get("value")),
+            "values": copy.deepcopy(detail.get("values"))
+            if isinstance(detail.get("values"), dict)
+            else None,
+            "source_values": copy.deepcopy(detail.get("source_values"))
+            if isinstance(detail.get("source_values"), dict)
+            else None,
+        }
+    return snaps
+
+
+def restore_replay_source_cells(
+    findings: list[dict[str, Any]] | None,
+    snaps: dict[str, dict[str, Any]] | None,
+    attempt_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Put the original cells back. The transformed try is ``replay_attempt``."""
+    import copy
+
+    attempts: dict[str, dict[str, Any]] = {}
+    for row in attempt_rows or []:
+        if not isinstance(row, dict):
+            continue
+        attempts[replay_row_identity(row)] = {
+            "value": copy.deepcopy(row.get("value")),
+            "values": copy.deepcopy(row.get("values"))
+            if isinstance(row.get("values"), dict)
+            else None,
+            "reason": row.get("reason") or row.get("failure_reason"),
+        }
+    out: list[dict[str, Any]] = []
+    for row in findings or []:
+        if not isinstance(row, dict):
+            continue
+        stamped = copy.deepcopy(row)
+        snap = (snaps or {}).get(replay_row_identity(stamped))
+        if snap:
+            stamped["value"] = snap.get("value")
+            if snap.get("values") is not None:
+                stamped["values"] = snap["values"]
+            if snap.get("source_values") is not None:
+                stamped["source_values"] = snap["source_values"]
+        attempt = attempts.get(replay_row_identity(stamped))
+        if attempt:
+            stamped["replay_attempt"] = attempt
+        out.append(stamped)
+    return out
+
+
 def stamp_replay_attempt(
     findings: list[dict[str, Any]] | None,
     *,
