@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 from services.brand_env import getenv_brand
@@ -173,12 +174,31 @@ def _identity(value: str | None) -> str | None:
     return value
 
 
+def _as_decimal(value: str | None) -> Decimal | None:
+    """Bind COPY text as a decimal, not as a character string.
+
+    ``DECIMAL(6,2)`` holds ``1000.00``, but that text is 7 characters because
+    of the decimal point. ODBC Driver 18 sizes the fast_executemany wchar
+    buffer from the precision (6 characters, 12 bytes) and then rejects the
+    text with ``String data, right truncation: length 14 buffer 12``. A
+    ``Decimal`` is sent as a numeric, so the point is not an extra character.
+    """
+    if value is None:
+        return None
+    try:
+        return Decimal(value)
+    except InvalidOperation as exc:
+        raise ValueError(f"SQL Server decimal value {value!r} is not a decimal") from exc
+
+
 def converter_for_ddl(ddl: str) -> Callable[[str | None], Any]:
     base = (ddl or "").split("(")[0].strip().upper().replace(" ", "")
     if base in {"BIGINT", "INT", "INTEGER", "SMALLINT", "TINYINT", "BIT"}:
         return _as_int
     if base in {"FLOAT", "REAL", "FLOAT4", "FLOAT8"} or base.startswith("DOUBLE"):
         return _as_float
+    if base in {"DECIMAL", "NUMERIC", "MONEY", "SMALLMONEY"}:
+        return _as_decimal
     if base == "DATE":
         return _as_date
     if base.startswith("DATETIME") or base.startswith("SMALLDATETIME"):

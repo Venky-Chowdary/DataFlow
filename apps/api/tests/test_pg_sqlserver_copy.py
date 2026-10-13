@@ -5,6 +5,7 @@ from __future__ import annotations
 import socket
 import sys
 import uuid
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -16,10 +17,26 @@ if str(_API_ROOT) not in sys.path:
 from connectors.postgresql_writer import _copy_text_value  # noqa: E402
 from services.copy_fast_path import FastPathUnavailable  # noqa: E402
 from services.copy_pg_sqlserver import (  # noqa: E402
+    converter_for_ddl,
     copy_postgres_to_sqlserver,
     decode_copy_text_field,
     decode_copy_text_row,
 )
+
+
+def test_decimal_copy_text_binds_as_decimal():
+    """DECIMAL(6,2) text is wider than the precision because of the point.
+
+    ODBC Driver 18 fast_executemany sizes a wchar buffer from the precision
+    and rejects ``1000.00`` (14 bytes into a 12-byte buffer). The numeric
+    bind is the value the column can store.
+    """
+    convert = converter_for_ddl("DECIMAL(6,2)")
+    assert convert("1000.00") == Decimal("1000.00")
+    assert convert("2000.50") == Decimal("2000.50")
+    assert convert(None) is None
+    with pytest.raises(ValueError):
+        convert("not-a-decimal")
 
 
 def test_copy_text_decode_roundtrip_matches_pg_escape():
