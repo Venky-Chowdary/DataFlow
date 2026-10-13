@@ -4,7 +4,7 @@ import { DtIcon } from "../components/DtIcon";
 import { useToast } from "../components/Toast";
 import { fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
 import { classifySignInFailure, SignInFailure } from "../lib/signInFailure";
-import { writeSession } from "../lib/session";
+import { UI_PREVIEW_TOKEN, writeSession } from "../lib/session";
 import { Screen } from "../lib/types";
 import type { PublicRoute } from "../lib/publicNavigation";
 
@@ -145,7 +145,7 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
         email: "test@gmail.com",
         name: "Test User",
         role: "admin",
-        token: "dev-ui-preview",
+        token: UI_PREVIEW_TOKEN,
         expires_at: Math.floor(Date.now() / 1000) + 86400,
         signed_in_at: Date.now(),
       },

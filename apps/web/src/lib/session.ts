@@ -9,6 +9,30 @@ export interface WorkspaceSession {
 
 const SESSION_KEY = "df2.session";
 
+/** Credential the dev preview writes. It is not an API session and must not be sent as Bearer. */
+export const UI_PREVIEW_TOKEN = "dev-ui-preview";
+
+export function isUiPreviewSession(session: WorkspaceSession | null = readSession()): boolean {
+  return session?.token === UI_PREVIEW_TOKEN;
+}
+
+/**
+ * Bearer credential for API calls. The dev preview token stays in the browser
+ * so the wizard can render, and is never presented as an API session.
+ */
+export function apiBearerToken(session: WorkspaceSession | null = readSession()): string | null {
+  if (!session?.token || isUiPreviewSession(session)) return null;
+  return session.token;
+}
+
+/**
+ * A 401 retires a real API session. A UI preview has no API session to expire,
+ * so the same 401 must leave the operator on the page they opened.
+ */
+export function apiUnauthorizedEndsSession(session: WorkspaceSession | null = readSession()): boolean {
+  return !isUiPreviewSession(session);
+}
+
 export function readSession(): WorkspaceSession | null {
   try {
     const raw = localStorage.getItem(SESSION_KEY) || sessionStorage.getItem(SESSION_KEY);
@@ -47,10 +71,6 @@ export function clearSession() {
   } catch {
     /* ignore */
   }
-}
-
-export function getAuthToken(): string | null {
-  return readSession()?.token ?? null;
 }
 
 /**

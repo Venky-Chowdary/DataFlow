@@ -2,7 +2,7 @@ import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload,
 import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
-import { clearSession, getAuthToken, getSessionActor } from "./session";
+import { apiBearerToken, apiUnauthorizedEndsSession, clearSession, getSessionActor, readSession } from "./session";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
 import { readOptionsPayload } from "./readOptions";
@@ -185,7 +185,8 @@ async function parseApiError(res: Response, fallback: string): Promise<string> {
 async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
   const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal, ...requestInit } = init;
   const headers = new Headers(requestInit.headers);
-  const token = getAuthToken();
+  const session = readSession();
+  const token = apiBearerToken(session);
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
   }
@@ -215,7 +216,7 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
 
   try {
     const res = await fetch(input, { ...mergedInit, signal: controller.signal });
-    if (res.status === 401) {
+    if (res.status === 401 && apiUnauthorizedEndsSession(session)) {
       notifyAuthRequired(typeof input === "string" ? input : String(input));
     } else if (res.ok) {
       noteApiSuccess();
@@ -1697,7 +1698,7 @@ export function streamJobProgress(
   };
 
   try {
-    const token = getAuthToken();
+    const token = apiBearerToken();
     const streamUrl = token
       ? `${API_BASE}/connectors/jobs/${jobId}/stream?token=${encodeURIComponent(token)}`
       : `${API_BASE}/connectors/jobs/${jobId}/stream`;
