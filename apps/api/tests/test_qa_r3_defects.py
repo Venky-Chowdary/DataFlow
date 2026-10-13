@@ -372,9 +372,32 @@ def test_cdc_policy_reads_wal_level_from_the_plan_endpoint() -> None:
             "password": "dataflow",
         },
     )
-    text = " ".join(str(g.get("message") or "") for g in gates).lower()
-    assert "wal_level" in text
-    assert any(g.get("status") == "block" and "wal_level" in str(g.get("message")) for g in gates)
+    import psycopg2
+
+    conn = psycopg2.connect(
+        host="127.0.0.1",
+        port=5432,
+        dbname="dataflow",
+        user="dataflow",
+        password="dataflow",
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SHOW wal_level")
+            level = str(cur.fetchone()[0]).lower()
+    finally:
+        conn.close()
+    wal_blocks = [
+        g
+        for g in gates
+        if g.get("status") == "block" and "wal_level" in str(g.get("message") or "")
+    ]
+    # The probe reads this server. replica/minimal must block and name
+    # wal_level. logical is allowed through that gate (R3-H1).
+    if level == "logical":
+        assert not wal_blocks, wal_blocks
+    else:
+        assert wal_blocks, gates
 
 
 def test_postgres_wal_downgrade_fails_closed() -> None:
