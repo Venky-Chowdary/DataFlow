@@ -18,7 +18,8 @@ describe("studio surfaces", () => {
     assert.match(mark, /tile:\s*"#0A3D3A"/);
     assert.match(mark, /strap:\s*"#F59E0B"/);
     assert.match(tokens, /--df-brand:\s*#0d9488/);
-    assert.match(tokens, /--df-brand-tile:\s*#0A3D3A/);
+    assert.match(tokens, /--df-logo-tile:\s*#0a3d3a/i);
+    assert.match(tokens, /--df-brand-tile:\s*var\(--df-logo-tile\)/);
   });
 
   it("loads studio tokens only inside the new surfaces", () => {
@@ -26,7 +27,8 @@ describe("studio surfaces", () => {
     const studio = read(join(webRoot, "styles/studio-next.css"));
     assert.match(styles, /@import "\.\/studio-next\.css"/);
     assert.doesNotMatch(studio, /#[0-9a-fA-F]{3,8}/);
-    assert.match(studio, /\.df2-studio-next \.df2-btn-primary[\s\S]*--df-brand-tile/);
+    assert.doesNotMatch(studio, /!important/);
+    assert.match(studio, /\.df2-studio-next \.df2-btn-primary[\s\S]*--df-accent:\s*var\(--df-brand-tile\)/);
   });
 
   it("gates the schema browser and canvas behind both flags", () => {

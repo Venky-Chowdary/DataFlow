@@ -6,16 +6,14 @@
 }
 
 .df2-studio-next .df2-btn-primary {
-  /* Beats the global primary !important so only these surfaces use the tile. */
-  background: var(--df-brand-tile) !important;
-  border-color: var(--df-brand-tile) !important;
-  color: var(--df-on-tile) !important;
+  /* premium-theme paints .df2-btn-primary from --df-accent. The variable
+     keeps the tile on these surfaces; the shared fill rule does the work. */
+  --df-accent: var(--df-brand-tile);
+  color: var(--df-on-tile);
 }
 
 .df2-studio-next .df2-btn-primary:hover:not(:disabled) {
-  background: var(--df-brand-text) !important;
-  border-color: var(--df-brand-text) !important;
-  color: var(--df-on-tile) !important;
+  --df-accent: var(--df-brand-text);
 }
 
 .df2-transfer-schema {
@@ -101,13 +99,13 @@
   position: static;
   bottom: auto;
   flex: 0 0 auto;
-  margin: 0 -16px -16px;
+  margin: 0 calc(-1 * var(--df-space-4)) calc(-1 * var(--df-space-4));
 }
 
 @media (max-width: 860px) {
   .df2-xform.df2-studio-next > .df2-xform-actions {
     bottom: auto;
-    margin: 0 -12px -12px;
+    margin: 0 calc(-1 * var(--df-space-3)) calc(-1 * var(--df-space-3));
   }
 }
 
@@ -120,8 +118,7 @@
 }
 
 .df2-canvas-head,
-.df2-canvas-head-actions,
-.df2-canvas-body {
+.df2-canvas-head-actions {
   display: flex;
   gap: var(--df-space-3);
 }
@@ -154,6 +151,8 @@
 }
 
 .df2-canvas-body {
+  display: flex;
+  gap: var(--df-space-3);
   flex: 1 1 0;
   min-height: 0;
   align-items: stretch;
@@ -422,7 +421,7 @@
 .df2-canvas-stage .react-flow {
   width: 100%;
   height: 100%;
-  min-height: 280px;
+  min-height: 0;
   background: var(--df-bg-canvas);
 }
 
@@ -497,12 +496,12 @@
   border-radius: 50%;
 }
 
-.df2-canvas-port.is-in {
+.df2-canvas-port.is-in,
+.df2-canvas-port.is-out {
   background: var(--df-brand-tile);
 }
 
 .df2-canvas-port.is-out {
-  background: var(--df-brand-tile);
   box-shadow: 0 0 0 2px var(--df-brand-arrow);
 }
 

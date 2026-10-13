@@ -91,10 +91,11 @@ describe("contrast", () => {
       assert.match(mark, new RegExp(hex, "i"));
       assert.match(tokens, new RegExp(hex, "i"));
     }
-    assert.match(tokens, /--df-brand-tile:\s*#0A3D3A/i);
-    assert.match(tokens, /--df-brand-text:\s*#0F766E/i);
-    assert.match(tokens, /--df-brand-arrow:\s*#2DD4BF/i);
-    assert.match(tokens, /--df-attention:\s*#F59E0B/i);
+    assert.match(tokens, /--df-brand-tile:\s*var\(--df-logo-tile\)/);
+    assert.match(tokens, /--df-brand-text:\s*var\(--df-logo-ink\)/);
+    assert.match(tokens, /--df-brand-arrow:\s*var\(--df-logo-arrow\)/);
+    assert.match(tokens, /--df-attention:\s*var\(--df-logo-strap\)/);
+    assert.match(tokens, /--df-on-attention:\s*var\(--df-logo-tile\)/);
     assert.match(tokens, /--df-brand:\s*#0d9488/i);
   });
 });

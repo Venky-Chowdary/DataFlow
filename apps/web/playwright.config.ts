@@ -24,7 +24,7 @@ export default defineConfig({
   projects: [
     {
       name: "wizard",
-      testMatch: /wizard\.spec\.ts/,
+      testMatch: /wizard.*\.spec\.ts/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1440, height: 900 },

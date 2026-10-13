@@ -3,12 +3,13 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { expectDisjoint, expectHitInside, expectStackedAbove, expectWithinViewport } from "./layout";
 import { openStudio, reachTransform, shoot } from "./support";
 
 /** A toast shifts the narrow page. Remove it before the shot; the mask alone does not. */
 async function quietChrome(page: Page): Promise<void> {
   await page.locator(".dt-toast").evaluateAll((nodes) => {
-    for (const node of nodes) node.remove();
+    for (const node of nodes) (node as HTMLElement).style.setProperty("display", "none");
   });
 }
 
@@ -106,6 +107,86 @@ test.describe("studio next", () => {
     await quietChrome(page);
     await expectActionBarBelowCanvas(page);
     await shoot(page, "canvas-dark-390.png", [], 0.04);
+  });
+
+  test("canvas regions, drawers, and dialogs stay apart", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    await page.locator(".df2-canvas-op[data-op='trim']").click();
+    await expect(page.locator(".react-flow__node")).toHaveCount(1);
+    const views = [
+      { width: 1440, height: 900, theme: "light" },
+      { width: 390, height: 844, theme: "light" },
+      { width: 1440, height: 900, theme: "dark" },
+      { width: 390, height: 844, theme: "dark" },
+    ] as const;
+    for (const view of views) {
+      await page.setViewportSize({ width: view.width, height: view.height });
+      await page.evaluate((theme) => {
+        localStorage.setItem("df2.theme", theme);
+        document.documentElement.setAttribute("data-theme", theme);
+        document.documentElement.classList.toggle("df2-theme-dark", theme === "dark");
+      }, view.theme);
+      await expectActionBarBelowCanvas(page);
+      const pairs: Array<[string, string]> = [
+        [".df2-canvas-head", ".df2-canvas-body"],
+        [".df2-canvas-rail", "[data-testid='transform-canvas-stage']"],
+        ["[data-testid='transform-canvas-stage']", "[data-testid='canvas-preview']"],
+        ["[data-testid='canvas-preview']", ".df2-xform-actions"],
+        ["[data-testid='transform-canvas']", ".df2-xform-actions"],
+        [".df2-canvas-rail", ".df2-canvas-inspector"],
+        ["[data-testid='transform-canvas-stage']", ".df2-canvas-inspector"],
+        ["[data-testid='canvas-preview']", ".df2-canvas-inspector"],
+        ["[aria-label='Transfer steps']", ".df2-xform-actions"],
+        [".df2-canvas-head", ".df2-xform-actions"],
+      ];
+      for (const [left, right] of pairs) await expectDisjoint(page, left, right);
+      for (const selector of [
+        ".df2-xform-actions",
+        "[data-testid='transform-canvas']",
+        "[data-testid='transform-canvas-stage']",
+        "[data-testid='canvas-preview']",
+      ]) {
+        await expectWithinViewport(page, selector);
+      }
+    }
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await quietChrome(page);
+    await page.getByRole("button", { name: "Rules and suggestions" }).click();
+    await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
+    await expectStackedAbove(page, ".df2-xform-actions", ".df2-drawer-overlay");
+    await expectWithinViewport(page, ".df2-drawer-overlay .df2-drawer", 8);
+    await expectHitInside(page, page.locator(".df2-drawer-close"), ".df2-drawer");
+    await page.locator(".df2-drawer-close").click();
+
+    await quietChrome(page);
+    await page.getByRole("button", { name: "Templates" }).click();
+    const templates = page.getByRole("dialog", { name: "Templates" });
+    await expect(templates).toBeVisible();
+    await expectStackedAbove(page, ".df2-xform-actions", ".df2-modal-overlay");
+    await expectWithinViewport(page, ".df2-modal");
+    await expectHitInside(page, templates.getByRole("button", { name: "Close" }), ".df2-modal");
+    await templates.getByRole("button", { name: "Close" }).click();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await quietChrome(page);
+    await page.evaluate(() => {
+      localStorage.setItem("df2.theme", "dark");
+      document.documentElement.setAttribute("data-theme", "dark");
+      document.documentElement.classList.add("df2-theme-dark");
+    });
+    await page.getByRole("button", { name: "Templates" }).click();
+    await expect(page.getByRole("dialog", { name: "Templates" })).toBeVisible();
+    await expectStackedAbove(page, ".df2-xform-actions", ".df2-modal-overlay");
+    await expectWithinViewport(page, ".df2-modal");
+    await page.getByRole("dialog", { name: "Templates" }).getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Rules and suggestions" }).click();
+    await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
+    await expectStackedAbove(page, ".df2-xform-actions", ".df2-drawer-overlay");
+    await expectWithinViewport(page, ".df2-drawer-overlay .df2-drawer", 8);
+    await expectWithinViewport(page, ".df2-drawer-close");
+    await expectHitInside(page, page.locator(".df2-drawer-close"), ".df2-drawer");
   });
 
   test("canvas is a full-page editor for drop, order, links, and preview", async ({ page }) => {
@@ -230,6 +311,16 @@ conn.commit()
     await expect(browser.getByRole("button", { name: "sales" })).toHaveCount(0);
     await expect(browser.getByText("customers")).toBeVisible();
     await expect(page.getByTestId("transform-canvas")).toHaveCount(0);
+    const schemaBrowser = page.getByTestId("studio-schema-browser");
+    const steps = page.getByRole("navigation", { name: "Transfer steps" });
+    const proceed = page.getByRole("button", { name: /Continue to Destination/ });
+    await expectDisjoint(page, schemaBrowser, steps);
+    await expectDisjoint(page, schemaBrowser, proceed);
+    await expectHitInside(page, proceed, ".df2-wizard-footer");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expectDisjoint(page, schemaBrowser, steps);
+    await expectDisjoint(page, schemaBrowser, proceed);
+    await expectHitInside(page, proceed, ".df2-wizard-footer");
   });
 });
 
