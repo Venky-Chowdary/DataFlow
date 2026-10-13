@@ -849,14 +849,10 @@ jobs:
       - name: pip-audit installed default API environment
         # Optional RAG extras (chromadb / sentence-transformers) live in
         # requirements-rag.txt and are intentionally out of this gate.
-        # Time-bounded exceptions: docs/SECURITY_SCANNING.md "Accepted vulnerability exceptions".
-        # The gate fails again once an exception passes its expiry date.
+        # Databricks SQL is in requirements-databricks.txt for the same reason:
+        # the connector still requires oauthlib<4. No vulnerabilities are ignored.
         run: |
-          if [ "$(date -u +%Y-%m-%d)" \> "2026-11-11" ]; then
-            echo "::error::pip-audit exceptions for oauthlib (PYSEC-2026-4114, PYSEC-2026-4113) expired on 2026-11-11; re-review docs/SECURITY_SCANNING.md"
-            exit 1
-          fi
-          pip-audit --local --ignore-vuln PYSEC-2026-4114 --ignore-vuln PYSEC-2026-4113
+          pip-audit --local
 
       - name: bandit high-severity gate (production code)
         # Fail on High only — Medium SQL f-string debt is tracked separately;

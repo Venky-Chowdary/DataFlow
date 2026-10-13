@@ -91,9 +91,12 @@ fdb>=2.0.0                   # Firebird
 thrift-sasl==0.4.3           # impyla dependency
 
 # Warehouses
-databricks-sqlalchemy>=2.0.0
-databricks-sql-connector>=4.3.0,<4.6
-thrift>=0.24.0,<0.25         # shared pin for databricks and impyla; <0.24 has PYSEC-2026-3925/6/7
+# Databricks SQL is not in the default install. databricks-sql-connector 4.5/4.6
+# requires oauthlib<4, and every oauthlib 3.x release is PYSEC-2026-4114 and
+# PYSEC-2026-4113. The connector's client calls are compatible with oauthlib
+# 4.0.0; its metadata is not. See requirements-databricks.txt and
+# https://github.com/databricks/databricks-sql-python/issues/964
+thrift>=0.24.0,<0.25         # impyla floor; <0.24 has PYSEC-2026-3925/6/7
 
 # Testing
 pytest>=9.0.3
@@ -102,10 +105,9 @@ httpx>=0.25.0
 responses>=0.24.0  # HTTP mocking for SaaS connector tests
 
 # Transitive floors for known CVEs (keep pip-audit green on default install).
-# oauthlib stays on 3.3.1 because databricks-sql-connector 4.6.0 requires
-# oauthlib<4. Raising it here fails the install. PYSEC-2026-4114 waits on
-# a connector release that accepts oauthlib 4.
-# PYSEC-2026-4114 / PYSEC-2026-4113 accepted until 2026-11-11 via --ignore-vuln in ci.yml; see docs/SECURITY_SCANNING.md.
+# 4.0.0 is the first release that fixes PYSEC-2026-4114 and PYSEC-2026-4113.
+# Nothing in the default install may resolve oauthlib 3.x.
+oauthlib>=4.0.0,<5
 urllib3>=2.8.0
 python-dotenv>=1.2.2
 
