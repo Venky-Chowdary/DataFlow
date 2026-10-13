@@ -60,16 +60,22 @@ def build_overwrite_create_new_mappings(
         from services.value_serializer import cell_to_string
 
         head = (sample_rows or [])[:8]
+        # Preserve SQL NULL. ``cell_to_string(None)`` is ``""``, and a JSON
+        # null then looks like a present empty string. That widened a real
+        # JSON column to VARCHAR and stored ``{"k":"v"}`` as text.
         source_schemas = [
             {
                 "name": c,
                 "inferred_type": schema.get(c, "string"),
-                "samples": [cell_to_string(r.get(c, "")) for r in head],
+                "samples": [
+                    cell_to_string(r.get(c, ""), preserve_sql_null=True) for r in head
+                ],
             }
             for c in columns
         ]
         source_samples = {
-            c: [cell_to_string(r.get(c, "")) for r in head] for c in columns
+            c: [cell_to_string(r.get(c, ""), preserve_sql_null=True) for r in head]
+            for c in columns
         }
         overwrite_result = run_mapping_pipeline(
             source_columns=columns,

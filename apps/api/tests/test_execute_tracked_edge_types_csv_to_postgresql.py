@@ -123,5 +123,6 @@ def test_edge_types_csv_to_postgresql():
     assert rows[1][3] == Decimal("0.025")
     assert rows[1][4] == Decimal("0")
     assert bytes(rows[1][5]) == b"world"
-    assert rows[1][6] is None
+    # A present CSV blank is stored text. Numeric and temporal blanks stay NULL.
+    assert rows[1][6] == ""
     assert rows[1][7] is False

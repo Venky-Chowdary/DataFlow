@@ -824,7 +824,11 @@ def run_mapping_pipeline(
 
     if source_samples and source_columns:
         from services.data_profiler import merge_profiler_schema, profile_dataset
-        from services.value_serializer import evidence_samples, is_null_evidence
+        from services.value_serializer import (
+            SQL_NULL_SENTINEL,
+            evidence_samples,
+            is_null_evidence,
+        )
 
         # Type evidence must drop NULL (a sentinel is not a VARCHAR token).
         # The column profile must not: stripping first reported null_rate=0.0
@@ -838,11 +842,15 @@ def run_mapping_pipeline(
             observed_null_rate[col] = round(empty / len(seq), 3)
         # A present ``""`` is text, not missing evidence. Stripping it before
         # the profiler let a JSON-looking column forget the empty cell and
-        # then reject that cell at write time.
+        # then reject that cell at write time. The SQL-null sentinel is not
+        # that cell: JSON ``null`` must stay a JSON column.
         present_empty_text = {
             col
             for col, vals in source_samples.items()
-            if any(isinstance(v, str) and not str(v).strip() for v in (vals or []))
+            if any(
+                isinstance(v, str) and v != SQL_NULL_SENTINEL and not str(v).strip()
+                for v in (vals or [])
+            )
         }
         source_samples = {
             col: evidence_samples(vals) for col, vals in source_samples.items()
