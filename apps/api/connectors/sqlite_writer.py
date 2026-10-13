@@ -935,14 +935,14 @@ def write_mapped_rows(
     stage_batch_idx = int(_kwargs.get("file_batch_idx") or 0)
     stage_total = max(1, int(_kwargs.get("total_chunks") or 1))
     publish_stage = False
-    if atomic_overwrite and stage_batch_idx > 0:
+    if atomic_overwrite and stage_batch_idx > 1:
         stage_candidate = sanitize_identifier(
             f"{live_table_name}__df_stage", preserve_case=True
         )
-        # A resumed chunk continues the stage that already holds earlier
-        # chunks. When that stage is absent, the committed prefix is on the
-        # live table. Publishing a tail-only stage would replace it and the
-        # destination would keep only the rows after the checkpoint.
+        # Stream and file batches are 1-based: index 1 is the first chunk of
+        # this attempt, and the stage is supposed to be absent. Only a later
+        # chunk with no stage means the committed prefix is already on the
+        # live table. Publishing a tail-only stage would replace that prefix.
         if not _sqlite_table_exists(path, stage_candidate):
             atomic_overwrite = False
     if atomic_overwrite:
@@ -1337,7 +1337,9 @@ def write_mapped_rows(
                     )
 
                     try:
-                        recreate_stage = atomic_overwrite and stage_batch_idx == 0
+                        # Index 0 (buffered adapter) and index 1 (first stream
+                        # chunk) both start the stage. A later chunk appends.
+                        recreate_stage = atomic_overwrite and stage_batch_idx <= 1
                         if recreate_stage:
                             cur.execute(f"DROP TABLE IF EXISTS {table_quoted}")
                         fidelity_plan = resolve_create_fidelity_plan(
