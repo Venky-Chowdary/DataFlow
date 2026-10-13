@@ -406,7 +406,6 @@ async def _run_lifecycle_confirm(
     raise HTTPException(status_code=400, detail=f"Unsupported approval kind: {kind}")
 
 
-@router.post("/confirm")
 def lifecycle_confirm_succeeded(result: dict) -> tuple[bool, dict]:
     """``applied: false`` means the confirm changed nothing (R4-D11)."""
     applied = result.get("applied") if isinstance(result, dict) else None
@@ -418,6 +417,7 @@ def lifecycle_confirm_succeeded(result: dict) -> tuple[bool, dict]:
     return True, result if isinstance(result, dict) else {}
 
 
+@router.post("/confirm")
 async def copilot_confirm(
     request: ConfirmActionRequest,
     http_request: Request,
