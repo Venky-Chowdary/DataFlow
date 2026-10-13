@@ -877,9 +877,11 @@ jobs:
           -lll
           -q
 
-  # Wizard project only. Flag-off Transfer Studio. This is the studio UI
-  # check to require. studio-ui-next covers the flagged surfaces and should
-  # not be a required status check.
+  # Wizard project plus the production pageerror smoke. Flag-off Transfer
+  # Studio stays on the dev server; prod-smoke loads `vite preview` of the
+  # production build. This is the studio UI check to require.
+  # studio-ui-next covers the flagged surfaces and should not be a required
+  # status check.
   studio-ui:
     runs-on: ubuntu-latest
     steps:
@@ -947,6 +949,30 @@ jobs:
           PLAYWRIGHT_BASE_URL: http://127.0.0.1:5173
         run: npx playwright test --project=wizard
 
+      - name: Production build
+        run: npm run build --workspace=@dataflow/web
+
+      - name: Start production preview
+        working-directory: apps/web
+        run: |
+          npx vite preview --host 127.0.0.1 --port 4173 --strictPort > /tmp/studio-preview.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sf http://127.0.0.1:4173 >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Production preview did not become ready" >&2
+          cat /tmp/studio-preview.log >&2 || true
+          exit 1
+
+      - name: Production pageerror smoke
+        working-directory: apps/web
+        env:
+          CI: "1"
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:4173
+        run: npx playwright test --project=prod-smoke
+
       - name: Upload wizard report
         if: ${{ failure() }}
         uses: actions/upload-artifact@v4
@@ -957,6 +983,7 @@ jobs:
             apps/web/test-results
             /tmp/studio-api.log
             /tmp/studio-web.log
+            /tmp/studio-preview.log
           if-no-files-found: warn
 
   studio-ui-next:
