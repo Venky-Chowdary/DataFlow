@@ -255,3 +255,48 @@ def test_bare_number_floor_invents_scale_chip():
         "BIGINT", "NUMBER(38,0)", destination_db_type="snowflake"
     )
     assert not any(r.get("kind") == "invented_decimal_scale" for r in integer_carrier)
+
+
+def test_qdrant_price_page_does_not_invent_numeric_4_2():
+    """Eight prices that fit DECIMAL(4,2) are not the collection's contract.
+
+    250.5 needs another integer digit. A payload scroll must stay unbounded
+    so that value is not a fidelity collapse. A spreadsheet sample still
+    invents a tight decimal.
+    """
+    from services.mapping_pipeline import run_mapping_pipeline
+    from services.schema_inference import infer_column
+    from services.schema_introspect import (
+        _unbound_sampled_decimal,
+        sample_page_is_not_a_precision_contract,
+    )
+
+    page = ["10.50", "12.00", "9.99", "8.25", "11.10", "7.50", "6.00", "4.75"]
+    inferred = infer_column(page, field_name="price")["logical_type"]
+    assert inferred == "DECIMAL(4,2)"
+    assert _unbound_sampled_decimal(inferred) == "DECIMAL"
+    assert sample_page_is_not_a_precision_contract("qdrant")
+    assert not sample_page_is_not_a_precision_contract("excel")
+
+    result = run_mapping_pipeline(
+        ["price"],
+        ["price"],
+        source_schemas=[{"name": "price", "inferred_type": "DECIMAL", "samples": page}],
+        destination_db_type="postgresql",
+        source_db_type="qdrant",
+        destination_table_exists=False,
+        use_llm=False,
+    )
+    stamped = str(result["mappings"][0]["target_type"]).upper()
+    assert "(4,2)" not in stamped
+    assert "NUMERIC" in stamped or stamped == "DECIMAL"
+    # A spreadsheet still invents from its cells. That path is
+    # create_new_mapping_target_type, not a payload scroll.
+    from services.type_system import create_new_mapping_target_type
+
+    sheet = create_new_mapping_target_type(
+        "DECIMAL",
+        "postgresql",
+        samples=["85.5", "92.0", "78.25"],
+    ).upper()
+    assert "(" in sheet

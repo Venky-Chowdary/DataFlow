@@ -23,11 +23,11 @@ async def get_freshness(
     when ``X-Workspace-Id`` is set — never another tenant's CDC lag. Isolation
     on and no header is a 400 (same as audit export).
     """
-    from services.audit_log import workspace_id_from_request
+    from services.audit_log import requested_workspace_id_from_request
     from services.ops_metrics import freshness_summary
     from services.team_store import require_workspace_isolation
 
-    workspace_id = workspace_id_from_request(request)
+    workspace_id = requested_workspace_id_from_request(request)
     if require_workspace_isolation() and not workspace_id:
         raise HTTPException(
             status_code=400,
@@ -63,11 +63,11 @@ async def get_dlq(
     is set — never the platform dump, never the page length. ``returned`` is
     the page. Isolation on and no header is a 400 (same as audit export).
     """
-    from services.audit_log import workspace_id_from_request
+    from services.audit_log import requested_workspace_id_from_request
     from services.quarantine_dlq import count_dlq_events, list_dlq_events
     from services.team_store import require_workspace_isolation
 
-    workspace_id = workspace_id_from_request(request)
+    workspace_id = requested_workspace_id_from_request(request)
     if require_workspace_isolation() and not workspace_id:
         raise HTTPException(
             status_code=400,

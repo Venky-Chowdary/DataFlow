@@ -11,7 +11,7 @@ are bound as NULL and counted in ``empty_string_as_null_cells``. Rows
 still land.
 
 Empty dest SELECTs the table once. Occupied dest with a mapped single PK
-skips complete ranges and DELETE+reloads partial ones. No mapped single
+skips a complete range. Append declines a partial range to the row path; overwrite DELETE+reloads it. No mapped single
 PK on an occupied dest: decline.
 
 Declines (row path keeps quarantine): transforms that change values,
@@ -25,7 +25,7 @@ import logging
 from typing import Any, Callable
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action
 from services.copy_mysql_oracle import python_bind_for_ora_ddl
 from services.copy_oracle_oracle import (
     _count as _ora_count,
@@ -237,6 +237,7 @@ def copy_sqlserver_to_oracle(
                         part["action"] = "load"
                         to_copy.append(part)
                     else:
+                        occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                         _ora_delete_range(
                             dst_cur, dest_ref, dest_ident, part
                         )

@@ -146,7 +146,7 @@ class AuthorizationRefused(ValueError):
 _DELEGABLE_FINDINGS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         r"source (schema|shape) (changed|drift)|schema drift|drift .*(refus|block)"
-        r"|column .*(added|renamed|dropped)",
+        r"|column .*(added|renamed|dropped)|schema change detected",
         (SCOPE_SCHEMA_DRIFT,),
     ),
     (

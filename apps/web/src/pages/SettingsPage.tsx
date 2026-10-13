@@ -8,7 +8,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, fetchAuditEvents, exportAuditLog, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole } from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -19,6 +19,9 @@ import { useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
 import { useTheme } from "../lib/useTheme";
 import type { ThemePreference } from "../lib/theme";
+import { auditExportFilename, API_KEY_LIFETIME_OPTIONS, filterWorkspaceApiKeys } from "../lib/iamAdmin";
+import { ServiceAccountsPanel } from "./settings/ServiceAccountsPanel";
+import { ScimSettings } from "./settings/ScimSettings";
 
 const TABS = [
   { id: "general", label: "General", desc: "Workspace defaults", icon: "settings" },
@@ -60,9 +63,13 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [logFilter, setLogFilter] = useState<"all" | AuditLog["level"]>("all");
   const [auditEvents, setAuditEvents] = useState<AuditLog[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
+  const [auditExportFormat, setAuditExportFormat] = useState<AuditExportFormat>("csv");
   /** Last chain verification result. Null means nobody has asked yet — which is not "intact". */
   const [chainReport, setChainReport] = useState<AuditChainVerification | null>(null);
   const [chainVerifying, setChainVerifying] = useState(false);
+  const [retentionResult, setRetentionResult] = useState<AuditRetentionPurgeResult | null>(null);
+  const [retentionLoading, setRetentionLoading] = useState(false);
+  const [retentionError, setRetentionError] = useState("");
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilities | null>(null);
   const [modelCapabilitiesLoaded, setModelCapabilitiesLoaded] = useState(false);
   const [modelError, setModelError] = useState("");
@@ -86,10 +93,18 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [apiKeyGenerating, setApiKeyGenerating] = useState(false);
   const [revokingKeyId, setRevokingKeyId] = useState<string | null>(null);
   const [newKeyName, setNewKeyName] = useState("Production key");
+  const [newKeyRole, setNewKeyRole] = useState<WorkspaceApiKeyRole>("editor");
+  const [newKeyLifetime, setNewKeyLifetime] = useState<WorkspaceApiKeyLifetime>("90d");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [posture, setPosture] = useState<SecurityPosture | null>(null);
   const [postureLoading, setPostureLoading] = useState(false);
   const workspaceManage = useWriteGate(PERMISSIONS.workspaceManage);
+  const retentionPurgeDisabled = !workspaceManage.allowed
+    || retentionLoading
+    || !retentionResult?.dry_run
+    || retentionResult.legal_hold
+    || retentionResult.retention_days === null
+    || (retentionResult.would_remove ?? 0) === 0;
   /** Only edit what was actually read: an unread value must not be re-saved. */
   const generalEditable = workspaceManage.allowed && settingsLoaded;
   const activeWorkspace = useActiveWorkspaceId();
@@ -168,7 +183,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     setApiKeysLoading(true);
     fetchWorkspaceApiKeys()
       .then((keys) => {
-        setApiKeys(keys);
+        setApiKeys(filterWorkspaceApiKeys(keys));
         setApiKeysError("");
       })
       .catch((err: unknown) => {
@@ -401,18 +416,27 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     if (!mayAdminister()) return;
     setApiKeyGenerating(true);
     try {
-      const created = await createWorkspaceApiKey(newKeyName.trim() || "API key");
+      const created = await createWorkspaceApiKey(
+        newKeyName.trim() || "API key",
+        newKeyRole,
+        newKeyLifetime,
+      );
       const optimistic: WorkspaceApiKey = {
         id: created.id,
         name: created.name,
         prefix: created.prefix,
+        role: created.role || newKeyRole,
         created_at: created.created_at,
         last_used_at: null,
+        expires_at: created.expires_at,
+        lifetime: created.lifetime || newKeyLifetime,
+        expired: false,
+        kind: "api_key",
       };
       setApiKeys((prev) => [optimistic, ...prev.filter((k) => k.id !== created.id)]);
       setRevealedKey(created.key);
       toast({ title: "API key created", message: "Copy it now — it won't be shown again.", tone: "success" });
-      fetchWorkspaceApiKeys().then(setApiKeys).catch(() => {});
+      fetchWorkspaceApiKeys().then((keys) => setApiKeys(filterWorkspaceApiKeys(keys))).catch(() => {});
     } catch (err) {
       toast({
         title: "Generation failed",
@@ -514,13 +538,13 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     }
   };
 
-  const downloadAuditExport = async (format: "csv" | "json") => {
+  const downloadAuditExport = async (format: AuditExportFormat) => {
     try {
       const blob = await exportAuditLog(format);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `datawrap-audit-${new Date().toISOString().slice(0, 10)}.${format}`;
+      a.download = auditExportFilename(format);
       a.click();
       URL.revokeObjectURL(url);
       toast({
@@ -534,6 +558,41 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         message: err instanceof Error ? err.message : "Could not export audit log",
         tone: "error",
       });
+    }
+  };
+
+  const previewAuditRetention = async () => {
+    if (!workspaceManage.allowed) return;
+    setRetentionLoading(true);
+    setRetentionError("");
+    setRetentionResult(null);
+    try {
+      setRetentionResult(await purgeAuditRetention(true));
+    } catch (err) {
+      setRetentionError(err instanceof Error ? err.message : "Could not preview audit retention.");
+    } finally {
+      setRetentionLoading(false);
+    }
+  };
+
+  const purgeAuditRetentionNow = async () => {
+    if (!workspaceManage.allowed) return;
+    if (!await confirm({
+      title: "Purge expired audit events?",
+      message: "This permanently removes events outside the configured retention window. A retention checkpoint will be recorded.",
+      confirmLabel: "Purge events",
+      tone: "danger",
+    })) return;
+    setRetentionLoading(true);
+    setRetentionError("");
+    setRetentionResult(null);
+    try {
+      setRetentionResult(await purgeAuditRetention(false));
+      await runChainVerification();
+    } catch (err) {
+      setRetentionError(err instanceof Error ? err.message : "Could not purge audit retention.");
+    } finally {
+      setRetentionLoading(false);
     }
   };
 
@@ -846,6 +905,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
             )}
 
             {tab === "auth" && (
+              <>
               <section className="df2-settings-section">
                 <div className="df2-settings-section-head">
                   <div>
@@ -901,6 +961,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   </p>
                 </div>
               </section>
+              <ScimSettings onOpenTeamSettings={() => setTab("team")} />
+              </>
             )}
 
             {tab === "team" && <TeamSettings />}
@@ -1048,11 +1110,18 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
             )}
 
             {tab === "api" && (
+              <>
               <section className="df2-settings-section">
                 <div className="df2-settings-section-head">
                   <div>
                     <h2>API keys</h2>
-                    <p>Authenticate programmatic transfers, schedules, and MCP agent calls.</p>
+                    <p>
+                      Authenticate programmatic transfers, schedules, and MCP. A key stays valid
+                      until the expiration you choose, or until you revoke it. Logging out does
+                      not remove it. Viewer reads. Operator runs jobs. Editor creates
+                      connectors, transfers, and schedules. Admin can also delete connectors.
+                      A key created before roles were stored acts as an editor.
+                    </p>
                   </div>
                 </div>
                 <PermissionNotice
@@ -1080,6 +1149,34 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         onChange={(e) => setNewKeyName(e.target.value)}
                         placeholder="e.g. Production ETL"
                       />
+                    </div>
+                    <div className="df2-settings-field">
+                      <label htmlFor="api-key-role">Role</label>
+                      <select
+                        id="api-key-role"
+                        className="df2-select"
+                        value={newKeyRole}
+                        onChange={(e) => setNewKeyRole(e.target.value as WorkspaceApiKeyRole)}
+                      >
+                        <option value="viewer">Viewer</option>
+                        <option value="operator">Operator</option>
+                        <option value="editor">Editor</option>
+                        <option value="admin">Admin</option>
+                      </select>
+                    </div>
+                    <div className="df2-settings-field">
+                      <label htmlFor="api-key-expires">Expiration</label>
+                      <select
+                        id="api-key-expires"
+                        className="df2-select"
+                        data-testid="api-key-expires"
+                        value={newKeyLifetime}
+                        onChange={(e) => setNewKeyLifetime(e.target.value as WorkspaceApiKeyLifetime)}
+                      >
+                        {API_KEY_LIFETIME_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>{option.label}</option>
+                        ))}
+                      </select>
                     </div>
                     <button
                       type="button"
@@ -1125,7 +1222,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       description="Use the toolbar above to authenticate programmatic transfers and MCP calls."
                     />
                   ) : (
-                    <div className="df2-api-key-list" role="list" aria-label="Workspace API keys">
+                    <div className="df2-api-key-list" role="list" aria-label="Workspace API keys" data-testid="workspace-api-key-list">
                       {apiKeys.map((key) => (
                         <article key={key.id} className="df2-api-key-card" role="listitem">
                           <div className="df2-api-key-card-main">
@@ -1133,13 +1230,26 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                               <DtIcon name="key" size={18} />
                             </div>
                             <div className="df2-api-key-card-copy">
-                              <strong>{key.name}</strong>
-                              <code>{key.prefix}…</code>
-                              <span className="df2-api-key-card-meta">
-                                Created {key.created_at ? new Date(key.created_at).toLocaleString() : "—"}
-                                {" · "}
-                                Last used {key.last_used_at ? new Date(key.last_used_at).toLocaleString() : "Never"}
-                              </span>
+                              <div className="df2-api-key-card-title">
+                                <strong>{key.name}</strong>
+                              </div>
+                              <div className="df2-api-key-card-meta-row">
+                                <span className="df2-api-key-card-meta">Prefix: <code>{key.prefix}…</code></span>
+                                <span className="df2-api-key-card-meta">Role: {key.role || "editor"}</span>
+                                <span className="df2-api-key-card-meta">
+                                  Created {key.created_at ? new Date(key.created_at).toLocaleString() : "—"}
+                                </span>
+                                <span className="df2-api-key-card-meta">
+                                  Last used {key.last_used_at ? new Date(key.last_used_at).toLocaleString() : "Never"}
+                                </span>
+                                <span className="df2-api-key-card-meta">
+                                  {key.expired
+                                    ? `Expired ${key.expires_at ? new Date(key.expires_at).toLocaleString() : ""}`
+                                    : key.expires_at
+                                      ? `Expires ${new Date(key.expires_at).toLocaleString()}`
+                                      : "No expiration"}
+                                </span>
+                              </div>
                             </div>
                           </div>
                           <div className="df2-api-key-card-actions">
@@ -1159,9 +1269,12 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   )}
                 </div>
               </section>
+              <ServiceAccountsPanel />
+              </>
             )}
 
             {tab === "logs" && (
+              <>
               <section className="df2-settings-section">
                 <div className="df2-settings-section-head">
                   <div>
@@ -1171,7 +1284,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       Verify walks the platform HMAC chain; findings named here are this workspace&apos;s records.
                     </p>
                   </div>
-                  <div className="df2-settings-section-actions">
+                  <div className="df2-settings-section-actions df2-iam-audit-actions">
                     <button
                       type="button"
                       className="df2-btn df2-btn-secondary df2-btn-sm"
@@ -1181,19 +1294,27 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     >
                       <DtIcon name="shield" size={14} /> {chainVerifying ? "Verifying…" : "Verify chain"}
                     </button>
+                    <label className="df2-iam-audit-export-format">
+                      <span>Format</span>
+                      <select
+                        className="df2-select"
+                        data-testid="audit-export-format"
+                        value={auditExportFormat}
+                        onChange={(event) => setAuditExportFormat(event.target.value as AuditExportFormat)}
+                      >
+                        <option value="csv">CSV</option>
+                        <option value="json">JSON</option>
+                        <option value="ndjson">NDJSON</option>
+                        <option value="cef">CEF</option>
+                      </select>
+                    </label>
                     <button
                       type="button"
                       className="df2-btn df2-btn-secondary df2-btn-sm"
-                      onClick={() => void downloadAuditExport("csv")}
+                      data-testid="audit-export"
+                      onClick={() => void downloadAuditExport(auditExportFormat)}
                     >
-                      <DtIcon name="download" size={14} /> Export CSV
-                    </button>
-                    <button
-                      type="button"
-                      className="df2-btn df2-btn-ghost df2-btn-sm"
-                      onClick={() => void downloadAuditExport("json")}
-                    >
-                      Export JSON
+                      <DtIcon name="download" size={14} /> Export
                     </button>
                   </div>
                 </div>
@@ -1279,6 +1400,68 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   </div>
                 </div>
               </section>
+              <section className="df2-settings-section" data-testid="audit-retention">
+                <div className="df2-settings-section-head">
+                  <div>
+                    <h2>Retention</h2>
+                    <p>Preview expired-event removal before purging. Purges record a retention checkpoint.</p>
+                  </div>
+                </div>
+                <div className="df2-settings-section-body">
+                  <PermissionNotice
+                    allowed={workspaceManage.allowed}
+                    reason={workspaceManage.reason}
+                    what="Audit retention requires workspace.manage."
+                  />
+                  <div className="df2-settings-section-actions">
+                    <Button
+                      variant="secondary"
+                      disabled={!workspaceManage.allowed || retentionLoading}
+                      title={workspaceManage.reason || undefined}
+                      data-testid="audit-retention-preview"
+                      onClick={() => void previewAuditRetention()}
+                    >
+                      {retentionLoading ? "Working…" : "Preview purge"}
+                    </Button>
+                    <Button
+                      variant="danger"
+                      disabled={retentionPurgeDisabled}
+                      title={workspaceManage.reason || undefined}
+                      data-testid="audit-retention-purge"
+                      onClick={() => void purgeAuditRetentionNow()}
+                    >
+                      Purge now
+                    </Button>
+                  </div>
+                  {retentionError && (
+                    <div className="df2-permission-notice" role="alert" data-testid="audit-retention-error">
+                      {retentionError}
+                    </div>
+                  )}
+                  {retentionResult && (
+                    <div className="df2-settings-policy-row" role="status" data-testid="audit-retention-result">
+                      <div>
+                        {retentionResult.dry_run ? (
+                          <p>Would remove: {retentionResult.would_remove ?? "not reported by the API"}</p>
+                        ) : (
+                          <p>Removed: {retentionResult.removed}</p>
+                        )}
+                        <p>Legal hold: {retentionResult.legal_hold ? "Enabled" : "Off"}</p>
+                        <p>
+                          {retentionResult.retention_days === null
+                            ? "Retention is off"
+                            : `Retention window: ${retentionResult.retention_days} days`}
+                        </p>
+                        {retentionResult.legal_hold && <p>Purge is disabled while legal hold is enabled.</p>}
+                        {!retentionResult.legal_hold && retentionResult.retention_days === null && (
+                          <p>Purge is disabled because retention is off.</p>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+              </>
             )}
           </div>
         </div>

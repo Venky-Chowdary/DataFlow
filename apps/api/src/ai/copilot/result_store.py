@@ -56,20 +56,45 @@ class PilotResultStore:
             if not self.path.exists():
                 return
             raw = json.loads(self.path.read_text(encoding="utf-8"))
-            entries = raw.get("entries") or {}
-            now = _now()
-            for rid, doc in entries.items():
-                if float(doc.get("expires_at") or 0) > now:
-                    self._entries[str(rid)] = doc
-            self._latest_by_session = {
-                str(k): str(v)
-                for k, v in (raw.get("latest_by_session") or {}).items()
-                if str(v) in self._entries
-            }
-            lg = raw.get("latest_global")
-            self._latest_global = str(lg) if lg and str(lg) in self._entries else None
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             _log.warning("pilot result store load failed: %s", exc)
+            return
+        self._merge_payload_locked(raw)
+
+    def _merge_payload_locked(self, raw: dict[str, Any]) -> None:
+        """Fold a disk snapshot in. A row already in memory stays if it is newer."""
+        entries = raw.get("entries") or {}
+        now = _now()
+        for rid, doc in entries.items():
+            if not isinstance(doc, dict):
+                continue
+            if float(doc.get("expires_at") or 0) <= now:
+                continue
+            key = str(rid)
+            current = self._entries.get(key)
+            if current is not None and float(current.get("created_at") or 0) > float(
+                doc.get("created_at") or 0
+            ):
+                continue
+            self._entries[key] = doc
+        for k, v in (raw.get("latest_by_session") or {}).items():
+            if str(v) in self._entries:
+                self._latest_by_session[str(k)] = str(v)
+        lg = raw.get("latest_global")
+        if lg and str(lg) in self._entries:
+            self._latest_global = str(lg)
+
+    def _reload_disk_locked(self) -> None:
+        """Another worker may have written the file after this process loaded it."""
+        try:
+            if not self.path.exists():
+                return
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            _log.warning("pilot result store reload failed: %s", exc)
+            return
+        if isinstance(raw, dict):
+            self._merge_payload_locked(raw)
 
     def _persist(self) -> None:
         try:
@@ -154,6 +179,9 @@ class PilotResultStore:
             self._gc_locked()
             doc = self._entries.get(rid)
             if not doc:
+                self._reload_disk_locked()
+                doc = self._entries.get(rid)
+            if not doc:
                 return None
             if float(doc.get("expires_at") or 0) <= _now():
                 self._entries.pop(rid, None)
@@ -166,28 +194,38 @@ class PilotResultStore:
         result_id: str = "",
         session_id: str = "",
     ) -> dict[str, Any] | None:
-        """Resolve explicit id or this session's latest. Never cross-session."""
+        """An explicit result_id is the credential. Latest-without-id stays on this session."""
         sid = (session_id or "").strip()
-        if result_id:
-            doc = self.get(result_id)
-            if not doc:
-                return None
-            owner = str(doc.get("session_id") or "").strip()
-            # Session-scoped rows require a matching session_id.
-            if owner and owner != sid:
-                return None
-            return doc
+        if (result_id or "").strip():
+            return self.get(result_id)
         if not sid:
             return None
         with self._lock:
             self._gc_locked()
             rid = self._latest_by_session.get(sid)
             if not rid:
+                self._reload_disk_locked()
+                rid = self._latest_by_session.get(sid)
+            if not rid:
                 return None
             doc = self._entries.get(rid)
             if doc and float(doc.get("expires_at") or 0) > _now():
                 return dict(doc)
         return None
+
+    def explain_miss(self, result_id: str = "", session_id: str = "") -> str:
+        """Distinct operator text for a bad id versus a session that never sampled."""
+        rid = (result_id or "").strip()
+        if rid:
+            return (
+                f"Stored result '{rid}' is not in the store. "
+                "It expires after one hour, or the id is wrong. "
+                "Sample the table or run the query again."
+            )
+        return (
+            "This session has no stored sample. "
+            "Pass the result_id from the sample or query, or sample a table first."
+        )
 
     def clear_for_tests(self) -> None:
         with self._lock:

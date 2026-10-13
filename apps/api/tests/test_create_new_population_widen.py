@@ -170,3 +170,57 @@ def test_live_destination_ddl_is_not_rewritten_by_a_map_type() -> None:
 
     assert widen is None
     assert mappings[0]["target_type"] == "NUMBER(11,8)"
+
+
+def test_continue_policy_create_new_widens_instead_of_forecasting_holdout() -> None:
+    """A quarantine policy must not keep the peeked narrow CREATE.
+
+    The gate only warns ("N rows will be held out") and lists no action.
+    The table does not exist yet, so the measured population still sizes the
+    CREATE. A live destination column is not rewritten.
+    """
+    rows = _population()
+    mappings = _mappings("DECIMAL(7,7)")
+    kwargs = _scan_kwargs(job_error_policy="quarantine", rows_total=len(rows))
+    report = _scan(rows, mappings, job_error_policy="quarantine")
+    gate = build_population_fit_gate(report)
+
+    assert report.evidence == "exact"
+    assert gate["status"] == "warn"
+    assert "held out" in gate["message"]
+    assert not (gate.get("details") or {}).get("suggested_actions")
+
+    widen = create_new_population_widen(
+        report,
+        mappings,
+        lambda: iter(rows),
+        scan_kwargs=kwargs,
+    )
+
+    assert widen is not None
+    assert not widen.report.findings
+    assert mappings[0]["target_type"] != "DECIMAL(7,7)"
+
+    live_mappings = _mappings("NUMBER(11,8)")
+    live = _scan(
+        rows,
+        live_mappings,
+        job_error_policy="quarantine",
+        dest_types={"DEP_TIME": "NUMBER(11,8)", "ID": "NUMBER(38,0)"},
+        dest_table_exists=True,
+        sync_mode="full_refresh_append",
+    )
+    live_widen = create_new_population_widen(
+        live,
+        live_mappings,
+        lambda: iter(rows),
+        scan_kwargs=_scan_kwargs(
+            job_error_policy="quarantine",
+            dest_types={"DEP_TIME": "NUMBER(11,8)", "ID": "NUMBER(38,0)"},
+            dest_table_exists=True,
+            sync_mode="full_refresh_append",
+            rows_total=len(rows),
+        ),
+    )
+    assert live_widen is None
+    assert live_mappings[0]["target_type"] == "NUMBER(11,8)"

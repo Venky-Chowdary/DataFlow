@@ -117,7 +117,7 @@ def dispatch_file_to_database(
 
                 chunk_idx += 1
 
-            combined_checksum = row_checksum([[c] for c in final_checksum_list])
+            _ = row_checksum([[c] for c in final_checksum_list])
 
             set_phase(job_id, WorkflowPhase.RECONCILE, "Verifying row fidelity")
             from services.reconciliation import ReconciliationReport

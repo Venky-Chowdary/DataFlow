@@ -196,15 +196,49 @@ def _env_date_locale() -> str:
     return (getenv_brand("DATE_ORDER") or "").strip().upper()
 
 
+_DATE_LOCALES = frozenset({"DMY", "MDY"})
+# Pinned when the caller sent a token that is not a locale. Empty means
+# Auto (deployment default may apply). This marker is not a locale and
+# must not be copied onto a report.
+_DATE_LOCALE_REJECTED = "REJECTED"
+
+
+def canonical_date_locale(locale: str) -> str:
+    """DMY or MDY. Any other token is Auto — never a locale, never echoed."""
+    loc = (locale or "").strip().upper()
+    return loc if loc in _DATE_LOCALES else ""
+
+
 def _active_date_locale(explicit: str = "") -> str:
-    """Return 'DMY' or 'MDY' from explicit > context > env, or '' if unset."""
-    loc = (explicit or _DATE_LOCALE_VAR.get() or "").strip().upper() or _env_date_locale()
-    return loc if loc in {"DMY", "MDY"} else ""
+    """Return 'DMY' or 'MDY' from explicit > context > env, or '' if unset.
+
+    A non-empty explicit token that is not DMY/MDY does not fall through
+    to context or the deployment default. A rejected pin does the same:
+    invalid means fail closed for that request, not the env order.
+    """
+    if (explicit or "").strip():
+        return canonical_date_locale(explicit)
+    pinned = (_DATE_LOCALE_VAR.get() or "").strip().upper()
+    if pinned == _DATE_LOCALE_REJECTED:
+        return ""
+    chosen = canonical_date_locale(pinned)
+    if chosen:
+        return chosen
+    return canonical_date_locale(_env_date_locale())
 
 
 def set_active_date_locale(locale: str) -> contextvars.Token[str]:
-    """Set the active date locale for the current request context."""
-    return _DATE_LOCALE_VAR.set((locale or "").strip().upper())
+    """Pin DMY/MDY for this request.
+
+    Empty is Auto: the deployment default may apply. Any other token that
+    is not DMY/MDY is a rejected pin — it is not stored, and it does not
+    fall through to the deployment default.
+    """
+    raw = (locale or "").strip()
+    if not raw:
+        return _DATE_LOCALE_VAR.set("")
+    chosen = canonical_date_locale(raw)
+    return _DATE_LOCALE_VAR.set(chosen or _DATE_LOCALE_REJECTED)
 
 
 def reset_active_date_locale(token: contextvars.Token[str]) -> None:
@@ -223,10 +257,21 @@ _WIRE_NUMBER_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _NUMBER_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
     "number_locale", default=""
 )
+# Strict validation with no declared locale: a decimal comma is a locale guess.
+_STRICT_NUMBER_VAR: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "strict_number_reading", default=False
+)
 
 
 def _active_number_locale(explicit: str = "") -> str:
-    loc = (explicit or _NUMBER_LOCALE_VAR.get() or "").strip().upper()
+    if (explicit or "").strip():
+        return canonical_number_locale(explicit)
+    return canonical_number_locale(_NUMBER_LOCALE_VAR.get())
+
+
+def canonical_number_locale(locale: str) -> str:
+    """US, EU, or WIRE. Any other token is Auto."""
+    loc = (locale or "").strip().upper()
     return loc if loc in _NUMBER_LOCALES else ""
 
 
@@ -243,13 +288,48 @@ def set_active_number_locale(locale: str) -> contextvars.Token[str]:
     ever typed it. Under WIRE a dot is the decimal point and a grouping
     separator is not a number at all — canonical, still no guessing.
     """
-    pinned = (locale or "").strip().upper()
-    return _NUMBER_LOCALE_VAR.set(pinned if pinned in _NUMBER_LOCALES else "")
+    return _NUMBER_LOCALE_VAR.set(canonical_number_locale(locale))
 
 
 def reset_active_number_locale(token: contextvars.Token[str]) -> None:
     """Restore the previous number locale."""
     _NUMBER_LOCALE_VAR.reset(token)
+
+
+def set_strict_number_reading(strict: bool) -> contextvars.Token[bool]:
+    """Refuse decimal-comma guesses (``4,0``) for this run.
+
+    Set for ``validation_mode=strict`` when the operator declared no number
+    locale: ``4,0`` is 4.0 only under EU and not a US number at all, so strict
+    quarantines it instead of picking EU silently (QA MX3-11).
+    """
+    return _STRICT_NUMBER_VAR.set(bool(strict))
+
+
+def reset_strict_number_reading(token: contextvars.Token[bool]) -> None:
+    """Restore the previous strict-number setting."""
+    _STRICT_NUMBER_VAR.reset(token)
+
+
+def strict_decimal_comma_reason(value: Any) -> str:
+    """Why strict refused ``value``, when the only reason is its decimal comma."""
+    text = str(value or "").strip()
+    if not text or "," not in text or not _STRICT_NUMBER_VAR.get():
+        return ""
+    if _parse_decimal(text) is not None:
+        return ""
+    token = _STRICT_NUMBER_VAR.set(False)
+    try:
+        auto = _parse_decimal(text)
+    finally:
+        _STRICT_NUMBER_VAR.reset(token)
+    if auto is None:
+        return ""
+    return (
+        f"'{text}' is a number only if ',' is the decimal separator (EU reads "
+        f"{auto}). Strict validation never guesses a number locale — set number "
+        "locale EU in Destination → Advanced, or fix the source value."
+    )
 
 
 def _implied_number_locale_from_currency(raw: str) -> str:
@@ -320,6 +400,9 @@ def number_locale_ambiguity_reason(value: Any) -> str:
     for any other reason, so a genuinely unparseable cell keeps its own error.
     """
     text = str(value or "").strip()
+    strict_reason = strict_decimal_comma_reason(text)
+    if strict_reason:
+        return strict_reason
     if not text or not _looks_like_grouped_number(text):
         return ""
     if _parse_decimal(text) is not None:
@@ -346,6 +429,7 @@ def ambiguous_number_columns(
     rows: list[dict] | None,
     columns: list[str] | None = None,
     number_locale: str = "",
+    column_types: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Columns whose samples fail Auto grouping and look numeric.
 
@@ -354,8 +438,11 @@ def ambiguous_number_columns(
     if _active_number_locale(number_locale) or not rows:
         return []
     cols = columns or (list(rows[0].keys()) if rows and isinstance(rows[0], dict) else [])
+    declared = column_types or {}
     findings: list[dict[str, Any]] = []
     for col in cols:
+        if _declared_text_column(declared, str(col)):
+            continue
         samples: list[str] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -381,10 +468,20 @@ def ambiguous_number_columns(
 NUMBER_LOCALE_DEFAULT = "US"
 
 
+def _declared_text_column(column_types: dict[str, str], column: str) -> bool:
+    raw = str(column_types.get(column) or "").strip()
+    if not raw:
+        return False
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(raw) in {"string", "text"}
+
+
 def assumed_number_locale(
     rows: list[dict] | None,
     columns: list[str] | None = None,
     number_locale: str = "",
+    column_types: dict[str, str] | None = None,
 ) -> str:
     """``US`` when a sample still holds Auto-ambiguous numbers, else ''.
 
@@ -396,7 +493,9 @@ def assumed_number_locale(
     """
     if _active_number_locale(number_locale) or not rows:
         return ""
-    if not ambiguous_number_columns(rows, columns, number_locale=number_locale):
+    if not ambiguous_number_columns(
+        rows, columns, number_locale=number_locale, column_types=column_types
+    ):
         return ""
     return NUMBER_LOCALE_DEFAULT
 
@@ -543,12 +642,23 @@ def ambiguous_date_columns(
             if not raw or not _is_ambiguous_mdy_dmy(raw):
                 continue
             samples.append(raw)
-        if samples:
-            findings.append({
-                "column": col,
-                "samples": samples[:5],
-                "next_action": "Set date locale DMY or MDY in Destination → Advanced",
-            })
+        if not samples:
+            continue
+        # 01/15/2024 in this column settles it. A settler in a different
+        # column must not clear the finding — that would parse 05/06/2024
+        # as May 6 because some other field was unambiguous.
+        column_values = [
+            str(row.get(col) or "").strip()
+            for row in rows
+            if isinstance(row, dict) and str(row.get(col) or "").strip()
+        ]
+        if not samples_are_auto_ambiguous_dates(column_values, date_locale):
+            continue
+        findings.append({
+            "column": col,
+            "samples": samples[:5],
+            "next_action": "Set date locale DMY or MDY in Destination → Advanced",
+        })
     return findings
 
 
@@ -629,6 +739,61 @@ def infer_date_locale(
     if mdy and mdy > dmy:
         return "MDY"
     return ""
+
+
+def records_from_sample(
+    headers: list[str],
+    rows: list[Any],
+) -> list[dict[str, Any]]:
+    """Matrix or dict sample → records ``infer_date_locale`` can scan."""
+    out: list[dict[str, Any]] = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            out.append(row)
+            continue
+        if isinstance(row, (list, tuple)):
+            out.append({
+                headers[i]: row[i]
+                for i in range(min(len(headers), len(row)))
+            })
+    return out
+
+
+_DATE_PARSE_TRANSFORMS = frozenset({"date", "datetime", "date_iso"})
+
+
+def bind_inferred_date_locale(
+    records: list[dict[str, Any]] | None,
+    columns: list[str] | None = None,
+) -> contextvars.Token[str] | None:
+    """Set MDY/DMY from unambiguous values in ``columns`` when Auto is unset.
+
+    Pass one column. ``01/15/2024`` in that column settles it, so
+    ``11/03/1992`` parses as November. A column of only ambiguous slash
+    dates stays unset — Auto does not guess, and it does not borrow the
+    order proven by a different column.
+    """
+    if _active_date_locale() or not records:
+        return None
+    inferred = infer_date_locale(records, columns)
+    if not inferred:
+        return None
+    return set_active_date_locale(inferred)
+
+
+def bind_column_date_locale(
+    values: Iterable[Any],
+    column: str,
+    *,
+    transform: str = "",
+) -> contextvars.Token[str] | None:
+    """Bind locale for one date column. Non-date transforms are a no-op."""
+    if (transform or "").strip().lower() not in _DATE_PARSE_TRANSFORMS:
+        return None
+    if _active_date_locale():
+        return None
+    records = [{column: value} for value in values]
+    return bind_inferred_date_locale(records, [column])
 
 
 def _reorder_date_patterns(text: str, patterns: tuple[str, ...], date_locale: str = "") -> list[str]:
@@ -813,6 +978,7 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
         if _WIRE_NUMBER_RE.match(text):
             return text
         locale = ""
+    refuse_comma_decimal = not locale and _STRICT_NUMBER_VAR.get()
     # Remove ASCII spaces used as thousands separators (e.g. "1 000 000").
     text = text.replace(" ", "").replace("\t", "")
 
@@ -823,6 +989,8 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
             candidate = text.replace(",", "")
             if candidate.count(".") <= 1:
                 return candidate
+            return None
+        if refuse_comma_decimal:
             return None
         text = text.replace(".", "")
         last_comma = text.rfind(",")
@@ -856,6 +1024,8 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
             and all(len(part) == 3 for part in parts[1:])
         ):
             return "".join(parts)
+        if refuse_comma_decimal:
+            return None
         if (
             len(parts) >= 2
             and all(len(part) == 3 for part in parts[1:-1])
@@ -922,7 +1092,26 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
     return text
 
 
-def _parse_decimal(value: str) -> str | None:
+def _numeric_text_has_markers(value: str) -> bool:
+    """Percent, currency, or accounting parentheses — not a plain number.
+
+    Grouping (``1,234.56``) and outer whitespace are not markers. Callers that
+    declared ``currency`` / ``percentage`` still parse those shapes; the
+    default integer and decimal transforms do not (R4-D07).
+    """
+    text = unicodedata.normalize("NFKC", value or "").strip()
+    if not text:
+        return False
+    if "%" in text:
+        return True
+    if text.startswith("(") and text.endswith(")"):
+        return True
+    return _CURRENCY_RE.search(text) is not None
+
+
+def _parse_decimal(value: str, *, allow_markers: bool = True) -> str | None:
+    if not allow_markers and _numeric_text_has_markers(value):
+        return None
     text = value.strip()
     # Tuple / point / coordinate strings such as (1,2) or (1, 2) are not numbers.
     if text.startswith("(") and text.endswith(")") and "," in text and "." not in text:
@@ -981,7 +1170,9 @@ def currency_samples_carry_markers(samples: list[str] | None) -> bool:
 
 
 
-def _parse_integer(value: str) -> int | None:
+def _parse_integer(value: str, *, allow_markers: bool = True) -> int | None:
+    if not allow_markers and _numeric_text_has_markers(value):
+        return None
     plain = value.strip()
     # An unadorned ASCII integer has nothing for NFKC, currency, accounting or
     # separator resolution to change, and its digit count is inside the wire
@@ -1140,6 +1331,11 @@ def integer_parse_failure_reason(value: str) -> str:
 # truth (Airbyte-class); refuse — operator must remap or transform.
 _STRICT_BOOL_TRUE = frozenset({"true", "t", "1"})
 _STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
+# The boolean *transform* accepts the words operators type. Inference and
+# numeric coercion stay on the strict set so a Y/N text column is not retargeted
+# as BOOLEAN and then rejected, and so "yes" does not become 1 in an integer.
+_TRANSFORM_BOOL_TRUE = _STRICT_BOOL_TRUE | frozenset({"yes", "y", "on"})
+_TRANSFORM_BOOL_FALSE = _STRICT_BOOL_FALSE | frozenset({"no", "n", "off"})
 
 #: Every token the write path can actually coerce to a boolean. A column typed
 #: BOOLEAN off ``Y``/``N`` samples is rejected here on every row ("Invalid
@@ -1158,12 +1354,34 @@ CANONICAL_BOOLEAN_SAMPLE_PATTERN = (
 
 
 def _parse_boolean(value: str) -> bool | None:
+    """Canonical boolean wire only: true/false/1/0/t/f.
+
+    Informal yes/on/y must not become TRUE here. Inference, bind, and an
+    unrequested boolean cast all use this parser so a text column of answers
+    is not rewritten as a flag.
+    """
     text = value.strip().lower()
     if text in NULL_SENTINELS:
         return None
     if text in _STRICT_BOOL_TRUE:
         return True
     if text in _STRICT_BOOL_FALSE:
+        return False
+    return None
+
+
+def _parse_operator_boolean(value: str) -> bool | None:
+    """Boolean cast the operator asked for (replay ``transform_overrides``).
+
+    yes/y/on and no/n/off are part of that cast. They stay refused on the
+    canonical parser so a guessed boolean column cannot invent TRUE.
+    """
+    text = value.strip().lower()
+    if text in NULL_SENTINELS:
+        return None
+    if text in _TRANSFORM_BOOL_TRUE:
+        return True
+    if text in _TRANSFORM_BOOL_FALSE:
         return False
     return None
 
@@ -1191,13 +1409,12 @@ def boolean_carrier_numeric_value(
 ) -> int | None:
     """1/0 when a boolean lands on an engine's boolean carrier, else ``None``.
 
-    Engines without a native boolean (Oracle, DB2) carry one as ``NUMBER(1)``,
-    so a ``BIT``/``BOOLEAN`` source arriving as ``"true"`` is in range there —
-    quarantining it as "decimal does not fit DECIMAL(1,0)" held out every
-    boolean column on those routes. Anything wider than a single integer digit
-    is a real numeric column and keeps refusing boolean wire.
+    Engines without a native boolean (Oracle, DB2) carry one as ``NUMBER(1)``.
+    A PostgreSQL ``BOOLEAN`` that landed on an existing ``NUMBER(38,0)`` is the
+    same 0/1 integer: preflight treats boolean→integer as lossless, and the
+    writer must bind it. A fractional column (money, quantity) still refuses.
     """
-    if precision is None or int(precision) > 1 or int(scale or 0) != 0:
+    if precision is None or int(scale or 0) != 0:
         return None
     if isinstance(value, bool):
         return int(value)
@@ -1235,6 +1452,12 @@ def _parse_json(value: Any) -> str | None:
             # text, per this codebase's Decimal-to-JSON policy.
             parsed = json_loads_exact(value, parse_constant=_json_reject_nonfinite)
         except json.JSONDecodeError:
+            # ``{bad json`` is a broken document, not a Mongo bare scalar.
+            # Wrapping it as a JSON string rewrote the quarantine ledger and
+            # the next replay saw the wrapped text (R4-D04).
+            stripped = value.strip()
+            if stripped[:1] in "{[":
+                raise ValueError(f"Invalid JSON: {stripped[:120]!r}") from None
             parsed = value  # wrap the raw scalar as a JSON string literal
         except ValueError:
             # Non-finite NaN/Infinity via parse_constant — refuse silent null.
@@ -1326,8 +1549,9 @@ def _hash_pii(value: str) -> str:
         # Fail closed — never hash with a shared public default (would be reversible
         # across tenants that ship the same binary).
         raise ValueError(
-            "hash_pii requires DATAFLOW_PII_HASH_KEY (or DATAFLOW_SECRET) — "
-            "refusing insecure default key"
+            "hash_pii is not configured. Set DATAFLOW_PII_HASH_KEY to an HMAC "
+            "secret and retry this replay. No row was hashed, and a shared "
+            "default key is refused because it would be reversible across tenants."
         )
     digest = hmac.new(
         secret.encode("utf-8"),
@@ -1406,6 +1630,41 @@ KNOWN_TRANSFORMS = frozenset({
     "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
     "strip_controls", "normalize_unicode",
 })
+
+def transform_override_refusal(
+    overrides: dict[str, str],
+    mapped_sources: list[str] | None = None,
+) -> str:
+    """Why a replay ``transform_overrides`` map is refused; ``""`` when it is valid.
+
+    An override the engine does not know (``"null"``), or one naming a column
+    the job never mapped, was staged and then silently ignored — the replay
+    re-ran the original cast (QA MX3-15). UI aliases are resolved first.
+    """
+    from services.transform_resolver import UI_TO_ENGINE
+
+    mapped = {str(c).strip().lower() for c in mapped_sources or [] if str(c).strip()}
+    for column, transform in (overrides or {}).items():
+        name = str(transform or "").strip()
+        engine = str(UI_TO_ENGINE.get(name, UI_TO_ENGINE.get(name.lower(), name))).lower()
+        if engine not in KNOWN_TRANSFORMS:
+            hint = (
+                " To write NULL, send the edited row with that cell set to null."
+                if name.lower() in {"null", "none_null", "set_null", "nullify"}
+                else ""
+            )
+            return (
+                f"transform_overrides[{column!r}] = {name!r} is not a transform the "
+                f"engine applies. Use one of: {', '.join(sorted(KNOWN_TRANSFORMS))}.{hint}"
+            )
+        if mapped and str(column).strip().lower() not in mapped:
+            return (
+                f"transform_overrides names column {column!r}, which this job does not "
+                f"map (mapped source columns: {', '.join(sorted(mapped))}). The override "
+                "would be ignored."
+            )
+    return ""
+
 
 #: Rename-only transforms — must not mutate wire (no strip). Trim is opt-in.
 _IDENTITY_TRANSFORMS = frozenset({
@@ -1798,12 +2057,41 @@ def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
     if moment.tzinfo is not None:
         return _format_datetime(moment), None
     try:
-        return _format_datetime(moment.replace(tzinfo=zone)), None
+        first = moment.replace(tzinfo=zone, fold=0)
+        second = moment.replace(tzinfo=zone, fold=1)
+        utc_first = first.astimezone(timezone.utc)
+        utc_second = second.astimezone(timezone.utc)
     except (ValueError, OverflowError) as exc:
         return None, f"Could not apply zone {zone_name!r}: {exc}"
 
+    def _round_trips(aware: datetime) -> bool:
+        civil = aware.astimezone(timezone.utc).astimezone(zone).replace(tzinfo=None)
+        return civil == moment.replace(fold=0)
 
-def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
+    # A spring-forward gap does not exist. zoneinfo still attaches an offset
+    # to both folds, and those offsets differ, so fold inequality is not
+    # enough to tell a gap from an ambiguous fall-back. Neither fold
+    # round-trips to the wall clock the operator wrote. Inventing 07:30Z
+    # for 02:30 would disagree with the source database and leave no flag.
+    if not _round_trips(first) and not _round_trips(second):
+        return None, (
+            f"Wall clock {text!r} does not exist in timezone {zone_name!r}"
+        )
+    # Ambiguous fall-back: both folds are real instants of the same civil
+    # time. PostgreSQL ``AT TIME ZONE`` uses the later one (standard time,
+    # fold=1). fold=0 is the earlier occurrence and is an hour off that.
+    if utc_first != utc_second:
+        chosen = second if _round_trips(second) else first
+        return _format_datetime(chosen), None
+    return _format_datetime(first), None
+
+
+def apply_transform(
+    raw: str | None,
+    transform: str,
+    *,
+    accept_informal_boolean: bool = False,
+) -> tuple[Any, str | None]:
     """Returns (value, error).
 
     Explicit SQL/Dynamo NULL sentinels → None. Empty string is preserved for
@@ -1861,7 +2149,11 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     if transform_l in _TYPED_TRANSFORMS:
         low = text.lower()
         if low in NULL_SENTINELS:
-            if transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
+            # JSON literal ``null`` is a value. The missing-cell sentinel
+            # table must not reject it (R4-D03). NaN / Infinity stay rejected.
+            if transform_l == "json" and low == "null":
+                pass
+            elif transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
                 pass  # fall through to typed parsers that reject non-finite
             else:
                 return None, f"Null sentinel {text!r} cannot coerce to {transform_l}"
@@ -1870,9 +2162,9 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         bool_as_number = canonical_boolean_as_number(text)
         if bool_as_number is not None:
             return Decimal(bool_as_number), None
-        parsed = _parse_decimal(text)
+        parsed = _parse_decimal(text, allow_markers=False)
         if parsed is None:
-            return None, f"Invalid decimal: {text!r}"
+            return None, strict_decimal_comma_reason(text) or f"Invalid decimal: {text!r}"
         # Return Decimal so bind does not re-apply locale to the canonical
         # spelling (EU ``1,234`` → ``1.234`` must not become thousands 1234).
         # Extreme scientific stays a short string (never expand 1e1000000).
@@ -1887,18 +2179,27 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         bool_as_number = canonical_boolean_as_number(text)
         if bool_as_number is not None:
             return bool_as_number, None
-        parsed_int = _parse_integer(text)
+        parsed_int = _parse_integer(text, allow_markers=False)
         if parsed_int is None:
             return None, integer_parse_failure_reason(text)
         return parsed_int, None
 
     if transform == "boolean":
-        parsed_bool = _parse_boolean(text)
+        parsed_bool = (
+            _parse_operator_boolean(text)
+            if accept_informal_boolean
+            else _parse_boolean(text)
+        )
         if parsed_bool is None:
             return None, f"Invalid boolean: {text!r}"
         return parsed_bool, None
 
     if transform == "date":
+        if _is_ambiguous_mdy_dmy(text):
+            return None, (
+                f"Invalid date: {text!r} — day/month order is ambiguous; "
+                "set date locale MDY or DMY"
+            )
         parsed = _parse_date(text, with_time=True)
         if parsed is None:
             return None, f"Invalid date: {text!r}"
@@ -1942,8 +2243,10 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         return parsed_binary, None
 
     if transform in {"trim", "trim_id"}:
-        cleaned = re.sub(r"\s+", " ", text)
-        return cleaned, None
+        # Strip the ends only. Collapsing internal runs rewrote '  pad  '
+        # into ' pad ' on a normal load (QA R2-019). collapse_whitespace is
+        # the explicit shape operation for that.
+        return text.strip(), None
 
     if transform == "strip_controls":
         cleaned = _strip_format_controls(text)
@@ -2038,7 +2341,10 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
 
                     _b64.b64decode(out, validate=True)
                 except Exception:
-                    return None, f"Invalid base64: {text!r}"
+                    return None, (
+                        f"Invalid base64: {text!r}. This transform decodes an "
+                        "existing base64 or hex payload; it does not encode plain text."
+                    )
                 return out, None
             return out, None
         return str(converted) if isinstance(converted, Decimal) else converted, None
@@ -2049,6 +2355,41 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     return text, None
 
 
+def _blank_sample_cell(raw: Any) -> bool:
+    if raw is None:
+        return True
+    return str(raw).strip() == ""
+
+
+def _blank_is_nullable_absence(
+    raw: Any,
+    err: str | None,
+    mapping: dict[str, Any],
+    *,
+    empty_cells_as_null: bool,
+    dest_nullability: dict[str, bool] | None,
+    database_extract: bool = False,
+    source_type: str = "",
+) -> bool:
+    """Blank → SQL NULL on a nullable typed column.
+
+    File blanks use ``empty_cells_as_null``. A database carrier that cannot
+    store ``""`` is a flattened SQL NULL. A proven NOT NULL destination still
+    fails. A text empty string stays stored.
+    """
+    from services.blank_cell_contract import blank_typed_cell_is_sql_null
+
+    return blank_typed_cell_is_sql_null(
+        raw,
+        err,
+        mapping,
+        empty_cells_as_null=empty_cells_as_null,
+        dest_nullability=dest_nullability,
+        database_extract=database_extract,
+        source_type=source_type,
+    )
+
+
 def dry_run_sample(
     *,
     headers: list[str],
@@ -2057,6 +2398,9 @@ def dry_run_sample(
     column_types: dict[str, str],
     sample_size: int = 100,
     max_errors_per_mapping: int = 5,
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
 ) -> tuple[bool, list[str]]:
     """Apply write-path transforms to the sample window.
 
@@ -2066,11 +2410,7 @@ def dry_run_sample(
     if not sample_rows:
         return False, ["No sample rows available for dry-run validation"]
 
-    errors: list[str] = []
-
-    from services.column_case import header_index
     from services.mapping_constraints import write_mappings
-    from services.transform_resolver import resolve_transform
 
     # A declared omission has no destination carrier, so there is no write-path
     # transform to dry-run. Probing it reported the omission itself as a cast
@@ -2082,6 +2422,37 @@ def dry_run_sample(
         for m in mappings
         if m.get("target") and m.get("target_type")
     }
+    return _dry_run_sample_body(
+        headers=headers,
+        sample_rows=sample_rows,
+        mappings=mappings,
+        column_types=column_types,
+        sample_size=sample_size,
+        max_errors_per_mapping=max_errors_per_mapping,
+        empty_cells_as_null=empty_cells_as_null,
+        dest_nullability=dest_nullability,
+        dest_types=dest_types,
+        database_extract=database_extract,
+    )
+
+
+def _dry_run_sample_body(
+    *,
+    headers: list[str],
+    sample_rows: list[list[str]],
+    mappings: list[dict],
+    column_types: dict[str, str],
+    sample_size: int,
+    max_errors_per_mapping: int,
+    empty_cells_as_null: bool,
+    dest_nullability: dict[str, bool] | None,
+    dest_types: dict[str, str],
+    database_extract: bool = False,
+) -> tuple[bool, list[str]]:
+    from services.column_case import header_index
+    from services.transform_resolver import resolve_transform
+
+    errors: list[str] = []
 
     for m in mappings:
         idx = header_index(headers, m["source"])
@@ -2093,22 +2464,43 @@ def dry_run_sample(
         transform = resolve_transform(m, column_types=column_types, dest_types=dest_types)
         mapping_errors = 0
         scanned = 0
-        for row in sample_rows[:sample_size]:
-            scanned += 1
-            raw = row[idx] if idx < len(row) else ""
-            _, err = apply_transform(raw, transform)
-            if err:
-                errors.append(f"{m['source']}→{m['target']}: {err}")
-                mapping_errors += 1
-                if mapping_errors >= max_errors_per_mapping:
-                    remaining = max(0, min(len(sample_rows), sample_size) - scanned)
-                    if remaining:
-                        errors.append(
-                            f"{m['source']}→{m['target']}: "
-                            f"+{remaining} sample row(s) not fully reported "
-                            f"(stopped after {max_errors_per_mapping} errors)"
-                        )
-                    break
+        column_values = [
+            row[idx] if idx < len(row) else ""
+            for row in sample_rows[:sample_size]
+        ]
+        column_token = bind_column_date_locale(
+            column_values, str(m["source"]), transform=transform
+        )
+        try:
+            for row in sample_rows[:sample_size]:
+                scanned += 1
+                raw = row[idx] if idx < len(row) else ""
+                _, err = apply_transform(raw, transform)
+                if _blank_is_nullable_absence(
+                    raw,
+                    err,
+                    m,
+                    empty_cells_as_null=empty_cells_as_null,
+                    dest_nullability=dest_nullability,
+                    database_extract=database_extract,
+                    source_type=str(column_types.get(m["source"]) or ""),
+                ):
+                    err = None
+                if err:
+                    errors.append(f"{m['source']}→{m['target']}: {err}")
+                    mapping_errors += 1
+                    if mapping_errors >= max_errors_per_mapping:
+                        remaining = max(0, min(len(sample_rows), sample_size) - scanned)
+                        if remaining:
+                            errors.append(
+                                f"{m['source']}→{m['target']}: "
+                                f"+{remaining} sample row(s) not fully reported "
+                                f"(stopped after {max_errors_per_mapping} errors)"
+                            )
+                        break
+        finally:
+            if column_token is not None:
+                reset_active_date_locale(column_token)
 
     return len(errors) == 0, errors[:40]
 
@@ -2121,6 +2513,9 @@ def preview_quarantine_cells(
     column_types: dict[str, str] | None = None,
     sample_size: int = 25,
     max_cells: int = 120,
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
 ) -> dict:
     """Cell-level preview: which sample values will quarantine / coerce before run.
 
@@ -2138,7 +2533,6 @@ def preview_quarantine_cells(
 
     # Omitted columns are never written, so they have no cell to quarantine.
     mappings = write_mappings(mappings)
-
     for m in mappings:
         src = m.get("source") or ""
         tgt = m.get("target") or src
@@ -2146,44 +2540,65 @@ def preview_quarantine_cells(
         if idx is None:
             continue
         transform = resolve_transform(m, column_types=column_types)
-        for row_i, row in enumerate(sample_rows[:sample_size]):
-            if len(cells) >= max_cells:
-                break
-            raw = row[idx] if idx < len(row) else ""
-            raw_s = "" if raw is None else str(raw)
-            out, err = apply_transform(raw_s, transform)
-            if err:
-                quarantine_count += 1
-                cells.append({
-                    "row": row_i,
-                    "source": src,
-                    "target": tgt,
-                    "raw": raw_s[:200],
-                    "status": "quarantine",
-                    "message": err,
-                    "transform": transform,
-                })
-            elif out is not None and str(out) != raw_s:
-                # Lossless datetime/date normalization (ISO Z ↔ same instant) is
-                # expected for CSV→SQL — do not flood Validate/Run with coerce noise.
-                if transform in {"datetime", "date", "time"} and _is_lossless_temporal_normalize(
-                    raw_s, str(out), transform
+        column_values = [
+            row[idx] if idx < len(row) else ""
+            for row in sample_rows[:sample_size]
+        ]
+        column_token = bind_column_date_locale(
+            column_values, src, transform=transform
+        )
+        try:
+            for row_i, row in enumerate(sample_rows[:sample_size]):
+                if len(cells) >= max_cells:
+                    break
+                raw = row[idx] if idx < len(row) else ""
+                raw_s = "" if raw is None else str(raw)
+                out, err = apply_transform(raw_s, transform)
+                if _blank_is_nullable_absence(
+                    raw,
+                    err,
+                    m,
+                    empty_cells_as_null=empty_cells_as_null,
+                    dest_nullability=dest_nullability,
+                    database_extract=database_extract,
+                    source_type=str((column_types or {}).get(src) or ""),
                 ):
-                    ok_count += 1
-                else:
-                    coerce_count += 1
-                    ok_count += 1
+                    out, err = None, None
+                if err:
+                    quarantine_count += 1
                     cells.append({
                         "row": row_i,
                         "source": src,
                         "target": tgt,
                         "raw": raw_s[:200],
-                        "coerced": str(out)[:200],
-                        "status": "coerced",
+                        "status": "quarantine",
+                        "message": err,
                         "transform": transform,
                     })
-            else:
-                ok_count += 1
+                elif out is not None and str(out) != raw_s:
+                    # Lossless datetime/date normalization (ISO Z ↔ same instant)
+                    # is expected for CSV→SQL — do not flood Validate with coerce noise.
+                    if transform in {"datetime", "date", "time"} and _is_lossless_temporal_normalize(
+                        raw_s, str(out), transform
+                    ):
+                        ok_count += 1
+                    else:
+                        coerce_count += 1
+                        ok_count += 1
+                        cells.append({
+                            "row": row_i,
+                            "source": src,
+                            "target": tgt,
+                            "raw": raw_s[:200],
+                            "coerced": str(out)[:200],
+                            "status": "coerced",
+                            "transform": transform,
+                        })
+                else:
+                    ok_count += 1
+        finally:
+            if column_token is not None:
+                reset_active_date_locale(column_token)
         if len(cells) >= max_cells:
             break
 

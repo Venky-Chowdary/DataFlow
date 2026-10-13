@@ -1464,6 +1464,17 @@
   word-break: break-all;
 }
 
+/* Scope tokens are words, not hex. break-all was splitting "independent". */
+.df2-gate8-proof-grid dd.df2-gate8-proof-scope {
+  word-break: normal;
+  overflow-wrap: break-word;
+  font-weight: 600;
+}
+
+.df2-gate8-proof-grid dd.df2-gate8-proof-scope span {
+  display: block;
+}
+
 .df2-gate8-proof-grid dd.is-ok { color: var(--df-success); }
 .df2-gate8-proof-grid dd.is-warn { color: var(--df-warning); }
 
@@ -2657,7 +2668,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
     gap: 10px;
   }
   .df2-pipeline-row-cadence,
-  .df2-pipeline-row-sync {
+  .df2-pipeline-row-sync,
+  .df2-pipeline-rows-head-cadence,
+  .df2-pipeline-rows-head-sync {
     display: none;
   }
   .df2-pipeline-rows-head-name {
@@ -4792,7 +4805,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  border: 1px solid #a7f3d0;
+  border: 1px solid var(--df-success-border);
   border-radius: 10px;
   background: var(--df-success-bg);
 }
@@ -4808,7 +4821,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-run-readiness-score {
   font-size: 12px;
   font-weight: 700;
-  color: #047857;
+  color: var(--df-success);
+  font-variant-numeric: tabular-nums;
 }
 
 .df2-run-readiness-route {
@@ -4827,7 +4841,10 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-run-readiness p {
-  display: none;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--df-text-secondary);
 }
 
 .df2-run-ready-body {
@@ -6621,7 +6638,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .dt-toast-host {
   top: calc(var(--df-header-height, 56px) + 12px) !important;
+  bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important;
   right: 16px !important;
+  max-height: calc(100dvh - var(--df-header-height, 56px) - 88px) !important;
   z-index: var(--df-z-toast, 1100) !important;
 }
 
@@ -11741,7 +11760,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-result-reuse-bar > span {
   display: block;
   height: 100%;
-  background: var(--df-accent, #3b82f6);
+  background: var(--df-logo-ink);
   border-radius: inherit;
 }
 
@@ -12058,6 +12077,15 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-weight: 700;
   color: var(--df-text-secondary, #64748b);
   min-width: 28px;
+}
+
+@media (max-width: 1280px) {
+  /* Destination and Models reuse the schedule cadence/sync classes.
+     Keep them visible here; only Schedules drops those columns. */
+  .df2-xform-rows .df2-pipeline-row-cadence,
+  .df2-xform-rows .df2-pipeline-row-sync {
+    display: block;
+  }
 }
 
 @media (max-width: 900px) {
@@ -13139,6 +13167,16 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-column-review-alert,
 .df2-app .df2-column-review-table tr.warn td {
   background: var(--df-warning-bg);
+}
+
+.df2-app .df2-column-review-alert.df2-column-review-alert-info {
+  background: var(--df-brand-subtle, #f0fdfa);
+  border-color: color-mix(in srgb, var(--df-brand, #0f766e) 28%, transparent);
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-app .df2-column-review-alert.df2-column-review-alert-info strong {
+  color: var(--df-brand, #0f766e);
 }
 
 .df2-app .df2-map-proof-pair.is-aligned,
@@ -14514,6 +14552,16 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
   color: var(--df-success);
 }
 
+.df2-app .df2-vd-rule-status.status-warn {
+  background: var(--df-warning-bg);
+  color: var(--df-warning);
+}
+
+.df2-app .df2-vd-rule-status.status-running {
+  background: var(--df-info-bg);
+  color: var(--df-info);
+}
+
 .df2-app .df2-preflight-compact-summary .block,
 .df2-app .df2-vd-rule-status.status-block {
   background: var(--df-danger-bg);
@@ -14521,8 +14569,10 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
 }
 
 .df2-app .df2-preflight-compact-summary .skip,
-.df2-app .df2-vd-rule-status.status-skip {
+.df2-app .df2-vd-rule-status.status-skip,
+.df2-app .df2-vd-rule-status.status-pending {
   background: var(--df-surface-muted);
+  color: var(--df-text-tertiary);
 }
 
 .df2-app .df2-vd-proof-chip {
@@ -14787,4 +14837,83 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
 
 .df2-app .dt-modal-subtitle {
   color: var(--df-text-secondary);
+}
+
+@media (max-width: 1280px) {
+  .df2-page-transfer-studio .df2-transfer-studio-chrome {
+    gap: 4px;
+    padding: 4px 8px;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-studio-chrome-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-studio-chrome-row .df2-wizard-studio {
+    order: 1;
+    width: 100%;
+    max-width: none;
+    flex: 0 0 auto;
+    padding: 0;
+  }
+
+  .df2-page-transfer-studio .df2-transfer-studio-chrome-row .df2-route-bar {
+    order: 2;
+    width: 100%;
+    max-width: none;
+    flex: 0 0 auto;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-track {
+    display: grid !important;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 1px;
+    width: 100%;
+    overflow: visible;
+    padding: 0;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-item {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-line {
+    display: none;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step {
+    width: 100%;
+    min-width: 0;
+    height: var(--df-stepper-mobile-height);
+    min-height: var(--df-stepper-mobile-height);
+    justify-content: center;
+    gap: 3px;
+    padding: 2px 3px;
+    white-space: nowrap;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-num {
+    width: var(--df-stepper-mobile-node);
+    height: var(--df-stepper-mobile-node);
+    flex: 0 0 var(--df-stepper-mobile-node);
+    font-size: 10px;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label {
+    display: none !important;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
+    display: inline !important;
+    overflow: visible;
+    font-size: 10px;
+    text-overflow: clip;
+    white-space: nowrap;
+  }
 }

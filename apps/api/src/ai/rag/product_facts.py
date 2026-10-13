@@ -230,19 +230,29 @@ def _sync_modes_section() -> GeneratedSection | None:
         behaviour = _SYNC_MODE_BEHAVIOUR.get(mode)
         if not behaviour:
             continue
-        needs: list[str] = []
-        try:
-            if requires_incremental(mode):
-                needs.append("a cursor field")
-        except Exception:
-            pass
-        if mode in _UNIQUE_IDENTITY_SYNC_MODES:
-            needs.append("a primary key")
-        requirement = (
-            f" It requires {' and '.join(needs)}; preflight refuses the run without them."
-            if needs
-            else " It needs neither a cursor nor a primary key."
-        )
+        if mode == "cdc":
+            # CDC reads the log. A table cursor column is the incremental
+            # contract, and saying CDC "requires a cursor field" made a GTID
+            # question inherit that sentence.
+            requirement = (
+                " It requires log access. MySQL binlog file and position is "
+                "enough; GTID is optional. CDC does not need an incremental "
+                "cursor column."
+            )
+        else:
+            needs: list[str] = []
+            try:
+                if requires_incremental(mode):
+                    needs.append("a cursor field")
+            except Exception:
+                pass
+            if mode in _UNIQUE_IDENTITY_SYNC_MODES:
+                needs.append("a primary key")
+            requirement = (
+                f" It requires {' and '.join(needs)}; preflight refuses the run without them."
+                if needs
+                else " It needs neither a cursor nor a primary key."
+            )
         lines.append(f"Sync mode {mode} {behaviour}.{requirement}")
 
     lines.append(
@@ -471,10 +481,12 @@ def _resume_section() -> GeneratedSection | None:
 
     text = "\n".join(
         [
-            "A transfer that fails part-way does not start over. Each "
-            "successfully committed chunk is checkpointed with the cursor the "
-            "next chunk must read from, so resume re-reads from that cursor "
-            "rather than from the beginning of the table.",
+            "Where a re-run starts depends on its sync mode: incremental and CDC "
+            "resume from the last committed cursor in the checkpoint and read the next "
+            "chunk. A full refresh overwrite or append re-run restarts from the "
+            "beginning: overwrite replaces the destination, and append reads the "
+            "source again. Each successfully committed incremental chunk is "
+            "checkpointed with the cursor the next chunk must read from.",
             "The checkpoint is the unit of resume: progress is durable per "
             "committed chunk, not per row. Under at-least-once delivery that "
             "means a crash can re-read the chunk in flight, which is why the "
@@ -982,10 +994,11 @@ def _gtid_section() -> GeneratedSection:
         doc_title="Sync modes",
         section_title="What GTID is on a MySQL CDC route",
         text=(
-            "GTID is a MySQL CDC resume token: the high water mark is kept as "
-            "a binlog file and position or GTID, so a recurring pipeline "
-            "continues from the last committed event rather than re-reading "
-            "the log."
+            "GTID is an optional MySQL CDC resume token. File and position are "
+            "enough to resume; GTID is not required. CDC does not need an "
+            "incremental cursor column. The high water mark is a binlog file "
+            "and position or a GTID, so a recurring pipeline continues from "
+            "the last committed event rather than re-reading the log."
         ),
         source_module="services/cdc_snapshot_resume.py · services/checkpoint_service.py",
         category="transfer",
@@ -2640,7 +2653,10 @@ def _preflight_gates_list_section() -> GeneratedSection | None:
             f"{first} through {last} are the {len(ordered)} core preflight gates "
             f"Validate runs before any write; G3 Schema contract is the one "
             f"that blocks a lossy type change. These preflight gates are the "
-            f"named Validate cards. " + " ".join(ordered)
+            # One card per line: the splitter is line-based, so a space-
+            # joined blob read as a single mega-sentence and the answer
+            # pasted the list on top of the Core gates copy (QA K03).
+            f"named Validate cards.\n" + "\n".join(ordered)
         ),
         source_module="preflight.gates · help-preflight#gates",
         category="transfer",

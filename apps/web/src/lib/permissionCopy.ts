@@ -29,6 +29,7 @@ const PERMISSION_PHRASE: Record<string, string> = {
   "workspace.manage": "change workspace settings",
   "member.invite": "add or remove workspace members",
   "audit.read": "read the audit log",
+  "iam.manage": "manage service accounts and SCIM provisioning",
 };
 
 /**
@@ -40,15 +41,22 @@ const PERMISSION_ROLE: Record<string, string> = {
   "connector.delete": "admin",
   "schedule.authorize": "admin",
   "workspace.manage": "admin",
+  "iam.manage": "admin",
 };
 
-/** The sentence a refused caller should read. */
-export function refusalSentence(permission: string, role: string): string {
-  const action = PERMISSION_PHRASE[permission] ?? "do this";
+/**
+ * The sentence a refused caller should read.
+ *
+ * `action` overrides the default verb when the same permission gates a
+ * different surface. Contracts use connector.write, but the page must say
+ * "sign or change contracts", not "add or change connections".
+ */
+export function refusalSentence(permission: string, role: string, action?: string): string {
+  const verb = action || PERMISSION_PHRASE[permission] || "do this";
   const who = ROLE_PHRASE[role];
   const needed = PERMISSION_ROLE[permission] ?? "editor";
   return (
-    `You don't have permission to ${action}` +
+    `You don't have permission to ${verb}` +
     (who ? ` — you are ${who} in this workspace` : "") +
     `. Ask a workspace admin for the ${needed} role` +
     (permission ? ` (needs ${permission})` : "") +

@@ -49,6 +49,7 @@ class UniversalSchema:
     row_count: int = 0
     industry: str | None = None
     file_type: str = ""
+    path: str = ""
 
 
 class UniversalDataFeeder:
@@ -147,6 +148,7 @@ class UniversalDataFeeder:
                         samples=samples,
                         row_count=result.row_count,
                         file_type=result.file_type,
+                        path=str(file_path.resolve()),
                     ))
                 except Exception as exc:
                     logger.warning("Could not load schema from %s: %s", file_path, exc)

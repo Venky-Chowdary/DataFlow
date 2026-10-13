@@ -2,8 +2,8 @@
 
 Replaces ad-hoc daemon threads with a bounded `ThreadPoolExecutor`. Jobs submitted
 through the scheduler survive the originating request/response cycle and are
-tracked through `job_store` / MongoDB. On startup the API scans persisted jobs and
-resubmits orphans so transfers can resume from checkpoints after a restart.
+tracked through `job_store` / MongoDB. ``services.orphan_jobs`` finds a job
+whose worker died and resumes it from its checkpoint or fails it.
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from __future__ import annotations
 import atexit
 import concurrent.futures
 import logging
-import os
 from services.brand_env import getenv_brand
+from services.ops_events import emit_event
 import threading
 from typing import Any, Callable
 
@@ -25,6 +25,8 @@ _started = threading.Event()
 _shutdown = False
 _worker_id = worker_id()
 _lease_store = WorkerLeaseStore(_worker_id)
+_inflight: set[str] = set()
+_inflight_lock = threading.Lock()
 
 
 def _ensure_executor() -> concurrent.futures.ThreadPoolExecutor:
@@ -48,6 +50,7 @@ def start() -> None:
     _ensure_executor()
     _started.set()
     _logger.info("Transfer scheduler started")
+    emit_event(_logger, "scheduler.service.start", outcome="succeeded")
 
 
 def shutdown(wait: bool = True, log: bool = True) -> None:
@@ -66,6 +69,7 @@ def shutdown(wait: bool = True, log: bool = True) -> None:
         _executor = None
     if log:
         _logger.info("Transfer scheduler shut down")
+        emit_event(_logger, "scheduler.service.stop", outcome="succeeded")
 
 
 def running() -> bool:
@@ -89,6 +93,10 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
     ttl_seconds = int(getenv_brand("WORKER_LEASE_TTL", "60"))
     if not _lease_store.acquire(job_id, ttl_seconds=ttl_seconds):
         _logger.warning("Transfer job %s is already leased by another worker; skipping", job_id)
+        emit_event(
+            _logger, "schedule.run.skip", outcome="skipped",
+            reason_code="already_leased", job_id=job_id,
+        )
         future: concurrent.futures.Future[Any] = concurrent.futures.Future()
         future.set_result(None)
         return future
@@ -105,10 +113,44 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
     except Exception:
         parent_ctx = None
 
+    fence = _lease_store.get_fence(job_id)
+
+    def _mark_lease_lost() -> None:
+        """Cooperative cancel so the transfer aborts on next checkpoint poll."""
+        try:
+            from services.mongodb_service import get_mongodb_service
+
+            mongo = get_mongodb_service()
+            mongo.request_job_cancel(job_id)
+            mongo.update_job_status(
+                job_id,
+                "cancelled",
+                phase="cancelled",
+                error="Lease lost to another worker; aborting to prevent dual writes",
+                message="Lease lost — cooperative cancel",
+                lease_fence=fence,
+            )
+        except Exception as exc:
+            emit_event(
+                _logger, "job.lease.lost", outcome="failed",
+                job_id=job_id, error=exc,
+            )
+
+    from services.lease_heartbeat import start_lease_heartbeat
+
+    # The heartbeat starts at submit, not when a pool thread is free. A job
+    # queued behind TRANSFER_WORKERS running transfers otherwise loses its
+    # lease while it waits and looks ownerless to another replica.
+    stop_heartbeat = start_lease_heartbeat(
+        _lease_store,
+        job_id,
+        ttl_seconds=ttl_seconds,
+        on_lost=_mark_lease_lost,
+    )
+    with _inflight_lock:
+        _inflight.add(job_id)
+
     def _leased_fn(*a: Any, **kw: Any) -> Any:
-        stop_event = threading.Event()
-        interval = max(5, ttl_seconds // 2)
-        fence = _lease_store.get_fence(job_id)
         detach_token = None
         try:
             from services.tracing import attach_context, detach_context
@@ -128,42 +170,13 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
         except Exception:
             log_token = None
 
-        def _mark_lease_lost() -> None:
-            """Cooperative cancel so the transfer aborts on next checkpoint poll."""
-            try:
-                from services.mongodb_service import get_mongodb_service
-
-                mongo = get_mongodb_service()
-                mongo.update_job_status(
-                    job_id,
-                    "cancelled",
-                    phase="cancelled",
-                    error="Lease lost to another worker; aborting to prevent dual writes",
-                    message="Lease lost — cooperative cancel",
-                    lease_fence=fence,
-                )
-            except Exception:
-                _logger.exception("Failed to mark job %s cancelled after lease loss", job_id)
-
-        def _heartbeat() -> None:
-            while not stop_event.wait(interval):
-                if not _lease_store.heartbeat(job_id, ttl_seconds=ttl_seconds):
-                    _logger.warning(
-                        "Lease heartbeat failed for job %s; aborting transfer (fence=%s)",
-                        job_id,
-                        fence,
-                    )
-                    _mark_lease_lost()
-                    break
-
-        beat_thread = threading.Thread(target=_heartbeat, name=f"df-lease-{job_id}", daemon=True)
-        beat_thread.start()
         try:
             return fn(*a, **kw)
         finally:
-            stop_event.set()
-            beat_thread.join(timeout=interval * 2)
+            stop_heartbeat()
             _lease_store.release(job_id)
+            with _inflight_lock:
+                _inflight.discard(job_id)
             if detach_token is not None:
                 try:
                     from services.tracing import detach_context
@@ -179,16 +192,17 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
                 except Exception:
                     pass
 
-    return executor.submit(_leased_fn, *args, **kwargs)
+    try:
+        return executor.submit(_leased_fn, *args, **kwargs)
+    except Exception:
+        stop_heartbeat()
+        _lease_store.release(job_id)
+        with _inflight_lock:
+            _inflight.discard(job_id)
+        raise
 
 
-def resubmit_orphan_jobs() -> int:
-    """On startup, resume any persisted jobs that were queued or running.
-
-    For now this is a hook called from `main.py` orphan-resume logic. The scheduler
-    itself is process-local, so true cross-process durability relies on the
-    persisted job record + checkpoint being re-submitted by the orchestrator.
-    """
-    _ensure_executor()
-    _started.set()
-    return 0
+def local_job_ids() -> frozenset[str]:
+    """Jobs this process has submitted and not yet finished."""
+    with _inflight_lock:
+        return frozenset(_inflight)

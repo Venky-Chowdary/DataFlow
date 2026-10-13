@@ -22,6 +22,7 @@ hardcoding ``\"public\"``.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -371,6 +372,62 @@ def denormalize_result_key(driver: str | None, name: str) -> str:
     if not folds_identifiers_upper(driver):
         return name
     return name.upper() if name.islower() else name
+
+
+_RESULT_WINDOW_RE = re.compile(
+    r"\b(?:LIMIT|TOP|FETCH\s+(?:FIRST|NEXT))\b",
+    re.IGNORECASE,
+)
+
+
+def query_already_windowed(sql: str) -> bool:
+    """True when the statement already has a row window (any dialect spelling)."""
+    return bool(_RESULT_WINDOW_RE.search(sql or ""))
+
+
+def _is_sqlserver_sample(driver: str | None) -> bool:
+    raw = (driver or "").strip().lower()
+    return is_sqlserver_like(driver) or raw in {"mssql", "sqlserver"}
+
+
+def sample_select_sql(driver: str | None, qualified: str, limit: int) -> str:
+    """``SELECT`` of at most ``limit`` rows. Never emits ``LIMIT`` on Oracle/DB2.
+
+    Oracle rejects ``LIMIT`` (ORA-03047). A table sample is not a paged scan,
+    so it does not need ``ORDER BY`` — ``FETCH FIRST n ROWS ONLY`` is legal
+    there, and SQL Server uses ``TOP``.
+    """
+    n = int(limit)
+    if _is_sqlserver_sample(driver):
+        return f"SELECT TOP {n} * FROM {qualified}"  # nosec B608
+    if uses_fetch_first_pagination(driver):
+        return f"SELECT * FROM {qualified} FETCH FIRST {n} ROWS ONLY"  # nosec B608
+    return f"SELECT * FROM {qualified} LIMIT {n}"  # nosec B608
+
+
+def append_result_limit(driver: str | None, sql: str, limit: int) -> str:
+    """Bound a read-only statement without inventing ``LIMIT`` on Oracle/DB2.
+
+    Metadata statements and queries that already name a window are unchanged.
+    SQL Server gets ``SELECT TOP n``. Fetch-first dialects get
+    ``FETCH FIRST n ROWS ONLY``. Everyone else keeps ``LIMIT``.
+    """
+    clean = (sql or "").strip().rstrip(";")
+    upper = clean.upper()
+    if not clean:
+        return clean
+    if upper.startswith(("SHOW", "DESCRIBE", "EXPLAIN", "ANALYZE", "PRAGMA")):
+        return clean
+    if query_already_windowed(clean):
+        return clean
+    n = int(limit)
+    if _is_sqlserver_sample(driver):
+        if upper.startswith("SELECT "):
+            return f"SELECT TOP {n} {clean[7:]}"
+        return clean
+    if uses_fetch_first_pagination(driver):
+        return f"{clean} FETCH FIRST {n} ROWS ONLY"
+    return f"{clean} LIMIT {n}"
 
 
 def page_clause(driver: str | None, offset: int, limit: int) -> str:

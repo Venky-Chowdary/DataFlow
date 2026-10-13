@@ -21,6 +21,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
 from services.collation_carry import destination_column_collations, plan_collation_carry
+from services.default_expression import (
+    default_exprs_equivalent as _default_exprs_equivalent,
+    normalize_default_expr as _normalize_default_expr,
+)
 from services.decimal_identity import plan_decimal_identity_carry
 from services.encoding_capacity import plan_encoding_carry
 from services.identity_carry import plan_identity_carry
@@ -487,6 +491,103 @@ def catalog_to_payload(catalog: SourceSchemaCatalog) -> dict[str, Any]:
     return asdict(catalog)
 
 
+_APPEND_KEY_REASON = (
+    "Append create-new does not declare a key. A second copy of the same row "
+    "is legal on this sync. Upsert or merge is what enforces the source key."
+)
+
+
+def withhold_append_key_constraints(plan: CreateFidelityPlan) -> CreateFidelityPlan:
+    """Drop PK, UNIQUE, and key generators from an append create-new plan.
+
+    The certificate records the skip. Leaving ``primary_key`` set while the
+    writer omitted it made the next append abort on a key the operator never
+    asked this sync to enforce.
+    """
+    for item in plan.report.items:
+        if item.aspect in {"primary_key", "unique"} and item.status == "carried":
+            item.status = "skipped"
+            item.reason = _APPEND_KEY_REASON
+            item.dest_ddl = ""
+        elif item.aspect == "identity" and item.status == "carried":
+            item.status = "skipped"
+            item.reason = (
+                "Append create-new does not declare the source key, so the key "
+                "generator is not emitted. The load writes the source values."
+            )
+            item.dest_ddl = ""
+    plan.primary_key = []
+    plan.unique_constraints = []
+    plan.identity_columns = {}
+    plan.identity_insert_columns = []
+    plan.table_constraints = [
+        clause
+        for clause in plan.table_constraints
+        if not str(clause).strip().upper().startswith(("PRIMARY KEY", "UNIQUE"))
+    ]
+    plan.post_create_sql = [
+        stmt
+        for stmt in plan.post_create_sql
+        if "UNIQUE" not in str(stmt).upper()
+    ]
+    cleaned: dict[str, list[str]] = {}
+    for col, suffixes in (plan.column_suffixes or {}).items():
+        kept = [
+            suffix
+            for suffix in suffixes
+            if "AUTO_INCREMENT" not in str(suffix).upper()
+            and "IDENTITY" not in str(suffix).upper()
+            and not str(suffix).upper().startswith("GENERATED")
+        ]
+        if kept:
+            cleaned[col] = kept
+    plan.column_suffixes = cleaned
+    return plan
+
+
+_FILE_SOURCE_DIALECTS = frozenset({
+    "csv", "tsv", "file", "upload", "json", "jsonl", "excel", "xlsx",
+    "parquet", "yaml", "yml",
+})
+
+
+def _synthesized_primary_key(
+    *,
+    catalog: SourceSchemaCatalog,
+    dest_cols: list[str],
+    operator_key_columns: list[str] | None,
+    dest_name_for_source: Any,
+) -> list[str]:
+    """PK columns when the source catalog has none.
+
+    An upsert key the operator named is the destination key. A file upload
+    with a single ``id`` / ``*_id`` column is that key too — a real database
+    catalog that truly has no PK is left without one.
+    """
+    resolved: list[str] = []
+    for raw in operator_key_columns or []:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        dest_col = dest_name_for_source(name)
+        if dest_col is None and name in dest_cols:
+            dest_col = name
+        if dest_col and dest_col not in resolved:
+            resolved.append(dest_col)
+    if resolved:
+        return resolved
+    dialect = (catalog.dialect or "").strip().lower()
+    if dialect not in _FILE_SOURCE_DIALECTS:
+        return []
+    candidates = [
+        col for col in dest_cols
+        if col.lower() == "id" or col.lower().endswith("_id")
+    ]
+    if len(candidates) == 1:
+        return candidates
+    return []
+
+
 def resolve_create_fidelity_plan(
     *,
     source_schema_catalog: Any,
@@ -498,6 +599,8 @@ def resolve_create_fidelity_plan(
     dest_table: str = "",
     dest_schema: str = "",
     dest_tablespaces: set[str] | None = None,
+    carry_keys: bool = True,
+    operator_key_columns: list[str] | None = None,
 ) -> CreateFidelityPlan:
     """Build a create-new fidelity plan; always returns a certificate (never silent)."""
     dest = (dest_dialect or "").strip().lower()
@@ -526,7 +629,10 @@ def resolve_create_fidelity_plan(
         dest_table=dest_table,
         dest_schema=dest_schema,
         dest_tablespaces=dest_tablespaces,
+        operator_key_columns=operator_key_columns,
     )
+    if not carry_keys:
+        plan = withhold_append_key_constraints(plan)
     if table_already_exists:
         # CREATE IF NOT EXISTS will not re-apply constraints — certify honestly.
         for item in plan.report.items:
@@ -561,6 +667,7 @@ def plan_create_new_fidelity(
     dest_table: str = "",
     dest_schema: str = "",
     dest_tablespaces: set[str] | None = None,
+    operator_key_columns: list[str] | None = None,
 ) -> CreateFidelityPlan:
     """Plan CREATE TABLE fidelity for mapped columns on dest_dialect."""
     dest = (dest_dialect or "").strip().lower()
@@ -630,7 +737,7 @@ def plan_create_new_fidelity(
     ]
     if catalog.primary_key and len(pk_dest) == len(catalog.primary_key):
         unindexable = [
-            c for c in pk_dest if dest in {"mysql", "mariadb"} and _mysql_index_requires_prefix(_dest_type(c))
+            c for c in pk_dest if dest in {"mysql", "mariadb"} and mysql_index_requires_prefix(_dest_type(c))
         ]
         if unindexable:
             report.items.append(
@@ -678,14 +785,50 @@ def plan_create_new_fidelity(
             )
         )
     else:
-        report.items.append(
-            SchemaFidelityItem(
-                aspect="primary_key",
-                name="*",
-                status="skipped",
-                reason="No PRIMARY KEY on source.",
-            )
+        synthesized = _synthesized_primary_key(
+            catalog=catalog,
+            dest_cols=dest_cols,
+            operator_key_columns=operator_key_columns,
+            dest_name_for_source=_dest_name_for_source,
         )
+        if synthesized:
+            pk_dest = synthesized
+            quoted = ", ".join(_q(c, dest) for c in pk_dest)
+            table_constraints.append(f"PRIMARY KEY ({quoted})")
+            for col in pk_dest:
+                suffixes.setdefault(col, [])
+                if "NOT NULL" not in suffixes[col]:
+                    suffixes[col].append("NOT NULL")
+                if col not in struct_not_null:
+                    struct_not_null.append(col)
+            why = (
+                "Operator upsert key"
+                if operator_key_columns
+                else "File identity column"
+            )
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=",".join(pk_dest),
+                    status="carried",
+                    reason=(
+                        "Source catalog has no PRIMARY KEY. "
+                        f"{why} {','.join(pk_dest)} is the destination "
+                        "PRIMARY KEY and NOT NULL."
+                    ),
+                    source_detail=",".join(pk_dest),
+                    dest_ddl=f"PRIMARY KEY ({quoted})",
+                )
+            )
+        else:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name="*",
+                    status="skipped",
+                    reason="No PRIMARY KEY on source.",
+                )
+            )
 
     # --- CARRY: NOT NULL ---
     nn_carried = 0
@@ -782,7 +925,7 @@ def plan_create_new_fidelity(
         if set(dest_uk_s) == pk_set and pk_set:
             continue  # covered by PRIMARY KEY
         if dest in {"mysql", "mariadb"} and any(
-            _mysql_index_requires_prefix(_dest_type(c)) for c in dest_uk_s
+            mysql_index_requires_prefix(_dest_type(c)) for c in dest_uk_s
         ):
             report.items.append(
                 SchemaFidelityItem(
@@ -1043,7 +1186,12 @@ def plan_create_new_fidelity(
         post_create_sql=post_sql,
         dest_columns=dest_cols,
         column_renames=renames,
-        primary_key=list(pk_dest) if len(pk_dest) == len(catalog.primary_key) else [],
+        primary_key=(
+            list(pk_dest)
+            if (catalog.primary_key and len(pk_dest) == len(catalog.primary_key))
+            or (not catalog.primary_key and bool(pk_dest))
+            else []
+        ),
         unique_constraints=struct_unique,
         check_predicates=struct_checks,
         not_null_columns=struct_not_null,
@@ -1531,74 +1679,6 @@ def _fetch_not_null_columns(
         if flag_s in {"NO", "N", "FALSE", "0"}:
             not_null.add(str(name))
     return not_null
-
-
-# Clock/boolean default synonyms treated as equivalent across dialects so a
-# faithfully-carried default is not falsely downgraded on cosmetic differences.
-_CLOCK_DEFAULTS = {
-    "current_timestamp", "current_timestamp()", "now()", "now", "getdate()",
-    "getutcdate()", "sysdate", "systimestamp", "localtimestamp",
-    "localtimestamp()", "statement_timestamp()", "transaction_timestamp()",
-    "clock_timestamp()", "sysdatetime()",
-}
-_TRUE_DEFAULTS = {"true", "t", "1", "b'1'"}
-_FALSE_DEFAULTS = {"false", "f", "0", "b'0'"}
-
-
-def _normalize_default_expr(expr: Any) -> str:
-    """Fold a catalog/planned default into a comparable literal.
-
-    Iteratively strips wrapping parens, trailing type casts (``'x'::text``,
-    ``'x'::character varying``), national/escape/bit/hex string-literal prefixes
-    (``N'x'``, ``E'x'``, ``B'1'``), and surrounding quotes to a fixed point — so
-    ``('active'::character varying)``, ``N'active'`` and ``active`` all unify —
-    then collapses clock precision (``current_timestamp(6)`` -> ``()``) and
-    casefolds.
-    """
-    s = str(expr if expr is not None else "").strip()
-    prev: str | None = None
-    while s and s != prev:
-        prev = s
-        if len(s) >= 2 and s[0] == "(" and s[-1] == ")":
-            s = s[1:-1].strip()
-            continue
-        stripped_cast = re.sub(r"::\s*[A-Za-z0-9_ \"\.\[\]]+\s*$", "", s).strip()
-        if stripped_cast != s:
-            s = stripped_cast
-            continue
-        prefix = re.match(r"^(?:[NnEeBbXx]|[Uu]&)(['\"].*)$", s)
-        if prefix:
-            s = prefix.group(1).strip()
-            continue
-        if len(s) >= 2 and s[0] in "'\"" and s[-1] == s[0]:
-            s = s[1:-1].strip()
-            continue
-    # current_timestamp(6) / localtimestamp(3) → drop precision for clock compare.
-    s = re.sub(r"\(\s*\d+\s*\)", "()", s)
-    return s.casefold()
-
-
-def _default_exprs_equivalent(a: str, b: str) -> bool:
-    if a == b:
-        return True
-    if a in _CLOCK_DEFAULTS and b in _CLOCK_DEFAULTS:
-        return True
-    if a in _TRUE_DEFAULTS and b in _TRUE_DEFAULTS:
-        return True
-    if a in _FALSE_DEFAULTS and b in _FALSE_DEFAULTS:
-        return True
-    try:
-        from decimal import Decimal
-
-        from services.decimal_identity import extract_decimal_identity
-
-        ia = extract_decimal_identity(a)
-        ib = extract_decimal_identity(b)
-    except ValueError:
-        return False
-    if ia is None or ib is None:
-        return False
-    return +Decimal(ia.to_canonical_text()) == +Decimal(ib.to_canonical_text())
 
 
 def _claimed_default_literal(item: Any) -> str:
@@ -2229,7 +2309,7 @@ def empty_unsupported_report(
 # ---------------------------------------------------------------------------
 
 
-def _mysql_index_requires_prefix(typ: str) -> bool:
+def mysql_index_requires_prefix(typ: str) -> bool:
     """True when MySQL/MariaDB would need a prefix length to index this type.
 
     TEXT/BLOB/JSON cannot be a PRIMARY KEY or UNIQUE without a prefix. Inventing
@@ -2240,6 +2320,89 @@ def _mysql_index_requires_prefix(typ: str) -> bool:
     if not u:
         return False
     return bool(re.match(r"^(TINY|MEDIUM|LONG)?(TEXT|BLOB)\b|^JSON\b", u))
+
+
+# InnoDB DYNAMIC/COMPRESSED key limit; utf8mb4 reserves 4 bytes per character.
+_MYSQL_MAX_KEY_BYTES = 3072
+_MYSQL_UTF8MB4_CHAR_BYTES = 4
+
+
+def mysql_key_compatible_types(
+    *,
+    table_name: str,
+    conflict_columns: list[str] | None,
+    target_cols: list[str],
+    target_types: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str] | None,
+) -> tuple[list[str], str | None]:
+    """Key-indexable create-new carriers for an upsert key, or an operator refusal.
+
+    MySQL cannot index TEXT/BLOB/JSON without a prefix length (error 1170), and
+    a prefix would enforce a different uniqueness rule than the source. A key
+    column whose carrier is a LOB becomes ``VARCHAR(n)`` from the width the
+    source declares; with no declared width the run is refused before any DDL.
+    G6 (Validate) and the MySQL writer (defence in depth) share this one rule.
+    """
+    from services.type_system import parse_string_carrier_width
+
+    types = list(target_types)
+    keys = [c for c in (conflict_columns or []) if c in target_cols]
+    source_of = {
+        str(m.get("target") or m.get("source") or ""): str(m.get("source") or "")
+        for m in mappings or []
+        if isinstance(m, dict)
+    }
+    declared_types = column_types or {}
+    widened: dict[str, int] = {}
+    unresolved: list[str] = []
+    for col in keys:
+        idx = target_cols.index(col)
+        if not mysql_index_requires_prefix(types[idx]):
+            continue
+        declared = declared_types.get(source_of.get(col) or col) or declared_types.get(col)
+        width = parse_string_carrier_width(declared)
+        if not width:
+            unresolved.append(f"{col} ({declared or types[idx]})")
+            continue
+        widened[col] = width
+        types[idx] = f"VARCHAR({width})"
+    key_label = ", ".join(keys)
+    where = f"new table {table_name}" if table_name else "the new destination table"
+    if unresolved:
+        logger.error(
+            "MySQL upsert key refused before CREATE: table=%s key=(%s) unindexable=%s",
+            table_name, key_label, unresolved,
+        )
+        return target_types, (
+            f"MySQL cannot enforce the upsert key ({key_label}) on {where}: "
+            f"{', '.join(unresolved)} would be created as a TEXT/BLOB "
+            "column, which MySQL refuses in a key without a prefix length "
+            "(error 1170). The source declares no width for it, and DataFlow "
+            "will not invent a prefix (that enforces a different uniqueness "
+            "rule). Map the column to VARCHAR(n) sized to its longest value, "
+            "or pre-create the destination table with this key."
+        )
+    key_bytes = sum(widened.values()) * _MYSQL_UTF8MB4_CHAR_BYTES
+    if key_bytes > _MYSQL_MAX_KEY_BYTES:
+        logger.error(
+            "MySQL upsert key too wide before CREATE: table=%s key=(%s) widths=%s",
+            table_name, key_label, widened,
+        )
+        return target_types, (
+            f"MySQL cannot enforce the upsert key ({key_label}) on {where}: "
+            f"the declared widths {widened} need {key_bytes} bytes "
+            f"in utf8mb4, above MySQL's {_MYSQL_MAX_KEY_BYTES}-byte key limit "
+            "(error 1071). Narrow the key columns or pre-create the destination "
+            "table with this key."
+        )
+    if widened:
+        logger.info(
+            "MySQL upsert key carriers sized from the source width: table=%s %s",
+            table_name, {c: f"VARCHAR({w})" for c, w in widened.items()},
+        )
+    return types, None
+
 
 
 def _q(ident: str, dialect: str) -> str:
@@ -2304,6 +2467,22 @@ def _normalize_default_sql(expr: str, dest_dialect: str, dest_type: str = "") ->
         if (dest_dialect or "").lower() == "sqlite":
             return "(datetime('now'))"
         return _mysql_clock_default("CURRENT_TIMESTAMP", dest_type) if mysql_family else "CURRENT_TIMESTAMP"
+    # SQL Server BIT and Oracle NUMBER(1) reject the token ``false``.
+    # PostgreSQL boolean defaults arrive as that token.
+    dest_name = (dest_dialect or "").lower()
+    numeric_bool = dest_name in {
+        "sqlserver", "mssql", "sql_server", "azure_sql", "azure_sql_database",
+        "oracle",
+    }
+    type_name = (dest_type or "").upper()
+    number_one = type_name.startswith("NUMBER(1)") or type_name.startswith("NUMBER(1,")
+    if numeric_bool and (
+        "BIT" in type_name or "BOOL" in type_name or number_one
+    ):
+        if lowered in {"false", "f", "'false'", "'f'"}:
+            return "0"
+        if lowered in {"true", "t", "'true'", "'t'"}:
+            return "1"
     return text
 
 

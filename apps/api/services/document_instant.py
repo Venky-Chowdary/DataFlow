@@ -41,6 +41,7 @@ def is_document_instant_token(engine: str | None, ddl_type_token: str | None) ->
     rule, including the one that asks a zoneless source for its zone before the
     writer refuses the rows.
     """
+    from services.dest_dialect_facts import _normalize_dest_db
     from services.type_system import (
         LOGICAL_DATE,
         LOGICAL_DATETIME,
@@ -48,10 +49,91 @@ def is_document_instant_token(engine: str | None, ddl_type_token: str | None) ->
         strip_identity_qualifier,
     )
 
-    if (engine or "").strip().lower() not in INSTANT_DATE_TOKEN_ENGINES:
+    raw_engine = (engine or "").strip().lower()
+    # Catalog aliases (``mongo``, ``cosmos``, ``amazon_elasticsearch``) are the
+    # same carrier. Normalization is the SSOT for those names. Firestore shares
+    # the mongodb DDL bucket and is not a BSON date, so it stays out.
+    if raw_engine == "firestore":
+        return False
+    canonical = _normalize_dest_db(raw_engine) if raw_engine else ""
+    if (
+        raw_engine not in INSTANT_DATE_TOKEN_ENGINES
+        and canonical not in INSTANT_DATE_TOKEN_ENGINES
+    ):
         return False
     token = strip_identity_qualifier(ddl_type_token).upper().strip()
     return normalize_logical_type(token) in {LOGICAL_DATE, LOGICAL_DATETIME}
+
+
+def promote_document_instant_create_target(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str,
+    source_db: str,
+) -> str:
+    """Create-new stamp that keeps a BSON datetime's milliseconds.
+
+    An echoed ``TIMESTAMP`` on MySQL is fractional-digits 0. The source token
+    has no typmod and used to look identical, so preflight called the pair a
+    fidelity collapse — or, when it did not, the write dropped every
+    millisecond. Live destination columns are not rewritten here.
+    """
+    from services.source_engine_scope import bind_source_engine
+    from services.type_system import temporal_precision_would_narrow
+
+    src = (source_type or "").strip()
+    tgt = (target_type or "").strip()
+    if not src or not tgt or not dest_db:
+        return tgt
+    with bind_source_engine(source_db or ""):
+        if not temporal_precision_would_narrow(src, tgt, dest_db=dest_db):
+            return tgt
+        from services.decision_kernel.type_invent import create_new_mapping_target_type
+
+        upgraded = create_new_mapping_target_type(src, dest_db, source_db=source_db or "")
+    return (upgraded or tgt).strip() or tgt
+
+
+def promote_document_instant_existing_target(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str,
+    source_db: str,
+) -> str:
+    """Dest-exists stamp when a BSON datetime lands on a whole-second MySQL column.
+
+    Create-new already stamps ``DATETIME(3)``. An existing ``TIMESTAMP`` or
+    ``DATETIME`` with fewer than 3 fractional digits still drops the
+    milliseconds. The planned target becomes ``DATETIME(3)`` so the writer
+    can ``MODIFY`` the column. A column that already keeps 3 digits is left
+    alone. ``DATETIME`` is not rewritten to ``TIMESTAMP`` — that carrier is
+    bounded to 1970..2038. The unaltered ``TIMESTAMP`` pair stays lossy.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.source_engine_scope import bind_source_engine
+    from services.type_system import (
+        LOGICAL_DATETIME,
+        destination_temporal_fractional_digits,
+        normalize_logical_type,
+    )
+
+    src = (source_type or "").strip()
+    tgt = (target_type or "").strip()
+    if not src or not tgt:
+        return tgt
+    if _normalize_dest_db(dest_db) != "mysql":
+        return tgt
+    with bind_source_engine(source_db or ""):
+        if not is_document_instant_token(source_db, src):
+            return tgt
+        if normalize_logical_type(src) != LOGICAL_DATETIME:
+            return tgt
+        live = destination_temporal_fractional_digits(tgt, dest_db="mysql")
+    if live is None or live >= DOCUMENT_INSTANT_FRACTIONAL_DIGITS:
+        return tgt
+    return f"DATETIME({DOCUMENT_INSTANT_FRACTIONAL_DIGITS})"
 
 
 def transform_narrows_to_calendar_day(transform: str | None) -> bool:
@@ -66,11 +148,71 @@ def transform_narrows_to_calendar_day(transform: str | None) -> bool:
     return (transform or "").strip().lower() == "date"
 
 
+def source_fractional_digits(source_type: str) -> int | None:
+    """Fractional-second digits the source column holds, engine defaults included.
+
+    A bare spelling is not "no precision": PostgreSQL ``timestamptz`` keeps
+    microseconds and SQL Server ``datetime2`` keeps seven digits. Reading only
+    an explicit typmod passed every PostgreSQL instant onto a millisecond
+    carrier while the write dropped its microseconds. An unnamed engine leaves a
+    bare spelling unknown (``None``); the writer still refuses any cell it would
+    truncate.
+    """
+    from services.source_engine_scope import active_source_engine
+    from services.type_system import (
+        destination_temporal_fractional_digits,
+        parse_temporal_fractional_precision,
+    )
+
+    explicit = parse_temporal_fractional_precision(source_type)
+    if explicit is not None:
+        return int(explicit)
+    engine = (active_source_engine() or "").strip()
+    if not engine:
+        return None
+    return destination_temporal_fractional_digits(source_type, dest_db=engine)
+
+
+def cell_exceeds_document_instant(value: object) -> bool:
+    """True when a cell carries a non-zero digit below the millisecond.
+
+    The per-cell rule the writer enforces and the population check measures.
+    Trailing zeros are not precision: ``10:00:00.120000`` lands intact.
+    """
+    from services.type_system import value_fractional_second_digits
+
+    return value_fractional_second_digits(value) > DOCUMENT_INSTANT_FRACTIONAL_DIGITS
+
+
+def population_fits_document_instant(population: object) -> bool | None:
+    """True when every measured cell fits milliseconds, False when one does not.
+
+    ``None`` means nothing was measured (no population, or only SQL NULL): a
+    sample that was never taken is not proof the column holds whole
+    milliseconds.
+    """
+    if population is None:
+        return None
+    try:
+        values = list(population)  # type: ignore[call-overload]
+    except TypeError:
+        return None
+    measured = False
+    for value in values:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        measured = True
+        if cell_exceeds_document_instant(value):
+            return False
+    return True if measured else None
+
+
 def document_instant_wire_preserved(
     source_type: str,
     target_type: str,
     *,
     dest_db: str = "",
+    population: object = None,
 ) -> bool:
     """True when a date/datetime source lands intact on a document instant.
 
@@ -84,13 +226,17 @@ def document_instant_wire_preserved(
     instant to preserve. Stamping one is the UTC invent the MongoDB writer
     refuses, and ``resolve_timezone_policy`` calls it POLICY_UTC_INVENT and
     requires an operator contract.
+
+    A source declaring more than three digits is preserved only when the
+    measured ``population`` holds whole milliseconds — the carrier then loses
+    nothing those rows contain, and the writer refuses any later cell that
+    does not. Unmeasured, the declaration stands and the pair is a truncation.
     """
     from services.type_system import (
         LOGICAL_DATE,
         LOGICAL_DATETIME,
         datetime_timezone_polarity,
         normalize_logical_type,
-        parse_temporal_fractional_precision,
     )
 
     if not is_document_instant_token(dest_db, target_type):
@@ -99,10 +245,10 @@ def document_instant_wire_preserved(
         return False
     if datetime_timezone_polarity(source_type) == "ntz":
         return False
-    src_p = parse_temporal_fractional_precision(source_type)
-    if src_p is None:
+    src_p = source_fractional_digits(source_type)
+    if src_p is None or src_p <= DOCUMENT_INSTANT_FRACTIONAL_DIGITS:
         return True
-    return int(src_p) <= DOCUMENT_INSTANT_FRACTIONAL_DIGITS
+    return population_fits_document_instant(population) is True
 
 
 def document_instant_utc_invent(

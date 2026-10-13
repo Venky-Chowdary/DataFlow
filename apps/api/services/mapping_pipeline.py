@@ -98,22 +98,34 @@ def _canonicalize_schema_rows(schemas: list[dict] | None) -> list[dict] | None:
     read as non-numeric text and made Map invent a lossy ``<col>_text``
     LONGTEXT destination instead of honouring the declared numeric type.
     """
-    from services.value_serializer import evidence_samples
+    from services.value_serializer import evidence_samples, is_null_evidence
 
     if not schemas:
         return schemas
     out: list[dict] = []
     for s in schemas:
+        raw_samples = list(s.get("samples") or [])
+        observed = None
+        if raw_samples:
+            nulls = sum(1 for value in raw_samples if is_null_evidence(value))
+            observed = round(nulls / len(raw_samples), 3)
         raw = s.get("native_type") or s.get("inferred_type") or "VARCHAR"
         # ddl_carrier_type answers the CREATE question (INTEGER → BIGINT).
         # Mapping / lossy-check must keep the source's own carrier — otherwise
         # INTEGER → existing INT4 is billed as a BIGINT narrowing and G4 blocks
         # a path stamp_mapping_fidelity later grades preserve.
         carrier = _reported_source_carrier(str(raw), ddl_carrier_type(str(raw)))
+        stamped = s.get("null_rate")
+        # A later profiler pass sees only the non-null evidence and reports
+        # 0.0. Keep the rate counted before that strip when the schema row
+        # has not already recorded a higher one.
+        if observed is not None and (stamped is None or float(stamped or 0) == 0.0):
+            stamped = observed
         out.append({
             **s,
             "inferred_type": carrier,
             "samples": evidence_samples(s.get("samples")),
+            **({} if stamped is None else {"null_rate": stamped}),
         })
     return out
 
@@ -198,6 +210,8 @@ def _passthrough_identity_transform(
     user_override: bool,
     src_type: str,
     tgt_type: str,
+    source: str = "",
+    target: str = "",
 ) -> str:
     """Drop name-triggered value rewrites on identity create-new mappings.
 
@@ -208,10 +222,22 @@ def _passthrough_identity_transform(
     confidence to 0.70 and blocks G4 — a create-new identity column is a
     byte-exact copy. Type-driven transforms (decimal, date, json) are untouched;
     an operator who wants Trim still chooses it explicitly.
+
+    Same-name pairs on an *existing* destination are identity too: run 2 of a
+    route the first run created flips strategy to match-existing, and a
+    name-triggered rewrite on PK / cursor / FK columns silently mutates
+    identity values and the checkpoint contract (QA T10).
     """
     if user_override or transform not in _VALUE_REWRITING_TRANSFORMS:
         return transform
-    if not (create_new or strategy in {"identity_passthrough", "create_compatible_new"}):
+    identity_named = bool(source) and bool(target) and (
+        _normalize_col_token(source) == _normalize_col_token(target)
+    )
+    if not (
+        create_new
+        or strategy in {"identity_passthrough", "create_compatible_new"}
+        or identity_named
+    ):
         return transform
     try:
         src_logical = normalize_logical_type(src_type)
@@ -414,6 +440,7 @@ def _repair_unparseable_numeric_targets(
     target_schemas: list[dict] | None,
     destination_db_type: str = "",
     destination_table_exists: bool | None = None,
+    source_db_type: str = "",
 ) -> list[dict]:
     """Rewrite hex/ObjectId → NUMBER/INTEGER mappings to create-new VARCHAR.
 
@@ -423,76 +450,110 @@ def _repair_unparseable_numeric_targets(
     """
     from services.schema_inference import samples_fit_logical_type
 
+    # Typed database extracts render numbers in wire form (``150.345``), which
+    # Auto's lone-3-digit-group ambiguity refuses — the same pin the profile
+    # pass above already takes for ``renders_typed_wire_values`` sources. A
+    # CSV's ``1.234`` stays ambiguous; a NUMERIC(10,3) cell never is.
+    wire_token = None
+    if source_db_type:
+        from src.transfer.connector_capabilities import renders_typed_wire_values
+        from services.transform_engine import (
+            NUMBER_LOCALE_WIRE,
+            _active_number_locale,
+            reset_active_number_locale,
+            set_active_number_locale,
+        )
+
+        if renders_typed_wire_values(source_db_type) and not _active_number_locale():
+            wire_token = set_active_number_locale(NUMBER_LOCALE_WIRE)
+
+    def _fits(samples: list[str], lt: str, field_name: str) -> bool:
+        return samples_fit_logical_type(samples, lt, field_name=field_name)
+
     src_by = {s["name"]: s for s in (source_schemas or [])}
     tgt_by = {s["name"]: s for s in (target_schemas or [])}
     taken = {str(m.get("target") or "").lower() for m in mappings}
     for t in tgt_by:
         taken.add(t.lower())
     out: list[dict] = []
-    for m in mappings:
-        src = str(m.get("source") or "")
-        tgt = str(m.get("target") or "")
-        samples = [str(x) for x in (src_by.get(src, {}).get("samples") or [])[:8] if str(x).strip()]
-        tgt_type = str(
-            m.get("target_type")
-            or tgt_by.get(tgt, {}).get("inferred_type")
-            or ""
-        )
-        logical = normalize_logical_type(tgt_type)
-        if (
-            samples
-            and len(samples) >= 2
-            and logical in {"integer", "decimal"}
-            and not samples_fit_logical_type(samples, tgt_type or "INTEGER", field_name=src)
-            # Only values that are not numbers at all belong in a text column.
-            # Values that are numeric but exceed the declared width are a widen /
-            # fidelity decision owned by schema drift and preflight — inventing a
-            # text twin there left the destination's real numeric column NULL for
-            # every row.
-            and not samples_fit_logical_type(samples, "DECIMAL", field_name=src)
-        ):
-            dest_db = (destination_db_type or "").strip().lower()
-            dest_native = ddl_type(dest_db, "VARCHAR") if dest_db else "VARCHAR"
-            candidate = src.strip() or tgt
-            # A create-new proposal's target is not a column that exists on the
-            # destination, even when Map lists it in ``target_schemas``.
-            existing_dest_column = (
-                destination_table_exists is not False
-                and not _is_create_new_mapping(m)
-                and tgt.lower() in {t.lower() for t in tgt_by}
+    try:
+        for m in mappings:
+            src = str(m.get("source") or "")
+            tgt = str(m.get("target") or "")
+            samples = [str(x) for x in (src_by.get(src, {}).get("samples") or [])[:8] if str(x).strip()]
+            tgt_type = str(
+                m.get("target_type")
+                or tgt_by.get(tgt, {}).get("inferred_type")
+                or ""
             )
-            if not existing_dest_column:
-                # Nothing to sit beside: the column is created by this run, so
-                # widen its own type instead of inventing a ``*_text`` twin the
-                # operator never named.
-                candidate = tgt or candidate
-            elif candidate.lower() in taken and candidate.lower() == tgt.lower():
-                # Keep source name when inventing beside an incompatible dest.
-                base = candidate
-                candidate = f"{base}_text" if f"{base}_text".lower() not in taken else f"src_{base}"
-            elif candidate.lower() in taken:
-                base = candidate
-                candidate = f"{base}_text" if f"{base}_text".lower() not in taken else f"src_{base}"
-            taken.add(candidate.lower())
-            repaired = {
-                **m,
-                "target": candidate,
-                "target_type": dest_native,
-                "source_type": src_by.get(src, {}).get("inferred_type") or m.get("source_type") or "VARCHAR",
-                "create_new": True,
-                "assignment_strategy": "create_compatible_new",
-                "transform": "none",
-                "requires_review": True,
-                "confidence": min(float(m.get("confidence") or 0.92), 0.92),
-                "reasoning": (
-                    f"{m.get('reasoning', '')} · samples are not numeric — "
-                    f"CREATE/ADD '{candidate}' as {dest_native} instead of "
-                    f"lossy {tgt} ({tgt_type or logical})"
-                ).strip(" ·"),
-            }
-            out.append(repaired)
-            continue
-        out.append(m)
+            logical = normalize_logical_type(tgt_type)
+            src_logical = normalize_logical_type(
+                src_by.get(src, {}).get("inferred_type") or m.get("source_type") or ""
+            )
+            if (
+                samples
+                and len(samples) >= 2
+                and logical in {"integer", "decimal"}
+                # A column declared numeric by the source catalog (or inferred so)
+                # can only render numeric samples — a wire-shaped scale-3 fraction
+                # like ``150.345`` reads Auto-ambiguous to the fit check and was
+                # diverted into a TEXT carrier (DEF-C-009 / ACC-03), producing a
+                # self-inflicted DECIMAL→TEXT fidelity-collapse block. Non-numeric
+                # sample evidence only exists on untyped / file columns.
+                and src_logical not in {"integer", "decimal", "float"}
+                and not _fits(samples, tgt_type or "INTEGER", src)
+                # Only values that are not numbers at all belong in a text column.
+                # Values that are numeric but exceed the declared width are a widen /
+                # fidelity decision owned by schema drift and preflight — inventing a
+                # text twin there left the destination's real numeric column NULL for
+                # every row.
+                and not _fits(samples, "DECIMAL", src)
+            ):
+                dest_db = (destination_db_type or "").strip().lower()
+                dest_native = ddl_type(dest_db, "VARCHAR") if dest_db else "VARCHAR"
+                candidate = src.strip() or tgt
+                # A create-new proposal's target is not a column that exists on the
+                # destination, even when Map lists it in ``target_schemas``.
+                existing_dest_column = (
+                    destination_table_exists is not False
+                    and not _is_create_new_mapping(m)
+                    and tgt.lower() in {t.lower() for t in tgt_by}
+                )
+                if not existing_dest_column:
+                    # Nothing to sit beside: the column is created by this run, so
+                    # widen its own type instead of inventing a ``*_text`` twin the
+                    # operator never named.
+                    candidate = tgt or candidate
+                elif candidate.lower() in taken and candidate.lower() == tgt.lower():
+                    # Keep source name when inventing beside an incompatible dest.
+                    base = candidate
+                    candidate = f"{base}_text" if f"{base}_text".lower() not in taken else f"src_{base}"
+                elif candidate.lower() in taken:
+                    base = candidate
+                    candidate = f"{base}_text" if f"{base}_text".lower() not in taken else f"src_{base}"
+                taken.add(candidate.lower())
+                repaired = {
+                    **m,
+                    "target": candidate,
+                    "target_type": dest_native,
+                    "source_type": src_by.get(src, {}).get("inferred_type") or m.get("source_type") or "VARCHAR",
+                    "create_new": True,
+                    "assignment_strategy": "create_compatible_new",
+                    "transform": "none",
+                    "requires_review": True,
+                    "confidence": min(float(m.get("confidence") or 0.92), 0.92),
+                    "reasoning": (
+                        f"{m.get('reasoning', '')} · samples are not numeric — "
+                        f"CREATE/ADD '{candidate}' as {dest_native} instead of "
+                        f"lossy {tgt} ({tgt_type or logical})"
+                    ).strip(" ·"),
+                }
+                out.append(repaired)
+                continue
+            out.append(m)
+    finally:
+        if wire_token is not None:
+            reset_active_number_locale(wire_token)
     return out
 
 
@@ -598,6 +659,48 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
         )
 
 
+def _sqlite_affinity_text(source_db: str, declared: str) -> bool:
+    """Bare SQLite TEXT is affinity, not a domain the catalog declared.
+
+    Postgres TEXT is unbounded text and stays text. SQLite ``TEXT`` / bare
+    ``VARCHAR`` is where an offset timestamp is stored (QA R2-014). A length
+    such as ``VARCHAR(64)`` is a real width and is not promoted.
+    """
+    db = (source_db or "").strip().lower()
+    if db != "sqlite":
+        return False
+    token = (declared or "").strip().upper()
+    if not token or "(" in token:
+        return False
+    return token in {"TEXT", "VARCHAR", "STRING", "CHAR", "CLOB"}
+
+
+def _offset_aware_profile(upgraded: str) -> bool:
+    """True when a profiled carrier carries an offset the text did not drop."""
+    from services.type_system import (
+        datetime_timezone_polarity,
+        time_timezone_polarity,
+    )
+
+    return datetime_timezone_polarity(upgraded) in {"tz", "ltz"} or (
+        time_timezone_polarity(upgraded) == "tz"
+    )
+
+
+def _existing_open_text_column(
+    name: str,
+    declared_target_types: dict[str, str],
+    destination_table_exists: bool | None,
+) -> bool:
+    """True when this destination column already exists as open text."""
+    if destination_table_exists is not True:
+        return False
+    declared = str(declared_target_types.get(name) or "").strip()
+    if not declared:
+        return False
+    return normalize_logical_type(declared) in _UNTYPED_TEXT_LOGICALS
+
+
 def run_mapping_pipeline(
     source_columns: list[str],
     target_columns: list[str],
@@ -619,6 +722,37 @@ def run_mapping_pipeline(
     target_type_authority: dict[str, str] | None = None,
     job_id: str = "",
 ) -> dict:
+    from services.source_engine_scope import active_source_engine, bind_source_engine
+
+    # Create-new DDL and the lossy gate read the source engine from this
+    # scope. An unbound call treated PostgreSQL VARCHAR → SQL Server NVARCHAR
+    # as an invent, and a MySQL TIMESTAMP source as DATETIME(6).
+    # file_format covers the Excel/CSV drop, which has no database engine id.
+    # Leaving it unbound graded Latin-1 VARCHAR as lossless on the plan while
+    # Validate, which binds the file format, blocked the same column.
+    scoped_engine = (source_db_type or file_format or "").strip()
+    if scoped_engine and not active_source_engine():
+        with bind_source_engine(scoped_engine):
+            return run_mapping_pipeline(
+                source_columns,
+                target_columns,
+                source_schemas=source_schemas,
+                target_schemas=target_schemas,
+                file_format=file_format,
+                confidence_threshold=confidence_threshold,
+                use_llm=use_llm,
+                source_samples=source_samples,
+                validation_mode=validation_mode,
+                destination_db_type=destination_db_type,
+                source_db_type=source_db_type,
+                schema_policy=schema_policy,
+                sync_mode=sync_mode,
+                destination_table_exists=destination_table_exists,
+                source_types_authoritative=source_types_authoritative,
+                prior_mappings=prior_mappings,
+                target_type_authority=target_type_authority,
+                job_id=job_id,
+            )
     from services.semantic_analyzer import analyze_schema
 
     classification = classify_format(source_columns, file_format)
@@ -684,8 +818,18 @@ def run_mapping_pipeline(
 
     if source_samples and source_columns:
         from services.data_profiler import merge_profiler_schema, profile_dataset
-        from services.value_serializer import evidence_samples
+        from services.value_serializer import evidence_samples, is_null_evidence
 
+        # Type evidence must drop NULL (a sentinel is not a VARCHAR token).
+        # The column profile must not: stripping first reported null_rate=0.0
+        # on a column that held seven SQL NULLs.
+        observed_null_rate: dict[str, float] = {}
+        for col, vals in source_samples.items():
+            seq = list(vals or [])
+            if not seq:
+                continue
+            empty = sum(1 for v in seq if is_null_evidence(v))
+            observed_null_rate[col] = round(empty / len(seq), 3)
         source_samples = {
             col: evidence_samples(vals) for col, vals in source_samples.items()
         }
@@ -698,7 +842,28 @@ def run_mapping_pipeline(
                 for col, vals in source_samples.items()
             })
         if profile_rows:
-            profiled = profile_dataset(source_columns, profile_rows)
+            wire_token = None
+            if source_db_type:
+                from services.transform_engine import (
+                    NUMBER_LOCALE_WIRE,
+                    _active_number_locale,
+                    reset_active_number_locale,
+                    set_active_number_locale,
+                )
+                from src.transfer.connector_capabilities import (
+                    renders_typed_wire_values,
+                )
+
+                # Postgres NUMERIC(12,3) arrives as ``1.234``. Auto reads that
+                # as a thousands group and the column is inferred TEXT, then
+                # the plan blocks. A typed database extract is WIRE.
+                if renders_typed_wire_values(source_db_type) and not _active_number_locale():
+                    wire_token = set_active_number_locale(NUMBER_LOCALE_WIRE)
+            try:
+                profiled = profile_dataset(source_columns, profile_rows)
+            finally:
+                if wire_token is not None:
+                    reset_active_number_locale(wire_token)
             merged_schema = merge_profiler_schema(
                 {s["name"]: s.get("inferred_type", "VARCHAR") for s in (source_schemas or [])},
                 profiled.get("schema", {}),
@@ -720,25 +885,70 @@ def run_mapping_pipeline(
             # the fidelity verdict must judge that same type. Otherwise Map
             # invents NUMBER from the profile and then calls its own invent a
             # lossy VARCHAR→NUMBER cast, blocking every file→warehouse route.
-            for name, upgraded in merged_schema.items():
+            profiled_schema = {
+                str(name): str(token or "")
+                for name, token in (profiled.get("schema") or {}).items()
+            }
+            for name, upgraded in list(merged_schema.items()):
                 declared = declared_source_types.get(name, "")
+                profiled_type = profiled_schema.get(name, "")
+                # Authoritative SQLite keeps TEXT even when every sample is an
+                # offset instant, and Map then blocks its own VARCHAR→TIMESTAMPTZ
+                # invent (QA R2-014). Promote only that affinity, and only when
+                # the destination is not already an open text column.
+                if (
+                    _sqlite_affinity_text(source_db_type, declared)
+                    and _offset_aware_profile(profiled_type)
+                    and not _existing_open_text_column(
+                        name,
+                        declared_target_types,
+                        destination_table_exists,
+                    )
+                ):
+                    merged_schema[name] = profiled_type
+                    declared_source_types[name] = profiled_type
+                    continue
                 if not upgraded or not declared:
                     continue
                 if normalize_logical_type(declared) in _UNTYPED_TEXT_LOGICALS and (
                     normalize_logical_type(upgraded)
                     != normalize_logical_type(declared)
                 ):
+                    # A declared text column whose samples carry an offset is
+                    # still text when the destination column is already text.
+                    # That is the ``::text`` cast: both sides store the offset
+                    # in the string. Promoting the source to TIMESTAMPTZ made
+                    # the cast demand a contract for TIMESTAMPTZ → TEXT.
+                    # A catalog TIMESTAMPTZ is not an untyped text declaration,
+                    # so that pair stays a contract.
+                    if _offset_aware_profile(str(upgraded)) and _existing_open_text_column(
+                        name,
+                        declared_target_types,
+                        destination_table_exists,
+                    ):
+                        merged_schema[name] = declared
+                        continue
                     declared_source_types[name] = str(upgraded)
             source_schemas = [
                 {
                     **s,
                     "inferred_type": merged_schema.get(s["name"], s.get("inferred_type", "VARCHAR")),
                     "samples": source_samples.get(s["name"], s.get("samples", []))[:8],
-                    "null_rate": (col_profiles.get(s["name"]) or {}).get("null_rate"),
+                    "null_rate": observed_null_rate.get(
+                        s["name"],
+                        (col_profiles.get(s["name"]) or {}).get("null_rate"),
+                    ),
                     "distinct_ratio": (col_profiles.get(s["name"]) or {}).get("distinct_ratio"),
                     "statistics": (col_profiles.get(s["name"]) or {}).get("statistics") or {},
                 }
                 for s in (source_schemas or [{"name": c, "inferred_type": "VARCHAR", "samples": []} for c in source_columns])
+            ]
+        elif observed_null_rate and source_schemas:
+            # Every sampled cell was NULL. There is no type evidence, but the
+            # profile must still say the column is entirely null.
+            source_schemas = [
+                {**s, "null_rate": observed_null_rate.get(s["name"], s.get("null_rate"))}
+                for s in source_schemas
             ]
 
     semantic_analysis = analyze_schema(source_schemas or [])
@@ -911,6 +1121,16 @@ def run_mapping_pipeline(
         col_samples = [
             str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
         ] or None
+        # A payload scroll is a page, not the population. Re-stamping bare
+        # DECIMAL from those cells put NUMERIC(4,2) on Postgres and blocked
+        # every later price that needed another integer digit.
+        from services.schema_introspect import sample_page_is_not_a_precision_contract
+
+        invent_samples = (
+            None
+            if sample_page_is_not_a_precision_contract(source_db_type)
+            else col_samples
+        )
 
         if pending_dest:
             tgt_type = ""
@@ -925,9 +1145,9 @@ def run_mapping_pipeline(
                 tgt_type = create_new_mapping_target_type(
                     "DECIMAL",
                     destination_db_type or "",
-                    samples=col_samples,
+                    samples=invent_samples,
                     source_db=source_db_type,
-                ) if destination_db_type or col_samples else "DECIMAL"
+                ) if destination_db_type or invent_samples else "DECIMAL"
             elif intentional_create and "unsigned" in src_l:
                 # INT/MEDIUMINT/SMALLINT UNSIGNED → BIGINT create-new (signed INT overflows).
                 tgt_type = "BIGINT"
@@ -937,7 +1157,7 @@ def run_mapping_pipeline(
                 tgt_type = create_new_mapping_target_type(
                     src_type,
                     destination_db_type,
-                    samples=col_samples,
+                    samples=invent_samples,
                     source_db=source_db_type,
                 )
             elif destination_db_type and destination_table_exists is True:
@@ -954,9 +1174,9 @@ def run_mapping_pipeline(
                 tgt_type = ""
             else:
                 # No dest dialect — still stamp observed DECIMAL(p,s) for Map honesty.
-                if col_samples and normalize_logical_type(src_type) in {"decimal", "float"}:
+                if invent_samples and normalize_logical_type(src_type) in {"decimal", "float"}:
                     tgt_type = create_new_mapping_target_type(
-                        src_type, "", samples=col_samples
+                        src_type, "", samples=invent_samples
                     )
                 else:
                     tgt_type = src_type
@@ -964,6 +1184,24 @@ def run_mapping_pipeline(
             tgt_type = _legalize_existing_timestamp_target_type(
                 destination_db_type, ddl_carrier_type(str(tgt_type))
             )
+            if (
+                destination_table_exists is True
+                and src_type
+                and tgt_type
+                and not (m.get("user_override") or m.get("userOverride"))
+            ):
+                from services.document_instant import (
+                    promote_document_instant_existing_target,
+                )
+
+                promoted = promote_document_instant_existing_target(
+                    src_type,
+                    str(tgt_type),
+                    dest_db=destination_db_type or "",
+                    source_db=source_db_type or "",
+                )
+                if promoted and promoted != str(tgt_type):
+                    tgt_type = promoted
             tgt_name = str(m.get("target") or "").strip()
             if tgt_name and tgt_type and destination_table_exists is not False:
                 # stamp_additive rebinds from live dest types; keep that map
@@ -975,7 +1213,7 @@ def run_mapping_pipeline(
             if (
                 strategy in {"identity_passthrough", "create_compatible_new"}
                 or destination_table_exists is False
-            ) and col_samples:
+            ) and invent_samples:
                 from services.type_system import parse_numeric_precision_scale
 
                 bare = normalize_logical_type(tgt_type) in {"decimal", "float"}
@@ -984,15 +1222,37 @@ def run_mapping_pipeline(
                     upgraded = create_new_mapping_target_type(
                         src_type or tgt_type,
                         destination_db_type or "",
-                        samples=col_samples,
+                        samples=invent_samples,
                         source_db=source_db_type,
                     )
                     if upgraded:
                         tgt_type = upgraded
+        if (
+            not (m.get("user_override") or m.get("userOverride"))
+            and (intentional_create or destination_table_exists is False)
+            and destination_table_exists is not True
+            and src_type
+            and tgt_type
+        ):
+            from services.document_instant import promote_document_instant_create_target
+
+            promoted = promote_document_instant_create_target(
+                src_type,
+                str(tgt_type),
+                dest_db=destination_db_type or "",
+                source_db=source_db_type or "",
+            )
+            if promoted and promoted != str(tgt_type):
+                tgt_type = promoted
+                tgt_key = str(m.get("target") or "").strip()
+                if tgt_key and tgt_key in declared_target_types:
+                    declared_target_types[tgt_key] = str(tgt_type)
         # LLM-invented transforms are held as suggested_transform until Map accept —
         # do not let deterministic infer silently re-apply the invent.
         if m.get("llm_invented_transform") and not m.get("user_override"):
             transform = m.get("transform") or "none"
+        elif operator_stamp and m.get("transform") is not None:
+            transform = str(m.get("transform") or "none")
         else:
             transform = infer_transform_for_mapping(
                 m["source"],
@@ -1009,6 +1269,8 @@ def run_mapping_pipeline(
                 user_override=bool(m.get("user_override")),
                 src_type=src_type,
                 tgt_type=tgt_type or src_type,
+                source=m["source"],
+                target=m["target"],
             )
         # New/generic destinations: typed transforms must stamp *physical* DDL
         # for the destination (DATETIME(6)/CHAR(36)/JSONB) — never bare logical
@@ -1101,6 +1363,13 @@ def run_mapping_pipeline(
             except Exception:
                 risk_cleared = False
             if not risk_cleared:
+                from services.decision_kernel.type_invent import (
+                    refuse_boolean_invent_from_numeric_source,
+                )
+
+                tgt_type = refuse_boolean_invent_from_numeric_source(
+                    src_type, tgt_type, destination_db_type or ""
+                )
                 tgt_type = refuse_create_new_numeric_collapse(
                     src_type, tgt_type, destination_db_type or ""
                 )
@@ -1147,18 +1416,40 @@ def run_mapping_pipeline(
 
     from services.sample_validator import refine_mappings_with_samples
 
-    enriched_mappings = refine_mappings_with_samples(
-        enriched_mappings,
-        source_schemas=source_schemas,
-        target_schemas=target_schemas,
-    )
-    enriched_mappings = _repair_unparseable_numeric_targets(
-        enriched_mappings,
-        source_schemas=source_schemas,
-        target_schemas=target_schemas,
-        destination_db_type=destination_db_type,
-        destination_table_exists=destination_table_exists,
-    )
+    # Sample parse rates and numeric-fit verdicts judge cells rendered by the
+    # source engine. A typed extract renders wire numbers (``150.345``), which
+    # Auto reads as an ambiguous thousands group — the same reason the profile
+    # pass pins WIRE. Without the pin, a scale-3 DECIMAL column was demoted to
+    # confidence 0.55 or diverted into a TEXT carrier (DEF-C-009 / ACC-03).
+    wire_token = None
+    if source_db_type:
+        from src.transfer.connector_capabilities import renders_typed_wire_values
+        from services.transform_engine import (
+            NUMBER_LOCALE_WIRE,
+            _active_number_locale,
+            reset_active_number_locale,
+            set_active_number_locale,
+        )
+
+        if renders_typed_wire_values(source_db_type) and not _active_number_locale():
+            wire_token = set_active_number_locale(NUMBER_LOCALE_WIRE)
+    try:
+        enriched_mappings = refine_mappings_with_samples(
+            enriched_mappings,
+            source_schemas=source_schemas,
+            target_schemas=target_schemas,
+        )
+        enriched_mappings = _repair_unparseable_numeric_targets(
+            enriched_mappings,
+            source_schemas=source_schemas,
+            target_schemas=target_schemas,
+            destination_db_type=destination_db_type,
+            destination_table_exists=destination_table_exists,
+            source_db_type=source_db_type,
+        )
+    finally:
+        if wire_token is not None:
+            reset_active_number_locale(wire_token)
 
     from services.mapping_quality import (
         detect_cross_field_issues,
@@ -1212,6 +1503,7 @@ def run_mapping_pipeline(
         validation_mode=validation_mode,
         dest_db_type=destination_db_type,
         dest_table_exists=destination_table_exists,
+        samples_by_source=source_samples,
     )
     if coercion_issues:
         quality_issues = [*quality_issues, *[c["message"] for c in coercion_issues if c.get("severity") == "block"]]
@@ -1238,12 +1530,25 @@ def run_mapping_pipeline(
     # Transforms are final here, so the verdict computed now is the one every
     # surface renders. Stamping it on the mapping keeps Map, column review, the
     # proof drawer, and the Pilot plan from each inventing their own risk chip.
+    # Samples travel with the verdict: an ASCII Excel column into a Latin-1
+    # VARCHAR is lossless, and the same column with no sample stays a collapse.
+    samples_by_src = {
+        str(s.get("name") or ""): list(
+            s.get("samples") or s.get("sample_values") or s.get("preview_values") or []
+        )[:64]
+        for s in (source_schemas or [])
+        if s.get("name")
+        and (
+            s.get("samples") or s.get("sample_values") or s.get("preview_values")
+        )
+    }
     enriched_mappings = stamp_mapping_fidelity(
         enriched_mappings,
         source_types=declared_source_types,
         target_types=declared_target_types,
         destination_db_type=destination_db_type or "",
         dest_table_exists=destination_table_exists,
+        samples_by_source=samples_by_src,
     )
     # Snapshot before the risk/Kernel stamps: both may replace a projected
     # carrier with the destination's physical DDL, which invalidates the verdict
@@ -1259,11 +1564,12 @@ def run_mapping_pipeline(
     try:
         from services.decision_kernel import stamp_additive_mapping_types
 
-        samples_by_src = {
-            str(s.get("name") or ""): list(s.get("samples") or [])[:32]
-            for s in (source_schemas or [])
-            if s.get("name")
-        }
+        if not samples_by_src:
+            samples_by_src = {
+                str(s.get("name") or ""): list(s.get("samples") or [])[:32]
+                for s in (source_schemas or [])
+                if s.get("name")
+            }
         live_types: dict[str, str] = {}
         for s in (introspected_target_schemas or []):
             name = str(s.get("name") or "")
@@ -1297,6 +1603,7 @@ def run_mapping_pipeline(
                 target_types=declared_target_types,
                 destination_db_type=destination_db_type or "",
                 dest_table_exists=destination_table_exists,
+                samples_by_source=samples_by_src,
             )
     except Exception as stamp_exc:
         # Fail-closed honesty: leave create-new target_type blank so Map/Validate
@@ -1471,13 +1778,29 @@ def run_mapping_pipeline(
         ],
     }
 
+    from services.db_type_utils import (
+        dest_schema_is_recreated_on_overwrite,
+        overwrite_replaces_rows,
+    )
     from services.shape_contract import classify_dest_exists_shape
+    from services.sync_cursor import is_overwrite_sync
 
+    _dest_recreated = is_overwrite_sync(
+        sync_mode
+    ) and dest_schema_is_recreated_on_overwrite(destination_db_type)
     shape_contract = classify_dest_exists_shape(
         destination_table_exists=destination_table_exists,
         source_columns=list(source_columns or []),
         dest_columns=list(target_columns or []),
         mappings=list(enriched_mappings),
+        dest_recreated=_dest_recreated,
+        # Relational overwrite keeps the table, replaces the rows — the
+        # contract copy must say replace, not "insert more" (QA T21).
+        dest_emptied=(
+            is_overwrite_sync(sync_mode)
+            and not _dest_recreated
+            and overwrite_replaces_rows(destination_db_type)
+        ),
     )
 
     return {

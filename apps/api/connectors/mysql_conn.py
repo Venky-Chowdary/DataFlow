@@ -62,6 +62,13 @@ def get_connection(
             io_timeout = 180
         else:
             io_timeout = 45
+    elif purpose_l == "reconcile":
+        # Gate-8 reads the population after the write. A metadata lock still
+        # fails at 120s. The socket wait is longer so a 100k checksum scan is
+        # not killed mid-row and left looking stuck at 99%.
+        connect_timeout = 15
+        io_timeout = 1800
+        lock_wait_s = 120
     else:
         connect_timeout = 15
         io_timeout = 300 if public_proxy else 120

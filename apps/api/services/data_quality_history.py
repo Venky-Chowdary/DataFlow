@@ -14,7 +14,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import os
 from services.brand_env import getenv_brand
 from collections import Counter
 from dataclasses import asdict, dataclass, field

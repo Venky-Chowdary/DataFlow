@@ -17,7 +17,7 @@ function mapRow(
   return out;
 }
 
-function serializeRows(rows: Record<string, unknown>[], format: string): { blob: Blob; mime: string; ext: string } {
+export function serializeRows(rows: Record<string, unknown>[], format: string): { blob: Blob; mime: string; ext: string } {
   const fmt = format.toLowerCase();
   if (fmt === "json") {
     return {

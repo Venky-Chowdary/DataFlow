@@ -210,6 +210,44 @@ export interface EditableMapping {
    * the operator asked for, which still requires an ALTER or a remap.
    */
   destTypeDeclared?: string;
+  /**
+   * Compiled business-rule workbook row that produced this pair. Empty when
+   * the operator mapped by hand. Provenance (sheet/line) is the audit trail
+   * for "why this dest column" — not a second confidence score.
+   */
+  businessRule?: MappingBusinessRule;
+  /**
+   * Execute-enforced business-rule contracts attached to this write. Emitted
+   * as ``rule_contracts``; the writer quarantines rows that fail them.
+   */
+  ruleContracts?: RuleContractWire[];
+}
+
+/** A compiled validate contract carried to Execute on the mapping that writes its dest. */
+export interface RuleContractWire {
+  rule_id: string;
+  type: string;
+  value?: string;
+  values?: string[];
+  op?: string;
+  pattern?: string;
+  rule_text?: string;
+}
+
+/** One compiled rule from an uploaded Excel / CSV / JSON workbook. */
+export interface MappingBusinessRule {
+  kind: string;
+  kindLabel: string;
+  text: string;
+  status: "executable" | "needs_confirmation" | "conflict" | string;
+  confidence: number;
+  sheet?: string;
+  row?: number;
+  issues?: string[];
+  /** Compiled rule id — links this mapping's evidence to the report row. */
+  ruleId?: string;
+  /** Compile-report fingerprint — links to the business_rules.compiled audit event. */
+  reportFingerprint?: string;
 }
 
 /** Reduction reason codes — keep aligned with ``REDUCTION_DISPOSITIONS``. */
@@ -2235,6 +2273,7 @@ export function buildPreflightMappings(
         // G20 — a declared code map travels with the mapping, never invented.
         code_crosswalk: omitted ? undefined : (safe.codeCrosswalk || undefined),
         code_crosswalk_system: omitted ? undefined : (safe.codeCrosswalkSystem?.trim() || undefined),
+        rule_contracts: omitted ? undefined : (safe.ruleContracts?.length ? safe.ruleContracts : undefined),
         // Existing dest: never invent target_type from inferredType when Map
         // left destType blank (partial Studio honesty — write path fail-closes).
         // Create-new may still preview from inferredType / destType stamp.
@@ -2271,6 +2310,20 @@ export function buildPreflightMappings(
         // Engine G15 only clears false-friend on this flag — not Approve / user_override.
         false_friend_confirmed: omitted ? undefined : Boolean(safe.falseFriendConfirmed) || undefined,
         control_total: omitted ? undefined : (safe.controlTotal === true ? true : safe.controlTotal === false ? false : undefined),
+        business_rule: safe.businessRule
+          ? {
+              kind: safe.businessRule.kind,
+              kind_label: safe.businessRule.kindLabel,
+              text: safe.businessRule.text,
+              status: safe.businessRule.status,
+              confidence: safe.businessRule.confidence,
+              sheet: safe.businessRule.sheet,
+              row: safe.businessRule.row,
+              issues: safe.businessRule.issues,
+              rule_id: safe.businessRule.ruleId,
+              report_fingerprint: safe.businessRule.reportFingerprint,
+            }
+          : undefined,
       };
     });
   }
@@ -2399,7 +2452,20 @@ export function editableFromPipelineMappings(
     false_friend_confirmed?: boolean;
     code_crosswalk?: Record<string, string>;
     code_crosswalk_system?: string;
+    rule_contracts?: RuleContractWire[];
     control_total?: boolean;
+    business_rule?: {
+      kind?: string;
+      kind_label?: string;
+      text?: string;
+      status?: string;
+      confidence?: number;
+      sheet?: string;
+      row?: number;
+      issues?: string[];
+      rule_id?: string;
+      report_fingerprint?: string;
+    };
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -2573,9 +2639,41 @@ export function editableFromPipelineMappings(
           )
         : undefined,
       codeCrosswalkSystem: m.code_crosswalk_system || undefined,
+      ruleContracts: Array.isArray(m.rule_contracts)
+        ? m.rule_contracts
+            .filter((c) => c && typeof c === "object")
+            .map((c) => ({
+              rule_id: String(c.rule_id || ""),
+              type: String(c.type || ""),
+              value: c.value,
+              values: c.values,
+              op: c.op,
+              pattern: c.pattern,
+              rule_text: c.rule_text,
+            }))
+        : undefined,
       controlTotal: typeof m.control_total === "boolean"
         ? m.control_total
         : defaultControlTotal(sourceType, destType, m.semantic_role),
+      businessRule: m.business_rule && typeof m.business_rule === "object"
+        ? {
+            kind: String(m.business_rule.kind || ""),
+            kindLabel: String(m.business_rule.kind_label || m.business_rule.kind || ""),
+            text: String(m.business_rule.text || ""),
+            status: String(m.business_rule.status || ""),
+            confidence: typeof m.business_rule.confidence === "number"
+              && Number.isFinite(m.business_rule.confidence)
+              ? m.business_rule.confidence
+              : 0,
+            sheet: m.business_rule.sheet,
+            row: m.business_rule.row,
+            issues: m.business_rule.issues,
+            ruleId: m.business_rule.rule_id ? String(m.business_rule.rule_id) : undefined,
+            reportFingerprint: m.business_rule.report_fingerprint
+              ? String(m.business_rule.report_fingerprint)
+              : undefined,
+          }
+        : undefined,
     };
     if (isEnumToBooleanConflict(base)) {
       if (base.existsInDestination) {

@@ -549,7 +549,6 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             if chunk:
                 yield headers, chunk
     elif fmt == "json":
-        import json
 
         from services.json_tabular import extract_json_records
 
@@ -571,7 +570,6 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             rows = [[cell_to_string(item.get(h, "")) for h in headers] for item in batch]
             yield headers, rows
     elif fmt == "jsonl":
-        import json
         # Two-pass: union sparse keys across the whole file, then project rows.
         headers: list[str] = []
         seen: set[str] = set()

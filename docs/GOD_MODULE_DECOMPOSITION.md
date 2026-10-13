@@ -131,3 +131,21 @@ endpoint resolution plus a lazy `services.foreign_key_orchestration` import.
 
 Both source modules stayed under budget afterwards without the ceiling being
 raised.
+
+## Extraction 2026-10-10
+
+| Module | What moved where | Lines before → after |
+| --- | --- | --- |
+| `services/type_system.py` | Coercion policy → `services/type_coercion.py` | 8484 → 7523 |
+| `services/reconciliation.py` | Vector verifiers → `services/reconciliation_vector_verify.py` | 5201 → 4916 |
+| `connectors/generic_sql.py` | SQLAlchemy/logical-type mappings → `connectors/generic_sql_sa_types.py` | 7015 → 6105 |
+| `connectors/writer_common.py` | Quarantine fit → `connectors/writer_quarantine_fit.py` | 5652 → 5439 |
+| `src/transfer/engine.py` | Preflight, destination, and automap helpers → `engine_preflight.py`, `engine_destination.py`, `engine_automap.py` | 6299 → 5423 |
+| `services/schema_introspect.py` | SQL Server/Oracle introspection → `services/schema_introspect_enterprise.py` | 5290 → 4504 |
+| `src/transfer/stream.py` | Write loop diagnostics → `src/transfer/stream_write.py` | 4337 → 3701 |
+| `src/transfer/adapters.py` | File destination writer → `src/transfer/adapters_file_write.py` | 2551 → 2252 |
+| `services/preflight_service.py` | Context and population gates → `services/preflight_context.py`, `services/preflight_population.py` | 3593 → 2961 |
+
+### Debt: module-object call prefixes
+
+Some moved helpers call back into the original module through a module-object prefix (`_ts.`, `_engine.`, `_si.`, `_x = sys.modules[__name__]`) and the originals keep lazy `__getattr__` / `# noqa: F401` re-exports. This is temporary. It exists only so existing `monkeypatch.setattr(<original module>, ...)` test seams still intercept the moved code. To remove it, migrate those tests to patch the owning module (`type_coercion`, `engine_destination`, `schema_introspect_enterprise`, ...), then drop the prefixes and the re-exports. New code must import from the owning module.

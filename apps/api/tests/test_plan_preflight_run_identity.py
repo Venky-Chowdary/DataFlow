@@ -77,7 +77,7 @@ PASSING = {
 def test_plan_preflight_returns_a_run_id():
     plan_id = _plan_id()
     with _patched_preflight(PASSING), \
-         patch("services.transfer_plan_service.read_source_database", side_effect=Exception("skip")):
+         patch("src.transfer.adapters.read_source_database", side_effect=Exception("skip")):
         out = run_plan_preflight(plan_id)
 
     run_id = out.get("run_id")
@@ -89,7 +89,7 @@ def test_plan_preflight_returns_a_run_id():
 def test_returned_run_id_is_the_id_in_plan_history():
     plan_id = _plan_id()
     with _patched_preflight(PASSING), \
-         patch("services.transfer_plan_service.read_source_database", side_effect=Exception("skip")):
+         patch("src.transfer.adapters.read_source_database", side_effect=Exception("skip")):
         out = run_plan_preflight(plan_id)
 
     plan = get_plan(plan_id)
@@ -103,7 +103,7 @@ def test_engine_supplied_run_id_is_preserved():
     plan_id = _plan_id()
     supplied = dict(PASSING, run_id="pf_engine_supplied_1")
     with _patched_preflight(supplied), \
-         patch("services.transfer_plan_service.read_source_database", side_effect=Exception("skip")):
+         patch("src.transfer.adapters.read_source_database", side_effect=Exception("skip")):
         out = run_plan_preflight(plan_id)
 
     assert out["run_id"] == "pf_engine_supplied_1"
@@ -115,7 +115,7 @@ def test_engine_supplied_run_id_is_preserved():
 def test_each_run_gets_its_own_id():
     plan_id = _plan_id()
     with _patched_preflight(PASSING), \
-         patch("services.transfer_plan_service.read_source_database", side_effect=Exception("skip")):
+         patch("src.transfer.adapters.read_source_database", side_effect=Exception("skip")):
         first = run_plan_preflight(plan_id)
         second = run_plan_preflight(plan_id)
 

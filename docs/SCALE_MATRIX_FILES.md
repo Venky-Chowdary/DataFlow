@@ -517,9 +517,9 @@ proves the destination stayed empty:
   column(s); refuse silent column drop`), destination `COUNT(*) = 0`. Quarantine is the
   answer for a bad *cell*; a ragged row is a disagreement about which column a value
   belongs to, and guessing would move values into the wrong columns.
-- legacy BIFF `.xls`: refused (`Legacy .xls is not supported. Save the workbook as .xlsx`).
-  No BIFF reader is shipped and BIFF8 caps a sheet at 65,536 rows, so a 100K `.xls`
-  cannot exist. Documented as unsupported rather than faked.
+- legacy BIFF `.xls`: read by xlrd when the file is an OLE compound document.
+  A renamed `.xlsx` is ZIP magic and loads as Excel. BIFF8 still caps a sheet at
+  65,536 rows, so the 100K cell stays `.xlsx` and `.xls` is not an unsupported-carrier cell.
 - `.zip` container: refused. The reader handles gzip only; the archive is rejected as
   undecodable bytes rather than misparsed. The message names the encoding, not the
   container — cosmetic, and worth a clearer error.

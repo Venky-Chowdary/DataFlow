@@ -39,19 +39,52 @@ def test_hubspot_cdk_spec_discover() -> None:
 def test_hubspot_cdk_check_and_read() -> None:
     c = HubSpotCDKConnector({"api_key": "tok"})
     with patch("connectors.sdk.hubspot_cdk.request") as req:
-        resp = MagicMock()
-        resp.raise_for_status = MagicMock()
-        resp.json.return_value = {
-            "results": [{"id": "1", "properties": {"email": "a@b.com", "lastmodifieddate": "2026-01-01"}}],
-            "paging": {"next": {"after": "cursor2"}},
-        }
-        req.return_value = resp
+        def response(payload: dict) -> MagicMock:
+            resp = MagicMock()
+            resp.raise_for_status = MagicMock()
+            resp.json.return_value = payload
+            return resp
+
+        req.side_effect = [
+            response({"results": []}),
+            response(
+                {
+                    "results": [
+                        {
+                            "id": "1",
+                            "properties": {
+                                "email": "a@b.com",
+                                "lastmodifieddate": "2026-01-01T00:00:00Z",
+                            },
+                        }
+                    ],
+                    "paging": {"next": {"after": "2"}},
+                }
+            ),
+            response(
+                {
+                    "results": [
+                        {
+                            "id": "2",
+                            "properties": {
+                                "email": "c@d.com",
+                                "lastmodifieddate": "2026-01-02T00:00:00Z",
+                            },
+                        }
+                    ]
+                }
+            ),
+        ]
         ok, msg = c.check()
         assert ok is True
         batches = list(c.read("contacts", state=None, limit=10))
-        assert len(batches) == 1
+        assert len(batches) == 2
         assert batches[0].records[0]["email"] == "a@b.com"
-        assert batches[0].state.get("contacts", {}).get("after") == "cursor2"
+        assert batches[-1].state["contacts"] == {
+            "cursor": "2026-01-02T00:00:00Z",
+            "after": None,
+            "mode": "search",
+        }
 
 
 def test_declarative_http_discover_and_read() -> None:

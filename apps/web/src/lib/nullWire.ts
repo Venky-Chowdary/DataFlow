@@ -17,3 +17,9 @@ export function nullWireLabel(raw: unknown): string | null {
   if (trimmed === MISSING_SENTINEL) return "absent";
   return null;
 }
+
+/** SQL NULL on a quarantine surface: JSON null or the internal wire token. */
+export function isSqlNullQuarantineCell(raw: unknown): boolean {
+  if (raw === null) return true;
+  return nullWireLabel(raw) === "NULL";
+}

@@ -146,19 +146,16 @@ def read_index_batch(
             # already present in _source (operator data wins for collision).
             if "_id" not in src:
                 src["_id"] = hit.get("_id")
-            if "_index" not in src and hit.get("_index") is not None:
-                src["_index"] = hit.get("_index")
-            if "_routing" not in src and hit.get("_routing") is not None:
-                src["_routing"] = hit.get("_routing")
-            if "_seq_no" not in src and "_seq_no" in hit:
-                src["_seq_no"] = hit.get("_seq_no")
-            if "_primary_term" not in src and "_primary_term" in hit:
-                src["_primary_term"] = hit.get("_primary_term")
+            # ``_index``, ``_routing``, ``_seq_no`` and ``_primary_term`` are
+            # hit metadata, not document fields. Projecting ``_index`` made
+            # Map create a destination column the SQL write then rejected,
+            # and the job finished with 0 rows on that field. An application
+            # field of the same name already in ``_source`` is left alone.
             records.append(src)
         page_keys: list[str] = []
         seen: set[str] = set()
         # Prefer identity columns first for Map / conflict_columns suggestion.
-        for preferred in ("_id", "_index", "_routing", "_seq_no", "_primary_term"):
+        for preferred in ("_id",):
             if any(preferred in r for r in records) and preferred not in seen:
                 seen.add(preferred)
                 page_keys.append(preferred)

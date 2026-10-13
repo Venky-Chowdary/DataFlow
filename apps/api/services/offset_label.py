@@ -164,7 +164,6 @@ def stores_originating_offset(engine: str, type_name: str) -> bool:
     ``TIMESTAMP WITH TIME ZONE`` is Oracle (stores) and PostgreSQL (does
     not) — claiming it without an engine is the SCT lie.
     """
-    from services.type_system import datetime_timezone_polarity
 
     raw = (type_name or "").strip()
     if not raw:

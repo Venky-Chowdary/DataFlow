@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from services.decision_kernel.findings import typed_cast_incompatible_with_text_sink
 from services.transform_engine import infer_transform_for_mapping
@@ -82,7 +85,7 @@ _STRING_TRANSFORMS: frozenset[str] = {
     "trim", "trim_id", "upper", "lower", "uuid", "hash_pii", "mask_pii", "redact",
     "none",
     "date", "datetime", "json", "binary", "decimal",
-    "phone", "email", "url", "iban", "postal",
+    "phone", "email", "url", "iban", "postal", "time",
     "currency", "percentage", "base64", "strip_controls", "normalize_unicode",
 }
 
@@ -178,6 +181,11 @@ def resolve_transform(
     raw = mapping.get("transform")
     if raw in UI_TO_ENGINE:
         raw = UI_TO_ENGINE[raw]
+    # Replay / Map sent this transform on purpose. Do not replace it with an
+    # inferred cast: that turned a valid IBAN, time, or id into NULL when the
+    # guessed carrier could not parse the token.
+    if mapping.get("transform_override") and raw not in {None, "", "none", "null"}:
+        return str(raw)
     # Intentional omit never participates in row projection / type coercion.
     if str(raw or "").lower() in {"omit", "intentional_omit", "drop", "exclude"}:
         return "omit"
@@ -281,6 +289,33 @@ def attach_transforms_to_mappings(
         )
         out.append(enriched)
     return out
+
+
+def write_plan_transform(
+    mapping: dict,
+    *,
+    column_types: dict[str, str] | None = None,
+    dest_types: dict[str, str] | None = None,
+    destination_table_exists: bool | None = None,
+) -> Any:
+    """Write-path cast Gate-8 will apply — the same resolver Execute stamps.
+
+    The Decision Artifact keeps the operator's transform. Only the gate plan
+    sees the resolved cast, so a blank integer is judged as SQL NULL on
+    Validate instead of passing as identity and failing at Run. A resolver
+    failure returns the operator transform; it does not invent a cast.
+    """
+    raw = mapping.get("transform") if isinstance(mapping, dict) else None
+    try:
+        live = dest_types if destination_table_exists is True else {}
+        return resolve_transform(
+            mapping if isinstance(mapping, dict) else {},
+            column_types=dict(column_types or {}),
+            dest_types=dict(live or {}),
+        )
+    except Exception:
+        logger.debug("write-path transform resolve skipped", exc_info=True)
+        return raw
 
 
 def mapping_for_api(m: dict) -> dict[str, Any]:

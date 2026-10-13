@@ -9,6 +9,12 @@ from services.tombstone import (
 )
 
 
+def test_business_soft_delete_is_not_a_hard_delete():
+    assert is_row_tombstone({"id": 5, "is_deleted": True}) is False
+    assert is_row_tombstone({"id": 8, "is_deleted": 1, "label": "kept"}) is False
+    assert is_row_tombstone({"id": 1, "deleted_at": "2024-01-01"}) is False
+
+
 def test_liveness_columns_are_not_tombstones():
     assert detect_tombstone_column({}, ["id", "is_active", "name"]) is None
     assert is_row_tombstone({"id": 1, "is_active": 0}) is False

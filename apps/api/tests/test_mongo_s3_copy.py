@@ -226,8 +226,9 @@ def test_live_mongo_s3_empty_string_and_null_preserved():
         assert result.source_rows == 3
         assert _dest_count(bucket, dest) == 3
         body = client.get_object(Bucket=bucket, Key=dest)["Body"].read().decode("utf-8")
-        assert "\\N" in body
+        assert "\\N" not in body
         assert '""' in body
+        assert any(line.endswith(",") or ",," in line for line in body.splitlines())
     finally:
         coll.drop()
         mongo.close()

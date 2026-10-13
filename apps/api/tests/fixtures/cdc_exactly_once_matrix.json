@@ -131,7 +131,7 @@
       "dest": "iceberg",
       "sync_mode": "cdc",
       "eligible": false,
-      "reason": "exactly_once_dest_not_transactional",
+      "reason": "exactly_once_dest_txn_not_wired",
       "wired": false,
       "pass": true
     },

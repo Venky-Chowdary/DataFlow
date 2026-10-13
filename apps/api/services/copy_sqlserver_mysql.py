@@ -9,7 +9,7 @@ This is **not** BCP. Dest ``COUNT(*)`` must equal the source snapshot.
 Empty string stays empty string (MySQL VARCHAR and SQL Server NVARCHAR).
 
 Empty dest SELECTs the table once. Occupied dest with a mapped single PK
-skips complete ranges and DELETE+reloads partial ones. No mapped single
+skips a complete range. Append declines a partial range to the row path; overwrite DELETE+reloads it. No mapped single
 PK on an occupied dest: decline.
 
 Declines (row path keeps quarantine): transforms that change values,
@@ -25,7 +25,7 @@ import tempfile
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action
 from services.copy_mysql_mysql import fast_load_data_text_value
 from services.copy_mysql_pg import _FETCH_BATCH, _mysql_connect, _mysql_ident
 from services.copy_pg_mysql import (
@@ -244,6 +244,7 @@ def copy_sqlserver_to_mysql(
                         part["action"] = "load"
                         to_copy.append(part)
                     else:
+                        occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                         _delete_mysql_range(dst_cur, dest_q, dest_ident, part)
                         part["action"] = "reload"
                         to_copy.append(part)

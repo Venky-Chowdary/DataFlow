@@ -29,6 +29,25 @@ describe("connectorHealth", () => {
     assert.equal(connectorLooksHealthy({ last_test_ok: false }), false);
   });
 
+  it("clears a stale failed probe after a later successful job", () => {
+    const c = {
+      last_test_ok: false,
+      last_tested_at: "2026-10-08T01:00:00Z",
+      last_transfer_ok_at: "2026-10-08T02:00:00Z",
+    };
+    assert.equal(connectorTestHealth(c), "passed");
+    assert.equal(connectorTestLabel(c), "Last job succeeded");
+    assert.equal(connectorLooksHealthy(c), true);
+    assert.equal(
+      connectorTestHealth({
+        last_test_ok: false,
+        last_tested_at: "2026-10-08T03:00:00Z",
+        last_transfer_ok_at: "2026-10-08T02:00:00Z",
+      }),
+      "failed",
+    );
+  });
+
   it("coerces string/number booleans from Mongo payloads", () => {
     assert.equal(coerceLastTestOk("true"), true);
     assert.equal(coerceLastTestOk("false"), false);

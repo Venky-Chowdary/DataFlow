@@ -79,7 +79,7 @@ def test_plan_preflight_refetches_thin_sample_cache() -> None:
             ),
         ),
         patch(
-            "services.transfer_plan_service.read_source_database",
+            "src.transfer.adapters.read_source_database",
             return_value=(fat, ["id"], {"id": "VARCHAR"}),
         ),
         patch("services.transfer_plan_service.add_preflight_run"),

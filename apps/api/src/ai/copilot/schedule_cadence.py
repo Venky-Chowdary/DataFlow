@@ -203,19 +203,23 @@ def _daily(hour: int | None, minute: int, tz: str, assumed: bool) -> CadenceSpec
 def _weekly(
     dow: int | None, hour: int | None, minute: int, tz: str, assumed: bool
 ) -> CadenceSpec:
-    if dow is None or hour is None:
+    if dow is None:
         return CadenceSpec(
             interval="weekly",
             timezone=tz,
             description="every 7 days, starting at the first run",
             timezone_assumed=assumed,
         )
+    # "weekly on Monday" with no time anchors to the start of that weekday —
+    # dropping the named day onto a rolling 7-day preset ran it on whatever
+    # day it was created (QA S10).
+    anchored = hour if hour is not None else 0
     day = next(name for name, i in _WEEKDAYS.items() if i == dow and len(name) > 3)
     return CadenceSpec(
         interval="weekly",
-        cron=f"{minute} {hour} * * {dow}",
+        cron=f"{minute} {anchored} * * {dow}",
         timezone=tz,
-        description=f"every {day} at {_clock(hour, minute)} {tz}",
+        description=f"every {day} at {_clock(anchored, minute)} {tz}",
         timezone_assumed=assumed,
     )
 
@@ -228,7 +232,7 @@ def _every_n(unit: str, count: int, tz: str, assumed: bool) -> CadenceSpec:
                 "minutes. For anything longer, say hourly, daily or weekly."
             )
         return CadenceSpec(
-            interval="hourly",
+            interval="cron",
             cron=f"*/{count} * * * *",
             timezone=tz,
             description=f"every {count} minute(s)",
@@ -241,7 +245,7 @@ def _every_n(unit: str, count: int, tz: str, assumed: bool) -> CadenceSpec:
                 "For a daily run, say daily and the time."
             )
         return CadenceSpec(
-            interval="hourly",
+            interval="cron",
             cron=f"0 */{count} * * *",
             timezone=tz,
             description=f"every {count} hour(s) on the hour",
@@ -264,6 +268,36 @@ def _every_n(unit: str, count: int, tz: str, assumed: bool) -> CadenceSpec:
         f"“every {count} days” has no honest cron form: a day-of-month step restarts "
         "each month, so it would fire unevenly. Tell me a weekday (weekly) or a day "
         "of the month (monthly) instead."
+    )
+
+
+_BARE_CRON_RE = re.compile(
+    r"^(?:[^\s]+\s+){4}[^\s]+$"
+)
+
+
+def _bare_cron(raw: str, tz: str, assumed: bool) -> CadenceSpec | None:
+    """Accept a 5-field cron that was not prefixed with the word cron.
+
+    ``*/5 * * * *`` is a schedule. Requiring the word "cron" made
+    create_schedule answer with the failure question instead of the
+    expression the runner already knows how to evaluate.
+    """
+    text = " ".join((raw or "").split())
+    if not _BARE_CRON_RE.match(text):
+        return None
+    from services.cron_schedule import CronError, validate_cron
+
+    try:
+        validate_cron(text)
+    except CronError:
+        return None
+    return CadenceSpec(
+        interval="cron",
+        cron=text,
+        timezone=tz,
+        description=f"cron “{text}” ({tz})",
+        timezone_assumed=assumed,
     )
 
 
@@ -305,7 +339,7 @@ def parse_cadence(text: str) -> CadenceSpec:
         except CronError as exc:
             return _ask(f"I cannot schedule cron “{expr}”: {exc}")
         return CadenceSpec(
-            interval="daily",
+            interval="cron",
             cron=expr,
             timezone=tz,
             description=f"cron “{expr}” ({tz})",
@@ -335,7 +369,7 @@ def parse_cadence(text: str) -> CadenceSpec:
                 "months. Pick day 1–28, or say “last day” is not supported yet."
             )
         return CadenceSpec(
-            interval="daily",
+            interval="cron",
             cron=f"{minute} {hour} {dom} * *",
             timezone=tz,
             description=f"on day {dom} of every month at {_clock(hour, minute)} {tz}",
@@ -343,6 +377,21 @@ def parse_cadence(text: str) -> CadenceSpec:
         )
 
     if any(w in lower for w in ("hourly", "every hour", "each hour")):
+        minute_at = re.search(r"\bminute\s+(\d{1,2})\b", lower)
+        if minute_at and not clock:
+            anchored = int(minute_at.group(1))
+            if not 0 <= anchored <= 59:
+                return _ask(
+                    "An hourly run needs a minute from 0 to 59. "
+                    "Say e.g. “hourly at minute 7”."
+                )
+            return CadenceSpec(
+                interval="hourly",
+                cron=f"{anchored} * * * *",
+                timezone=tz,
+                description=f"every hour at :{anchored:02d} {tz}",
+                timezone_assumed=assumed,
+            )
         if hour is not None and clock:
             # "hourly at :15" — the hour field is meaningless, the minute is not.
             return CadenceSpec(
@@ -356,6 +405,20 @@ def parse_cadence(text: str) -> CadenceSpec:
             interval="hourly",
             timezone=tz,
             description="every hour, starting at the first run",
+            timezone_assumed=assumed,
+        )
+
+    if re.search(r"\bweekdays?\b", lower):
+        if hour is None:
+            return _ask(
+                "Weekdays needs a time of day. Say e.g. “weekdays at 21:40 UTC”. "
+                "Without a time this would be stored as every 7 days."
+            )
+        return CadenceSpec(
+            interval="cron",
+            cron=f"{minute} {hour} * * 1-5",
+            timezone=tz,
+            description=f"weekdays at {_clock(hour, minute)} {tz}",
             timezone_assumed=assumed,
         )
 
@@ -381,8 +444,63 @@ def parse_cadence(text: str) -> CadenceSpec:
         # A bare time with no cadence word is a daily run at that time.
         return _daily(hour, minute, tz, assumed)
 
+    bare = _bare_cron(raw, tz, assumed)
+    if bare is not None:
+        return bare
+
     return _ask(
         f"I could not turn “{raw.strip()}” into a schedule. I can do hourly, daily "
         "at a time, weekly on a weekday, a day of the month, every N minutes/hours, "
         "or an explicit 5-field cron."
     )
+
+
+def describe_stored_cadence(interval: str, cron: str = "", timezone: str = "UTC") -> str:
+    """Human label for a saved schedule. Cron wins over the interval preset.
+
+    ``hourly`` plus ``7 * * * *`` is hourly at minute 7, not a rolling hour.
+    ``daily`` plus ``40 21 * * 1-5`` is weekdays at 21:40, not every day.
+    """
+    expr = " ".join(str(cron or "").split())
+    tz = (timezone or "UTC").strip() or "UTC"
+    if expr:
+        parts = expr.split(" ")
+        if len(parts) == 5:
+            minute, hour, dom, month, dow = parts
+            step = re.fullmatch(r"\*/(\d+)", minute)
+            if (
+                hour == "*"
+                and dom == "*"
+                and month == "*"
+                and dow == "*"
+                and step
+                and 1 <= int(step.group(1)) <= 59
+            ):
+                return f"Every {int(step.group(1))} minutes {tz}"
+            if (
+                hour == "*"
+                and dom == "*"
+                and month == "*"
+                and dow == "*"
+                and minute.isdigit()
+            ):
+                return f"Hourly at :{int(minute):02d} {tz}"
+            if (
+                dom == "*"
+                and month == "*"
+                and dow == "1-5"
+                and minute.isdigit()
+                and hour.isdigit()
+            ):
+                return f"Weekdays at {int(hour):02d}:{int(minute):02d} {tz}"
+            if (
+                dom == "*"
+                and month == "*"
+                and dow == "*"
+                and minute.isdigit()
+                and hour.isdigit()
+            ):
+                return f"Daily at {int(hour):02d}:{int(minute):02d} {tz}"
+        return f"Cron {expr} ({tz})"
+    labels = {"hourly": "Every hour", "daily": "Daily", "weekly": "Weekly"}
+    return labels.get((interval or "").strip().lower(), (interval or "").strip() or "Unscheduled")

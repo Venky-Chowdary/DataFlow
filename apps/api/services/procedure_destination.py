@@ -26,7 +26,7 @@ DataFlow (stricter than Informatica continue-on-error):
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 from services.procedure_source import (
@@ -184,6 +184,13 @@ class DestProcedurePlan:
 def dest_write_mode_of(dest: Any) -> str:
     extra = _extra(dest)
     raw = str(extra.get("dest_write_mode") or extra.get("dest_read_mode") or "").strip().lower()
+    # An explicit table write wins over a leftover CALL. Multi-stream uses that
+    # to keep one stream a table while a sibling stream names its own procedure.
+    # Before/after hooks still run — they are not a row-apply.
+    if raw == MODE_TABLE:
+        if extra.get("dest_procedure_before") or extra.get("dest_procedure_after"):
+            return MODE_HOOKS
+        return MODE_TABLE
     if raw in {MODE_QUERY, "dest_query", "sql"}:
         return MODE_QUERY
     if raw in {MODE_ROW_APPLY, "procedure", "stored_procedure"}:
@@ -386,6 +393,20 @@ def binds_for_row(
             continue
         missing.append(name)
     return binds, missing
+
+
+def row_apply_plan_without_hooks(plan: DestProcedurePlan | None) -> DestProcedurePlan | None:
+    """The per-chunk CALL. Hooks stay off this plan so a batch cannot replay them.
+
+    A before/after statement is once per transfer (or once per session when
+    several tables share one destination). ``apply_rows_via_procedure`` would
+    run those hooks on every chunk if they stayed on the plan.
+    """
+    if plan is None or plan.mode not in DEST_ROW_MODES or plan.row_spec is None:
+        return None
+    if plan.before_spec is None and plan.after_spec is None:
+        return plan
+    return replace(plan, before_spec=None, after_spec=None)
 
 
 def apply_rows_via_procedure(

@@ -1,4 +1,5 @@
 import { Connector, PipelineSchedule, TransferJob } from "./types";
+import { scheduleCadenceLabel } from "./scheduleCadence";
 
 export interface ConnectionWorkbenchContext {
   relatedJobs: TransferJob[];
@@ -101,7 +102,7 @@ export function buildConnectionWorkbenchContext(
   let scheduleLabel = "Manual";
   if (enabledScheduleCount === 1) {
     const s = relatedSchedules.find((x) => x.enabled);
-    scheduleLabel = s ? `${s.interval} · ${s.name}` : "Manual";
+    scheduleLabel = s ? `${scheduleCadenceLabel(s)} · ${s.name}` : "Manual";
   } else if (enabledScheduleCount > 1) {
     scheduleLabel = `${enabledScheduleCount} schedules enabled`;
   } else if (relatedSchedules.length > 0) {

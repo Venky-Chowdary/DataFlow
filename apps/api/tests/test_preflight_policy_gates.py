@@ -119,6 +119,111 @@ def test_scd2_blocks_on_non_sql_destination():
     assert "SQL table destination" in str(g9["details"])
 
 
+def test_cdc_incremental_alias_blocks_without_a_primary_key():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc_incremental",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_keys": [""],
+        }],
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    assert "Missing primary key" in str(g9["details"])
+
+
+def test_cdc_log_position_does_not_also_require_a_table_cursor():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "primary_key": ["id"],
+            "cursor_semantics": "cdc_position",
+        }],
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        source_columns=["id", "status"],
+        mappings=[{"source": "id", "target": "id"}],
+        source_table="orders",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "pass"
+    assert "Missing cursor" not in str(g9.get("details") or "")
+
+
+def test_cdc_catalog_primary_key_satisfies_a_blank_contract():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "cursor_semantics": "cdc_position",
+            "primary_keys": [""],
+        }],
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        source_columns=["id", "updated_at"],
+        catalog_primary_key_columns=["id"],
+        mappings=[{"source": "id", "target": "id"}, {"source": "updated_at", "target": "updated_at"}],
+        source_table="orders",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "pass"
+
+
+def test_cdc_unmapped_catalog_key_still_blocks():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_keys": [""],
+        }],
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        catalog_primary_key_columns=["id"],
+        mappings=[{"source": "name", "target": "name"}],
+        source_table="orders",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    assert "Missing primary key" in str(g9["details"])
+
+
+def test_cdc_with_no_stream_contract_blocks():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[],
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    assert "Missing primary key" in str(g9["details"])
+
+
 def test_cdc_passes_for_database_source_with_cursor_and_pk():
     gates = run_transfer_policy_gates(
         sync_mode="cdc",
@@ -295,7 +400,7 @@ def test_cdc_exactly_once_passes_on_wired_sql_dest():
     assert g16["details"]["platform_claimed"] is False
 
 
-def test_cdc_default_delivery_gate_is_at_least_once():
+def test_cdc_auto_selects_exactly_once_on_an_eligible_route():
     gates = run_transfer_policy_gates(
         sync_mode="cdc",
         schema_policy="manual_review",
@@ -314,7 +419,104 @@ def test_cdc_default_delivery_gate_is_at_least_once():
     )
     g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
     assert g16["status"] == "pass"
+    assert g16["details"]["delivery_guarantee"] == "exactly_once"
+    assert g16["details"]["selected_by"] == "route_default"
+    assert g16["details"]["platform_claimed"] is False
+
+
+def test_cdc_auto_stays_at_least_once_when_the_dest_cannot_commit():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "cdc_position",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="csv",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "pass"
     assert g16["details"]["delivery_guarantee"] == "at_least_once"
+    assert g16["details"]["selected_by"] == "route_default"
+    assert g16["details"]["reason"] == "exactly_once_dest_not_transactional"
+
+
+def test_cdc_timestamp_cursor_does_not_select_exactly_once():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "modification_timestamp",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="postgresql",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "pass"
+    assert g16["details"]["delivery_guarantee"] == "at_least_once"
+    assert g16["details"]["reason"] == "exactly_once_requires_durable_lsn"
+    assert g16["details"]["platform_claimed"] is False
+
+
+def test_cdc_explicit_exactly_once_without_a_log_position_blocks():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "modification_timestamp",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="postgresql",
+        delivery_guarantee="exactly_once",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "block"
+    assert g16["details"]["reason"] == "exactly_once_requires_durable_lsn"
+
+
+def test_cdc_explicit_at_least_once_pin_is_not_upgraded():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "cdc_position",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="postgresql",
+        delivery_guarantee="at_least_once",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "pass"
+    assert g16["details"]["delivery_guarantee"] == "at_least_once"
+    assert g16["details"]["selected_by"] == "operator_pin"
 
 
 def test_full_refresh_omits_cdc_delivery_gate():
@@ -462,4 +664,131 @@ def test_incremental_deduped_blocks_an_undeclared_cursor():
     assert g9["status"] == "block"
     verdicts = g9["details"]["cursor_semantics"]
     assert verdicts and verdicts[0]["primary_action"]
+
+
+def test_validate_blocks_one_call_replayed_onto_every_stream():
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_overwrite",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[
+            {"name": "customers", "selected": True},
+            {"name": "orders", "selected": True},
+        ],
+        source_endpoint={
+            "format": "postgresql",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL public.get_customers()",
+        },
+    )
+    gate = next(g for g in gates if g["id"] == "g23_stream_procedures")
+    assert gate["status"] == "block"
+    assert "get_customers" in gate["message"]
+    assert "orders" in gate["message"]
+
+
+def test_validate_passes_when_each_stream_has_its_own_call():
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_overwrite",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[
+            {
+                "name": "customers",
+                "selected": True,
+                "source_read_mode": "procedure",
+                "procedure_call": "CALL public.get_customers()",
+            },
+            {
+                "name": "orders",
+                "selected": True,
+                "source_read_mode": "procedure",
+                "procedure_call": "CALL public.get_orders()",
+            },
+        ],
+        source_endpoint={
+            "format": "postgresql",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL public.get_customers()",
+        },
+    )
+    gate = next(g for g in gates if g["id"] == "g23_stream_procedures")
+    assert gate["status"] == "pass"
+
+
+def test_one_stream_does_not_emit_the_replay_gate():
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_overwrite",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[{"name": "customers", "selected": True}],
+        source_endpoint={
+            "format": "postgresql",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL public.get_customers()",
+        },
+    )
+    assert all(g["id"] != "g23_stream_procedures" for g in gates)
+
+
+def test_validate_blocks_cdc_destination_call_on_one_stream():
+    """Validate and Execute share the refusal. One stream is not a replay, but CDC cannot CALL."""
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[{"name": "orders", "selected": True, "primary_key": "id"}],
+        destination_endpoint={
+            "format": "postgresql",
+            "dest_write_mode": "procedure",
+            "dest_procedure_call": "CALL public.land(:id)",
+        },
+    )
+    gate = next(g for g in gates if g["id"] == "g23_stream_procedures")
+    assert gate["status"] == "block"
+    assert gate["details"]["reason"] == "dest_procedure_refuses_history_sync"
+    assert "CALL" in gate["message"]
+
+
+def test_validate_blocks_cdc_call_named_on_the_stream_contract():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[
+            {
+                "name": "orders",
+                "selected": True,
+                "primary_key": "id",
+                "dest_write_mode": "procedure",
+                "dest_procedure_call": "CALL public.land(:id)",
+            }
+        ],
+        destination_endpoint={"format": "postgresql"},
+    )
+    gate = next(g for g in gates if g["id"] == "g23_stream_procedures")
+    assert gate["status"] == "block"
+    assert "CALL" in gate["message"]
+
+
+def test_validate_allows_cdc_table_hooks_on_one_stream():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        stream_contracts=[{"name": "orders", "selected": True, "primary_key": "id"}],
+        destination_endpoint={
+            "format": "postgresql",
+            "dest_write_mode": "table",
+            "dest_procedure_before": "CALL public.prep()",
+            "dest_procedure_after": "CALL public.finish()",
+        },
+    )
+    assert all(g["id"] != "g23_stream_procedures" for g in gates)
 

@@ -67,6 +67,41 @@ def parse_debezium_envelope(payload: dict[str, Any] | str) -> DebeziumChange | N
     )
 
 
+def kafka_value_to_row(val: Any, *, registry_url: str = "") -> dict[str, Any] | None:
+    """One Kafka value as a row. A tombstone (empty value) is ``None``.
+
+    Debezium envelopes and plain JSON objects share this decoder. The
+    transfer consumer and the sample reader must not grow a second parser.
+    """
+    if not val:
+        return None
+    from connectors.confluent_schema_registry import (
+        SchemaRegistryError,
+        decode_kafka_value,
+    )
+
+    try:
+        parsed = decode_kafka_value(val, registry_url=registry_url)
+    except SchemaRegistryError:
+        raise
+    except Exception:
+        parsed = val
+    change = parse_debezium_envelope(parsed if isinstance(parsed, (dict, str)) else None)
+    if change is not None:
+        return debezium_to_row(change)
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(parsed, str):
+        try:
+            obj = json_loads_exact(parsed)
+        except json.JSONDecodeError:
+            return {"_kafka_value": parsed}
+        if isinstance(obj, dict):
+            return obj
+        return {"_kafka_value": str(obj)}
+    return {"_kafka_value": str(parsed)}
+
+
 def debezium_to_row(change: DebeziumChange) -> dict[str, Any] | None:
     """Map envelope to a destination row (delete → tombstone with __deleted)."""
     if change.op in ("c", "r", "u"):
@@ -108,15 +143,21 @@ class KafkaDebeziumConsumer:
                 "kafka-python is required for the Debezium bridge. "
                 "Install with: pip install kafka-python"
             ) from exc
-        self._consumer = KafkaConsumer(
-            self.config["topic"],
-            bootstrap_servers=self.config.get("bootstrap_servers") or "localhost:9092",
-            group_id=self.config.get("group_id") or "dataflow-debezium",
-            auto_offset_reset=self.config.get("auto_offset_reset") or "earliest",
-            enable_auto_commit=False,
-            # Keep raw bytes so Confluent Schema Registry wire (magic+id+payload) survives.
-            value_deserializer=lambda b: b if b is not None else b,
-        )
+        from connectors.kafka_reader import _consumer_configs
+        from services.copy_kafka_common import kafka_classified_bootstrap
+
+        with kafka_classified_bootstrap(self.config):
+            self._consumer = KafkaConsumer(
+                self.config["topic"],
+                **_consumer_configs(
+                    self.config,
+                    group_id=self.config.get("group_id") or "dataflow-debezium",
+                    auto_offset_reset=self.config.get("auto_offset_reset") or "earliest",
+                    enable_auto_commit=False,
+                    # Keep raw bytes so Confluent Schema Registry wire (magic+id+payload) survives.
+                    value_deserializer=lambda b: b if b is not None else b,
+                ),
+            )
 
     def pending_offsets(self) -> list[dict[str, Any]]:
         """Return next-offset tokens for the current uncommitted poll batch."""
@@ -151,17 +192,15 @@ class KafkaDebeziumConsumer:
         if offsets is None:
             self._pending_offsets.clear()
 
+    def has_assignment(self) -> bool:
+        return bool(self._consumer is not None and self._consumer.assignment())
+
     def poll_rows(self, *, max_records: int = 500, timeout_ms: int = 1000) -> Iterator[dict[str, Any]]:
         """Yield destination rows — Debezium envelopes preferred, else JSON passthrough."""
         if self._consumer is None:
             self.connect()
         if self._consumer is None:
             raise RuntimeError("Kafka consumer is not connected")
-        from connectors.confluent_schema_registry import (
-            SchemaRegistryError,
-            decode_kafka_value,
-        )
-
         registry_url = str(self.config.get("schema_registry_url") or "").strip()
         batch = self._consumer.poll(timeout_ms=timeout_ms, max_records=max_records)
         for tp, messages in batch.items():
@@ -172,36 +211,9 @@ class KafkaDebeziumConsumer:
                 prev = self._pending_offsets.get(key)
                 if prev is None or nxt > prev:
                     self._pending_offsets[key] = nxt
-                val = msg.value
-                if not val:
-                    continue
-                try:
-                    parsed = decode_kafka_value(val, registry_url=registry_url)
-                except SchemaRegistryError:
-                    raise
-                except Exception:
-                    parsed = val
-                # Debezium envelopes may arrive as dict (JSON) or still need string parse.
-                change = parse_debezium_envelope(parsed if isinstance(parsed, (dict, str)) else None)
-                if change is not None:
-                    row = debezium_to_row(change)
-                    if row:
-                        yield row
-                    continue
-                if isinstance(parsed, dict):
-                    yield parsed
-                elif isinstance(parsed, str):
-                    try:
-                        obj = json_loads_exact(parsed)
-                    except json.JSONDecodeError:
-                        yield {"_kafka_value": parsed}
-                        continue
-                    if isinstance(obj, dict):
-                        yield obj
-                    else:
-                        yield {"_kafka_value": str(obj)}
-                else:
-                    yield {"_kafka_value": str(parsed)}
+                row = kafka_value_to_row(msg.value, registry_url=registry_url)
+                if row:
+                    yield row
 
     def close(self) -> None:
         if self._consumer is not None:

@@ -10,6 +10,7 @@ so the reads live together here rather than inside the introspection walk.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier
@@ -22,6 +23,8 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
 
     ``UNIQUE (lower(email))`` is invisible in ``information_schema`` alone — we
     also read ``pg_index`` / ``pg_get_expr`` so Validate casefolds like the engine.
+    An invalid or not-ready unique index stays in the list. Filtering it out
+    would look like the destination has no key.
     """
     from services.type_system import parse_case_insensitive_index_expression
 
@@ -93,7 +96,9 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
                        COALESCE(pg_get_expr(i.indpred, i.indrelid), '') AS pred,
                        pg_get_indexdef(i.indexrelid) AS indexdef,
                        i.indkey,
-                       COALESCE(i.indnullsnotdistinct, false) AS nulls_not_distinct
+                       COALESCE(i.indnullsnotdistinct, false) AS nulls_not_distinct,
+                       i.indisvalid,
+                       i.indisready
                 FROM pg_catalog.pg_index i
                 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
                 JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
@@ -101,7 +106,6 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
                 WHERE n.nspname = %s
                   AND t.relname = %s
                   AND i.indisunique
-                  AND i.indisvalid
                 """,
                 (schema, table),
             )
@@ -115,7 +119,9 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
                        COALESCE(pg_get_expr(i.indpred, i.indrelid), '') AS pred,
                        pg_get_indexdef(i.indexrelid) AS indexdef,
                        i.indkey,
-                       false AS nulls_not_distinct
+                       false AS nulls_not_distinct,
+                       i.indisvalid,
+                       i.indisready
                 FROM pg_catalog.pg_index i
                 JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
                 JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
@@ -123,19 +129,22 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
                 WHERE n.nspname = %s
                   AND t.relname = %s
                   AND i.indisunique
-                  AND i.indisvalid
                 """,
                 (schema, table),
             )
-        for (
-            idx_name,
-            is_primary,
-            exprs,
-            pred,
-            indexdef,
-            indkey,
-            nulls_not_distinct,
-        ) in cur.fetchall() or []:
+        for row in cur.fetchall() or []:
+            fields = tuple(row)
+            if len(fields) < 7:
+                continue
+            (
+                idx_name,
+                is_primary,
+                exprs,
+                pred,
+                indexdef,
+                indkey,
+                nulls_not_distinct,
+            ) = fields[:7]
             key = str(idx_name)
             bucket = by_name.setdefault(
                 key,
@@ -152,6 +161,12 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
             )
             bucket["primary"] = bool(is_primary) or bool(bucket.get("primary"))
             bucket["nulls_not_distinct"] = bool(nulls_not_distinct)
+            # A seven-column fixture did not ask. Do not invent the bits.
+            if len(fields) > 7 and _pg_index_bool(fields[7]) is False:
+                bucket["index_valid"] = False
+            if len(fields) > 8 and _pg_index_bool(fields[8]) is False:
+                bucket["index_ready"] = False
+                bucket["enforced"] = False
             if pred:
                 bucket["filter_predicate"] = str(pred).strip()
             expr_text = str(exprs or "").strip() or str(indexdef or "")
@@ -188,54 +203,258 @@ def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
     return {"primary_key_columns": pk, "unique_keys": unique_keys}
 
 
+def _pg_index_bool(value: Any) -> bool | None:
+    """``pg_index`` boolean. None when this cell did not say.
+
+    A raw cursor may return ``t`` / ``f``. A driver may return a real bool.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "t", "y"}:
+        return True
+    if text in {"0", "false", "no", "f", "n"}:
+        return False
+    return None
+
+
+def postgres_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
+    """Column set to existing-row gap from ``pg_index`` bits and ``indpred``.
+
+    Columns are folded. A valid index with no predicate on the same columns
+    keeps the proof: a partial or invalid sibling does not cancel it.
+    ``partial`` means ``indpred`` is set. A four-column row did not ask.
+    ``not_ready`` is the only gap that is also not a new-write rule. A row
+    that omits the validity cells is ``unreported`` for that index.
+    """
+    from services.foreign_key_metadata import postgres_unique_index_gap
+
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        fields = tuple(row)
+        if len(fields) < 2 or not fields[0] or not fields[1]:
+            continue
+        name = str(fields[0])
+        bucket = by_name.setdefault(
+            name, {"columns": [], "valid": None, "ready": None, "partial": None}
+        )
+        bucket["columns"].append(str(fields[1]).strip().casefold())
+        if len(fields) > 2:
+            valid = _pg_index_bool(fields[2])
+            if valid is False:
+                bucket["valid"] = False
+            elif valid is True and bucket["valid"] is not False:
+                bucket["valid"] = True
+        if len(fields) > 3:
+            ready = _pg_index_bool(fields[3])
+            if ready is False:
+                bucket["ready"] = False
+            elif ready is True and bucket["ready"] is not False:
+                bucket["ready"] = True
+        if len(fields) > 4:
+            predicate = str(fields[4] or "").strip()
+            if predicate:
+                bucket["partial"] = True
+            elif bucket["partial"] is not True:
+                bucket["partial"] = False
+    proof: dict[frozenset[str], str] = {}
+    rank = {"": 4, "not_checked": 3, "partial": 2, "not_ready": 1, "unreported": 0}
+    for bucket in by_name.values():
+        columns = frozenset(col for col in bucket["columns"] if col)
+        if not columns:
+            continue
+        gap = postgres_unique_index_gap(
+            bucket["valid"], bucket["ready"], bucket["partial"]
+        )
+        if columns not in proof or rank[gap] > rank[proof[columns]]:
+            proof[columns] = gap
+    return proof
+
+
+def read_postgres_uniqueness_rows(
+    conn: Any, schema: str, table: str
+) -> list[Any] | None:
+    """Unique-index rows, or None when ``indisvalid`` was not read.
+
+    An empty list is a successful read of no unique index. Invalid indexes
+    stay in the result. The schema default is ``public`` when the caller
+    did not name one.
+    """
+    import sqlalchemy as sa
+
+    schema_name = (schema or "").strip() or "public"
+    try:
+        return list(
+            conn.execute(
+                sa.text(
+                    """
+                    SELECT ic.relname AS index_name,
+                           a.attname AS column_name,
+                           i.indisvalid,
+                           i.indisready,
+                           pg_get_expr(i.indpred, i.indrelid) AS pred
+                    FROM pg_catalog.pg_index i
+                    JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
+                    JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
+                    JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
+                    JOIN pg_catalog.pg_attribute a
+                      ON a.attrelid = t.oid
+                     AND a.attnum = ANY (i.indkey)
+                    WHERE n.nspname = :schema
+                      AND t.relname = :table
+                      AND i.indisunique
+                      AND a.attnum > 0
+                      AND NOT a.attisdropped
+                    ORDER BY ic.relname, a.attnum
+                    """
+                ),
+                {"schema": schema_name, "table": table},
+            ).fetchall()
+        )
+    except Exception:
+        return None
+
+
+def _sqlserver_flag(value: Any) -> bool | None:
+    """A SQL Server bit. None when this cell did not say."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes"}:
+        return True
+    if text in {"0", "false", "no"}:
+        return False
+    return None
+
+
+def _sqlserver_index_disabled(value: Any) -> bool | None:
+    """``sys.indexes.is_disabled``. None when this cell did not say."""
+    return _sqlserver_flag(value)
+
+
+def sqlserver_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
+    """Column set to existing-row gap from disabled and filter bits.
+
+    Columns are folded. Disabled wins across the column rows of one index.
+    A non-empty ``filter_definition`` on an enabled index is ``partial``.
+    Across two indexes on the same columns, an enabled unfiltered index
+    keeps the proof. A six-column row did not ask for ``is_disabled``.
+    """
+    from services.foreign_key_metadata import sqlserver_disabled_unique_gap
+
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        fields = tuple(row)
+        if len(fields) < 3 or not fields[0] or not fields[2]:
+            continue
+        name = str(fields[0])
+        bucket = by_name.setdefault(
+            name, {"columns": [], "disabled": None, "filtered": None}
+        )
+        bucket["columns"].append(str(fields[2]).strip().casefold())
+        if len(fields) > 5:
+            predicate = str(fields[5] or "").strip()
+            if predicate:
+                bucket["filtered"] = True
+            elif bucket["filtered"] is not True:
+                bucket["filtered"] = False
+        if len(fields) > 6:
+            disabled = _sqlserver_index_disabled(fields[6])
+            if disabled is True:
+                bucket["disabled"] = True
+            elif disabled is False and bucket["disabled"] is not True:
+                bucket["disabled"] = False
+    proof: dict[frozenset[str], str] = {}
+    # An enabled unfiltered index is the check. A filtered or disabled
+    # sibling on the same columns does not erase it.
+    rank = {"": 3, "partial": 2, "unreported": 1, "not_checked": 0}
+    for bucket in by_name.values():
+        columns = frozenset(col for col in bucket["columns"] if col)
+        if not columns:
+            continue
+        gap = sqlserver_disabled_unique_gap(bucket["disabled"], bucket["filtered"])
+        if columns not in proof or rank[gap] > rank[proof[columns]]:
+            proof[columns] = gap
+    return proof
+
+
+def read_sqlserver_uniqueness_rows(
+    conn: Any, schema: str, table: str
+) -> list[Any] | None:
+    """Unique-index rows, or None when the catalog did not answer.
+
+    ``is_disabled`` and ``ignore_dup_key`` are on the row. An empty list
+    is a successful read of no unique index. A shorter fixture does not
+    invent either bit.
+    """
+    import sqlalchemy as sa
+
+    try:
+        return list(
+            conn.execute(
+                sa.text(
+                    """
+                    SELECT
+                      i.name AS index_name,
+                      i.is_primary_key,
+                      c.name AS column_name,
+                      ic.key_ordinal,
+                      CONVERT(nvarchar(4000), cc.definition) AS computed_def,
+                      CONVERT(nvarchar(4000), i.filter_definition) AS filter_def,
+                      i.is_disabled,
+                      i.ignore_dup_key
+                    FROM sys.indexes i
+                    JOIN sys.index_columns ic
+                      ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+                    JOIN sys.columns c
+                      ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+                    LEFT JOIN sys.computed_columns cc
+                      ON cc.object_id = c.object_id AND cc.column_id = c.column_id
+                    JOIN sys.tables t ON t.object_id = i.object_id
+                    JOIN sys.schemas s ON s.schema_id = t.schema_id
+                    WHERE s.name = :schema
+                      AND t.name = :table
+                      AND i.is_unique = 1
+                      AND ic.is_included_column = 0
+                      AND i.is_hypothetical = 0
+                    ORDER BY i.name, ic.key_ordinal
+                    """
+                ),
+                {"schema": schema, "table": table},
+            ).fetchall()
+        )
+    except Exception:
+        return None
+
+
 def _sqlserver_fetch_unique_keys(conn: Any, schema: str, table: str) -> dict[str, Any]:
     """Return PRIMARY KEY + UNIQUE indexes from ``sys.indexes``.
 
     Also resolves computed-column definitions (``LOWER(email)``) so Validate
     casefolds like the engine when uniqueness is on a computed CI column.
     """
-    import sqlalchemy as sa
     from services.type_system import parse_case_insensitive_index_expression
 
     pk: list[str] = []
     unique_keys: list[dict[str, Any]] = []
-    try:
-        rows = conn.execute(
-            sa.text(
-                """
-                SELECT
-                  i.name AS index_name,
-                  i.is_primary_key,
-                  c.name AS column_name,
-                  ic.key_ordinal,
-                  CONVERT(nvarchar(4000), cc.definition) AS computed_def,
-                  CONVERT(nvarchar(4000), i.filter_definition) AS filter_def
-                FROM sys.indexes i
-                JOIN sys.index_columns ic
-                  ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-                JOIN sys.columns c
-                  ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-                LEFT JOIN sys.computed_columns cc
-                  ON cc.object_id = c.object_id AND cc.column_id = c.column_id
-                JOIN sys.tables t ON t.object_id = i.object_id
-                JOIN sys.schemas s ON s.schema_id = t.schema_id
-                WHERE s.name = :schema
-                  AND t.name = :table
-                  AND i.is_unique = 1
-                  AND ic.is_included_column = 0
-                  AND i.is_hypothetical = 0
-                ORDER BY i.name, ic.key_ordinal
-                """
-            ),
-            {"schema": schema, "table": table},
-        ).fetchall()
-    except Exception:
+    rows = read_sqlserver_uniqueness_rows(conn, schema, table)
+    if rows is None:
         return {"primary_key_columns": [], "unique_keys": []}
 
     grouped: dict[str, dict[str, Any]] = {}
-    for idx_name, is_pk, col, _ord, computed_def, filter_def in rows or []:
-        if not idx_name:
+    for row in rows or []:
+        fields = tuple(row)
+        if len(fields) < 6 or not fields[0]:
             continue
+        idx_name, is_pk, col, _ord, computed_def, filter_def = fields[:6]
         key = str(idx_name)
         bucket = grouped.setdefault(
             key,
@@ -251,6 +470,16 @@ def _sqlserver_fetch_unique_keys(conn: Any, schema: str, table: str) -> dict[str
         )
         bucket["primary"] = bool(is_pk) or bool(bucket.get("primary"))
         bucket["columns"].append(str(col))
+        # A six-column fixture did not ask. Do not invent is_disabled.
+        if len(fields) > 6 and _sqlserver_index_disabled(fields[6]) is True:
+            bucket["disabled"] = True
+            bucket["enforced"] = False
+        # A seven-column row asked for is_disabled only. Do not invent
+        # IGNORE_DUP_KEY. ON drops a duplicate insert instead of failing
+        # the statement. The index still rejects through the probe, and
+        # stored rows stay unique, so enforced stays true.
+        if len(fields) > 7 and _sqlserver_flag(fields[7]) is True:
+            bucket["ignore_dup_key"] = True
         if filter_def and not bucket.get("filter_predicate"):
             bucket["filter_predicate"] = str(filter_def).strip()
         expr = str(computed_def or "").strip()
@@ -285,7 +514,9 @@ def _oracle_unique_constraint_rows(conn: Any, owner: str, table: str) -> list[An
                   ac.constraint_name,
                   ac.constraint_type,
                   acc.column_name,
-                  acc.position
+                  acc.position,
+                  ac.validated,
+                  ac.status
                 FROM all_constraints ac
                 JOIN all_cons_columns acc
                   ON ac.owner = acc.owner
@@ -294,13 +525,87 @@ def _oracle_unique_constraint_rows(conn: Any, owner: str, table: str) -> list[An
                 WHERE ac.owner = :owner
                   AND ac.table_name = :table
                   AND ac.constraint_type IN ('P', 'U')
-                  AND ac.status = 'ENABLED'
                 ORDER BY ac.constraint_name, acc.position
                 """
             ),
             {"owner": owner, "table": table},
         ).fetchall()
     )
+
+
+def oracle_uniqueness_proof(rows: Any) -> dict[frozenset[str], str]:
+    """Column set to existing-row gap from ``STATUS`` and ``VALIDATED``.
+
+    Columns are folded. ``NOT VALIDATED`` wins across the column rows of
+    one constraint. ``DISABLED`` wins inside that constraint. Across two
+    constraints on the same columns, an enabled constraint keeps the
+    proof: a disabled sibling does not cancel it. A five-column row did
+    not ask for ``STATUS``.
+    """
+    from services.foreign_key_metadata import (
+        coerce_validated,
+        oracle_constraint_enabled,
+        oracle_uniqueness_status_gap,
+    )
+
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in rows or []:
+        fields = tuple(row)
+        if len(fields) < 4 or not fields[0] or not fields[2]:
+            continue
+        name = str(fields[0])
+        bucket = by_name.setdefault(
+            name, {"columns": [], "validated": None, "enabled": None}
+        )
+        bucket["columns"].append(str(fields[2]).strip().casefold())
+        if len(fields) > 4:
+            checked = coerce_validated(fields[4])
+            if checked is False:
+                bucket["validated"] = False
+            elif checked is True and bucket["validated"] is not False:
+                bucket["validated"] = True
+        if len(fields) > 5:
+            enabled = oracle_constraint_enabled(fields[5])
+            if enabled is False:
+                bucket["enabled"] = False
+            elif enabled is True and bucket["enabled"] is not False:
+                bucket["enabled"] = True
+    proof: dict[frozenset[str], str] = {}
+    # An enabled constraint is the check. A disabled constraint on the
+    # same columns does not erase it.
+    best = {"": 3, "not_checked": 2, "unreported": 1, "disabled": 0}
+    for bucket in by_name.values():
+        columns = frozenset(col for col in bucket["columns"] if col)
+        if not columns:
+            continue
+        gap = oracle_uniqueness_status_gap(bucket["enabled"], bucket["validated"])
+        current = proof.get(columns)
+        if current is None or best[gap] > best[current]:
+            proof[columns] = gap
+    return proof
+
+
+def read_oracle_uniqueness_rows(conn: Any, owner: str, table: str) -> list[Any] | None:
+    """PRIMARY/UNIQUE rows, or None when the catalog did not answer.
+
+    ``DISABLED`` stays in the list. An empty list is a successful read of
+    no constraint. It is not a failed read. The exact owner/table spelling
+    is tried before upper case.
+    """
+    owner_u = (owner or "").upper()
+    table_u = (table or "").upper()
+    attempts = [(str(owner or ""), str(table or ""))]
+    if (owner_u, table_u) != attempts[0]:
+        attempts.append((owner_u, table_u))
+    try:
+        rows: list[Any] = []
+        for owner_try, table_try in attempts:
+            rows = _oracle_unique_constraint_rows(conn, owner_try, table_try)
+            if rows:
+                return list(rows)
+        return []
+    except Exception:
+        return None
 
 
 def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, Any]:
@@ -334,7 +639,14 @@ def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, An
     except Exception:
         return {"primary_key_columns": [], "unique_keys": []}
 
-    for name, ctype, col, _pos in rows or []:
+    from services.foreign_key_metadata import (
+        coerce_validated,
+        oracle_constraint_enabled,
+    )
+
+    for row in rows or []:
+        fields = tuple(row)
+        name, ctype, col, _pos = fields[:4]
         key = str(name)
         bucket = by_name.setdefault(
             key,
@@ -349,6 +661,17 @@ def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, An
             },
         )
         bucket["columns"].append(str(col))
+        # A four-column fixture did not ask. Do not invent VALIDATED.
+        if len(fields) > 4:
+            checked = coerce_validated(fields[4])
+            if checked is False:
+                bucket["validated"] = False
+            elif checked is True and bucket.get("validated") is not False:
+                bucket["validated"] = True
+        # A five-column fixture did not ask. Do not invent STATUS.
+        if len(fields) > 5 and oracle_constraint_enabled(fields[5]) is False:
+            bucket["disabled"] = True
+            bucket["enforced"] = False
     # Unique function-based indexes (UPPER/LOWER) — not constraint-backed.
     try:
         fbi_rows = conn.execute(
@@ -414,11 +737,14 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
 
     Hybrid tables enforce these at write time; standard tables often declare
     ``NOT ENFORCED`` constraints — surface ``enforced`` so Validate does not
-    invent blockers for advisory-only keys (Snowflake honesty bar).
+    invent blockers for advisory-only keys. ``table_kind`` is
+    ``INFORMATION_SCHEMA.TABLES.IS_HYBRID`` (``YES`` or ``NO``). An unread
+    kind stays empty, so a stamped ``enforced`` flag is not a hybrid table.
     """
     pk: list[str] = []
     unique_keys: list[dict[str, Any]] = []
     by_name: dict[str, dict[str, Any]] = {}
+    row_has_rely = False
     try:
         try:
             cur.execute(
@@ -427,7 +753,8 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
                        tc.constraint_type,
                        kcu.column_name,
                        kcu.ordinal_position,
-                       COALESCE(tc.enforced, 'YES') AS enforced
+                       COALESCE(tc.enforced, 'YES') AS enforced,
+                       tc.rely
                 FROM information_schema.table_constraints tc
                 JOIN information_schema.key_column_usage kcu
                   ON tc.constraint_catalog = kcu.constraint_catalog
@@ -442,9 +769,33 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
                 """,
                 (schema, table),
             )
+            row_has_rely = True
         except Exception:
-            # Older SF builds may lack ENFORCED — treat as YES (fail-closed).
-            cur.execute(
+            try:
+                cur.execute(
+                    """
+                    SELECT tc.constraint_name,
+                           tc.constraint_type,
+                           kcu.column_name,
+                           kcu.ordinal_position,
+                           COALESCE(tc.enforced, 'YES') AS enforced
+                    FROM information_schema.table_constraints tc
+                    JOIN information_schema.key_column_usage kcu
+                      ON tc.constraint_catalog = kcu.constraint_catalog
+                     AND tc.constraint_schema = kcu.constraint_schema
+                     AND tc.constraint_name = kcu.constraint_name
+                     AND tc.table_schema = kcu.table_schema
+                     AND tc.table_name = kcu.table_name
+                    WHERE UPPER(tc.table_schema) = UPPER(%s)
+                      AND tc.table_name = %s
+                      AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                    ORDER BY tc.constraint_type, tc.constraint_name, kcu.ordinal_position
+                    """,
+                    (schema, table),
+                )
+            except Exception:
+                # Older SF builds may lack ENFORCED — treat as YES (fail-closed).
+                cur.execute(
                 """
                 SELECT tc.constraint_name,
                        tc.constraint_type,
@@ -465,7 +816,12 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
                 """,
                 (schema, table),
             )
-        for name, ctype, col, _ord, enforced in cur.fetchall() or []:
+        for raw in cur.fetchall() or []:
+            fields = tuple(raw)
+            if len(fields) < 5:
+                continue
+            name, ctype, col, _ord, enforced = fields[:5]
+            rely = _snowflake_rely(fields[5]) if row_has_rely and len(fields) > 5 else None
             key = str(name)
             is_primary = str(ctype).upper() == "PRIMARY KEY"
             bucket = by_name.setdefault(
@@ -484,16 +840,49 @@ def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str,
             bucket["primary"] = is_primary or bool(bucket.get("primary"))
             if str(enforced or "YES").upper() == "NO":
                 bucket["enforced"] = False
+            if rely is True:
+                bucket["rely"] = True
+            elif rely is False and bucket.get("rely") is not True:
+                bucket["rely"] = False
             if col:
                 bucket["columns"].append(str(col))
     except Exception:
-        return {"primary_key_columns": [], "unique_keys": []}
+        return {"primary_key_columns": [], "unique_keys": [], "table_kind": ""}
 
+    table_kind = _snowflake_table_kind(cur, schema, table)
     for bucket in by_name.values():
         if bucket.get("primary"):
             pk = list(bucket.get("columns") or [])
+        if table_kind:
+            bucket["table_kind"] = table_kind
         unique_keys.append(bucket)
-    return {"primary_key_columns": pk, "unique_keys": unique_keys}
+    return {
+        "primary_key_columns": pk,
+        "unique_keys": unique_keys,
+        "table_kind": table_kind,
+    }
+
+
+def _snowflake_rely(value: Any) -> bool | None:
+    """``TABLE_CONSTRAINTS.RELY``. None when this row did not say.
+
+    RELY lets the optimizer assume the constraint. It is not ``ENFORCED``.
+    """
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if text in {"YES", "Y", "TRUE", "1"}:
+        return True
+    if text in {"NO", "N", "FALSE", "0"}:
+        return False
+    return None
+
+
+def _snowflake_table_kind(cur: Any, schema: str, table: str) -> str:
+    """Measured table kind. Empty when the catalog did not answer."""
+    from services.foreign_key_metadata import read_snowflake_table_kind
+
+    return read_snowflake_table_kind(cur, schema, table)
 
 
 def _mysql_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
@@ -574,10 +963,326 @@ def _mysql_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any
     return {"primary_key_columns": pk, "unique_keys": unique_keys}
 
 
+def _sqlite_index_is_partial(row: Any) -> bool | None:
+    """PRAGMA index_list partial bit. None when that column was not returned.
+
+    A four-column row is an older or trimmed read. It is not proof the index
+    is partial, and it is not proof the index is whole.
+    """
+    try:
+        if len(row) < 5:
+            return None
+    except TypeError:
+        return None
+    raw = row[4]
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    try:
+        return int(raw) == 1
+    except (TypeError, ValueError):
+        text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y"}:
+        return True
+    if text in {"0", "false", "f", "no", "n"}:
+        return False
+    return None
+
+
+def _sqlite_index_where(sql: str) -> str:
+    """WHERE expression on a CREATE INDEX statement, or empty when absent.
+
+    ``sqlite_master.sql`` is the statement SQLite stored. PRAGMA index_list
+    only says the index is partial. The predicate is the WHERE at parenthesis
+    depth 0, after the column list. A WHERE inside a quote or inside the
+    indexed expression is not that clause.
+    """
+    text = (sql or "").strip()
+    if text.endswith(";"):
+        text = text[:-1].rstrip()
+    if not text:
+        return ""
+    depth = 0
+    in_squote = False
+    in_dquote = False
+    in_bracket = False
+    where_at: int | None = None
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if in_squote:
+            if ch == "'":
+                if i + 1 < n and text[i + 1] == "'":
+                    i += 2
+                    continue
+                in_squote = False
+            i += 1
+            continue
+        if in_dquote:
+            if ch == '"':
+                if i + 1 < n and text[i + 1] == '"':
+                    i += 2
+                    continue
+                in_dquote = False
+            i += 1
+            continue
+        if in_bracket:
+            if ch == "]":
+                in_bracket = False
+            i += 1
+            continue
+        if ch == "'":
+            in_squote = True
+        elif ch == '"':
+            in_dquote = True
+        elif ch == "[":
+            in_bracket = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth:
+                depth -= 1
+        elif (
+            depth == 0
+            and text[i : i + 5].upper() == "WHERE"
+            and (i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_"))
+        ):
+            end = i + 5
+            if end >= n or not (text[end].isalnum() or text[end] == "_"):
+                where_at = end
+        i += 1
+    if where_at is None:
+        return ""
+    return text[where_at:].strip()
+
+
+def _sqlite_index_sql(cur: Any, index_name: str) -> str:
+    """CREATE INDEX text from sqlite_master, or empty when it was not read."""
+    try:
+        cur.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (index_name,),
+        )
+        row = cur.fetchone()
+    except Exception as exc:
+        logger.debug("sqlite index sql unread: %s", exc, exc_info=exc)
+        return ""
+    if not row:
+        return ""
+    try:
+        sql = row[0]
+    except Exception:
+        sql = None
+    return str(sql or "")
+
+
+_SQLITE_INDEX_SUFFIX_RE = re.compile(
+    r"\s+(?:COLLATE\s+(?:\"(?:[^\"]|\"\")+\"|[A-Za-z_][\w$]*)|(?:ASC|DESC))\s*$",
+    re.I,
+)
+_SQLITE_PLAIN_IDENT_RE = re.compile(
+    r'^("(?:[^"]|"")+"|\[[^\]]+\]|`[^`]+`|[A-Za-z_][\w$]*)$'
+)
+_SQLITE_PURE_FOLD_RE = re.compile(
+    r'^(?:lower|upper|casefold)\s*\(\s*"?[A-Za-z_][\w$]*"?\s*\)$',
+    re.I,
+)
+
+
+def _sqlite_scan_quote(text: str, i: int, n: int, quote: str) -> int:
+    """Index after a quoted span that starts at ``i``. ``quote`` is the opener."""
+    i += 1
+    while i < n:
+        ch = text[i]
+        if quote == '"' and ch == '"':
+            if i + 1 < n and text[i + 1] == '"':
+                i += 2
+                continue
+            return i + 1
+        if quote == "'" and ch == "'":
+            if i + 1 < n and text[i + 1] == "'":
+                i += 2
+                continue
+            return i + 1
+        if quote == "[" and ch == "]":
+            return i + 1
+        if quote == "`" and ch == "`":
+            return i + 1
+        i += 1
+    return n
+
+
+def _sqlite_index_key_parts(sql: str) -> list[str]:
+    """Indexed expressions inside the first parenthesis list of CREATE INDEX.
+
+    Empty when that list was not in the statement. A comma inside ``lower(a)``
+    or inside a quote does not split the list.
+    """
+    text = (sql or "").strip()
+    if text.endswith(";"):
+        text = text[:-1].rstrip()
+    if not text:
+        return []
+    depth = 0
+    start: int | None = None
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if ch in {"'", '"', "[", "`"}:
+            i = _sqlite_scan_quote(text, i, n, ch)
+            continue
+        if ch == "(":
+            if depth == 0:
+                start = i + 1
+            depth += 1
+        elif ch == ")":
+            if depth == 1 and start is not None:
+                return _sqlite_split_key_list(text[start:i])
+            if depth:
+                depth -= 1
+        i += 1
+    return []
+
+
+def _sqlite_split_key_list(inner: str) -> list[str]:
+    parts: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    i = 0
+    n = len(inner)
+    while i < n:
+        ch = inner[i]
+        if ch in {"'", '"', "[", "`"}:
+            end = _sqlite_scan_quote(inner, i, n, ch)
+            buf.append(inner[i:end])
+            i = end
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")" and depth:
+            depth -= 1
+        elif ch == "," and depth == 0:
+            part = "".join(buf).strip()
+            if part:
+                parts.append(part)
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    part = "".join(buf).strip()
+    if part:
+        parts.append(part)
+    return parts
+
+
+def _sqlite_strip_index_suffix(part: str) -> str:
+    text = (part or "").strip()
+    while True:
+        nxt = _SQLITE_INDEX_SUFFIX_RE.sub("", text).strip()
+        if nxt == text:
+            return text
+        text = nxt
+
+
+def _sqlite_plain_column(part: str) -> str | None:
+    """Bare indexed column, or None when the part is an expression."""
+    match = _SQLITE_PLAIN_IDENT_RE.match(_sqlite_strip_index_suffix(part))
+    if not match:
+        return None
+    ident = match.group(1)
+    if ident.startswith('"') and ident.endswith('"'):
+        return ident[1:-1].replace('""', '"')
+    if ident.startswith("[") and ident.endswith("]"):
+        return ident[1:-1]
+    if ident.startswith("`") and ident.endswith("`"):
+        return ident[1:-1]
+    return ident
+
+
+def _sqlite_classify_key_parts(
+    parts: list[str],
+) -> tuple[list[str], list[str], str, bool] | None:
+    """Split a key list into columns and pure ``lower``/``upper`` folds.
+
+    None when a part is an expression this probe cannot evaluate. The caller
+    must not publish the plain columns as if they were the whole unique key.
+    """
+    from services.type_system import parse_case_insensitive_index_expression
+
+    if not parts:
+        return None
+    columns: list[str] = []
+    expr_cols: list[str] = []
+    exprs: list[str] = []
+    folded = False
+    for part in parts:
+        core = _sqlite_strip_index_suffix(part)
+        plain = _sqlite_plain_column(core)
+        if plain:
+            columns.append(plain)
+            continue
+        if _SQLITE_PURE_FOLD_RE.match(core):
+            folded = True
+            exprs.append(core)
+            for col in parse_case_insensitive_index_expression(core):
+                if col not in expr_cols:
+                    expr_cols.append(col)
+            continue
+        return None
+    return columns, expr_cols, "; ".join(exprs), folded
+
+
+def _sqlite_xinfo_keys(rows: list[Any]) -> tuple[list[str], bool, bool]:
+    """Plain columns, whether an expression key is present, and NOCASE.
+
+    ``PRAGMA index_xinfo`` field 5 is 0 for the rowid companion. A shorter
+    ``index_info`` row did not measure that bit or the collation, so a name
+    stays a key column and NOCASE is not invented.
+    """
+    plain: list[str] = []
+    has_expr = False
+    nocase = False
+    for info in rows or []:
+        try:
+            name = info[2]
+        except Exception:
+            continue
+        is_key = True
+        coll = ""
+        if len(info) > 5 and info[5] is not None:
+            try:
+                is_key = int(info[5] or 0) == 1
+            except (TypeError, ValueError):
+                is_key = True
+        if len(info) > 4 and info[4] is not None:
+            coll = str(info[4]).strip().upper()
+        if not is_key:
+            continue
+        if name is None or str(name).strip() == "":
+            has_expr = True
+            continue
+        plain.append(str(name))
+        if coll == "NOCASE":
+            nocase = True
+    return plain, has_expr, nocase
+
+
 def _sqlite_fetch_unique_keys(
     cur: Any, table_quoted: str, info_rows: list[Any]
 ) -> dict[str, Any]:
-    """Return SQLite PRIMARY KEY + UNIQUE indexes (enforced at write)."""
+    """Return SQLite PRIMARY KEY + UNIQUE indexes (enforced at write).
+
+    A partial unique index still rejects a new duplicate, but only for rows
+    that match its WHERE. The predicate comes from ``sqlite_master.sql`` when
+    PRAGMA index_list says the index is partial. ``lower(email)`` and
+    ``COLLATE NOCASE`` casefold like the engine. An expression this probe
+    cannot evaluate stays on the key and is not reduced to its plain columns.
+    The key stays enforced.
+    """
     pk_ord: list[tuple[int, str]] = []
     for row in info_rows or []:
         # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
@@ -613,6 +1318,7 @@ def _sqlite_fetch_unique_keys(
                 idx_name = str(idx[1])
                 is_unique = int(idx[2] or 0) == 1
                 origin = str(idx[3] or "").lower() if len(idx) > 3 else ""
+                partial = _sqlite_index_is_partial(idx)
             except Exception:
                 continue
             if not is_unique:
@@ -620,26 +1326,40 @@ def _sqlite_fetch_unique_keys(
             # PK already covered via table_info.
             if origin == "pk":
                 continue
-            cur.execute(f"PRAGMA index_info({quote_sql_identifier(idx_name)})")
-            cols: list[str] = []
-            for info in cur.fetchall() or []:
-                try:
-                    col = info[2]
-                except Exception:
-                    col = None
-                if col:
-                    cols.append(str(col))
-            if not cols:
+            cur.execute(f"PRAGMA index_xinfo({quote_sql_identifier(idx_name)})")
+            plain, has_expr, nocase = _sqlite_xinfo_keys(cur.fetchall() or [])
+            if not plain and not has_expr:
+                continue
+            # partial is True only when PRAGMA measured it. The statement is
+            # read once when the WHERE or an expression key has to be parsed.
+            sql = ""
+            if partial is True or has_expr:
+                sql = _sqlite_index_sql(cur, idx_name)
+            predicate = _sqlite_index_where(sql) if partial is True else ""
+            cols = list(plain)
+            expr_cols: list[str] = []
+            expression = ""
+            case_insensitive = nocase
+            if has_expr:
+                classified = _sqlite_classify_key_parts(_sqlite_index_key_parts(sql))
+                if classified is None:
+                    cols = []
+                    case_insensitive = False
+                    expression = " ".join(_sqlite_index_key_parts(sql))
+                else:
+                    cols, expr_cols, expression, folded = classified
+                    case_insensitive = nocase or folded
+            if not cols and not expr_cols and not has_expr:
                 continue
             unique_keys.append(
                 {
                     "name": idx_name,
                     "columns": cols,
                     "primary": False,
-                    "expression": "",
-                    "expression_columns": [],
-                    "case_insensitive": False,
-                    "filter_predicate": "",
+                    "expression": expression,
+                    "expression_columns": expr_cols,
+                    "case_insensitive": case_insensitive,
+                    "filter_predicate": predicate,
                     "enforced": True,
                 }
             )

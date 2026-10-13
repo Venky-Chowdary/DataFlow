@@ -4,6 +4,8 @@ import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "../../lib/types";
 import { formatJobRowMetric, destMetricCompact } from "../../lib/conservationLedger";
+import { formatJobRoute, readJobStreamNames } from "../../lib/jobEvidence";
+import { scheduleCadenceLabel } from "../../lib/scheduleCadence";
 
 export interface SearchNavigateTarget {
   screen: Screen;
@@ -147,6 +149,7 @@ export function WorkspaceSearch({
       const dest = connectors.find((c) => c.id === s.dest_connector_id);
       if (
         matchesQuery(s.name, q)
+        || matchesQuery(scheduleCadenceLabel(s), q)
         || matchesQuery(s.interval, q)
         || matchesQuery(s.source_table, q)
         || matchesQuery(s.dest_table, q)
@@ -157,7 +160,7 @@ export function WorkspaceSearch({
           id: `sched-${s.id}`,
           kind: "pipeline",
           label: s.name,
-          meta: `${s.interval} · ${s.enabled ? "active" : "paused"} · ${source?.name ?? "source"} → ${dest?.name ?? "dest"}`,
+          meta: `${scheduleCadenceLabel(s)} · ${s.enabled ? "active" : "paused"} · ${source?.name ?? "source"} → ${dest?.name ?? "dest"}`,
           screen: "schedules",
           scheduleId: s.id,
         });
@@ -166,8 +169,12 @@ export function WorkspaceSearch({
 
     for (const j of jobs.slice(0, 40)) {
       const srcName = j.source_name ?? "";
+      const route = formatJobRoute(j);
+      const streamHit = readJobStreamNames(j).some((name) => matchesQuery(name, q));
       if (
         matchesQuery(srcName, q)
+        || matchesQuery(route, q)
+        || streamHit
         || matchesQuery(j.source_type, q)
         || matchesQuery(j.destination_type, q)
         || matchesQuery(j._id, q)
@@ -179,7 +186,7 @@ export function WorkspaceSearch({
         out.push({
           id: `job-${j._id}`,
           kind: "job",
-          label: `${srcName || j.source_type || "Source"} → ${j.destination_collection || j.destination_database || "dest"}`,
+          label: route,
           meta: `${j.status} · ${destMetricCompact(rows)}`,
           screen: "jobs",
           jobId: j._id,

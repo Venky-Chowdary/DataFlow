@@ -248,7 +248,9 @@ def test_csv_sqlite_overwrite_dest_count_equals_source(tmp_path):
     # Full-refresh COPY fingerprints the mapped rows during the write pass, so
     # Gate-8 compares a value digest to the dest read-back — not dest_count:N.
     assert len(summary.get("checksum") or "") == 64
-    assert summary.get("checksum_mode") == "inline_write_pass"
+    assert summary.get("checksum_mode") == "source_reread"
+    assert summary.get("identity_hash_aligned") is True
+    assert summary.get("source_independently_reread") is True
     assert summary.get("engine_source_checksum") == "dest_count:3"
     assert summary.get("engine_target_checksum") == "dest_count:3"
     assert summary.get("proof_scope") == "dest_count_equals_source_snapshot_count"
@@ -631,9 +633,7 @@ def test_csv_mysql_incremental_append_delta_and_noop(monkeypatch, tmp_path):
 
 def test_file_incremental_duckdb_still_uses_row_path(monkeypatch, tmp_path):
     """json/yaml/duckdb stay on the row path; COPY is CSV→SQL-core only."""
-    duckdb = pytest.importorskip(
-        "duckdb", reason="requires the optional DuckDB test dependency"
-    )
+    pytest.importorskip("duckdb", reason="requires the optional DuckDB test dependency")
     _isolate_cursor_store(monkeypatch, tmp_path)
     dest = EndpointConfig(
         kind="database",

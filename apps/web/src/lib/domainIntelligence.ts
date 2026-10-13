@@ -24,7 +24,7 @@ const DOMAIN_RULES: {
   {
     id: "logistics",
     label: "Logistics & supply chain",
-    accent: "#0ea5e9",
+    accent: "var(--df-logo-ink)",
     icon: "truck",
     weight: 1,
     patterns: [
@@ -36,7 +36,7 @@ const DOMAIN_RULES: {
   {
     id: "healthcare",
     label: "Healthcare & life sciences",
-    accent: "#ec4899",
+    accent: "var(--df-logo-tile)",
     icon: "heart",
     weight: 1.1,
     compliance: ["HIPAA", "HITECH"],
@@ -49,7 +49,7 @@ const DOMAIN_RULES: {
   {
     id: "finance",
     label: "Financial services",
-    accent: "#8b5cf6",
+    accent: "var(--df-logo-arrow)",
     icon: "dollar",
     weight: 1.05,
     compliance: ["PCI-DSS", "SOX"],
@@ -62,7 +62,7 @@ const DOMAIN_RULES: {
   {
     id: "insurance",
     label: "Insurance",
-    accent: "#f59e0b",
+    accent: "var(--df-logo-strap)",
     icon: "shield",
     weight: 1.05,
     compliance: ["NAIC", "SOC2"],
@@ -88,7 +88,7 @@ export function detectDataDomain(
     label: "General enterprise data",
     confidence: 0.55,
     signals: [],
-    accent: "#0f766e",
+    accent: "var(--df-logo-ink)",
     icon: "database",
   };
 

@@ -175,7 +175,6 @@ class MongodbChangeStreamCdc:
         self._last_signal_poll_at = 0.0
         self._signal_poll_interval_sec = float(cfg.get("signal_poll_interval_sec") or 15)
         self._signal_index_ready = False
-        import os
 
         from services.cdc_lease import CdcLeaseGuard
 
@@ -341,6 +340,16 @@ class MongodbChangeStreamCdc:
                     query[pk] = {"$gt": last_pk}
             except Exception:
                 query[pk] = {"$gt": last_pk}
+        from services.cdc_snapshot_filter import (
+            compile_snapshot_filter_mongo,
+            normalize_snapshot_filter,
+        )
+
+        extra = compile_snapshot_filter_mongo(
+            normalize_snapshot_filter(getattr(sig, "row_filter", None))
+        )
+        if extra:
+            query = {"$and": [query, extra]} if query else extra
         cursor = self.coll.find(query).sort(pk, 1).limit(limit)
         records: list[dict[str, Any]] = []
         new_last = last_pk

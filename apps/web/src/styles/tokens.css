@@ -16,6 +16,11 @@
   --dt-flow-particle: var(--df-brand);
   --df-brand: #0d9488;
   --df-brand-hover: #0f766e;
+  /* Logo palette — the mark in packages/design-system brand/mark.ts */
+  --df-logo-tile: #0a3d3a;
+  --df-logo-ink: #0f766e;
+  --df-logo-arrow: #2dd4bf;
+  --df-logo-strap: #f59e0b;
   --df-brand-strong: #115e59;
   --df-brand-deep: #0f766e;
   --df-brand-bright: #14b8a6;
@@ -179,6 +184,12 @@
 
   --df-header-height: 60px;
   --df-sidebar-width: 252px;
+  --df-mobile-nav-max-width: 280px;
+  --df-mobile-nav-gutter: 16px;
+  --df-mobile-nav-offset: 8px;
+  --df-mobile-nav-duration: var(--df-dur);
+  --df-mobile-nav-overlay-z: 55;
+  --df-mobile-nav-z: 60;
   --df-content-max: none;
   --df-rail-width: 360px;
   --dt-copilot-rail-width: 360px;
@@ -211,6 +222,8 @@
      retunes --df-control-height; this alias follows. */
   --df-tab-height: var(--df-control-height);
   --df-icon-btn-size: 28px;
+  --df-stepper-mobile-node: 18px;
+  --df-stepper-mobile-height: 32px;
   --df-chip-height: 28px;
   --df-inline-action-h: 24px;
   --df-min-target: 24px;

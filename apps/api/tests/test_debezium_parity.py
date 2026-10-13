@@ -364,6 +364,96 @@ def test_snapshot_modes_debezium_compatible() -> None:
     assert should_run_snapshot(SnapshotMode.WHEN_NEEDED, watermark="x") is False
 
 
+def test_open_snapshot_phase_is_not_a_finished_dump() -> None:
+    """A phase=snapshot cursor still has unread keys. Stream-only would skip them."""
+    import json
+
+    from connectors.postgresql_change_stream import encode_pg_resume_token
+    from services.cdc_snapshot_mode import (
+        KIND_BLOCKING,
+        build_snapshot_mode_preflight_gate,
+        classify_snapshot_plan,
+        resolve_cdc_snapshot_plan,
+        snapshot_dump_open,
+    )
+    from services.cdc_cursor_gap import CdcCursorGapError
+
+    pg_open = encode_pg_resume_token(
+        "s", lsn="0/1", phase="snapshot", table="orders", last_pk="1"
+    )
+    pg_done = encode_pg_resume_token("s", lsn="0/1", phase="streaming")
+    mysql_open = json.dumps(
+        {
+            "phase": "snapshot",
+            "file": "mysql-bin.000001",
+            "pos": 4,
+            "table": "orders",
+            "last_pk": "1",
+        },
+        separators=(",", ":"),
+    )
+    mssql_open = encode_mssql_cdc_token(
+        "0000001a", table="orders", phase="snapshot", offset=1, last_pk="1"
+    )
+    oracle_open = encode_logminer_token(
+        1000, table="ORDERS", phase="snapshot", offset=1, last_pk="1"
+    )
+    incremental = json.dumps(
+        {"incremental_snapshot": True, "phase": "snapshot", "lsn": "0/9"}
+    )
+
+    assert snapshot_dump_open(pg_open) is True
+    assert snapshot_dump_open(mysql_open) is True
+    assert snapshot_dump_open(mssql_open) is True
+    assert snapshot_dump_open(oracle_open) is True
+    assert snapshot_dump_open(pg_done) is False
+    assert snapshot_dump_open("2") is False
+    assert snapshot_dump_open(incremental) is False
+    assert snapshot_dump_open(None) is False
+
+    for token in (pg_open, mysql_open, mssql_open, oracle_open):
+        assert should_run_snapshot(SnapshotMode.INITIAL, watermark=token) is True
+        plan = classify_snapshot_plan(SnapshotMode.INITIAL, watermark=token)
+        assert plan["kind"] == KIND_BLOCKING
+        assert plan["run_snapshot"] is True
+        assert plan["reason"] == "snapshot_in_progress"
+        needed = classify_snapshot_plan(SnapshotMode.WHEN_NEEDED, watermark=token)
+        assert needed["run_snapshot"] is True
+
+    finished = classify_snapshot_plan(SnapshotMode.INITIAL, watermark=pg_done)
+    assert finished["run_snapshot"] is False
+    assert finished["reason"] == "resume_ok"
+
+    # A purged log during an unfinished dump is not "initial already spent".
+    gapped = classify_snapshot_plan(
+        SnapshotMode.INITIAL, watermark=pg_open, retention_status="gap"
+    )
+    assert gapped["kind"] == KIND_BLOCKING
+    assert gapped["run_snapshot"] is True
+    assert gapped["reason"] == "snapshot_in_progress"
+
+    with pytest.raises(CdcCursorGapError) as refused:
+        resolve_cdc_snapshot_plan(SnapshotMode.NEVER, watermark=pg_open)
+    assert refused.value.snapshot_plan["reason"] == "never_forbids_open_snapshot"
+
+    gate = build_snapshot_mode_preflight_gate(
+        sync_mode="cdc",
+        watermark=pg_open,
+        request_snapshot_mode="initial",
+    )
+    assert gate is not None
+    assert gate["status"] == "pass"
+    assert gate["details"]["run_snapshot"] is True
+    assert gate["details"]["snapshot_dump_open"] is True
+    blocked = build_snapshot_mode_preflight_gate(
+        sync_mode="cdc",
+        watermark=pg_open,
+        request_snapshot_mode="never",
+    )
+    assert blocked is not None
+    assert blocked["status"] == "block"
+
+
 def test_classify_snapshot_plan_when_needed_gap_is_blocking() -> None:
     from services.cdc_snapshot_mode import (
         KIND_BLOCKING,
@@ -665,12 +755,11 @@ def test_mysql_poll_preserves_gtid_on_resume_token(monkeypatch) -> None:
         ),
     ):
         batches = list(cdc.poll())
-    assert batches
-    # Idle poll still refreshes GTID into resume token (commit-boundary path).
-    token = batches[0].resume_token
-    if isinstance(token, dict) and token.get("txn_held"):
-        token = token.get("token") or {}
-    assert token.get("gtid") == "uuid:1-10"
+    # An idle poll did not apply a captured-table change. Publishing the
+    # live head (including its GTID) is how the next run started past an
+    # unread update (DEF-B2-009).
+    assert batches == []
+    assert cdc.resume_token.get("pos") == 100
 
 
 def test_extract_cdc_lsn_supports_gtid_mongo_scn() -> None:

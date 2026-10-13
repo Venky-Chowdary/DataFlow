@@ -378,7 +378,7 @@ Success metric for the company: a migration programme owner can move Oracle/SQL 
 - [x] F1 Fingerprints during write pass (`checksum_mode=inline_write_pass`; opt-in `RECONCILE_SOURCE_REREAD`)
 - [x] F2 Keyset pagination: composite PK + SQL Server/Oracle (`services/keyset_pagination.py`; `pagination_mode` proof)
 - [x] F3 Bulk export — PG COPY implemented; Snowflake/BQ fail-closed stubs + capability `bulk_export_status=planned`
-- [~] F4 CDC `START_REPLICATION` transport (`postgresql_cdc_transport`; **default still peek**; capability `cdc_streaming_status=planned_opt_in` — not certified until lag curves)
+- [x] F4 CDC `START_REPLICATION` transport (`postgresql_cdc_transport`; default `auto` = streaming with peek fallback; capability `cdc_streaming_status=default_with_peek_fallback`; live ITs `test_cdc_postgres_streaming_transport_live.py` + lag numbers in `KEYSET_AND_BULK_IO.md`)
 - [x] F5 Durable distributed scheduler — Mongo `transfer_job_queue` + leases + fences (`scheduler_mode` local|claim|auto); API claim loop; `docs/DISTRIBUTED_SCHEDULER.md` (Temporal deferred — correctness via claim/lease)
 - [x] F6 Defaults + measured tuning guide — `PARALLEL_WORKERS` min(4,cpu), `TRANSFER_WORKERS` 8; `docs/TUNING_AND_BENCHMARKS.md` + `scripts/throughput_microbench.py` → `throughput_microbench.json`
 - [x] F7 Capability registry for all TRANSFER_READY unique drivers — profile hash + matrix artifact; Decision Artifact stamps `capability_*_hash` (`export_live_capability_matrix`)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import io
 import socket
 import sqlite3
@@ -98,9 +99,11 @@ def _run(
     return written, summary
 
 
-def test_xls_declines_copy(tmp_path):
-    dest_cfg = {"format": "sqlite", "database": str(tmp_path / "x.db"), "table": "events"}
-    declined = try_copy_local_csv(
+def test_renamed_xlsx_still_copies(tmp_path):
+    """ZIP magic under an ``.xls`` name is OOXML, not a declined legacy file."""
+    dest_path = tmp_path / "renamed.db"
+    dest_cfg = {"format": "sqlite", "database": str(dest_path), "table": "events"}
+    used = try_copy_local_csv(
         content=_xlsx(APPEND_DAY1),
         filename="events.xls",
         file_type="excel",
@@ -112,7 +115,10 @@ def test_xls_declines_copy(tmp_path):
         schema=_schema(),
         effective_sync="full_refresh_overwrite",
     )
-    assert declined is None
+    assert used is not None
+    written, _ddl, summary, _cols = used
+    assert written == 2
+    assert summary.get("copy_fast_path") == "used"
 
 
 def test_windowed_excel_declines_copy(tmp_path):
@@ -302,6 +308,116 @@ def test_excel_to_sqlite_execute_tracked_gate8(tmp_path):
         conn.close()
     assert n == 2
     assert names == ["a", "b"]
+
+
+def test_sqlite_copy_encoder_matches_row_serializer_for_mixed_types(tmp_path):
+    from connectors.sqlite_writer import _to_sqlite_value
+    from services.copy_csv_local import _write_mapped_csv
+
+    columns = [
+        "date_value",
+        "midnight_value",
+        "datetime_value",
+        "timestamptz_value",
+        "time_value",
+        "decimal_value",
+        "boolean_value",
+        "json_value",
+        "null_value",
+    ]
+    logical_types = [
+        "DATE",
+        "DATETIME",
+        "DATETIME",
+        "TIMESTAMPTZ",
+        "TIME",
+        "DECIMAL",
+        "BOOLEAN",
+        "JSON",
+        "TEXT",
+    ]
+    source_values = [
+        "2024-06-01T00:00:00",
+        "2024-06-01T00:00:00",
+        "2024-06-01T12:34:56",
+        "2024-06-01T12:34:56+00:00",
+        "12:34:56",
+        "1234.500",
+        "true",
+        '{"a":1}',
+        None,
+    ]
+    source = io.StringIO(newline="")
+    writer = csv.writer(source)
+    writer.writerow(columns)
+    writer.writerow(source_values)
+    mapped_path = tmp_path / "mapped.csv"
+    pairs = [(column, column) for column in columns]
+
+    assert _write_mapped_csv(
+        source.getvalue().encode("utf-8"),
+        "values.csv",
+        pairs,
+        str(mapped_path),
+        file_type="csv",
+        declared_types=logical_types,
+        physical_types=["TEXT"] * len(columns),
+        dest_db="sqlite",
+    ) == 1
+
+    with mapped_path.open(encoding="utf-8", newline="") as handle:
+        encoded_rows = list(csv.reader(handle))
+    assert encoded_rows[0] == columns
+    expected = []
+    for value, logical_type in zip(source_values, logical_types, strict=True):
+        row_value = _to_sqlite_value(value, logical_type)
+        if row_value is None:
+            expected.append(r"\N")
+        else:
+            expected.append(str(row_value))
+    assert encoded_rows[1] == expected
+    assert encoded_rows[1][0] == "2024-06-01"
+
+
+def test_excel_sqlite_binary_declines_copy_with_reason(tmp_path):
+    from services.million_row_proof import ensure_memory_job_store_if_mongo_down
+
+    ensure_memory_job_store_if_mongo_down()
+    db = tmp_path / "binary.db"
+    mappings = [
+        {"source": "id", "target": "id", "type": "INTEGER", "transform": "none"},
+        {"source": "name", "target": "name", "type": "TEXT", "transform": "none"},
+        {
+            "source": "updated_at",
+            "target": "updated_at",
+            "type": "BINARY",
+            "transform": "none",
+        },
+    ]
+    written, _ddl, summary, _columns = stream_file_to_database(
+        _xlsx([(1, "a", "SGVsbG8=")]),
+        "binary.xlsx",
+        EndpointConfig(
+            kind="database", format="sqlite", database=str(db), table="events"
+        ),
+        mappings,
+        {"id": "INTEGER", "name": "TEXT", "updated_at": "BINARY"},
+        job_id="excel-sqlite-binary-decline",
+        checkpoint_service=_FakeCheckpointService(),
+        sync_mode="full_refresh_overwrite",
+        stream_contracts=_contracts("full_refresh_overwrite"),
+    )
+    assert written == 1
+    assert summary.get("copy_fast_path") == "declined"
+    reason = summary.get("copy_decline_reason", "")
+    assert "BINARY" in reason and "COPY-safe" in reason
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(
+            "SELECT typeof(updated_at), updated_at FROM events"
+        ).fetchone() == ("blob", b"Hello")
+    finally:
+        conn.close()
 
 
 @pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not on 5432")

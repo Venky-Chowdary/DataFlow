@@ -6,6 +6,7 @@ import datetime
 import json
 import logging
 import re
+import sys
 from collections.abc import Sequence
 from typing import Any
 
@@ -24,9 +25,10 @@ from services.foreign_key_metadata import probe_foreign_keys
 from services.identity_carry import apply_identity_probe
 from services.physical_storage_metadata import probe_physical_storage
 from services.secondary_indexes import probe_secondary_indexes
-from services.value_serializer import json_default
+from services.value_serializer import cell_to_string, json_default
 
 logger = logging.getLogger(__name__)
+_si = sys.modules[__name__]
 
 
 def _catalog_type_head(token: str) -> str:
@@ -125,6 +127,7 @@ def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str
             "UUID": "UUID",
             "DATE": "DATE",
             "TIMESTAMP": "DATETIME",
+            "TIMESTAMPTZ": "TIMESTAMPTZ",
             "TIME": "TIME",
             "BOOLEAN": "BOOLEAN",
             "VARCHAR": "TEXT",
@@ -193,6 +196,13 @@ def _refine_columns_by_samples(
                 continue
             str_values = [str(v) for v in values]
             inferred = _infer_logical_from_strings(str_values, field_name=c["name"])
+            # An offset string (``Z`` or ``±HH:MM``) is text that happens to
+            # look like a timestamp. Promoting it to DATETIME drops the offset.
+            if inferred in {"DATETIME", "TIMESTAMP", "TIMESTAMPTZ", "DATE"} and any(
+                re.search(r"(?:Z|[+-]\d{2}:?\d{2})\s*$", str(value).strip(), re.I)
+                for value in str_values
+            ):
+                continue
             if inferred and inferred != "TEXT":
                 # Keep the catalog carrier: value inference describes the rows a
                 # source holds, not what a destination column will accept. A
@@ -301,9 +311,16 @@ def _introspect_schema(
     auth_role: str = "",
     private_key: str = "",
     strict_namespace: bool = False,
+    reader_cfg: dict[str, Any] | None = None,
     **options: Any,
 ) -> dict[str, Any]:
     """Load tables/columns for ``table`` in the requested database/schema.
+
+    ``reader_cfg`` asks a document store for the shape its Execute reader will
+    emit (the connector config the reader is built from). Without it MongoDB
+    reports raw top-level keys, which is right for ``$group`` pipelines but not
+    for a transfer plan: the reader expands nested objects into ``parent_child``
+    columns, and a plan built from the raw keys never maps them.
 
     ``options`` carries the connection-affecting extras from the connector
     config (``connectors.generic_sql.connection_options``): TLS material,
@@ -316,6 +333,10 @@ def _introspect_schema(
     must report empty columns so Studio can honestly create-on-write — not
     claim ``users`` exists in ``railway`` because another DB on the host has it.
     """
+    # Timescale is the Postgres catalog. Cockroach stays unresolved here so a
+    # planned engine does not inherit a live schema probe.
+    if db_type in {"timescaledb", "timescale"}:
+        db_type = "postgresql"
     if db_type in {
         "generic_sql",
         "duckdb",
@@ -391,7 +412,7 @@ def _introspect_schema(
             **options,
         )
     if db_type in ("oracle", "oracle_db", "amazon_rds_oracle"):
-        return _introspect_oracle(
+        return _si._introspect_oracle(
             host=host,
             port=port,
             database=database,
@@ -405,7 +426,7 @@ def _introspect_schema(
             **options,
         )
     if db_type in ("sqlserver", "mssql", "sql_server", "azure_sql"):
-        return _introspect_sqlserver(
+        return _si._introspect_sqlserver(
             host=host,
             port=port,
             database=database,
@@ -440,6 +461,7 @@ def _introspect_schema(
             connection_string=connection_string,
             auth_source=auth_source,
             table=table,
+            reader_cfg=reader_cfg,
         )
     if db_type == "dynamodb":
         return _introspect_dynamodb(
@@ -549,6 +571,26 @@ def _introspect_schema(
         return _introspect_redis(host=host, port=port, password=password, table=table, connection_string=connection_string)
     if db_type == "sqlite":
         return _introspect_sqlite(database=database, connection_string=connection_string, host=host, table=table)
+    if db_type == "neo4j":
+        return _introspect_neo4j(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            table=table,
+            ssl=ssl,
+        )
+    if db_type == "weaviate":
+        return _introspect_weaviate(
+            host=host,
+            port=port,
+            database=database,
+            table=table,
+            connection_string=connection_string,
+            api_key=api_key,
+            ssl=ssl,
+        )
     return {"ok": False, "error": f"Schema introspection not implemented for {db_type}", "columns": [], "tables": []}
 
 
@@ -1079,6 +1121,8 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
         }
+        if "table_kind" in unique_meta:
+            out["table_kind"] = unique_meta.get("table_kind") or ""
         # Advisory (NOT ENFORCED) keys — do not invent write blockers, but tell the operator.
         advisory = [
             u.get("name")
@@ -1259,7 +1303,9 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                     if "auto_increment" in extra:
                         logical = f"{logical} AUTO_INCREMENT"
                     # VIRTUAL/STORED GENERATED — client INSERT must omit (like PG ALWAYS).
-                    elif "generated" in extra:
+                    # DEFAULT_GENERATED is an expression default (CURRENT_TIMESTAMP),
+                    # not a computed column.
+                    elif _mysql_extra_is_computed_column(extra):
                         logical = f"{logical} GENERATED ALWAYS"
                     if collation:
                         logical = f"{logical} COLLATE {collation}"
@@ -1277,7 +1323,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         "is_identity": "auto_increment" in extra,
                         "generation": (
                             "always"
-                            if "generated" in extra
+                            if _mysql_extra_is_computed_column(extra)
                             else ("by_default" if "auto_increment" in extra else "")
                         ),
                         "collation": collation,
@@ -2170,6 +2216,18 @@ def _pg_to_logical(dtype: str) -> str:
         return "VARCHAR"
     return "TEXT"
 
+def _mysql_extra_is_computed_column(extra: str) -> bool:
+    """True only for a VIRTUAL or STORED generated column.
+
+    MySQL 8 writes ``DEFAULT_GENERATED`` into EXTRA for
+    ``DEFAULT CURRENT_TIMESTAMP(6)``. That substring contains ``generated``
+    and is still a normal writable column. Marking it GENERATED ALWAYS made
+    the writer omit ``updated_at``.
+    """
+    text = (extra or "").lower()
+    return "virtual generated" in text or "stored generated" in text
+
+
 def _mysql_to_logical(dtype: str) -> str:
     """Map MySQL ``column_type`` to logical carriers, preserving DECIMAL(p,s)."""
     raw = (dtype or "").strip()
@@ -2273,734 +2331,27 @@ def _mysql_to_logical(dtype: str) -> str:
         return f"{m.group(1).upper()}({m.group(2)})"
     if d in {"varchar", "char"}:
         return d.upper()
-    if "text" in d:
+    # Order matters: "text" is a substring of longtext, mediumtext, and tinytext.
+    # Reading LONGTEXT back as TEXT made the next overwrite CREATE a 64 KB column.
+    if d == "longtext" or d.startswith("longtext"):
+        return "LONGTEXT"
+    if d == "mediumtext" or d.startswith("mediumtext"):
+        return "MEDIUMTEXT"
+    if d == "tinytext" or d.startswith("tinytext"):
+        return "TINYTEXT"
+    if d == "text" or d.startswith("text"):
         return "TEXT"
     return "TEXT"
 
 
-def _oracle_to_logical(dtype: str) -> str:
-    """Map Oracle data_type (+ optional precision/scale) to logical carriers.
-
-    NUMBER(p,0) → INTEGER when p ≤ 18; else DECIMAL(p,0). NUMBER(p,s) → DECIMAL(p,s).
-    BINARY_FLOAT/DOUBLE → FLOAT. Oracle DATE includes time-of-day → TIMESTAMP.
-    """
-    raw = (dtype or "").strip()
-    d = raw.upper().replace(" ", "")
-    # NUMBER(p,s) / FLOAT(p) carriers
-    m = re.match(r"^NUMBER\((\d+)(?:,(\d+))?\)$", d)
-    if m:
-        from services.type_system import zero_scale_numeric_carrier
-
-        if m.group(2) is not None and int(m.group(2)) == 0:
-            return zero_scale_numeric_carrier(int(m.group(1)))
-        if m.group(2) is not None:
-            return f"DECIMAL({m.group(1)},{m.group(2)})"
-        return f"DECIMAL({m.group(1)})"
-    if d == "NUMBER" or d.startswith("NUMBER("):
-        return "DECIMAL"
-    # Oracle ANSI FLOAT(p) is NUMBER-backed binary precision (bare FLOAT = 126
-    # binary digits ~ 38 decimal), not IEEE-64. Reading it as DOUBLE silently
-    # drops it to a 53-bit mantissa, so the declared carrier is preserved and
-    # the destination decides how to hold it.
-    m_float = re.match(r"^FLOAT(?:\((\d+)\))?$", d)
-    if m_float:
-        return f"FLOAT({m_float.group(1)})" if m_float.group(1) else "FLOAT"
-    if d in {"BINARY_FLOAT", "BINARY_DOUBLE"} or d.startswith("FLOAT"):
-        from services.type_system import float_width_carrier
-
-        return float_width_carrier(d) or ("BINARY_DOUBLE" if "DOUBLE" in d else "FLOAT")
-    if d in {"INTEGER", "INT", "SMALLINT", "BIGINT"}:
-        from services.type_system import integer_width_carrier
-
-        return integer_width_carrier(d) or "BIGINT"
-    if d == "BOOLEAN":
-        return "BOOLEAN"
-    if d == "DATE":
-        return "TIMESTAMP"  # Oracle DATE is datetime
-    if "TIMESTAMP" in d:
-        if "WITHLOCALTIMEZONE" in d:
-            return "TIMESTAMP_LTZ"
-        if "WITHTIMEZONE" in d:
-            return "TIMESTAMP_TZ"
-        return "TIMESTAMP_NTZ"
-    if "INTERVAL" in raw.upper():
-        # Preserve Oracle leading-field / fractional-second precision
-        # (INTERVAL DAY(3) TO SECOND(6) — ANSI/Oracle contract).
-        raw_u = re.sub(r"\s+", " ", raw.upper()).strip()
-        m_ym = re.match(
-            r"INTERVAL YEAR(?:\((\d+)\))? TO MONTH(?:\((\d+)\))?",
-            raw_u,
-        )
-        if m_ym:
-            if m_ym.group(1):
-                return f"INTERVAL YEAR({m_ym.group(1)}) TO MONTH"
-            return "INTERVAL YEAR TO MONTH"
-        m_ds = re.match(
-            r"INTERVAL DAY(?:\((\d+)\))? TO SECOND(?:\((\d+)\))?",
-            raw_u,
-        )
-        if m_ds:
-            if m_ds.group(1) or m_ds.group(2):
-                day_p = m_ds.group(1) or "2"
-                sec_p = m_ds.group(2) or "6"
-                return f"INTERVAL DAY({day_p}) TO SECOND({sec_p})"
-            return "INTERVAL DAY TO SECOND"
-        if "YEAR" in raw_u and "MONTH" in raw_u:
-            return "INTERVAL YEAR TO MONTH"
-        if any(tok in raw_u for tok in ("DAY", "SECOND", "HOUR", "MINUTE")):
-            return "INTERVAL DAY TO SECOND"
-        return "INTERVAL"
-    # VARCHAR2(n BYTE|CHAR) — BYTE is Oracle default; multi-byte UTF-8 can
-    # truncate under BYTE while CHAR semantics still fit (Informatica-class bug).
-    m = re.match(r"^(VARCHAR2|NVARCHAR2|CHAR|NCHAR)\((\d+)(?:(BYTE|CHAR))?\)$", d)
-    if m:
-        fixed = m.group(1) in {"CHAR", "NCHAR"}
-        national = m.group(1) in {"NVARCHAR2", "NCHAR"}
-        if national:
-            prefix = "NCHAR" if fixed else "NVARCHAR"
-        else:
-            prefix = "CHAR" if fixed else "VARCHAR"
-        unit = (m.group(3) or "").upper()
-        if unit in {"BYTE", "CHAR"}:
-            return f"{prefix}({m.group(2)} {unit})"
-        return f"{prefix}({m.group(2)})"
-    if d in {"CLOB", "NCLOB", "LONG", "VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR", "VARCHAR"}:
-        return "TEXT"
-    if d in {"BLOB", "RAW", "LONGRAW", "BFILE"} or d.startswith("RAW("):
-        return "BINARY"
-    if d == "JSON":
-        return "JSON"
-    if d in {"XMLTYPE", "XML"}:
-        return "XMLTYPE"
-    if d in {"ROWID", "UROWID"}:
-        return d
-    if "SDO_GEOMETRY" in d:
-        return "SDO_GEOMETRY"
-    if d == "GEOGRAPHY":
-        return "GEOGRAPHY"
-    if d == "GEOMETRY":
-        return "GEOMETRY"
-    return "TEXT"
 
 
-def _sqlserver_to_logical(dtype: str) -> str:
-    """Map SQL Server type_name (+ optional (p,s)) to logical carriers."""
-    raw = (dtype or "").strip()
-    d = raw.lower()
-    m = re.match(r"^(decimal|numeric)\s*\(\s*(\d+)\s*(?:,\s*(\d+))?\s*\)$", d)
-    if m:
-        from services.type_system import zero_scale_numeric_carrier
-
-        if m.group(3) is not None and int(m.group(3)) == 0:
-            return zero_scale_numeric_carrier(int(m.group(2)))
-        if m.group(3) is not None:
-            return f"DECIMAL({m.group(2)},{m.group(3)})"
-        return f"DECIMAL({m.group(2)})"
-    if d.startswith("decimal") or d.startswith("numeric"):
-        return "DECIMAL"
-    if d == "money":
-        return "MONEY"  # → DECIMAL(19,4) via normalize/ddl; keep token for money quarantine
-    if d == "smallmoney":
-        return "SMALLMONEY"
-    if d in {"float", "real"}:
-        from services.type_system import float_width_carrier
-
-        return float_width_carrier(d) or "FLOAT"
-    if d in {"int", "bigint", "smallint", "tinyint"}:
-        from services.type_system import integer_width_carrier
-
-        # SQL Server INT is unambiguously 32-bit. The shared carrier widens the
-        # ambiguous INT/INTEGER keyword to BIGINT (never-narrower invent), which
-        # would turn a read int32 column into a BIGINT on the destination and
-        # lose the declared width — so name it explicitly, as PostgreSQL int4 is.
-        if d == "int":
-            return "INT4"
-        return integer_width_carrier(d) or "BIGINT"
-    if d == "bit":
-        return "BOOLEAN"
-    if d == "date":
-        return "DATE"
-    if d == "time" or d.startswith("time("):
-        m = re.search(r"time\s*\(\s*(\d+)\s*\)", d)
-        return f"TIME({m.group(1)})" if m else "TIME"
-    if d == "datetimeoffset" or d.startswith("datetimeoffset"):
-        # Offset-pinned (SQL Server) — TIMESTAMP_TZ polarity, not session LTZ.
-        m = re.search(r"datetimeoffset\s*\(\s*(\d+)\s*\)", d)
-        return f"TIMESTAMP_TZ({m.group(1)})" if m else "TIMESTAMP_TZ"
-    if d.startswith("datetime2"):
-        m = re.search(r"datetime2\s*\(\s*(\d+)\s*\)", d)
-        return f"TIMESTAMP_NTZ({m.group(1)})" if m else "TIMESTAMP_NTZ"
-    # Minute accuracy + Microsoft rounding — keep carrier (wave 70).
-    if d == "smalldatetime":
-        return "SMALLDATETIME"
-    if d in {"datetime"} or d.startswith("datetime"):
-        return "TIMESTAMP_NTZ"
-    if d == "uniqueidentifier":
-        return "UUID"
-    if d == "hierarchyid":
-        # Path polarity `/1/2/` — PG create-new maps to LTREE (wave 67).
-        return "HIERARCHYID"
-    if d == "json":
-        return "JSON"
-    if d == "xml":
-        # Preserve XML specialty (not opaque TEXT) — PG/Oracle XML bind SSOT.
-        return "XML"
-    if d == "sql_variant":
-        # Opaque typed union — JSONB envelope on PG create-new (wave 69).
-        return "SQL_VARIANT"
-    if d == "geography":
-        return "GEOGRAPHY"
-    if d == "geometry":
-        return "GEOMETRY"
-    m = re.match(r"^(varbinary|binary)\s*\(\s*(\d+)\s*\)$", d)
-    if m:
-        return f"{m.group(1).upper()}({m.group(2)})"
-    # SQL Server TIMESTAMP is ROWVERSION (8-byte concurrency token), NOT datetime.
-    # HVR/Estuary map it to BYTEA — never invent a clock type (wave 66).
-    if d in {"rowversion", "timestamp"}:
-        return "ROWVERSION"
-    if d in {"binary", "varbinary", "image"}:
-        return "BINARY"
-    if "varbinary" in d and "(max)" in d:
-        return "BINARY"
-    if "binary" in d:
-        return "BINARY"
-    # Prefer parametric carriers when length was folded into dtype (e.g. varchar(50)).
-    m = re.match(r"^(n?varchar|n?char)\s*\(\s*(\d+)\s*\)$", d)
-    if m:
-        base = m.group(1).lower()
-        width = m.group(2)
-        if base.startswith("n"):
-            return f"N{'CHAR' if 'char' in base and 'varchar' not in base else 'VARCHAR'}({width})"
-        return f"{'CHAR' if base == 'char' else 'VARCHAR'}({width})"
-    if d in {"text", "ntext"} or "(max)" in d:
-        return "TEXT"
-    if any(tok in d for tok in ("nvarchar", "varchar", "nchar", "char", "sysname")):
-        if "char" in d and "varchar" not in d:
-            return "CHAR"
-        return "VARCHAR"
-    return "TEXT"
 
 
-def _introspect_oracle(**kwargs) -> dict[str, Any]:
-    """Oracle ALL_TAB_COLUMNS introspect with NUMBER(p,s) / FLOAT honesty."""
-    try:
-        import sqlalchemy as sa
-        from connectors.generic_sql import _engine, connection_options
-    except Exception:
-        return {
-            "ok": False,
-            "error": "Install oracledb/SQLAlchemy for Oracle introspection",
-            "columns": [],
-            "tables": [],
-        }
-
-    table = (kwargs.get("table") or "").strip()
-    schema = (kwargs.get("schema") or kwargs.get("username") or "").strip().upper()
-    cfg = {
-        # Connection-affecting extras first: service name / SID / TLS decide
-        # which instance answers, and the explicit keys below stay authoritative.
-        **connection_options(kwargs),
-        "type": "oracle",
-        "host": kwargs.get("host") or "",
-        "port": int(kwargs.get("port") or 1521),
-        "database": kwargs.get("database") or "",
-        "username": kwargs.get("username") or "",
-        "password": kwargs.get("password") or "",
-        "schema": schema,
-        "connection_string": kwargs.get("connection_string") or "",
-        "ssl": bool(kwargs.get("ssl", True)),
-    }
-    try:
-        engine = _engine(cfg)
-    except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
-
-    try:
-        with engine.connect() as conn:
-            tables: list[str] = []
-            if not table:
-                if schema:
-                    rows = conn.execute(
-                        sa.text(
-                            "SELECT table_name FROM all_tables WHERE owner = :owner ORDER BY table_name"
-                        ),
-                        {"owner": schema},
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        sa.text("SELECT table_name FROM user_tables ORDER BY table_name")
-                    ).fetchall()
-                tables = [r[0] for r in rows]
-                return {"ok": True, "columns": [], "tables": tables, "schema": schema}
-
-            owner = schema or (kwargs.get("username") or "").upper()
-            tables = [table.upper()]
-            # Stored spelling inside the requested owner: a quoted lower-case
-            # table read as "does not exist" under the folded name, so Validate
-            # planned create-new (and skipped the destination PK / duplicate
-            # gate) for a table that was really there. Same-owner resolution
-            # only — cross-owner healing stays behind ``strict_namespace``.
-            from services.sql_object_identity import resolve_object_identity
-
-            _ident = resolve_object_identity(conn, table, owner)
-            resolved_table = _ident.table if _ident.exists else table.upper()
-            if _ident.exists and _ident.schema:
-                owner = _ident.schema
-            tables = [resolved_table]
-            # VIRTUAL_COLUMN / IDENTITY_COLUMN — client INSERT must omit ALWAYS.
-            # ALL_TAB_COLS (not ALL_TAB_COLUMNS) is the view that exposes
-            # VIRTUAL_COLUMN; the join used to fail with ORA-00904 on every
-            # Oracle and silently degrade to the identity-blind fallback, so a
-            # virtual or identity column looked like an ordinary insertable one.
-            _oracle_col_sql = """
-                    SELECT atc.column_name, atc.data_type, atc.data_precision, atc.data_scale,
-                           atc.nullable, atc.char_length, atc.char_used,
-                           atc.virtual_column, atc.identity_column,
-                           ic.generation_type, atc.data_default
-                    FROM all_tab_cols atc
-                    LEFT JOIN all_tab_identity_cols ic
-                      ON atc.owner = ic.owner
-                     AND atc.table_name = ic.table_name
-                     AND atc.column_name = ic.column_name
-                    WHERE atc.owner = :owner AND atc.table_name = :table
-                      AND atc.hidden_column = 'NO'
-                    ORDER BY atc.column_id
-                    """
-            try:
-                col_rows = conn.execute(
-                    sa.text(_oracle_col_sql),
-                    {"owner": owner, "table": resolved_table},
-                ).fetchall()
-            except Exception:
-                # Pre-12c / limited grants: fall back without identity join.
-                _oracle_col_sql = """
-                    SELECT column_name, data_type, data_precision, data_scale, nullable,
-                           char_length, char_used, virtual_column, 'NO', NULL, data_default
-                    FROM all_tab_cols
-                    WHERE owner = :owner AND table_name = :table
-                      AND hidden_column = 'NO'
-                    ORDER BY column_id
-                    """
-                try:
-                    col_rows = conn.execute(
-                        sa.text(_oracle_col_sql),
-                        {"owner": owner, "table": resolved_table},
-                    ).fetchall()
-                except Exception:
-                    _oracle_col_sql = """
-                        SELECT column_name, data_type, data_precision, data_scale, nullable,
-                               char_length, char_used, 'NO', 'NO', NULL, data_default
-                        FROM all_tab_columns
-                        WHERE owner = :owner AND table_name = :table
-                        ORDER BY column_id
-                        """
-                    col_rows = conn.execute(
-                        sa.text(_oracle_col_sql),
-                        {"owner": owner, "table": resolved_table},
-                    ).fetchall()
-            # Destination probes must NOT heal across owners: another schema's
-            # columns would mark a create-new target as already existing.
-            if not col_rows and not bool(kwargs.get("strict_namespace")):
-                found = conn.execute(
-                    sa.text(
-                        """
-                        SELECT owner, table_name FROM all_tables
-                        WHERE UPPER(table_name) = UPPER(:table)
-                        ORDER BY CASE
-                          WHEN owner = :owner THEN 0
-                          ELSE 1
-                        END
-                        FETCH FIRST 5 ROWS ONLY
-                        """
-                    ),
-                    {"table": table, "owner": owner},
-                ).fetchall()
-                for found_owner, found_table in found or []:
-                    try:
-                        col_rows = conn.execute(
-                            sa.text(_oracle_col_sql),
-                            {"owner": found_owner, "table": found_table},
-                        ).fetchall()
-                    except Exception:
-                        col_rows = []
-                    if col_rows:
-                        owner = found_owner
-                        resolved_table = str(found_table)
-                        break
-            columns: list[dict] = []
-            for row in col_rows:
-                name, data_type, precision, scale, nullable = row[:5]
-                char_length = row[5] if len(row) > 5 else None
-                char_used = row[6] if len(row) > 6 else None
-                virtual_col = row[7] if len(row) > 7 else "NO"
-                identity_col = row[8] if len(row) > 8 else "NO"
-                generation = row[9] if len(row) > 9 else None
-                data_default = row[10] if len(row) > 10 else None
-                dtype = str(data_type or "")
-                dtype_u = dtype.upper()
-                if dtype_u == "NUMBER" and precision is not None:
-                    if scale is not None:
-                        dtype = f"NUMBER({int(precision)},{int(scale)})"
-                    else:
-                        dtype = f"NUMBER({int(precision)})"
-                elif dtype_u == "NUMBER" and (
-                    (scale is not None and int(scale) == 0)
-                    or str(identity_col or "").upper() == "YES"
-                ):
-                    # Oracle reports an unconstrained NUMBER for an identity
-                    # column (precision and scale both NULL), but the identity
-                    # sequence only ever yields integers. Read bare it became a
-                    # fractional DECIMAL, so the key landed in a column with
-                    # decimal places that no destination will generate into.
-                    # 38 is Oracle's maximum precision.
-                    dtype = "NUMBER(38,0)"
-                elif (
-                    dtype_u in {"VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR"}
-                    and char_length is not None
-                    and int(char_length) > 0
-                ):
-                    unit = "CHAR" if str(char_used or "").upper() == "C" else "BYTE"
-                    # NVARCHAR2/NCHAR are always character semantics in Oracle.
-                    if dtype_u in {"NVARCHAR2", "NCHAR"}:
-                        unit = "CHAR"
-                    dtype = f"{dtype_u}({int(char_length)} {unit})"
-                logical = _oracle_to_logical(dtype)
-                if str(virtual_col or "").upper() == "YES":
-                    logical = f"{logical} GENERATED ALWAYS"
-                elif str(identity_col or "").upper() == "YES":
-                    gen = str(generation or "").upper()
-                    if "ALWAYS" in gen and "DEFAULT" not in gen:
-                        logical = f"{logical} GENERATED ALWAYS"
-                    else:
-                        logical = f"{logical} GENERATED BY DEFAULT"
-                col_ora: dict[str, Any] = {
-                    "name": name,
-                    "inferred_type": logical,
-                    "nullable": str(nullable).upper() == "Y",
-                    "default": (
-                        str(data_default).strip()
-                        if data_default is not None
-                        and str(data_default).strip() not in ("", "NULL")
-                        else None
-                    ),
-                    "is_identity": str(identity_col or "").upper() == "YES",
-                    "data_type": dtype,
-                }
-                attach_declared_catalog_type(
-                    col_ora, str(dtype or ""), dest_db="oracle"
-                )
-                columns.append(col_ora)
-            if columns:
-                apply_identity_probe("oracle", conn, owner, resolved_table, columns)
-            unique_meta = (
-                _oracle_fetch_unique_keys(conn, owner, resolved_table)
-                if columns
-                else {"primary_key_columns": [], "unique_keys": []}
-            )
-            foreign_keys, foreign_keys_meta = (
-                _fetch_foreign_keys("oracle", conn, owner, resolved_table)
-                if columns
-                else ([], None)
-            )
-            return {
-                "ok": True,
-                "columns": columns,
-                "tables": tables,
-                "schema": owner,
-                "primary_key_columns": unique_meta.get("primary_key_columns") or [],
-                "unique_keys": unique_meta.get("unique_keys") or [],
-                "foreign_keys": foreign_keys,
-                "foreign_keys_meta": foreign_keys_meta,
-                "physical_storage": (
-                    probe_physical_storage("oracle", conn, owner, resolved_table).to_dict()
-                    if columns
-                    else None
-                ),
-                "check_constraints_meta": (
-                    probe_check_constraints("oracle", conn, owner, resolved_table).to_dict()
-                    if columns
-                    else None
-                ),
-                "indexes_meta": (
-                    probe_secondary_indexes("oracle", conn, owner, resolved_table).to_dict()
-                    if columns
-                    else None
-                ),
-            }
-    except Exception as exc:
-        logger.warning("oracle introspect failed", exc_info=True)
-        try:
-            from connectors.generic_sql import introspect_table_schema
-
-            info = introspect_table_schema(cfg, table)
-            if info.get("ok") and info.get("columns"):
-                for col in info["columns"]:
-                    inferred = str(col.get("inferred_type") or "").lower()
-                    if inferred in {"float", "double"}:
-                        col["inferred_type"] = "FLOAT"
-                    elif inferred.startswith("decimal"):
-                        col["inferred_type"] = col["inferred_type"].upper() if "(" in inferred else "DECIMAL"
-                return info
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
-    finally:
-        try:
-            release_engine(engine)
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
-def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
-    """SQL Server INFORMATION_SCHEMA introspect with FLOAT≠DECIMAL honesty."""
-    try:
-        import sqlalchemy as sa
-        from connectors.generic_sql import _engine, connection_options
-    except Exception:
-        return {
-            "ok": False,
-            "error": "Install pyodbc/SQLAlchemy for SQL Server introspection",
-            "columns": [],
-            "tables": [],
-        }
 
-    table = (kwargs.get("table") or "").strip()
-    schema = (kwargs.get("schema") or "dbo").strip()
-    cfg = {
-        # Carry TLS/driver keywords: Driver 18 verifies by default, so an
-        # operator-declared certificate or trust flag has to reach the probe.
-        **connection_options(kwargs),
-        "type": "sqlserver",
-        "host": kwargs.get("host") or "",
-        "port": int(kwargs.get("port") or 1433),
-        "database": kwargs.get("database") or "",
-        "username": kwargs.get("username") or "",
-        "password": kwargs.get("password") or "",
-        "schema": schema,
-        "connection_string": kwargs.get("connection_string") or "",
-        "ssl": bool(kwargs.get("ssl", True)),
-    }
-    try:
-        engine = _engine(cfg)
-    except Exception as exc:
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
 
-    try:
-        with engine.connect() as conn:
-            tables: list[str] = []
-            if not table:
-                tables = [
-                    r[0]
-                    for r in conn.execute(
-                        sa.text(
-                            """
-                            SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
-                            WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = :schema
-                            ORDER BY TABLE_NAME
-                            """
-                        ),
-                        {"schema": schema},
-                    ).fetchall()
-                ]
-                return {"ok": True, "columns": [], "tables": tables, "schema": schema}
-
-            tables = [table]
-            col_rows = conn.execute(
-                sa.text(
-                    """
-                    SELECT
-                      c.COLUMN_NAME,
-                      c.DATA_TYPE,
-                      c.NUMERIC_PRECISION,
-                      c.NUMERIC_SCALE,
-                      c.CHARACTER_MAXIMUM_LENGTH,
-                      c.DATETIME_PRECISION,
-                      c.COLLATION_NAME,
-                      c.IS_NULLABLE,
-                      c.COLUMN_DEFAULT
-                    FROM INFORMATION_SCHEMA.COLUMNS c
-                    WHERE c.TABLE_SCHEMA = :schema AND c.TABLE_NAME = :table
-                    ORDER BY c.ORDINAL_POSITION
-                    """
-                ),
-                {"schema": schema, "table": table},
-            ).fetchall()
-            if not col_rows and not bool(kwargs.get("strict_namespace")):
-                found = conn.execute(
-                    sa.text(
-                        """
-                        SELECT TABLE_SCHEMA, TABLE_NAME
-                        FROM INFORMATION_SCHEMA.TABLES
-                        WHERE TABLE_TYPE = 'BASE TABLE'
-                          AND LOWER(TABLE_NAME) = LOWER(:table)
-                        ORDER BY CASE
-                          WHEN TABLE_SCHEMA = :schema THEN 0
-                          WHEN TABLE_SCHEMA = 'dbo' THEN 1
-                          ELSE 2
-                        END
-                        """
-                    ),
-                    {"table": table, "schema": schema},
-                ).fetchall()
-                for found_schema, found_table in found or []:
-                    col_rows = conn.execute(
-                        sa.text(
-                            """
-                            SELECT
-                              c.COLUMN_NAME,
-                              c.DATA_TYPE,
-                              c.NUMERIC_PRECISION,
-                              c.NUMERIC_SCALE,
-                              c.CHARACTER_MAXIMUM_LENGTH,
-                              c.DATETIME_PRECISION,
-                              c.COLLATION_NAME,
-                              c.IS_NULLABLE,
-                              c.COLUMN_DEFAULT
-                            FROM INFORMATION_SCHEMA.COLUMNS c
-                            WHERE c.TABLE_SCHEMA = :schema AND c.TABLE_NAME = :table
-                            ORDER BY c.ORDINAL_POSITION
-                            """
-                        ),
-                        {"schema": found_schema, "table": found_table},
-                    ).fetchall()
-                    if col_rows:
-                        schema = found_schema
-                        break
-            columns: list[dict] = []
-            for row in col_rows:
-                (
-                    name,
-                    data_type,
-                    precision,
-                    scale,
-                    char_len,
-                    dt_prec,
-                    collation,
-                    nullable,
-                ) = tuple(row)[:8]
-                column_default = row[8] if len(row) > 8 else None
-                dtype = str(data_type or "")
-                base = dtype.lower()
-                if base in {"decimal", "numeric"} and precision is not None:
-                    if scale is not None:
-                        dtype = f"{base}({int(precision)},{int(scale)})"
-                    else:
-                        dtype = f"{base}({int(precision)})"
-                elif (
-                    base in {"varchar", "nvarchar", "char", "nchar", "binary", "varbinary"}
-                    and char_len is not None
-                    and int(char_len) > 0
-                ):
-                    # -1 means MAX — leave unbounded (logical TEXT/BINARY via mapper).
-                    dtype = f"{base}({int(char_len)})"
-                elif base in {"time", "datetime2", "datetimeoffset"} and dt_prec is not None:
-                    dtype = f"{base}({int(dt_prec)})"
-                logical = _sqlserver_to_logical(dtype)
-                coll = str(collation or "").strip()
-                if coll:
-                    from services.type_system import normalize_logical_type
-
-                    if normalize_logical_type(logical) in {"string", "text"}:
-                        logical = f"{logical} COLLATE {coll}"
-                col_mssql: dict[str, Any] = {
-                    "name": name,
-                    "inferred_type": logical,
-                    "nullable": str(nullable).upper() == "YES",
-                    "default": (
-                        str(column_default)
-                        if column_default is not None
-                        else None
-                    ),
-                    "data_type": dtype,
-                    "collation": coll,
-                }
-                attach_declared_catalog_type(
-                    col_mssql, str(dtype or ""), dest_db="sqlserver"
-                )
-                columns.append(col_mssql)
-            # IDENTITY columns: INFORMATION_SCHEMA does not expose them, so a
-            # SQL Server source looked like a plain BIGINT key and the
-            # destination was created without a generator — the client's first
-            # insert after cutover then had no key to use. Seed/increment are
-            # measured from sys.identity_columns (sql_variant decoded).
-            if columns:
-                apply_identity_probe("sqlserver", conn, schema, table, columns)
-
-            # Computed columns are not insertable — annotate GENERATED ALWAYS
-            # so writers omit them (same path as PG/MySQL identity).
-            if columns:
-                try:
-                    computed_rows = conn.execute(
-                        sa.text(
-                            """
-                            SELECT c.name
-                            FROM sys.computed_columns cc
-                            JOIN sys.columns c
-                              ON cc.object_id = c.object_id AND cc.column_id = c.column_id
-                            JOIN sys.tables t ON t.object_id = cc.object_id
-                            JOIN sys.schemas s ON s.schema_id = t.schema_id
-                            WHERE s.name = :schema AND t.name = :table
-                            """
-                        ),
-                        {"schema": schema, "table": table},
-                    ).fetchall()
-                    computed_names = {str(r[0]) for r in (computed_rows or []) if r and r[0]}
-                    for col in columns:
-                        if col["name"] in computed_names:
-                            typ = str(col.get("inferred_type") or "")
-                            if "GENERATED ALWAYS" not in typ.upper():
-                                col["inferred_type"] = f"{typ} GENERATED ALWAYS"
-                except Exception:
-                    pass
-            unique_meta = (
-                _sqlserver_fetch_unique_keys(conn, schema, table)
-                if columns
-                else {"primary_key_columns": [], "unique_keys": []}
-            )
-            foreign_keys, foreign_keys_meta = (
-                _fetch_foreign_keys("sqlserver", conn, schema, table)
-                if columns
-                else ([], None)
-            )
-            return {
-                "ok": True,
-                "columns": columns,
-                "tables": tables,
-                "schema": schema,
-                "primary_key_columns": unique_meta.get("primary_key_columns") or [],
-                "unique_keys": unique_meta.get("unique_keys") or [],
-                "foreign_keys": foreign_keys,
-                "foreign_keys_meta": foreign_keys_meta,
-                "physical_storage": (
-                    probe_physical_storage("sqlserver", conn, schema, table).to_dict()
-                    if columns
-                    else None
-                ),
-                "check_constraints_meta": (
-                    probe_check_constraints("sqlserver", conn, schema, table).to_dict()
-                    if columns
-                    else None
-                ),
-                "indexes_meta": (
-                    probe_secondary_indexes("sqlserver", conn, schema, table).to_dict()
-                    if columns
-                    else None
-                ),
-            }
-    except Exception as exc:
-        logger.warning("sqlserver introspect failed", exc_info=True)
-        try:
-            from connectors.generic_sql import introspect_table_schema
-
-            return introspect_table_schema(cfg, table)
-        except Exception:
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
-    finally:
-        try:
-            release_engine(engine)
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _arrow_to_logical(dtype: str) -> str:
@@ -3312,6 +2663,24 @@ def _sf_to_logical(
     return "TEXT"
 
 
+def _bson_int_is_named_epoch(value: int, key: str) -> bool:
+    """True when a BSON integer is an epoch instant on a temporal field name.
+
+    Digit width matches the writer (``transform_engine`` 10-second / 13-millis).
+    The field-name owner is schema inference, so catalog and CSV agree.
+    """
+    if isinstance(value, bool) or not str(key or "").strip():
+        return False
+    from services.schema_inference import _is_timestamp_field_name
+
+    if not _is_timestamp_field_name(key):
+        return False
+    text = str(value)
+    if text[:1] in "+-":
+        text = text[1:]
+    return len(text) in {10, 13} and text.isdigit()
+
+
 def _sample_logical_type(value: Any, key: str = "") -> str:
     if value is None:
         # Null/absent is unknown, not TEXT. Returning "" keeps a null observation
@@ -3320,6 +2689,12 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int):
+        # A BSON int on a temporal name that is 10-digit seconds or 13-digit
+        # millis is an instant (Mongo extended JSON, HubSpot, Stripe). The
+        # same name rule as string inference owns this — a 13-digit ``_id``
+        # stays BIGINT. Reclassifying every large int would corrupt keys.
+        if _bson_int_is_named_epoch(value, key):
+            return "TIMESTAMPTZ"
         # Python int is unbounded — never stamp INT32; BIGINT is safe invent.
         return "BIGINT" if abs(value) > 2_147_483_647 else "INTEGER"
     if isinstance(value, float):
@@ -3516,6 +2891,22 @@ def mongodb_bson_column_types(documents: Any) -> dict[str, str]:
     return types
 
 
+def mongodb_bson_homogeneous_date_fields(documents: Any) -> set[str]:
+    """Fields whose non-null sampled values are all BSON Date datetimes."""
+    homogeneous: dict[str, bool] = {}
+    for doc in documents or []:
+        if not isinstance(doc, dict):
+            continue
+        for key, value in doc.items():
+            if value is None:
+                continue
+            name = str(key)
+            homogeneous[name] = homogeneous.get(name, True) and isinstance(
+                value, datetime.datetime
+            )
+    return {name for name, is_homogeneous in homogeneous.items() if is_homogeneous}
+
+
 def prefer_bson_numeric_carrier(
     schema: dict[str, str] | None,
     bson_types: dict[str, str] | None,
@@ -3547,6 +2938,29 @@ def prefer_bson_numeric_carrier(
     return merged
 
 
+def prefer_bson_source_carrier(
+    schema: dict[str, str] | None,
+    bson_types: dict[str, str] | None,
+    *,
+    homogeneous_date_fields: set[str] | None = None,
+) -> dict[str, str]:
+    """Preserve BSON carriers lost by stringification when their evidence fits."""
+    merged = prefer_bson_numeric_carrier(schema, bson_types)
+    schema_names = {str(name).casefold(): str(name) for name in merged}
+    homogeneous_dates = {
+        str(name).casefold() for name in (homogeneous_date_fields or set())
+    }
+    for col, bson_type in (bson_types or {}).items():
+        if str(bson_type).strip().upper() != "TIMESTAMPTZ":
+            continue
+        if str(col).casefold() not in homogeneous_dates:
+            continue
+        name = schema_names.get(str(col).casefold())
+        if name is not None:
+            merged[name] = "TIMESTAMPTZ"
+    return merged
+
+
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     try:
@@ -3572,7 +2986,26 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         # Sample BSON types BEFORE stringifying _id — otherwise ObjectId is
         # erased to TEXT and create-new never stamps VARCHAR(24).
         docs = list(db[target].find().limit(100)) if target else []
+        reader_cfg = kwargs.get("reader_cfg")
+        if reader_cfg is not None and docs:
+            # Same expansion as connectors.mongodb_reader._page_docs_to_batch, on
+            # the BSON values (ObjectId / Decimal128 carriers survive it).
+            from services.json_intelligence import expand_mongo_documents
+
+            raw_keys = {k for doc in docs for k in doc}
+            docs = expand_mongo_documents(docs, cfg=reader_cfg)
+            expanded = sorted({k for doc in docs for k in doc} - raw_keys)
+            if expanded:
+                logger.info(
+                    "mongodb introspect %s.%s: %d nested column(s) from the reader's "
+                    "expansion: %s",
+                    db_name,
+                    target,
+                    len(expanded),
+                    ", ".join(expanded[:12]),
+                )
         resolved, mix_notes = _mongodb_types_with_notes(docs)
+        homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(docs)
         for doc in docs:
             for key, val in list(doc.items()):
                 sample_text = "" if val is None else str(val)
@@ -3596,6 +3029,23 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
             name = str(col.get("name") or "")
             if resolved.get(name):
                 col["inferred_type"] = resolved[name]
+                if (
+                    col["inferred_type"] == "TIMESTAMPTZ"
+                    and name not in homogeneous_date_fields
+                ):
+                    from services.schema_inference import infer_schema_map
+
+                    samples = [
+                        cell_to_string(doc[name], preserve_sql_null=True)
+                        for doc in docs
+                        if isinstance(doc, dict)
+                        and name in doc
+                        and doc[name] is not None
+                    ]
+                    sampled_schema, _intel = infer_schema_map({name: samples})
+                    col["inferred_type"] = sampled_schema.get(name) or col[
+                        "inferred_type"
+                    ]
                 if mix_notes.get(name):
                     col["type_mix_warning"] = mix_notes[name]
             elif not col.get("inferred_type"):
@@ -3631,7 +3081,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
     try:
         from connectors.dynamodb_reader import (
             DDB_NULL_SENTINEL,
-            describe_key_schema,
+            describe_table_key_contract_or_empty,
             describe_table_schema,
             estimate_item_count,
             list_tables,
@@ -3648,11 +3098,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "region": kwargs.get("region") or "",
         }
         names, types = describe_table_schema(cfg, table)
-        key_schema = []
-        try:
-            key_schema = describe_key_schema(cfg, table)
-        except Exception:
-            logger.debug("DynamoDB key schema describe failed for %s", table, exc_info=True)
+        key_schema, index_attributes = describe_table_key_contract_or_empty(cfg, table)
         # Sample real items — union every attribute (sparse keys) + native types.
         try:
             from connectors.dynamodb_reader import read_table_batch
@@ -3715,6 +3161,7 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
             "row_estimate": row_estimate,
             "primary_key_columns": pk_names,
             "dynamo_key_schema": key_schema,
+            "dynamo_index_attributes": index_attributes,
         }
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
@@ -3723,7 +3170,32 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
 def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
     index = kwargs.get("table") or kwargs.get("database")
     if not index:
-        return {"ok": False, "error": "Elasticsearch index name required", "columns": [], "tables": []}
+        try:
+            from connectors.elasticsearch_reader import _client
+
+            cfg = {
+                "host": kwargs.get("host") or "localhost",
+                "port": kwargs.get("port") or 9200,
+                "username": kwargs.get("username") or "",
+                "password": kwargs.get("password") or "",
+                "connection_string": kwargs.get("connection_string") or "",
+                "ssl": kwargs.get("ssl", False),
+            }
+            client = _client(cfg)
+            raw = client.indices.get_alias(index="*")
+            names = sorted(
+                name
+                for name in (raw or {})
+                if name and not str(name).startswith(".")
+            )
+            return {"ok": True, "columns": [], "tables": names, "schema": ""}
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "columns": [],
+                "tables": [],
+            }
     try:
         from connectors.elasticsearch_mapping import (
             carrier_for_es_field_type,
@@ -4020,6 +3492,13 @@ def _introspect_sqlite(
     if not table:
         return {"ok": False, "error": "SQLite table name is required", "columns": [], "tables": []}
 
+    from connectors.sqlite_common import require_sqlite_source_file
+
+    try:
+        require_sqlite_source_file(path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "columns": [], "tables": []}
+
     try:
         from connectors.sql_identifiers import quote_sql_identifier
 
@@ -4130,9 +3609,13 @@ def _introspect_sqlite(
                 prow = pragma_by_name.get(name)
                 notnull = int(prow[3] or 0) if prow is not None else 0
                 dflt = prow[4] if prow is not None else None
+                native_type = str(prow[2] or "").strip() if prow is not None else ""
                 col_out: dict[str, Any] = {
                     "name": name,
                     "inferred_type": inferred,
+                    "declared_type": native_type,
+                    "native_type": native_type,
+                    "sample_refined": any(bool(value) for value in values),
                     # Property 6 — never invent nullable=True when PRAGMA says NOT NULL.
                     "nullable": notnull == 0,
                 }
@@ -4756,7 +4239,18 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
         "schema_registry_url": registry,
     }
     if not topic:
-        return {"ok": True, "columns": [], "tables": [], "schema": ""}
+        try:
+            from connectors.kafka_reader import list_topics
+
+            topics = list_topics(cfg)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "columns": [],
+                "tables": [],
+            }
+        return {"ok": True, "columns": [], "tables": topics, "schema": ""}
     try:
         schema_map, native, warning = infer_topic_schema(cfg, topic, sample_limit=50)
     except Exception as exc:
@@ -4777,6 +4271,63 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
     return out
 
 
+# A bounded scroll is not a census. Inventing NUMERIC(4,2) from the first
+# eight prices quarantined every later value that needed another integer digit.
+_PAYLOAD_SAMPLE_ENGINES = frozenset({
+    "qdrant",
+    "mongodb",
+    "dynamodb",
+    "elasticsearch",
+    "opensearch",
+    "couchbase",
+    "redis",
+    "weaviate",
+    "pinecone",
+    "milvus",
+})
+
+
+def sample_page_is_not_a_precision_contract(source_db: str) -> bool:
+    """Payload and document engines do not declare decimal precision."""
+    key = (source_db or "").lower().strip()
+    if not key:
+        return False
+    if key in _PAYLOAD_SAMPLE_ENGINES:
+        return True
+    try:
+        from src.transfer.connector_capabilities import CATALOG_ID_ALIASES
+    except Exception:
+        return False
+    return CATALOG_ID_ALIASES.get(key, key) in _PAYLOAD_SAMPLE_ENGINES
+
+
+def _unbound_sampled_decimal(carrier: str) -> str:
+    """Drop a precision invented from a sample page.
+
+    Catalog ``DECIMAL(p,s)`` must not be passed here. A payload sample that
+    happened to fit ``DECIMAL(4,2)`` is not the column's contract.
+    """
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+
+    text = str(carrier or "").strip()
+    if not text:
+        return text
+    try:
+        logical = normalize_logical_type(text)
+    except (TypeError, ValueError):
+        return text
+    if logical != LOGICAL_DECIMAL:
+        return text
+    precision, _scale = parse_numeric_precision_scale(text)
+    if precision is None:
+        return text
+    return "DECIMAL"
+
+
 def _introspect_qdrant(**kwargs: Any) -> dict[str, Any]:
     """Infer Qdrant payload fields from payload_schema and a bounded scroll.
 
@@ -4793,7 +4344,34 @@ def _introspect_qdrant(**kwargs: Any) -> dict[str, Any]:
         "ssl": bool(kwargs.get("ssl", False)),
     }
     if not collection:
-        return {"ok": True, "columns": [], "tables": [], "schema": ""}
+        try:
+            from connectors.qdrant_writer import qdrant_rest
+
+            session, base_url, headers = qdrant_rest(cfg)
+            listed = session.get(f"{base_url}/collections", headers=headers, timeout=10)
+            if listed.status_code != 200:
+                return {
+                    "ok": False,
+                    "error": f"Qdrant collection list failed: {listed.status_code}",
+                    "columns": [],
+                    "tables": [],
+                }
+            body = listed.json() if listed.content else {}
+            result = body.get("result") if isinstance(body, dict) else {}
+            collections = result.get("collections") if isinstance(result, dict) else []
+            names = sorted(
+                str(item.get("name") or "")
+                for item in (collections or [])
+                if isinstance(item, dict) and item.get("name")
+            )
+            return {"ok": True, "columns": [], "tables": names, "schema": ""}
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "columns": [],
+                "tables": [],
+            }
     try:
         from connectors.qdrant_reader import QDRANT_OMIT_PAYLOAD_KEYS, read_points_batch
         from connectors.qdrant_writer import _qdrant_live_payload_types, qdrant_rest
@@ -4846,6 +4424,11 @@ def _introspect_qdrant(**kwargs: Any) -> dict[str, Any]:
                 (inferred.get("logical_type") if isinstance(inferred, dict) else inferred)
                 or "TEXT"
             )
+            # A scroll of payload points is not a precision contract. DECIMAL(4,2)
+            # from the first page quarantined the rest of the collection on
+            # Postgres NUMERIC(4,2). Bare DECIMAL is unbounded there and the
+            # create-new floor elsewhere. A declared payload schema is kept.
+            carrier = _unbound_sampled_decimal(carrier)
         columns.append(
             {
                 "name": name,
@@ -4856,3 +4439,125 @@ def _introspect_qdrant(**kwargs: Any) -> dict[str, Any]:
             }
         )
     return {"ok": True, "columns": columns, "tables": [collection], "schema": collection}
+
+
+def _introspect_neo4j(**kwargs: Any) -> dict[str, Any]:
+    """List Neo4j labels, and sample one label's properties when named."""
+    from connectors.neo4j import list_labels, read_object
+
+    label = str(kwargs.get("table") or "").strip()
+    common = {
+        "host": str(kwargs.get("host") or ""),
+        "port": int(kwargs.get("port") or 7474),
+        "database": str(kwargs.get("database") or "neo4j"),
+        "username": str(kwargs.get("username") or ""),
+        "password": str(kwargs.get("password") or ""),
+        "ssl": bool(kwargs.get("ssl")),
+    }
+    try:
+        labels = list_labels(**common)
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+    if not label:
+        return {"ok": True, "columns": [], "tables": labels, "schema": common["database"]}
+    try:
+        batch = read_object(cfg=common, object=label, limit=20)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "columns": [],
+            "tables": labels or [label],
+        }
+    columns = [
+        {"name": name, "inferred_type": "TEXT", "nullable": True}
+        for name in (batch.headers or [])
+    ]
+    return {"ok": True, "columns": columns, "tables": labels or [label], "schema": label}
+
+
+def _introspect_weaviate(**kwargs: Any) -> dict[str, Any]:
+    """List Weaviate classes, and read one class's properties when named."""
+    import requests
+
+    from connectors.weaviate_writer import (
+        _base_url,
+        _headers,
+        _weaviate_property_to_carrier,
+    )
+
+    class_name = str(kwargs.get("table") or kwargs.get("database") or "").strip()
+    base = _base_url(
+        str(kwargs.get("host") or ""),
+        int(kwargs.get("port") or 8080),
+        bool(kwargs.get("ssl")),
+        str(kwargs.get("connection_string") or ""),
+    )
+    headers = _headers(str(kwargs.get("api_key") or ""))
+    try:
+        listed = requests.get(f"{base}/v1/schema", headers=headers, timeout=10)
+        listed.raise_for_status()
+        body = listed.json() if listed.content else {}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "columns": [], "tables": []}
+    classes = body.get("classes") if isinstance(body, dict) else []
+    names = sorted(
+        str(item.get("class") or "")
+        for item in (classes or [])
+        if isinstance(item, dict) and item.get("class")
+    )
+    if not class_name:
+        return {"ok": True, "columns": [], "tables": names, "schema": ""}
+    match = next(
+        (
+            item
+            for item in (classes or [])
+            if isinstance(item, dict)
+            and str(item.get("class") or "").lower() == class_name.lower()
+        ),
+        None,
+    )
+    if match is None:
+        return {
+            "ok": True,
+            "columns": [],
+            "tables": names,
+            "schema": class_name,
+        }
+    columns = []
+    for prop in match.get("properties") or []:
+        if not isinstance(prop, dict) or not prop.get("name"):
+            continue
+        columns.append(
+            {
+                "name": str(prop["name"]),
+                "inferred_type": _weaviate_property_to_carrier(prop.get("dataType")),
+                "nullable": True,
+            }
+        )
+    return {
+        "ok": True,
+        "columns": columns,
+        "tables": names or [str(match.get("class"))],
+        "schema": str(match.get("class") or class_name),
+    }
+
+_ENTERPRISE_INTROSPECT_EXPORTS = frozenset(
+    {
+        "_introspect_oracle",
+        "_introspect_sqlserver",
+        "_oracle_apply_timestamp_scale",
+        "_oracle_to_logical",
+        "_sqlserver_to_logical",
+    }
+)
+
+
+def __getattr__(name: str):
+    if name in _ENTERPRISE_INTROSPECT_EXPORTS:
+        from services import schema_introspect_enterprise
+
+        value = getattr(schema_introspect_enterprise, name)
+        globals()[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

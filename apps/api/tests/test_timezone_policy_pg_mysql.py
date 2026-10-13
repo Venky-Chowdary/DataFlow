@@ -146,6 +146,21 @@ def test_mysql_timestamp_bind_survives_a_dst_spring_forward_boundary() -> None:
     assert after - before == timedelta(seconds=1)
 
 
+def test_mysql_datetime_bind_normalizes_an_offset_to_utc() -> None:
+    """TIMESTAMPTZ landing in Maria/MySQL DATETIME keeps the instant, not the civil clock."""
+    out = coerce_sql_temporal(
+        "2024-03-01T12:00:00+05:30", "DATETIME(6)", engine="mariadb"
+    )
+    assert out == datetime(2024, 3, 1, 6, 30)
+    assert out.tzinfo is None
+
+
+def test_mysql_datetime_bind_does_not_invent_utc_for_a_naive_value() -> None:
+    out = coerce_sql_temporal("2024-03-01T12:00:00", "DATETIME(6)", engine="mysql")
+    assert out.hour == 12
+    assert out.tzinfo is None
+
+
 def test_non_mysql_timestamp_bind_stays_wall_clock() -> None:
     # Bare TIMESTAMP on Postgres is TIMESTAMP WITHOUT TIME ZONE — an offset wire
     # must not be silently UTC-shifted there.
@@ -228,7 +243,7 @@ def test_aware_wire_into_mysql_timestamp_is_not_an_offset_strip_quarantine() -> 
     assert rejected == []
 
 
-def test_aware_wire_into_mysql_datetime_still_quarantines_the_offset_strip() -> None:
+def test_aware_wire_into_mysql_datetime_is_utc_normalized_not_quarantined() -> None:
     from connectors.writer_common import quarantine_unfit_temporals
 
     rejected: list[dict] = []
@@ -240,5 +255,5 @@ def test_aware_wire_into_mysql_datetime_still_quarantines_the_offset_strip() -> 
         "quarantine",
         dest_db="mysql",
     )
-    assert rows == []
-    assert len(rejected) == 1
+    assert len(rows) == 1
+    assert rejected == []

@@ -49,6 +49,64 @@ def endpoint_source_column_types(endpoint: Any) -> dict[str, str]:
     return {str(k): str(v) for k, v in schema.items() if str(v or "").strip()}
 
 
+def endpoint_primary_key_columns(endpoint: Any) -> list[str]:
+    """Source-catalog primary key. Empty when the catalog has none or cannot be read.
+
+    A failed introspect is empty on purpose: CDC must not be approved on a
+    guessed ``id`` when the catalog could not be read.
+    """
+    if endpoint is None:
+        return []
+    try:
+        from src.transfer.endpoint_intelligence import introspect_endpoint
+
+        extra = dict(getattr(endpoint, "extra", None) or {})
+        extra["introspect_purpose"] = "source"
+        endpoint.extra = extra
+        info = introspect_endpoint(endpoint)
+    except Exception:  # noqa: BLE001 — unread catalog blocks CDC; it does not approve it
+        logger.debug("catalog primary key introspect failed", exc_info=True)
+        return []
+    if not isinstance(info, dict):
+        return []
+    return [
+        str(col).strip()
+        for col in (info.get("primary_key_columns") or [])
+        if str(col or "").strip()
+    ]
+
+
+def live_source_primary_key_columns(
+    *,
+    source_connector_id: str = "",
+    source_table: str = "",
+    source_collection: str = "",
+    source_schema: str = "",
+    source_database: str = "",
+) -> list[str]:
+    """Catalog primary key of a saved source, or empty when it has none."""
+    connector_id = (source_connector_id or "").strip()
+    stream = (source_table or source_collection or "").strip()
+    if not connector_id or not stream:
+        return []
+    try:
+        from services.connector_probe import endpoint_from_saved_connector
+
+        endpoint = endpoint_from_saved_connector(
+            connector_id,
+            table=source_table or stream,
+            collection=source_collection or stream,
+            schema=source_schema or "",
+            database=source_database or "",
+        )
+    except Exception:  # noqa: BLE001 — same fail-closed rule as the endpoint helper
+        logger.debug("saved source primary key lookup failed", exc_info=True)
+        return []
+    if endpoint is None:
+        return []
+    return endpoint_primary_key_columns(endpoint)
+
+
 def live_source_column_types(
     *,
     source_connector_id: str = "",
@@ -142,4 +200,38 @@ def restamp_mapping_source_types(
         if live:
             row["source_type"] = live
         out.append(row)
+    return out
+
+
+def empty_source_column_types(
+    column_types: dict[str, str] | None,
+    mappings: list[dict[str, Any]] | None,
+    *,
+    declared: dict[str, str] | None = None,
+    previous: dict[str, str] | None = None,
+    destination: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Column types for a measured-empty source whose types were only inferred.
+
+    A header-only file has names and no values, so ``string`` on every column
+    is a placeholder, not evidence. Judging it as evidence paused the route for
+    a ``type_change`` and refused ``string → INTEGER`` into the table it loads
+    every day. With no value to contradict it, the known contract stands: the
+    declared type, else the last run's, else the live destination column the
+    mapping writes by name. A column none of them knows keeps its placeholder.
+    """
+    out = dict(column_types or {})
+    targets = {
+        str(m.get("source") or ""): str(m.get("target") or "")
+        for m in mappings or []
+        if isinstance(m, dict)
+    }
+    for col in list(out):
+        known = (
+            column_type_or_none(declared or {}, col)
+            or column_type_or_none(previous or {}, col)
+            or column_type_or_none(destination or {}, targets.get(col) or col)
+        )
+        if known and str(known).strip():
+            out[col] = str(known).strip()
     return out

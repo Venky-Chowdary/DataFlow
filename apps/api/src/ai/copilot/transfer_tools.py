@@ -114,7 +114,12 @@ def sync_mode_from_phrase(spoken: str, *, default: str = "full_refresh_append") 
     return default
 
 
-def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") -> str:
+def normalize_sync_mode(
+    spoken: str,
+    *,
+    default: str = "full_refresh_append",
+    strict: bool = False,
+) -> str:
     """Pilot-facing wrapper: phrase → sync-mode token, engine-validated.
 
     The Pilot keeps emitting its historical spellings because every engine path
@@ -122,12 +127,29 @@ def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") ->
     is now *checked* against the one canonical table in ``services.sync_cursor``
     before it is returned, so a phrase can no longer resolve to a token the
     engine would quietly ignore and degrade to full-read + insert.
+
+    ``strict=True`` (used when the operator *explicitly* named a mode) refuses
+    an unresolvable token instead of silently changing load semantics — a typo
+    like ``teleport_mode`` must not quietly become ``full_refresh_append``
+    (QA T06: that silently duplicates rows on every re-run).
     """
     from services.sync_cursor import CANONICAL_SYNC_MODES
     from services.sync_cursor import normalize_sync_mode as _canonical
 
+    if strict and (spoken or "").strip():
+        # Passing default=None distinguishes "unrecognized token" from "the
+        # phrase legitimately resolved to the default mode".
+        recognized = sync_mode_from_phrase(spoken, default=None)  # type: ignore[arg-type]
+        if recognized is None or _canonical(recognized, default="") not in CANONICAL_SYNC_MODES:
+            valid = ", ".join(sorted(SYNC_MODES))
+            raise ValueError(
+                f"Unknown sync_mode {spoken!r} — I will not guess the load semantics. "
+                f"Valid modes: {valid}."
+            )
+
     candidate = sync_mode_from_phrase(spoken, default=default)
-    if _canonical(candidate, default=default) not in CANONICAL_SYNC_MODES:
+    canonical = _canonical(candidate, default=default)
+    if canonical not in CANONICAL_SYNC_MODES:
         _LOG.warning(
             "Pilot phrase %r produced sync_mode %r, which no engine mode "
             "accepts; falling back to the non-destructive default %r.",
@@ -257,11 +279,49 @@ def _transfer_decision(preflight: dict[str, Any]) -> str:
     ).strip().lower()
 
 
+def _pii_acknowledgement(raw: dict[str, Any] | None) -> dict[str, str] | None:
+    """Validate the operator's PII/compliance acknowledgement (or None)."""
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("pii_acknowledgement must be an object with approved_by and reason.")
+    approved_by = str(raw.get("approved_by") or "").strip()
+    reason = str(raw.get("reason") or "").strip()
+    if not approved_by or not reason:
+        raise ValueError(
+            "pii_acknowledgement needs approved_by and reason — an unsigned "
+            "acknowledgement cannot clear a PII/compliance review."
+        )
+    _LOG.info("PII/compliance review acknowledged by %s: %s", approved_by, reason)
+    return {"approved_by": approved_by, "reason": reason}
+
+
 def _is_execute_cleared(preflight: dict[str, Any]) -> bool:
     """Same bar as Studio Execute — passed + approve; never local / review-grade."""
     run_id = str(preflight.get("run_id") or "")
     if run_id.startswith("pf_local_"):
         return False
+    # Defense-in-depth (QA T04/T12): a severity=block blocker must override any
+    # stale approve verdict instead of letting safe_to_start stay true beside it.
+    # Root-cause blockers are block-severity by construction even when the
+    # severity field is only in root_causes[].
+    blocking_root_ids = {
+        str(r.get("root_id") or "")
+        for r in preflight.get("root_causes") or []
+        if isinstance(r, dict) and str(r.get("severity") or "").lower() == "block"
+    }
+    for blocker in preflight.get("blockers") or []:
+        if not isinstance(blocker, dict):
+            continue
+        sev = str(
+            blocker.get("severity")
+            or (blocker.get("details") or {}).get("severity")
+            or ""
+        ).lower()
+        if sev == "block":
+            return False
+        if blocking_root_ids and str(blocker.get("id") or "") in blocking_root_ids:
+            return False
     return bool(preflight.get("passed") and _transfer_decision(preflight) == "approve")
 
 
@@ -274,6 +334,41 @@ def _risky_conversions(conversions: list[dict[str, Any]]) -> list[dict[str, Any]
         c for c in conversions
         if str(c.get("fidelity") or "").strip().lower() in _RISKY_FIDELITY
     ]
+
+
+def _stored_as_text(mappings: list[dict[str, Any]], dest_db: str) -> list[dict[str, Any]]:
+    """Typed columns a schemaless destination can only hold as exact text.
+
+    Redis keeps each row as one JSON document: DECIMAL / DATE / TIMESTAMP have
+    no JSON type, so the destination type map stores them as exact text. The
+    value round-trips, but readers get a string — Confirm names it instead of
+    passing it silently as "preserve".
+    """
+    from services.decision_kernel import InventContext, invent_dest_type, normalize_logical_type
+    from services.dest_schema_authority import destination_schema_is_sampled
+
+    if not dest_db or not destination_schema_is_sampled(dest_db):
+        return []
+    text = {"string", "text", "unknown", ""}
+    out: list[dict[str, Any]] = []
+    for m in mappings:
+        src_type = str(m.get("source_type") or m.get("inferred_type") or "")
+        logical = normalize_logical_type(src_type) if src_type else ""
+        if logical in text:
+            continue
+        carrier = invent_dest_type(src_type, dest_db=dest_db, context=InventContext.CREATE_NEW)
+        if normalize_logical_type(str(carrier or "")) not in text:
+            continue
+        column = str(m.get("target") or m.get("target_column") or m.get("source") or "")
+        out.append({
+            "column": column,
+            "source_type": src_type,
+            "note": (
+                f"{dest_db} has no {logical} type: {column} is stored as exact "
+                "JSON text, so readers get a string, not a typed value."
+            ),
+        })
+    return out
 
 
 def _dest_table_exists_tri_state(dst_info: dict[str, Any]) -> bool | None:
@@ -342,65 +437,200 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _declare_zone_on_schema(
-    src_rows: list[dict],
-    zone: str,
-) -> tuple[list[dict], set[str]]:
-    """Apply an operator-declared zone to the zoneless temporal source columns.
+# risk_acceptance.on_cast_failure → signed contract quarantine_policy.
+_ON_CAST_FAILURE_POLICIES = {
+    "quarantine": "holdout_rejected_rows",
+    "null": "coerce_null",
+}
 
-    A declared zone is a fact about the source schema, so it has to be true
-    *before* mapping runs: the mapper, its proof, and every gate read the source
-    type, and a declaration applied afterwards would change the value the writer
-    sends while leaving the run blocked for the zoneless problem the operator
-    just answered.
 
-    Only zoneless columns are touched. A column that already carries an offset
-    has an instant the source was explicit about, and overriding it would move a
-    timestamp on the operator's behalf.
+def _sign_required_risk_contracts(
+    mappings: list[dict[str, Any]],
+    acceptance: dict[str, Any],
+    *,
+    table: str,
+    force_columns: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Sign a continue-policy contract only on mappings a gate already requires.
+
+    Omitted acceptance signs nothing. A partial acceptance is refused: the
+    operator named the action and left out who approved it or why. Safe
+    mappings are never given a contract they do not need.
     """
-    from services.timezone_policy import effective_source_type
-    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
-    from services.type_system import datetime_timezone_polarity
+    if not isinstance(acceptance, dict) or not acceptance:
+        return list(mappings or [])
+    from preflight.risk_contract import (
+        mapping_is_structural_review,
+        mapping_requires_risk_contract,
+    )
+    from services.decision_kernel import is_lossy_coercion
+    from services.type_coercion import is_precision_collapse_coercion
+    from services.migration_risk_contract import (
+        CONTINUE_POLICIES,
+        create_migration_risk_contract,
+    )
 
-    declared: set[str] = set()
-    out: list[dict] = []
-    for row in src_rows:
-        entry = dict(row)
-        src_type = str(entry.get("inferred_type") or "")
-        if src_type and datetime_timezone_polarity(src_type) == "ntz":
-            entry["inferred_type"] = effective_source_type(
-                src_type, f"{ASSUME_TIMEZONE_PREFIX}{zone}"
-            )
-            declared.add(str(entry.get("name") or ""))
-        out.append(entry)
-    return out, declared
+    approved_by = str(acceptance.get("approved_by") or "").strip()
+    reason = str(acceptance.get("reason") or "").strip()
+    policy = str(acceptance.get("execution_policy") or "").strip().upper()
+    if policy == "CAST_FAIL_QUARANTINE":
+        policy = "CAST_AND_CONTINUE"
+    if not approved_by or not reason or not policy:
+        raise ValueError(
+            "risk_acceptance needs approved_by, reason, and execution_policy. "
+            "Nothing was signed."
+        )
+    if policy not in CONTINUE_POLICIES:
+        raise ValueError(
+            f"execution_policy {policy} does not clear a gate. "
+            "Use QUARANTINE_ROW, CAST_AND_CONTINUE, TRANSFORM_AND_CONTINUE, "
+            "SKIP_ROW, or STOP_COLUMN."
+        )
+    # QA MX3-14: without this the NULL variant of CAST_AND_CONTINUE was
+    # unreachable and the policy behaved exactly like QUARANTINE_ROW.
+    on_cast_failure = str(acceptance.get("on_cast_failure") or "").strip().lower()
+    if on_cast_failure and on_cast_failure not in _ON_CAST_FAILURE_POLICIES:
+        raise ValueError(
+            f"on_cast_failure {on_cast_failure!r} is not supported. Use "
+            "'quarantine' (hold the row out) or 'null' (write NULL). Nothing was signed."
+        )
+    if on_cast_failure and policy not in {"CAST_AND_CONTINUE", "TRANSFORM_AND_CONTINUE"}:
+        raise ValueError(
+            f"on_cast_failure applies only to CAST_AND_CONTINUE / "
+            f"TRANSFORM_AND_CONTINUE, not {policy}. Nothing was signed."
+        )
+    quarantine_policy = _ON_CAST_FAILURE_POLICIES[on_cast_failure or "quarantine"]
+    named = {
+        str(c).strip()
+        for c in (acceptance.get("columns") or [])
+        if str(c or "").strip()
+    }
+    forced = {str(c).strip() for c in (force_columns or set()) if str(c).strip()}
+    out: list[dict[str, Any]] = []
+    signed = 0
+    for raw in mappings or []:
+        row = dict(raw)
+        source = str(row.get("source") or "")
+        target = str(row.get("target") or "")
+        in_force = bool(forced) and (source in forced or target in forced)
+        if named and source not in named and target not in named and not in_force:
+            out.append(row)
+            continue
+        src_t = str(row.get("source_type") or row.get("sourceType") or "")
+        tgt_t = str(row.get("target_type") or row.get("targetType") or "")
+        fidelity = str(row.get("fidelity") or "").strip().lower()
+        needs = mapping_requires_risk_contract(row) or mapping_is_structural_review(row)
+        needs = needs or fidelity in {"lossy_cast", "cast", "mutate", "narrow", "lossy"}
+        needs = needs or in_force
+        if src_t and tgt_t:
+            needs = needs or bool(is_lossy_coercion(src_t, tgt_t))
+            needs = needs or bool(is_precision_collapse_coercion(src_t, tgt_t))
+        already = row.get("risk_contract") or row.get("riskContract")
+        if already and not in_force:
+            out.append(row)
+            continue
+        if already and in_force:
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
-
-def _stamp_zone_transform(
-    mappings: list[dict],
-    zone: str,
-    columns: set[str],
-) -> list[dict]:
-    """Carry the declaration to the writer as the transform that applies it.
-
-    The type says what the column means; the transform is what attaches the zone
-    to each value. Both are required — a declared type with no transform would
-    write the naive wall clock under an instant contract.
-    """
-    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
-
-    out: list[dict] = []
-    for m in mappings:
-        entry = dict(m)
-        existing = str(entry.get("transform") or "").strip().lower()
-        # A plain temporal transform is the mapper parsing the value, not a
-        # decision about its zone — the declaration refines it. Anything else is
-        # an operator choice and is left alone.
-        already_typed = existing not in {"", "none", "identity", "datetime", "date", "timestamp"}
-        if str(entry.get("source") or "") in columns and not already_typed:
-            entry["transform"] = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
-        out.append(entry)
+            if mapping_has_clearing_risk_contract(row):
+                out.append(row)
+                continue
+        if not needs:
+            out.append(row)
+            continue
+        contract = create_migration_risk_contract(
+            column=source or target,
+            source_type=src_t,
+            destination_type=tgt_t,
+            approved_by=approved_by,
+            reason=reason,
+            execution_policy=policy,
+            target=target or source,
+            table=table,
+            fidelity=str(row.get("fidelity") or ""),
+            transform=row.get("transform"),
+            quarantine_policy=quarantine_policy,
+            expected_nulls=quarantine_policy == "coerce_null",
+        )
+        row["risk_contract"] = contract.to_dict()
+        signed += 1
+        out.append(row)
+    if named and signed == 0 and forced:
+        raise ValueError(
+            "risk_acceptance named columns that do not require a Migration Risk Contract. "
+            "Nothing was signed."
+        )
     return out
+
+
+def _apply_column_transforms(
+    mappings: list[dict[str, Any]],
+    column_transforms: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Stamp operator transforms onto the mapping the writer will run.
+
+    Replay was the only tool that accepted a transform (QA R2-060).
+    """
+    if not isinstance(column_transforms, dict) or not column_transforms:
+        return list(mappings or [])
+    out: list[dict[str, Any]] = []
+    for raw in mappings or []:
+        row = dict(raw)
+        source = str(row.get("source") or "")
+        target = str(row.get("target") or "")
+        spec = column_transforms.get(source)
+        if spec is None:
+            spec = column_transforms.get(target)
+        if spec is not None and str(spec).strip():
+            row["transform"] = str(spec).strip()
+            row["transform_override"] = True
+        out.append(row)
+    return out
+
+
+def _fidelity_columns_from_preflight(preflight: dict[str, Any], mappings: list[dict[str, Any]]) -> set[str]:
+    """Columns a blocked preflight is still talking about."""
+    blob_parts: list[str] = []
+    for bucket in ("blockers", "gates"):
+        for item in preflight.get(bucket) or []:
+            if not isinstance(item, dict):
+                continue
+            blob_parts.append(str(item.get("message") or ""))
+            details = item.get("details") or {}
+            if isinstance(details, dict):
+                for issue in details.get("issues") or []:
+                    blob_parts.append(str(issue))
+    blob = " \n ".join(blob_parts)
+    found: set[str] = set()
+    for row in mappings or []:
+        for key in ("source", "target"):
+            name = str(row.get(key) or "")
+            if name and name in blob:
+                found.add(name)
+    return found
+
+
+def _plan_source_types_authoritative(
+    src_conn: dict, src_info: dict, callable_plan: dict | None
+) -> bool:
+    """Whether Map may treat the peeked source types as declared DDL.
+
+    A procedure extract and an object store do not declare precision. Calling
+    them authoritative made the plan bind TEXT while the integrity check
+    expected the profiled DECIMAL. Warehouse catalogs stay authoritative.
+    """
+    if callable_plan:
+        return False
+    from services.data_profiler import source_types_are_authoritative
+
+    kind = str(src_conn.get("kind") or "database")
+    fmt = str(
+        src_info.get("db_type")
+        or src_conn.get("type")
+        or src_conn.get("db_type")
+        or ""
+    )
+    return source_types_are_authoritative(kind, fmt)
 
 
 def plan_transfer(
@@ -423,11 +653,18 @@ def plan_transfer(
     require_signed_contract: Any = None,
     source_filter: dict[str, Any] | None = None,
     upsert_key: str = "",
+    primary_key: str = "",
     dedupe_key: str = "",
+    cursor_column: str = "",
+    cursor_semantics: str = "",
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
     cadence: str = "",
     all_tables: bool = False,
+    risk_acceptance: dict[str, Any] | None = None,
+    pii_acknowledgement: dict[str, Any] | None = None,
+    column_transforms: dict[str, Any] | None = None,
+    schema_drift_acknowledged: bool = False,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -438,6 +675,9 @@ def plan_transfer(
     says which zone the source meant.
     """
     tool = "plan_transfer"
+    upsert_key = _column_arg(upsert_key or primary_key)
+    cursor_column = _column_arg(cursor_column)
+    cursor_semantics = str(cursor_semantics or "").strip()
     src_table = (source_table or "").strip()
     unapplied = [str(q) for q in (rule_questions or []) if str(q or "").strip()]
     if unapplied:
@@ -479,7 +719,16 @@ def plan_transfer(
         )
     dst_table = (dest_table or (callable_plan["stream_name"] if callable_plan else src_table)).strip()
 
-    mode = normalize_sync_mode(sync_mode)
+    # An omitted mode plus a key means "dedupe this". A mode the operator
+    # actually named must stay that mode — a primary key on overwrite is an
+    # identity, not permission to switch the run to incremental upsert.
+    # T06: an *explicitly named* mode that resolves to nothing is refused, not
+    # coerced — silently staging full_refresh_append duplicates rows on re-run.
+    requested_sync_mode = bool((sync_mode or "").strip())
+    try:
+        mode = normalize_sync_mode(sync_mode, strict=requested_sync_mode)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
     if callable_plan:
         from services.procedure_source import assert_callable_sync_allowed
 
@@ -509,6 +758,15 @@ def plan_transfer(
             return err
     except AmbiguousConnectorError as exc:
         return _tool_result(tool, success=False, error=exc.message)
+
+    from connectors.sql_identifiers import unsafe_destination_identifier_reason
+
+    ident_err = unsafe_destination_identifier_reason(
+        str(dst_conn.get("type") or dst_conn.get("format") or ""),
+        dst_table,
+    )
+    if ident_err:
+        return _tool_result(tool, success=False, error=ident_err)
 
     if (
         not callable_plan
@@ -542,7 +800,7 @@ def plan_transfer(
         sample_rows = list(src_info.get("sample_rows") or [])
     else:
         try:
-            src_info = _introspect(src_conn, src_table, purpose="source")
+            src_info = _introspect(src_conn, src_table, purpose="source", execute_shape=True)
         except Exception as exc:
             _LOG.warning("plan_transfer source introspect failed: %s", exc, exc_info=True)
             return _tool_result(tool, success=False, error=f"Could not read the source: {exc}")
@@ -567,6 +825,7 @@ def plan_transfer(
         source_columns=src_names,
         source_label=f"{src_conn.get('name')}.{src_table}",
         mode=mode,
+        honor_requested_mode=requested_sync_mode,
     )
     if rules_error:
         return _tool_result(tool, success=False, error=rules_error)
@@ -582,7 +841,16 @@ def plan_transfer(
     src_rows = _schema_rows(src_info["columns"], samples)
     zone_columns: set[str] = set()
     if source_timezone:
-        src_rows, zone_columns = _declare_zone_on_schema(src_rows, source_timezone)
+        from services.timezone_policy import (
+            declare_zone_on_schema,
+            stamp_zone_transform,
+            validate_source_timezone,
+        )
+
+        source_timezone, zone_error = validate_source_timezone(source_timezone)
+        if zone_error:
+            return _tool_result(tool, success=False, error=zone_error)
+        src_rows, zone_columns = declare_zone_on_schema(src_rows, source_timezone)
         # The declaration is a fact about the source, so it travels with the
         # schema every gate reads — not just with the mapping.
         src_info["schema"] = {
@@ -604,38 +872,109 @@ def plan_transfer(
         schema_policy=schema_policy,
         sync_mode=mode,
         destination_table_exists=dest_exists,
-        # Both ends were introspected, so their DDL is fact, not a guess.
-        source_types_authoritative=not bool(callable_plan),
+        # Warehouse DDL is fact. Object stores, files, and procedure extracts
+        # are a sample: marking them authoritative made the plan say TEXT
+        # while the integrity check bound the profiled DECIMAL.
+        source_types_authoritative=_plan_source_types_authoritative(
+            src_conn, src_info, callable_plan
+        ),
         use_llm=False,
     )
     mappings = list(mapping.get("mappings") or [])
+    mappings = _apply_column_transforms(mappings, column_transforms)
     if zone_columns:
-        mappings = _stamp_zone_transform(mappings, source_timezone, zone_columns)
+        mappings = stamp_zone_transform(mappings, source_timezone, zone_columns)
 
-    preflight = _run_preflight(
-        src_conn=src_conn,
-        dst_conn=dst_conn,
-        src_table=src_table,
-        dst_table=dst_table,
-        src_rows=src_rows,
-        sample_rows=sample_rows,
-        mappings=mappings,
+    contracts, identity_error = _identity_stream_contract(
         mode=mode,
-        schema_policy=schema_policy,
-        validation_mode=validation_mode,
-        src_db_type=str(src_info.get("db_type") or ""),
-        source_config=_stamp_callable_source_config(
-            _endpoint_dict(src_info.get("endpoint")),
-            callable_plan,
-        ),
-        dest_db_type=str(dst_info.get("db_type") or ""),
-        dest_exists=dest_exists,
-        source_primary_key=_source_primary_key(src_info),
-        write_via_staging=bool(write_via_staging),
-        source_read_mode=str((callable_plan or {}).get("mode") or ""),
-        source_filter=row_rules["source_filter"] or None,
-        stream_contracts=row_rules["stream_contracts"] or None,
+        source_table=src_table,
+        source_columns=src_names,
+        mappings=mappings,
+        operator_key=str(row_rules.get("upsert_key") or ""),
+        catalog_key=_source_primary_key(src_info),
+        cursor_column=cursor_column,
+        cursor_semantics=cursor_semantics,
     )
+    if identity_error:
+        return _tool_result(tool, success=False, error=identity_error)
+    row_rules["stream_contracts"] = contracts
+    if contracts and not row_rules.get("upsert_key") and contracts[0].get("primary_key"):
+        row_rules["upsert_key"] = _primary_key_csv(contracts[0].get("primary_key"))
+    if contracts and contracts[0].get("cursor_field"):
+        row_rules["cursor_column"] = str(contracts[0]["cursor_field"])
+    if contracts and contracts[0].get("cursor_semantics"):
+        row_rules["cursor_semantics"] = str(contracts[0]["cursor_semantics"])
+    if contracts and contracts[0].get("cursor_inferred"):
+        row_rules["cursor_inferred"] = True
+
+    try:
+        pii_ack = _pii_acknowledgement(pii_acknowledgement)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
+
+    blocked_for_contract: set[str] = set()
+    preflight: dict[str, Any] = {}
+    for _contract_pass in (1, 2):
+        if risk_acceptance:
+            try:
+                mappings = _sign_required_risk_contracts(
+                    mappings,
+                    risk_acceptance,
+                    table=dst_table,
+                    force_columns=blocked_for_contract or None,
+                )
+            except ValueError as exc:
+                return _tool_result(tool, success=False, error=str(exc))
+
+        preflight = _run_preflight(
+            src_conn=src_conn,
+            dst_conn=dst_conn,
+            src_table=src_table,
+            dst_table=dst_table,
+            src_rows=src_rows,
+            sample_rows=sample_rows,
+            mappings=mappings,
+            mode=mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            src_db_type=str(src_info.get("db_type") or ""),
+            source_config=_stamp_callable_source_config(
+                _endpoint_dict(src_info.get("endpoint")),
+                callable_plan,
+            ),
+            dest_db_type=str(dst_info.get("db_type") or ""),
+            dest_exists=dest_exists,
+            source_primary_key=(
+                _primary_key_csv(contracts[0].get("primary_key"))
+                if contracts
+                else _source_primary_key(src_info)
+            ),
+            write_via_staging=bool(write_via_staging),
+            source_read_mode=str((callable_plan or {}).get("mode") or ""),
+            source_filter=row_rules["source_filter"] or None,
+            stream_contracts=row_rules["stream_contracts"] or None,
+            pii_ack=pii_ack,
+            schema_drift_acknowledged=bool(schema_drift_acknowledged),
+        )
+        if (
+            _contract_pass == 2
+            or not risk_acceptance
+            or _is_execute_cleared(preflight)
+        ):
+            break
+        blocked_for_contract = _fidelity_columns_from_preflight(preflight, mappings)
+        if not blocked_for_contract:
+            break
+
+    contract_refusal = _plan_contract_refusal(
+        contract_id,
+        require_signed_contract,
+        source_format=str(src_info.get("db_type") or ""),
+        destination_format=str(dst_info.get("db_type") or ""),
+        column_types={r["name"]: r["inferred_type"] for r in src_rows},
+    )
+    if contract_refusal:
+        preflight = _block_plan_on_contract(preflight, contract_refusal)
 
     conversions = _type_conversions(mappings)
     unmapped = [
@@ -685,18 +1024,24 @@ def plan_transfer(
             "engine_mappings": mappings,
             "column_types": {r["name"]: r["inferred_type"] for r in src_rows},
             "sync_mode": mode,
+            "sync_mode_requested": (sync_mode or "").strip(),
+            **(
+                {
+                    "sync_mode_alias_note": (
+                        f"{(sync_mode or '').strip()} and {mode} are the same "
+                        "upsert write, not a second copy."
+                    )
+                }
+                if (sync_mode or "").strip()
+                and (sync_mode or "").strip().lower().replace("-", "_").replace(" ", "_")
+                != mode
+                else {}
+            ),
             "schema_policy": schema_policy,
             "validation_mode": validation_mode,
             "source_filter": row_rules["source_filter"],
             "stream_contracts": row_rules["stream_contracts"],
-            "data_rules": {
-                "applied": [str(r) for r in (applied_rules or [])],
-                "upsert_key": row_rules["upsert_key"],
-                "row_filter": row_rules["filter_description"],
-                # Chat stages one run; a cadence is a Schedules object, so it is
-                # echoed back as an unmet request rather than silently honoured.
-                "cadence_not_scheduled": str(cadence or ""),
-            },
+            "data_rules": _data_rules_preview(row_rules, applied_rules, cadence),
             "mapped_count": len(mappings),
             "unmapped_source_columns": unmapped[:20],
             "type_conversions": conversions[:_MAX_PREVIEW_MAPPINGS],
@@ -721,6 +1066,7 @@ def plan_transfer(
             # Align with Execute unlock — passed alone must not invent safe_to_start.
             "safe_to_start": _is_execute_cleared(preflight),
             **_preview_bound_contract(contract_id, require_signed_contract),
+            **({"contract_blocker": contract_refusal} if contract_refusal else {}),
         },
     )
 
@@ -739,6 +1085,37 @@ def _unapplied_rules_error(questions: list[str]) -> str:
     return head + "\n" + "\n".join(f"• {q}" for q in questions[:4])
 
 
+def _column_arg(value: Any) -> str:
+    """A tool argument naming columns: one string, or a list of names.
+
+    MCP clients send either. A list must not be stringified into ``"['id']"``.
+    """
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(part).strip() for part in value if str(part).strip())
+    return str(value or "").strip()
+
+
+def _data_rules_preview(
+    row_rules: dict[str, Any],
+    applied_rules: list[str] | None,
+    cadence: str,
+) -> dict[str, Any]:
+    """The row rules the confirm preview and a schedule both read."""
+    preview: dict[str, Any] = {
+        "applied": [str(r) for r in (applied_rules or [])],
+        "upsert_key": row_rules.get("upsert_key") or "",
+        "row_filter": row_rules.get("filter_description") or "",
+        # Chat stages one run; a cadence is a Schedules object, so it is
+        # echoed back as an unmet request rather than silently honoured.
+        "cadence_not_scheduled": str(cadence or ""),
+    }
+    if row_rules.get("cursor_column"):
+        preview["cursor_column"] = row_rules["cursor_column"]
+    if row_rules.get("cursor_semantics"):
+        preview["cursor_semantics"] = row_rules["cursor_semantics"]
+    return preview
+
+
 def _ground_data_rules(
     *,
     source_filter: dict[str, Any] | None,
@@ -747,6 +1124,7 @@ def _ground_data_rules(
     source_columns: list[str],
     source_label: str,
     mode: str,
+    honor_requested_mode: bool = False,
 ) -> tuple[dict[str, Any], str]:
     """Bind spoken row rules to real source columns, or refuse.
 
@@ -754,8 +1132,14 @@ def _ground_data_rules(
     source. An unknown column cannot be silently ignored: the run would move
     more rows than the operator asked for, and reconcile green while doing it.
     """
+    from services.sync_cursor import normalize_sync_mode as engine_sync_mode
     from .transfer_rules import filter_columns
 
+    # Pilot says cdc_incremental / incremental_upsert. The gates and the CDC
+    # runner speak cdc / incremental_deduped. Leaving the alias here downgraded
+    # CDC to upsert and then blocked it for a table cursor the log does not use.
+    if (mode or "").strip():
+        mode = engine_sync_mode(mode)
     spec = dict(source_filter or {})
     known = {c.lower(): c for c in source_columns}
     out: dict[str, Any] = {
@@ -790,16 +1174,174 @@ def _ground_data_rules(
 
     key = (upsert_key or dedupe_key or "").strip()
     if key:
-        actual, err = resolve(key, "upsert key")
-        if err:
-            return out, err
-        out["upsert_key"] = actual
-        out["sync_mode"] = normalize_sync_mode("upsert")
-        # The engine takes its merge keys from the stream contract, so an upsert
-        # on a named column has to be declared there or the write falls back to
-        # insert and duplicates the key.
-        out["stream_contracts"] = [{"name": "stream", "primary_key": actual, "selected": True}]
+        parts = [part.strip() for part in key.replace(";", ",").split(",") if part.strip()]
+        bound: list[str] = []
+        for part in parts:
+            actual, err = resolve(part, "upsert key")
+            if err:
+                return out, err
+            bound.append(actual)
+        out["upsert_key"] = ",".join(bound)
+        # A key with no spoken mode means upsert: the operator named an
+        # identity and left the mode at the non-destructive default. CDC,
+        # SCD2, and mirror already require a key — do not downgrade them.
+        # incremental_append is cursor-bounded insert. A key the operator
+        # attached to a mode they named (overwrite, append) is recorded and
+        # the mode stays. Rewriting that to upsert also inferred updated_at.
+        from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
+
+        if (
+            not honor_requested_mode
+            and mode not in MODES_REQUIRING_PRIMARY_KEY
+            and mode != "incremental_append"
+        ):
+            out["sync_mode"] = normalize_sync_mode("upsert")
     return out, ""
+
+
+def _primary_key_csv(raw: Any) -> str:
+    """Join a contract key without inventing ``i,d`` from the string ``id``.
+
+    A cursor-only incremental_append contract has no ``primary_key`` key.
+    Indexing it raised KeyError, and the error humanizer then told the
+    operator the run needed an identity column.
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(part).strip() for part in raw if str(part).strip())
+    return str(raw).strip()
+
+
+def _identity_stream_contract(
+    *,
+    mode: str,
+    source_table: str,
+    source_columns: list[str],
+    mappings: list[dict[str, Any]],
+    operator_key: str,
+    catalog_key: str,
+    cursor_column: str = "",
+    cursor_semantics: str = "",
+) -> tuple[list[dict[str, Any]], str]:
+    """The stream contract Execute and preflight both read.
+
+    The operator's key wins. Otherwise a mode that requires identity uses the
+    source catalog key when every column is mapped. No column named ``id`` is
+    invented. CDC's cursor is the log position (``cdc_position``), not a
+    guessed ``updated_at``. An incremental cursor is the column the operator
+    named. When they name none and the source has exactly one conventional
+    modification-timestamp column, that column is selected and declared
+    ``modification_timestamp`` — the plan says so. Two candidates are not a
+    guess, a missing column is not invented, and a named cursor with no
+    semantics stays undeclared so the gate can still refuse it.
+    """
+    from services.preflight_cursor_gate import MODES_REQUIRING_PRIMARY_KEY
+    from services.primary_key import mapped_catalog_upsert_key
+    from services.sync_cursor import normalize_sync_mode as engine_sync_mode
+
+    if (mode or "").strip():
+        mode = engine_sync_mode(mode)
+    mapping_rows: list[dict[str, Any]] = []
+    for item in mappings or []:
+        row = item
+        if not isinstance(row, dict):
+            dump = getattr(row, "model_dump", None)
+            row = dump() if callable(dump) else {}
+        if not isinstance(row, dict):
+            continue
+        src = str(row.get("source") or row.get("source_column") or "").strip()
+        tgt = str(row.get("target") or row.get("target_column") or src).strip()
+        if src and tgt:
+            mapping_rows.append({"source": src, "target": tgt})
+
+    def _fully_mapped(cols: list[str]) -> bool:
+        if not cols:
+            return False
+        sources, _targets = mapped_catalog_upsert_key(cols, mapping_rows)
+        return [s.lower() for s in sources] == [c.lower() for c in cols]
+
+    chosen: list[str] = []
+    if operator_key:
+        chosen = [part for part in operator_key.split(",") if part]
+        if not _fully_mapped(chosen):
+            return [], (
+                f"Upsert key `{operator_key}` is not in the column mapping, "
+                "so the write cannot merge on it. Map that column, or name a "
+                "key that is mapped."
+            )
+    elif mode in MODES_REQUIRING_PRIMARY_KEY and catalog_key:
+        known = {col.lower(): col for col in source_columns}
+        parts = [part.strip() for part in catalog_key.split(",") if part.strip()]
+        if parts and all(part.lower() in known for part in parts):
+            bound = [known[part.lower()] for part in parts]
+            if _fully_mapped(bound):
+                chosen = bound
+    cursor = ""
+    semantics = ""
+    inferred = False
+    if mode == "cdc":
+        # The log is the cursor. A table column here would make the snapshot
+        # reader filter on it and skip rows the log had already captured.
+        semantics = "cdc_position"
+    else:
+        raw_cursor = (cursor_column or "").strip()
+        if raw_cursor:
+            known = {col.lower(): col for col in source_columns}
+            actual = known.get(raw_cursor.lower(), "")
+            if not actual:
+                listed = ", ".join(source_columns[:12]) or "none readable"
+                return [], (
+                    f"Source has no column `{raw_cursor}`, so I cannot advance "
+                    f"on it. Columns I can see: {listed}."
+                )
+            cursor = actual
+        raw_sem = (cursor_semantics or "").strip().lower()
+        if raw_sem:
+            from services.cursor_semantics import CURSOR_SEMANTICS
+
+            if raw_sem not in CURSOR_SEMANTICS:
+                return [], (
+                    f"Unknown cursor semantics '{raw_sem}' — declare one of: "
+                    + ", ".join(sorted(CURSOR_SEMANTICS))
+                )
+            semantics = raw_sem
+        elif not cursor:
+            from services.cursor_semantics import (
+                MODIFICATION_TIMESTAMP,
+                sole_modification_timestamp_column,
+            )
+            from services.preflight_cursor_gate import MODES_REQUIRING_CURSOR
+
+            picked = ""
+            if mode in MODES_REQUIRING_CURSOR:
+                picked = sole_modification_timestamp_column(source_columns)
+            if picked:
+                cursor = picked
+                semantics = MODIFICATION_TIMESTAMP
+                inferred = True
+    if not chosen and not cursor:
+        return [], ""
+    contract: dict[str, Any] = {
+        "name": source_table or "stream",
+        "selected": True,
+    }
+    if chosen:
+        contract["primary_key"] = chosen
+    if cursor:
+        contract["cursor_field"] = cursor
+    if semantics:
+        contract["cursor_semantics"] = semantics
+    if inferred:
+        contract["cursor_inferred"] = True
+    if mode:
+        # Execute prefers the contract mode. The canonical token is what the
+        # CDC branch and the progress check compare against.
+        contract["sync_mode"] = mode
+    if mode == "cdc":
+        # Debezium default: snapshot when no resume exists, then tail the log.
+        contract["snapshot_mode"] = "initial"
+    return [contract], ""
 
 
 def _rebind_filter_columns(
@@ -853,6 +1395,25 @@ def _source_primary_key(src_info: dict[str, Any]) -> str:
     return ",".join(cols)
 
 
+def _preflight_issue_lines(details: dict[str, Any]) -> list[str]:
+    """The sentences an operator can act on, not the gate's count summary."""
+    lines: list[str] = []
+    for issue in (details.get("issues") or [])[:1]:
+        text = str(issue).strip()
+        if text:
+            lines.append(text)
+    for row in (details.get("issues_detail") or [])[:2]:
+        if not isinstance(row, dict):
+            continue
+        for failure in (row.get("sample_failures") or [])[:1]:
+            if not isinstance(failure, dict):
+                continue
+            reason = str(failure.get("reason") or "").strip()
+            if reason and reason not in lines:
+                lines.append(reason)
+    return lines[:3]
+
+
 def _run_preflight(
     *,
     src_conn: dict[str, Any],
@@ -874,6 +1435,10 @@ def _run_preflight(
     source_read_mode: str = "",
     source_filter: dict[str, Any] | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
+    source_kind: str = "database",
+    known_row_count: int | None = None,
+    pii_ack: dict[str, str] | None = None,
+    schema_drift_acknowledged: bool = False,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.preflight_run_store import save_preflight_run
@@ -901,7 +1466,9 @@ def _run_preflight(
     column_types = {r["name"]: r["inferred_type"] for r in src_rows}
     # G7 capacity sizes batches from the real volume, so send the exact count
     # rather than the sample size, which would understate a large table.
-    if (source_read_mode or "").strip().lower() in {"procedure", "query"}:
+    if known_row_count is not None:
+        row_count = max(0, int(known_row_count))
+    elif (source_read_mode or "").strip().lower() in {"procedure", "query"}:
         # COUNT(*) against a procedure stream name would hit a colliding table.
         row_count = len(sample_rows)
     else:
@@ -917,12 +1484,21 @@ def _run_preflight(
             stream_contracts=list(stream_contracts or []),
             backfill_new_fields=False,
             source_columns=columns,
+            catalog_primary_key_columns=[
+                part.strip()
+                for part in str(source_primary_key or "").split(",")
+                if part.strip()
+            ] or None,
+            mappings=mappings,
+            source_table=src_table,
             dest_type=dest_db_type,
             source_type=src_db_type,
-            source_kind="database",
+            source_kind=source_kind or "database",
             # G12 must match Studio / Execute — Pilot cannot soft-skip staging policy.
             write_via_staging=bool(write_via_staging),
             source_read_mode=source_read_mode,
+            source_endpoint=source_config,
+            destination_endpoint=dst_conn,
         )
         # These must mirror ``UniversalTransferEngine`` exactly. The source
         # config and table are what enable the live coercion probe; without
@@ -940,6 +1516,12 @@ def _run_preflight(
         destination_live_column_types = (
             dict(dest_types) if dest_recreated and dest_types else None
         )
+        # The inspect above is what Gate-2 uses to say the table exists. The
+        # collision probe has to use that same connection. Dropping it made
+        # every append into a readable table warn that the destination was
+        # unavailable, then Execute discovered the duplicate.
+        measured_exists = dest_probe.get("table_exists")
+        table_exists = measured_exists if isinstance(measured_exists, bool) else dest_exists
 
         result = run_file_preflight(
             columns=columns,
@@ -948,6 +1530,11 @@ def _run_preflight(
             row_count=row_count,
             mappings=mappings,
             destination_connected=bool(dest_probe.get("connected")),
+            # The probe's own reason (e.g. a TLS handshake against a plaintext
+            # Redis) is the operator's fix; "not reachable" alone is not.
+            destination_error=None
+            if dest_probe.get("connected")
+            else (dest_probe.get("error") or dest_probe.get("message") or None),
             sample_rows=sample_rows,
             sync_mode=mode,
             schema_policy=schema_policy,
@@ -958,11 +1545,35 @@ def _run_preflight(
             destination_column_defaults=dest_probe.get("column_defaults") or {},
             destination_identity_columns=dest_probe.get("identity_columns") or [],
             destination_generated_columns=dest_probe.get("generated_columns") or [],
-            destination_table_exists=dest_exists,
+            destination_table_exists=table_exists,
             destination_can_create=can_create if isinstance(can_create, bool) else None,
+            # Connectivity is not INSERT. Dropping the probe here made Gate-2
+            # say "write access" for a role that can only SELECT, and Execute
+            # then failed with the denial the probe had already measured.
+            destination_can_write=(
+                dest_probe.get("can_write")
+                if isinstance(dest_probe.get("can_write"), bool)
+                else None
+            ),
+            privilege_probe=(
+                dest_probe.get("privilege_probe")
+                if isinstance(dest_probe.get("privilege_probe"), dict)
+                else None
+            ),
+            redshift_staging_probe=(
+                dest_probe.get("redshift_staging_probe")
+                if isinstance(dest_probe.get("redshift_staging_probe"), dict)
+                else None
+            ),
             destination_db_type=dest_db_type,
             destination_table=dst_table,
-            source_kind="database",
+            destination_pk_columns=(
+                dest_probe.get("primary_key_columns") or dest_probe.get("pk_columns")
+            ),
+            destination_unique_keys=list(dest_probe.get("unique_keys") or []),
+            destination_foreign_keys=list(dest_probe.get("foreign_keys") or []),
+            destination_config=dest_probe.get("_probe_cfg") or None,
+            source_kind=source_kind or "database",
             source_format=src_db_type,
             source_table=src_table,
             source_connector_id=str(src_conn.get("id") or ""),
@@ -976,6 +1587,20 @@ def _run_preflight(
             contract_primary_key=source_primary_key or None,
             source_filter=source_filter or None,
             stream_contracts=list(stream_contracts or []),
+            compliance_acknowledged=bool(pii_ack),
+            acknowledgment_actor=(pii_ack or {}).get("approved_by", ""),
+            acknowledgment_reason=(pii_ack or {}).get("reason", ""),
+            schema_drift_acknowledged=bool(schema_drift_acknowledged),
+            rows_are_population=(
+                (source_read_mode or "").strip().lower() in {"query", "procedure"}
+                and not sample_rows
+            ),
+            population_rows=(
+                []
+                if (source_read_mode or "").strip().lower() in {"query", "procedure"}
+                and not sample_rows
+                else None
+            ),
         )
         result = apply_policy_gates(
             result,
@@ -1029,7 +1654,10 @@ def _run_preflight(
                 # Only the fix travels from the details blob: without it the chat
                 # refusal names a problem and no way out of it.
                 "details": {
-                    "recommended_fix": ((b.get("details") or {}).get("recommended_fix") or "")
+                    "recommended_fix": ((b.get("details") or {}).get("recommended_fix") or ""),
+                    # The gate summary is "1 type coercion issue(s)". The issue
+                    # sentence names the column; the sample reason names the value.
+                    "issues": _preflight_issue_lines(b.get("details") or {}),
                 },
             }
             for b in (result.get("blockers") or [])
@@ -1045,6 +1673,12 @@ def _stamp_callable_source_config(
 ) -> dict[str, Any]:
     """Put CALL/SELECT fields on the preflight/execute source cfg."""
     cfg = dict(source_config or {})
+    # ``endpoint_to_dict`` carries the driver as ``format``. The SQL URL
+    # builder and the procedure dialect both read ``type``.
+    if not str(cfg.get("type") or "").strip():
+        driver = str(cfg.get("format") or cfg.get("db_type") or "").strip()
+        if driver:
+            cfg["type"] = driver
     if not callable_plan:
         return cfg
     extra = dict(cfg.get("extra") or {}) if isinstance(cfg.get("extra"), dict) else {}
@@ -1152,6 +1786,8 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
     would turn preflight into theatre, so an unavailable sample yields an empty
     list and lets those gates report SKIP honestly.
     """
+    from services.preflight_sample import engine_sample_rows
+
     from .query_tools import sample_connector_object
 
     try:
@@ -1161,12 +1797,23 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
             limit=limit,
             analyze=False,
         )
-        if not res.success:
-            return []
-        return list((res.output or {}).get("rows") or [])
+        if res.success:
+            rows = list((res.output or {}).get("rows") or [])
+            if rows:
+                return rows
+        else:
+            _LOG.warning("preview sampler failed for %s: %s", table, res.error)
     except Exception as exc:
-        _LOG.info("sample for preflight unavailable: %s", exc)
-        return []
+        _LOG.warning("preview sampler failed for %s: %s", table, exc)
+    # The query sampler and the Execute reader are different paths; a failure
+    # in the first must not leave Map and Gate-8 judging no rows.
+    return engine_sample_rows(
+        source_kind="database",
+        source_format=str(conn.get("type") or ""),
+        source_connector_id=str(conn.get("id") or ""),
+        source_table=table,
+        limit=limit,
+    ).rows
 
 
 def _require_signed_flag(contract_id: str, require_signed_contract: Any) -> bool:
@@ -1202,6 +1849,61 @@ def _preview_bound_contract(
         else "not_found"
     )
     return preview
+
+
+def _plan_contract_refusal(
+    contract_id: str = "",
+    require_signed_contract: Any = None,
+    *,
+    source_format: str = "",
+    destination_format: str = "",
+    column_types: dict[str, str] | None = None,
+) -> str:
+    """Why Confirm would refuse this contract bind; ``""`` when it would not.
+
+    Same bind check as staging (QA MX3-02) plus the contract's route/schema
+    compatibility the engine enforces after Confirm (QA MX3-18).
+    """
+    try:
+        _stage_bound_contract(contract_id, require_signed_contract)
+    except ValueError as exc:
+        _LOG.warning("plan_transfer: contract bind %r refused: %s", contract_id, exc)
+        return str(exc)
+    if not str(contract_id or "").strip():
+        return ""
+    from src.transfer.contract_engine import contract_route_refusal
+
+    return contract_route_refusal(
+        contract_id,
+        source_format=source_format,
+        destination_format=destination_format,
+        column_types=column_types,
+    )
+
+
+def _block_plan_on_contract(preflight: dict[str, Any], refusal: str) -> dict[str, Any]:
+    """Turn the plan's verdict into block for a contract bind Confirm refuses."""
+    out = dict(preflight)
+    bundle = dict(out.get("proof_bundle") or {})
+    bundle["transfer_decision"] = {
+        **dict(bundle.get("transfer_decision") or {}),
+        "decision": "block",
+        "reason": refusal,
+    }
+    out["proof_bundle"] = bundle
+    out["blockers"] = [
+        *(out.get("blockers") or []),
+        {
+            "id": "contract_bind",
+            "severity": "block",
+            "message": refusal,
+            "fix": (
+                "Bind a SIGNED contract that matches this route, re-sign the "
+                "contract, or turn off require_signed_contract."
+            ),
+        },
+    ]
+    return out
 
 
 def _stage_bound_contract(
@@ -1244,11 +1946,18 @@ def start_transfer(
     require_signed_contract: Any = None,
     source_filter: dict[str, Any] | None = None,
     upsert_key: str = "",
+    primary_key: str = "",
     dedupe_key: str = "",
+    cursor_column: str = "",
+    cursor_semantics: str = "",
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
     cadence: str = "",
     all_tables: bool = False,
+    risk_acceptance: dict[str, Any] | None = None,
+    pii_acknowledgement: dict[str, Any] | None = None,
+    column_transforms: dict[str, Any] | None = None,
+    schema_drift_acknowledged: bool = False,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -1268,12 +1977,22 @@ def start_transfer(
         source_query=source_query,
         procedure_params=procedure_params,
         source_filter=source_filter,
-        upsert_key=upsert_key,
+        upsert_key=upsert_key or primary_key,
+        primary_key=primary_key,
         dedupe_key=dedupe_key,
+        cursor_column=cursor_column,
+        cursor_semantics=cursor_semantics,
         rule_questions=rule_questions,
         applied_rules=applied_rules,
         cadence=cadence,
         all_tables=all_tables,
+        risk_acceptance=risk_acceptance,
+        pii_acknowledgement=pii_acknowledgement,
+        column_transforms=column_transforms,
+        schema_drift_acknowledged=schema_drift_acknowledged,
+        # The plan evaluates the bound contract against this route (QA MX3-18).
+        contract_id=contract_id,
+        require_signed_contract=require_signed_contract,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)
@@ -1310,10 +2029,15 @@ def start_transfer(
                 "re-run Validate against the API until decision is approve."
             )
         else:
+            reason = str(
+                ((preflight.get("proof_bundle") or {}).get("transfer_decision") or {}).get("reason")
+                or ""
+            ).strip()
             err = (
                 f"Preflight is {decision}-grade, not approve — Confirm is blocked "
                 "until Studio Execute would unlock "
                 + (f"(run {preflight.get('run_id')})." if preflight.get("run_id") else ".")
+                + (f" Reason: {reason}" if reason else "")
             )
         return _tool_result(
             tool,
@@ -1365,7 +2089,14 @@ def start_transfer(
         # Chat can never turn the gates off.
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
+        "schema_drift_acknowledged": bool(schema_drift_acknowledged),
     }
+    pii_ack = _pii_acknowledgement(pii_acknowledgement)
+    if pii_ack:
+        # Execute re-runs Validate: the same ack and its trail ride on the job.
+        payload["compliance_acknowledged"] = True
+        payload["acknowledgment_actor"] = pii_ack["approved_by"]
+        payload["acknowledgment_reason"] = pii_ack["reason"]
     try:
         bound = _stage_bound_contract(contract_id, require_signed_contract)
     except ValueError as exc:
@@ -1389,11 +2120,32 @@ def start_transfer(
         "validation_mode": plan.get("validation_mode"),
         "schema_policy": plan.get("schema_policy"),
     }
+    stored_as_text = _stored_as_text(
+        list(plan.get("engine_mappings") or plan.get("mappings") or []),
+        str(destination.get("type") or ""),
+    )
+    if stored_as_text:
+        preview["stored_as_text"] = stored_as_text
+    if pii_ack:
+        preview["pii_acknowledgement"] = dict(pii_ack)
     rules_preview = plan.get("data_rules") or {}
     if rules_preview.get("row_filter"):
         preview["row_filter"] = rules_preview["row_filter"]
     if rules_preview.get("upsert_key"):
         preview["upsert_key"] = rules_preview["upsert_key"]
+    if rules_preview.get("cursor_column"):
+        preview["cursor_column"] = rules_preview["cursor_column"]
+    if rules_preview.get("cursor_semantics"):
+        preview["cursor_semantics"] = rules_preview["cursor_semantics"]
+    if rules_preview.get("cursor_inferred"):
+        col = rules_preview.get("cursor_column") or "the watermark"
+        preview["cursor_inferred"] = True
+        preview["cursor_assumption"] = (
+            f"{col} is the only modification-timestamp column on the source, "
+            "so this incremental upsert advances on it as modification_timestamp. "
+            "That assumes the source maintains the column on every change. "
+            "Pass cursor_column and cursor_semantics to choose a different watermark."
+        )
     if payload.get("limit"):
         preview["row_limit"] = payload["limit"]
     if rules_preview.get("cadence_not_scheduled"):

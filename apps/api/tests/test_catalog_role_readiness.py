@@ -161,9 +161,12 @@ def test_transfer_capabilities_splits_the_two_sides():
     destinations = set(caps["destination_databases"])
 
     # Write-only stores are destinations, never sources.
-    for write_only in ("pinecone", "weaviate", "milvus", "pgvector"):
+    for write_only in ("pinecone", "weaviate", "milvus"):
         assert write_only not in sources, f"{write_only} cannot be read"
         assert write_only in destinations, f"{write_only} should be offered as a destination"
+
+    # pgvector is PostgreSQL + the vector type: it reads via the PG reader (MX2-12).
+    assert "pgvector" in sources and "pgvector" in destinations
 
     # Qdrant reads point payloads (scroll), so it sits on both sides.
     assert "qdrant" in sources and "qdrant" in destinations

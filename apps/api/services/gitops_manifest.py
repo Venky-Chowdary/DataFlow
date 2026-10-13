@@ -11,6 +11,10 @@ from __future__ import annotations
 from typing import Any
 
 
+class WorkspaceScopeError(ValueError):
+    """An explicit manifest id resolves outside the selected workspace."""
+
+
 _SCHEDULE_RUNTIME_KEYS = frozenset(
     {
         "last_run_at",
@@ -293,10 +297,15 @@ def _coerce_payload(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]
     return payload
 
 
-def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
+def plan_manifest(
+    payload: dict[str, Any] | list[Any] | str,
+    *,
+    workspace_id: str = "",
+) -> dict[str, Any]:
     """Dry-run: report create/update/skip without mutating stores."""
     payload = _coerce_payload(payload)
     from services.schedule_store import get_schedule, list_schedules
+    from services.workspace_access import workspace_resource_is_visible
 
     try:
         from services.contract_store import get_contract_store
@@ -305,7 +314,12 @@ def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
 
     resources = _normalize_resources(payload)
     actions: list[dict[str, Any]] = []
-    schedule_names = {s.name: s.id for s in list_schedules()}
+    scope = (workspace_id or "").strip()
+    visible_schedules = [
+        s for s in list_schedules()
+        if workspace_resource_is_visible(getattr(s, "workspace_id", ""), scope)
+    ]
+    schedule_names = {s.name: s.id for s in visible_schedules}
     store = get_contract_store()
 
     for resource in resources:
@@ -315,6 +329,10 @@ def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
             sid = str(spec.get("id") or "").strip()
             name = str(spec.get("name") or "").strip()
             existing = get_schedule(sid) if sid else None
+            if existing and not workspace_resource_is_visible(
+                getattr(existing, "workspace_id", ""), scope
+            ):
+                raise WorkspaceScopeError("Schedule belongs to another workspace")
             if existing is None and name and name in schedule_names:
                 existing = get_schedule(schedule_names[name])
             action = "update" if existing else "create"
@@ -327,6 +345,11 @@ def plan_manifest(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]:
         elif kind in {"DataContract", "MappingBundle"}:
             cid = str(spec.get("id") or "").strip()
             existing = store.get_contract(cid) if cid else None
+            if existing and not workspace_resource_is_visible(
+                str((getattr(existing, "metadata", None) or {}).get("workspace_id") or ""),
+                scope,
+            ):
+                raise WorkspaceScopeError("Contract belongs to another workspace")
             action = "update" if existing else "create"
             actions.append({
                 "kind": kind,
@@ -368,8 +391,10 @@ def bind_contract_workspace(contract: Any, workspace_id: str, *, existing: Any =
     if existing is not None:
         existing_meta = getattr(existing, "metadata", None) or {}
         existing_ws = str(existing_meta.get("workspace_id") or "").strip()
-        if bound and existing_ws and existing_ws != bound:
-            raise ValueError("Contract belongs to another workspace")
+        from services.workspace_access import workspace_resource_is_visible
+
+        if bound and not workspace_resource_is_visible(existing_ws, bound):
+            raise WorkspaceScopeError("Contract belongs to another workspace")
     if bound:
         meta = dict(getattr(contract, "metadata", None) or {})
         meta["workspace_id"] = bound
@@ -392,7 +417,7 @@ def apply_manifest(
     """
     payload = _coerce_payload(payload)
     if dry_run:
-        return plan_manifest(payload)
+        return plan_manifest(payload, workspace_id=workspace_id)
 
     from services.schedule_store import (
         assert_signed_contract,
@@ -411,6 +436,7 @@ def apply_manifest(
     resources = _normalize_resources(payload)
     results: list[dict[str, Any]] = []
     store = get_contract_store()
+    from services.workspace_access import workspace_resource_is_visible
 
     for resource in resources:
         kind, _ident = _resource_identity(resource)
@@ -427,11 +453,12 @@ def apply_manifest(
                     # Fail closed before create/update so CD never soft-skips.
                     assert_signed_contract(cid, require_signed=True)
                 sid = str(apply_spec.get("id") or "").strip()
-                if sid and get_schedule(sid):
-                    existing = get_schedule(sid)
-                    existing_ws = (getattr(existing, "workspace_id", "") or "").strip()
-                    if bound_ws and existing_ws and existing_ws != bound_ws:
-                        raise ValueError("Schedule belongs to another workspace")
+                existing = get_schedule(sid) if sid else None
+                if existing and not workspace_resource_is_visible(
+                    getattr(existing, "workspace_id", ""), bound_ws
+                ):
+                    raise WorkspaceScopeError("Schedule belongs to another workspace")
+                if sid and existing:
                     updated = update_schedule(sid, apply_spec)
                     results.append({
                         "kind": kind,
@@ -462,6 +489,12 @@ def apply_manifest(
                 # Imported contracts stay draft until explicitly signed.
                 contract.status = ContractStatus.DRAFT
                 existing = store.get_contract(contract.id) if contract.id else None
+                if existing:
+                    existing_meta = getattr(existing, "metadata", None) or {}
+                    if not workspace_resource_is_visible(
+                        str(existing_meta.get("workspace_id") or ""), workspace_id
+                    ):
+                        raise WorkspaceScopeError("Contract belongs to another workspace")
                 bind_contract_workspace(contract, workspace_id, existing=existing)
                 store.save_contract(contract)
                 results.append({
@@ -480,12 +513,15 @@ def apply_manifest(
                     "reason": f"unsupported kind {kind!r}",
                 })
         except Exception as exc:
-            results.append({
+            result = {
                 "kind": kind or "Unknown",
                 "action": "error",
                 "ok": False,
                 "error": str(exc)[:400],
-            })
+            }
+            if isinstance(exc, WorkspaceScopeError):
+                result["error_code"] = "cross_workspace"
+            results.append(result)
 
     return {
         "dry_run": False,

@@ -28,6 +28,7 @@ import pytest
 from services.copy_fast_path import (
     FastPathUnavailable,
     copy_between_postgres,
+    occupied_pk_range_action,
     skip_complete_identity_copy,
 )
 
@@ -38,6 +39,15 @@ CFG = {
     "username": "dataflow",
     "password": "dataflow",
 }
+
+
+def test_append_does_not_delete_a_partial_occupied_range():
+    """E3-001: dest 50 → 54 after a full-refresh append deleted the 50."""
+    with pytest.raises(FastPathUnavailable, match="partly"):
+        occupied_pk_range_action(50, 54, replace_destination=False)
+    assert occupied_pk_range_action(0, 54, replace_destination=False) == "load"
+    assert occupied_pk_range_action(54, 54, replace_destination=False) == "skip"
+    assert occupied_pk_range_action(50, 54, replace_destination=True) == "reload"
 
 
 def test_skip_complete_identity_copy_shape():
@@ -321,7 +331,7 @@ def test_replace_destination_false_appends(pg):
         tables.drop()
 
 
-def test_pk_resume_skips_complete_and_reloads_partial(pg, monkeypatch):
+def test_pk_resume_declines_a_partial_append_range(pg, monkeypatch):
     monkeypatch.setenv("DATAFLOW_PG_MYSQL_COPY_WORKERS", "4")
     tables = _Tables(pg, "id bigint PRIMARY KEY, note text")
     try:
@@ -337,16 +347,11 @@ def test_pk_resume_skips_complete_and_reloads_partial(pg, monkeypatch):
             cur.execute(f'DELETE FROM "{tables.dst}" WHERE id = %s', (lo,))
             cur.execute(f'SELECT COUNT(*) FROM "{tables.dst}"')
             assert int(cur.fetchone()[0]) == 7999
-        second = _copy(
-            tables, [("id", "id"), ("note", "note")], replace_destination=False
-        )
-        assert second.source_rows == 8000
-        assert second.target_rows == 8000
-        actions = [p["action"] for p in second.source_snapshot["partition_proof"]]
-        assert actions.count("skip") == 3
-        assert actions.count("reload") == 1
-        assert second.source_snapshot.get("partitions_skipped") == 3
-        assert tables.count(tables.dst) == 8000
+        with pytest.raises(FastPathUnavailable, match="partly"):
+            _copy(
+                tables, [("id", "id"), ("note", "note")], replace_destination=False
+            )
+        assert tables.count(tables.dst) == 7999
     finally:
         tables.drop()
 

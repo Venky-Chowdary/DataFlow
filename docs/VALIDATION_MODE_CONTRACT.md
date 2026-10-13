@@ -16,6 +16,10 @@ Sample validation never claims population proof in any mode.
 | `discovery` | **No** | 0.0 | Report-only — Execute refused |
 | `audit` | **No** | 0.85 | Hard-block audit trail — Execute refused |
 
+`lenient` (offered by Pilot/MCP) is an alias of `balanced`. Any other unknown mode
+fails closed to `strict`; `g11_validation_posture` names the requested and the
+applied mode and its confidence threshold.
+
 ## Engine fail-closed
 
 `assert_mode_allows_write` runs before destination mutation.

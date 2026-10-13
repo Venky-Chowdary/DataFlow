@@ -7,6 +7,7 @@ import { Connector } from "../lib/types";
 import { ConnectionWorkbenchContext, formatRelativeTime } from "../lib/connectionWorkbench";
 import { connectorHealthLabel, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { formatJobRowMetric } from "../lib/conservationLedger";
+import { formatJobRoute, formatStreamNames, readJobStreamNames } from "../lib/jobEvidence";
 import { introspectTransferEndpoints, type EndpointIntrospection } from "../lib/api";
 import {
   formatConnectorRoleLabel,
@@ -328,8 +329,16 @@ export function ConnectionWorkbench({
                       return (
                       <tr key={job._id}>
                         <td>
-                          <div className="df2-cell-title">{job.source_name}</div>
-                          <div className="df2-cell-meta">{job.source_type} → {job.destination_type}</div>
+                          {(() => {
+                            const names = readJobStreamNames(job);
+                            const title = names.length >= 2 ? formatStreamNames(names) : job.source_name;
+                            return (
+                              <>
+                                <div className="df2-cell-title" title={formatJobRoute(job)}>{title}</div>
+                                <div className="df2-cell-meta">{job.source_type} → {job.destination_type}</div>
+                              </>
+                            );
+                          })()}
                         </td>
                         <td><span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span></td>
                         <td title={rows.title}>

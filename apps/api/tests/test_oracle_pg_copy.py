@@ -305,25 +305,20 @@ def test_live_oracle_pg_resume_skips_complete_range(monkeypatch):
             pcur.execute(f'DELETE FROM public."{dest}" WHERE id = %s', (lo,))
             pcur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
             assert int(pcur.fetchone()[0]) == 7999
-        second = copy_oracle_to_postgres(
-            source_cfg=_ora_cfg(),
-            source_table=src,
-            dest_cfg=_pg_cfg(),
-            dest_schema="public",
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            pg_ddls=["BIGINT", "VARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_rows == 8000
-        assert second.target_rows == 8000
-        actions = [p["action"] for p in second.source_snapshot["partition_proof"]]
-        assert actions.count("skip") == 3
-        assert actions.count("reload") == 1
-        assert second.source_snapshot.get("partitions_skipped") == 3
+        with pytest.raises(FastPathUnavailable, match="partly"):
+            copy_oracle_to_postgres(
+                source_cfg=_ora_cfg(),
+                source_table=src,
+                dest_cfg=_pg_cfg(),
+                dest_schema="public",
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                pg_ddls=["BIGINT", "VARCHAR(32)"],
+                replace_destination=False,
+            )
         with pg.cursor() as pcur:
             pcur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
-            assert int(pcur.fetchone()[0]) == 8000
+            assert int(pcur.fetchone()[0]) == 7999
     finally:
         _drop_ora(ora.cursor(), src)
         ora.commit()

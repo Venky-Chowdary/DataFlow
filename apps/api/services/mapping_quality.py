@@ -289,8 +289,20 @@ def merge_column_profile(
     """Merge analyzer profile with data_profiler statistics for Map strip SSOT."""
     out = dict(base or {})
     src = schema_row or {}
-    if src.get("null_rate") is not None:
-        out["null_rate"] = src.get("null_rate")
+    schema_rate = src.get("null_rate")
+    if schema_rate is not None:
+        # A stripped sample list analyzes as 0.0 and must not erase a rate
+        # counted while the SQL NULLs were still in the sample.
+        try:
+            analyzed = float(out.get("null_rate") or 0)
+            declared = float(schema_rate)
+        except (TypeError, ValueError):
+            out["null_rate"] = schema_rate
+        else:
+            if declared == 0.0 and analyzed > 0:
+                out["null_rate"] = round(analyzed, 3)
+            else:
+                out["null_rate"] = schema_rate
     if src.get("distinct_ratio") is not None:
         out["unique_ratio"] = src.get("distinct_ratio")
     stats = src.get("statistics") if isinstance(src.get("statistics"), dict) else {}
@@ -359,14 +371,29 @@ def _is_dialect_sanctioned_carrier(
     A cross-family pair is normally weak evidence, but ``DECIMAL(12,2) → TEXT``
     on SQLite is the exact-digit carrier :func:`materialize_dest_ddl` itself
     picks — re-running a migration into a table DataFlow created must not score
-    its own DDL as an incompatible-type conflict.
+    its own DDL as an incompatible-type conflict. A carrier never excuses a
+    lossy source-to-target conversion.
     """
     if not dest_db or not source_type or not target_type:
         return False
-    from services.type_system import materialize_dest_ddl
+    from services.dest_schema_authority import destination_schema_is_sampled
+    from services.type_system import is_lossy_coercion, materialize_dest_ddl
 
     try:
-        expected = str(materialize_dest_ddl(dest_db, source_type) or "").strip()
+        if is_lossy_coercion(source_type, target_type, dest_db=dest_db):
+            return False
+        if destination_schema_is_sampled(dest_db):
+            # No DDL here: the write's carrier is the destination type map's
+            # (Redis stores DECIMAL as exact JSON text); the SQL materializer
+            # only echoes the source type back.
+            from services.decision_kernel import InventContext, invent_dest_type
+
+            expected = str(
+                invent_dest_type(source_type, dest_db=dest_db, context=InventContext.CREATE_NEW)
+                or ""
+            ).strip()
+        else:
+            expected = str(materialize_dest_ddl(dest_db, source_type) or "").strip()
     except Exception:
         return False
     if not expected:
@@ -462,6 +489,12 @@ def classify_mapping_confidence(
         "confidence_class": cls,
         "confidence_class_label": CONFIDENCE_CLASS_LABELS[cls],
         "type_path_class": str(mapping.get("conversion_class") or ""),
+        "type_same_declared": bool(
+            str(mapping.get("source_type") or mapping.get("inferred_type") or "").strip()
+            and str(mapping.get("target_type") or mapping.get("dest_type") or "").strip()
+            and type_same
+        ),
+        "source_expr": src,
         "semantic_role": str(
             mapping.get("semantic_role")
             or profile.get("semantic_role")
@@ -487,7 +520,15 @@ def apply_confidence_class(
     conf = float(confidence)
     if cls == "create_new_projected":
         conv = str(classification.get("type_path_class") or "").lower()
-        if conv in {"equivalent", "identity"}:
+        expression = "(" in str(classification.get("source_expr") or "")
+        same_declared = bool(classification.get("type_same_declared"))
+        hard_loss = conv in {"narrowing", "lossy", "incompatible"}
+        # round(x*1.18, 2) is a SQL expression classified as a cast and sat
+        # under the 0.85 floor (R3-M3). A declared same-type projection is
+        # the same case. A real text→numeric cast is not lifted.
+        if not hard_loss and (
+            conv in {"equivalent", "identity"} or expression or same_declared
+        ):
             role = str(classification.get("semantic_role") or "").lower()
             if role in {"categorical", "market_segment"}:
                 return round(min(0.88, max(conf, 0.82)), 3)

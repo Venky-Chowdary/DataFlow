@@ -98,6 +98,7 @@ def test_apply_manifest_binds_workspace_and_refuses_foreign_update(tmp_path, mon
         workspace_id="ws-a",
     )
     assert result["failed"] == 1
+    assert result["results"][0]["error_code"] == "cross_workspace"
     still = ss.get_schedule(foreign.id)
     assert still is not None
     assert still.workspace_id == "ws-b"

@@ -13,11 +13,17 @@ table, and guessing between them would be worse than reporting nothing.
 
 from __future__ import annotations
 
-from typing import Mapping, Sequence, TypeVar
+from typing import Any, Mapping, Sequence, TypeVar
 
 _V = TypeVar("_V")
 
-__all__ = ["lookup_column", "lookup_row_value", "header_index", "column_type_or_none"]
+__all__ = [
+    "lookup_column",
+    "lookup_row_value",
+    "header_index",
+    "column_type_or_none",
+    "column_population",
+]
 
 
 def lookup_column(source: Mapping[str, _V] | None, name: str | None) -> _V | None:
@@ -53,6 +59,29 @@ def lookup_row_value(
     if len(hits) == 1:
         return row[hits[0]]
     return default
+
+
+def column_population(
+    rows: Sequence[Any] | None,
+    name: str | None,
+    *,
+    limit: int = 500,
+) -> list[Any] | None:
+    """Measured cells for ``name``, or None when no rows were supplied.
+
+    A missing key is None. An empty string is a present cell. Substituting
+    ``""`` for a missing key would make an unread column look like measured
+    ASCII and clear a Latin-1 code-page collapse it never proved.
+    """
+    if not rows or not name:
+        return None
+    out: list[Any] = []
+    for row in list(rows)[:limit]:
+        if isinstance(row, Mapping):
+            out.append(lookup_row_value(row, name))
+        else:
+            out.append(None)
+    return out
 
 
 def header_index(headers: Sequence[str] | None, name: str | None) -> int | None:

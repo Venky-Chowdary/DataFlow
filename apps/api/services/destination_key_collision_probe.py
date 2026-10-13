@@ -1,11 +1,10 @@
 """Destination-side key collision probe for append sync modes.
 
-An append writes rows the destination has never seen. When the destination
-table already carries a PRIMARY KEY / UNIQUE constraint on the identity column,
-re-appending a key that is already stored is a *deterministic* write failure —
-Postgres aborts the whole COPY with ``duplicate key value violates unique
-constraint`` and nothing lands. That verdict is knowable before the write: it
-needs one bounded ``SELECT key WHERE key IN (…)`` against the destination.
+An append writes rows the destination has never seen. Re-appending a key, or
+a whole mapped row, that is already stored is a duplicate. A PRIMARY KEY or
+UNIQUE constraint makes that insert abort. A table without one stores the
+second copy. Both are knowable before the write: one bounded comparison of
+the batch against the destination.
 
 Preflight owning that query is the difference between "Validate greened and
 Execute exploded" and "Validate told the operator to switch to upsert/merge".
@@ -85,10 +84,17 @@ class DestinationCollisionResult:
     # A resumed run re-delivers the interrupted batch on purpose. The writer
     # applies that overlap through the destination key (ON CONFLICT / MERGE),
     # so overlapping keys are expected evidence rather than a write abort.
+    # That is only true when the destination actually rejects a second copy.
     idempotent_apply: bool = False
+    # True when a PRIMARY KEY or UNIQUE constraint would abort the insert.
+    # False when the engine would store the second copy. Both are duplicates.
+    key_enforced: bool = True
     # An incremental run reads past its watermark, so only that delta can
     # collide. Recorded so an operator can see which rows were actually probed.
     delta_scope: dict[str, Any] = field(default_factory=dict)
+    # True when this batch is the interrupted run being delivered again.
+    # A heap would store that overlap a second time, so resume still blocks.
+    resume_redelivery: bool = False
 
     @property
     def ran(self) -> bool:
@@ -98,6 +104,10 @@ class DestinationCollisionResult:
 def sync_mode_appends_without_key_resolution(sync_mode: str) -> bool:
     """True when the write inserts rows without resolving an existing key."""
     return (sync_mode or "").strip().lower() in APPEND_ONLY_SYNC_MODES
+
+
+def _folded_names(columns: list[str] | None) -> list[str]:
+    return [str(c).strip().lower() for c in (columns or []) if str(c or "").strip()]
 
 
 def destination_enforces_key(
@@ -111,19 +121,33 @@ def destination_enforces_key(
     Only single-column constraints count: a composite key tolerates a repeated
     first column, so treating it as enforced would invent a blocker.
     """
-    key = (key_column or "").strip().lower()
-    if not key:
+    return destination_enforces_columns(
+        [key_column],
+        destination_pk_columns=destination_pk_columns,
+        destination_unique_keys=destination_unique_keys,
+    )
+
+
+def destination_enforces_columns(
+    columns: list[str],
+    *,
+    destination_pk_columns: list[str] | None = None,
+    destination_unique_keys: list[dict[str, Any]] | None = None,
+) -> bool:
+    """True when a constraint rejects a second copy of this whole column set.
+
+    Order does not matter. A shorter or longer key is a different constraint:
+    repeating the first column of a composite key is not a collision.
+    """
+    wanted = _folded_names(columns)
+    if not wanted:
         return False
-    pk = [str(c).strip().lower() for c in (destination_pk_columns or []) if str(c or "").strip()]
-    if pk == [key]:
+    pk = _folded_names(destination_pk_columns)
+    if pk and sorted(pk) == sorted(wanted):
         return True
     for uk in destination_unique_keys or []:
-        cols = [
-            str(c).strip().lower()
-            for c in (uk.get("columns") or [])
-            if str(c or "").strip()
-        ]
-        if cols == [key]:
+        cols = _folded_names(list(uk.get("columns") or []))
+        if cols and sorted(cols) == sorted(wanted):
             return True
     return False
 
@@ -299,20 +323,138 @@ def probe_append_key_collisions(
     """Resolve the identity key, then probe it — ``None`` when not applicable.
 
     ``None`` means "this write cannot collide by construction" (create-new
-    table, overwrite/upsert semantics, no enforced single-column key), which is
-    different from a probe that could not run and must not block.
+    table, overwrite/upsert semantics), which is different from a probe that
+    could not run and must not block.
+
+    An append of a key the destination enforces aborts the insert, so Validate
+    blocks before Execute. A table with no key stores the second copy; that is
+    append, so Validate warns and the write proceeds. Upsert, merge, and
+    overwrite already say what a colliding key becomes, so they are not probed.
     """
     if not sync_mode_appends_without_key_resolution(sync_mode):
         return None
     if destination_table_exists is not True:
         return None
-    if not (destination_pk_columns or destination_unique_keys):
+
+    pairs = _identity_pairs(
+        mappings=mappings,
+        source_columns=source_columns,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+        stream_contracts=stream_contracts,
+        source_table=source_table,
+        destination_table=destination_table,
+    )
+    if not pairs:
         return None
 
+    target_columns = [target for _source, target in pairs]
+    enforced = destination_enforces_columns(
+        target_columns,
+        destination_pk_columns=destination_pk_columns,
+        destination_unique_keys=destination_unique_keys,
+    )
+    # The plan's key list can be the source identity copied forward. A heap
+    # then blocked the second append with "enforces uniqueness" and inserted
+    # nothing (DEF-B2-001). The live catalog is the enforcement fact for a
+    # single column. A composite key is not a single-column reject, so the
+    # plan answer stands. A catalog miss returns no names and does not invent
+    # a blocker; the engine still rejects a real duplicate at insert time.
+    if (
+        destination_config
+        and destination_table
+        and len(target_columns) == 1
+        and (destination_db_type or "").strip().lower() in SQLISH_SOURCE_TYPES
+    ):
+        live_keys = live_single_column_unique_keys(
+            destination_config, destination_table
+        )
+        wanted = target_columns[0].casefold()
+        enforced = any(str(key).casefold() == wanted for key in live_keys)
+    # Probe the rows this run will read, not the whole table. An incremental
+    # append past a watermark cannot collide with keys it will never re-read,
+    # and probing them refused every run after the first.
+    batch_rows = rows_a_cursor_read_will_deliver(
+        sample_rows,
+        cursor_column=incremental_cursor_column,
+        watermark=incremental_watermark,
+        tiebreak_column=incremental_tiebreak_column,
+    )
+    if len(pairs) == 1:
+        source_key, target_key = pairs[0]
+        result = probe_destination_key_collisions(
+            destination_config=destination_config,
+            destination_db_type=destination_db_type,
+            destination_table=destination_table,
+            key_column=target_key,
+            values=[row.get(source_key) for row in batch_rows],
+        )
+    else:
+        result = probe_destination_tuple_collisions(
+            destination_config=destination_config,
+            destination_db_type=destination_db_type,
+            destination_table=destination_table,
+            columns=target_columns,
+            tuples=[
+                tuple(present_cell_text(row.get(source)) for source, _target in pairs)
+                for row in batch_rows[:MAX_PROBE_VALUES]
+            ],
+        )
+    if incremental_cursor_column and incremental_watermark:
+        result.delta_scope = {
+            "cursor_column": incremental_cursor_column,
+            "watermark": str(incremental_watermark),
+            "tiebreak_column": incremental_tiebreak_column,
+            "sample_rows": len(sample_rows or []),
+            "delta_rows": len(batch_rows),
+        }
+    result.key_enforced = enforced
+    # Resume re-reads from the last committed checkpoint. The overlap is safe
+    # only when the destination rejects a second copy of the key. A heap table
+    # would store that overlap again, so resume does not excuse it.
+    result.idempotent_apply = bool(resume and enforced)
+    result.resume_redelivery = bool(resume)
+    return result
+
+
+def _mapped_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for item in mappings or []:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "").strip()
+        target = str(item.get("target") or "").strip()
+        if source and target:
+            pairs.append((source, target))
+    return pairs
+
+
+def _identity_pairs(
+    *,
+    mappings: list[dict[str, Any]] | None,
+    source_columns: list[str] | None,
+    dest_kind: str,
+    validation_mode: str,
+    destination_pk_columns: list[str] | None,
+    contract_primary_key: str | None,
+    stream_contracts: list[dict[str, Any]] | None,
+    source_table: str,
+    destination_table: str,
+) -> list[tuple[str, str]]:
+    """Source/target columns that identify a row, else every mapped column.
+
+    The identity resolver is the same one uniqueness already uses. When it
+    names nothing, the mapped row itself is the identity: appending that row
+    again is the same data.
+    """
+    mapped = _mapped_pairs(mappings)
+    target_by_source = {source: target for source, target in mapped}
     try:
         from services.primary_key import resolve_primary_key_source_columns
 
-        pk_source_cols = resolve_primary_key_source_columns(
+        source_keys = resolve_primary_key_source_columns(
             mappings=list(mappings or []),
             source_columns=list(source_columns or []),
             dest_kind=dest_kind,
@@ -325,56 +467,13 @@ def probe_append_key_collisions(
         )
     except Exception as exc:
         logger.debug("append collision key resolution failed: %s", exc, exc_info=exc)
-        return None
-    if len(pk_source_cols) != 1:
-        return None
-
-    source_key = pk_source_cols[0]
-    target_key = next(
-        (
-            str(m.get("target") or "")
-            for m in (mappings or [])
-            if isinstance(m, dict) and str(m.get("source") or "") == source_key
-        ),
-        source_key,
-    )
-    if not destination_enforces_key(
-        target_key,
-        destination_pk_columns=destination_pk_columns,
-        destination_unique_keys=destination_unique_keys,
-    ):
-        return None
-
-    # Probe the rows this run will read, not the whole table. An incremental
-    # append past a watermark cannot collide with keys it will never re-read,
-    # and probing them refused every run after the first.
-    batch_rows = rows_a_cursor_read_will_deliver(
-        sample_rows,
-        cursor_column=incremental_cursor_column,
-        watermark=incremental_watermark,
-        tiebreak_column=incremental_tiebreak_column,
-    )
-    result = probe_destination_key_collisions(
-        destination_config=destination_config,
-        destination_db_type=destination_db_type,
-        destination_table=destination_table,
-        key_column=target_key,
-        values=[row.get(source_key) for row in batch_rows],
-    )
-    if incremental_cursor_column and incremental_watermark:
-        result.delta_scope = {
-            "cursor_column": incremental_cursor_column,
-            "watermark": str(incremental_watermark),
-            "tiebreak_column": incremental_tiebreak_column,
-            "sample_rows": len(sample_rows or []),
-            "delta_rows": len(batch_rows),
-        }
-    # Resume re-reads from the last committed checkpoint, so the overlap with
-    # rows already at rest is the interrupted batch, not a new append. The
-    # writer resolves it on the enforced key; blocking here would strand a
-    # half-loaded destination with no forward path.
-    result.idempotent_apply = bool(resume)
-    return result
+        source_keys = []
+    if source_keys:
+        return [
+            (source, target_by_source.get(source, source))
+            for source in source_keys
+        ]
+    return mapped
 
 
 def probe_destination_key_collisions(
@@ -384,7 +483,7 @@ def probe_destination_key_collisions(
     destination_table: str = "",
     key_column: str = "",
     values: list[Any] | None = None,
-    limit: int = 5,
+    limit: int = MAX_PROBE_VALUES,
 ) -> DestinationCollisionResult:
     """Find keys already present at the destination for an append batch."""
     key = (key_column or "").strip()
@@ -453,3 +552,285 @@ def probe_destination_key_collisions(
         key_column=key,
         values_probed=len(probe_values),
     )
+
+
+def _tuple_label(values: tuple[Any, ...]) -> str:
+    return " | ".join("NULL" if value is None else str(value) for value in values)
+
+
+def probe_destination_tuple_collisions(
+    *,
+    destination_config: Mapping[str, Any] | None = None,
+    destination_db_type: str = "",
+    destination_table: str = "",
+    columns: list[str] | None = None,
+    tuples: list[tuple[Any, ...]] | None = None,
+    limit: int = MAX_PROBE_VALUES,
+) -> DestinationCollisionResult:
+    """Find mapped rows already stored, compared column by column.
+
+    SQL ``IN`` does not match NULL, so each column uses equality or IS NULL.
+    A skip is not proof that the batch is new.
+    """
+    names = [str(column).strip() for column in (columns or []) if str(column).strip()]
+    key = ", ".join(names)
+    db_type = (destination_db_type or "").strip().lower()
+    batch = [tuple(row) for row in (tuples or []) if len(row) == len(names)]
+    batch = batch[:MAX_PROBE_VALUES]
+    if not names:
+        return DestinationCollisionResult(
+            status="skipped_no_key",
+            message="No mapped columns resolved for collision probe",
+            db_type=db_type,
+        )
+    if not batch:
+        return DestinationCollisionResult(
+            status="skipped_no_values",
+            message="No batch rows available for collision probe",
+            db_type=db_type,
+            key_column=key,
+        )
+    if not destination_config or not destination_table:
+        return DestinationCollisionResult(
+            status="skipped_no_destination",
+            message="Destination connection or table unavailable for collision probe",
+            db_type=db_type,
+            key_column=key,
+        )
+    cfg = dict(destination_config)
+    cfg.setdefault("type", db_type)
+    try:
+        if db_type in ("mongodb", "mongodb_atlas"):
+            findings = _mongo_existing_tuples(cfg, destination_table, names, batch, limit)
+        elif db_type in SQLISH_SOURCE_TYPES:
+            findings = _sql_existing_tuples(cfg, destination_table, names, batch, limit)
+        else:
+            return DestinationCollisionResult(
+                status="skipped_unsupported",
+                message=(
+                    "Append collision probe not implemented for destination type "
+                    f"{db_type or 'unknown'}"
+                ),
+                db_type=db_type,
+                key_column=key,
+            )
+    except Exception as exc:
+        logger.warning("Destination row collision probe failed: %s", exc, exc_info=exc)
+        return DestinationCollisionResult(
+            status="error",
+            message=f"Destination collision probe skipped: {exc}"[:400],
+            db_type=db_type,
+            key_column=key,
+            values_probed=len(batch),
+        )
+    return DestinationCollisionResult(
+        findings=findings,
+        status="ran",
+        message=(
+            f"Append collision probe on {destination_table} ({key}) "
+            f"({len(batch)} batch row(s) checked)"
+        ),
+        db_type=db_type,
+        key_column=key,
+        values_probed=len(batch),
+    )
+
+
+def _sql_existing_tuples(
+    cfg: dict[str, Any],
+    table: str,
+    columns: list[str],
+    tuples: list[tuple[Any, ...]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
+    from services.sql_object_identity import resolve_object_identity
+
+    engine = _engine(cfg)
+    schema, table_name = split_qualified_table(
+        table, (cfg.get("schema") or "").strip() or None
+    )
+    ident = resolve_object_identity(engine, table_name, schema, columns=columns)
+    resolved = [
+        ident.columns.get(column, column) if ident.exists else column
+        for column in columns
+    ]
+    if ident.exists:
+        table_name = sa.sql.quoted_name(ident.table, True)
+        schema_name = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
+    else:
+        schema_name = schema
+    tbl = sa.table(table_name, schema=schema_name)
+    cols = [
+        sa.column(sa.sql.quoted_name(name, True) if ident.exists else name)
+        for name in resolved
+    ]
+    texts = ["" if value is None else str(value) for row in tuples for value in row]
+    carrier = key_comparison_carrier(str(getattr(engine.dialect, "name", "")), texts)
+    clauses = []
+    for row in tuples:
+        parts = []
+        for col, value in zip(cols, row):
+            if value is None:
+                parts.append(col.is_(None))
+            else:
+                parts.append(sa.cast(col, carrier) == str(value))
+        clauses.append(sa.and_(*parts))
+    stmt = sa.select(*cols).select_from(tbl).where(sa.or_(*clauses)).limit(limit)
+    with engine.connect() as conn:
+        rows = conn.execute(stmt).fetchall()
+    return [
+        {"column": ", ".join(resolved), "value": _tuple_label(tuple(row))}
+        for row in rows
+    ]
+
+
+def _mongo_existing_tuples(
+    cfg: dict[str, Any],
+    collection: str,
+    columns: list[str],
+    tuples: list[tuple[Any, ...]],
+    limit: int,
+) -> list[dict[str, Any]]:
+    from pymongo import MongoClient
+
+    from connectors.mongodb_common import normalize_mongodb_connection_string
+
+    uri = normalize_mongodb_connection_string(
+        cfg.get("connection_string", ""),
+        database=cfg.get("database", ""),
+        host=cfg.get("host", ""),
+        port=int(cfg.get("port") or 0),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        ssl=bool(cfg.get("ssl")),
+        auth_source=cfg.get("auth_source", ""),
+    )
+    client: MongoClient = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    try:
+        db = client[cfg.get("database") or cfg.get("auth_source") or "test"]
+        query = {
+            "$or": [
+                {column: value for column, value in zip(columns, row)}
+                for row in tuples
+            ]
+        }
+        cursor = db[collection].find(query, {column: 1 for column in columns}).limit(limit)
+        return [
+            {
+                "column": ", ".join(columns),
+                "value": _tuple_label(tuple(doc.get(column) for column in columns)),
+            }
+            for doc in cursor
+        ]
+    finally:
+        client.close()
+
+
+def live_single_column_unique_keys(
+    destination_config: Mapping[str, Any],
+    destination_table: str,
+) -> list[str]:
+    """Single-column PRIMARY KEY or UNIQUE names on the live table.
+
+    A composite key does not reject a repeated first column, so it is not an
+    enforced append key. An unreadable catalog returns an empty list: the
+    database still rejects a real duplicate, and a false empty list must not
+    invent a blocker on a heap.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
+
+    cfg = dict(destination_config)
+    schema, table_name = split_qualified_table(
+        destination_table, (cfg.get("schema") or "").strip() or None
+    )
+    try:
+        engine = _engine(cfg)
+        insp = sa_inspect(engine)
+        pk = insp.get_pk_constraint(table_name, schema=schema) or {}
+    except Exception as exc:  # noqa: BLE001 — catalog miss is not a heap
+        logger.warning("append key catalog read failed: %s", exc)
+        return []
+    names: list[str] = []
+    pk_cols = [str(c) for c in (pk.get("constrained_columns") or []) if c]
+    if len(pk_cols) == 1:
+        names.append(pk_cols[0])
+    try:
+        uniques = insp.get_unique_constraints(table_name, schema=schema) or []
+    except Exception as exc:  # noqa: BLE001 — PK alone is still enforced
+        logger.debug("unique constraint catalog read failed: %s", exc)
+        uniques = []
+    for item in uniques:
+        cols = [str(c) for c in (item.get("column_names") or []) if c]
+        if len(cols) == 1 and cols[0] not in names:
+            names.append(cols[0])
+    return names
+
+
+def refuse_enforced_append_before_write(
+    *,
+    destination_config: Mapping[str, Any] | None,
+    destination_db_type: str,
+    destination_table: str,
+    headers: list[str],
+    data_rows: list[Any],
+    mappings: list[dict[str, Any]] | None,
+) -> str | None:
+    """Refuse an insert that the live key would abort, before any row lands.
+
+    Validate is supposed to catch this. When that probe did not run, Execute
+    inserted until the engine aborted and reported zero rows over a prefix
+    that had already committed.
+    """
+    if not data_rows or not destination_config or not destination_table:
+        return None
+    keys = live_single_column_unique_keys(destination_config, destination_table)
+    if not keys:
+        return None
+    target_to_source: dict[str, str] = {}
+    for item in mappings or []:
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "").strip()
+        target = str(item.get("target") or "").strip()
+        if source and target:
+            target_to_source[target.casefold()] = source
+    header_index = {str(name): index for index, name in enumerate(headers or [])}
+    for key in keys:
+        source = target_to_source.get(str(key).casefold())
+        if source is None or source not in header_index:
+            continue
+        index = header_index[source]
+        values = [
+            row[index]
+            if isinstance(row, (list, tuple)) and index < len(row)
+            else None
+            for row in data_rows
+        ]
+        result = probe_destination_key_collisions(
+            destination_config=destination_config,
+            destination_db_type=destination_db_type,
+            destination_table=destination_table,
+            key_column=key,
+            values=values,
+        )
+        if result.status == "error":
+            return (
+                f"Append refused before insert: the destination enforces {key} "
+                f"and the collision probe could not run ({result.message}). "
+                "No rows from this batch were written."
+            )
+        if result.findings:
+            return (
+                f"Append refused before insert: {len(result.findings)} key "
+                f"value(s) in this batch are already stored on {key}, which "
+                "enforces uniqueness. No rows from this batch were written. "
+                "Switch this sync to upsert/merge or overwrite."
+            )
+    return None

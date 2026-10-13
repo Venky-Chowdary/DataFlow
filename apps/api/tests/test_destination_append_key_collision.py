@@ -100,17 +100,137 @@ def test_append_passes_when_batch_keys_are_new(tmp_path: Path) -> None:
     assert g6["status"] != "block", g6
 
 
-def test_no_enforced_destination_key_leaves_append_alone(tmp_path: Path) -> None:
-    """A destination without a PK legally accepts repeated values."""
-    db_path = _seed_destination(tmp_path, [("a", "A")])
+def test_append_warns_when_a_heap_already_holds_the_key(tmp_path: Path) -> None:
+    """A table with no key stores the second copy. That is append."""
+    db_path = tmp_path / "heap.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE jobs (id TEXT, name TEXT)")
+    conn.execute("INSERT INTO jobs VALUES (?, ?)", ("a", "A"))
+    conn.commit()
+    conn.close()
     result = _run(
-        db_path=db_path,
+        db_path=str(db_path),
         sample_rows=[{"id": "a", "name": "A2"}],
         sync_mode="append",
         destination_pk_columns=[],
     )
     g6 = _gate(result, "g6_target_ddl")
-    assert g6["status"] != "block", g6
+    assert g6["status"] == "warn", g6
+    assert "second copy" in g6["message"]
+    assert "upsert/merge" in g6["message"]
+    assert result["passed"] is True
+
+
+def test_append_blocks_the_same_mapped_row_when_there_is_no_key(tmp_path: Path) -> None:
+    db_path = tmp_path / "notes.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE notes (body TEXT, city TEXT)")
+    conn.execute("INSERT INTO notes VALUES (?, ?)", ("hello", "london"))
+    conn.commit()
+    conn.close()
+    from services.preflight_service import run_file_preflight
+
+    mappings = [
+        {"source": "body", "target": "body", "confidence": 0.99, "transform": None},
+        {"source": "city", "target": "city", "confidence": 0.99, "transform": None},
+    ]
+    result = run_file_preflight(
+        columns=["body", "city"],
+        column_types={"body": "VARCHAR", "city": "VARCHAR"},
+        row_count=1,
+        mappings=mappings,
+        destination_connected=True,
+        destination_can_create=True,
+        destination_can_write=True,
+        source_connected=True,
+        source_kind="file",
+        source_format="csv",
+        sync_mode="full_refresh_append",
+        sample_rows=[{"body": "hello", "city": "london"}],
+        destination_db_type="sqlite",
+        destination_table="notes",
+        destination_table_exists=True,
+        destination_pk_columns=[],
+        destination_config=_dest_cfg(str(db_path)),
+        destination_column_types={"body": "TEXT", "city": "TEXT"},
+        validation_mode="strict",
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "warn", g6
+    assert result["passed"] is True
+
+    fresh = run_file_preflight(
+        columns=["body", "city"],
+        column_types={"body": "VARCHAR", "city": "VARCHAR"},
+        row_count=1,
+        mappings=mappings,
+        destination_connected=True,
+        destination_can_create=True,
+        destination_can_write=True,
+        source_connected=True,
+        source_kind="file",
+        source_format="csv",
+        sync_mode="full_refresh_append",
+        sample_rows=[{"body": "hello", "city": "paris"}],
+        destination_db_type="sqlite",
+        destination_table="notes",
+        destination_table_exists=True,
+        destination_pk_columns=[],
+        destination_config=_dest_cfg(str(db_path)),
+        destination_column_types={"body": "TEXT", "city": "TEXT"},
+        validation_mode="strict",
+    )
+    fresh_gate = _gate(fresh, "g6_target_ddl")
+    assert fresh_gate["status"] == "pass", fresh_gate
+    assert "no collision" in fresh_gate["message"]
+
+
+def test_composite_key_blocks_only_the_whole_pair(tmp_path: Path) -> None:
+    db_path = tmp_path / "lines.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE lines (id TEXT, region TEXT, qty INT, PRIMARY KEY (id, region))"
+    )
+    conn.execute("INSERT INTO lines VALUES (?, ?, ?)", ("a", "us", 1))
+    conn.commit()
+    conn.close()
+    from services.preflight_service import run_file_preflight
+
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "region", "target": "region", "confidence": 0.99},
+        {"source": "qty", "target": "qty", "confidence": 0.99},
+    ]
+
+    def run(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        return run_file_preflight(
+            columns=["id", "region", "qty"],
+            column_types={"id": "VARCHAR", "region": "VARCHAR", "qty": "INTEGER"},
+            row_count=len(rows),
+            mappings=mappings,
+            destination_connected=True,
+            destination_can_create=True,
+            destination_can_write=True,
+            source_connected=True,
+            source_kind="file",
+            source_format="csv",
+            sync_mode="append",
+            sample_rows=rows,
+            destination_db_type="sqlite",
+            destination_table="lines",
+            destination_table_exists=True,
+            destination_pk_columns=["id", "region"],
+            destination_config=_dest_cfg(str(db_path)),
+            destination_column_types={"id": "TEXT", "region": "TEXT", "qty": "INT"},
+            validation_mode="strict",
+        )
+
+    other_region = run([{"id": "a", "region": "eu", "qty": 2}])
+    assert _gate(other_region, "g6_target_ddl")["status"] != "block", other_region
+    same_pair = run([{"id": "a", "region": "us", "qty": 9}])
+    blocked = _gate(same_pair, "g6_target_ddl")
+    assert blocked["status"] == "block", blocked
+    assert same_pair["passed"] is False
 
 
 def test_create_new_destination_is_not_probed(tmp_path: Path) -> None:
@@ -195,6 +315,44 @@ def test_resumed_append_applies_the_overlap_instead_of_blocking(tmp_path: Path) 
     details = g6.get("details") or {}
     assert details.get("delivery") == "at_least_once_idempotent_apply", g6
     assert details.get("rule_id") == "g6_target_ddl.append_key_collision_resume", g6
+
+
+def test_unenforced_probe_that_cannot_run_is_not_a_clean_pass(tmp_path: Path) -> None:
+    """A heap with no readable destination must not pass as 'uniqueness not required'."""
+    result = _run(
+        db_path=str(tmp_path / "empty.db"),
+        sample_rows=[{"id": "a", "name": "A"}],
+        sync_mode="full_refresh_append",
+        destination_pk_columns=[],
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "warn", g6
+    assert "did not run" in g6["message"]
+    assert "uniqueness not required" not in g6["message"]
+
+
+def test_resume_of_an_unenforced_heap_still_blocks(tmp_path: Path) -> None:
+    """Resume is idempotent only when the destination rejects a second copy.
+
+    A heap stores the re-delivered batch again. Overlap is not a forward path.
+    """
+    db_path = tmp_path / "heap.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE jobs (id TEXT, name TEXT)")
+    conn.execute("INSERT INTO jobs VALUES (?, ?)", ("a", "A"))
+    conn.commit()
+    conn.close()
+    result = _run(
+        db_path=str(db_path),
+        sample_rows=[{"id": "a", "name": "A"}],
+        sync_mode="append",
+        destination_pk_columns=[],
+        resume=True,
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "block", g6
+    assert "second copy" in g6["message"]
+    assert result["passed"] is False
 
 
 def test_resume_flag_is_recorded_on_the_probe_result(tmp_path: Path) -> None:

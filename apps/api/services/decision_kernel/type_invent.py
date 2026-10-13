@@ -1110,6 +1110,9 @@ def _stamp_create_new_mapping_target_type(
     stamp = unicode_safe_target_carrier(
         stamp, dest_db=dest_db_type, source_db=source_db, source_type=src_type
     )
+    stamp = refuse_boolean_invent_from_numeric_source(
+        src_type, stamp, dest_db_type
+    )
     stamp = refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
     # A file has no column width. Re-inheriting VARCHAR(16777216) from a
     # warehouse source would make Map look like an unread Snowflake sink and
@@ -1134,6 +1137,31 @@ def _stamp_create_new_mapping_target_type(
     return collated
 
 
+def refuse_boolean_invent_from_numeric_source(
+    src_type: str, stamp: str, dest_db_type: str
+) -> str:
+    """Create-new must not turn a declared number into BOOLEAN.
+
+    File inference promotes flag-shaped ``0``/``1`` to BOOLEAN. A query or
+    table that declared ``DECIMAL(1,0)`` / ``NUMBER(5,0)`` then copied that
+    guess onto the destination, and Validate blocked its own invent
+    (DEF-B-011). ``TINYINT(1)`` / ``BIT(1)`` already normalize to boolean, so
+    they keep the boolean stamp.
+    """
+    src = (src_type or "").strip()
+    dest = (stamp or "").strip()
+    if not src or not dest:
+        return stamp
+    src_logical = normalize_logical_type(src)
+    if src_logical not in {LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_FLOAT}:
+        return stamp
+    if normalize_logical_type(dest) != LOGICAL_BOOLEAN:
+        return stamp
+    db = (dest_db_type or "").strip()
+    recovered = ddl_type(db, src) if db else src
+    return recovered or src
+
+
 def refuse_create_new_numeric_collapse(
     src_type: str, stamp: str, dest_db_type: str
 ) -> str:
@@ -1150,9 +1178,14 @@ def refuse_create_new_numeric_collapse(
     db = (dest_db_type or "").strip()
     if not src or not dest:
         return stamp
-    # Only rewrite numeric/integer/float invent. DECIMAL→TEXT is an explicit
-    # Map stamp (quarantine unfit cells), not the BIGINT / NUMERIC(9,4) cliff.
     dest_logical = normalize_logical_type(dest)
+    if dest_logical in {LOGICAL_STRING, LOGICAL_TEXT}:
+        # DECIMAL(12,3) → TEXT drops fixed point on an engine that has it.
+        # A pair that exceeds the destination cap stays text: that is the
+        # lossless digit carrier. SQLite and file sinks have no DECIMAL.
+        # An operator override or a clearing contract never reaches here.
+        return _recover_fitting_decimal_from_text(src, stamp, db)
+    # Only rewrite numeric/integer/float invent. Other text stamps stay.
     if dest_logical not in {LOGICAL_DECIMAL, LOGICAL_INTEGER, LOGICAL_FLOAT}:
         return stamp
     # Bare DECIMAL/NUMBER may still be sample-sized. Only rewrite when the
@@ -1180,6 +1213,28 @@ def refuse_create_new_numeric_collapse(
     return src
 
 
+def _recover_fitting_decimal_from_text(src: str, stamp: str, db: str) -> str:
+    """Restore DECIMAL(p,s) when the destination can store that fixed point."""
+    if not db:
+        return stamp
+    from services.numeric_fit import decimal_fixed_point_would_collapse_to_text
+    from services.type_system import (
+        decimal_precision_would_truncate,
+        decimal_scale_would_truncate,
+    )
+
+    if not decimal_fixed_point_would_collapse_to_text(src, stamp, dest_db=db):
+        return stamp
+    if decimal_scale_would_truncate(src, db) or decimal_precision_would_truncate(
+        src, db
+    ):
+        return stamp
+    recovered = ddl_type(db, src)
+    if recovered and normalize_logical_type(recovered) == LOGICAL_DECIMAL:
+        return recovered
+    return stamp
+
+
 def _unsigned_polarity_only_collapse(src: str, dest: str, db: str) -> bool:
     """True when the sole collapse is losing UNSIGNED polarity, not capacity.
 
@@ -1203,8 +1258,48 @@ def _unsigned_polarity_only_collapse(src: str, dest: str, db: str) -> bool:
         or integer_width_would_narrow(src, dest, dest_db=db)
         or decimal_params_would_narrow(src, dest, dest_db=db)
         or float_mantissa_would_narrow(src, dest, dest_db=db)
-        or string_width_would_narrow(src, dest)
+        or string_width_would_narrow(src, dest, dest_db=db)
     )
+
+
+def _open_domain_decimal_stamp(
+    src_type: str,
+    dest_db_type: str,
+    *,
+    samples: list | None,
+    source_db: str,
+) -> str:
+    """Create-new stamp for a decimal inferred from an untyped source's sample.
+
+    ``""`` when the rule does not apply (declared source domain, not a decimal,
+    IEEE residue that must stay FLOAT, or unknown scale on a bounded engine).
+    """
+    from services.decimal_observe import (
+        observe_numeric_samples,
+        open_domain_decimal_carrier,
+        sampled_numeric_is_not_a_domain,
+    )
+
+    if normalize_logical_type(src_type) != LOGICAL_DECIMAL:
+        return ""
+    if not sampled_numeric_is_not_a_domain(source_db):
+        return ""
+    scale: int | None = None
+    if samples:
+        obs = observe_numeric_samples(samples)
+        kind = obs.get("kind")
+        if kind == "ieee_float":
+            return ""
+        if kind in {"fixed_decimal", "integer"}:
+            scale = int(obs.get("scale") or 0)
+    if scale is None:
+        _p, declared_scale = parse_numeric_precision_scale(src_type)
+        scale = declared_scale
+    carrier = open_domain_decimal_carrier(scale, dest_db=dest_db_type)
+    if not carrier:
+        return ""
+    db = (dest_db_type or "").strip()
+    return ddl_type(db, carrier) if db else carrier
 
 
 def _create_new_mapping_target_type(
@@ -1225,6 +1320,14 @@ def _create_new_mapping_target_type(
     invent observed ``DECIMAL(p,s)`` or ``FLOAT`` (IEEE residue) — never silent
     platform floor ``DECIMAL(38,15)`` from an empty typmod.
     """
+    # Sample-inferred decimals (files, object stores, document scrolls) are not
+    # a domain: size the integer part to the destination, keep observed scale
+    # (QA MX2-10 — a 50-row DECIMAL(4,2) quarantined 99% of the file).
+    open_stamp = _open_domain_decimal_stamp(
+        src_type, dest_db_type, samples=samples, source_db=source_db
+    )
+    if open_stamp:
+        return open_stamp
     # Bare DECIMAL/NUMERIC invent from samples before specialty / UUID paths.
     # Declared DECIMAL(p,s) wins; empty samples fall through (no fake (38,15)).
     # Declared FLOAT/DOUBLE/REAL must never invent DECIMAL from samples — that
@@ -1777,6 +1880,15 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
             return False
         return True
     bare = upper.split("(", 1)[0].strip()
+    # MySQL LOB tiers are different widths. Rematerializing LONGTEXT through
+    # the logical TEXT default, or collapsing it on the way back from the
+    # catalog, recreated a 4 GB column as 64 KB TEXT on the next overwrite.
+    if bare in {"LONGTEXT", "MEDIUMTEXT", "TINYTEXT"} and db in {
+        "mysql",
+        "mariadb",
+        "tidb",
+    }:
+        return True
     if bare in _PHYSICAL_STAMP_PASS_THROUGH or upper in _PHYSICAL_STAMP_PASS_THROUGH:
         # Refuse pass-through of tokens illegal / non-create-wire on this dest.
         if bare in reject or upper in reject:
@@ -2055,8 +2167,17 @@ def materialize_dest_ddl(
         ):
             return ddl_type(db, raw)
     if _is_explicit_physical_stamp(raw, db):
-        legalized = promote_create_new_temporal_stamp("", raw, db)
-        return legalized or raw
+        legalized = promote_create_new_temporal_stamp("", raw, db) or raw
+        # A copied NVARCHAR stamp is MySQL's utf8mb3 alias. A SQL Server
+        # national source holds every scalar; leaving the alias (or a bare
+        # VARCHAR that inherits the server's utf8mb3 default) rejects emoji
+        # with 1366 after preflight said the value fits (DEF-B2-010).
+        # ``raw`` has already lost COLLATE. The original carrier (or the
+        # explicit source type) still names a SQL Server collation, which is
+        # the measurement that licenses utf8mb4 when the engine context is gone.
+        return carry_national_unicode_charset(
+            db, source_type or carrier or raw, legalized
+        )
     # Rematerialized UUID aliases must use create-new width-safe wire
     # (BQ STRING(36), not bare STRING) so writers match Map stamps.
     if normalize_logical_type(raw) == LOGICAL_UUID:
@@ -2248,6 +2369,7 @@ def temporal_precision_would_narrow(
         DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
         SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS,
         SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR,
+        SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS,
         _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS,
         destination_temporal_fractional_digits,
         is_document_instant_token,
@@ -2272,6 +2394,11 @@ def temporal_precision_would_narrow(
         return True
     tgt_p = destination_temporal_fractional_digits(target_type, dest_db=dest_db)
     src_p = parse_temporal_fractional_precision(source_type)
+    if src_p is None and is_document_instant_token(active_source_engine(), source_type):
+        # BSON date keeps milliseconds. A bare source token has no typmod,
+        # so reading it as "unknown precision" green-lit MySQL TIMESTAMP
+        # (fractional digits 0) and dropped every millisecond.
+        src_p = DOCUMENT_INSTANT_FRACTIONAL_DIGITS
     if tgt_p is None:
         return False
     if src_p is None:
@@ -2279,7 +2406,7 @@ def temporal_precision_would_narrow(
         # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
         bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
         if bare_src in {"DATETIME2", "DATETIMEOFFSET"}:
-            src_p = 7
+            src_p = SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
         elif bare_src in _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS:
             if bare_src == re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip():
                 # Both sides carry the same unparameterized declaration, so the
@@ -2310,4 +2437,21 @@ def temporal_precision_would_narrow(
             src_p = SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS
         else:
             return False
+    # SQL Server DATETIME2(7) / TIMESTAMP_NTZ(7) into a destination that is
+    # already at its documented maximum (PostgreSQL microseconds) cannot be
+    # widened. Blocking that pair made every MSSQL→Postgres timestamp route
+    # unrunnable. A destination below its own cap (TIMESTAMP(3) on Postgres)
+    # still blocks so the operator can widen it. The exemption covers only that
+    # dialect-default tick: a declared ``(8)``/``(9)`` is nanosecond evidence,
+    # and dropping it needs the Risk Contract.
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.type_system import _TEMPORAL_FSP_CAPS
+
+    cap = _TEMPORAL_FSP_CAPS.get(_normalize_dest_db(dest_db) if dest_db else "")
+    if (
+        cap is not None
+        and tgt_p >= cap
+        and cap < src_p <= SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
+    ):
+        return False
     return src_p > tgt_p

@@ -46,6 +46,52 @@ import { needsMappingReview } from "./columnWorkbench.js";
 import { typeFamily } from "./typeDisplay.js";
 
 describe("transform SSOT round-trip", () => {
+  it("approving a mapping preserves a held business rule as not applied", () => {
+    const mapping: EditableMapping = {
+      source: "email",
+      target: "email",
+      confidence: 0.94,
+      approved: false,
+      inferredType: "VARCHAR",
+      destType: "VARCHAR",
+      businessRule: {
+        kind: "formula",
+        kindLabel: "Review",
+        text: "=HYPERLINK(\"https://example.test\")",
+        status: "needs_confirmation",
+        confidence: 0,
+        ruleId: "V008",
+      },
+    };
+    const approved = approveMappingHonestly(mapping);
+    assert.equal(approved.approved, true);
+    assert.equal(approved.businessRule?.status, "needs_confirmation");
+    assert.equal(approved.businessRule?.ruleId, "V008");
+  });
+
+  it("approving a mapping preserves a held business rule as not applied", () => {
+    const mapping: EditableMapping = {
+      source: "email",
+      target: "email",
+      confidence: 0.94,
+      approved: false,
+      inferredType: "VARCHAR",
+      destType: "VARCHAR",
+      businessRule: {
+        kind: "formula",
+        kindLabel: "Review",
+        text: "=HYPERLINK(\"https://example.test\")",
+        status: "needs_confirmation",
+        confidence: 0,
+        ruleId: "V008",
+      },
+    };
+    const approved = approveMappingHonestly(mapping);
+    assert.equal(approved.approved, true);
+    assert.equal(approved.businessRule?.status, "needs_confirmation");
+    assert.equal(approved.businessRule?.ruleId, "V008");
+  });
+
   it("preserves phone/currency/integer engine transforms through Map edit", () => {
     const editable = editableFromPipelineMappings(
       [
@@ -779,6 +825,45 @@ describe("destination schema honesty", () => {
     assert.equal(rows[0].confidence, 0.88);
     assert.equal(rows[1].confidence, 0.91);
     assert.notEqual(rows[0].confidence, rows[1].confidence);
+  });
+
+  it("hydrates compiled business-rule confidence from the pipeline wire", () => {
+    const editable = editableFromPipelineMappings([
+      {
+        source: "status",
+        target: "status",
+        confidence: 0.8,
+        transform: "none",
+        business_rule: {
+          kind: "lookup",
+          kind_label: "Lookup",
+          text: "A → ACTIVE",
+          status: "executable",
+          confidence: 0.98,
+          sheet: "Codes",
+          row: 4,
+        },
+      },
+      {
+        source: "notes",
+        target: "notes",
+        confidence: 0.4,
+        transform: "none",
+        business_rule: {
+          kind: "unknown",
+          kind_label: "Review",
+          text: "N/A",
+          status: "needs_confirmation",
+        },
+      },
+    ]);
+    assert.equal(editable[0].businessRule?.confidence, 0.98);
+    assert.equal(editable[0].businessRule?.kind, "lookup");
+    assert.equal(editable[1].businessRule?.confidence, 0);
+    assert.equal(editable[1].businessRule?.status, "needs_confirmation");
+    const wire = buildPreflightMappings([], editable);
+    assert.equal(wire[0].business_rule?.confidence, 0.98);
+    assert.equal(wire[1].business_rule?.confidence, 0);
   });
 
   it("create-new Approve destType is the target_type Validate reads", () => {

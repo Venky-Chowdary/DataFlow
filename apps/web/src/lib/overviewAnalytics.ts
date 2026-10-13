@@ -78,11 +78,11 @@ function statusSlices(
   other: number,
 ): JobStatusSlice[] {
   return [
-    { key: "completed", label: "Completed", count: completed, color: "#10b981" },
-    { key: "quarantine", label: "Completed with quarantine", count: quarantine, color: "#d97706" },
-    { key: "running", label: "Running", count: running, color: "#0ea5e9" },
-    { key: "failed", label: "Failed", count: failed, color: "#ef4444" },
-    { key: "other", label: "Other", count: other, color: "#94a3b8" },
+    { key: "completed", label: "Completed", count: completed, color: "var(--df-logo-ink)" },
+    { key: "quarantine", label: "Completed with quarantine", count: quarantine, color: "var(--df-logo-strap)" },
+    { key: "running", label: "Running", count: running, color: "var(--df-logo-arrow)" },
+    { key: "failed", label: "Failed", count: failed, color: "var(--df-danger)" },
+    { key: "other", label: "Other", count: other, color: "var(--df-text-tertiary)" },
   ].filter((s) => s.count > 0);
 }
 

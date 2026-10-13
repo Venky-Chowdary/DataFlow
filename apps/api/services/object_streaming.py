@@ -830,10 +830,22 @@ def open_sftp_binary(cfg: dict[str, Any]) -> tuple[Any, Any] | bool | None:
     return handle, _close
 
 
+def _raise_missing_object(exc: BaseException, *, bucket: str, key: str) -> None:
+    if _object_missing_from_client_error(exc):
+        raise ValueError(
+            f"Object store has no object '{key}' in bucket '{bucket}'. "
+            "Check the path, or wait until the file has been uploaded."
+        ) from exc
+    raise exc
+
+
 def download_s3_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
     from connectors.aws_common import boto3_client
 
-    obj = boto3_client("s3", cfg).get_object(Bucket=bucket, Key=key)
+    try:
+        obj = boto3_client("s3", cfg).get_object(Bucket=bucket, Key=key)
+    except Exception as exc:  # noqa: BLE001 — missing-object check re-raises
+        _raise_missing_object(exc, bucket=bucket, key=key)
     with open(path, "wb") as f:
         for chunk in obj["Body"].iter_chunks(chunk_size=8 * 1024 * 1024):
             if chunk:
@@ -843,19 +855,25 @@ def download_s3_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -
 def download_gcs_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
     from connectors.gcs_common import gcs_client, gcs_emulator_kwargs
 
-    gcs_client(cfg).bucket(bucket).blob(key).download_to_filename(
-        str(path), **gcs_emulator_kwargs(cfg)
-    )
+    try:
+        gcs_client(cfg).bucket(bucket).blob(key).download_to_filename(
+            str(path), **gcs_emulator_kwargs(cfg)
+        )
+    except Exception as exc:  # noqa: BLE001 — missing-object check re-raises
+        _raise_missing_object(exc, bucket=bucket, key=key)
 
 
 def download_adls_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
     from connectors.adls_common import blob_service_client
 
-    blob = blob_service_client(cfg).get_blob_client(bucket, key)
-    with open(path, "wb") as f:
-        for chunk in blob.download_blob().chunks():
-            if chunk:
-                f.write(chunk)
+    try:
+        blob = blob_service_client(cfg).get_blob_client(bucket, key)
+        with open(path, "wb") as f:
+            for chunk in blob.download_blob().chunks():
+                if chunk:
+                    f.write(chunk)
+    except Exception as exc:  # noqa: BLE001 — missing-object check re-raises
+        _raise_missing_object(exc, bucket=bucket, key=key)
 
 
 def download_sftp_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:

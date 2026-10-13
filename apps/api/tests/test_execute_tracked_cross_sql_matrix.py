@@ -78,7 +78,12 @@ def _run(request: TransferRequest) -> None:
         assert "no source value digest" in str(recon.get("message") or "").lower()
 
 
-def _seed_postgresql(table: str) -> None:
+def _seed_postgresql(
+    table: str,
+    *,
+    id_type: str = "INT",
+    amount_type: str = "NUMERIC(10,2)",
+) -> None:
     import psycopg2
     conn = psycopg2.connect(
         host="localhost", port=5432, database="dataflow",
@@ -87,7 +92,10 @@ def _seed_postgresql(table: str) -> None:
     conn.autocommit = True
     with conn.cursor() as cur:
         cur.execute(f"DROP TABLE IF EXISTS {table}")
-        cur.execute(f"CREATE TABLE {table} (id INT PRIMARY KEY, name TEXT, amount NUMERIC(10,2))")
+        cur.execute(
+            f"CREATE TABLE {table} "
+            f"(id {id_type} PRIMARY KEY, name TEXT, amount {amount_type})"
+        )
         cur.execute(f"INSERT INTO {table} VALUES (1,'alice',1000.00),(2,'bob',2000.50)")
     conn.close()
 
@@ -194,7 +202,11 @@ def test_sqlite_to_postgresql():
 
     src_table = "sq_to_pg_src_" + uuid.uuid4().hex[:8]
     dst_table = "sq_to_pg_dst_" + uuid.uuid4().hex[:8]
-    _seed_postgresql(dst_table)
+    _seed_postgresql(
+        dst_table,
+        id_type="BIGINT",
+        amount_type="DOUBLE PRECISION",
+    )
 
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         path = f.name

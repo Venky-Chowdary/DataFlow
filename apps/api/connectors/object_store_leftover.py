@@ -150,7 +150,6 @@ def delete_by_primary_keys(
     from connectors.table_manager import DestinationDeleteError
     from services.cdc_snapshot_window import _pk_columns
     from services.dest_precount import (
-        _infer_artifact_format,
         _norm_dest_key,
         _object_store_kind,
         _object_store_list_keys,

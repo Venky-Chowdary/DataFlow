@@ -73,6 +73,169 @@ def test_pg_fetch_unique_keys_groups_pk_and_unique():
     assert "email" in names["users_email_ci"]["expression_columns"]
     assert names["users_active_email"]["filter_predicate"] == "(status = 'active'::text)"
     assert names["users_active_email"]["nulls_not_distinct"] is True
+    assert "index_valid" not in names["users_email_key"]
+    assert "index_ready" not in names["users_email_key"]
+
+
+def test_pg_invalid_unique_index_stays_visible_and_splits_the_write_rule():
+    """``indisvalid`` false is not existing-row proof.
+
+    A seven-column row does not invent the bits. ``indisready`` false does
+    not reject a new duplicate. ``indisready`` true still does.
+    """
+    from services.data_integrity import _check_duplicate_keys, _unique_constraint_enforced
+    from services.unique_key_introspect import (
+        postgres_uniqueness_proof,
+        read_postgres_uniqueness_rows,
+    )
+
+    assert postgres_uniqueness_proof(
+        [
+            ("users_pkey", "id", True, True),
+            ("users_email_invalid", "email", False, True),
+            ("users_email_also", "email", True, True),
+        ]
+    ) == {frozenset({"id"}): "", frozenset({"email"}): ""}
+    assert postgres_uniqueness_proof(
+        [("users_email_invalid", "email", False, True)]
+    ) == {frozenset({"email"}): "not_checked"}
+    assert postgres_uniqueness_proof(
+        [("users_email_building", "email", False, False)]
+    ) == {frozenset({"email"}): "not_ready"}
+    assert postgres_uniqueness_proof(
+        [("users_pkey", "id")]
+    ) == {frozenset({"id"}): "unreported"}
+    assert postgres_uniqueness_proof(
+        [("users_active_email", "email", True, True, "(status = 'active'::text)")]
+    ) == {frozenset({"email"}): "partial"}
+    assert postgres_uniqueness_proof(
+        [("users_email_key", "email", True, True)]
+    ) == {frozenset({"email"}): ""}
+    assert postgres_uniqueness_proof(
+        [
+            ("users_active_email", "email", True, True, "(status = 'active'::text)"),
+            ("users_email_key", "email", True, True, None),
+        ]
+    ) == {frozenset({"email"}): ""}
+
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [],
+        [(1, "email")],
+        [
+            (
+                "users_email_invalid",
+                False,
+                "",
+                "",
+                "CREATE UNIQUE INDEX users_email_invalid ON users (email)",
+                "1",
+                False,
+                False,
+                True,
+            )
+        ],
+    ]
+    meta = _pg_fetch_unique_keys(cur, "public", "users")
+    key = meta["unique_keys"][0]
+    assert key["name"] == "users_email_invalid"
+    assert key["columns"] == ["email"]
+    assert key["index_valid"] is False
+    assert "index_ready" not in key
+    assert "enforced" not in key
+    sql = str(cur.execute.call_args_list[-1].args[0]).lower()
+    assert "i.indisvalid" in sql
+    assert "i.indisready" in sql
+    assert "and i.indisvalid" not in sql
+
+    not_ready = MagicMock()
+    not_ready.fetchall.side_effect = [
+        [],
+        [(1, "email")],
+        [
+            (
+                "users_email_building",
+                False,
+                "",
+                "",
+                "CREATE UNIQUE INDEX users_email_building ON users (email)",
+                "1",
+                False,
+                False,
+                False,
+            )
+        ],
+    ]
+    building = _pg_fetch_unique_keys(not_ready, "public", "users")["unique_keys"][0]
+    assert building["index_ready"] is False
+    assert building["enforced"] is False
+
+    class _Broken:
+        def execute(self, sql, params=()):
+            raise RuntimeError("pg_index unavailable")
+
+    assert read_postgres_uniqueness_rows(_Broken(), "public", "users") is None
+    proof_conn = MagicMock()
+    proof_conn.execute.return_value.fetchall.return_value = []
+    assert read_postgres_uniqueness_rows(proof_conn, "", "users") == []
+    proof_sql = str(proof_conn.execute.call_args.args[0]).lower()
+    assert "pg_get_expr(i.indpred" in proof_sql
+    assert "and i.indisvalid" not in proof_sql
+
+    assert _unique_constraint_enforced(
+        {"name": "users_email_invalid", "columns": ["email"], "index_valid": False},
+        dest_kind="postgresql",
+    ) is True
+    blocked = _check_duplicate_keys(
+        [{"source": "email", "target": "email"}],
+        [{"email": "a"}, {"email": "a"}],
+        "strict",
+        dest_kind="postgres",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[
+            {
+                "name": "users_email_invalid",
+                "columns": ["email"],
+                "index_valid": False,
+            }
+        ],
+        target_types={"email": "text"},
+    )
+    assert blocked["passed"] is False
+    assert blocked["blocks_transfer"] is True
+    assert any("indisvalid" in warning for warning in blocked["warnings"])
+
+    assert _unique_constraint_enforced(
+        {
+            "name": "users_email_building",
+            "columns": ["email"],
+            "index_valid": False,
+            "index_ready": False,
+        },
+        dest_kind="azure_postgres",
+    ) is False
+    warned = _check_duplicate_keys(
+        [{"source": "email", "target": "email"}],
+        [{"email": "a"}, {"email": "a"}],
+        "strict",
+        dest_kind="azure_postgres",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[
+            {
+                "name": "users_email_building",
+                "columns": ["email"],
+                "index_ready": False,
+                "index_valid": False,
+                "enforced": False,
+            }
+        ],
+        target_types={"email": "text"},
+    )
+    assert warned["passed"] is True
+    assert warned["blocks_transfer"] is False
+    assert any("indisready" in warning for warning in warned["warnings"])
 
 
 def test_mysql_fetch_unique_keys_primary_and_unique():
@@ -91,9 +254,9 @@ def test_mysql_fetch_unique_keys_primary_and_unique():
 def test_pg_fetch_foreign_keys_groups_columns():
     cur = MagicMock()
     # pg_constraint row: name, col, ref schema, ref table, ref col,
-    # confdeltype, confupdtype, ordinal.
+    # confdeltype, confupdtype, convalidated, ordinal.
     cur.fetchall.return_value = [
-        ("orders_customer_fkey", "customer_id", "public", "customers", "id", "c", "a", 1),
+        ("orders_customer_fkey", "customer_id", "public", "customers", "id", "c", "a", False, 1),
     ]
     fks, meta = _fetch_foreign_keys("postgresql", cur, "public", "orders")
     assert meta["status"] == "measured"
@@ -103,6 +266,7 @@ def test_pg_fetch_foreign_keys_groups_columns():
     assert fks[0]["referenced_table"] == "customers"
     assert fks[0]["referenced_columns"] == ["id"]
     assert fks[0]["referenced_schema"] == "public"
+    assert fks[0]["validated"] is False
 
 
 def test_mysql_fetch_foreign_keys():
@@ -130,6 +294,133 @@ def test_sqlserver_fetch_unique_keys():
     assert "UQ_users_email" in names
     assert names["UQ_email_ci"]["case_insensitive"] is True
     assert names["UQ_email_ci"]["filter_predicate"] == "([active]=(1))"
+
+
+def test_sqlserver_disabled_unique_index_does_not_block():
+    """``is_disabled`` is not invented for a six-column row. 1 is not a write block."""
+    from services.data_integrity import _check_duplicate_keys, _unique_constraint_enforced
+    from services.unique_key_introspect import (
+        read_sqlserver_uniqueness_rows,
+        sqlserver_uniqueness_proof,
+    )
+
+    assert sqlserver_uniqueness_proof(
+        [("UQ_EMAIL", False, "EMAIL", 1, None, None, 1)]
+    ) == {frozenset({"email"}): "not_checked"}
+    assert sqlserver_uniqueness_proof(
+        [("PK_users", True, "id", 1, None, None, 0)]
+    ) == {frozenset({"id"}): ""}
+    assert sqlserver_uniqueness_proof(
+        [("PK_users", True, "id", 1, None, None)]
+    ) == {frozenset({"id"}): "unreported"}
+    assert sqlserver_uniqueness_proof(
+        [("UQ_active", False, "email", 1, None, "([active]=(1))", 0)]
+    ) == {frozenset({"email"}): "partial"}
+    assert sqlserver_uniqueness_proof(
+        [
+            ("UQ_active", False, "email", 1, None, "([active]=(1))", 0),
+            ("UQ_email", False, "email", 1, None, None, 0),
+        ]
+    ) == {frozenset({"email"}): ""}
+    assert sqlserver_uniqueness_proof(
+        [
+            ("UQ_active", False, "email", 1, None, "([active]=(1))", 0),
+            ("UQ_off", False, "email", 1, None, None, 1),
+        ]
+    ) == {frozenset({"email"}): "partial"}
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = [
+        ("UQ_EMAIL", False, "email", 1, None, None, 1),
+    ]
+    meta = _sqlserver_fetch_unique_keys(conn, "dbo", "users")
+    key = meta["unique_keys"][0]
+    assert key["disabled"] is True
+    assert key["enforced"] is False
+    assert "is_disabled" in str(conn.execute.call_args.args[0]).lower()
+
+    enabled = MagicMock()
+    enabled.execute.return_value.fetchall.return_value = [
+        ("PK_users", True, "id", 1, None, None),
+    ]
+    plain = _sqlserver_fetch_unique_keys(enabled, "dbo", "users")
+    assert "disabled" not in plain["unique_keys"][0]
+    assert "enforced" not in plain["unique_keys"][0]
+
+    class _Broken:
+        def execute(self, sql, params=()):
+            raise RuntimeError("is_disabled unavailable")
+
+    assert read_sqlserver_uniqueness_rows(_Broken(), "dbo", "users") is None
+    assert _sqlserver_fetch_unique_keys(_Broken(), "dbo", "users") == {
+        "primary_key_columns": [],
+        "unique_keys": [],
+    }
+
+    assert _unique_constraint_enforced(
+        {"name": "UQ_EMAIL", "columns": ["email"], "disabled": True},
+        dest_kind="sqlserver",
+    ) is False
+    warned = _check_duplicate_keys(
+        [{"source": "email", "target": "EMAIL"}],
+        [{"email": "a"}, {"email": "a"}],
+        "strict",
+        dest_kind="mssql",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[
+            {"name": "UQ_EMAIL", "columns": ["EMAIL"], "disabled": True}
+        ],
+        target_types={"EMAIL": "VARCHAR"},
+    )
+    assert warned["passed"] is True
+    assert warned["blocks_transfer"] is False
+    assert any("disabled" in warning for warning in warned["warnings"])
+
+
+def test_sqlserver_ignore_dup_key_still_blocks_the_duplicate():
+    """``IGNORE_DUP_KEY`` drops the insert. It does not hide the key.
+
+    A seven-column row did not ask for the bit. Stored rows stay unique,
+    so the catalog gap stays empty and the probe still quarantines.
+    """
+    from services.data_integrity import _check_duplicate_keys, _unique_constraint_enforced
+    from services.unique_key_introspect import sqlserver_uniqueness_proof
+
+    conn = MagicMock()
+    conn.execute.return_value.fetchall.return_value = [
+        ("UQ_EMAIL", False, "email", 1, None, None, 0, 1),
+    ]
+    meta = _sqlserver_fetch_unique_keys(conn, "dbo", "users")
+    key = meta["unique_keys"][0]
+    assert key["ignore_dup_key"] is True
+    assert key.get("enforced") is not False
+    assert "disabled" not in key
+    assert "ignore_dup_key" in str(conn.execute.call_args.args[0]).lower()
+
+    short = MagicMock()
+    short.execute.return_value.fetchall.return_value = [
+        ("UQ_EMAIL", False, "email", 1, None, None, 0),
+    ]
+    plain = _sqlserver_fetch_unique_keys(short, "dbo", "users")
+    assert "ignore_dup_key" not in plain["unique_keys"][0]
+
+    assert sqlserver_uniqueness_proof(
+        [("UQ_EMAIL", False, "email", 1, None, None, 0, 1)]
+    ) == {frozenset({"email"}): ""}
+    assert _unique_constraint_enforced(key, dest_kind="sqlserver") is True
+    blocked = _check_duplicate_keys(
+        [{"source": "email", "target": "EMAIL"}],
+        [{"email": "a"}, {"email": "a"}],
+        "strict",
+        dest_kind="sqlserver",
+        primary_key="id",
+        sync_mode="append",
+        destination_unique_keys=[key],
+        target_types={"EMAIL": "VARCHAR"},
+    )
+    assert blocked["passed"] is False
+    assert any("IGNORE_DUP_KEY" in warning for warning in blocked["warnings"])
 
 
 def test_oracle_fetch_unique_keys():
@@ -237,6 +528,32 @@ def test_integrity_partial_unique_ignores_out_of_filter_dupes():
     assert result["passed"] is True
 
 
+def test_integrity_partial_unique_blocks_in_filter_dupes():
+    from services.data_integrity import _check_duplicate_keys
+
+    result = _check_duplicate_keys(
+        [{"source": "email", "target": "email"}],
+        [
+            {"email": "same@x.com", "status": "active"},
+            {"email": "same@x.com", "status": "active"},
+        ],
+        "strict",
+        dest_kind="postgresql",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=[
+            {
+                "name": "uq_active_email",
+                "columns": ["email"],
+                "filter_predicate": "(status = 'active'::text)",
+            }
+        ],
+        target_types={"email": "VARCHAR(100)"},
+    )
+    assert result["passed"] is False
+    assert result["blocks_transfer"] is True
+
+
 def test_integrity_nulls_not_distinct_blocks_multi_null():
     from services.data_integrity import _check_duplicate_keys
 
@@ -314,3 +631,215 @@ def test_composite_unique_blocks_full_tuple_dupes():
     )
     assert result["passed"] is False
     assert any("uq_org_code" in i or "UNIQUE" in i for i in result["issues"])
+
+
+def test_sqlite_partial_unique_where_limits_the_write_block(tmp_path: Path) -> None:
+    """A SQLite partial unique index blocks only rows that match its WHERE.
+
+    Proved against a real sqlite_master catalog, then through the duplicate
+    probe. A full unique on the same columns still blocks the other rows.
+    """
+    import sqlite3
+
+    from services.data_integrity import _check_duplicate_keys
+    from services.unique_key_introspect import (
+        _sqlite_fetch_unique_keys,
+        _sqlite_index_where,
+    )
+
+    where_in_literal = (
+        "CREATE UNIQUE INDEX u ON t (email) "
+        "WHERE note != 'x) WHERE y' AND status = 'active'"
+    )
+    assert _sqlite_index_where(where_in_literal) == (
+        "note != 'x) WHERE y' AND status = 'active'"
+    )
+    assert _sqlite_index_where("CREATE UNIQUE INDEX u ON t (email)") == ""
+
+    db = tmp_path / "partial.db"
+    con = sqlite3.connect(db)
+    try:
+        con.execute(
+            "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT, status TEXT)"
+        )
+        con.execute(
+            "CREATE UNIQUE INDEX ux_email ON people (email) "
+            "WHERE status = 'active'"
+        )
+        con.execute("CREATE UNIQUE INDEX ux_status ON people (status)")
+        cur = con.cursor()
+        info = list(cur.execute('PRAGMA table_info("people")'))
+        meta = _sqlite_fetch_unique_keys(cur, '"people"', info)
+    finally:
+        con.close()
+
+    names = {u["name"]: u for u in meta["unique_keys"]}
+    assert names["ux_email"]["filter_predicate"] == "status = 'active'"
+    assert names["ux_email"]["enforced"] is True
+    assert names["ux_email"]["columns"] == ["email"]
+    assert names["ux_status"]["filter_predicate"] == ""
+    assert names["PRIMARY"]["filter_predicate"] == ""
+
+    partial_only = [names["ux_email"]]
+    out_of_filter = _check_duplicate_keys(
+        [
+            {"source": "email", "target": "email"},
+            {"source": "status", "target": "status"},
+        ],
+        [
+            {"email": "same@x.com", "status": "archived"},
+            {"email": "same@x.com", "status": "archived"},
+        ],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=partial_only,
+        target_types={"email": "TEXT", "status": "TEXT"},
+    )
+    assert out_of_filter["passed"] is True
+    in_filter = _check_duplicate_keys(
+        [
+            {"source": "email", "target": "email"},
+            {"source": "status", "target": "status"},
+        ],
+        [
+            {"email": "same@x.com", "status": "active"},
+            {"email": "same@x.com", "status": "active"},
+        ],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=partial_only,
+        target_types={"email": "TEXT", "status": "TEXT"},
+    )
+    assert in_filter["passed"] is False
+    assert in_filter["blocks_transfer"] is True
+
+    sibling = _check_duplicate_keys(
+        [
+            {"source": "email", "target": "email"},
+            {"source": "status", "target": "status"},
+        ],
+        [
+            {"email": "same@x.com", "status": "archived"},
+            {"email": "same@x.com", "status": "archived"},
+        ],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=[
+            names["ux_email"],
+            {"name": "uq_email", "columns": ["email"], "filter_predicate": ""},
+        ],
+        target_types={"email": "TEXT", "status": "TEXT"},
+    )
+    assert sibling["passed"] is False
+    assert sibling["blocks_transfer"] is True
+
+
+def test_sqlite_partial_bit_without_where_stays_in_the_duplicate_probe() -> None:
+    """Partial flag with no stored WHERE does not drop the write block."""
+    from services.unique_key_introspect import _sqlite_fetch_unique_keys
+
+    cur = MagicMock()
+    cur.fetchall.side_effect = [
+        [(0, "ux", 1, "c", 1)],
+        [(0, 0, "email")],
+    ]
+    cur.fetchone.return_value = (None,)
+    info_rows = [(0, "email", "TEXT", 0, None, 0)]
+    meta = _sqlite_fetch_unique_keys(cur, '"people"', info_rows)
+    names = {u["name"]: u for u in meta["unique_keys"]}
+    assert names["ux"]["filter_predicate"] == ""
+    assert names["ux"]["enforced"] is True
+    executed = " ".join(str(call.args[0]) for call in cur.execute.call_args_list)
+    assert "sqlite_master" in executed
+
+
+def test_sqlite_expression_and_nocase_unique_casefold(tmp_path: Path) -> None:
+    """SQLite lower() and COLLATE NOCASE are the same write rule as the engine.
+
+    An expression the probe cannot evaluate stays on the key. It is not
+    rewritten as a unique constraint on the plain columns beside it.
+    """
+    import sqlite3
+
+    from services.data_integrity import _check_duplicate_keys
+    from services.unique_key_introspect import _sqlite_fetch_unique_keys
+
+    db = tmp_path / "expr.db"
+    con = sqlite3.connect(db)
+    try:
+        con.execute(
+            "CREATE TABLE people (id INTEGER PRIMARY KEY, email TEXT, status TEXT)"
+        )
+        con.execute("CREATE UNIQUE INDEX ux_fold ON people (lower(email))")
+        con.execute(
+            "CREATE UNIQUE INDEX ux_nocase ON people (status COLLATE NOCASE)"
+        )
+        con.execute(
+            "CREATE UNIQUE INDEX ux_prefix ON people (substr(email, 1, 3), status)"
+        )
+        cur = con.cursor()
+        info = list(cur.execute('PRAGMA table_info("people")'))
+        meta = _sqlite_fetch_unique_keys(cur, '"people"', info)
+    finally:
+        con.close()
+
+    names = {u["name"]: u for u in meta["unique_keys"]}
+    assert names["ux_fold"]["columns"] == []
+    assert names["ux_fold"]["expression_columns"] == ["email"]
+    assert names["ux_fold"]["case_insensitive"] is True
+    assert names["ux_fold"]["enforced"] is True
+    assert names["ux_nocase"]["columns"] == ["status"]
+    assert names["ux_nocase"]["case_insensitive"] is True
+    assert names["ux_nocase"]["expression"] == ""
+    assert names["ux_prefix"]["columns"] == []
+    assert names["ux_prefix"]["expression_columns"] == []
+    assert "substr" in names["ux_prefix"]["expression"]
+    assert names["ux_prefix"]["enforced"] is True
+
+    folded = _check_duplicate_keys(
+        [{"source": "email", "target": "email"}],
+        [{"email": "A@x.com"}, {"email": "a@x.com"}],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=[names["ux_fold"]],
+        target_types={"email": "TEXT"},
+    )
+    assert folded["passed"] is False
+    assert folded["blocks_transfer"] is True
+    nocase = _check_duplicate_keys(
+        [{"source": "status", "target": "status"}],
+        [{"status": "Active"}, {"status": "active"}],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="status",
+        sync_mode="append",
+        destination_unique_keys=[names["ux_nocase"]],
+        target_types={"status": "TEXT"},
+    )
+    assert nocase["passed"] is False
+    assert nocase["blocks_transfer"] is True
+    prefix = _check_duplicate_keys(
+        [
+            {"source": "email", "target": "email"},
+            {"source": "status", "target": "status"},
+        ],
+        [
+            {"email": "abc-1", "status": "open"},
+            {"email": "abc-2", "status": "open"},
+        ],
+        "strict",
+        dest_kind="sqlite",
+        primary_key="email",
+        sync_mode="append",
+        destination_unique_keys=[names["ux_prefix"]],
+        target_types={"email": "TEXT", "status": "TEXT"},
+    )
+    assert prefix["passed"] is True

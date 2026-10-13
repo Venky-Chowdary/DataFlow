@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import io
-import json
 import logging
 import re
 import sys
@@ -33,11 +30,11 @@ except (
     from src.services.mongodb_service import get_mongodb_service
 
 try:
-    from services.value_serializer import cell_to_string, json_default
+    from services.value_serializer import cell_to_string, json_default  # noqa: F401
 except (
     ImportError
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-    from src.services.value_serializer import cell_to_string, json_default
+    pass
 
 from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connection_string
 from services.read_options import ReadOptions
@@ -141,6 +138,12 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     coerced = int(getattr(result, "coerced_null_rows", 0) or 0)
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
     warnings = list(getattr(result, "warnings", []) or [])
+    try:
+        from services.vectorization import attach_embedding_fallback_warning
+
+        warnings = attach_embedding_fallback_warning(warnings)
+    except ImportError:
+        pass
     # GA: never truncate rejected_details before quarantine / proof harvest.
     rejected_details = list(getattr(result, "rejected_details", []) or [])
     out: dict[str, Any] = {
@@ -403,67 +406,56 @@ def _find_implicit_connector_id(
     return None
 
 
+# Form defaults and EndpointConfig parsing stamp these when the operator did
+# not type a host. They are not an override of a saved connector.
+_LOOPBACK_HOSTS = frozenset(
+    {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "0.0.0.0",
+        "host.docker.internal",
+    }
+)
+
+
+def _loopback_host(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if text.startswith("[") and text.endswith("]"):
+        text = text[1:-1]
+    return text in _LOOPBACK_HOSTS
+
+
+def _saved_host_wins_placeholder(inline: Any, saved: Any) -> bool:
+    """True when the inline host is a loopback placeholder and the saved host is not.
+
+    Studio and job payloads send ``localhost`` whenever the form default was
+    not replaced. The saved connector (bore.pub, a cloud host) is the endpoint
+    Test already proved. A real non-loopback inline host remains an override.
+    A connector that is actually localhost stays localhost.
+    """
+    return (
+        _loopback_host(inline)
+        and bool(str(saved or "").strip())
+        and not _loopback_host(saved)
+    )
+
+
 def resolve_connector_config(
     endpoint: EndpointConfig, workspace_id: str | None = None
 ) -> dict[str, Any]:
     """Merge saved connector with inline overrides."""
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import (
+        effective_port,
+        prefer_listen_port,
+        resolve_driver_type,
+        stored_listen_port,
+    )
 
     driver = resolve_driver_type(endpoint.format or "")
     fmt = driver
-    default_port = (
-        27017
-        if fmt == "mongodb"
-        else 3306
-        if fmt == "mysql"
-        else 1433
-        if fmt == "sqlserver"
-        else 1521
-        if fmt == "oracle"
-        else 9092
-        if fmt == "kafka"
-        else 6379
-        if fmt == "redis"
-        else 9200
-        if fmt == "elasticsearch"
-        else 5439
-        if fmt == "redshift"
-        else 0
-        if fmt in ("sqlite", "generic_sql", "iceberg")
-        else 22
-        if fmt == "sftp"
-        else 587
-        if fmt == "email"
-        else 6333
-        if fmt == "qdrant"
-        else 8080
-        if fmt == "weaviate"
-        else 19530
-        if fmt == "milvus"
-        else 443
-        if fmt
-        in (
-            "snowflake",
-            "bigquery",
-            "dynamodb",
-            "s3",
-            "gcs",
-            "adls",
-            "salesforce",
-            "hubspot",
-            "stripe",
-            "shopify",
-            "zendesk",
-            "notion",
-            "airtable",
-            "rest_api",
-            "influxdb",
-            "neo4j",
-            "couchbase",
-            "pinecone",
-        )
-        else 5432
-    )
+    # One owner with the writer. Neo4j is 7474, InfluxDB 8086, Redis 6379.
+    default_port = effective_port(fmt, 0)
     from services.dialect_profiles import normalize_schema
 
     # Start with inline endpoint values only; driver defaults are applied after the
@@ -518,9 +510,30 @@ def resolve_connector_config(
                 else (saved if saved is not None else "")
             )
 
+        inline_host = cfg.get("host")
+        saved_host = conn_dict.get("host")
+        placeholder_host = _saved_host_wins_placeholder(inline_host, saved_host)
+        chosen_host = (
+            saved_host if placeholder_host else _pick(inline_host, saved_host)
+        )
+        inline_port = cfg.get("port")
+        saved_port = conn_dict.get("port")
+        # A discarded localhost is not an instruction to keep the driver
+        # default port. The tunnel port on the saved connector is the one
+        # Test dialed. A non-default inline port is still an override.
+        if placeholder_host:
+            try:
+                inline_port_num = int(inline_port or 0)
+            except (TypeError, ValueError):
+                inline_port_num = 0
+            if inline_port_num in (0, int(default_port or 0)):
+                inline_port = 0
+        dial_driver = resolve_driver_type(str(conn_dict.get("type") or fmt or ""))
         merged_cfg = {
-            "host": _pick(cfg.get("host"), conn_dict.get("host")),
-            "port": _pick(cfg.get("port"), conn_dict.get("port")),
+            "host": chosen_host,
+            # Inline 5432 is the old form default, not an instruction to
+            # ignore a saved Redis 6380 / Elasticsearch 9200 / Kafka 9092.
+            "port": prefer_listen_port(dial_driver, inline_port, saved_port),
             "database": chosen_database,
             "schema": _pick(cfg.get("schema"), conn_dict.get("schema")),
             "username": _pick(cfg.get("username"), conn_dict.get("username")),
@@ -580,7 +593,10 @@ def resolve_connector_config(
         cfg["host"] = cfg["host"] or "localhost"
     else:
         cfg["host"] = cfg.get("host") or ""
-    cfg["port"] = cfg["port"] or default_port
+    cfg["port"] = stored_listen_port(
+        resolve_driver_type(str(cfg.get("type") or fmt or "")),
+        cfg.get("port"),
+    )
     driver_type = (cfg.get("type") or fmt or "").lower()
     # Always resolve against the *merged* driver — never the pre-merge fmt default alone.
     cfg["schema"] = normalize_schema(
@@ -727,11 +743,11 @@ def read_source_database(
     cursor_column: str = "",
     cursor_after: Any = None,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import resolve_driver_type, source_read_driver
 
     cfg = resolve_connector_config(endpoint)
     # Prefer the saved connector's driver type over any inline format string.
-    db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
+    db_type = source_read_driver(resolve_driver_type(cfg.get("type") or endpoint.format or ""))
 
     from services.procedure_source import is_callable_source, read_callable_batch
 
@@ -746,6 +762,28 @@ def read_source_database(
             schema = {c: "string" for c in batch.headers}
         return _pack_source_read(
             records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
+
+    from connectors.sdk import get_descriptor, sdk_read_as_matrix
+
+    sdk_descriptor = get_descriptor(db_type)
+    if (
+        sdk_descriptor
+        and "source" in sdk_descriptor.roles
+        and sdk_descriptor.catalog_ids
+    ):
+        stream = endpoint.table or endpoint.collection
+        if not stream:
+            raise ValueError(f"Source {db_type} stream name required")
+        headers, rows, schema, _ = sdk_read_as_matrix(
+            db_type,
+            cfg,
+            stream,
+            limit=limit,
+        )
+        records = [dict(zip(headers, row)) for row in rows]
+        return _pack_source_read(
+            records, headers, schema, stamp_total=stamp_total
         )
 
     if db_type == "postgresql" or db_type == "redshift":
@@ -1237,6 +1275,36 @@ def read_source_database(
             "Email cannot be a transfer source; configure it as a destination only."
         )
 
+    if db_type == "kafka":
+        # Buffered reads (kafka → file, or a destination that is not in the
+        # streaming set) previously raised "read not implemented". The topic
+        # reader is the same one the checkpointed stream uses. Offsets are
+        # not committed here — delivery stays at-least-once until the
+        # destination apply commits them on the streaming path.
+        from connectors.kafka_reader import read_topic_batch
+
+        topic = endpoint.table or endpoint.database or endpoint.collection or ""
+        if not topic:
+            raise ValueError("Kafka source topic name required")
+        batch, _cursor = read_topic_batch(cfg=cfg, topic=topic, limit=limit or 500)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type, topic)
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        native = batch.meta if isinstance(batch.meta, dict) else {}
+        typed = native.get("native_types") if isinstance(native, dict) else None
+        schema = (
+            dict(typed)
+            if isinstance(typed, dict) and typed
+            else (
+                FileParser.infer_schema(records)
+                if records
+                else {c: "string" for c in batch.headers}
+            )
+        )
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
+
     raise ValueError(f"Database source '{db_type}' read not implemented")
 
 
@@ -1418,6 +1486,7 @@ def _write_destination_database(
     error_policy: str | None = None,
     sync_mode: str = "",
     source_spool: Any = None,
+    allow_equal_lsn: bool = False,
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
 
@@ -1427,7 +1496,7 @@ def _write_destination_database(
     zone, which must land every source row for inspection even when the job is
     strict. Callers that omit it keep the validation-mode-derived policy.
     """
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import effective_port, resolve_driver_type
     from connectors.write_resilience import build_write_batch_key
 
     cfg = resolve_connector_config(endpoint)
@@ -1472,34 +1541,7 @@ def _write_destination_database(
 
     common = {
         "host": cfg["host"],
-        "port": cfg["port"]
-        or (
-            5439
-            if db_type == "redshift"
-            else 5432
-            if db_type == "postgresql"
-            else 3306
-            if db_type == "mysql"
-            else 1433
-            if db_type == "sqlserver"
-            else 1521
-            if db_type == "oracle"
-            else 9092
-            if db_type == "kafka"
-            else 6333
-            if db_type == "qdrant"
-            else 8080
-            if db_type == "weaviate"
-            else 19530
-            if db_type == "milvus"
-            else 22
-            if db_type == "sftp"
-            else 587
-            if db_type == "email"
-            else 0
-            if db_type in ("generic_sql", "iceberg", "sqlite")
-            else 443
-        ),
+        "port": effective_port(db_type, cfg.get("port")),
         "database": cfg["database"],
         "username": cfg.get("username", ""),
         "password": cfg.get("password", ""),
@@ -1546,6 +1588,8 @@ def _write_destination_database(
         ),
         "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog"),
     }
+    if allow_equal_lsn:
+        common["allow_equal_lsn"] = True
     from .connector_dispatch import writer_extra_kwargs
 
     common.update(writer_extra_kwargs(db_type, cfg=cfg, dest=endpoint, common=common))
@@ -1573,7 +1617,9 @@ def _write_destination_database(
                 f"SNOWFLAKE COLUMN {col} {ddl_type('snowflake', schema.get(col, 'string'))}"
             )
         result = write_mapped_rows(
-            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
         )
         if not result.ok:
             raise_writer_failure(result, "Snowflake write failed")
@@ -1600,6 +1646,10 @@ def _write_destination_database(
         if db_type in {"redshift", "amazon_redshift", "redshift_serverless"}:
             common["port"] = cfg["port"] or 5439
             common["dest_extra"] = dict(cfg.get("extra") or {})
+        if db_type == "postgresql" and (getattr(endpoint, "extra", None) or {}).get(
+            "pg_overwrite_in_transaction"
+        ):
+            common["pg_overwrite_in_transaction"] = True
         for col in columns:
             ddl_log.append(
                 f"{db_type.upper()} COLUMN {col} {ddl_type(db_type, schema.get(col, 'string'))}"
@@ -1836,7 +1886,11 @@ def _write_destination_database(
 
         for col in columns:
             ddl_log.append(f"REDIS FIELD {col}")
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+        )
         if not result.ok:
             raise_writer_failure(result, "Redis write failed")
         ddl_log.insert(0, f"SET keys under prefix {result.table_name}")
@@ -1846,6 +1900,9 @@ def _write_destination_database(
             {
                 "type": "redis",
                 "prefix": result.table_name,
+                # Reconcile reads dest_summary["table"]. The prefix-only key
+                # left the table name empty and Gate-8 scanned the whole database.
+                "table": result.table_name,
                 "checksum": result.checksum,
                 "driver": result.driver,
                 **_writer_diagnostics(result),
@@ -1854,13 +1911,18 @@ def _write_destination_database(
 
     if db_type == "sqlite":
         from connectors.sqlite_writer import write_mapped_rows
+        from services.sync_cursor import is_overwrite_sync
 
         for col in columns:
             ddl_log.append(
                 f"SQLITE COLUMN {col} {ddl_type('sqlite', schema.get(col, 'string'))}"
             )
         result = write_mapped_rows(
-            **common, write_mode=write_mode, conflict_columns=conflict_columns or []
+            **common,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns or [],
+            atomic_overwrite=is_overwrite_sync(sync_mode),
+            total_chunks=1,
         )
         if not result.ok:
             raise_writer_failure(result, "SQLite write failed")
@@ -2123,309 +2185,6 @@ _CONTAINER_EXPORT_FORMATS: frozenset[str] = frozenset(
 )
 
 
-def write_destination_file(
-    endpoint: EndpointConfig,
-    records: list[dict],
-    columns: list[str],
-    *,
-    source_format: str | None = None,
-    mappings: list[dict] | None = None,
-    column_types: dict[str, str] | None = None,
-    validation_mode: str = "strict",
-) -> tuple[bytes, str, dict]:
-    """Write records to CSV, JSON, JSONL, TSV, YAML, FWF, or a container format."""
-    import sys
-    from pathlib import Path
-
-    _api_root = Path(__file__).resolve().parents[2]
-    if str(_api_root) not in sys.path:
-        sys.path.insert(0, str(_api_root))
-    from connectors.writer_common import (
-        resolve_target_columns,
-        transform_error_policy_for_validation_mode,
-    )
-    from services.format_converter import can_convert, convert_rows
-
-    fmt = (endpoint.format or "json").lower()
-    # ndjson is a JSON Lines alias for the conversion engine
-    if fmt == "ndjson":
-        fmt = "jsonl"
-    src_fmt = (source_format or fmt).lower()
-    if src_fmt == "ndjson":
-        src_fmt = "jsonl"
-    types = column_types or {}
-
-    export_columns = columns
-    export_records = records
-    transform_errors: list[str] = []
-    rejected_details: list[dict[str, Any]] = []
-
-    if mappings:
-        from connectors.writer_common import (
-            apply_write_quarantine_matrix,
-            build_mapped_rows_with_details,
-            reject_on_strict_policy,
-            transform_error_policy,
-        )
-        from connectors.source_row_spool import matrix_row_from_record
-
-        headers = columns
-        data_rows = [matrix_row_from_record(rec, headers) for rec in records]
-        target_cols, _ = resolve_target_columns(mappings, types)
-        error_policy = transform_error_policy_for_validation_mode(validation_mode)
-        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=types,
-            error_policy=error_policy,
-            dest_types={
-                str(m.get("target") or ""): str(
-                    m.get("target_type") or m.get("dest_type") or types.get(m.get("source") or "", "")
-                )
-                for m in mappings
-                if str(m.get("target") or "").strip()
-            },
-        )
-        # Same typed quarantine matrix as SQL/object writers — never export oversize/
-        # unfit cells that transforms left as strings.
-        dest_type_list = [
-            str(
-                next(
-                    (
-                        m.get("target_type") or m.get("dest_type") or types.get(m.get("source") or "", "")
-                        for m in mappings
-                        if str(m.get("target") or "") == col
-                    ),
-                    types.get(col, ""),
-                )
-                or ""
-            )
-            for col in target_cols
-        ]
-        if mapped_rows and any(str(t).strip() for t in dest_type_list):
-            policy = transform_error_policy(error_policy)
-            mapped_rows = apply_write_quarantine_matrix(
-                mapped_rows,
-                target_cols,
-                dest_type_list,
-                rejected_details,
-                policy,
-                dialect_label="file_export",
-                mappings=list(mappings) or None,
-            )
-        # Keep DF_MISSING through export — JSON/JSONL omit keys; dense CSV/grid
-        # render empty via to_delimited_value. Never force-null invent before serialize.
-        abort = reject_on_strict_policy(error_policy, rejected_details, "file_export")
-        if abort:
-            raise FileExportMapBlocked(
-                abort,
-                rejected_details=rejected_details,
-                rejected_rows=len(rejected_details),
-            )
-        export_columns = target_cols
-        export_records = [dict(zip(target_cols, row)) for row in mapped_rows]
-
-    if mappings:
-        export_dest_types = {
-            str(m.get("target") or ""): str(
-                m.get("target_type")
-                or m.get("dest_type")
-                or types.get(m.get("source") or "", "")
-            )
-            for m in mappings
-            if str(m.get("target") or "").strip()
-        }
-    else:
-        export_dest_types = dict(types)
-
-    from connectors.writer_common import to_delimited_value
-
-    def _export_grid_cell(val: Any, col: str) -> str:
-        """One CSV/grid cell — reader-null is empty, never the extract token."""
-        parsed = to_delimited_value(val, col, export_dest_types)
-        if parsed is None:
-            return ""
-        if isinstance(parsed, str):
-            return parsed
-        return cell_to_string(parsed)
-
-    def _export_summary(
-        filename: str,
-        *,
-        mime: str | None = None,
-        converted_from: str | None = None,
-    ) -> dict[str, Any]:
-        out: dict[str, Any] = {
-            "format": fmt,
-            "filename": filename,
-            "rows": len(export_records),
-            "transform_errors": transform_errors[:10],
-            "mapped": bool(mappings),
-            "rejected_details": list(rejected_details),
-            "rejected_rows": len(rejected_details),
-        }
-        if mime is not None:
-            out["mime"] = mime
-        if converted_from is not None:
-            out["converted_from"] = converted_from
-        return out
-
-    grid = [
-        [_export_grid_cell(rec.get(col), col) for col in export_columns]
-        for rec in export_records
-    ]
-
-    # JSON/JSONL must use omit-aware serialization below — the grid convert path
-    # renders DF_MISSING / reader-null as empty (never the extract token).
-    #
-    # A container format is decided by the *destination*, never by whether the
-    # source's own format can be converted into it: a database source has no
-    # file format to convert from, so ``can_convert("postgresql", "avro")`` is
-    # false and the export used to fall through to the JSON writer — landing
-    # JSON bytes under an ``.avro`` name that no Avro reader can open. An empty
-    # population is still that container, not an empty JSON array.
-    container = fmt in _CONTAINER_EXPORT_FORMATS
-    if fmt not in {"json", "jsonl", "yaml", "fixed_width", "fwf"} and (
-        container or (can_convert(src_fmt, fmt) and grid)
-    ):
-        content, mime = convert_rows(
-            export_columns,
-            grid,
-            source_format="csv" if container else src_fmt,
-            target_format=fmt,
-        )
-        ext = (
-            "tsv"
-            if fmt == "tsv"
-            else "xlsx"
-            if fmt == "excel"
-            else "parquet"
-            if fmt == "parquet"
-            else "avro"
-            if fmt == "avro"
-            else "orc"
-            if fmt == "orc"
-            else "xml"
-            if fmt == "xml"
-            else fmt
-            if fmt in ("csv", "jsonl")
-            else "json"
-        )
-        filename = f"export.{ext}"
-        return (
-            content,
-            filename,
-            _export_summary(
-                filename=filename,
-                mime=mime,
-                converted_from=src_fmt if src_fmt != fmt else None,
-            ),
-        )
-
-    def _json_export_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        from connectors.writer_common import present_field_bindings, to_json_value
-
-        # Kafka/object-store class: omit STOP_COLUMN / sparse CDC keys entirely.
-        # Reader-null binds as None then JSON null — never the extract token.
-        return [
-            {
-                c: to_json_value(v, c, export_dest_types)
-                for c, v in present_field_bindings(r).items()
-            }
-            for r in rows
-        ]
-
-    export_mime = ""
-    if fmt == "csv":
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(
-            [
-                {c: _export_grid_cell(r.get(c), c) for c in export_columns}
-                for r in export_records
-            ]
-        )
-        content = buf.getvalue().encode("utf-8")
-        filename = "export.csv"
-        export_mime = "text/csv"
-    elif fmt == "tsv":
-        buf = io.StringIO()
-        writer = csv.DictWriter(
-            buf, fieldnames=export_columns, delimiter="\t", extrasaction="ignore"
-        )
-        writer.writeheader()
-        writer.writerows(
-            [
-                {c: _export_grid_cell(r.get(c), c) for c in export_columns}
-                for r in export_records
-            ]
-        )
-        content = buf.getvalue().encode("utf-8")
-        filename = "export.tsv"
-        export_mime = "text/tab-separated-values"
-    elif fmt == "jsonl":
-        records = _json_export_records(export_records)
-        lines = [
-            json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False)
-            for r in records
-        ]
-        content = "\n".join(lines).encode("utf-8")
-        filename = "export.jsonl"
-        export_mime = "application/x-ndjson"
-    elif fmt == "yaml":
-        from services.yaml_tabular import dump_yaml_records
-
-        yaml_rows = [
-            {c: _export_grid_cell(r.get(c), c) for c in export_columns}
-            for r in export_records
-        ]
-        content = dump_yaml_records(yaml_rows, export_columns)
-        filename = "export.yaml"
-        export_mime = "application/yaml"
-    elif fmt in {"fixed_width", "fwf"}:
-        from services.fixed_width_layout import (
-            dump_fixed_width_records,
-            resolve_dest_export_layout,
-        )
-
-        extra = endpoint.extra if isinstance(endpoint.extra, dict) else {}
-        write_opts = extra.get("write_options") if isinstance(extra.get("write_options"), dict) else {}
-        declared = extra.get("fixed_width_layout")
-        if declared in (None, "", (), []):
-            declared = write_opts.get("fixed_width_layout")
-        layout = resolve_dest_export_layout(
-            declared=declared,
-            columns=export_columns,
-            dest_types=export_dest_types,
-        )
-        fwf_rows = [
-            {c: _export_grid_cell(r.get(c), c) for c in export_columns}
-            for r in export_records
-        ]
-        content = dump_fixed_width_records(fwf_rows, layout)
-        filename = "export.fwf"
-        export_mime = "text/plain"
-        fmt = "fixed_width"
-    else:
-        if fmt not in {"json", "csv", "tsv", "jsonl", "yaml", "fixed_width"}:
-            raise ValueError(
-                f"File export format '{fmt}' is not supported — refusing to "
-                "write JSON bytes under that name"
-            )
-        records = _json_export_records(export_records)
-        content = json.dumps(
-            records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
-        ).encode("utf-8")
-        filename = "export.json"
-        export_mime = "application/json"
-    return (
-        content,
-        filename,
-        _export_summary(filename, mime=export_mime or None),
-    )
 
 
 #: Destinations whose catalog folds unquoted identifiers to one case.
@@ -2498,3 +2257,11 @@ from src.transfer.adapters_introspect import (  # noqa: E402,F401
     _introspect_table_schema,
     _introspect_table_schema_rich,
 )
+
+def __getattr__(name: str):
+    if name == "write_destination_file":
+        from src.transfer.adapters_file_write import write_destination_file
+
+        globals()[name] = write_destination_file
+        return write_destination_file
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

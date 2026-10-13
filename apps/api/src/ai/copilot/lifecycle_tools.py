@@ -1,5 +1,5 @@
 """Lifecycle operations Pilot can stage: job cancel/retry/resume/replay, connector
-test/delete, schedule pause/resume/delete.
+test/delete, schedule pause/resume/cadence/delete.
 
 Every mutation here follows the same contract as ``run_schedule_now``: the tool
 resolves the object, writes a redacted preview, stages an ack on the server
@@ -10,16 +10,21 @@ implementation with its own rules.
 
 Resolution is deliberately conservative. A job is picked by id, or by a
 status word ("the failed job", "the running transfer") only when exactly one
-job carries that status in the recent window; a connector or schedule is
-picked by the shared fuzzy matcher and any tie becomes a question.
+job carries that status in the recent window. A connector or schedule name
+matches in full (case-insensitive). Delete, update, and CDC prepare also
+refuse a dialect word. Two objects with the same name are an error.
 """
 
 from __future__ import annotations
+
+import logging
 
 import re
 from typing import TYPE_CHECKING, Any
 
 from .schema_tools import AmbiguousConnectorError, _connector_dict, _tool_result
+
+_logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .tools import ToolResult
@@ -94,13 +99,46 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "replay_quarantine",
         "description": (
-            "Stage a replay of a job's open quarantine rows through the destination "
-            "with the original mapping. Pending action until Confirm."
+            "Stage a replay of a job's open quarantine rows through the same writer "
+            "the screen uses. Pass transform_overrides to replace the cast that "
+            "quarantined the cell, and rows to send edited cell values. Without "
+            "those, the original mapping is used. Pending action until Confirm."
         ),
         "input_schema": {
             "type": "object",
-            "properties": {"job_id": {"type": "string"}, "selector": {"type": "string"}},
+            "properties": {
+                "job_id": {"type": "string"},
+                "selector": {"type": "string"},
+                "transform_overrides": {
+                    "type": "object",
+                    "description": "Source column to transform, applied on Confirm.",
+                },
+                "rows": {
+                    "type": "array",
+                    "description": "Edited quarantine records. Empty replays every open row.",
+                    "items": {"type": "object"},
+                },
+            },
             "required": [],
+        },
+    },
+    {
+        "name": "repair_cdc_drift",
+        "description": (
+            "Stage an operator-confirmed, fenced copy of selected CDC drifted rows. "
+            "This is state convergence / reconciliation, not log replay."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "key_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Key IDs from the job's drift evidence; empty selects all evidenced keys.",
+                },
+            },
+            "required": ["job_id"],
         },
     },
     {
@@ -124,6 +162,32 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {"connector_id": {"type": "string"}, "name": {"type": "string"}},
+            "required": [],
+        },
+    },
+    {
+        "name": "update_connector",
+        "description": (
+            "Stage a change to one saved connector's connection fields (host, port, "
+            "database, username, password, connection_string, schema, ssl) or its "
+            "name. Pending action until Confirm; the connector id, and every "
+            "pipeline bound to it, stay the same. Secrets are never echoed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string"},
+                "host": {"type": "string"},
+                "port": {"type": "integer"},
+                "database": {"type": "string"},
+                "username": {"type": "string"},
+                "password": {"type": "string"},
+                "connection_string": {"type": "string"},
+                "schema": {"type": "string"},
+                "ssl": {"type": "boolean"},
+                "new_name": {"type": "string"},
+            },
             "required": [],
         },
     },
@@ -155,6 +219,61 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
             "required": [],
         },
     },
+    {
+        "name": "update_schedule",
+        "description": (
+            "Stage a cadence or name change on one existing pipeline. The route, "
+            "the mapping, and the sync mode stay as they are — this does not "
+            "re-plan the transfer. An interval with no clock (hourly) clears a "
+            "previous cron. Pending action until Confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "schedule_id": {"type": "string"},
+                "name": {"type": "string", "description": "Current pipeline name"},
+                "cadence": {
+                    "type": "string",
+                    "description": "New cadence in the operator's words, e.g. daily at 03:00 UTC or hourly",
+                },
+                "new_name": {"type": "string", "description": "Rename the pipeline. Omit to keep the name."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "prepare_cdc_source",
+        "description": (
+            "Stage the server settings continuous CDC needs on one saved database. "
+            "PostgreSQL: write wal_level=logical (slots and WAL senders at 10) to "
+            "postgresql.auto.conf. Restart PostgreSQL from the host so the "
+            "postmaster reads it. MySQL: GRANT REPLICATION SLAVE, "
+            "REPLICATION CLIENT to the saved user, then persist gtid_mode=ON when "
+            "that user is allowed to. Nothing changes until Confirm. A role that "
+            "cannot run the statement is reported; a GTID is not invented."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string", "description": "Saved connector name"},
+                "restart": {
+                    "type": "boolean",
+                    "description": (
+                        "Record that the operator will restart PostgreSQL from the "
+                        "host after ALTER SYSTEM. Confirm writes postgresql.auto.conf only."
+                    ),
+                    "default": True,
+                },
+                "enable_gtid": {
+                    "type": "boolean",
+                    "description": "Persist MySQL GTID after the replication grant. Default true.",
+                    "default": True,
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 LIFECYCLE_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in LIFECYCLE_TOOL_DEFINITIONS)
@@ -166,9 +285,13 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "retry_job": "retry_job",
     "resume_job": "resume_job",
     "replay_quarantine": "replay_quarantine",
+    "repair_cdc_drift": "repair_cdc_drift",
     "delete_connector": "delete_connector",
+    "update_connector": "update_connector",
     "set_schedule_enabled": "set_schedule_enabled",
     "delete_schedule": "delete_schedule",
+    "update_schedule": "update_schedule",
+    "prepare_cdc_source": "prepare_cdc_source",
 }
 
 
@@ -183,9 +306,34 @@ def _job_brief(job: dict[str, Any]) -> dict[str, Any]:
         "destination": str(dst.get("connector_name") or dst.get("name") or dst.get("type") or ""),
         "table": str(src.get("table") or req.get("source_table") or ""),
         "rows_written": job.get("rows_written"),
-        "rejected_rows": job.get("rejected_rows"),
+        "rejected_rows": _open_quarantine_count(job),
         "progress_pct": job.get("progress_pct"),
     }
+
+
+def _open_quarantine_count(job: dict[str, Any]) -> int:
+    """Open findings, not the historical rejected_rows counter (R4-D05).
+
+    A replay that closes some rows used to keep advertising the original
+    count, so the next preview said 6 rejected when 3 were still open.
+    """
+    from services.quarantine_dlq import open_quarantine_details
+
+    stored = [
+        d
+        for d in (
+            job.get("rejected_details")
+            or (job.get("destination_summary") or {}).get("rejected_details")
+            or []
+        )
+        if isinstance(d, dict)
+    ]
+    if stored:
+        return len(open_quarantine_details(stored))
+    try:
+        return int(job.get("rejected_rows") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def resolve_job(job_id: str = "", selector: str = "") -> tuple[dict[str, Any] | None, str]:
@@ -239,7 +387,70 @@ def _stage(tool: str, *, payload: dict[str, Any], preview: dict[str, Any], label
     )
 
 
-def _job_tool(tool: str, job_id: str, selector: str) -> ToolResult:
+def normalize_quarantine_replay_edits(
+    transform_overrides: Any = None,
+    rows: Any = None,
+) -> tuple[dict[str, str], list[dict[str, Any]], str]:
+    """The edits Confirm will hand to the screen's quarantine replay.
+
+    An empty result means replay the open rows with the original mapping.
+    A non-empty error string refuses the stage — a bad edit must not become
+    an ack that Confirm then applies as the original integer cast.
+    """
+    raw_overrides = transform_overrides or {}
+    if not isinstance(raw_overrides, dict):
+        return {}, [], "transform_overrides must name each source column and its transform."
+    overrides: dict[str, str] = {}
+    for key, value in raw_overrides.items():
+        column = str(key or "").strip()
+        transform = str(value or "").strip()
+        if not column or not transform:
+            return {}, [], "Each transform override needs a source column and a transform."
+        overrides[column] = transform
+    raw_rows = rows or []
+    if not isinstance(raw_rows, list):
+        return {}, [], "rows must be a list of quarantine records."
+    edited: list[dict[str, Any]] = []
+    for item in raw_rows:
+        if not isinstance(item, dict):
+            return {}, [], "Each edited quarantine row must be an object."
+        edited.append(dict(item))
+    return overrides, edited, ""
+
+
+def _job_mapped_sources(job: dict[str, Any]) -> list[str]:
+    """Source columns the job's saved mapping reads (empty when unknown)."""
+    req = job.get("transfer_request") or {}
+    return [
+        str(m.get("source") or m.get("source_column") or "")
+        for m in (req.get("mappings") or [] if isinstance(req, dict) else [])
+        if isinstance(m, dict)
+    ]
+
+
+def _job_tool(
+    tool: str,
+    job_id: str,
+    selector: str,
+    transform_overrides: Any = None,
+    rows: Any = None,
+    key_ids: Any = None,
+) -> ToolResult:
+    if not (job_id or "").strip() and not (selector or "").strip():
+        # A mutating call with no target must not fall through to the
+        # implicit "latest job" — replay_quarantine {} silently aimed at
+        # whatever job happened to be newest (QA Q06). Naming a selector
+        # ("the last job", "the failed job") stays allowed; an empty call
+        # names nothing.
+        return _tool_result(
+            tool,
+            success=False,
+            output=None,
+            error=(
+                "Which job? Give the job_id, or name a selector like "
+                "“the last job” — a mutating call with no target is refused."
+            ),
+        )
     job, clarify = resolve_job(job_id, selector)
     if not job:
         return _tool_result(tool, success=False, output=None, error=clarify)
@@ -247,6 +458,76 @@ def _job_tool(tool: str, job_id: str, selector: str) -> ToolResult:
     status = brief["status"].lower()
     jid = brief["job_id"]
     short = short_job_id(jid)
+    if tool == "repair_cdc_drift":
+        extras = job.get("extras") if isinstance(job.get("extras"), dict) else {}
+        evidence = extras.get("cdc_drift_repair")
+        request = job.get("transfer_request") or {}
+        source = request.get("source") or {}
+        destination = request.get("destination") or {}
+        if not isinstance(evidence, dict) or evidence.get("action") != "operator_fenced_repair_required":
+            return _tool_result(
+                tool,
+                success=False,
+                output=None,
+                error="This job has no operator-fenced CDC drift evidence to repair.",
+            )
+        if (
+            str(evidence.get("source_table") or "") != str(source.get("table") or source.get("collection") or "")
+            or str(evidence.get("dest_table") or "") != str(destination.get("table") or destination.get("collection") or "")
+            or not str(job.get("cdc_lease_cursor_key") or "").strip()
+            or str(job.get("cdc_lease_cursor_key")) != str(evidence.get("cursor_key") or "")
+        ):
+            return _tool_result(
+                tool,
+                success=False,
+                output=None,
+                error="CDC drift evidence does not match this job's table or cursor.",
+            )
+        evidence_keys = evidence.get("keys")
+        if not isinstance(evidence_keys, list):
+            return _tool_result(
+                tool,
+                success=False,
+                output=None,
+                error="CDC drift evidence has no selectable key IDs.",
+            )
+        available = {
+            str(item.get("key_id") or "")
+            for item in evidence_keys
+            if isinstance(item, dict) and item.get("key_id")
+        }
+        if not isinstance(key_ids, list):
+            return _tool_result(
+                tool,
+                success=False,
+                output=None,
+                error="key_ids must be a list of evidenced key IDs.",
+            )
+        selected = [str(item) for item in key_ids] if key_ids else sorted(available)
+        if not selected or not set(selected).issubset(available):
+            return _tool_result(
+                tool,
+                success=False,
+                output=None,
+                error="Select only key IDs present in this job's CDC drift evidence.",
+            )
+        table = str(evidence.get("dest_table") or "")
+        position = evidence.get("committed_position")
+        preview = {
+            "table": table,
+            "key_count": len(selected),
+            "committed_position": position,
+        }
+        return _stage(
+            tool,
+            payload={"job_id": jid, "key_ids": selected},
+            preview=preview,
+            label=(
+                f"Re-copy {len(selected)} drifted row(s) from source "
+                "(state reconciliation, not log replay)"
+            ),
+            destructive=True,
+        )
     if tool == "cancel_job":
         if status in _TERMINAL:
             return _tool_result(tool, success=False, output=None,
@@ -266,6 +547,22 @@ def _job_tool(tool: str, job_id: str, selector: str) -> ToolResult:
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} is {status}; only a failed, cancelled or paused job can be resumed from its checkpoint.",
             )
+        from services.checkpoint_service import Checkpoint, evaluate_resume_safety
+
+        cp_raw = job.get("checkpoint")
+        safety = evaluate_resume_safety(
+            Checkpoint.from_dict(cp_raw) if isinstance(cp_raw, dict) else cp_raw,
+            job=job,
+        )
+        if not safety.get("ok"):
+            reasons = [str(r) for r in (safety.get("reasons") or []) if str(r).strip()]
+            detail = "; ".join(reasons) if reasons else "checkpoint not safe"
+            return _tool_result(
+                tool,
+                success=False,
+                output={"reasons": reasons, "honesty": safety.get("honesty")},
+                error=f"Resume refused — checkpoint not safe: {detail}",
+            )
         return _stage(tool, payload={"job_id": jid}, preview=brief,
                       label=f"Resume job {short} from its last checkpoint", destructive=False)
     if tool == "replay_quarantine":
@@ -273,28 +570,118 @@ def _job_tool(tool: str, job_id: str, selector: str) -> ToolResult:
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} has no quarantined rows to replay.",
             )
-        return _stage(tool, payload={"job_id": jid}, preview=brief,
-                      label=f"Replay quarantine rows of job {short}", destructive=False)
+        from services.quarantine_dlq import replay_quarantine_details
+
+        stored = [
+            d for d in (
+                job.get("rejected_details")
+                or (job.get("destination_summary") or {}).get("rejected_details")
+                or []
+            )
+            if isinstance(d, dict)
+        ]
+        if stored and not replay_quarantine_details(stored):
+            return _tool_result(tool, success=False, output=None,
+                error=(
+                    f"Job {short} has only SKIP_ROW (contract skip) rows — they were "
+                    "dropped by the signed Risk Contract and are kept for audit, not "
+                    "quarantined for replay. Re-run the transfer without the SKIP_ROW "
+                    "contract to load them."
+                ),
+            )
+        overrides, edited, edit_error = normalize_quarantine_replay_edits(
+            transform_overrides, rows
+        )
+        if not edit_error and overrides:
+            from services.transform_engine import transform_override_refusal
+
+            edit_error = transform_override_refusal(
+                overrides, _job_mapped_sources(job)
+            )
+            if edit_error:
+                _logger.warning("replay_quarantine %s: override refused: %s", short, edit_error)
+        if edit_error:
+            return _tool_result(tool, success=False, output=None, error=edit_error)
+        payload = {"job_id": jid}
+        if overrides:
+            brief["transform_overrides"] = overrides
+            payload["transform_overrides"] = overrides
+        if edited:
+            brief["edited_rows"] = len(edited)
+            payload["rows"] = edited
+        label = f"Replay quarantine rows of job {short}"
+        if overrides or edited:
+            label += " with the staged cell edits"
+        return _stage(tool, payload=payload, preview=brief, label=label, destructive=False)
     return _tool_result(tool, success=False, output=None, error=f"Unknown job tool {tool}")
 
 
 def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
-    return {
+    ctype = str(conn.get("type") or conn.get("format") or "")
+    # Role is the driver's declared topology, not a stale stored string —
+    # connectors saved before role normalization (pgvector with role=both)
+    # would keep reporting the wrong side forever (QA C09).
+    from services.connector_store import normalize_connector_role
+
+    host = str(conn.get("host") or "")
+    port = int(conn.get("port") or 0)
+    effective_host, effective_port = host, port
+    # A connection string overrides the stored host field — the probe dials
+    # the URL's authority, so reporting the form's 'localhost' misreports the
+    # real endpoint on failures (QA C04).
+    conn_str = str(conn.get("connection_string") or "")
+    if conn_str:
+        try:
+            from connectors.url_authority import parse_url_authority
+
+            auth = parse_url_authority(conn_str)
+            if auth.host:
+                effective_host, effective_port = (
+                    auth.host,
+                    auth.port or effective_port,
+                )
+        except Exception:
+            pass
+    brief = {
         "connector_id": str(conn.get("id") or conn.get("connector_id") or ""),
         "name": str(conn.get("name") or ""),
-        "type": str(conn.get("type") or conn.get("format") or ""),
-        "host": str(conn.get("host") or ""),
+        "type": ctype,
+        "host": host,
         "database": str(conn.get("database") or ""),
-        "role": str(conn.get("role") or ""),
+        "role": normalize_connector_role(ctype, str(conn.get("role") or "")),
+        "effective_host": effective_host,
+        "effective_port": effective_port,
     }
+    if (effective_host, effective_port) != (host, port):
+        brief["host_note"] = (
+            f"Probe targets {effective_host}:{effective_port} from the "
+            "connection string — the stored host field is not what is dialed."
+        )
+    return brief
 
 
-def _connector(tool: str, connector_id: str, name: str) -> tuple[dict[str, Any] | None, ToolResult | None]:
+# Delete, in-place edit, and CDC prepare write or destroy an instance.
+# A dialect word or a shared token is not enough to choose which one.
+_EXACT_NAME_TOOLS = frozenset({
+    "delete_connector",
+    "update_connector",
+    "prepare_cdc_source",
+})
+
+
+def _connector(
+    tool: str,
+    connector_id: str,
+    name: str,
+    *,
+    exact_name: bool | None = None,
+) -> tuple[dict[str, Any] | None, ToolResult | None]:
     if not (connector_id or "").strip() and not (name or "").strip():
         return None, _tool_result(tool, success=False, output=None,
                                 error="Which connector? Name a saved connector from Connectors.")
+    strict = tool in _EXACT_NAME_TOOLS if exact_name is None else exact_name
     try:
-        conn = _connector_dict(connector_id, name)
+        conn = _connector_dict(connector_id, name, exact_name=strict)
     except AmbiguousConnectorError as exc:
         return None, _tool_result(tool, success=False, output=None, error=exc.message)
     if not conn:
@@ -302,6 +689,121 @@ def _connector(tool: str, connector_id: str, name: str) -> tuple[dict[str, Any] 
             error=f"No connector matched “{name or connector_id}”. Name a saved connector from Connectors.",
         )
     return conn, None
+
+
+def describe_cdc_prepare(engine: str) -> dict[str, Any]:
+    """Operator text for CDC setup. Only Postgres and MySQL-family engines are staged.
+
+    SQL Server, Oracle, and TimescaleDB used to receive the MySQL grant
+    preview, marked destructive, even though Confirm cannot run that SQL
+    on those engines.
+    """
+    key = (engine or "").strip().lower()
+    if key in {"postgresql", "postgres"}:
+        return {
+            "stage": True,
+            "change": (
+                "ALTER SYSTEM wal_level=logical, max_replication_slots=10, "
+                "max_wal_senders=10. Restart PostgreSQL from the host afterward"
+            ),
+        }
+    if key == "mysql":
+        return {
+            "stage": True,
+            "change": (
+                "GRANT REPLICATION SLAVE, REPLICATION CLIENT, then persist "
+                "gtid_mode when allowed"
+            ),
+        }
+    if key == "mariadb":
+        return {
+            "stage": True,
+            "change": (
+                "GRANT REPLICATION SLAVE, REPLICATION CLIENT on MariaDB. "
+                "gtid_mode is MySQL-only and is not applied."
+            ),
+        }
+    if key in {
+        "sqlserver",
+        "mssql",
+        "microsoft_sql_server",
+        "sql_server",
+        "azure_sql",
+        "azure_sql_database",
+        "amazon_rds_sql_server",
+    }:
+        return {
+            "stage": False,
+            "change": (
+                "SQL Server CDC is enabled with sys.sp_cdc_enable_db and "
+                "sys.sp_cdc_enable_table. No MySQL replication grant was staged."
+            ),
+        }
+    if key == "oracle":
+        return {
+            "stage": False,
+            "change": (
+                "Oracle CDC needs supplemental logging and LogMiner privileges. "
+                "No MySQL replication grant was staged."
+            ),
+        }
+    if key in {"timescaledb", "timescale"}:
+        return {
+            "stage": False,
+            "change": (
+                "CDC is not supported for source type 'timescaledb'. "
+                "No server change was staged."
+            ),
+        }
+    label = key or "this engine"
+    return {
+        "stage": False,
+        "change": (
+            f"CDC server prerequisites are not defined for {label}. "
+            "No grant was staged."
+        ),
+    }
+
+
+def prepare_cdc_source(
+    connector_id: str = "",
+    name: str = "",
+    restart: bool = True,
+    enable_gtid: bool = True,
+) -> ToolResult:
+    """Stage logical decoding or the MySQL replication grant. Confirm applies it."""
+    conn, err = _connector("prepare_cdc_source", connector_id, name)
+    if err:
+        return err
+    assert conn is not None
+    brief = _connector_brief(conn)
+    engine = str(brief.get("type") or conn.get("type") or "")
+    described = describe_cdc_prepare(engine)
+    if not described.get("stage"):
+        return _tool_result(
+            "prepare_cdc_source",
+            success=False,
+            output={**brief, "change": described.get("change"), "staged": False},
+            error=str(described.get("change") or "CDC setup was not staged."),
+        )
+    preview = {
+        **brief,
+        "restart": bool(restart),
+        "enable_gtid": bool(enable_gtid) and engine.strip().lower() == "mysql",
+        "change": described["change"],
+    }
+    return _stage(
+        "prepare_cdc_source",
+        payload={
+            "connector_id": brief["connector_id"],
+            "name": brief["name"],
+            "restart": bool(restart),
+            "enable_gtid": bool(preview["enable_gtid"]),
+        },
+        preview=preview,
+        label=f"Prepare CDC on {brief['name']}",
+        destructive=True,
+    )
 
 
 def test_connector(connector_id: str = "", name: str = "") -> ToolResult:
@@ -335,6 +837,102 @@ def delete_connector(connector_id: str = "", name: str = "") -> ToolResult:
         preview=preview,
         label=f"Delete connector “{brief['name']}”",
         destructive=True,
+    )
+
+
+_CONNECTOR_SECRET_FIELDS = frozenset({"password", "connection_string"})
+
+
+def update_connector(  # nosec B107
+    connector_id: str = "",
+    name: str = "",
+    *,
+    host: str = "",
+    port: int = 0,
+    database: str = "",
+    username: str = "",
+    password: str = "",
+    connection_string: str = "",
+    schema: str = "",
+    ssl: bool | None = None,
+    new_name: str = "",
+    host_key: str = "",
+) -> ToolResult:
+    """Stage an in-place connector edit; Confirm applies it via ``PUT /saved-connectors``.
+
+    Empty values mean "unchanged". The payload keeps the new secrets on the
+    server-side ack ledger; the preview only says that a secret changed.
+    An SFTP host-key pin is not editable here: the PUT body
+    (``ConnectorSaveDTO``) has no trust fields, so a staged pin would be
+    dropped on Confirm while the preview claimed it changed.
+    """
+    if (host_key or "").strip():
+        _logger.warning("update_connector refused an SFTP host-key change for %r", connector_id or name)
+        return _tool_result(
+            "update_connector",
+            success=False,
+            output=None,
+            error=(
+                "update_connector cannot change an SFTP host key pin — the saved-connector "
+                "update has no host-key field, so the new pin would not be stored. After "
+                "verifying the new fingerprint with the server admin, save it with "
+                "create_connector(host_key=SHA256:...) as a new connector."
+            ),
+        )
+    conn, err = _connector("update_connector", connector_id, name)
+    if err:
+        return err
+    assert conn is not None
+    brief = _connector_brief(conn)
+    requested: dict[str, Any] = {
+        "host": (host or "").strip(),
+        "port": int(port or 0),
+        "database": (database or "").strip(),
+        "username": (username or "").strip(),
+        "password": password or "",
+        "connection_string": (connection_string or "").strip(),
+        "schema": (schema or "").strip(),
+        "name": (new_name or "").strip(),
+    }
+    changes = {k: v for k, v in requested.items() if v and v != conn.get(k)}
+    if ssl is not None and bool(ssl) != bool(conn.get("ssl")):
+        changes["ssl"] = bool(ssl)
+    if not changes:
+        return _tool_result(
+            "update_connector",
+            success=False,
+            output=None,
+            error=(
+                f"What should change on “{brief['name']}”? Give a host, port, database, "
+                "username, password, connection string, schema, ssl or a new name."
+            ),
+        )
+    if "name" in changes:
+        try:
+            clash = _connector_dict("", changes["name"])
+        except AmbiguousConnectorError:
+            clash = {"id": "<several>"}
+        if clash and str(clash.get("id") or "") != brief["connector_id"]:
+            return _tool_result(
+                "update_connector",
+                success=False,
+                output=None,
+                error=f"A connector named “{changes['name']}” already exists. Pick another name.",
+            )
+    shown = {
+        k: ("(changed — hidden)" if k in _CONNECTOR_SECRET_FIELDS else v)
+        for k, v in changes.items()
+    }
+    _logger.info(
+        "update_connector staged for %s (%s): fields=%s",
+        brief["connector_id"], brief["type"], sorted(changes),
+    )
+    return _stage(
+        "update_connector",
+        payload={"connector_id": brief["connector_id"], "name": brief["name"], "changes": changes},
+        preview={**brief, "changes": shown, "bound_schedules": _schedules_bound_to(brief["connector_id"])},
+        label=f"Update connector “{brief['name']}”",
+        destructive=False,
     )
 
 
@@ -407,6 +1005,110 @@ def delete_schedule(resolver: Any, schedule_id: str = "", name: str = "") -> Too
         preview=preview,
         label=f"Delete pipeline “{sched.name}”",
         destructive=True,
+    )
+
+
+def update_schedule(
+    resolver: Any,
+    schedule_id: str = "",
+    name: str = "",
+    cadence: str = "",
+    new_name: str = "",
+) -> ToolResult:
+    """Stage a clock or name change. The route is not re-planned.
+
+    Confirm applies the patch through ``patch_pipeline_schedule``. A cadence
+    that has no cron sends ``cron=""`` so a previous clock is cleared — omitting
+    the field would keep the old cron. Mappings, connectors, and sync mode are
+    left off the payload, so a down source cannot block a clock change and a
+    later re-map cannot replace the approved contract.
+    """
+    sched, err = _schedule("update_schedule", resolver, schedule_id, name)
+    if err:
+        return err
+    from .schedule_cadence import parse_cadence
+
+    cadence_text = (cadence or "").strip()
+    renamed = (new_name or "").strip()
+    current_name = str(getattr(sched, "name", "") or "")
+    if not cadence_text and not renamed:
+        return _tool_result(
+            "update_schedule",
+            success=False,
+            output=None,
+            error=(
+                "What should change? Give a cadence (hourly, daily at 03:00 UTC) "
+                "or a new name. The route and the mapping stay as they are."
+            ),
+        )
+
+    current_interval = str(getattr(sched, "interval", "") or "")
+    current_cron = str(getattr(sched, "cron", "") or "")
+    current_tz = str(getattr(sched, "timezone", "") or "UTC")
+    payload: dict[str, Any] = {"schedule_id": sched.id}
+    preview: dict[str, Any] = {
+        "schedule_id": sched.id,
+        "name": current_name,
+        "interval": current_interval,
+        "cron": current_cron,
+        "timezone": current_tz,
+        "enabled": bool(getattr(sched, "enabled", True)),
+    }
+    label_bits: list[str] = []
+
+    if cadence_text:
+        spec = parse_cadence(cadence_text)
+        if not spec.resolved:
+            return _tool_result("update_schedule", success=False, output=None, error=spec.question)
+        # A phrase with no zone must not move the pipeline onto UTC.
+        # "every 15 minutes" on an America/New_York schedule did that
+        # (QA TC50 / RT5-09). Name a zone to change it.
+        zone_after = current_tz if spec.timezone_assumed else spec.timezone
+        same_clock = (spec.interval, spec.cron, zone_after) == (
+            current_interval,
+            current_cron,
+            current_tz,
+        )
+        if not same_clock:
+            # cron is always present, including "" — an hourly spec must clear
+            # a previous "0 2 * * *" rather than leave it beside interval=hourly.
+            payload["interval"] = spec.interval
+            payload["cron"] = spec.cron
+            payload["timezone"] = zone_after
+            preview["interval_after"] = spec.interval
+            preview["cron_after"] = spec.cron
+            preview["timezone_after"] = zone_after
+            preview["cadence"] = spec.description
+            if spec.timezone_assumed:
+                preview["timezone_note"] = (
+                    f"No timezone was named, so {current_tz} stays. "
+                    "Say e.g. “in Asia/Kolkata” to change it."
+                )
+            label_bits.append(spec.description)
+
+    if renamed and renamed != current_name:
+        payload["name"] = renamed
+        preview["name_after"] = renamed
+        label_bits.append(f"rename to “{renamed}”")
+
+    if "interval" not in payload and "name" not in payload:
+        if cadence_text and renamed:
+            detail = f"Pipeline “{current_name}” already has that cadence and that name."
+        elif cadence_text:
+            detail = f"Pipeline “{current_name}” is already on that cadence."
+        else:
+            detail = f"Pipeline “{current_name}” already has that name."
+        return _tool_result("update_schedule", success=False, output=None, error=detail)
+
+    label = f"Update pipeline “{current_name}”"
+    if label_bits:
+        label = f"{label} — {', '.join(label_bits)}"
+    return _stage(
+        "update_schedule",
+        payload=payload,
+        preview=preview,
+        label=label,
+        destructive=False,
     )
 
 
@@ -533,6 +1235,38 @@ def plan_lifecycle_operation(message: str) -> list[tuple[str, dict[str, Any]]] |
         return [("delete_connector", {"name": name} if name else {})]
 
     # --- schedules ------------------------------------------------------
+    # Cadence and rename are a patch of the existing pipeline. They are
+    # matched before pause/delete so "change the cadence of pipeline X" is
+    # not read as a new schedule or as a delete.
+    rename = re.search(
+        rf"\brename\s+{_ART}{_SCHED_NOUN}\s+(?P<name>.+?)\s+to\s+(?P<new>.+?)\s*$",
+        lower,
+    )
+    if rename:
+        new_label = text[rename.start("new"):rename.end("new")].strip(" .,!?\"'“”")
+        args: dict[str, Any] = {"new_name": new_label}
+        named = _named(text, rename)
+        if named:
+            args["name"] = named
+        return [("update_schedule", args)]
+    cadence_change = re.search(
+        rf"\b(?:change|update|reschedule)\s+(?:the\s+)?cadence\s+of\s+{_ART}{_SCHED_NOUN}\s+"
+        rf"(?P<name>.+?)\s+to\s+(?P<cadence>.+?)\s*$",
+        lower,
+    ) or re.search(
+        rf"\breschedule\s+{_ART}{_SCHED_NOUN}\s+(?P<name>.+?)\s+to\s+(?P<cadence>.+?)\s*$",
+        lower,
+    )
+    if cadence_change:
+        cadence_label = text[cadence_change.start("cadence"):cadence_change.end("cadence")].strip(
+            " .,!?\"'“”"
+        )
+        args = {"cadence": cadence_label}
+        named = _named(text, cadence_change)
+        if named:
+            args["name"] = named
+        return [("update_schedule", args)]
+
     for tool, verb, enabled in (
         ("set_schedule_enabled", _PAUSE, False),
         ("set_schedule_enabled", _ENABLE, True),

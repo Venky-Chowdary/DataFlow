@@ -9,6 +9,7 @@ import {
   mappingMapBand,
   partitionMapBands,
   shouldCollapseSafeBand,
+  shouldCollapseReadyBand,
 } from "./mapSafeBand.js";
 
 function m(partial: Partial<EditableMapping> & Pick<EditableMapping, "source">): EditableMapping {
@@ -82,5 +83,21 @@ describe("mapSafeBand — fail-closed classification", () => {
     assert.equal(bands.ready.length, 1);
     assert.equal(shouldCollapseSafeBand(bands), true);
     assert.equal(shouldCollapseSafeBand({ ...bands, safe: bands.safe.slice(0, 1) }), false);
+    assert.equal(shouldCollapseReadyBand(bands), false);
+  });
+
+  it("keeps an all-approved map on screen and folds ready rows only beside other work", () => {
+    const approved = [0, 1, 2].map((index) => ({
+      index,
+      mapping: m({ source: `c${index}`, approved: true }),
+    }));
+    const onlyReady = partitionMapBands(approved);
+    assert.equal(shouldCollapseReadyBand(onlyReady), false);
+
+    const withIssue = partitionMapBands([
+      ...approved,
+      { index: 3, mapping: m({ source: "risk", fidelity: "lossy_cast", riskAckRequired: true }) },
+    ]);
+    assert.equal(shouldCollapseReadyBand(withIssue), true);
   });
 });

@@ -7,7 +7,7 @@ import json
 import logging
 import sqlite3
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -170,6 +170,7 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
                 f"SQLite {upper} refuses timezone-aware wire (would strip offset). "
                 "Map to TIMESTAMPTZ or provide a naive wall-clock value."
             )
+        tz_carrier = upper in {"TIMESTAMP_TZ", "TIMESTAMPTZ", "TIMESTAMP_LTZ"}
 
         try:
             coerced = coerce_sql_temporal(
@@ -181,6 +182,18 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
         except ValueError:
             # Fail-closed at row bind — never invent NULL from empty temporal.
             raise
+        # A TZ carrier stores RFC 3339 UTC with an explicit "+00:00". The
+        # declared TIMESTAMPTZ token is not read back by any reader, so a bare
+        # UTC clock re-read as naive and our own table failed to load into a
+        # PostgreSQL TIMESTAMPTZ (MXD07). SQLite's date functions accept the
+        # offset; the naive COPY reader declines it to the row path.
+        if (
+            tz_carrier
+            and isinstance(coerced, datetime)
+            and coerced.tzinfo is not None
+            and coerced.utcoffset() is not None
+        ):
+            return coerced.astimezone(timezone.utc).isoformat()
         if wire is not None:
             return wire
         if coerced is None:
@@ -577,6 +590,7 @@ def _sqlite_upsert_batch(
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
     row_offset: int = 0,
+    allow_equal_lsn: bool = False,
 ) -> tuple[int, int]:
     """Upsert with optional ``_df_lsn`` monotonic guard (at-least-once CDC).
 
@@ -620,6 +634,7 @@ def _sqlite_upsert_batch(
             target_cols,
             quote='"',
             placeholder="?",
+            allow_equal_lsn=allow_equal_lsn,
         )
     else:
         skipped = 0
@@ -638,7 +653,9 @@ def _sqlite_upsert_batch(
     conflict_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
 
     if lsn_guarded and update_cols:
-        where_sql = sqlite_lsn_update_guard_sql(table_name)
+        where_sql = sqlite_lsn_update_guard_sql(
+            table_name, allow_equal_lsn=allow_equal_lsn
+        )
         set_sql = ", ".join(
             f"{quote_sql_identifier(c)}=excluded.{quote_sql_identifier(c)}"
             for c in update_cols
@@ -748,6 +765,69 @@ def _sqlite_update_insert_upsert(
     return len(rows)
 
 
+def _sqlite_duplicate_key_message(
+    exc: BaseException,
+    conflict_cols: list[str],
+    target_cols: list[str],
+    batch: list[Any],
+) -> str:
+    """Name the key columns and the first row's key values (QA R2-071)."""
+    names = [c for c in conflict_cols if c in target_cols]
+    sample = ""
+    if names and batch:
+        row = batch[0]
+        parts = []
+        for name in names:
+            idx = target_cols.index(name)
+            value = row[idx] if isinstance(row, (list, tuple)) and idx < len(row) else "?"
+            parts.append(f"{name}={value!r}")
+        sample = ", ".join(parts)
+    key = ", ".join(names) or "PRIMARY KEY"
+    detail = f" — first row {sample}" if sample else ""
+    return f"duplicate key ({key}){detail}: {exc}"
+
+
+def _publish_sqlite_stage(
+    conn: Any,
+    *,
+    stage_quoted: str,
+    stage_name: str,
+    live_name: str,
+    columns: list[str],
+) -> None:
+    """Swap the staged load onto the live name in one transaction.
+
+    A reader sees the previous snapshot until this commits, then the full new
+    snapshot. A failure leaves the live table untouched.
+    """
+    live_quoted = quote_sql_identifier(live_name)
+    with conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (live_name,),
+        )
+        live_exists = cur.fetchone() is not None
+        if not live_exists:
+            cur.execute(f"ALTER TABLE {stage_quoted} RENAME TO {live_quoted}")
+            return
+        col_sql = ", ".join(quote_sql_identifier(c) for c in columns)
+        try:
+            cur.execute("SAVEPOINT df_stage_pub")
+            cur.execute(f"DELETE FROM {live_quoted}")
+            cur.execute(
+                f"INSERT INTO {live_quoted} ({col_sql}) "
+                f"SELECT {col_sql} FROM {stage_quoted}"
+            )
+            cur.execute(f"DROP TABLE {stage_quoted}")
+            cur.execute("RELEASE df_stage_pub")
+        except sqlite3.Error:
+            cur.execute("ROLLBACK TO df_stage_pub")
+            cur.execute(f"DROP TABLE {live_quoted}")
+            cur.execute(f"ALTER TABLE {stage_quoted} RENAME TO {live_quoted}")
+    del stage_name
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -833,6 +913,18 @@ def write_mapped_rows(
             )
 
     table_name = sanitize_identifier(table_name, preserve_case=True)
+    live_table_name = table_name
+    atomic_overwrite = bool(_kwargs.get("atomic_overwrite"))
+    stage_batch_idx = int(_kwargs.get("file_batch_idx") or 0)
+    stage_total = max(1, int(_kwargs.get("total_chunks") or 1))
+    publish_stage = False
+    if atomic_overwrite:
+        # Readers keep the previous snapshot until the last chunk swaps the
+        # stage table in one transaction (QA R2-035).
+        table_name = sanitize_identifier(
+            f"{live_table_name}__df_stage", preserve_case=True
+        )
+        publish_stage = stage_batch_idx + 1 >= stage_total
     table_quoted = quote_sql_identifier(table_name)
     # Prefer Studio-probed live DDL over Map stamps (BOOLEAN→TEXT invent cliff).
     from connectors.writer_common import resolve_studio_or_map_dest_types
@@ -1218,14 +1310,20 @@ def write_mapped_rows(
                     )
 
                     try:
+                        recreate_stage = atomic_overwrite and stage_batch_idx == 0
+                        if recreate_stage:
+                            cur.execute(f"DROP TABLE IF EXISTS {table_quoted}")
                         fidelity_plan = resolve_create_fidelity_plan(
                             source_schema_catalog=_kwargs.get("source_schema_catalog"),
                             mappings=mappings,
                             target_columns=target_cols,
                             target_types=target_types,
                             dest_dialect="sqlite",
-                            table_already_exists=bool(table_existed),
-                            dest_table=table_name,
+                            table_already_exists=bool(table_existed) and not recreate_stage,
+                            dest_table=live_table_name,
+                            carry_keys=write_mode != "insert"
+                            or bool(_kwargs.get("carry_source_keys")),
+                            operator_key_columns=list(conflict_cols),
                         )
                     except Exception as exc:
                         logger.warning(
@@ -1425,11 +1523,19 @@ def write_mapped_rows(
                                     rejected_details=rejected_details,
                                     policy=policy,
                                     row_offset=start,
+                                    allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
                                 )
                                 written += chunk_written
                                 rows_skipped += chunk_skipped
                             else:
-                                cur.executemany(insert, batch)
+                                try:
+                                    cur.executemany(insert, batch)
+                                except sqlite3.IntegrityError as exc:
+                                    raise sqlite3.IntegrityError(
+                                        _sqlite_duplicate_key_message(
+                                            exc, conflict_cols, target_cols, batch
+                                        )
+                                    ) from exc
                                 written += len(batch)
                                 if use_ledger:
                                     mark_raw_chunk_committed(
@@ -1446,6 +1552,9 @@ def write_mapped_rows(
                         if on_checkpoint:
                             on_checkpoint(chunk_idx + 1, max(chunks, chunk_idx + 1), written)
                         chunk_idx += 1
+                    write_acc.note_collapsed_duplicates(
+                        finished.collapsed_duplicate_rows
+                    )
                     write_acc.add_accepted(dense)
                     row_offset += len(dense)
                 del finished
@@ -1462,6 +1571,7 @@ def write_mapped_rows(
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,
+                collapsed_duplicates=write_acc.collapsed_duplicate_rows,
             )
             coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
             _final_abort = reject_on_strict_policy(policy, rejected_details, "SQLite")
@@ -1484,6 +1594,15 @@ def write_mapped_rows(
                     warnings=transform_errors,
                 )
 
+            if publish_stage:
+                _publish_sqlite_stage(
+                    conn,
+                    stage_quoted=table_quoted,
+                    stage_name=table_name,
+                    live_name=live_table_name,
+                    columns=target_cols,
+                )
+                table_name = live_table_name
             meta_out = write_acc.gate8_meta(conflict_columns=conflict_cols or None)
             fid_report = _kwargs.get("_schema_fidelity_report")
             if isinstance(fid_report, dict):

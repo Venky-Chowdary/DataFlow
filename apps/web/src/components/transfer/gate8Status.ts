@@ -115,6 +115,77 @@ export function isGate8KeyedBatch(report: Gate8Reconciliation | null | undefined
   return String(report.checksum_scope || "").toLowerCase() === "written_batch_keys";
 }
 
+/** True when the job digest is the last table of a multi-table run. */
+export function isGate8LastStream(report: Gate8Reconciliation | null | undefined): boolean {
+  if (!report) return false;
+  return String(report.checksum_scope || "").toLowerCase() === "last_stream";
+}
+
+const NARROW_GATE8_SCOPES = new Set([
+  "whole_table_not_comparable",
+  "written_batch_keys",
+  "cdc_source_image_count",
+  "no_op_destination_unchanged",
+  "last_stream",
+]);
+
+/** Sum stored per-stream dest COUNT(*) values. ``true`` is not a count. */
+export function jobDestCountFromStreams(streams: unknown): number | undefined {
+  if (!Array.isArray(streams) || streams.length === 0) return undefined;
+  let sum = 0;
+  let measured = 0;
+  for (const row of streams) {
+    if (!row || typeof row !== "object") return undefined;
+    const ledger = (row as { row_accounting?: { dest_count?: unknown } }).row_accounting;
+    const count = ledger?.dest_count;
+    if (typeof count !== "number" || !Number.isInteger(count) || count < 0) return undefined;
+    sum += count;
+    measured += 1;
+  }
+  return measured === streams.length ? sum : undefined;
+}
+
+/**
+ * Present a stored multi-table Gate-8 report.
+ *
+ * New runs already carry ``checksum_scope: last_stream`` from
+ * ``qualify_multi_stream_reconciliation``. Jobs written before that stamp
+ * still say the last table's digest proved the whole transfer. This only
+ * relabels that stored report for display. It does not recompute a checksum.
+ */
+export function presentMultiStreamGate8<T extends Gate8Reconciliation>(
+  report: T | null | undefined,
+  summary: { multi_stream?: unknown; streams?: unknown } | null | undefined,
+): T | null | undefined {
+  if (!report || !summary || summary.multi_stream !== true) return report;
+  const streams = Array.isArray(summary.streams) ? summary.streams : [];
+  if (streams.length < 2) return report;
+  const scope = String(report.checksum_scope || "").toLowerCase();
+  if (NARROW_GATE8_SCOPES.has(scope)) return report;
+  const assurance = String(report.assurance_level || "").toLowerCase();
+  const coverage = String(report.coverage || "").toLowerCase();
+  const message = String(report.message || "").trim();
+  const rows = report.source_rows ?? report.target_rows;
+  const rowLabel = rows == null ? "the last stream" : `${rows} rows`;
+  const honest = /not the whole job/i.test(message)
+    ? message
+    : /^row fidelity verified/i.test(message)
+      ? `Checksum matches the last stream (${rowLabel}). This digest is not the ${streams.length}-stream job.`
+      : `${message} This digest is not the whole job.`.trim();
+  const jobDest = typeof report.job_dest_count === "number" && Number.isInteger(report.job_dest_count)
+    ? report.job_dest_count
+    : jobDestCountFromStreams(streams);
+  return {
+    ...report,
+    checksum_scope: "last_stream",
+    migration_proven: false,
+    assurance_level: assurance === "full_checksum" ? "per_stream_checksum" : report.assurance_level,
+    coverage: coverage === "full_checksum" ? "per_stream_checksum" : report.coverage,
+    message: honest,
+    ...(jobDest != null ? { job_dest_count: jobDest } : {}),
+  };
+}
+
 /** Dest-before identity for Full Append / keyed extra dest. Display-only — never recompute conservation. */
 export function gate8AppendIdentity(report: Gate8Reconciliation): {
   destBefore: number | null;
@@ -199,6 +270,9 @@ export function classifyGate8Status(
   }
   if (isGate8WritePassDestReadback(report)) {
     return { label: "Write-pass + dest read-back", tone: "warn", fullPass: false };
+  }
+  if (isGate8LastStream(report) && report.passed === true) {
+    return { label: "Last stream checksum", tone: "warn", fullPass: false };
   }
   const provenance = String(report.source_checksum_provenance || "").toLowerCase();
   if (

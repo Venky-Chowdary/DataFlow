@@ -230,18 +230,25 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       assurance === "write_pass_dest_readback"
       || phase.includes("write_pass");
     const appendDelta = isAppendDeltaProof(recon);
+    const lastStream =
+      String(recon.checksum_scope || "").toLowerCase() === "last_stream"
+      || assurance === "per_stream_checksum";
     const fullChecksum =
-      assurance === "full_checksum"
-      || (
-        passed === true
-        && Boolean(recon.source_checksum)
-        && Boolean(recon.target_checksum)
-        && String(recon.source_checksum) === String(recon.target_checksum)
-        && !writerAck
-        && !sample
-        && !writePass
-        && !unproven
-        && !appendDelta
+      !lastStream
+      && (
+        assurance === "full_checksum"
+        || (
+          passed === true
+          && Boolean(recon.source_checksum)
+          && Boolean(recon.target_checksum)
+          && String(recon.source_checksum) === String(recon.target_checksum)
+          && !writerAck
+          && !sample
+          && !writePass
+          && !unproven
+          && !appendDelta
+          && String(recon.checksum_scope || "").toLowerCase() !== "last_stream"
+        )
       );
     const preWrite =
       preview
@@ -251,7 +258,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
 
     let reconScore = 70;
     const fidelity = recon.row_fidelity_score;
-    if (typeof fidelity === "number" && Number.isFinite(fidelity)) {
+    if (lastStream && passed !== false) {
+      reconScore = 70;
+    } else if (typeof fidelity === "number" && Number.isFinite(fidelity)) {
       reconScore = fidelity <= 1 ? fidelity * 100 : Math.max(0, Math.min(100, fidelity));
     } else if (passed === false) {
       reconScore = 18;
@@ -289,6 +298,8 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       rNote = "Sample-verified Gate-8 — not full independent checksum.";
     } else if (appendDelta) {
       rNote = "Gate-8 append delta verified — whole-table checksums are not comparable; per-cell fidelity is not proven.";
+    } else if (lastStream) {
+      rNote = "Checksum matches the last stream only — not a single digest for the multi-table job.";
     } else if (missing || extra) {
       rNote = `Keys missing=${missing} extra=${extra}.`;
     } else if (fullChecksum) {
@@ -368,8 +379,10 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       && recon?.unproven !== true
       && recon?.skipped_readback !== true
       && assurance !== "row_count"
+      && assurance !== "per_stream_checksum"
       && !phase.includes("row_count")
-      && String(recon?.checksum_scope || "") !== "whole_table_not_comparable"
+      && String(recon?.checksum_scope || "").toLowerCase() !== "whole_table_not_comparable"
+      && String(recon?.checksum_scope || "").toLowerCase() !== "last_stream"
     );
   if (!recon) {
     score = Math.min(score, 84);

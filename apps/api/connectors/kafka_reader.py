@@ -12,6 +12,8 @@ Crash mid-write redelivers — at-least-once.
 from __future__ import annotations
 
 import logging
+import re
+import time
 import sys
 from pathlib import Path
 from typing import Any
@@ -29,6 +31,65 @@ if str(_api_root) not in sys.path:
 from services.value_serializer import cell_to_string
 
 
+def accepted_kafka_configs(kwargs: dict[str, Any], accepted: set[str] | None) -> dict[str, Any]:
+    """Drop client configs this kafka-python build does not recognize.
+
+    ``api_version_auto_timeout_ms`` is a real kafka-python timeout on some
+    releases and ``KafkaConfigurationError: Unrecognized configs`` on others.
+    Topic listing used to fail closed on that mismatch and Gate-2 then reported
+    the topic as unknown.
+    """
+    if not accepted:
+        return dict(kwargs)
+    return {key: value for key, value in kwargs.items() if key in accepted}
+
+
+def _consumer_configs(cfg: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    # SASL login is mapped once for every kafka-python client; a consumer
+    # without it never authenticates and the broker only "times out" (MX1-03).
+    from services.copy_kafka_common import kafka_client_kwargs
+
+    kwargs: dict[str, Any] = kafka_client_kwargs(cfg)
+    kwargs.update(extra)
+    try:
+        from kafka import KafkaConsumer
+    except ImportError:
+        return kwargs
+    accepted = set(getattr(KafkaConsumer, "DEFAULT_CONFIG", {}) or {})
+    return accepted_kafka_configs(kwargs, accepted or None)
+
+
+def list_topics(cfg: dict[str, Any]) -> list[str]:
+    """User topics on the cluster. Internal topics (``_`` prefix) stay out.
+
+    An empty list is a real empty cluster, not a missing dialect. Import
+    failure is raised so the caller can say kafka-python is absent.
+    """
+    try:
+        from kafka import KafkaConsumer
+    except ImportError as exc:
+        raise ImportError("kafka-python is required to list Kafka topics") from exc
+
+    from services.copy_kafka_common import kafka_classified_bootstrap
+
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+                api_version_auto_timeout_ms=8000,
+            )
+        )
+    try:
+        names = consumer.topics() or set()
+    finally:
+        consumer.close()
+    return sorted(
+        name for name in names if name and not str(name).startswith("_")
+    )
+
+
 def _bootstrap(cfg: dict[str, Any]) -> str:
     cs = str(cfg.get("connection_string") or "").strip()
     if cs:
@@ -38,7 +99,7 @@ def _bootstrap(cfg: dict[str, Any]) -> str:
             return cs.replace("bootstrap.servers=", "").strip()
     host = str(cfg.get("host") or cfg.get("bootstrap_servers") or "localhost").strip()
     port = int(cfg.get("port") or 9092)
-    if "," in host:
+    if "," in host or re.search(r"(^[^:]+|\])(:\d+)$", host):
         return host
     return f"{host}:{port}"
 
@@ -91,18 +152,28 @@ def commit_kafka_offsets(cfg: dict[str, Any], cursor: dict[str, Any] | None) -> 
         tps_meta[tp] = OffsetAndMetadata(int(item["offset"]), None, -1)
     if not tps_meta:
         return
-    consumer = KafkaConsumer(
-        bootstrap_servers=_bootstrap(cfg),
-        group_id=group_id,
-        enable_auto_commit=False,
-        consumer_timeout_ms=2000,
-        request_timeout_ms=8000,
-    )
+    from services.copy_kafka_common import kafka_classified_bootstrap
+
+    # Same SASL mapping as every other client: a consumer without it never
+    # authenticates and the fail-closed commit fails the job (MX1-03).
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                group_id=group_id,
+                enable_auto_commit=False,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+            )
+        )
     try:
         consumer.assign(tps)
         consumer.commit(tps_meta)
     finally:
         consumer.close()
+
+
+_JOIN_WAIT_S = 15.0
 
 
 def read_topic_batch(
@@ -130,6 +201,7 @@ def read_topic_batch(
     # Durable commits happen only after destination apply (stream.commit_kafka_offsets).
     # Never commit prior pending offsets here — prefetch can race ahead of sink durability.
     consumer = KafkaDebeziumConsumer({
+        **cfg,
         "topic": topic_name,
         "bootstrap_servers": _bootstrap(cfg),
         "group_id": group_id,
@@ -141,8 +213,10 @@ def read_topic_batch(
     try:
         records: list[dict[str, Any]] = []
         polls = 0
+        # Until the group join assigns partitions, an empty poll is not
+        # "caught up": the broker delays a new group's first join (3 s default).
+        join_deadline = time.monotonic() + _JOIN_WAIT_S
         while len(records) < limit and polls < 5:
-            polls += 1
             got = 0
             for row in consumer.poll_rows(
                 max_records=min(limit - len(records), 500),
@@ -152,23 +226,14 @@ def read_topic_batch(
                 got += 1
                 if len(records) >= limit:
                     break
+            if consumer.has_assignment():
+                polls += 1
+            elif time.monotonic() < join_deadline:
+                continue
             if got == 0:
                 break
 
-        page_keys: list[str] = []
-        seen: set[str] = set()
-        for rec in records:
-            for k in rec.keys():
-                if k not in seen:
-                    seen.add(k)
-                    page_keys.append(k)
-        headers = union_attribute_keys(columns, page_keys) if columns else page_keys
-        rows = [
-            [cell_to_string(rec.get(h), preserve_sql_null=True) for h in headers]
-            for rec in records
-        ]
-        total = known_total_rows if known_total_rows is not None else None
-        batch = ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
+        batch = _records_to_batch(records, columns, known_total_rows)
         pending = consumer.pending_offsets()
         # Emit a continuation cursor whenever offsets were consumed — including
         # tombstone / decode-skip batches that produce no output rows. Without
@@ -183,27 +248,132 @@ def read_topic_batch(
             if pending
             else None
         )
-        # Native types for schemaless absorb / Map honesty (pre-string samples).
-        native_types: dict[str, str] = {}
-        try:
-            from services.schema_introspect import _kafka_value_to_logical
-
-            for rec in records:
-                for k, v in rec.items():
-                    lt = _kafka_value_to_logical(v)
-                    if not lt:
-                        continue
-                    prev = native_types.get(k)
-                    if prev is None:
-                        native_types[k] = lt
-                    elif prev != lt and {prev, lt} <= {"INTEGER", "FLOAT", "DECIMAL"}:
-                        native_types[k] = "DECIMAL" if "DECIMAL" in {prev, lt} else "FLOAT"
-                    elif prev != lt:
-                        native_types[k] = "TEXT"
-            batch.meta = {"native_types": native_types}
-        except Exception as exc:
-            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
         return batch, next_cursor
+    finally:
+        consumer.close()
+
+
+def _records_to_batch(
+    records: list[dict[str, Any]],
+    columns: list[str] | None,
+    known_total_rows: int | None,
+) -> ReadBatch:
+    """Headers, string matrix, and native types for one page of Kafka rows."""
+    page_keys: list[str] = []
+    seen: set[str] = set()
+    for rec in records:
+        for key in rec.keys():
+            if key not in seen:
+                seen.add(key)
+                page_keys.append(key)
+    headers = union_attribute_keys(columns, page_keys) if columns else page_keys
+    rows = [
+        [cell_to_string(rec.get(header), preserve_sql_null=True) for header in headers]
+        for rec in records
+    ]
+    total = known_total_rows if known_total_rows is not None else None
+    batch = ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
+    native_types: dict[str, str] = {}
+    try:
+        from services.schema_introspect import _kafka_value_to_logical
+
+        for rec in records:
+            for key, value in rec.items():
+                logical = _kafka_value_to_logical(value)
+                if not logical:
+                    continue
+                prev = native_types.get(key)
+                if prev is None:
+                    native_types[key] = logical
+                elif prev != logical and {prev, logical} <= {"INTEGER", "FLOAT", "DECIMAL"}:
+                    native_types[key] = "DECIMAL" if "DECIMAL" in {prev, logical} else "FLOAT"
+                elif prev != logical:
+                    native_types[key] = "TEXT"
+        batch.meta = {"native_types": native_types}
+    except Exception as exc:
+        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+    return batch
+
+
+def sample_topic_batch(
+    *,
+    cfg: dict[str, Any],
+    topic: str,
+    limit: int = 50,
+) -> ReadBatch:
+    """Read up to ``limit`` records that are already on the topic.
+
+    The transfer reader subscribes with the pipeline consumer group. After a
+    load that group sits at the end, and the first poll during a rebalance
+    is empty, so a sample reported 0 rows on a topic that had data. This
+    assigns the partitions and seeks to the tail. It does not join that
+    group and it does not commit.
+    """
+    topic_name = (topic or cfg.get("database") or cfg.get("table") or "").strip()
+    if not topic_name:
+        raise ValueError("Kafka source topic name required")
+    try:
+        from kafka import KafkaConsumer, TopicPartition
+    except ImportError as exc:
+        raise ImportError("kafka-python is required to sample a Kafka topic") from exc
+
+    from connectors.kafka_debezium_bridge import kafka_value_to_row
+
+    registry_url = str(
+        cfg.get("schema_registry_url") or cfg.get("registry_url") or ""
+    ).strip()
+    from services.copy_kafka_common import kafka_classified_bootstrap
+
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                enable_auto_commit=False,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+                value_deserializer=lambda raw: raw if raw is not None else raw,
+            )
+        )
+    try:
+        parts = consumer.partitions_for_topic(topic_name)
+        if not parts:
+            # Metadata is often empty until the first lookup. ``None`` here
+            # is "not loaded yet", which a sample used to treat as no rows.
+            try:
+                consumer.topics()
+            except Exception as exc:
+                logger.debug("Kafka metadata refresh failed: %s", exc)
+            parts = consumer.partitions_for_topic(topic_name)
+        if not parts:
+            return _records_to_batch([], None, 0)
+        tps = [TopicPartition(topic_name, int(part)) for part in sorted(parts)]
+        consumer.assign(tps)
+        begin = consumer.beginning_offsets(tps) or {}
+        end = consumer.end_offsets(tps) or {}
+        window = max(1, int(limit))
+        for tp in tps:
+            start = max(int(begin.get(tp, 0) or 0), int(end.get(tp, 0) or 0) - window)
+            consumer.seek(tp, start)
+        records: list[dict[str, Any]] = []
+        polls = 0
+        while len(records) < window and polls < 5:
+            polls += 1
+            got = 0
+            polled = consumer.poll(timeout_ms=800, max_records=window) or {}
+            for messages in polled.values():
+                for msg in messages:
+                    row = kafka_value_to_row(msg.value, registry_url=registry_url)
+                    if not row:
+                        continue
+                    records.append(row)
+                    got += 1
+                    if len(records) >= window:
+                        break
+                if len(records) >= window:
+                    break
+            if got == 0:
+                break
+        return _records_to_batch(records, None, None)
     finally:
         consumer.close()
 
@@ -255,11 +425,10 @@ def infer_topic_schema(
     else:
         registry_warning = ""
 
-    sample_cfg = {
-        **cfg,
-        "group_id": f"dataflow-kafka-schema-sample-{topic or 'topic'}",
-    }
-    batch, _ = read_topic_batch(cfg=sample_cfg, topic=topic, limit=sample_limit)
+    # Schema sampling must not join the transfer group. A committed offset
+    # at the end, or the empty poll during rebalance, made this look like
+    # a topic with no fields.
+    batch = sample_topic_batch(cfg=cfg, topic=topic, limit=sample_limit)
     native = dict((batch.meta or {}).get("native_types") or {})
     if not batch.headers:
         warning = registry_warning or (

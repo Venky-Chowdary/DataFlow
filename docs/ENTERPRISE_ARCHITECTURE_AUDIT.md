@@ -70,6 +70,63 @@ row. One green route is not enterprise readiness.
 | Observability | **Partial** | Prometheus-compatible `/metrics`, `/ops/freshness`, optional OpenTelemetry spans across the pool boundary (`services/tracing.py`). No SLO/alert pack shipped |
 | Security | **Partial** | RBAC middleware with viewer/editor/admin, audit log, SSO state, secret redaction in spans. **No SOC 2 claim**, no encryption-at-rest module, and the dev role maps to `editor` — a production deployment must gate on the real claim |
 
+### RBAC: deny-by-default
+
+RBAC denies an authenticated request with HTTP 403 when its method/path has no
+explicit permission rule and is not in the reviewed public-route set. Unknown
+and nonexistent paths are also `no_rule` denials; they do not inherit a broad
+prefix rule or the old method fallback. Denials are recorded as `authz.denied`
+through the bounded M5 audit dedupe.
+
+`DATAFLOW_RBAC_UNRULED_ROUTES` defaults to `deny`. The temporary
+`allow_and_log` value restores the legacy fallback (`GET` → `job.read`;
+`POST`/`PUT`/`PATCH`/`DELETE` → `connector.write`) while warning on each hit
+and emitting a startup warning and `authz.config.unruled_routes_allowed`
+audit event. Invalid values log an error and fail closed to `deny`. When
+authentication is disabled, RBAC remains skipped.
+
+The reviewed public-route allow-list is explicit and tested against the live
+route table. It covers health, login/logout/bootstrap, SSO start/callback/
+providers, OAuth protected-resource metadata, docs/OpenAPI/Redoc, and the
+currently public connector catalog. SCIM retains its bearer-token gate;
+MCP retains its own authentication/tool gates, including the special
+`tools/call` gate. The allow-list must equal the route set that RBAC treats as
+public. AuthMiddleware and RBAC have intentionally distinct public policies;
+the three RBAC-only and five AuthMiddleware-only route mismatches are pinned
+in `apps/api/tests/test_rbac_route_inventory.py` and are not silently changed.
+
+The approved least-privilege tightenings are applied as explicit method/path
+rules in `apps/api/services/rbac.py`, ahead of broad prefix rules.
+
+| Routes | Old permission | New permission | Viewer / operator / editor effect |
+|---|---|---|---|
+| `GET /api/v1/ops/cdc-cursors`, `/api/v1/ops/cdc-cursors/keys`, `/api/v1/ops/cdc-leases`, `/api/v1/ops/cdc-leases/list`, `/api/v1/ops/metrics/json`, `GET /metrics`; `POST /api/v1/ops/cdc-cursors/clear`, `/api/v1/ops/cdc-leases/force-release`, `/api/v1/training-agent/run`, `/api/v1/training-agent/run/sync` | `job.read` on GET; `connector.write` on POST | `workspace.manage` | Viewer, operator and editor lose access; admin retains it. |
+| `POST /api/v1/transfer/execute`, `/api/v1/transforms/{project_id}/run`, `/api/v1/cdc/signals/ensure-table`, `/api/v1/cdc/signals/execute-snapshot`, `/api/v1/cdc/snapshots`, `/api/v1/transfer/{job_id}/cdc/snapshots`, `/api/v1/ops/cdc-retention/probe`, `/api/v1/ops/source-ha/probe` | `connector.write` | `job.run` | Viewer remains denied; operator gains access; editor retains access. |
+| `POST /api/v1/cdc/snapshots/{signal_id}/cancel`, `/api/v1/transfer/{job_id}/cdc/snapshots/{signal_id}/cancel`, `/api/v1/transfer/{job_id}/rollback/execute`, `/api/v1/repair/proposals/{proposal_id}/decide` | `connector.write` | `job.manage` | Viewer remains denied; operator gains access; editor retains access. |
+| `POST /api/v1/transfer/analyze`, `/api/v1/transfer/analyze-file`, `/api/v1/transfer/introspect`, `/api/v1/transfer/map`, `/api/v1/transfer/plans`, `/api/v1/transfer/route`, `/api/v1/preflight/run`, `/api/v1/repair/propose/preflight`, `/api/v1/repair/propose/quarantine` | `connector.write` | `job.plan` | Viewer and operator remain denied; editor retains access. |
+
+The read-only POSTs `/api/v1/audit/verify-pack`, `/api/v1/contracts/test`,
+`/api/v1/preflight/{explain,preview-cells,schema-drift}`,
+`/api/v1/transfer/{certificate,proof-pack}/verify`, and
+`/api/v1/transforms/plan` are unchanged. Other routes are unchanged.
+Authenticated Prometheus scraping of `/metrics` now requires a credential
+holding `workspace.manage`, such as a scoped service-account key.
+
+Legacy unscoped transform projects (`workspace_id=""` or missing in Mongo) are
+visible only from the no-header workspace context. A non-empty workspace header
+matches exact workspace IDs and does not inherit legacy rows. No-header list
+behavior remains unchanged (unfiltered); it is the legacy/internal context,
+not a workspace member context. This read-time rule is reversible, needs no
+migration, and also covers writes from older versions or other replicas. A
+later backfill could assign a creator workspace where determinable; no backfill
+is run here.
+
+Open M2 follow-ups, not changed in this phase: the fidelity-check path can
+load a blank-workspace legacy schedule and resolve connectors by ID without a
+workspace filter; GitOps planning discards the resolved workspace and performs
+global schedule/contract lookups. These are static scope findings, not runtime-
+confirmed exploits.
+
 ---
 
 ## 2. Head-to-head, by capability (not by brand)

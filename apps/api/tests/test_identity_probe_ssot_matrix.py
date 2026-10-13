@@ -67,7 +67,9 @@ def test_uniqueness_required_modes_block_on_probe_dups(sync_mode: str) -> None:
 
 @pytest.mark.parametrize("sync_mode", ["full_refresh_overwrite", "overwrite", "replace"])
 def test_overwrite_modes_block_on_probe_dups(sync_mode: str) -> None:
-    result = _dup_check(sync_mode=sync_mode)
+    # The probe proves duplicates of a declared identity; an inferred one only
+    # warns on overwrite (see test_defect_round_32 heap case).
+    result = _dup_check(sync_mode=sync_mode, identity_declared=True)
     assert result["blocks_transfer"] is True
 
 

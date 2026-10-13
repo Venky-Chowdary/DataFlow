@@ -7,7 +7,7 @@ import io
 import socket
 import sys
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -82,9 +82,11 @@ def test_messy_csv_to_postgresql_preserves_types():
         rows = cur.fetchall()
     conn.close()
 
-    assert rows[0] == (1, Decimal("1000.00"), None, date(2024, 1, 15), True, {"k": "v"}, ["a", "b"])
-    assert rows[1] == (2, Decimal("2000.50"), "hello", date(2024, 2, 28), False, None, None)
-    assert rows[2] == (3, Decimal("3.14"), "null", date(2024, 3, 1), True, {}, [])
+    # One cell carries 14:30, so the column joins to TIMESTAMP on the type
+    # lattice. A DATE column would silently drop that time of day.
+    assert rows[0] == (1, Decimal("1000.00"), None, datetime(2024, 1, 15), True, {"k": "v"}, ["a", "b"])
+    assert rows[1] == (2, Decimal("2000.50"), "hello", datetime(2024, 2, 28, 14, 30), False, None, None)
+    assert rows[2] == (3, Decimal("3.14"), "null", datetime(2024, 3, 1), True, {}, [])
 
 
 def test_csv_to_postgresql_auto_date_locale_mdy():

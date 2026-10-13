@@ -19,8 +19,6 @@ from connectors.writer_common import (
     assert_sparse_upsert_has_pk,
     bind_rows_keeping_numbers,
     bind_sql_mapped_rows_with_quarantine,
-    dedupe_rows,
-    dedupe_rows_by_pk_and_lsn_keeping_numbers,
     null_safe_merge_on,
     quarantine_currency_markers_into_numeric,
     quarantine_unfit_arrays,
@@ -36,14 +34,11 @@ from connectors.writer_common import (
     quarantine_unfit_temporals,
     quarantine_unfit_years,
     resolve_target_columns,
-    row_checksum,
     sanitize_identifier,
     sparse_present_bindings,
     reject_on_strict_policy,
     resolve_conflict_targets,
     resolve_row_number,
-    dedupe_rows_keeping_numbers,
-    split_dense_sparse_rows_with_numbers,
     transform_error_policy,
 )
 from connectors.writer_common import (
@@ -399,9 +394,7 @@ def _bq_apply_sparse_upsert(
     """
     from connectors.writer_common import (
         DF_LSN_COL,
-        assert_sparse_upsert_has_pk,
         materialize_sparse_row_for_checksum,
-        sparse_present_bindings,
     )
     from services.cdc_effectively_once import should_apply_pk_row
     from services.value_serializer import cell_to_string
@@ -1561,6 +1554,9 @@ def write_mapped_rows(
                             )
                     else:
                         written += len(dense)
+                write_acc.note_collapsed_duplicates(
+                    finished.collapsed_duplicate_rows
+                )
                 write_acc.add_accepted(dense)
                 chunks_completed += 1
                 if on_checkpoint:
@@ -1577,6 +1573,7 @@ def write_mapped_rows(
             rejected_details,
             policy,
             source_row_count=source_row_count or None,
+            collapsed_duplicates=write_acc.collapsed_duplicate_rows,
         )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         _final_abort = reject_on_strict_policy(policy, rejected_details, "BigQuery")

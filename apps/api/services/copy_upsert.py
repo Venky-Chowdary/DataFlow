@@ -367,9 +367,11 @@ def copy_between_postgres_upsert(
                     "COPY upsert requires exactly one mapped primary key"
                 )
             _src_pk, dest_pk = pk_map
+            from connectors.sql_identifiers import pg_regclass_literal
+
             dst_cur.execute(
                 "SELECT to_regclass(%s)",
-                (f"{dest_schema or 'public'}.{dest_table}",),
+                (pg_regclass_literal(dest_schema or "public", dest_table),),
             )
             if dst_cur.fetchone()[0] is None:
                 create_destination_like_source(

@@ -125,3 +125,83 @@ def test_non_numeric_samples_still_get_a_compatible_new_column() -> None:
     )
     assert out[0]["target"] != "id"
     assert out[0]["create_new"] is True
+
+
+_SCALE3 = ["150.345", "1.250", "99.001", "1234.567"]
+
+
+def test_scale3_numeric_source_column_keeps_decimal_stamp() -> None:
+    """ACC-03 / DEF-C-009 — NUMERIC(10,3) wire samples are not ambiguous text.
+
+    A typed catalog column renders ``150.345``; Auto's lone-3-digit-group
+    rule reads that as a possible EU-thousands group and the repair diverted
+    ``score`` into TEXT/LONGTEXT on every route, then preflight blocked the
+    same divergence it invented. A numeric-declared source column can never
+    emit non-numeric samples, so the repair must not consult the fit probe.
+    """
+    out = repair_unparseable_numeric_targets(
+        [
+            {
+                "source": "score",
+                "target": "score",
+                "target_type": "NUMERIC(10,3)",
+                "source_type": "NUMERIC(10,3)",
+                "create_new": True,
+            }
+        ],
+        source_schemas=[
+            {"name": "score", "inferred_type": "NUMERIC(10,3)", "samples": _SCALE3}
+        ],
+        target_schemas=[],
+        destination_db_type="mariadb",
+        destination_table_exists=False,
+        source_db_type="postgresql",
+    )
+    assert out[0]["target"] == "score"
+    assert out[0]["target_type"] == "NUMERIC(10,3)"
+    assert out[0].get("assignment_strategy") != "create_compatible_new"
+
+
+def test_scale3_existing_numeric_dest_column_is_not_shadowed() -> None:
+    out = repair_unparseable_numeric_targets(
+        [
+            {
+                "source": "score",
+                "target": "score",
+                "target_type": "NUMERIC(10,3)",
+                "source_type": "NUMERIC(10,3)",
+            }
+        ],
+        source_schemas=[
+            {"name": "score", "inferred_type": "NUMERIC(10,3)", "samples": _SCALE3}
+        ],
+        target_schemas=[{"name": "score", "inferred_type": "NUMERIC(10,3)"}],
+        destination_db_type="postgresql",
+        destination_table_exists=True,
+        source_db_type="postgresql",
+    )
+    assert out[0]["target"] == "score"
+    assert not out[0].get("create_new")
+
+
+def test_untyped_non_numeric_samples_still_divert() -> None:
+    """The repair's real purpose survives: text samples on a numeric target."""
+    out = repair_unparseable_numeric_targets(
+        [
+            {
+                "source": "code",
+                "target": "code",
+                "target_type": "NUMERIC(10,3)",
+                "source_type": "VARCHAR",
+            }
+        ],
+        source_schemas=[
+            {"name": "code", "inferred_type": "VARCHAR", "samples": ["abc", "def"]}
+        ],
+        target_schemas=[],
+        destination_db_type="postgresql",
+        destination_table_exists=False,
+        source_db_type="postgresql",
+    )
+    assert out[0]["create_new"] is True
+    assert out[0].get("assignment_strategy") == "create_compatible_new"

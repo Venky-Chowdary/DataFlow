@@ -201,6 +201,38 @@ def test_mysql_source_national_keeps_its_own_spelling() -> None:
     assert "utf8mb4" not in stamped.lower(), stamped
 
 
+def test_materialize_widens_copied_nvarchar_stamp_for_sqlserver() -> None:
+    """Map can echo NVARCHAR(100). MySQL would create that as utf8mb3.
+
+    The writer materializes the stamp as-is unless the national carry runs.
+    SQL Server NVARCHAR holds emoji; the created column must say utf8mb4.
+    """
+    from services.decision_kernel.type_invent import materialize_dest_ddl
+
+    with bind_source_engine("sqlserver"):
+        stamped = materialize_dest_ddl(
+            "mysql",
+            "NVARCHAR(100)",
+            source_type="NVARCHAR(100) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS",
+        )
+    assert "utf8mb4" in stamped.lower(), stamped
+    assert not stamped.upper().startswith("NVARCHAR"), stamped
+
+
+def test_materialize_keeps_mysql_nvarchar_alias() -> None:
+    from services.decision_kernel.type_invent import materialize_dest_ddl
+
+    with bind_source_engine("mysql"):
+        stamped = materialize_dest_ddl(
+            "mysql", "NVARCHAR(32)", source_type="NVARCHAR(32)"
+        )
+    assert stamped.upper().startswith("NVARCHAR"), stamped
+    unbound = materialize_dest_ddl(
+        "mysql", "NVARCHAR(32)", source_type="NVARCHAR(32)"
+    )
+    assert unbound.upper().startswith("NVARCHAR"), unbound
+
+
 def test_unknown_source_engine_does_not_invent_a_widen() -> None:
     """Unknown means unmeasured: keep the source's spelling, decide nothing."""
     stamped = _mysql_type("NVARCHAR(32)", source_engine="")
@@ -268,3 +300,86 @@ def test_collation_matches_the_charset_the_column_stores() -> None:
     assert "character set" not in clauses, clauses
     if clauses:
         assert "utf8mb3_bin" in clauses, clauses
+
+
+def _compile_mysql(logical: str) -> str:
+    """DDL the MySQL dialect actually emits for one column type."""
+    from sqlalchemy.dialects.mysql.base import MySQLDialect
+
+    from connectors.generic_sql import _sa_type_for_logical
+
+    sa_type = _sa_type_for_logical(logical, "mysql", "mysql")
+    return MySQLDialect().type_compiler.process(sa_type)
+
+
+def test_sqlserver_nvarchar_compiles_as_utf8mb4() -> None:
+    """CREATE must state utf8mb4. sa.Unicode drops the clause and the server
+    default utf8mb3 then rejects emoji with 1366.
+    """
+    stamp = "NVARCHAR(100) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS"
+    with bind_source_engine("sqlserver"):
+        sql = _compile_mysql(stamp)
+    folded = sql.upper()
+    assert "CHARACTER SET UTF8MB4" in folded, sql
+    assert "NVARCHAR" not in folded, sql
+    assert "NATIONAL" not in folded, sql
+    assert "SQL_LATIN1" not in folded, sql
+
+
+def test_unbound_sqlserver_collation_still_compiles_utf8mb4() -> None:
+    """The collation on the stamp is the measurement when the engine context
+    was dropped before CREATE.
+    """
+    sql = _compile_mysql("NVARCHAR(100) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS")
+    folded = sql.upper()
+    assert "CHARACTER SET UTF8MB4" in folded, sql
+    assert "NVARCHAR" not in folded, sql
+    assert "SQL_LATIN1" not in folded, sql
+
+
+def test_widened_varchar_keeps_character_set_through_compile() -> None:
+    """A stamp materialize already widened must not be compiled back to bare VARCHAR."""
+    sql = _compile_mysql("VARCHAR(100) CHARACTER SET utf8mb4")
+    assert "CHARACTER SET utf8mb4" in sql, sql
+    assert "NVARCHAR" not in sql.upper(), sql
+
+
+def test_mysql_source_nvarchar_compiles_as_the_alias() -> None:
+    """MySQL NVARCHAR is utf8mb3. A charset clause on it is 1064, and utf8mb4 would lie."""
+    with bind_source_engine("mysql"):
+        sql = _compile_mysql("NVARCHAR(32)")
+    folded = sql.upper()
+    assert "CHARACTER SET" not in folded, sql
+    assert "UTF8MB4" not in folded, sql
+    assert "NATIONAL" in folded or "NVARCHAR" in folded, sql
+
+
+def test_unknown_engine_bare_nvarchar_compiles_as_the_alias() -> None:
+    sql = _compile_mysql("NVARCHAR(32)")
+    folded = sql.upper()
+    assert "CHARACTER SET" not in folded, sql
+    assert "UTF8MB4" not in folded, sql
+
+
+def test_foreign_national_collation_widens_without_an_engine() -> None:
+    from services.decision_kernel.type_invent import materialize_dest_ddl
+
+    stamped = materialize_dest_ddl(
+        "mysql",
+        "NVARCHAR(100) COLLATE SQL_LATIN1_GENERAL_CP1_CI_AS",
+    )
+    assert "utf8mb4" in stamped.lower(), stamped
+    assert "sql_latin1" not in stamped.lower(), stamped
+    assert not stamped.upper().startswith("NVARCHAR"), stamped
+
+
+def test_mysql_utf8mb3_collation_on_nvarchar_stays_the_alias() -> None:
+    from services.decision_kernel.type_invent import materialize_dest_ddl
+
+    stamped = materialize_dest_ddl(
+        "mysql",
+        "NVARCHAR(32) COLLATE utf8mb3_general_ci",
+        source_type="NVARCHAR(32) COLLATE utf8mb3_general_ci",
+    )
+    assert stamped.upper().startswith("NVARCHAR"), stamped
+    assert "utf8mb4" not in stamped.lower(), stamped

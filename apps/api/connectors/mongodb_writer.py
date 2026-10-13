@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import InvalidOperation
@@ -32,7 +31,10 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
-from services.document_instant import transform_narrows_to_calendar_day
+from services.document_instant import (
+    cell_exceeds_document_instant,
+    transform_narrows_to_calendar_day,
+)
 from services.value_serializer import json_loads_exact
 
 logger = logging.getLogger(__name__)
@@ -96,14 +98,95 @@ def _target_is_temporal(target_type: str) -> bool:
     return normalize_logical_type(target_type) in {LOGICAL_DATE, LOGICAL_DATETIME}
 
 
-def _declares_calendar_day(mapping: Mapping[str, Any]) -> bool:
-    """True when the source column is a calendar day, not an instant."""
+def _declares_calendar_day(
+    mapping: Mapping[str, Any], source_type: str = ""
+) -> bool:
+    """True when the resolved source type declares a calendar day."""
     from services.type_system import LOGICAL_DATE, normalize_logical_type
 
-    declared = mapping.get("source_type") or mapping.get("sourceType") or ""
-    if not isinstance(declared, str) or not declared.strip():
+    return normalize_logical_type(source_type) == LOGICAL_DATE
+
+
+def _is_pure_date_value(value: Any) -> bool:
+    """True for a date value with no clock component."""
+    import re
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+
+    from connectors.sql_temporal import parse_sql_date
+
+    if isinstance(value, _datetime):
         return False
-    return normalize_logical_type(declared) == LOGICAL_DATE
+    if isinstance(value, _date):
+        return True
+    if not isinstance(value, str):
+        return False
+    text = value.strip()
+    if re.search(r"(?:[Tt]\s*\d|\s+\d{1,2}:\d{2})", text):
+        return False
+    return parse_sql_date(text) is not None
+
+
+def declared_source_is_instant(source_type: str) -> bool:
+    """True when the source type is an offset-bearing instant.
+
+    A naive Python value of that type already lost ``tzinfo`` in the driver.
+    MySQL TIMESTAMP is read after the session is pinned to UTC, and live
+    introspect stamps it ``TIMESTAMPTZ``. Stamping UTC keeps the clock.
+    Bare ``TIMESTAMP`` / ``DATETIME`` / ``TIMESTAMP_NTZ`` stay wall-clock and
+    still need the operator's UTC contract.
+    """
+    from services.type_system import datetime_timezone_polarity
+
+    return datetime_timezone_polarity(source_type) in {"tz", "ltz"}
+
+
+def _mapping_source_type(
+    mapping: Mapping[str, Any], column_types: Mapping[str, str]
+) -> str:
+    """Source DDL for one mapping. The mapping stamp wins over the schema."""
+    declared = mapping.get("source_type") or mapping.get("sourceType") or ""
+    if isinstance(declared, str) and declared.strip():
+        return declared.strip()
+    source_name = str(mapping.get("source") or "")
+    if not source_name:
+        return ""
+    looked = column_types.get(source_name)
+    if looked is None:
+        looked = column_types.get(source_name.lower(), "")
+    return str(looked or "").strip()
+
+
+def _row_projection_column_types(
+    mappings: list[dict[str, Any]],
+    column_types: Mapping[str, str],
+    dest_types: Mapping[str, Any],
+) -> dict[str, str]:
+    """Keep BSON-date cells raw until the writer applies per-cell policy."""
+    from services.type_system import LOGICAL_DATE, normalize_logical_type
+
+    projected = dict(column_types)
+    for mapping in mappings:
+        target_name = sanitize_identifier(
+            mapping.get("target") or mapping.get("source"), preserve_case=True
+        )
+        target_type = (
+            dest_types.get(target_name)
+            or dest_types.get(target_name.lower())
+            or dest_types.get(target_name.upper())
+            or mapping.get("target_type")
+            or mapping.get("targetType")
+            or ""
+        )
+        transform = str(mapping.get("transform") or "").strip().lower()
+        if (
+            normalize_logical_type(str(target_type)) == LOGICAL_DATE
+            and transform in {"", "none", "null", "identity"}
+        ):
+            source_name = str(mapping.get("source") or "")
+            if source_name:
+                projected[source_name] = "VARCHAR"
+    return projected
 
 
 # MongoDB commands handle ~1000-document batches most reliably through proxies
@@ -197,7 +280,9 @@ def _mongo_rematerialize_if_physical_differs(
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
-        column_types=column_types,
+        column_types=_row_projection_column_types(
+            mappings, column_types or {}, live_dest_types
+        ),
         dest_types=live_dest_types,
         error_policy=policy,
         preserve_case=True,
@@ -353,6 +438,9 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="MongoDB",
+    )
+    row_column_types = _row_projection_column_types(
+        mappings, column_types, dest_types
     )
     policy = transform_error_policy(error_policy)
 
@@ -527,7 +615,7 @@ def write_mapped_rows(
                         data_rows=data_rows,
                         mappings=mappings,
                         target_cols=target_cols,
-                        column_types=column_types,
+                        column_types=row_column_types,
                         dest_types=dest_types,
                         error_policy=policy,
                         preserve_case=True,
@@ -544,7 +632,7 @@ def write_mapped_rows(
                 data_rows=data_rows,
                 mappings=mappings,
                 target_cols=target_cols,
-                column_types=column_types,
+                column_types=row_column_types,
                 dest_types=dest_types,
                 error_policy=policy,
                 preserve_case=True,
@@ -585,9 +673,7 @@ def write_mapped_rows(
 
         from datetime import date as _date
         from datetime import datetime as _datetime
-        from datetime import time as _time
 
-        from bson.binary import Binary
         from bson.decimal128 import Decimal128
 
         transform_by_col = {
@@ -608,6 +694,7 @@ def write_mapped_rows(
             if m.get("risk_acknowledged") or m.get("riskAcknowledged")
         }
         utc_normalized_cols: set[str] = set()
+        ms_truncated_cols: set[str] = set()
         # Columns the source declares as a calendar day. A date has no time of
         # day and therefore no zone to invent: UTC midnight is the one instant
         # every driver reads back as the same date. Refusing it as "naive"
@@ -618,7 +705,68 @@ def write_mapped_rows(
                 m.get("target") or m.get("source"), preserve_case=True
             )
             for m in mappings
-            if _declares_calendar_day(m)
+            if _declares_calendar_day(m, _mapping_source_type(m, column_types))
+        }
+        from services.type_system import (
+            LOGICAL_DATETIME,
+            LOGICAL_DATE,
+            LOGICAL_TIME,
+            normalize_logical_type,
+        )
+
+        pure_date_target_cols = set()
+        for mapping in mappings:
+            source_type = _mapping_source_type(mapping, column_types)
+            source_logical = normalize_logical_type(source_type)
+            target_name = sanitize_identifier(
+                mapping.get("target") or mapping.get("source"),
+                preserve_case=True,
+            )
+            target_logical = normalize_logical_type(
+                str(
+                    dest_types.get(target_name)
+                    or mapping.get("target_type")
+                    or mapping.get("targetType")
+                    or ""
+                )
+            )
+            if (
+                source_logical not in {LOGICAL_DATETIME, LOGICAL_TIME}
+                and target_logical == LOGICAL_DATE
+            ):
+                pure_date_target_cols.add(
+                    sanitize_identifier(
+                        mapping.get("target") or mapping.get("source"),
+                        preserve_case=True,
+                    )
+                )
+        calendar_day_truncation_contract_cols = set()
+        from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+        for mapping in mappings:
+            column = sanitize_identifier(
+                mapping.get("target") or mapping.get("source"),
+                preserve_case=True,
+            )
+            contract = mapping.get("risk_contract") or mapping.get("riskContract")
+            if (
+                column in calendar_day_cols
+                and isinstance(contract, dict)
+                and mapping_has_clearing_risk_contract(mapping)
+                and (
+                    contract.get("expected_precision_loss")
+                    or contract.get("expected_truncation")
+                )
+            ):
+                calendar_day_truncation_contract_cols.add(column)
+        # Polarity is a property of the column, not the cell. Resolving it
+        # once keeps a million-row write off the DDL regex.
+        instant_cols = {
+            sanitize_identifier(
+                m.get("target") or m.get("source"), preserve_case=True
+            )
+            for m in mappings
+            if declared_source_is_instant(_mapping_source_type(m, column_types))
         }
 
         def _to_bson(
@@ -708,10 +856,41 @@ def write_mapped_rows(
             if _target_is_temporal(upper) and (
                 transform_narrows_to_calendar_day(transform)
                 or column in calendar_day_cols
+                or (
+                    column in pure_date_target_cols
+                    and _is_pure_date_value(value)
+                )
             ):
-                from connectors.sql_temporal import coerce_sql_temporal
+                from connectors.sql_temporal import (
+                    coerce_sql_temporal,
+                    parse_sql_date,
+                    parse_sql_datetime,
+                )
                 from datetime import timezone as _tz
 
+                parsed = parse_sql_datetime(value, wall_clock=True)
+                if (
+                    parsed is not None
+                    and any(
+                        (
+                            parsed.hour,
+                            parsed.minute,
+                            parsed.second,
+                            parsed.microsecond,
+                        )
+                    )
+                    and column in calendar_day_cols
+                    and column not in calendar_day_truncation_contract_cols
+                ):
+                    raise ValueError(
+                        "non-midnight value for logical DATE would truncate "
+                        "time-of-day — refuse silent truncation without a "
+                        "covering Risk Contract"
+                    )
+                if parsed is None and parse_sql_date(value) is None:
+                    raise ValueError(
+                        f"cannot parse {value!r} as a pure logical DATE"
+                    )
                 coerced = coerce_sql_temporal(value, "DATE")
                 # DATE → BSON Date as UTC midnight (calendar date instant), never
                 # leave naive for PyMongo local-TZ invent.
@@ -730,10 +909,10 @@ def write_mapped_rows(
             # A "DATE" carrier with a datetime transform is Mongo's single BSON
             # date, which stores a full instant. Narrowing it truncated every
             # timestamp to midnight even though the carrier could hold the time.
-            if upper in {"DATE"} or upper in {
-                "DATETIME", "TIMESTAMP", "TIMESTAMP_TZ", "TIMESTAMPTZ",
-                "TIMESTAMP_LTZ", "TIMESTAMP_NTZ",
-            }:
+            # Every date/datetime spelling names BSON's one carrier —
+            # ``TIMESTAMPTZ(6)`` / ``DATETIME2(7)`` echoed from the source
+            # included. Matching only the bare tokens wrote those as strings.
+            if _target_is_temporal(upper):
                 from connectors.sql_temporal import coerce_sql_temporal
 
                 # BSON Date is a UTC instant. Coerce as TIMESTAMPTZ so ISO-Z keeps
@@ -745,20 +924,38 @@ def write_mapped_rows(
                 if coerced is None:
                     return None
                 if isinstance(coerced, _datetime):
-                    # Never invent UTC on a naive wall-clock (would silently shift
-                    # polarity). Require offset/Z from the wire, a prior coerce, or
-                    # an accepted UTC-normalize risk on this column.
+                    # A declared instant (TIMESTAMPTZ / TIMESTAMP_TZ / LTZ) that
+                    # arrives naive already had its offset stripped by the
+                    # driver. Stamp UTC and keep the clock. A wall-clock source
+                    # still needs an accepted UTC-normalize risk — stamping one
+                    # quietly would shift polarity.
                     if coerced.tzinfo is None:
                         from datetime import timezone as _tzu
 
-                        if column not in utc_normalize_ack:
+                        if column in instant_cols:
+                            coerced = coerced.replace(tzinfo=_tzu.utc)
+                        elif column not in utc_normalize_ack:
                             raise ValueError(
                                 "MongoDB date/time refused naive wall-clock — "
                                 "provide offset/Z, or accept the UTC-normalize "
                                 "risk on this column (refuse silent UTC invent)"
                             )
-                        utc_normalized_cols.add(column)
-                        coerced = coerced.replace(tzinfo=_tzu.utc)
+                        else:
+                            utc_normalized_cols.add(column)
+                            coerced = coerced.replace(tzinfo=_tzu.utc)
+                    # BSON date counts milliseconds; the driver drops anything
+                    # finer without a word. Judge the raw cell so a seven-digit
+                    # string is not first truncated to Python's six.
+                    if cell_exceeds_document_instant(value):
+                        if column in utc_normalize_ack:
+                            ms_truncated_cols.add(column)
+                        else:
+                            raise ValueError(
+                                f"MongoDB date refused {value!r}: BSON date keeps "
+                                "milliseconds and this value has finer digits — map "
+                                "to a string, or accept the millisecond-truncation "
+                                "risk on this column (refuse silent truncation)"
+                            )
                     from datetime import timezone as _tz
 
                     return coerced.astimezone(_tz.utc)
@@ -1112,7 +1309,19 @@ def write_mapped_rows(
             rejected_rows=max(rejected_rows, len(data_rows) - written - skipped_total),
             rejected_details=list(rejected_details),
             coerced_null_rows=coerced_null_rows,
-            warnings=transform_errors,
+            warnings=[
+                *transform_errors,
+                *(
+                    f"{col}: zoneless values written as UTC under the accepted "
+                    "UTC-normalize risk"
+                    for col in sorted(utc_normalized_cols)
+                ),
+                *(
+                    f"{col}: sub-millisecond digits truncated to BSON milliseconds "
+                    "under the accepted risk"
+                    for col in sorted(ms_truncated_cols)
+                ),
+            ],
             meta=gate8_writer_meta(mapped_rows, target_cols),
         )
     except (pymongo.errors.PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:

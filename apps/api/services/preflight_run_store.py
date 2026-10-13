@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from services.ops_events import emit_event
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "preflight_runs.jsonl"
 _LOCK = threading.Lock()
 MAX_RUNS = 500
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -27,7 +32,7 @@ def save_preflight_run(
     source_label: str = "",
     dest_label: str = "",
     validation_mode: str = "",
-    route: dict[str, Any] | None = None,
+    route: dict[str, Any] | str | None = None,
 ) -> dict[str, Any]:
     """Attach a stable run_id to *result*, persist a summary, return the enriched result."""
     run_id = str(result.get("run_id") or f"pf_{uuid.uuid4().hex[:12]}")
@@ -61,7 +66,53 @@ def save_preflight_run(
         "suggested_remediations": _suggest_remediations(blockers),
     }
     _append(record)
+    _emit_preflight_verdict(record, route)
     return enriched
+
+
+def _route_types(route: dict[str, Any] | str | None) -> tuple[str | None, str | None]:
+    """Source/dest connector types from a router dict or Pilot's ``"src->dst"``."""
+    if isinstance(route, dict):
+        return (
+            route.get("source_type") or route.get("source_kind") or None,
+            route.get("dest_type") or route.get("dest_kind") or None,
+        )
+    if isinstance(route, str) and "->" in route:
+        src, _, dst = route.partition("->")
+        return src.strip() or None, dst.strip() or None
+    return None, None
+
+
+def _emit_preflight_verdict(record: dict[str, Any], route: dict[str, Any] | str | None) -> None:
+    """``preflight.run.completed``: verdict, counts and gate ids — no object names.
+
+    A block is an expected, operator-recoverable validation outcome, so it is
+    ``held`` at INFO rather than an error.
+    """
+    passed = bool(record.get("passed"))
+    gate_ids = sorted(
+        {
+            str(b["id"])
+            for b in record.get("blockers") or []
+            if isinstance(b, dict) and b.get("id")
+        }
+    )
+    source_type, destination_type = _route_types(route)
+    emit_event(
+        logger,
+        "preflight.run.completed",
+        outcome="succeeded" if passed else "held",
+        level=logging.INFO,
+        run_id=record.get("run_id"),
+        verdict="passed" if passed else "blocked",
+        validation_mode=record.get("validation_mode") or None,
+        passed_count=record.get("passed_count"),
+        total_gates=record.get("total_gates"),
+        blocker_count=len(record.get("blockers") or []),
+        blocking_gate_ids=",".join(gate_ids) or None,
+        source_type=source_type,
+        destination_type=destination_type,
+    )
 
 
 def get_preflight_run(run_id: str) -> dict[str, Any] | None:
@@ -108,6 +159,8 @@ def _append(record: dict[str, Any]) -> None:
     with _LOCK:
         with STORE_PATH.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
         _trim_locked()
 
 

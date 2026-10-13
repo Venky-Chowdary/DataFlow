@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from services.file_parser import store_upload
-from services.schema_inference import infer_columns_from_rows, infer_type
+from services.schema_inference import infer_columns_from_rows, infer_schema_map, infer_type
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -97,6 +97,40 @@ class TestInferType:
     def test_never_invents_vector_1536(self) -> None:
         # Sparse / short sample must not invent a warehouse default dim.
         assert "1536" not in infer_type(["[0.1,0.2]"], field_name="embedding")
+
+
+def test_mixed_aware_and_zoneless_temporal_samples_infer_timestamptz() -> None:
+    schema, _intel = infer_schema_map(
+        {
+            "created_at": [
+                "2024-01-01T00:00:00+00:00",
+                "2024-06-01",
+            ]
+        }
+    )
+
+    assert schema["created_at"] == "TIMESTAMPTZ"
+
+
+def test_all_aware_temporal_samples_infer_timestamptz() -> None:
+    schema, _intel = infer_schema_map(
+        {
+            "created_at": [
+                "2024-01-01T00:00:00+00:00",
+                "2024-06-01T12:30:00+00:00",
+            ]
+        }
+    )
+
+    assert schema["created_at"] == "TIMESTAMPTZ"
+
+
+def test_all_zoneless_dates_infer_date() -> None:
+    schema, _intel = infer_schema_map(
+        {"created_at": ["2024-01-01", "2024-06-01"]}
+    )
+
+    assert schema["created_at"] == "DATE"
 
 
 class TestSchemaTypesFixture:

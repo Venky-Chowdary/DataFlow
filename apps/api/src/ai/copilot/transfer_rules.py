@@ -100,6 +100,8 @@ class TransferDataRules:
     source_filter: dict[str, Any] = field(default_factory=dict)
     upsert_key: str = ""
     dedupe_key: str = ""
+    cursor_column: str = ""
+    cursor_semantics: str = ""
     limit: int = 0
     cadence: str = ""
     #: Rules that were understood but cannot be applied from chat. Each entry is
@@ -115,6 +117,8 @@ class TransferDataRules:
             self.source_filter
             or self.upsert_key
             or self.dedupe_key
+            or self.cursor_column
+            or self.cursor_semantics
             or self.limit
             or self.cadence
             or self.questions
@@ -134,6 +138,10 @@ class TransferDataRules:
             out["upsert_key"] = self.upsert_key
         if self.dedupe_key:
             out["dedupe_key"] = self.dedupe_key
+        if self.cursor_column:
+            out["cursor_column"] = self.cursor_column
+        if self.cursor_semantics:
+            out["cursor_semantics"] = self.cursor_semantics
         if self.limit:
             out["limit"] = self.limit
         if self.cadence:
@@ -245,6 +253,17 @@ _LIMIT_RE = re.compile(
 _UPSERT_KEY_RE = re.compile(
     rf"\b(?:upsert|merge)(?:ing)?\s+(?:on|by|using|with|key(?:ed)?(?:\s+on)?)\s+"
     rf"(?:the\s+)?(?:column\s+)?({_COLUMN})",
+    re.IGNORECASE,
+)
+_CURSOR_RE = re.compile(
+    rf"\b(?:incremental|watermark|cursor)(?:\s+column)?\s+"
+    rf"(?:on|of|is|using|by)\s+"
+    rf"(?:the\s+)?(?:column\s+)?({_COLUMN})",
+    re.IGNORECASE,
+)
+_CURSOR_SEM_RE = re.compile(
+    r"\b(?:cursor\s+semantics|semantics)\s+(?:is\s+|of\s+|as\s+)?"
+    r"(insert_only|modification_timestamp|monotonic_sequence|cdc_position|business_date)\b",
     re.IGNORECASE,
 )
 _DEDUPE_KEY_RE = re.compile(
@@ -380,6 +399,8 @@ def parse_transfer_data_rules(message: str) -> tuple[str, TransferDataRules]:
     applied: list[str] = []
     upsert_key = ""
     dedupe_key = ""
+    cursor_column = ""
+    cursor_semantics = ""
     limit = 0
     cadence = ""
     # Spans removed from the route text, collected then cut back-to-front.
@@ -419,6 +440,12 @@ def parse_transfer_data_rules(message: str) -> tuple[str, TransferDataRules]:
         cut(m)
     for m in _DEDUPE_KEY_RE.finditer(text):
         dedupe_key = dedupe_key or m.group(1)
+        cut(m)
+    for m in _CURSOR_RE.finditer(text):
+        cursor_column = cursor_column or m.group(1)
+        cut(m)
+    for m in _CURSOR_SEM_RE.finditer(text):
+        cursor_semantics = cursor_semantics or m.group(1).lower()
         cut(m)
 
     for m in _SKIP_NULLS_COL_RE.finditer(text):
@@ -488,6 +515,10 @@ def parse_transfer_data_rules(message: str) -> tuple[str, TransferDataRules]:
         applied.append(f"upsert keyed on {upsert_key}")
     elif dedupe_key:
         applied.append(f"upsert (dedupe) keyed on {dedupe_key}")
+    if cursor_column:
+        applied.append(f"advances on watermark {cursor_column}")
+    if cursor_semantics:
+        applied.append(f"cursor semantics {cursor_semantics}")
 
     route = text
     for start, end in _merged(cuts):
@@ -500,6 +531,8 @@ def parse_transfer_data_rules(message: str) -> tuple[str, TransferDataRules]:
         source_filter=source_filter,
         upsert_key=upsert_key,
         dedupe_key=dedupe_key,
+        cursor_column=cursor_column,
+        cursor_semantics=cursor_semantics,
         limit=limit,
         cadence=cadence,
         questions=tuple(questions),

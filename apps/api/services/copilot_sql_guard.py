@@ -10,6 +10,16 @@ import re
 from typing import Any
 
 _IDENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
+# Engine catalogs are not columns of the table being read. Refusing them
+# blocked ``SELECT * FROM sqlite_master`` (QA R2-090).
+_CATALOG_RELATIONS = frozenset({
+    "sqlite_master",
+    "sqlite_schema",
+    "sqlite_temp_master",
+    "sqlite_temp_schema",
+    "information_schema",
+    "pg_catalog",
+})
 _SQL_KEYWORDS = frozenset(
     {
         "select",
@@ -127,11 +137,62 @@ def extract_sql_identifiers(sql: str) -> set[str]:
         m.group(1).lower()
         for m in re.finditer(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b", scrubbed, flags=re.I)
     }
+    # Bare (non-AS) aliases are equally not schema identifiers:
+    #   FROM orders o / JOIN order_items oi   — token after a relation name
+    #   FROM (...) q / count(*) n             — token after a closing paren
+    #   WITH cte AS (...)                     — the CTE head name is query-defined
+    # Without these exclusions, standard SQL aliases are refused as invented
+    # identifiers (QA R23).
+    aliases.update(
+        m.group(1).lower()
+        for m in re.finditer(
+            r"\b(?:from|join)\s+[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)?\s+([A-Za-z_][\w]*)",
+            scrubbed,
+            flags=re.I,
+        )
+    )
+    aliases.update(
+        m.group(1).lower()
+        for m in re.finditer(r"\)\s*(?:as\s+)?([A-Za-z_][\w]*)", scrubbed, flags=re.I)
+    )
+    aliases.update(
+        m.group(1).lower()
+        for m in re.finditer(r"\b([A-Za-z_][\w]*)\s+as\s*\(", scrubbed, flags=re.I)
+    )
+    # ``t.col`` — the qualifier is a query alias, not a catalog column
+    # (QA R2-091: ORDER BY / UNION rejected the alias ``t``).
+    aliases.update(
+        m.group(1).lower()
+        for m in re.finditer(
+            r"\b([A-Za-z_][\w]*)\s*\.\s*[A-Za-z_]",
+            scrubbed,
+        )
+    )
+    # Bare select-list alias with no AS: ``SELECT id t FROM orders``.
+    # One identifier only — ``SELECT invented FROM t`` must still be checked.
+    aliases.update(
+        m.group(1).lower()
+        for m in re.finditer(
+            r"\bselect\s+[A-Za-z_][\w]*(?:\.[A-Za-z_][\w]*)?\s+([A-Za-z_][\w]*)\s+from\b",
+            scrubbed,
+            flags=re.I,
+        )
+    )
+    # date_trunc( and round( are calls. ::numeric is a cast. Neither is a column
+    # the catalog would list. A bare `SELECT round FROM t` is still checked.
+    function_calls = {
+        m.group(1).lower()
+        for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(", scrubbed)
+    }
+    cast_types = {
+        m.group(1).lower()
+        for m in re.finditer(r"::\s*([A-Za-z_][A-Za-z0-9_]*)", scrubbed)
+    }
     found: set[str] = set()
     for match in _IDENT.finditer(scrubbed):
         tok = match.group(1)
         low = tok.lower()
-        if low in _SQL_KEYWORDS or low in aliases:
+        if low in _SQL_KEYWORDS or low in aliases or low in function_calls or low in cast_types:
             continue
         if tok.isdigit():
             continue
@@ -176,7 +237,7 @@ def assert_identifiers_allowed(
         raise ValueError(
             "Schema allow-list unavailable — refuse Pilot SQL until introspection succeeds."
         )
-    unknown = sorted(extract_sql_identifiers(sql) - allowed)
+    unknown = sorted(extract_sql_identifiers(sql) - allowed - _CATALOG_RELATIONS)
     if unknown:
         preview = ", ".join(unknown[:12])
         more = f" (+{len(unknown) - 12} more)" if len(unknown) > 12 else ""

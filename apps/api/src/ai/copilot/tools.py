@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from services.ops_events import emit_event
 from services.value_serializer import json_default
 
 from ..rag.product_docs import (
@@ -42,6 +45,45 @@ class ToolResult:
     success: bool
     output: Any
     error: str = ""
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _tool_executed(
+    result: ToolResult,
+    started: float,
+    *,
+    tool: str | None = None,
+    reason: str | None = None,
+    error: BaseException | None = None,
+    role: str | None = None,
+) -> ToolResult:
+    """Emit ``pilot.tool.executed`` for one dispatch and return ``result``.
+
+    Carries the tool name, a bounded reason and the error class only — never
+    the prompt, the arguments, the output, or the error text.
+    """
+    if result.success:
+        outcome, level = "succeeded", None
+    else:
+        outcome = "failed"
+        # An unhandled exception is a defect (ERROR); a refused or rejected call
+        # is an expected outcome the operator can act on (WARNING).
+        level = None if reason == "exception" else logging.WARNING
+        reason = reason or "tool_reported_failure"
+    emit_event(
+        _logger,
+        "pilot.tool.executed",
+        outcome=outcome,
+        level=level,
+        duration_ms=(time.monotonic() - started) * 1000.0,
+        error=error,
+        tool=tool or result.name,
+        reason=reason,
+        caller_role=role,
+    )
+    return result
 
 
 @dataclass
@@ -107,7 +149,8 @@ TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Create a saved connector from credentials the user provided "
             "(MySQL, PostgreSQL, MongoDB, etc.). Always confirm before saving. "
-            "Accepts a connection URL and/or host, port, database, username, password."
+            "Accepts a connection URL and/or host, port, database, username, password. "
+            "BigQuery also accepts service_account (the JSON key) and database as the project id."
         ),
         "input_schema": {
             "type": "object",
@@ -123,8 +166,21 @@ TOOL_DEFINITIONS: list[dict] = [
                 "username": {"type": "string"},
                 "password": {"type": "string"},
                 "connection_string": {"type": "string"},
+                "service_account": {
+                    "type": "string",
+                    "description": (
+                        "Service-account JSON key for BigQuery or GCS. "
+                        "Paste the key file contents. It is stored on the "
+                        "server ledger and is not echoed in the preview."
+                    ),
+                },
                 "ssl": {"type": "boolean"},
                 "schema": {"type": "string"},
+                "host_key": {
+                    "type": "string",
+                    "description": "SFTP only: operator-approved server key fingerprint "
+                    "(SHA256:...) shown by a failed test; pins this connector.",
+                },
                 "message": {
                     "type": "string",
                     "description": "Original user message (for credential extraction)",
@@ -136,11 +192,22 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_jobs",
-        "description": "List recent transfer jobs with status, IDs, and record counts.",
+        "description": (
+            "List recent transfer jobs with status, IDs, and record counts. "
+            "``total`` is the whole history for ``scope`` (default ``workspace``, "
+            "the same population as brief_workspace). Pass ``scope=all`` only when "
+            "you explicitly need every workspace."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "limit": {"type": "integer", "description": "Max jobs to return", "default": 10},
+                "scope": {
+                    "type": "string",
+                    "enum": ["workspace", "all"],
+                    "default": "workspace",
+                    "description": "workspace = this workspace; all = every workspace",
+                },
             },
             "required": [],
         },
@@ -161,8 +228,22 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "get_transfer_capabilities",
-        "description": "Show supported source→destination transfer combinations.",
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "description": (
+            "Show supported source→destination transfer combinations. "
+            "The default is a short summary (counts and driver lists). "
+            "Pass detail=full only when the complete route matrix is required."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "detail": {
+                    "type": "string",
+                    "enum": ["summary", "full"],
+                    "description": "summary (default) omits the route matrix; full returns every combination",
+                },
+            },
+            "required": [],
+        },
     },
     {
         "name": "navigate",
@@ -285,6 +366,39 @@ TOOL_DEFINITIONS: list[dict] = [
                 "table": {"type": "string", "description": "Source table — required for a real plan"},
                 "dest_table": {"type": "string", "description": "Destination table (defaults to the source name)"},
                 "sync_mode": {"type": "string"},
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. A column named id is never invented."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key. Same source identity column or composite.",
+                },
+                "cursor_column": {
+                    "type": "string",
+                    "description": (
+                        "Source watermark column for incremental_append or "
+                        "incremental_upsert. When omitted and the source has "
+                        "exactly one modification-timestamp column (updated_at, "
+                        "modified_at, last_updated, and the same family), that "
+                        "column is selected and declared modification_timestamp. "
+                        "Two candidates are not guessed. A column that is not on "
+                        "the source is never invented. CDC uses the log position "
+                        "and does not take a table cursor."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means in the source: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date. Required for incremental_upsert. "
+                        "Never inferred from the column name."
+                    ),
+                },
                 "leftover_nl": {
                     "type": "string",
                     "description": "Remaining operator prose (contract / migrate / data rules). Never parse skip_preflight.",
@@ -330,6 +444,48 @@ TOOL_DEFINITIONS: list[dict] = [
                         "incremental_upsert, or cdc_incremental"
                     ),
                 },
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. When omitted, the source "
+                        "catalog primary key is used if every column is mapped. "
+                        "A column named id is never invented."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key. Same source identity column or composite.",
+                },
+                "cursor_column": {
+                    "type": "string",
+                    "description": (
+                        "Source watermark column for incremental_append or "
+                        "incremental_upsert. When omitted and the source has "
+                        "exactly one modification-timestamp column (updated_at, "
+                        "modified_at, last_updated, and the same family), that "
+                        "column is selected and declared modification_timestamp. "
+                        "Two candidates are not guessed. A column that is not on "
+                        "the source is never invented. CDC uses the log position "
+                        "and does not take a table cursor."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means in the source: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date. Required for incremental_upsert. "
+                        "Never inferred from the column name."
+                    ),
+                },
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for source columns that are wall-clock instants "
+                        "with no offset (assume_timezone). Empty leaves them unchanged."
+                    ),
+                },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
@@ -338,6 +494,43 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
                 "require_signed_contract": {"type": "boolean"},
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "Operator signature for mappings that already require a "
+                        "Migration Risk Contract. Requires approved_by, reason, "
+                        "and a continue execution_policy (QUARANTINE_ROW, "
+                        "CAST_AND_CONTINUE, TRANSFORM_AND_CONTINUE, SKIP_ROW, "
+                        "STOP_COLUMN). Omitted means nothing is signed. "
+                        "FAIL_JOB does not clear a gate. Confirm is still required. "
+                        "CAST_AND_CONTINUE / TRANSFORM_AND_CONTINUE take optional "
+                        "on_cast_failure: 'quarantine' (default — the row is held "
+                        "out, disposition=cast_failure) or 'null' (the failing cell "
+                        "is written as NULL and counted in coerced_null_rows)."
+                    ),
+                },
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "(the finding names the columns and rule). Requires "
+                        "approved_by and reason; recorded on the job as "
+                        "compliance_acknowledged + acknowledgment_actor/reason."
+                    ),
+                },
+                "column_transforms": {
+                    "type": "object",
+                    "description": (
+                        "Per-column transforms keyed by source or target column. "
+                        "Applied on the planned mapping as an operator override."
+                    ),
+                },
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Acknowledge a schema_drift review block so the plan can clear."
+                    ),
+                },
             },
             "required": [],
         },
@@ -347,7 +540,8 @@ TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Stage a transfer between two saved connectors for the operator to Confirm. "
             "Runs the plan and preflight first and refuses when any gate blocks. "
-            "This never moves data on its own — execution happens only after Confirm."
+            "This never moves data on its own — execution happens only after confirm_action. "
+            "An uploaded file uses start_dataset_transfer, not this tool."
         ),
         "input_schema": {
             "type": "object",
@@ -361,7 +555,50 @@ TOOL_DEFINITIONS: list[dict] = [
                 "dest_connector_name": {"type": "string"},
                 "dest_table": {"type": "string"},
                 "sync_mode": {"type": "string"},
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. When omitted, the source "
+                        "catalog primary key is used if every column is mapped. "
+                        "A column named id is never invented."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key. Same source identity column or composite.",
+                },
+                "cursor_column": {
+                    "type": "string",
+                    "description": (
+                        "Source watermark column for incremental_append or "
+                        "incremental_upsert. When omitted and the source has "
+                        "exactly one modification-timestamp column (updated_at, "
+                        "modified_at, last_updated, and the same family), that "
+                        "column is selected and declared modification_timestamp. "
+                        "Two candidates are not guessed. A column that is not on "
+                        "the source is never invented. CDC uses the log position "
+                        "and does not take a table cursor."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means in the source: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date. Required for incremental_upsert. "
+                        "Never inferred from the column name."
+                    ),
+                },
                 "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for source columns that are wall-clock instants "
+                        "with no offset (assume_timezone). Empty leaves them unchanged. "
+                        "Values that already carry an offset are not rewritten."
+                    ),
+                },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
@@ -370,6 +607,39 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "contract_id": {"type": "string", "description": "Signed data contract to enforce on Confirm"},
                 "require_signed_contract": {"type": "boolean"},
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "Same operator signature as plan_transfer. Applied only "
+                        "to mappings that already require a continue-policy "
+                        "Migration Risk Contract. Never signed when omitted."
+                    ),
+                },
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "(the finding names the columns and rule). Requires "
+                        "approved_by and reason; recorded on the job as "
+                        "compliance_acknowledged + acknowledgment_actor/reason."
+                    ),
+                },
+                "column_transforms": {
+                    "type": "object",
+                    "description": (
+                        "Per-column transforms applied on the load, keyed by "
+                        "source or target column name. Example: {\"email\": \"hash_pii\"}. "
+                        "Stamped as an operator override, not only on quarantine replay."
+                    ),
+                },
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Acknowledge a schema_drift block (type change or new "
+                        "columns under manual_review) so Validate can proceed. "
+                        "The acknowledgement is recorded on the transfer."
+                    ),
+                },
             },
             "required": [],
         },
@@ -389,6 +659,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "has_cursor": {"type": "boolean"},
                 "has_primary_key": {"type": "boolean"},
                 "needs_history": {"type": "boolean"},
+                "row_count": {"type": "number"},
                 "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
             },
             "required": [],
@@ -472,7 +743,7 @@ TOOL_DEFINITIONS: list[dict] = [
         "name": "run_schedule_now",
         "description": (
             "Propose an immediate run of a pipeline schedule. Returns a pending action — "
-            "the UI must confirm before the run starts."
+            "confirm_action must be called with the returned ack_id before the run starts."
         ),
         "input_schema": {
             "type": "object",
@@ -491,7 +762,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "preflight to clear, and stores the approved mapping on the schedule. "
             "Cadence is the operator's own wording — “nightly at 2am in Asia/Kolkata”, "
             "“every 15 minutes”, “weekly on Monday”, or a 5-field cron. This creates "
-            "nothing on its own: the schedule exists only after Confirm."
+            "nothing on its own: the schedule exists only after confirm_action."
         ),
         "input_schema": {
             "type": "object",
@@ -505,9 +776,33 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": "Cadence wording, with time/timezone when stated",
                 },
                 "sync_mode": {"type": "string"},
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "Source identity column for upsert, CDC, SCD2, or mirror. "
+                        "Comma-separate a composite key. When omitted, the source "
+                        "catalog primary key is used if every column is mapped."
+                    ),
+                },
+                "primary_key": {
+                    "type": "string",
+                    "description": "Alias of upsert_key.",
+                },
                 "cursor_column": {
                     "type": "string",
-                    "description": "Watermark column — required for incremental modes",
+                    "description": (
+                        "Watermark column for incremental modes. When omitted and "
+                        "the source has exactly one modification-timestamp column, "
+                        "that column is selected. Two candidates are not guessed."
+                    ),
+                },
+                "cursor_semantics": {
+                    "type": "string",
+                    "description": (
+                        "What cursor_column means: insert_only, "
+                        "modification_timestamp, monotonic_sequence, cdc_position, "
+                        "or business_date. Required for incremental_upsert."
+                    ),
                 },
                 "name": {"type": "string", "description": "Schedule display name"},
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
@@ -517,13 +812,107 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "contract_id": {"type": "string"},
                 "require_signed_contract": {"type": "boolean"},
+                "column_transforms": {
+                    "type": "object",
+                    "description": (
+                        "Per-column transforms stored on the schedule mapping, "
+                        "keyed by source or target column. Applied on every run, "
+                        "not only on quarantine replay."
+                    ),
+                },
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Accept additive schema drift for this schedule. "
+                        "Hard-breaking changes (type change, narrowing, NOT NULL) "
+                        "still block. The same flag on plan_transfer and start_transfer "
+                        "accepts drift for a manual run."
+                    ),
+                },
             },
             "required": ["cadence"],
         },
     },
     {
+        "name": "start_dataset_transfer",
+        "description": (
+            "Stage a transfer from an uploaded file (csv, tsv, json, jsonl, and the "
+            "other formats the file parser reads) into a saved connector. Resolves "
+            "the file by the name analyze_dataset uses, maps columns with the same "
+            "pipeline as Transfer Studio, and runs preflight. Nothing is written "
+            "until confirm_action. A template with no file is refused. A timestamp "
+            "column that mixes offsets with wall-clock values is refused until "
+            "source_timezone names the zone for the values that have none."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dataset_name": {"type": "string", "description": "Uploaded dataset name"},
+                "dest_connector_name": {"type": "string"},
+                "dest_connector_id": {"type": "string"},
+                "dest_table": {"type": "string", "description": "Destination table; defaults to the file name"},
+                "sync_mode": {"type": "string"},
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                },
+                "limit": {"type": "integer"},
+                "source_timezone": {
+                    "type": "string",
+                    "description": (
+                        "IANA zone for timestamp values that have no offset. "
+                        "Required when a column mixes those values with offset-bearing "
+                        "ones. Empty does not invent UTC. Offset-bearing values stay as written."
+                    ),
+                },
+                "contract_id": {"type": "string"},
+                "require_signed_contract": {"type": "boolean"},
+                "pii_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Operator acknowledgement of the PII/compliance review "
+                        "(the finding names the columns and rule). Requires "
+                        "approved_by and reason; recorded on the job as "
+                        "compliance_acknowledged + acknowledgment_actor/reason."
+                    ),
+                },
+            },
+            "required": ["dataset_name"],
+        },
+    },
+    {
+        "name": "confirm_action",
+        "description": (
+            "Consume a pending approval (ack_id) and perform the mutation the operator "
+            "already staged: create_connector, start_transfer, start_dataset_transfer, create_schedule, "
+            "run_schedule_now, or a lifecycle action (cancel, retry, resume, replay "
+            "quarantine, delete connector, enable, update, or delete a schedule). "
+            "This is the same gate as Confirm in the product. Calling the staging "
+            "tool does not move data; confirm_action does. Replaying a consumed "
+            "ack_id returns the original result and does not run the mutation twice."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ack_id": {
+                    "type": "string",
+                    "description": "ack_id returned by the staging tool",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Audit note stored with the approval",
+                },
+            },
+            "required": ["ack_id"],
+        },
+    },
+    {
         "name": "list_contracts",
-        "description": "List data contracts available in the workspace.",
+        "description": (
+            "List data contracts. ``count`` is this page. ``total`` is the whole "
+            "store from the status census, not the page length."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {"limit": {"type": "integer", "default": 50}},
@@ -844,6 +1233,7 @@ TOOL_FAMILIES: list[dict] = [
             "plan_transfer_route",
             "plan_transfer",
             "start_transfer",
+            "start_dataset_transfer",
             "get_transfer_capabilities",
             "recommend_sync_mode",
         ],
@@ -866,6 +1256,7 @@ TOOL_FAMILIES: list[dict] = [
             "get_schedule",
             "run_schedule_now",
             "create_schedule",
+            "confirm_action",
             "list_contracts",
             "open_job",
             "open_schedule",
@@ -878,8 +1269,10 @@ TOOL_FAMILIES: list[dict] = [
             "replay_quarantine",
             "test_connector",
             "delete_connector",
+            "update_connector",
             "set_schedule_enabled",
             "delete_schedule",
+            "update_schedule",
         ],
     },
 ]
@@ -914,6 +1307,98 @@ def get_tool_registry() -> dict:
     }
 
 
+# Names operators and models send that the schema spells differently.
+# Applied only when the handler accepts the canonical name and not the alias.
+_TOOL_ARG_ALIASES = {
+    "connector_name": "name",
+    "connector": "name",
+    "table_name": "table",
+    "source_name": "source_connector_name",
+    "dest_name": "dest_connector_name",
+    "serviceAccount": "service_account",
+}
+
+
+def _tool_schema_properties(name: str) -> list[str]:
+    for tool in TOOL_DEFINITIONS:
+        if tool.get("name") == name:
+            props = (tool.get("input_schema") or {}).get("properties") or {}
+            return [str(key) for key in props]
+    return []
+
+
+def _tool_argument_error(name: str, raw: str) -> str:
+    """Operator text for a bad call. Never the Python signature."""
+    accepted = _tool_schema_properties(name)
+    if "unexpected keyword" not in raw and "required positional" not in raw and "missing" not in raw:
+        if accepted:
+            return f"{name} could not run with those arguments. Accepted parameters: {', '.join(accepted)}."
+        return f"{name} could not run with those arguments."
+    if accepted:
+        return (
+            f"{name} does not accept that argument. "
+            f"Accepted parameters: {', '.join(accepted)}."
+        )
+    return f"{name} does not accept that argument."
+
+
+def _bind_tool_arguments(
+    name: str,
+    handler: Callable[..., Any],
+    args: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    """Rewrite known aliases, and refuse anything the handler cannot take."""
+    try:
+        params = inspect.signature(handler).parameters
+    except (TypeError, ValueError):
+        return dict(args), ""
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
+        return dict(args), ""
+    accepted = {
+        key for key, param in params.items()
+        if key != "self" and param.kind in {
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        }
+    }
+    bound: dict[str, Any] = {}
+    unknown: list[str] = []
+    for key, value in args.items():
+        target = key
+        alias = _TOOL_ARG_ALIASES.get(key)
+        if target not in accepted and alias in accepted and alias not in args:
+            target = alias
+        if target not in accepted:
+            unknown.append(key)
+            continue
+        bound[target] = value
+    if unknown:
+        return {}, _tool_argument_error(name, "unexpected keyword argument")
+    return bound, ""
+
+
+def _preview_endpoint(draft: dict[str, Any]) -> tuple[str, int | None, bool]:
+    """Host, port, and URL password the saved connector will really use.
+
+    A URL names its own port (or none: the driver/scheme default applies);
+    the draft's stamped default port and "a connection string exists" are not
+    evidence of either (QA MXD03 / MX1-04).
+    """
+    from connectors.url_authority import parse_url_authority
+
+    cs = str(draft.get("connection_string") or "").strip()
+    host = str(draft.get("host") or "").strip()
+    if cs and "://" in cs:
+        url = parse_url_authority(cs)
+        return url.host or host or "(from URL)", url.port or None, bool(url.password)
+    if cs:
+        return host or "(from URL)", draft.get("port") or None, False
+    if "://" in host:
+        url = parse_url_authority(host)
+        return host, url.port or draft.get("port") or None, bool(url.password)
+    return host or "(from URL)", draft.get("port"), False
+
+
 class DataPilotTools:
     """Execute Datawrap Pilot tools against live app state."""
 
@@ -928,6 +1413,7 @@ class DataPilotTools:
             "search_data": self._search_data,
             "list_connectors": self._list_connectors,
             "create_connector": self._create_connector,
+            "confirm_action": self._confirm_action,
             "list_jobs": self._list_jobs,
             "get_job": self._get_job,
             "get_transfer_capabilities": self._get_capabilities,
@@ -942,6 +1428,7 @@ class DataPilotTools:
             "plan_transfer_route": self._plan_transfer_route,
             "plan_transfer": self._plan_transfer,
             "start_transfer": self._start_transfer,
+            "start_dataset_transfer": self._start_dataset_transfer,
             "explain_mapping_assurance": self._explain_mapping_assurance,
             "recommend_sync_mode": self._recommend_sync_mode,
             "inspect_schema_policy": self._inspect_schema_policy,
@@ -970,36 +1457,94 @@ class DataPilotTools:
             "retry_job": self._retry_job,
             "resume_job": self._resume_job,
             "replay_quarantine": self._replay_quarantine,
+            "repair_cdc_drift": self._repair_cdc_drift,
+            "prepare_cdc_source": self._prepare_cdc_source,
             "test_connector": self._test_connector,
             "delete_connector": self._delete_connector,
+            "update_connector": self._update_connector,
             "set_schedule_enabled": self._set_schedule_enabled,
             "delete_schedule": self._delete_schedule,
+            "update_schedule": self._update_schedule,
         }
+        started = time.monotonic()
         handler = handlers.get(name)
         if not handler:
-            return ToolResult(name=name, success=False, output=None, error=f"Unknown tool: {name}")
+            # The requested name is model/caller text, so it is not logged.
+            return _tool_executed(
+                ToolResult(name=name, success=False, output=None, error=f"Unknown tool: {name}"),
+                started,
+                tool="unknown",
+                reason="unknown_tool",
+            )
         # One chokepoint for permissions: every path into a tool — the
         # deterministic planner, an LLM tool loop, a recovery follow-up — comes
         # through here, so none of them can reach a tool the caller's role does
         # not hold.
         role = current_caller_role()
         if not is_tool_allowed(role, name):
-            return ToolResult(
-                name=name,
-                success=False,
-                output=None,
-                error=denial_message(role, name),
+            return _tool_executed(
+                ToolResult(
+                    name=name,
+                    success=False,
+                    output=None,
+                    error=denial_message(role, name),
+                ),
+                started,
+                reason="permission_denied",
+                role=role,
             )
         try:
-            return handler(**args)
+            bound, bind_error = _bind_tool_arguments(name, handler, args)
+            if bind_error:
+                return _tool_executed(
+                    ToolResult(name=name, success=False, output=None, error=bind_error),
+                    started,
+                    reason="invalid_arguments",
+                    role=role,
+                )
+            result = handler(**bound)
         except TypeError as e:
-            return ToolResult(name=name, success=False, output=None, error=str(e))
+            return _tool_executed(
+                ToolResult(
+                    name=name,
+                    success=False,
+                    output=None,
+                    error=_tool_argument_error(name, str(e)),
+                ),
+                started,
+                reason="invalid_arguments",
+                error=e,
+                role=role,
+            )
         except Exception as e:
-            return ToolResult(name=name, success=False, output=None, error=str(e))
+            return _tool_executed(
+                ToolResult(name=name, success=False, output=None, error=str(e)),
+                started,
+                reason="exception",
+                error=e,
+                role=role,
+            )
+        return _tool_executed(result, started, role=role)
 
     def _list_datasets(self) -> ToolResult:
         datasets = self.analyst.list_datasets()
-        return ToolResult(name="list_datasets", success=True, output={"datasets": datasets, "count": len(datasets)})
+        # QA DS03: the tool result is what the client shows — a full
+        # `columns: [...]` dump per dataset reads as a raw metadata blob.
+        # Business summary per dataset; `_search_data` and column-matching
+        # paths keep calling `analyst.list_datasets()` for the full schema.
+        shaped = []
+        for ds in datasets:
+            cols = [str(c) for c in (ds.get("columns") or [])]
+            shaped.append({
+                **{k: v for k, v in ds.items() if k != "columns"},
+                "column_preview": cols[:8],
+                "column_count": ds.get("column_count") or len(cols),
+            })
+        return ToolResult(
+            name="list_datasets",
+            success=True,
+            output={"datasets": shaped, "count": len(shaped)},
+        )
 
     def _analyze_dataset(self, dataset_name: str = "") -> ToolResult:
         schema = self.analyst.resolve_dataset(dataset_name)
@@ -1067,6 +1612,7 @@ class DataPilotTools:
                     "status": d.get("status", "saved"),
                     "last_test_ok": d.get("last_test_ok"),
                     "last_tested_at": d.get("last_tested_at"),
+                    "last_transfer_ok_at": d.get("last_transfer_ok_at"),
                 })
         except Exception as exc:
             logging.getLogger(__name__).warning("connector_store list failed: %s", exc, exc_info=exc)
@@ -1086,6 +1632,7 @@ class DataPilotTools:
                         "status": c.get("status", "unknown"),
                         "last_test_ok": c.get("last_test_ok"),
                         "last_tested_at": c.get("last_tested_at"),
+                        "last_transfer_ok_at": c.get("last_transfer_ok_at"),
                     })
             except Exception as exc:
                 logging.getLogger(__name__).warning("mongo list_connectors failed: %s", exc, exc_info=exc)
@@ -1121,16 +1668,15 @@ class DataPilotTools:
             )
 
         # "get me the passed connectors" must not list every connector. Health is
-        # the last saved probe result, never a guess from the engine name.
+        # the saved probe, overruled only by a transfer that completed after it —
+        # never a guess from the engine name.
+        from services.connector_store import connector_health
+
+        for c in summary:
+            c["health"] = connector_health(c)
         want = (health or "any").strip().lower()
         if want in {"passed", "failed", "untested"}:
-            buckets = {
-                "passed": lambda ok: ok is True,
-                "failed": lambda ok: ok is False,
-                "untested": lambda ok: ok not in (True, False),
-            }
-            keep = buckets[want]
-            summary = [c for c in summary if keep(c.get("last_test_ok"))]
+            summary = [c for c in summary if c["health"] == want]
         else:
             want = "any"
         return ToolResult(
@@ -1157,13 +1703,25 @@ class DataPilotTools:
         username: str = "",
         password: str = "",
         connection_string: str = "",
+        service_account: str = "",
         ssl: bool = False,
         schema: str = "",
         message: str = "",
         test_first: bool = True,
+        host_key: str = "",
     ) -> ToolResult:
         from .connector_create import build_connector_draft, draft_is_complete
 
+        if (host_key or "").strip():
+            from connectors.sftp_common import normalize_host_key_pin
+
+            try:
+                host_key = normalize_host_key_pin(host_key)
+            except ValueError as exc:
+                logging.getLogger(__name__).warning(
+                    "create_connector refused a malformed SFTP host_key pin for %r", name
+                )
+                return ToolResult(name="create_connector", success=False, output=None, error=str(exc))
         draft = build_connector_draft(
             message or "",
             {
@@ -1175,7 +1733,9 @@ class DataPilotTools:
                 "username": username,
                 "password": password,
                 "connection_string": connection_string,
+                "service_account": service_account,
                 "ssl": ssl,
+                "host_key": host_key,
                 "schema": schema,
             },
         )
@@ -1188,6 +1748,23 @@ class DataPilotTools:
                 success=False,
                 output=redact_payload(draft),
                 error=missing,
+            )
+        from services.connector_store import (
+            connector_name_conflict_message,
+            connector_name_taken,
+        )
+
+        if connector_name_taken(
+            str(draft.get("name") or ""),
+            workspace_id=str(draft.get("workspace_id") or "") or None,
+        ):
+            from .ack_ledger import redact_payload
+
+            return ToolResult(
+                name="create_connector",
+                success=False,
+                output=redact_payload(draft),
+                error=connector_name_conflict_message(str(draft.get("name") or "")),
             )
 
         probe_msg = ""
@@ -1210,19 +1787,52 @@ class DataPilotTools:
                         "auth_mode": draft.get("auth_mode") or "",
                         "warehouse": draft.get("warehouse") or "",
                         "account": draft.get("account") or "",
+                        "service_account": draft.get("service_account") or "",
+                        "host_key": draft.get("host_key") or "",
                     },
                 )
                 if not probe_ok:
                     from .ack_ledger import redact_payload
 
+                    # A host-key or preauth refusal is not a bad password.
+                    # Prefixing "credentials" is the message QA recorded.
+                    # An unsupported connector type is not a credentials
+                    # failure either — 'No connectivity probe for foobardb'
+                    # wrapped as "Could not connect with those credentials"
+                    # blames the password for a missing driver (QA N05).
+                    not_credentials = re.search(
+                        r"host key|not trusted|fingerprint|known_hosts|"
+                        r"preauth|before authentication|"
+                        r"unsupported connector type|no connectivity probe|"
+                        r"no probe configured",
+                        probe_msg or "",
+                        re.I,
+                    )
+                    if not_credentials:
+                        error = probe_msg
+                    else:
+                        from .connector_create import probe_failure_advice
+
+                        host = str(draft.get("host") or "")
+                        port = str(draft.get("port") or "")
+                        attempted = f"{host}:{port}" if host and port else host
+                        target = f" to {attempted}" if attempted else ""
+                        advice = probe_failure_advice(
+                            str(draft.get("type") or ""),
+                            host=host,
+                            connection_string=str(
+                                draft.get("connection_string") or ""
+                            ),
+                        )
+                        error = (
+                            f"Could not connect{target} with those credentials: "
+                            f"{probe_msg}. {advice}"
+                        )
                     return ToolResult(
                         name="create_connector",
                         success=False,
                         output=redact_payload(draft),
-                        error=(
-                            f"Could not connect with those credentials: {probe_msg}. "
-                            "Fix host/port/user/password (use the public proxy if this is Railway), then ask again."
-                        ),
+                        error=error,
                     )
             except Exception as exc:
                 from .ack_ledger import redact_payload
@@ -1233,19 +1843,65 @@ class DataPilotTools:
                     output=redact_payload(draft),
                     error=f"Connection test failed: {exc}",
                 )
+        # A successful handshake is not a usable connector: the login may own
+        # zero readable objects (public RNAcentral lacked schema USAGE — QA
+        # N09). Count readable objects once and warn in the preview rather
+        # than letting the operator save a connector that can read nothing.
+        readable_objects: int | None = None
+        readable_warning = ""
+        if test_first:
+            try:
+                from src.transfer.endpoint_intelligence import introspect_endpoint
+                from .schema_tools import _endpoint_from_connector
+
+                endpoint = _endpoint_from_connector(draft)
+                info = introspect_endpoint(endpoint)
+                if info.get("connected"):
+                    readable_objects = len(info.get("objects") or [])
+                    if readable_objects == 0:
+                        readable_warning = (
+                            "Connected, but the login can read 0 tables/schemas. "
+                            "Check USAGE/SELECT grants on the target schema "
+                            "before saving — transfers from this connector "
+                            "will find nothing to read."
+                        )
+            except Exception as exc:
+                # A listing failure must not block connector creation — the
+                # probe already proved connectivity; the warning is best-effort.
+                logging.getLogger(__name__).info(
+                    "create_connector readable-object check skipped: %s", exc
+                )
+        preview_host, preview_port, url_password = _preview_endpoint(draft)
+        preview_type = str(draft.get("type") or "").strip().lower().replace("-", "_")
+        preview_user = draft.get("username") or ""
+        if preview_type in {
+            "s3", "amazon_s3", "aws_s3", "minio", "s3_compatible",
+            "gcs", "google_cloud_storage", "adls", "azure_blob_storage",
+            "azure_data_lake", "azure_data_lake_storage",
+        }:
+            # S3 stores the access key id in username. The preview must not echo it.
+            preview_user = ""
         safe_preview = {
             "name": draft["name"],
             "type": draft["type"],
-            "host": draft.get("host") or "(from URL)",
-            "port": draft.get("port"),
+            "host": preview_host,
+            "port": preview_port,
             "database": draft.get("database") or "",
-            "username": draft.get("username") or "",
+            "username": preview_user,
             "ssl": bool(draft.get("ssl")),
             "auth_mode": draft.get("auth_mode") or "",
             "schema": draft.get("schema") or "",
-            "has_password": bool(draft.get("password") or draft.get("connection_string")),
+            "has_password": bool(draft.get("password") or url_password),
+            "has_service_account": bool(draft.get("service_account")),
             "test": probe_msg or "skipped",
         }
+        if draft.get("host_key"):
+            # A fingerprint is public; a human must see the pin before Confirm.
+            safe_preview["host_key"] = str(draft["host_key"])
+        if readable_objects is not None:
+            safe_preview["readable_objects"] = readable_objects
+        if readable_warning:
+            safe_preview["warning"] = readable_warning
         from .ack_ledger import get_ack_ledger
 
         ack_id = get_ack_ledger().put(
@@ -1267,12 +1923,29 @@ class DataPilotTools:
             },
         )
 
-    def _list_jobs(self, limit: int = 10) -> ToolResult:
-        from .job_reads import list_transfer_jobs
+    def _confirm_action(self, ack_id: str = "", reason: str = "") -> ToolResult:
+        from .confirm_ack import confirm_from_tool
 
-        summary, counts, source = list_transfer_jobs(limit=limit)
-        # "How many jobs?" must be answered from the whole history — the page we
-        # read here is only the window we can show.
+        body = confirm_from_tool(ack_id, reason or "")
+        if not body.get("ok"):
+            return ToolResult(
+                name="confirm_action",
+                success=False,
+                output=body,
+                error=str(body.get("error") or "Confirm failed"),
+            )
+        return ToolResult(name="confirm_action", success=True, output=body)
+
+    def _list_jobs(self, limit: int = 10, scope: str = "workspace") -> ToolResult:
+        from .job_reads import job_list_workspace_scope, list_transfer_jobs
+
+        try:
+            workspace_id = job_list_workspace_scope(scope)
+        except ValueError as exc:
+            return ToolResult(name="list_jobs", success=False, output=None, error=str(exc))
+        summary, counts, source = list_transfer_jobs(limit=limit, workspace_id=workspace_id)
+        # "How many jobs?" must be answered from the whole history for this scope.
+        # The page we read here is only the window we can show.
         return ToolResult(
             name="list_jobs",
             success=True,
@@ -1282,13 +1955,16 @@ class DataPilotTools:
                 "total": int(counts.get("total") or 0),
                 "status_counts": counts.get("by_status") or {},
                 "store": source,
+                "scope": "all" if workspace_id is None else "workspace",
             },
         )
 
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
 
-        from .job_reads import read_transfer_job
+        from services.job_status import job_timestamp_iso
+
+        from .job_reads import job_governance, read_transfer_job
 
         job = read_transfer_job((job_id or "").strip())
         if not job:
@@ -1298,15 +1974,32 @@ class DataPilotTools:
                 output=None,
                 error=f"Job '{job_id}' not found. Ask the user for the job ID shown on Jobs / Job Theater.",
             )
+        from services.quarantine_dlq import replay_quarantine_details
+
         quarantine = merge_job_quarantine(job)
-        row_ids = {d.get("row") for d in quarantine if d.get("row") is not None}
-        quarantine_row_count = len(row_ids) if row_ids else len(quarantine)
+        # Skipped and NULL-coerced rows are audit findings, not held-out rows.
+        held_out = replay_quarantine_details(quarantine)
+        row_ids = {d.get("row") for d in held_out if d.get("row") is not None}
+        quarantine_row_count = len(row_ids) if row_ids else len(held_out)
+        from services.quarantine_from_preflight import drop_phantom_identity_rows
+
+        stored_rejected = int(job.get("rejected_rows") or 0)
+        stored_details = list(job.get("rejected_details") or [])
+        if stored_details and not drop_phantom_identity_rows(stored_details) and not quarantine:
+            stored_rejected = 0
+        reported_rejected = stored_rejected or quarantine_row_count
         samples = [
             {
                 "row": d.get("row"),
                 "column": d.get("column"),
                 "value": str(d.get("value") or "")[:120],
                 "reason": str(d.get("reason") or "")[:200],
+                # Which signed policy held the row out (cast_failure vs quarantined).
+                **{
+                    k: d[k]
+                    for k in ("execution_policy", "disposition")
+                    if d.get(k)
+                },
             }
             for d in quarantine[:8]
         ]
@@ -1366,15 +2059,17 @@ class DataPilotTools:
                 "source_type": job.get("source_type"),
                 "destination_type": job.get("destination_type"),
                 "records_processed": job.get("records_processed", 0),
-                "rejected_rows": int(job.get("rejected_rows") or 0) or quarantine_row_count,
+                "rejected_rows": reported_rejected,
                 "coerced_null_rows": job.get("coerced_null_rows", 0),
                 "quarantine_issue_count": len(quarantine),
                 "quarantine_row_count": quarantine_row_count,
                 "quarantine_samples": samples,
                 "progress_pct": job.get("progress_pct"),
                 "error": job.get("error"),
-                "created_at": str(job.get("created_at", "")),
-                "completed_at": str(job.get("completed_at", "")),
+                "created_at": job_timestamp_iso(job.get("created_at")),
+                "updated_at": job_timestamp_iso(job.get("updated_at")),
+                "completed_at": job_timestamp_iso(job.get("completed_at")),
+                "governance": job_governance(job),
                 "sync_mode": route.get("sync_mode"),
                 "route": route,
                 "live_source_schema": live_schema,
@@ -1382,9 +2077,21 @@ class DataPilotTools:
             },
         )
 
-    def _get_capabilities(self) -> ToolResult:
+    def _get_capabilities(self, detail: str = "summary") -> ToolResult:
         from ...transfer.registry import get_capabilities
-        return ToolResult(name="get_transfer_capabilities", success=True, output=get_capabilities())
+
+        full = get_capabilities()
+        if str(detail or "").strip().lower() in {"full", "all", "verbose"}:
+            return ToolResult(name="get_transfer_capabilities", success=True, output=full)
+        combos = list(full.get("live_combinations") or [])
+        summary = {k: v for k, v in full.items() if k != "live_combinations"}
+        summary["detail"] = "summary"
+        summary["live_combination_count"] = len(combos)
+        summary["full_detail"] = (
+            "Pass detail=full to receive every source×destination combination. "
+            "The default summary omits that matrix."
+        )
+        return ToolResult(name="get_transfer_capabilities", success=True, output=summary)
 
     def _navigate(self, screen: str = "dashboard") -> ToolResult:
         # Alias product labels → Screen ids
@@ -1433,7 +2140,12 @@ class DataPilotTools:
             )
         return ToolResult(name="get_preflight_run", success=True, output=record)
 
-    def _remediate_validation(self, kind: str = "", run_id: str = "") -> ToolResult:
+    def _remediate_validation(
+        self,
+        kind: str = "",
+        run_id: str = "",
+        workspace_id: str = "",
+    ) -> ToolResult:
         allowed = {
             "normalize_control_chars",
             "open_bad_data_fix",
@@ -1448,6 +2160,20 @@ class DataPilotTools:
                 output=None,
                 error=f"Unknown remediation kind '{kind}'. Use one of: {', '.join(sorted(allowed))}",
             )
+        cited = (run_id or "").strip()
+        if cited:
+            from services.preflight_run_store import get_preflight_run
+
+            if not get_preflight_run(cited):
+                return ToolResult(
+                    name="remediate_validation",
+                    success=False,
+                    output=None,
+                    error=(
+                        f"Preflight run '{cited}' not found. "
+                        "Ask the user for the pf_… ID shown on Validate."
+                    ),
+                )
         labels = {
             "normalize_control_chars": "Normalize control characters…",
             "open_bad_data_fix": "Fix bad data…",
@@ -1455,6 +2181,28 @@ class DataPilotTools:
             "review_mappings": "Open Map step to review mappings",
             "rerun_preflight": "Re-run Validate",
         }
+        requires_confirm = kind in {"open_bad_data_fix", "quarantine_and_rerun"}
+        ack_id = ""
+        if requires_confirm:
+            from .ack_ledger import get_ack_ledger
+
+            destructive = kind == "quarantine_and_rerun"
+            payload = {
+                "remediation_kind": kind,
+                "run_id": cited or None,
+                "destructive": destructive,
+                "workspace_id": str(workspace_id or "").strip() or None,
+            }
+            ack_id = get_ack_ledger().put(
+                kind="studio_remediation",
+                payload=payload,
+                preview={
+                    "remediation_kind": kind,
+                    "run_id": cited or None,
+                    "label": labels[kind],
+                    "destructive": destructive,
+                },
+            )
         return ToolResult(
             name="remediate_validation",
             success=True,
@@ -1462,9 +2210,22 @@ class DataPilotTools:
                 "action": "studio",
                 "kind": kind,
                 "label": labels[kind],
-                "run_id": run_id or None,
-                "risk": "mutate",
-                "requires_confirm": True,
+                "run_id": cited or None,
+                "risk": "mutate" if requires_confirm else "safe",
+                "requires_confirm": requires_confirm,
+                "destructive": kind == "quarantine_and_rerun",
+                "ui_only": not requires_confirm,
+                **({"ack_id": ack_id} if ack_id else {}),
+                "note": (
+                    "This stages a change for confirmation in Transfer Studio. "
+                    "Nothing is written from this chat."
+                    if requires_confirm
+                    else (
+                        "This opens the studio control. It does not change data "
+                        "until you use that screen. There is no confirm ack because "
+                        "nothing is written here."
+                    )
+                ),
             },
         )
 
@@ -1501,7 +2262,9 @@ class DataPilotTools:
         try:
             ds = self._list_datasets()
             if ds.success:
-                datasets = (ds.output or {}).get("datasets", [])[:8]
+                # The whole inventory — an 8-item cap hid 14 of 22 datasets
+                # (QA D09). Entries are name/shape summaries, cheap to return.
+                datasets = (ds.output or {}).get("datasets", [])
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         try:
@@ -1544,6 +2307,8 @@ class DataPilotTools:
                     "Create a saved connector from a URL or host/user/password (server ack + Confirm)",
                     "Compare source vs destination schemas and map columns",
                     "List and run pipeline schedules (with confirmation)",
+                    "Create, pause, resume, or delete a pipeline schedule after you Confirm",
+                    "Delete a saved connector after you Confirm",
                     "Open Fix bad data / quarantine paths in Transfer Studio (Confirm required)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
                     "Brief the live workspace (connectors, jobs, parked pipelines, contracts)",
@@ -1551,11 +2316,11 @@ class DataPilotTools:
                 "cannot_yet": [
                     "Export a table to a downloadable file from chat "
                     "(sample the table or use Query for larger pulls)",
-                    "Create a brand-new schedule/pipeline definition from chat "
-                    "(I can list and run existing ones)",
                     "Rewrite quarantine rows in place from chat "
                     "(I open Transfer Studio Fix with your Confirm)",
-                    "Delete connectors, jobs, or data",
+                    "Delete jobs or warehouse rows from chat "
+                    "(deleting a connector or a schedule asks you to Confirm "
+                    "and does not undo a committed load)",
                     "Run dbt Cloud or use dbt as the transfer engine "
                     "(transform projects can export a dbt starter pack)",
                     "Open an SSH tunnel or bastion in front of a database "
@@ -1580,7 +2345,14 @@ class DataPilotTools:
                     "Run changing actions without your Confirm",
                 ],
                 "datasets": [
-                    {"name": d.get("name"), "columns": d.get("column_count"), "rows": d.get("row_count")}
+                    {
+                        "name": d.get("name"),
+                        "columns": d.get("column_count"),
+                        "rows": d.get("row_count"),
+                        "file": d.get("file") or "",
+                        "file_type": d.get("file_type") or "",
+                        "duplicate_name": bool(d.get("duplicate_name")),
+                    }
                     for d in datasets
                     if d.get("name") and not looks_like_index_dump_name(str(d.get("name")))
                 ],
@@ -1941,6 +2713,10 @@ class DataPilotTools:
         table: str = "",
         dest_table: str = "",
         sync_mode: str = "",
+        upsert_key: str = "",
+        primary_key: str = "",
+        cursor_column: str = "",
+        cursor_semantics: str = "",
         leftover_nl: str = "",
         contract_id: str = "",
         require_signed_contract: Any = None,
@@ -1980,6 +2756,10 @@ class DataPilotTools:
                 dest_connector_name=destination,
                 dest_table=dest_table or table,
                 sync_mode=sync_mode or workload,
+                upsert_key=upsert_key or primary_key,
+                primary_key=primary_key,
+                cursor_column=cursor_column,
+                cursor_semantics=cursor_semantics,
                 **bind,
             )
             if planned.success:
@@ -2047,26 +2827,69 @@ class DataPilotTools:
         has_primary_key: bool = False,
         needs_history: bool = False,
         source_read_mode: str = "",
+        row_count: int = 0,
     ) -> ToolResult:
         w = workload.lower()
         callable_src = (source_read_mode or "").strip().lower() in {"procedure", "query"}
-        if callable_src and ("cdc" in w or needs_history or "scd" in w or "mirror" in w):
-            return ToolResult(name="recommend_sync_mode", success=True, output={
-                "recommended_mode": "Full Refresh Append",
-                "reason": (
-                    "CALL/SELECT is a result-set snapshot, not a WAL/binlog or table "
-                    "identity. CDC, SCD2, and mirror are refused. Use full refresh, "
-                    "or incremental only when the procedure is cursor-stable."
-                ),
-                "requires": {
-                    "cursor": False,
-                    "primary_key": False,
-                    "cdc_log_access": False,
-                },
-            })
-        if "cdc" in w:
+        mentions_delete = bool(re.search(r"\bdelet", w))
+        mentions_update = bool(re.search(r"\bupdat", w))
+        near_realtime = any(
+            token in w
+            for token in (
+                "near-real-time",
+                "near real-time",
+                "near realtime",
+                "real-time",
+                "realtime",
+                "real time",
+            )
+        )
+        # S04: Lookup tables (small dimension tables without PK/cursor) should use
+        # Full Refresh Overwrite, not Full Refresh Append. Append is not rerun-safe
+        # for static reference data - it would accumulate duplicates.
+        is_lookup_table = (
+            not has_cursor
+            and not has_primary_key
+            and row_count > 0
+            and row_count < 10000  # Heuristic: lookup tables are typically small
+            and ("lookup" in w or "reference" in w or "dimension" in w or "config" in w)
+        )
+        if is_lookup_table:
+            mode = "Full Refresh Overwrite"
+            reason = (
+                "Lookup/reference tables without a cursor or primary key should use "
+                "Full Refresh Overwrite. Full Refresh Append would accumulate duplicates "
+                "on each run because there is no cursor to detect new rows or key to dedupe."
+            )
+        # A procedure or query is a result set, not a log. CDC / SCD2 / mirror
+        # cannot run on it. Append is the non-destructive refusal unless the
+        # workload says rows disappear: appending that snapshot duplicates the
+        # full result and leaves deleted rows behind.
+        if callable_src and mentions_delete:
+            mode = "Full Refresh Overwrite"
+            reason = (
+                "A query or procedure returns the current result, not a change log. "
+                "Deletes in that result are rows that are no longer present, so the "
+                "destination has to be replaced. Append would copy the full result "
+                "again and leave the deleted rows in place."
+            )
+        elif callable_src and ("cdc" in w or needs_history or "scd" in w or "mirror" in w):
+            mode = "Full Refresh Append"
+            reason = (
+                "CALL/SELECT is a result-set snapshot, not a WAL/binlog or table "
+                "identity. CDC, SCD2, and mirror are refused. Use full refresh, "
+                "or incremental only when the procedure is cursor-stable."
+            )
+        elif "cdc" in w or (
+            near_realtime and has_primary_key and (mentions_delete or mentions_update)
+        ):
             mode = "Incremental CDC"
-            reason = "Source changes should be read from a log stream and resumed from cursor state."
+            reason = (
+                "Updates and deletes at near-real-time have to be read from the "
+                "log. Incremental append inserts new rows only, so a changed row "
+                "is duplicated and a deleted row stays. CDC here is at-least-once "
+                "upsert and needs log access plus the primary key."
+            )
         elif "upsert" in w or "merge" in w or (has_primary_key and "incremental" in w):
             mode = "Incremental Upsert"
             reason = (
@@ -2076,24 +2899,59 @@ class DataPilotTools:
         elif has_cursor and has_primary_key and needs_history:
             mode = "Incremental Append + Deduped"
             reason = "Cursor and key allow efficient updates while preserving change history."
+        elif has_primary_key and mentions_update:
+            mode = "Incremental Upsert"
+            reason = (
+                "The workload updates existing rows and a primary key is present. "
+                "Incremental append would insert a second copy of each changed row. "
+                "Incremental upsert updates the destination row in place."
+            )
+        elif mentions_delete and has_primary_key:
+            mode = "Mirror"
+            reason = (
+                "Deletes have to remove the destination row. Incremental append "
+                "and upsert leave it. Mirror rewrites the key and deletes "
+                "destination rows the source no longer has. It is a full read, "
+                "not a log capture."
+            )
+        elif mentions_delete or "snapshot" in w or "full" in w or "overwrite" in w:
+            mode = "Full Refresh Overwrite"
+            reason = (
+                "Snapshot workloads should replace the destination with the latest "
+                "source state. Append would keep rows the source has already deleted."
+                if mentions_delete
+                else "Snapshot workloads should replace the destination with the latest source state."
+            )
         elif has_cursor:
             mode = "Incremental Append"
             reason = "Cursor allows new records to be read without a full scan."
-        elif "snapshot" in w or "full" in w or "overwrite" in w:
-            mode = "Full Refresh Overwrite"
-            reason = "Snapshot workloads should replace the destination with the latest source state."
         elif has_primary_key:
             mode = "Incremental Upsert"
             reason = "A primary key is enough to upsert; add a cursor later to avoid full scans."
         else:
-            mode = "Full Refresh Append"
-            reason = "Use append until cursor/key metadata is confirmed."
+            # S04: No cursor and no key - recommend Overwrite for small tables to avoid
+            # duplicate accumulation on reruns. This is safer than Append for static data.
+            if row_count > 0 and row_count < 10000:
+                mode = "Full Refresh Overwrite"
+                reason = (
+                    "Small tables without cursor or key should use Full Refresh Overwrite "
+                    "to avoid duplicate accumulation on reruns. Append would keep adding "
+                    "the same rows on each run."
+                )
+            else:
+                mode = "Full Refresh Append"
+                reason = "Use append until cursor/key metadata is confirmed."
+        incremental = mode.startswith("Incremental")
         return ToolResult(name="recommend_sync_mode", success=True, output={
             "recommended_mode": mode,
             "reason": reason,
             "requires": {
-                "cursor": "Append" in mode or "CDC" in mode,
-                "primary_key": "Upsert" in mode or "Deduped" in mode,
+                # "Full Refresh Append" contains "Append". A cursor is required
+                # only for a mode that advances one. Overwrite does not.
+                "cursor": incremental and "Upsert" not in mode,
+                "primary_key": (
+                    "Upsert" in mode or "Deduped" in mode or "CDC" in mode or mode == "Mirror"
+                ),
                 "cdc_log_access": "CDC" in mode,
             },
         })
@@ -2111,41 +2969,126 @@ class DataPilotTools:
         ]
 
     def _profile_quality_rules(self, dataset_name: str = "") -> ToolResult:
-        schema = self.analyst.resolve_dataset(dataset_name) if dataset_name else None
-        columns = schema.columns if schema else []
-        pii_candidates = [c for c in columns if any(t in c.lower() for t in ("email", "phone", "ssn", "card", "name"))]
+        """Profile one named upload. A miss or two same-named files is not a profile.
+
+        The six gate sentences used to come back for every string, including a
+        name that is not a dataset, and PII was a four-token substring that
+        missed ``ACCT_NO``. Duplicate stems (CSV and TSV both called
+        ``sample_payments``) were silently reduced to the wider file.
+        """
+        from services.dataset_resolve import exact_datasets
+
         gate_ids = self._engine_gate_ids()
-        return ToolResult(name="profile_quality_rules", success=True, output={
-            "dataset": schema.name if schema else dataset_name or "active dataset",
-            "rules": [
-                "declared types validated by G3 schema contract (sample-aware when rows exist)",
-                "null rate checked against inferred required / NOT NULL fields",
-                "primary key uniqueness when candidate key exists",
-                "PII columns tagged before destination write",
-                "row rejection quarantine enabled for lossy coercions",
-                "post-write row count and checksum reconciliation (G8/G9)",
-            ],
-            "honesty": (
-                "No invented numeric parse-success floor — cite preflight_gates / "
-                "evidence pack measurements, not marketing thresholds."
+        name = (dataset_name or "").strip()
+        honesty = (
+            "No invented numeric parse-success floor — cite preflight_gates / "
+            "evidence pack measurements, not marketing thresholds."
+        )
+        empty_steps = [
+            "Upload a file in Transfer or name a dataset to analyze",
+            "Or: sample <table> on <connector>",
+            "Ask what quality gates do you have for the G1–G9 list",
+        ]
+
+        def _miss(message: str, *, candidates: list[dict] | None = None) -> ToolResult:
+            return ToolResult(
+                name="profile_quality_rules",
+                success=True,
+                output={
+                    "dataset": name,
+                    "rules": [],
+                    "honesty": honesty,
+                    "message": message,
+                    "preflight_gates": gate_ids,
+                    "pii_candidates": [],
+                    "column_count": 0,
+                    "has_dataset": False,
+                    "ambiguous": bool(candidates),
+                    "candidates": candidates or [],
+                    "next_steps": empty_steps,
+                },
+            )
+
+        if not name:
+            return _miss("Name a dataset to profile. No file was measured.")
+
+        schemas = []
+        feeder = getattr(self.analyst, "feeder", None)
+        if feeder is not None and hasattr(feeder, "feed_all"):
+            schemas = list(feeder.feed_all() or [])
+        matches = exact_datasets(schemas, name)
+        shapes = {
+            (
+                (getattr(s, "file_type", "") or "").lower(),
+                tuple(getattr(s, "columns", []) or []),
+            )
+            for s in matches
+        }
+        if len(matches) > 1 and len(shapes) > 1:
+            candidates = [
+                {
+                    "name": getattr(s, "name", ""),
+                    "file_type": getattr(s, "file_type", "") or "",
+                    "column_count": len(getattr(s, "columns", []) or []),
+                    "columns": list(getattr(s, "columns", []) or []),
+                    "row_count": int(getattr(s, "row_count", 0) or 0),
+                }
+                for s in matches
+            ]
+            listed = ", ".join(
+                f"{c['name']}.{c['file_type'] or 'file'} "
+                f"({c['column_count']} columns, {c['row_count']} rows)"
+                for c in candidates
+            )
+            return _miss(
+                f"More than one dataset is named {name}. Name the file: {listed}.",
+                candidates=candidates,
+            )
+
+        schema = self.analyst.resolve_dataset(name)
+        columns = list(schema.columns) if schema else []
+        if not schema or not columns:
+            return _miss(
+                f"Dataset {name!r} was not found. No quality rules were measured for it."
+            )
+
+        insight = self.analyst.analyze_schema(schema)
+        pii_candidates = list(getattr(insight, "pii_columns", []) or [])
+        rules = [
+            (
+                f"Measured {len(columns)} columns"
+                + (f" and {int(schema.row_count):,} rows" if schema.row_count else "")
+                + f" on {schema.name}"
+                + (f" ({schema.file_type})" if getattr(schema, "file_type", "") else "")
             ),
+            (
+                "PII columns tagged before destination write: "
+                + ", ".join(pii_candidates)
+                if pii_candidates
+                else "Pattern engine found no PII columns on this dataset"
+            ),
+            "null rate checked against inferred required / NOT NULL fields",
+            "primary key uniqueness when candidate key exists",
+            "row rejection quarantine enabled for lossy coercions",
+            "post-write row count and checksum reconciliation (G8/G9)",
+        ]
+        return ToolResult(name="profile_quality_rules", success=True, output={
+            "dataset": schema.name,
+            "file_type": getattr(schema, "file_type", "") or "",
+            "rules": rules,
+            "honesty": honesty,
+            "message": "",
             "preflight_gates": gate_ids,
             "pii_candidates": pii_candidates,
             "column_count": len(columns),
-            "has_dataset": bool(schema and columns),
-            "next_steps": (
-                [
-                    "Sample a live table to profile real null/type rates",
-                    "Say fix bad data to open Transfer Studio remediation (Confirm)",
-                    "Run Validate (9 gates) before Execute",
-                ]
-                if schema and columns
-                else [
-                    "Upload a file in Transfer or name a dataset to analyze",
-                    "Or: sample <table> on <connector>",
-                    "Ask what quality gates do you have for the G1–G9 list",
-                ]
-            ),
+            "has_dataset": True,
+            "ambiguous": False,
+            "candidates": [],
+            "next_steps": [
+                "Sample a live table to profile real null/type rates",
+                "Say fix bad data to open Transfer Studio remediation (Confirm)",
+                "Run Validate (9 gates) before Execute",
+            ],
         })
 
     def _resolve_schedule(self, schedule_id: str = "", name: str = ""):
@@ -2160,26 +3103,27 @@ class DataPilotTools:
         needle = (name or "").strip().lower()
         if not needle:
             return None, None
-        exact = []
-        fuzzy = []
-        for s in list_schedules():
-            label = (s.name or "").strip().lower()
-            if label == needle:
-                exact.append(s)
-            elif needle in label or label in needle:
-                fuzzy.append(s)
-        if exact:
+        # Full name only. A substring used to run or delete a different
+        # pipeline, and two schedules were allowed to share a name.
+        exact = [
+            s for s in list_schedules()
+            if (s.name or "").strip().lower() == needle
+        ]
+        if len(exact) == 1:
             return exact[0], None
-        if len(fuzzy) == 1:
-            return fuzzy[0], None
-        if len(fuzzy) > 1:
-            names = [s.name for s in fuzzy[:5] if s.name]
-            listed = ", ".join(f"**{n}**" for n in names)
-            return None, f"Which pipeline did you mean? {listed}"
+        if len(exact) > 1:
+            shown = [
+                f"**{s.name}** ({s.id})" for s in exact[:5] if s.name
+            ]
+            listed = ", ".join(shown)
+            return None, (
+                f"“{name.strip()}” matches {len(exact)} pipelines. "
+                f"Pass the schedule id. {listed}"
+            )
         return None, None
 
     def _schedule_summary(self, s) -> dict:
-        from services.schedule_store import schedule_bind_summary
+        from services.schedule_store import has_open_approval, schedule_bind_summary
 
         row = {
             "id": s.id,
@@ -2195,6 +3139,14 @@ class DataPilotTools:
             "last_run_at": s.last_run_at,
             "last_status": s.last_status,
             "run_count": s.run_count,
+            "missed_window_count": int(getattr(s, "missed_window_count", 0) or 0),
+            "last_missed_windows": int(getattr(s, "last_missed_windows", 0) or 0),
+            # One overdue slot fires after resume. Extra missed windows are
+            # counted on the schedule and are not replayed (QA R2-115).
+            "catch_up_policy": (
+                "Resume keeps a past next_run_at so the beat fires one catch-up. "
+                "Further missed windows are counted and not replayed."
+            ),
         }
         validation_mode = str(getattr(s, "validation_mode", "") or "").strip()
         schema_policy = str(getattr(s, "schema_policy", "") or "").strip()
@@ -2203,6 +3155,18 @@ class DataPilotTools:
         if schema_policy:
             row["schema_policy"] = schema_policy
         row.update(schedule_bind_summary(s))
+        if has_open_approval(s):
+            # Parked: due_schedules skips it until a human decides, so
+            # next_run_at stops advancing. Say why instead of looking stuck.
+            req = s.approval_request
+            row.update(
+                needs_approval=True,
+                approval_id=str(req.get("id") or ""),
+                approval_code=str(req.get("code") or ""),
+                approval_finding=str(req.get("finding") or ""),
+                approval_corrective_action=str(req.get("corrective_action") or ""),
+                approvable=bool(req.get("approvable")),
+            )
         return row
 
     def _list_schedules(self, limit: int = 20) -> ToolResult:
@@ -2298,10 +3262,48 @@ class DataPilotTools:
 
         return _job_tool("resume_job", job_id, selector)
 
-    def _replay_quarantine(self, job_id: str = "", selector: str = "") -> ToolResult:
+    def _replay_quarantine(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        transform_overrides: dict | None = None,
+        rows: list | None = None,
+    ) -> ToolResult:
         from .lifecycle_tools import _job_tool
 
-        return _job_tool("replay_quarantine", job_id, selector)
+        return _job_tool(
+            "replay_quarantine",
+            job_id,
+            selector,
+            transform_overrides=transform_overrides,
+            rows=rows,
+        )
+
+    def _repair_cdc_drift(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        key_ids: list[str] | None = None,
+    ) -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool(
+            "repair_cdc_drift",
+            job_id,
+            selector,
+            key_ids=key_ids or [],
+        )
+
+    def _prepare_cdc_source(
+        self,
+        connector_id: str = "",
+        name: str = "",
+        restart: bool = True,
+        enable_gtid: bool = True,
+    ) -> ToolResult:
+        from .lifecycle_tools import prepare_cdc_source
+
+        return prepare_cdc_source(connector_id, name, restart, enable_gtid)
 
     def _test_connector(self, connector_id: str = "", name: str = "") -> ToolResult:
         from .lifecycle_tools import test_connector
@@ -2312,6 +3314,29 @@ class DataPilotTools:
         from .lifecycle_tools import delete_connector
 
         return delete_connector(connector_id, name)
+
+    def _update_connector(  # nosec B107
+        self,
+        connector_id: str = "",
+        name: str = "",
+        host: str = "",
+        port: int = 0,
+        database: str = "",
+        username: str = "",
+        password: str = "",
+        connection_string: str = "",
+        schema: str = "",
+        ssl: bool | None = None,
+        new_name: str = "",
+        host_key: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import update_connector
+
+        return update_connector(
+            connector_id, name, host=host, port=port, database=database,
+            username=username, password=password, connection_string=connection_string,
+            schema=schema, ssl=ssl, new_name=new_name, host_key=host_key,
+        )
 
     def _set_schedule_enabled(
         self, schedule_id: str = "", name: str = "", enabled: bool = True
@@ -2324,6 +3349,17 @@ class DataPilotTools:
         from .lifecycle_tools import delete_schedule
 
         return delete_schedule(self._resolve_schedule, schedule_id, name)
+
+    def _update_schedule(
+        self,
+        schedule_id: str = "",
+        name: str = "",
+        cadence: str = "",
+        new_name: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import update_schedule
+
+        return update_schedule(self._resolve_schedule, schedule_id, name, cadence, new_name)
 
     def _list_contracts(self, limit: int = 50) -> ToolResult:
         from services.contract_store import get_contract_store
@@ -2344,7 +3380,23 @@ class DataPilotTools:
                 "status": d.get("status"),
                 "updated_at": str(d.get("updated_at") or ""),
             })
-        return ToolResult(name="list_contracts", success=True, output={"contracts": rows, "count": len(rows)})
+        census: dict = {}
+        try:
+            census = store.count_contracts_by_status() or {}
+        except Exception:
+            census = {}
+        total = sum(int(n) for n in census.values()) if census else len(rows)
+        return ToolResult(
+            name="list_contracts",
+            success=True,
+            output={
+                "contracts": rows,
+                "count": len(rows),
+                "total": total,
+                "truncated": total > len(rows),
+                "by_status": census,
+            },
+        )
 
     def _open_job(self, job_id: str = "") -> ToolResult:
         jid = (job_id or "").strip()
@@ -2524,12 +3576,19 @@ class DataPilotTools:
         require_signed_contract: Any = None,
         source_filter: dict | None = None,
         upsert_key: str = "",
+        primary_key: str = "",
         dedupe_key: str = "",
+        cursor_column: str = "",
+        cursor_semantics: str = "",
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         cadence: str = "",
         all_tables: bool = False,
         limit: int = 0,
+        risk_acceptance: dict | None = None,
+        pii_acknowledgement: dict | None = None,
+        column_transforms: dict | None = None,
+        schema_drift_acknowledged: bool = False,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -2551,12 +3610,19 @@ class DataPilotTools:
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
             source_filter=source_filter,
-            upsert_key=upsert_key,
+            upsert_key=upsert_key or primary_key,
+            primary_key=primary_key,
             dedupe_key=dedupe_key,
+            cursor_column=cursor_column,
+            cursor_semantics=cursor_semantics,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             cadence=cadence,
             all_tables=all_tables,
+            risk_acceptance=risk_acceptance,
+            pii_acknowledgement=pii_acknowledgement,
+            column_transforms=column_transforms,
+            schema_drift_acknowledged=schema_drift_acknowledged,
         )
 
     def _start_transfer(
@@ -2580,11 +3646,18 @@ class DataPilotTools:
         require_signed_contract: Any = None,
         source_filter: dict | None = None,
         upsert_key: str = "",
+        primary_key: str = "",
         dedupe_key: str = "",
+        cursor_column: str = "",
+        cursor_semantics: str = "",
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         cadence: str = "",
         all_tables: bool = False,
+        risk_acceptance: dict | None = None,
+        pii_acknowledgement: dict | None = None,
+        column_transforms: dict | None = None,
+        schema_drift_acknowledged: bool = False,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -2607,12 +3680,51 @@ class DataPilotTools:
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
             source_filter=source_filter,
-            upsert_key=upsert_key,
+            upsert_key=upsert_key or primary_key,
+            primary_key=primary_key,
             dedupe_key=dedupe_key,
+            cursor_column=cursor_column,
+            cursor_semantics=cursor_semantics,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             cadence=cadence,
             all_tables=all_tables,
+            risk_acceptance=risk_acceptance,
+            pii_acknowledgement=pii_acknowledgement,
+            column_transforms=column_transforms,
+            schema_drift_acknowledged=schema_drift_acknowledged,
+        )
+
+    def _start_dataset_transfer(
+        self,
+        dataset_name: str = "",
+        dest_connector_id: str = "",
+        dest_connector_name: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+        schema_policy: str = "manual_review",
+        validation_mode: str = "balanced",
+        limit: int = 0,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        source_timezone: str = "",
+        pii_acknowledgement: dict | None = None,
+    ) -> ToolResult:
+        from .dataset_transfer import stage_dataset_transfer
+
+        return stage_dataset_transfer(
+            dataset_name=dataset_name,
+            dest_connector_id=dest_connector_id,
+            dest_connector_name=dest_connector_name,
+            dest_table=dest_table,
+            sync_mode=sync_mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            limit=limit,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            source_timezone=source_timezone,
+            pii_acknowledgement=pii_acknowledgement,
         )
 
     def _create_schedule(
@@ -2629,6 +3741,7 @@ class DataPilotTools:
         cadence: str = "",
         name: str = "",
         cursor_column: str = "",
+        cursor_semantics: str = "",
         source_timezone: str = "",
         source_read_mode: str = "",
         procedure_call: str = "",
@@ -2638,10 +3751,13 @@ class DataPilotTools:
         require_signed_contract: Any = None,
         source_filter: dict | None = None,
         upsert_key: str = "",
+        primary_key: str = "",
         dedupe_key: str = "",
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         limit: int = 0,
+        column_transforms: dict | None = None,
+        schema_drift_acknowledged: bool = False,
     ) -> ToolResult:
         from .schedule_tools import create_schedule
 
@@ -2658,6 +3774,7 @@ class DataPilotTools:
             cadence=cadence,
             name=name,
             cursor_column=cursor_column,
+            cursor_semantics=cursor_semantics,
             source_timezone=source_timezone,
             source_read_mode=source_read_mode,
             procedure_call=procedure_call,
@@ -2666,11 +3783,14 @@ class DataPilotTools:
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
             source_filter=source_filter,
-            upsert_key=upsert_key,
+            upsert_key=upsert_key or primary_key,
+            primary_key=primary_key,
             dedupe_key=dedupe_key,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             limit=limit,
+            column_transforms=column_transforms,
+            schema_drift_acknowledged=schema_drift_acknowledged,
         )
 
     def _analyze_result(
@@ -3282,6 +4402,10 @@ def _has_explicit_workspace_subject(lower: str) -> bool:
         return True
     if re.search(r"\b(?:job_|pf_)[A-Za-z0-9_\-]+", lower):
         return True
+    # "status of job 64f1a2…" names a specific run — the explanatory-question
+    # drop then must not strip get_job (QA Q04).
+    if re.search(r"\b(?:job|run|transfer)\s+[a-f0-9]{12,26}\b|\b[a-f0-9]{20,26}\b", lower):
+        return True
     if re.search(r"\bmapping assurance\b", lower):
         return True
     # "which of my connectors are broken" names a live connection-test bucket.
@@ -3447,6 +4571,8 @@ _WORKSPACE_INVENTORY_TOOLS: tuple[tuple[re.Pattern[str], tuple[str, dict]], ...]
 # "how many do I have" asks about this workspace.
 _WORKSPACE_COUNT_ASK = re.compile(
     r"\bhow\s+many\s+[\w \-]{0,40}?\b(?:do|does|did)\s+(?:i|we|you)\s+have\b"
+    r"|\bhow\s+many\s+[\w \-]{0,40}?\bhave\s+(?:i|we|you)\s+"
+    r"(?:run|ran|done|completed|started|created|made|scheduled|executed|performed|saved|kicked\s+off|set\s+up)\b"
     r"|\bhow\s+many\s+(?:of\s+)?(?:my|our)\b"
     r"|\b(?:number|count|total)\s+of\s+(?:my|our)\b",
     re.I,
@@ -3506,7 +4632,7 @@ _HEALTH_WORD_IS_DOCUMENTATION = re.compile(
 def connector_health_filter(message: str) -> str:
     """Which connection-test bucket the operator asked for, or ``any``.
 
-    Health is the last saved probe (``last_test_ok``). Listing all twelve
+    Health is ``connector_store.connector_health``. Listing all twelve
     connectors for "the passed connectors" reads like every one is green.
     """
     text = (message or "").strip()
@@ -3972,6 +5098,10 @@ _TOOL_PRIORITY: dict[str, int] = {
     # A named source→destination move is the most specific thing an operator can
     # ask for, so it outranks the schema tools it is built from.
     "start_transfer": 110,
+    # An uploaded file is as concrete as a connector route — without a
+    # priority, a bare plan_transfer_route companion outranked it and the
+    # operator got a sketch instead of the staged plan (QA DS04).
+    "start_dataset_transfer": 109,
     "plan_transfer": 108,
     "map_connector_schemas": 100,
     "diff_schemas": 95,
@@ -4203,7 +5333,18 @@ def prune_planned_tools(
     # "did anything fail in the last 24 hours" is answered by the ledger. Pairing
     # it with a Help passage put the Daily-cadence-preset paragraph in front of
     # the runs, which reads as though the question about last night was declined.
-    if "list_jobs" in names and asks_what_failed_recently(message):
+    if "list_jobs" in names and (
+        asks_what_failed_recently(message)
+        # "why did the transfer fail" is a job-ledger triage question — the
+        # RAG essay beside it was a doc dump in front of the run's own error
+        # (QA Q02).
+        or re.search(
+            r"\bwhy\b.+\b(?:fail|error|went\s+wrong|broke|problem|issue)\b"
+            r"|\bwhat\b.+\b(?:went\s+wrong|broke|failed)\b",
+            message or "",
+            re.I,
+        )
+    ):
         planned = [
             (n, a)
             for n, a in planned
@@ -4235,7 +5376,9 @@ def prune_planned_tools(
         # "tell me about my datasets" is an inventory read, and the possessive is
         # what says so. Read as documentation it dropped ``list_datasets`` and
         # answered with a Help card about datasets in general.
-        _own_inventory = "list_datasets" in names and _asks_to_count_workspace_objects(
+        _own_inventory = names & {
+            "list_datasets", "list_jobs", "list_schedules", "list_connectors",
+        } and _asks_to_count_workspace_objects(
             (message or "").lower()
         )
         # "which of my connectors are sqlite" is a filter on saved rows. The
@@ -4253,7 +5396,7 @@ def prune_planned_tools(
                 if n not in ("list_datasets", "analyze_dataset", "search_data", "compare_datasets")
             ]
         names = {n for n, _ in planned}
-    if names & {"start_transfer", "plan_transfer", "create_schedule"}:
+    if names & {"start_transfer", "plan_transfer", "create_schedule", "start_dataset_transfer"}:
         planned = [
             (n, a) for n, a in planned
             if n not in (
@@ -4605,7 +5748,8 @@ _ROUTE_ARROW_RE = re.compile(
 _TRANSFER_VERB_RE = re.compile(rf"\b(?:{_TRANSFER_VERBS}|moving)\b", re.IGNORECASE)
 _BARE_OBJECT_WORDS = frozenset({
     "data", "rows", "records", "everything", "all", "it", "them", "tables",
-    "table", "stuff", "things",
+    "table", "stuff", "things", "dataset", "datasets", "file", "files",
+    "upload", "uploads",
 })
 
 
@@ -5223,6 +6367,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             flags=re.I,
         ).strip()
         sched_name = re.sub(r"\s+(?:schedule|pipeline)$", "", sched_name, flags=re.I).strip()
+        # "open job_abc123" is a run, not a pipeline — routing it through the
+        # short-title matcher staged open_schedule beside open_job and the
+        # Jobs screen showed two CTAs for one object (QA Q04).
+        if re.fullmatch(r"job_[a-z0-9_-]{3,}|[a-f0-9]{12,24}", sched_name or ""):
+            sched_name = ""
         if sched_name and sched_name not in {"now", "it", "this", "that", "list", "all"}:
             sched_name = re.sub(r"^(?:the|my|a|an)\s+", "", sched_name, flags=re.I).strip()
             tool = "open_schedule" if any(w in lower for w in ("open", "view")) else "get_schedule"
@@ -5409,7 +6558,15 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         )
         or _asks_whether_any_exist(lower, "jobs?", "transfers?")
     ):
-        planned.append(("list_jobs", {"limit": 10}))
+        # "show last 3 transfers" named a count — returning the default 10
+        # (or 20 rows rendered) silently widened it (QA C08).
+        _n_m = re.search(
+            r"\b(?:last|recent|top|first)\s+(\d{1,3})\b"
+            r"(?!\s*(?:minutes?|mins?|min|m|hours?|hrs?|hr|h|days?|d|weeks?|wks?|wk|w)\b)",
+            lower,
+        )
+        _n = max(1, min(int(_n_m.group(1)), 100)) if _n_m else 10
+        planned.append(("list_jobs", {"limit": _n}))
         planned = [
             (n, a) for n, a in planned
             if not (n == "navigate" and (a or {}).get("screen") == "jobs")
@@ -5464,8 +6621,10 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("list_jobs", {"limit": 8}))
             planned.append(("remediate_validation", {"kind": "open_bad_data_fix"}))
 
-    job_match = re.search(r"\b([a-f0-9]{24})\b", lower) or re.search(r"\b(job_[a-z0-9_-]{6,})\b", lower)
-    if job_match and not (pf_match and job_match.group(1) == pf_match.group(0)):
+    job_match = re.search(r"\b([a-f0-9]{20,26})\b", lower) or re.search(r"\b(job_[a-z0-9_-]{6,})\b", lower)
+    if job_match and not (pf_match and job_match.group(1) == pf_match.group(0)) and not re.search(
+        r"\b(?:delete|drop|remove|cancel|stop|pause|truncate)\b", lower
+    ):
         jid = job_match.group(1)
         if any(w in lower for w in ("open", "show", "go to", "take me")):
             planned.append(("open_job", {"job_id": jid}))
@@ -5493,6 +6652,10 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "get job details",
             "job details",
             "last transfer status",
+            "went wrong with the transfer",
+            "went wrong with the job",
+            "went wrong with my transfer",
+            "wrong with the last transfer",
         )
     ) or re.search(r"\bwhy\s+did\s+(?:the\s+)?(?:last\s+)?(?:transfer|job)\s+fail\b", lower) or re.search(
         r"\b(?:status|details?)\s+of\s+(?:my\s+|the\s+)?(?:last\s+)?(?:transfer|job)\b",
@@ -5504,15 +6667,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         # "give me the proof for my last transfer": both were recognised as
         # reads of the workspace and then reached no tool at all, so the reply
         # asked which table they meant.
+        # "my last successful transfer" — an adjective between `last` and the
+        # noun dropped it to documentation (QA N09).
         r"\b(?:my|our|the)\s+(?:last|latest|most\s+recent|previous)\s+"
-        r"(?:job|run|transfer|sync|load|migration)\b",
+        r"(?:[a-z]+\s+){0,2}?(?:job|run|transfer|sync|load|migration)\b",
         lower,
     ):
+        # The inventory block above may already have queued a bare limit-10
+        # list_jobs; the last-run read is the more specific ask.
+        planned = [(n, a) for n, a in planned if n != "list_jobs"]
         planned.append(("list_jobs", {"limit": 5}))
-        planned = [
-            (n, a) for n, a in planned
-            if not (n == "navigate" and (a or {}).get("screen") == "jobs")
-        ]
 
     if any(w in lower for w in (
         "strip control", "strip controls", "fix bad data", "format-control",
@@ -5565,6 +6729,42 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if any(w in lower for w in ("capabilities", "what can transfer", "supported", "any to any")):
         planned.append(("get_transfer_capabilities", {}))
 
+    # "transfer datasets from customers_staging to Snowflake" /
+    # "move the sales dataset into Snowflake" — the noun is an uploaded file,
+    # not a connector table. parse_transfer_intent reads it as connector SQL
+    # and the turn answered with a connector list instead of a plan (QA DS04).
+    if not any(n == "start_dataset_transfer" for n, _ in planned):
+        ds_route = re.search(
+            r"(?:transfer|move|copy|send|push|load)\s+datasets?\s+from\s+"
+            r"(?P<ds>.+?)\s+(?:to|into)\s+(?P<dst>.+?)\s*$",
+            lower,
+        ) or re.search(
+            r"(?:transfer|move|copy|send|push|load)\s+"
+            r"(?:(?:the|my|uploaded|an|a)\s+)*"
+            r"(?P<ds>[\w .-]{2,80}?)\s+datasets?\s+(?:to|into)\s+(?P<dst>.+?)\s*$",
+            lower,
+        )
+        if ds_route:
+            cand = ds_route.group("ds").strip()
+            dst = ds_route.group("dst").strip()
+            try:
+                schema = get_data_analyst().resolve_dataset(cand)
+            except Exception as exc:
+                logging.getLogger(__name__).debug(
+                    "dataset-transfer resolve skipped: %s", exc, exc_info=exc
+                )
+                schema = None
+            if (
+                schema is not None
+                and getattr(schema, "source", "") == "upload"
+                and getattr(schema, "path", "")
+            ):
+                planned.append(("start_dataset_transfer", {
+                    "dataset_name": getattr(schema, "name", "") or cand,
+                    "dest_connector_name": dst[:80],
+                    "sync_mode": normalize_sync_mode_for_message(lower),
+                }))
+
     transfer_intent = parse_transfer_intent(message)
     if transfer_intent:
         plan_only = transfer_intent.pop("plan_only", False)
@@ -5581,7 +6781,59 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 k: v for k, v in transfer_intent.items() if k != "all_tables"
             }))
         else:
-            planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
+            # "transfer datasets from customers_staging to Snowflake" names an
+            # uploaded file, not a table on a connector — planning start_transfer
+            # answered with a connector lookup and never a real plan (QA DS04).
+            # start_dataset_transfer parses the file, runs the same mapping +
+            # 9-gate preflight, and still stops at Confirm.
+            ds_name = ""
+            # A literal filename wins over fuzzy dataset matching — resolving
+            # "customers.csv" to a different upload named *customers* would
+            # stage the wrong file (QA DS05).
+            st = str(transfer_intent.get("source_table") or "").strip()
+            if re.search(
+                r"\.(?:csv|tsv|jsonl?|ndjson|parquet|xlsx?|ods|txt|avro|orc)$",
+                st,
+                re.I,
+            ):
+                ds_name = st
+            explicit_source_connector = str(
+                transfer_intent.get("source_connector_name") or ""
+            ).strip()
+            if not ds_name and not explicit_source_connector:
+                try:
+                    for cand in (
+                        st,
+                        explicit_source_connector,
+                    ):
+                        if not cand or cand.lower() in _BARE_OBJECT_WORDS:
+                            continue
+                        schema = get_data_analyst().resolve_dataset(cand)
+                        if (
+                            schema is not None
+                            and getattr(schema, "source", "") == "upload"
+                            and getattr(schema, "path", "")
+                        ):
+                            ds_name = getattr(schema, "name", "") or cand
+                            break
+                except Exception as exc:
+                    logging.getLogger(__name__).debug(
+                        "dataset-source resolution skipped: %s", exc, exc_info=exc
+                    )
+            if ds_name:
+                planned.append(("start_dataset_transfer", {
+                    "dataset_name": ds_name,
+                    "dest_connector_name": transfer_intent.get("dest_connector_name") or "",
+                    "dest_table": transfer_intent.get("dest_table") or "",
+                    "sync_mode": transfer_intent.get("sync_mode") or "",
+                    "schema_policy": transfer_intent.get("schema_policy") or "manual_review",
+                    "validation_mode": transfer_intent.get("validation_mode") or "balanced",
+                    "contract_id": transfer_intent.get("contract_id") or "",
+                    "require_signed_contract": transfer_intent.get("require_signed_contract"),
+                    "source_timezone": transfer_intent.get("source_timezone") or "",
+                }))
+            else:
+                planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
 
     if not transfer_intent and is_transfer_capability_ask(message):
         # No endpoints named yet, so the sketch is the answer: it states the next
@@ -6050,7 +7302,8 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         # never accepts from a data tool.
         r"(?:sample|preview|show(?:\s+me)?(?:\s+some)?(?:\s+data)?(?:\s+from)?|rows?\s+from|"
         r"run\s+(?:a\s+)?quer(?:y|ies)\s+(?:on|against|over)|quer(?:y|ies)|"
-        r"analyze|profile|peek(?:\s+at)?|(?:give\s+me\s+(?:a\s+)?)?quick\s+look\s+at)\s+(?:the\s+|a\s+)?"
+        r"analyze|profile|peek(?:\s+at)?|see|look(?:\s+at)?|check(?:\s+out)?|"
+        r"(?:give\s+me\s+(?:a\s+)?)?quick\s+look\s+at)\s+(?:the\s+|a\s+)?"
         r"([a-zA-Z0-9_.-]+)(?:\s+(?:table|collection|rows))?"
         r"(?:\s+(?:on|in|from|using)\s+(.+))$",
         lower,
@@ -6072,7 +7325,15 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:\s+(?:on|in|from|using)\s+(.+))$",
         lower,
     ) or re.search(
-        r"(?:data|rows)\s+(?:in|from)\s+([a-zA-Z0-9_.-]+)"
+        r"(?:data|rows|records)\s+(?:in|from|of)\s+([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:on|in|from|using)\s+(.+))$",
+        lower,
+    ) or re.search(
+        # "give me a sample of the orders table in X" — `sample of` missed
+        # every phrasing above and planned nothing, leaving the turn to a
+        # later guess (QA T04: silent connector substitution).
+        r"(?:a\s+)?(?:sample|preview)\s+of\s+(?:the\s+)?([a-zA-Z0-9_.-]+)"
+        r"(?:\s+(?:table|collection|rows))?"
         r"(?:\s+(?:on|in|from|using)\s+(.+))$",
         lower,
     ) or re.search(
@@ -6095,6 +7356,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             and "columns" not in lower
             and "describe" not in lower
             and "list_connector_objects" not in [p[0] for p in planned]
+            and "list_jobs" not in [p[0] for p in planned]
             and not any(w in lower for w in (" to ", " into ", "->"))
             and not re.search(r"\b(?:move|transfer|migrate|sync|copy|replicate)\b.+\b(?:from|to)\b", lower)
         ):
@@ -6249,15 +7511,69 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             elif "contain" in op_raw or "like" in op_raw:
                 op = "contains"
             args = {"column": col, "op": op, "value": val}
-            # Strip a trailing "on <connector>" accidentally captured in value.
-            if args.get("value"):
-                args["value"] = re.sub(
-                    r"\s+on\s+[A-Za-z0-9_\- ]+$",
-                    "",
-                    str(args["value"]),
-                    flags=re.I,
-                ).strip()
-            if col:
+            # "filter orders where status = paid on PilotSQLite" — the value
+            # regex swallows the object clause ("paid in orders"), and
+            # filter_result then ran the stale last result or, with none,
+            # answered zero/all rows of the wrong table (QA R21). Read the
+            # trailing "in/from/on <object>" out of the predicate first.
+            obj_m = re.search(
+                r"\s+(?:from|in)\s+([A-Za-z0-9_.\-]+)"
+                r"(?:\s+on\s+([A-Za-z0-9_\- ]+))?\s*$"
+                r"|\s+on\s+([A-Za-z0-9_\- ]+)\s*$",
+                str(args.get("value") or ""),
+                flags=re.I,
+            )
+            obj_table, obj_conn = "", ""
+            if obj_m:
+                obj_table = (obj_m.group(1) or "").strip()
+                obj_conn = (obj_m.group(2) or obj_m.group(3) or "").strip()
+                args["value"] = str(args["value"])[: obj_m.start()].strip()
+            if not obj_table:
+                # "filter orders where status = paid" — the object precedes
+                # `where`; the predicate must still bind that table.
+                lead_m = re.search(
+                    r"(?:filter|show|rows?\s+in|rows?\s+from|from)\s+"
+                    r"([A-Za-z0-9_.\-]+)\s+where\b",
+                    lower,
+                )
+                if lead_m:
+                    _obj = (lead_m.group(1) or "").strip()
+                    # "filter result where …" — `result` is the tool noun,
+                    # not a table name.
+                    if _obj not in {
+                        "result", "results", "row", "rows", "data",
+                        "it", "them", "this", "that", "output",
+                    }:
+                        obj_table = _obj
+            if obj_table and not obj_conn:
+                conn_m = re.search(r"\bon\s+([A-Za-z0-9_\- ]+?)\s*$", lower)
+                if conn_m:
+                    obj_conn = (conn_m.group(1) or "").strip()
+            if col and obj_table:
+                # Named a live object — the predicate must bind THAT table.
+                # filter_result only sees the last stored sample; silently
+                # filtering a different result (or a broad unfiltered read)
+                # is the wrong-data class R21 flagged. A bounded read-only
+                # SELECT applies the predicate where it was named.
+                lit = str(args.get("value") or "")
+                lit_sql = lit.replace("'", "''")
+                sql_op = {
+                    "eq": "=", "ne": "!=", "gt": ">", "gte": ">=",
+                    "lt": "<", "lte": "<=",
+                }.get(op, "=")
+                if op in {"is_null", "not_null"}:
+                    clause = f'{col} IS {"NOT " if op == "not_null" else ""}NULL'
+                elif op == "contains":
+                    clause = f"{col} LIKE '%{lit_sql}%'"
+                else:
+                    clause = f"{col} {sql_op} '{lit_sql}'"
+                q_args = {
+                    "query": f"SELECT * FROM {obj_table} WHERE {clause} LIMIT 50",
+                }
+                if obj_conn:
+                    q_args["connector_name"] = obj_conn
+                planned.append(("run_query", q_args))
+            elif col:
                 planned.append(("filter_result", args))
 
     diff_m = re.search(

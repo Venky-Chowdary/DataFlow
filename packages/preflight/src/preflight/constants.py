@@ -44,3 +44,39 @@ def schemaless_dest_canonical(db_type: str | None) -> str:
 def is_schemaless_dest(db_type: str | None) -> bool:
     """True when destination is a document/KV store without relational DDL contract."""
     return schemaless_dest_canonical(db_type) in SCHEMALESS_DESTS
+
+
+# Object stores create a missing key with PutObject / storage.objects.create.
+# ``can_create_table`` on these engines is bucket or container CREATE, which a
+# writer does not need when the bucket already exists and object write is proven.
+_OBJECT_STORE_PUT_KINDS: frozenset[str] = frozenset(
+    {
+        "s3",
+        "amazon_s3",
+        "aws_s3",
+        "minio",
+        "wasabi",
+        "backblaze_b2",
+        "digitalocean_spaces",
+        "cloudflare_r2",
+        "alibaba_oss",
+        "alibaba_cloud_object_storage",
+        "s3_compatible",
+        "gcs",
+        "google_cloud_storage",
+        "google_gcs",
+        "adls",
+        "adls_gen2",
+        "azure_blob",
+        "azure_blob_storage",
+        "azure_data_lake",
+        "azure_data_lake_storage",
+        "object_store",
+    }
+)
+
+
+def object_store_put_creates_key(db_type: str | None) -> bool:
+    """True when a missing destination object is created by PUT, not CREATE TABLE."""
+    kind = (db_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return kind in _OBJECT_STORE_PUT_KINDS

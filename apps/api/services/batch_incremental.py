@@ -121,6 +121,8 @@ def bind_transfer_request(request: Any, source_format: str) -> BatchIncrementalB
         dest_type=dest_type,
         dest_database=dest_database,
         dest_object=dest_object,
+        source=request.source,
+        destination=request.destination,
     )
 
 
@@ -135,6 +137,8 @@ def bind_batch_incremental(
     dest_database: str,
     dest_object: str,
     dest_rows: int | None = None,
+    source: Any = None,
+    destination: Any = None,
 ) -> BatchIncrementalBound:
     """Resolve this route's cursor state, refusing states it cannot honour."""
     scope = resolve_incremental_read_scope(
@@ -146,6 +150,8 @@ def bind_batch_incremental(
         dest_type=dest_type,
         dest_database=dest_database,
         dest_object=dest_object,
+        source=source,
+        destination=destination,
     )
     if scope.cursor_column_changed:
         from services.preflight_cursor_gate import cursor_identity_issue

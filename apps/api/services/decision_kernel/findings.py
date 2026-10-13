@@ -43,7 +43,7 @@ class FailureClass(str, Enum):
 
 
 # Typed engine transforms that must not survive a Widen-to-text remediation.
-_TYPED_CAST_TRANSFORMS = frozenset(
+TYPED_CAST_TRANSFORMS = frozenset(
     {
         "integer",
         "decimal",
@@ -407,7 +407,7 @@ def typed_cast_incompatible_with_text_sink(transform: str, target_logical: str) 
     """True when a typed cast must not survive Widen-to-text without CAST contract."""
     raw = (transform or "").strip().lower()
     tgt = (target_logical or "").strip().lower()
-    return tgt in {"string", "text"} and raw in _TYPED_CAST_TRANSFORMS
+    return tgt in {"string", "text"} and raw in TYPED_CAST_TRANSFORMS
 
 
 @dataclass(frozen=True, slots=True)
@@ -584,7 +584,10 @@ def findings_from_coercion_report(
             row_number=row_number,
             operation=str(col.get("transform") or ""),
             dest_db=dest_db,
-            blocking=severity == "block" or fidelity,
+            # A signed continue policy already softened severity to warn.
+            # fidelity_collapse stays on the finding so the column is still
+            # named, and it must not put the block back (DEF-R20-001).
+            blocking=severity == "block",
             gate_ids=("g3_coercion",),
             failure_class=fc,
             suggested_target_type=str(col.get("suggested_target_type") or ""),

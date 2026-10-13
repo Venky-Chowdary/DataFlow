@@ -17,7 +17,11 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from services import connector_store
+from services.connector_telemetry import connector_operation, driver_family
+from services.log_redaction import redact_log_text
+from services.safe_errors import public_error, safe_http_exception, user_query_error
 from services.value_serializer import sanitize_json_value
+from src.transfer.connector_registry import humanize_connection_error
 
 router = APIRouter(prefix="/query", tags=["query"])
 
@@ -43,7 +47,10 @@ def _is_safe_sql(raw_query: str) -> bool:
     except ImportError:
         return _is_safe_sql_fallback(raw_query)
 
-    parsed = sqlparse.parse(raw_query.strip())
+    from services.sql_literals import sql_outside_literals
+
+    # A semicolon or DROP inside a quote is not a second statement (QA R2-001/002).
+    parsed = sqlparse.parse(sql_outside_literals(raw_query).strip())
     if not parsed or len(parsed) != 1:
         return False
 
@@ -58,7 +65,7 @@ def _is_safe_sql(raw_query: str) -> bool:
     destructive = {
         "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
         "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
-        "COPY", "LOAD",
+        "COPY", "LOAD", "CALL", "DO", "LOCK", "UNLOCK",
     }
     safe_starts = {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES"}
     first_keyword = None
@@ -83,26 +90,134 @@ def _is_safe_sql(raw_query: str) -> bool:
     if stmt_type and stmt_type not in {"SELECT", "UNKNOWN"}:
         return False
 
+    if _has_side_effect_functions(raw_query):
+        return False
+
+    if first_keyword == "PRAGMA" and not _pragma_is_readonly(raw_query):
+        return False
+
     return first_keyword in safe_starts
+
+
+# SQLite PRAGMA is not in the documented read allowlist. Catalog reads the
+# operator already uses (table_info, index_list) stay. An assignment
+# (writable_schema, journal_mode=WAL) is a write and is refused.
+_READONLY_PRAGMAS = frozenset({
+    "table_info",
+    "table_list",
+    "table_xinfo",
+    "index_info",
+    "index_list",
+    "index_xinfo",
+    "database_list",
+    "foreign_key_list",
+    "foreign_key_check",
+    "function_list",
+    "module_list",
+    "pragma_list",
+    "compile_options",
+    "collation_list",
+    "integrity_check",
+    "quick_check",
+})
+
+
+def _pragma_is_readonly(sql: str) -> bool:
+    from services.sql_literals import sql_outside_literals
+
+    code = sql_outside_literals(sql or "")
+    match = re.match(
+        r"\s*PRAGMA\s+(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)",
+        code,
+        re.I,
+    )
+    if not match:
+        return False
+    name = match.group(1).lower()
+    head = code[match.end():].split("(", 1)[0]
+    if "=" in head:
+        return False
+    return name in _READONLY_PRAGMAS
+
+
+# Read-only is a *session* guarantee, not a keyword filter. A SELECT can still
+# invoke volatile functions that mutate session/server state (QA R06):
+# set_config flips transaction_read_only, nextval burns sequences,
+# pg_terminate_backend kills connections, dblink/lo_* run side-channel writes.
+# These names are blocked inside any read-path query, plus a session-level
+# read-only mode is applied on dialects that support one.
+_SIDE_EFFECT_FUNCTIONS = frozenset({
+    # session/config mutation
+    "set_config", "reset", "set", "use",
+    # sequence mutation (burns values even in a rolled-back tx)
+    "nextval", "setval", "currval",
+    # backend control / admin
+    "pg_terminate_backend", "pg_cancel_backend", "pg_reload_conf",
+    "pg_rotate_logfile", "pg_promote", "pg_create_restore_point",
+    "pg_switch_wal", "pg_switch_xlog", "pg_backup_start", "pg_backup_stop",
+    "pg_control_checkpoint", "pg_logical_emit_message", "pg_notify",
+    # replication slot mutation
+    "pg_create_physical_replication_slot", "pg_drop_replication_slot",
+    "pg_create_logical_replication_slot", "pg_logical_slot_get_changes",
+    "pg_logical_slot_peek_changes", "pg_replication_slot_advance",
+    # server filesystem read (information disclosure)
+    "pg_read_file", "pg_read_binary_file", "pg_ls_dir", "pg_stat_file",
+    "pg_ls_logdir", "pg_ls_waldir", "pg_ls_archive_statusdir", "pg_ls_tmpdir",
+    # advisory locks / denial of service
+    "pg_advisory_lock", "pg_advisory_unlock", "pg_advisory_unlock_all",
+    "pg_advisory_xact_lock", "pg_try_advisory_lock", "pg_try_advisory_xact_lock",
+    "pg_advisory_xact_lock_shared", "pg_advisory_lock_shared",
+    "pg_try_advisory_xact_lock_shared", "pg_try_advisory_lock_shared",
+    "pg_sleep", "sleep", "benchmark",
+    # side-channel drivers (pg dblink, mysql locks/files, mssql xp_)
+    "get_lock", "release_lock", "load_file",
+    "xp_cmdshell", "xp_dirtree", "xp_fileexist", "xp_regread", "xp_regwrite",
+    "openrowset", "opendatasource", "bulk",
+    # oracle administrative packages are prefixed dbms_/utl_ below
+})
+_SIDE_EFFECT_PREFIXES = (
+    "dblink", "lo_", "dbms_", "utl_", "sys_exec", "sys_eval", "sp_",
+)
+
+_FUNC_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def _has_side_effect_functions(sql: str) -> bool:
+    """True when a read query invokes a function with session/server side effects."""
+    scrubbed = re.sub(r"'(?:''|[^'])*'", " ", sql or "")
+    scrubbed = re.sub(r'"(?:""|[^"])*"', " ", scrubbed)
+    for match in _FUNC_CALL_RE.finditer(scrubbed):
+        name = match.group(1).lower()
+        if name in _SIDE_EFFECT_FUNCTIONS:
+            return True
+        if any(name.startswith(prefix) for prefix in _SIDE_EFFECT_PREFIXES):
+            return True
+    return False
 
 
 def _is_safe_sql_fallback(raw_query: str) -> bool:
     """Conservative read-only gate when sqlparse is unavailable."""
     import re
 
+    from services.sql_literals import mask_sql_string_literals
+
     text = (raw_query or "").strip()
     if not text:
         return False
-    # Reject multi-statement payloads.
-    stripped = re.sub(r"--[^\n]*", " ", text)
-    stripped = re.sub(r"/\*.*?\*/", " ", stripped, flags=re.S)
-    if ";" in stripped.rstrip().rstrip(";"):
+    # Reject multi-statement payloads. Literals are masked first so a
+    # semicolon or DROP inside quotes is not a second statement.
+    code, _literals = mask_sql_string_literals(text)
+    code = re.sub(r"--[^\n]*", " ", code)
+    code = re.sub(r"/\*.*?\*/", " ", code, flags=re.S)
+    if ";" in code.rstrip().rstrip(";"):
         return False
-    upper = stripped.upper()
+    upper = code.upper()
     if not re.match(
         r"^\s*(SELECT|WITH|EXPLAIN|SHOW|DESCRIBE|DESC|ANALYZE|PRAGMA|VALUES)\b",
         upper,
     ):
+        return False
+    if upper.lstrip().startswith("PRAGMA") and not _pragma_is_readonly(text):
         return False
     if re.search(
         r"\b(INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE|"
@@ -265,9 +380,18 @@ async def query_execute(
         raise
     except Exception as exc:
         # Defensive: prevent an unhandled ExceptionGroup from crashing the worker.
+        detail, cid = public_error(
+            exc,
+            event="query.execute.errored",
+            public_message="Query execution failed.",
+            status_code=500,
+        )
         return JSONResponse(
             status_code=500,
-            content={"detail": f"Query execution failed: {exc}"},
+            content={
+                "detail": detail,
+                "correlation_id": cid,
+            },
         )
 
 
@@ -285,11 +409,24 @@ async def query_export(
         raise HTTPException(status_code=404, detail="Connector not found")
 
     try:
-        rows, columns, schema, _ = _run_query(connector, body)
+        rows, columns, schema, _ = _run_query(
+            connector,
+            body,
+            surface="query_export",
+        )
     except HTTPException:
         raise
     except Exception as exc:
-        return QueryExportResult(success=False, error=f"Query execution failed: {exc}", format=body.format)
+        detail, _cid = public_error(
+            exc,
+            event="query.export.errored",
+            public_message="Query execution failed.",
+        )
+        return QueryExportResult(
+            success=False,
+            error=detail,
+            format=body.format,
+        )
     if not rows:
         return QueryExportResult(success=True, row_count=0, format=body.format)
 
@@ -335,8 +472,17 @@ async def query_export(
             row_count=len(rows),
             format=body.format,
         )
-    except Exception as e:
-        return QueryExportResult(success=False, error=str(e), format=body.format)
+    except Exception as exc:
+        detail, _cid = public_error(
+            exc,
+            event="query.export.errored",
+            public_message="Export failed.",
+        )
+        return QueryExportResult(
+            success=False,
+            error=detail,
+            format=body.format,
+        )
 
 
 @router.post("/schema", response_model=QuerySchemaResult)
@@ -381,8 +527,10 @@ async def query_schema(
         logging.getLogger(__name__).warning(
             "Query schema introspection failed for %s: %s", body.connector_id, exc
         )
+        driver = getattr(endpoint, "format", "") or ""
         raise HTTPException(
-            status_code=400, detail=f"Schema introspection failed: {exc}"
+            status_code=400,
+            detail=f"Schema introspection failed: {humanize_connection_error(driver, exc)}",
         ) from exc
 
     col_types: dict[str, str] = dict(info.get("schema") or {})
@@ -555,25 +703,60 @@ def _export_to_connector(
             filename=body.destination or "",
             download_url=dest_summary.get("download_url", ""),
         )
-    except Exception as e:
-        return QueryExportResult(success=False, error=str(e), format=dest_connector.type)
+    except Exception as exc:
+        detail, _cid = public_error(
+            exc,
+            event="query.export.errored",
+            public_message="Export failed.",
+        )
+        return QueryExportResult(
+            success=False,
+            error=detail,
+            format=dest_connector.type,
+        )
 
 
-def _run_query(connector: connector_store.SavedConnector, body: QueryExecuteRequest):
+def _run_query(
+    connector: connector_store.SavedConnector,
+    body: QueryExecuteRequest,
+    *,
+    surface: str = "query",
+):
     ctype = (connector.type or "").lower().strip()
-    if ctype == "mongodb":
-        return _run_mongodb_query(connector, body)
-    if ctype == "snowflake":
-        return _run_snowflake_query(connector, body)
-    # MySQL-wire family must use pymysql dialect (handled in generic_sql._DRIVERNAME_MAP).
-    return _run_sql_query(connector, body)
+    with connector_operation(
+        "query",
+        driver_family=driver_family(ctype),
+        role="source",
+        surface=surface,
+        connector_id=connector.id,
+    ) as op:
+        try:
+            if ctype == "mongodb":
+                result = _run_mongodb_query(connector, body)
+            elif ctype == "snowflake":
+                result = _run_snowflake_query(connector, body)
+            else:
+                # MySQL-wire family must use pymysql dialect (handled in generic_sql._DRIVERNAME_MAP).
+                result = _run_sql_query(connector, body)
+        except HTTPException as exc:
+            if exc.status_code < 500:
+                op.failed(category="invalid_request", error=exc)
+            raise
+        rows, columns, *_ = result
+        op.succeeded(row_count=len(rows), column_count=len(columns))
+        return result
 
 
 def _run_mongodb_query(connector, body):
     try:
         import pymongo  # noqa: F401
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"MongoDB driver unavailable: {exc}") from exc
+        raise safe_http_exception(
+            exc,
+            event="query.mongodb_driver.unavailable",
+            public_message="MongoDB driver unavailable.",
+            status_code=500,
+        ) from exc
 
     conn_str = connector.connection_string or _build_mongodb_connection_string(connector)
     client = _mongo_client(conn_str)
@@ -594,7 +777,11 @@ def _run_mongodb_query(connector, body):
                 rows = list(cursor)
                 return _normalize_rows(rows)
         except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=400, detail=f"Invalid MongoDB filter JSON: {exc}") from exc
+            raise user_query_error(
+                exc,
+                public_message="Invalid MongoDB filter JSON",
+                status_code=400,
+            ) from exc
 
     cursor = coll.find(query_filter).limit(body.limit)
     rows = list(cursor)
@@ -626,8 +813,10 @@ def _parse_mongodb_json(raw: str) -> Any:
     except json.JSONDecodeError:
         raise
     except Exception as exc:
-        raise HTTPException(
-            status_code=400, detail=f"Invalid MongoDB query: {exc}"
+        raise user_query_error(
+            exc,
+            public_message="Invalid MongoDB query",
+            status_code=400,
         ) from exc
     return demote_exact_json(parsed)
 
@@ -646,6 +835,50 @@ def _jsonify_value(value: Any) -> Any:
     """Return a JSON-safe Python value (no Python repr() artifacts)."""
     # Query display: null placeholder for NA/NaN is OK — write paths refuse.
     return sanitize_json_value(value, refuse_nonfinite=False)
+
+
+def _unique_column_names(columns: list[str]) -> list[str]:
+    """Disambiguate duplicate result column names.
+
+    ``{col: value}`` row dicts silently collapse duplicate projection names —
+    ``SELECT count(*), count(*)`` returns one ``count`` key and the second
+    column is unrecoverable (QA R23, silent data loss in reconciliation output).
+    Suffix the nth duplicate so every projected value survives and ``columns``
+    still documents the mapping.
+    """
+    seen: dict[str, int] = {}
+    out: list[str] = []
+    for name in columns:
+        key = str(name)
+        count = seen.get(key, 0) + 1
+        seen[key] = count
+        out.append(key if count == 1 else f"{key}__{count}")
+    return out
+
+
+def _apply_read_only_session(conn: Any, db_type: str) -> None:
+    """Enforce read-only at the session level where the dialect supports it.
+
+    The keyword filter is the first line of defense; a session-level READ ONLY
+    mode is the second (QA R06). Best-effort — an unsupported dialect falls back
+    to the keyword + side-effect-function filters rather than failing the query.
+    """
+    db = (db_type or "").lower()
+    try:
+        from sqlalchemy import text
+
+        if db in {"postgresql", "postgres", "cockroachdb", "redshift", "greenplum", "yugabytedb"}:
+            conn.execute(text("SET TRANSACTION READ ONLY"))
+        elif db in {"mysql", "mariadb", "singlestore", "tidb"}:
+            # Transaction-scoped, not SESSION: a pooled connection must not
+            # hand a stale read-only mode to the next write query.
+            conn.execute(text("SET TRANSACTION READ ONLY"))
+        elif db in {"sqlite", "duckdb"}:
+            conn.execute(text("PRAGMA query_only = ON"))
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "read-only session option not applied on %s: %s", db, exc
+        )
 
 
 def _column_schema(columns: list[str], rows: list[dict[str, Any]]) -> dict[str, str]:
@@ -729,36 +962,71 @@ def _run_sql_query(connector, body):
     try:
         engine = get_sqlalchemy_engine(cfg)
     except RuntimeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not create database engine: {exc}") from exc
+        raise HTTPException(
+            status_code=400,
+            detail=humanize_connection_error(connector.type or "", exc),
+        ) from exc
 
-    # Append a safe limit unless the user already supplied one or the query is metadata.
-    clean_query = raw_query.rstrip(";")
-    upper = clean_query.upper()
-    append_limit = (
-        not upper.startswith(("SHOW", "DESCRIBE", "EXPLAIN", "ANALYZE", "PRAGMA"))
-        and " LIMIT " not in upper
-        and " FETCH FIRST " not in upper
-        and " TOP " not in upper
-    )
-    if append_limit:
-        clean_query = f"{clean_query} LIMIT {body.limit}"
+    from services.dialect_profiles import append_result_limit
+
+    # Oracle/DB2 reject LIMIT (ORA-03047). A query that already has FETCH or TOP
+    # is left alone — that is why a hand-written Oracle extract succeeded while
+    # a table sample did not.
+    clean_query = append_result_limit(connector.type, raw_query, body.limit)
 
     try:
         from sqlalchemy import text
 
         with engine.connect() as conn:
-            result = conn.execute(text(clean_query), dict(body.params or {}))
-            columns = list(result.keys())
+            _apply_read_only_session(conn, connector.type)
+            from services.sql_literals import escape_sqlalchemy_literal_colons
+
+            result = conn.execute(
+                text(escape_sqlalchemy_literal_colons(clean_query)),
+                dict(body.params or {}),
+            )
+            columns = _unique_column_names(list(result.keys()))
+            raw_desc = getattr(getattr(result, "cursor", None), "description", None)
+            description = (
+                tuple(tuple(col) if col is not None else None for col in raw_desc)
+                if raw_desc
+                else None
+            )
             rows = []
             for i, row in enumerate(result):
                 if i >= body.limit:
                     break
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
-        return rows, columns, _column_schema(columns, rows), False
+            try:
+                result.close()
+            except Exception:
+                pass
+            # Name custom enums after the result is closed. A pg_type
+            # lookup on the open cursor cancels the extract.
+            from services.decimal_observe import annotate_unresolved_pg_types
+
+            description = annotate_unresolved_pg_types(
+                conn, description, dialect=str(connector.type or "")
+            )
+        schema = _column_schema(columns, rows)
+        from services.decimal_observe import cursor_declared_carriers
+
+        declared = cursor_declared_carriers(
+            columns, description, dialect=str(connector.type or "")
+        )
+        if declared:
+            schema = {**schema, **declared}
+        return rows, columns, schema, False
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
+        raise user_query_error(
+            exc,
+            public_message="Query failed",
+            status_code=400,
+        ) from exc
 
 
 def _run_snowflake_query(connector, body):
@@ -798,10 +1066,11 @@ def _run_snowflake_query(connector, body):
             private_key_passphrase=connector.password or "",
         )
     except Exception as exc:
-        classified = classify_snowflake_connect_error(str(exc))
+        classified = classify_snowflake_connect_error(redact_log_text(str(exc)))
+        connection_detail = humanize_connection_error("snowflake", classified or exc)
         raise HTTPException(
             status_code=400,
-            detail=f"Could not connect to Snowflake: {classified or exc}",
+            detail=f"Could not connect to Snowflake: {connection_detail}",
         ) from exc
 
     try:
@@ -824,7 +1093,7 @@ def _run_snowflake_query(connector, body):
         with conn.cursor() as cur:
             cur.execute(clean_query, params or None)
             description = cur.description or []
-            columns = [desc[0] for desc in description]
+            columns = _unique_column_names([desc[0] for desc in description])
             rows = []
             for i, row in enumerate(cur.fetchall()):
                 if i >= body.limit:
@@ -832,7 +1101,11 @@ def _run_snowflake_query(connector, body):
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
         return rows, columns, _column_schema(columns, rows), False
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
+        raise user_query_error(
+            exc,
+            public_message="Query failed",
+            status_code=400,
+        ) from exc
     finally:
         if conn is not None:
             try:

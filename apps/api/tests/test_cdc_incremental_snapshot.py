@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import pytest
+
+from connectors.oracle_logminer import OracleLogMinerReadError
+from connectors.sqlserver_cdc_native import SqlServerCdcReadError
 import services.cdc_incremental_snapshot as snap_mod
+from services.cdc_cursor_gap import CdcLsnGapError, CdcScnGapError
 from services.cdc_incremental_snapshot import (
     claim_next_signal,
     complete_signal,
@@ -61,6 +66,67 @@ def test_interleave_fast_forwards_signal_from_dest_open(tmp_path, monkeypatch) -
     assert batches[0].inserts[0]["id"] == "z"
     claimed = claim_next_signal("src:pg", table="orders")
     assert claimed is None or claimed.last_pk == "z"
+
+
+@pytest.mark.parametrize(
+    "error_factory",
+    [
+        lambda: SqlServerCdcReadError(
+            RuntimeError("non-transient SQL Server read failure"),
+            capture_instance="dbo_orders",
+            table="dbo.orders",
+            cursor_key="sqlserver:dbo.orders",
+        ),
+        lambda: OracleLogMinerReadError(
+            RuntimeError("non-transient Oracle read failure"),
+            table="orders",
+            cursor_key="oracle:orders",
+        ),
+        lambda: CdcScnGapError(
+            "Oracle SCN gap",
+            resume_scn=10,
+            oldest_scn=20,
+            cursor_key="oracle:orders",
+        ),
+        lambda: CdcLsnGapError(
+            "SQL Server LSN gap",
+            resume_lsn="0/10",
+            min_lsn="0/20",
+            cursor_key="sqlserver:dbo.orders",
+        ),
+    ],
+    ids=["sqlserver-read", "oracle-read", "oracle-gap", "sqlserver-gap"],
+)
+def test_incremental_snapshot_peek_propagates_typed_cdc_errors(
+    tmp_path, monkeypatch, error_factory
+) -> None:
+    from services.cdc_incremental_runner import interleave_incremental_snapshot
+
+    monkeypatch.setattr(snap_mod, "_PATH", str(tmp_path / "signals.json"))
+    monkeypatch.setattr(snap_mod, "_DATA_DIR", str(tmp_path))
+    sig = request_incremental_snapshot(
+        "src:pg", "orders", primary_key="id", chunk_size=10
+    )
+    error = error_factory()
+
+    def peek(_signal):
+        raise error
+
+    with pytest.raises(type(error)) as raised:
+        list(
+            interleave_incremental_snapshot(
+                "src:pg",
+                table="orders",
+                fetch_chunk=lambda _signal: ([{"id": "1"}], "1", True),
+                stream_events_during_chunk=peek,
+            )
+        )
+    assert str(raised.value) == str(error)
+
+    failed = list_signals("src:pg", status="failed")
+    assert len(failed) == 1
+    assert failed[0].id == sig.id
+    assert failed[0].error == str(error)
 
 
 def test_debezium_envelope_parse() -> None:

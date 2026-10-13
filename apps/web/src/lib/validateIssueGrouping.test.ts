@@ -4,7 +4,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { PreflightResult, ValidationIssue } from "./types.js";
+import { gateLabel } from "./preflightGates.js";
 import {
+  buildBlockingGateSummaries,
   buildDisplayBlockers,
   buildExecutiveSummary,
   findDuplicateKeyRoot,
@@ -14,6 +16,8 @@ import {
   isDeclaredFidelityCollapse,
   isEncodingIntegritySignal,
   isIsoNormalizeCoercion,
+  coercionCount,
+  coercionSampleFailures,
   partitionCoercionColumns,
   partitionExplainIssues,
   remapToTypeForMismatch,
@@ -188,6 +192,27 @@ describe("ISO normalize grouping", () => {
     assert.ok(parts.isoGroup);
   });
 
+  it("treats a missing coercion sample_failures list as empty", () => {
+    const partial = {
+      source: "status",
+      target: "status",
+      source_type: "TEXT",
+      target_type: "INTEGER",
+      severity: "warn" as const,
+    };
+    assert.deepEqual(coercionSampleFailures(partial), []);
+    assert.deepEqual(coercionSampleFailures({ sample_failures: null }), []);
+    assert.equal(coercionSampleFailures({
+      sample_failures: [{ row: 2, value: "x", reason: "not an integer" }],
+    }).length, 1);
+    assert.equal(coercionCount(undefined), 0);
+    assert.equal(coercionCount(null), 0);
+    assert.equal(coercionCount(Number.NaN), 0);
+    assert.equal(coercionCount(4), 4);
+    const { otherActionable } = partitionCoercionColumns([partial as never]);
+    assert.equal(otherActionable.length, 1);
+  });
+
   it("partitions coercion warn-normalize rows out of actionable drama", () => {
     const { isoNormalize, otherActionable, clean } = partitionCoercionColumns([
       {
@@ -266,6 +291,94 @@ describe("ISO normalize grouping", () => {
 });
 
 describe("buildExecutiveSummary", () => {
+  it("merges repeated blocker details by gate id and uses that count throughout", () => {
+    const pf = basePreflight({
+      gates: [
+        {
+          id: "g20_code_crosswalk",
+          status: "block",
+          message: "1 coded column(s) have population values with no target in the crosswalk.",
+          duration_ms: 1,
+        },
+        {
+          id: "g4_mapping_confidence",
+          status: "block",
+          message: "2 mapping(s) are below the confidence floor.",
+          duration_ms: 1,
+        },
+      ],
+      blockers: [
+        { id: "g20_code_crosswalk", message: "Code crosswalk coverage" },
+        {
+          id: "g20_code_crosswalk",
+          message: "1 coded column(s) have population values with no target in the crosswalk.",
+        },
+        { id: "g4_mapping_confidence", message: "Mapping confidence below floor" },
+        {
+          id: "g4_mapping_confidence",
+          message: "2 mapping(s) are below the confidence floor.",
+        },
+        {
+          id: "proof_0",
+          message: "1 coded column(s) have population values with no target in the crosswalk.",
+          guidance: { gate: "general" },
+        },
+        {
+          id: "proof_1",
+          message: "2 mapping(s) are below the confidence floor.",
+          guidance: { gate: "general" },
+        },
+        {
+          id: "rc-mapping-confidence-test",
+          message: "Mapping confidence below floor: 2 mapping(s) are below the floor.",
+          details: {
+            root_cause: true,
+            root_id: "rc-mapping-confidence-test",
+            impacted_gates: ["g4_mapping_confidence"],
+            absorbed_blocker_ids: ["g4_mapping_confidence"],
+          },
+        },
+      ],
+      root_causes: [
+        {
+          root_id: "rc-mapping-confidence-test",
+          kind: "mapping_confidence",
+          title: "Mapping confidence below floor",
+          summary: "Mapping confidence below floor: 2 mapping(s) are below the floor.",
+          business_impact: "Review the mappings before transfer.",
+          impacted_gates: ["g4_mapping_confidence"],
+          absorbed_blocker_ids: ["g4_mapping_confidence"],
+        },
+      ],
+    });
+    const summary = buildExecutiveSummary(pf);
+    const display = buildDisplayBlockers(pf);
+    const gates = buildBlockingGateSummaries(pf);
+    assert.ok(summary);
+    assert.equal(summary!.blockingGateCount, 2);
+    assert.equal(summary!.untilLines.length, 2);
+    assert.match(summary!.untilLines[0], /Code crosswalk coverage.*1 coded column/);
+    assert.match(summary!.untilLines[1], /^Column mappings.*2 mapping/);
+    assert.match(summary!.subtitle, /2 blocking gate/);
+    assert.equal(display.filter((item) => item.kind === "blocker").length, 2);
+    assert.equal(gates.length, 2);
+    assert.equal(gates[1].title, gateLabel("g4_mapping_confidence"));
+    assert.match(summary!.railLine, /Blocked by 2 gates/);
+  });
+
+  it("uses the canonical label for known gates instead of a message-shaped title", () => {
+    const summaries = buildBlockingGateSummaries(basePreflight({
+      gates: [{
+        id: "g4_mapping_confidence",
+        status: "block",
+        message: "1: low confidence",
+        duration_ms: 1,
+      }],
+    }));
+    assert.equal(summaries[0].title, gateLabel("g4_mapping_confidence"));
+    assert.notEqual(summaries[0].title, "1: low confidence");
+  });
+
   it("tells a blocked story with root-cause until lines", () => {
     const pf = basePreflight({
       gates: [
@@ -300,9 +413,14 @@ describe("buildExecutiveSummary", () => {
     const summary = buildExecutiveSummary(pf);
     assert.ok(summary);
     assert.equal(summary!.title, "Validation blocked");
-    assert.match(summary!.subtitle, /1 blocking issue/);
-    assert.deepEqual(summary!.untilLines, ["Duplicate identity keys resolved"]);
-    assert.match(summary!.railLine, /duplicate identity keys/i);
+    assert.match(summary!.subtitle, /3 blocking gates/);
+    assert.equal(summary!.blockingGateCount, 3);
+    assert.deepEqual(summary!.untilLines, [
+      "Data integrity — duplicate key values on id",
+      "Target DDL — Primary key candidate 'id' has 12 duplicate value(s)",
+      "Sample reconciliation — 12 duplicate target key(s) on id",
+    ]);
+    assert.match(summary!.railLine, /Blocked by 3 gates/i);
     assert.equal(summary!.aiPromptHint, "Why are duplicate IDs blocking this transfer?");
     assert.match(summary!.readinessCaption, /10\/13 gates/);
   });

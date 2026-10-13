@@ -6,6 +6,7 @@ engines use :mod:`connectors.cdc_eos_sa` (one dest transaction).
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +16,9 @@ from connectors.lsn_guards import DF_LSN_COL
 from connectors.sqlite_common import sqlite_file_path
 from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 from services.cdc_exactly_once import (
+    concurrent_commit_error,
+    log_apply_outcome,
+    _ICEBERG_EOS_SINKS,
     ALGORITHM,
     WATERMARK_TABLE,
     DestWmView,
@@ -24,8 +28,10 @@ from services.cdc_exactly_once import (
     EosOpenResult,
     ExactlyOnceRouteError,
     assert_bundle_members_reached,
+    assert_unambiguous_eos_row_columns,
     batch_apply_checksum,
     combine_change_batch,
+    committed_apply_checksum,
     decide_from_view,
     encode_resume_blob,
     extract_snapshot_last_pk,
@@ -46,6 +52,8 @@ from services.cdc_exactly_once import (
     require_batch_lsn,
 )
 from services.cdc_engine import ChangeBatch
+
+_logger = logging.getLogger(__name__)
 
 _WM_DDL = f"""
 CREATE TABLE IF NOT EXISTS {WATERMARK_TABLE} (
@@ -135,8 +143,20 @@ def _ensure_wm_table(cur: sqlite3.Cursor) -> None:
     for stmt in _WM_ALTERS:
         try:
             cur.execute(stmt.format(table=WATERMARK_TABLE))
-        except Exception:
-            pass
+        except sqlite3.OperationalError as exc:
+            # Column already present on an upgraded table; anything else fails closed.
+            if "duplicate column" not in str(exc).lower():
+                _logger.error("cdc_eos: watermark table migration failed: %s", exc)
+                raise
+
+
+def _rollback(conn: sqlite3.Connection, what: str) -> None:
+    try:
+        conn.execute("ROLLBACK")
+    except sqlite3.Error as exc:
+        # The original error is re-raised by the caller; a failed ROLLBACK is
+        # logged so it is never silently lost (SQLite discards the txn on close).
+        _logger.warning("cdc_eos: sqlite ROLLBACK after failed %s also failed: %s", what, exc)
 
 
 def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> DestWmView:
@@ -147,7 +167,12 @@ def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> DestWmView:
             f"FROM {WATERMARK_TABLE} WHERE stream_key = ?",
             (stream_key,),
         )
-    except Exception:
+    except sqlite3.OperationalError as exc:
+        _logger.warning(
+            "cdc_eos: watermark read without seq columns for stream_key=%s: %s",
+            stream_key,
+            exc,
+        )
         cur.execute(
             f"SELECT committed_lsn, epoch FROM {WATERMARK_TABLE} WHERE stream_key = ?",
             (stream_key,),
@@ -166,6 +191,7 @@ def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> DestWmView:
         window_id=str(row[7] or "") if len(row) > 7 else "",
         snapshot_signal_id=str(row[8] or "") if len(row) > 8 else "",
         window_hi_pk=str(row[9] or "") if len(row) > 9 else "",
+        exists=True,
     )
 
 
@@ -186,49 +212,60 @@ def _write_watermark(
     window_id: str = "",
     snapshot_signal_id: str = "",
     window_hi_pk: str = "",
+    expected: DestWmView,
 ) -> None:
+    """INSERT the first watermark, else compare-and-set on the read (epoch, fence)."""
     now = datetime.now(timezone.utc).isoformat()
+    values = (
+        lsn,
+        batch_id,
+        now,
+        dest_object,
+        epoch,
+        fence_epoch,
+        prev_lsn,
+        phase,
+        apply_checksum,
+        resume_blob,
+        apply_seq,
+        window_id,
+        snapshot_signal_id,
+        window_hi_pk,
+    )
+    if not expected.exists:
+        try:
+            cur.execute(
+                f"""
+                INSERT INTO {WATERMARK_TABLE}
+                  (committed_lsn, batch_id, committed_at, dest_object, epoch,
+                   fence_epoch, prev_lsn, phase, apply_checksum, resume_blob, apply_seq,
+                   window_id, snapshot_signal_id, window_hi_pk, stream_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,  # nosec B608
+                (*values, stream_key),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise concurrent_commit_error(
+                stream_key, expected_epoch=0, expected_fence=0
+            ) from exc
+        return
     cur.execute(
         f"""
-        INSERT INTO {WATERMARK_TABLE}
-          (stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch,
-           fence_epoch, prev_lsn, phase, apply_checksum, resume_blob, apply_seq,
-           window_id, snapshot_signal_id, window_hi_pk)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(stream_key) DO UPDATE SET
-          committed_lsn = excluded.committed_lsn,
-          batch_id = excluded.batch_id,
-          committed_at = excluded.committed_at,
-          dest_object = excluded.dest_object,
-          epoch = excluded.epoch,
-          fence_epoch = excluded.fence_epoch,
-          prev_lsn = excluded.prev_lsn,
-          phase = excluded.phase,
-          apply_checksum = excluded.apply_checksum,
-          resume_blob = excluded.resume_blob,
-          apply_seq = excluded.apply_seq,
-          window_id = excluded.window_id,
-          snapshot_signal_id = excluded.snapshot_signal_id,
-          window_hi_pk = excluded.window_hi_pk
-        """,
-        (
-            stream_key,
-            lsn,
-            batch_id,
-            now,
-            dest_object,
-            epoch,
-            fence_epoch,
-            prev_lsn,
-            phase,
-            apply_checksum,
-            resume_blob,
-            apply_seq,
-            window_id,
-            snapshot_signal_id,
-            window_hi_pk,
-        ),
+        UPDATE {WATERMARK_TABLE} SET
+          committed_lsn = ?, batch_id = ?, committed_at = ?, dest_object = ?,
+          epoch = ?, fence_epoch = ?, prev_lsn = ?, phase = ?, apply_checksum = ?,
+          resume_blob = ?, apply_seq = ?, window_id = ?, snapshot_signal_id = ?,
+          window_hi_pk = ?
+        WHERE stream_key = ? AND epoch = ? AND fence_epoch = ?
+        """,  # nosec B608
+        (*values, stream_key, expected.epoch, expected.fence_epoch),
     )
+    if cur.rowcount != 1:
+        raise concurrent_commit_error(
+            stream_key,
+            expected_epoch=expected.epoch,
+            expected_fence=expected.fence_epoch,
+        )
 
 
 def _delete_on_cursor(
@@ -357,6 +394,11 @@ def _sqlite_apply_member(
         mappings, column_types, pk_target_cols
     )
     change = combine_change_batch(change, pk_cols=pk_target_cols)
+    assert_unambiguous_eos_row_columns(
+        incoming_rows=list(change.inserts or []) + list(change.updates or []),
+        mappings=mappings,
+        target_cols=target_cols,
+    )
     incoming_phase = extract_cdc_phase(change.resume_token)
     incoming_checksum = batch_apply_checksum(
         change, incoming_lsn=incoming_lsn, pk_cols=pk_target_cols
@@ -417,12 +459,15 @@ def _sqlite_apply_member(
             fence_epoch=fence,
             prev_lsn=dest.committed_lsn,
             phase="streaming",
-            apply_checksum=incoming_checksum or dest.apply_checksum,
+            apply_checksum=committed_apply_checksum(
+                incoming_checksum, dest.apply_checksum, change
+            ),
             resume_blob=resume_blob or dest.resume_blob,
             apply_seq=dest_seq,
             window_id=window_id,
             snapshot_signal_id=signal_id,
             window_hi_pk=hi_pk,
+            expected=dest,
         )
         return EosApplyResult(
             status="handoff_phase",
@@ -432,7 +477,9 @@ def _sqlite_apply_member(
             already_committed=True,
             fence_epoch=fence,
             phase="streaming",
-            apply_checksum=incoming_checksum or dest.apply_checksum,
+            apply_checksum=committed_apply_checksum(
+                incoming_checksum, dest.apply_checksum, change
+            ),
             apply_seq=dest_seq,
             window_id=window_id,
             snapshot_signal_id=signal_id,
@@ -473,10 +520,7 @@ def _sqlite_apply_member(
             values: list[Any] = []
             for tgt in target_cols:
                 src = tgt_to_src.get(tgt, tgt)
-                if tgt in stamped:
-                    values.append(stamped.get(tgt))
-                else:
-                    values.append(stamped.get(src))
+                values.append(stamped.get(src) if src in stamped else stamped.get(tgt))
             tuples.append(tuple(values))
         written, _skipped = _sqlite_upsert_batch(
             cur,
@@ -516,6 +560,7 @@ def _sqlite_apply_member(
         window_id=window_id,
         snapshot_signal_id=signal_id,
         window_hi_pk=hi_pk,
+        expected=dest,
     )
     if crash_after == "after_watermark_before_commit":
         from services.cdc_exactly_once import EosCrash
@@ -559,6 +604,39 @@ def apply_change_batch_exactly_once(
     ``_apply_change_batch``.
     """
     dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest in _ICEBERG_EOS_SINKS:
+        incoming = require_batch_lsn(change.resume_token)
+        change = combine_change_batch(change, pk_cols=pk_target_cols)
+        stream_key = eos_stream_key(
+            dest_type=dest,
+            dest_database=str(dest_cfg.get("database") or ""),
+            dest_object=dest_table,
+            cursor_key=cursor_key,
+            stream_name=stream_name,
+        )
+        from connectors.iceberg_eos import apply_eos_iceberg
+
+        result = apply_eos_iceberg(
+            dest_type=dest,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            change=change,
+            mappings=mappings,
+            column_types=column_types,
+            pk_target_cols=pk_target_cols,
+            stream_key=stream_key,
+            incoming_lsn=incoming,
+            batch_id=f"eos-{uuid.uuid4().hex[:12]}",
+            crash_after=crash_after,
+            writer_fence=writer_fence,
+        )
+        log_apply_outcome(dest_type=dest, stream_key=stream_key, result=result)
+        return (
+            result.rows_written,
+            "",
+            result.to_dest_summary(),
+            result.deleted,
+        )
     incoming = require_batch_lsn(change.resume_token)
     change = combine_change_batch(change, pk_cols=pk_target_cols)
     stream_key = eos_stream_key(
@@ -604,6 +682,7 @@ def apply_change_batch_exactly_once(
             crash_after=crash_after,
             writer_fence=writer_fence,
         )
+        log_apply_outcome(dest_type=dest, stream_key=stream_key, result=result)
         return (
             result.rows_written,
             "",
@@ -624,6 +703,7 @@ def apply_change_batch_exactly_once(
         crash_after=crash_after,
         writer_fence=writer_fence,
     )
+    log_apply_outcome(dest_type=dest, stream_key=stream_key, result=result)
     return (
         result.rows_written,
         "",
@@ -669,10 +749,7 @@ def _apply_eos_sqlite(
             )
             conn.execute("COMMIT")
         except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
+            _rollback(conn, "dest transaction")
             raise
         if result.status in {"applied", "empty"} and result.committed_lsn:
             verify_dest_commit(
@@ -701,10 +778,15 @@ def apply_eos_bundle(
     Crash before COMMIT rolls back every member. Source ack happens after.
     """
     dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest in _ICEBERG_EOS_SINKS:
+        raise ExactlyOnceRouteError(
+            "Iceberg exactly-once cannot atomically commit a multi-table bundle.",
+            reason="iceberg_eos_bundle_unsupported",
+        )
     if dest != "sqlite":
         from connectors.cdc_eos_sa import apply_eos_sa_bundle
 
-        return apply_eos_sa_bundle(
+        sa_bundle = apply_eos_sa_bundle(
             dest_type=dest,
             dest_cfg=dest_cfg,
             streams=streams,
@@ -713,6 +795,10 @@ def apply_eos_bundle(
             writer_fence=writer_fence,
             crash_after=crash_after,
         )
+        log_apply_outcome(
+            dest_type=dest, stream_key=bundle_key or "bundle", result=sa_bundle
+        )
+        return sa_bundle
     if not incoming_lsn:
         if streams:
             incoming_lsn = require_batch_lsn(streams[0].change.resume_token)
@@ -774,6 +860,7 @@ def apply_eos_bundle(
                         fence_epoch=fence,
                         prev_lsn=dest_wm.committed_lsn,
                         phase="streaming",
+                        expected=dest_wm,
                     )
             if crash_after in {
                 "after_apply_before_watermark",
@@ -784,10 +871,7 @@ def apply_eos_bundle(
                 raise EosCrash(crash_after)
             conn.execute("COMMIT")
         except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
+            _rollback(conn, "dest transaction")
             raise
     finally:
         conn.close()
@@ -811,7 +895,7 @@ def apply_eos_bundle(
     rows = sum(m.rows_written for m in members)
     deleted = sum(m.deleted for m in members)
     fence = max((m.fence_epoch for m in members), default=writer_fence)
-    return EosBundleResult(
+    bundle = EosBundleResult(
         members=members,
         committed_lsn=incoming_lsn or None,
         already_committed=bool(members) and all(m.already_committed for m in members),
@@ -820,6 +904,8 @@ def apply_eos_bundle(
         fence_epoch=fence,
         bundle_key=bundle_key,
     )
+    log_apply_outcome(dest_type="sqlite", stream_key=bundle_key or "bundle", result=bundle)
+    return bundle
 
 
 def open_eos_session(
@@ -832,6 +918,16 @@ def open_eos_session(
 ) -> EosOpenResult:
     """Estuary Open: raise dest fence with no data; return dest resume blob."""
     dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest in _ICEBERG_EOS_SINKS:
+        from connectors.iceberg_eos import open_iceberg_eos_session
+
+        return open_iceberg_eos_session(
+            dest_type=dest,
+            dest_cfg=dest_cfg,
+            stream_key=stream_key,
+            incoming_fence=incoming_fence,
+            job_resume=job_resume,
+        )
     if dest != "sqlite":
         from connectors.cdc_eos_sa import open_eos_sa_session
 
@@ -850,6 +946,11 @@ def open_eos_session(
         try:
             _ensure_wm_table(cur)
             view = _read_watermark(cur, stream_key)
+            from services.cdc_slot_resume import without_retired_slot_resume
+
+            view, job_resume = without_retired_slot_resume(
+                view, job_resume, cursor_key=stream_key
+            )
             opened = plan_open_session(
                 dest=view, incoming_fence=incoming_fence, job_resume=job_resume
             )
@@ -870,14 +971,12 @@ def open_eos_session(
                     window_id=view.window_id,
                     snapshot_signal_id=view.snapshot_signal_id,
                     window_hi_pk=view.window_hi_pk,
+                    expected=view,
                 )
             conn.execute("COMMIT")
             return opened
         except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
+            _rollback(conn, "dest transaction")
             raise
     finally:
         conn.close()
@@ -896,6 +995,39 @@ def dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str) -> str | None:
         if cur.fetchone() is None:
             return None
         return _read_watermark(cur, stream_key).committed_lsn
+    finally:
+        conn.close()
+
+
+def blank_sqlite_eos_resume(dest_cfg: dict[str, Any], stream_key: str, *, lsn: str) -> bool:
+    """Blank a SQLite dest resume for a dropped slot. Fence epoch stays."""
+    target = str(lsn or "").strip()
+    key = str(stream_key or "").strip()
+    if not target or not key:
+        return False
+    path = _sqlite_path(dest_cfg)
+    conn = sqlite3.connect(path, timeout=30, isolation_level=None)
+    try:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            _ensure_wm_table(cur)
+            cur.execute(
+                f"UPDATE {WATERMARK_TABLE} SET committed_lsn = '' "  # nosec B608
+                f"WHERE stream_key = ? AND committed_lsn = ?",
+                (key, target),
+            )
+            cleared = cur.rowcount > 0
+            cur.execute(
+                f"UPDATE {WATERMARK_TABLE} SET resume_blob = '' "  # nosec B608
+                f"WHERE stream_key = ? AND committed_lsn = ''",
+                (key,),
+            )
+            conn.execute("COMMIT")
+            return cleared
+        except Exception:
+            _rollback(conn, "dest transaction")
+            raise
     finally:
         conn.close()
 
@@ -946,21 +1078,59 @@ def read_route_dest_lsn(
 ) -> str | None:
     """Dest-authoritative watermark read (resume Open)."""
     dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest in _ICEBERG_EOS_SINKS:
+        from connectors.iceberg_eos import iceberg_dest_watermark_lsn
+
+        return iceberg_dest_watermark_lsn(dest_cfg, stream_key)
+    # Raises on a failed read: an unreadable dest watermark must not look
+    # like "no watermark" (that would let a job cursor invent a resume point).
     if dest == "sqlite":
-        try:
-            return dest_watermark_lsn(dest_cfg, stream_key)
-        except Exception:
-            return None
+        return dest_watermark_lsn(dest_cfg, stream_key)
     from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS
 
     if dest not in EOS_TXN_WIRED_DESTS:
         return None
-    try:
-        from connectors.cdc_eos_sa import sa_dest_watermark_lsn
+    from connectors.cdc_eos_sa import sa_dest_watermark_lsn
 
-        return sa_dest_watermark_lsn(dest_cfg, stream_key, dest)
-    except Exception:
-        return None
+    return sa_dest_watermark_lsn(dest_cfg, stream_key, dest)
+
+
+def blank_route_dest_resume(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    stream_key: str,
+    *,
+    lsn: str,
+) -> bool:
+    """Blank one dest exactly-once resume after its Postgres slot was dropped.
+
+    The fence epoch is not changed. A newer LSN written by another run is
+    left in place. Never raises — a failed blank still leaves the retirement
+    record, and the next Open ignores that LSN.
+    """
+    dest = (dest_type or "").strip().lower().replace("-", "_")
+    try:
+        if dest in _ICEBERG_EOS_SINKS:
+            from connectors.iceberg_eos import iceberg_blank_eos_resume
+
+            return iceberg_blank_eos_resume(dest_cfg, stream_key, lsn=lsn)
+        if dest == "sqlite":
+            return blank_sqlite_eos_resume(dest_cfg, stream_key, lsn=lsn)
+        from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS
+
+        if dest not in EOS_TXN_WIRED_DESTS:
+            return False
+        from connectors.cdc_eos_sa import sa_blank_eos_resume
+
+        return sa_blank_eos_resume(dest_cfg, stream_key, dest, lsn=lsn)
+    except Exception as exc:  # noqa: BLE001 — documented never-raise; logged
+        _logger.warning(
+            "cdc_eos: could not blank dest resume stream_key=%s lsn=%s: %s",
+            stream_key,
+            lsn,
+            exc,
+        )
+        return False
 
 
 def read_route_dest_resume(
@@ -970,21 +1140,19 @@ def read_route_dest_resume(
 ) -> Any:
     """Dest-stored resume blob (Estuary Opened checkpoint)."""
     dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest in _ICEBERG_EOS_SINKS:
+        from connectors.iceberg_eos import iceberg_dest_resume_blob
+
+        return iceberg_dest_resume_blob(dest_cfg, stream_key)
     if dest == "sqlite":
-        try:
-            return dest_watermark_view(dest_cfg, stream_key).resume_blob
-        except Exception:
-            return ""
+        return dest_watermark_view(dest_cfg, stream_key).resume_blob
     from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS
 
     if dest not in EOS_TXN_WIRED_DESTS:
         return ""
-    try:
-        from connectors.cdc_eos_sa import sa_dest_resume_blob
+    from connectors.cdc_eos_sa import sa_dest_resume_blob
 
-        return sa_dest_resume_blob(dest_cfg, stream_key, dest)
-    except Exception:
-        return ""
+    return sa_dest_resume_blob(dest_cfg, stream_key, dest)
 
 
 # Imported by proofs — keep algorithm name on the connector surface.

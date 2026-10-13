@@ -11,7 +11,7 @@ import { DtIcon } from "../DtIcon";
  */
 export function TransformGuidePanel({ postLoadOnly }: { postLoadOnly: string[] }) {
   return (
-    <div className="df2-xform-guide" role="region" aria-label="How Transform (pre-load) works">
+    <div className="df2-xform-guide">
       <ol className="df2-xform-guide-list">
         <li>
           <span className="df2-xform-guide-num">1</span>
@@ -79,9 +79,9 @@ export function TransformGuidePanel({ postLoadOnly }: { postLoadOnly: string[] }
           <div>
             <strong>The recipe is pinned by identity.</strong>
             <p>
-              The <code>recipe</code> hash shown above is approved with the plan and re-checked
-              before Execute: if the steps change afterwards the run is refused rather than
-              silently running a different recipe. Every step also reports what it did — cells
+              The <code>recipe</code> hash on the Transform page is approved with the plan and
+              re-checked before Execute: if the steps change afterwards the run is refused rather
+              than silently running a different recipe. Every step also reports what it did — cells
               changed, nulls introduced, rows removed — on the sample and again on the real run.
             </p>
           </div>
@@ -89,8 +89,10 @@ export function TransformGuidePanel({ postLoadOnly }: { postLoadOnly: string[] }
       </ol>
       <p className="df2-xform-guide-foot">
         <DtIcon name="alert" size={14} />
-        Charts and previews below are a <strong>sample</strong>. Validate re-checks every row of the
-        population before the destination is touched.
+        <span>
+          Charts and the before/after on this page use the sample. Validate re-checks every row of the
+          population before the destination is touched.
+        </span>
       </p>
     </div>
   );

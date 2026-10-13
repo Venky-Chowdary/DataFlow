@@ -40,6 +40,23 @@ def test_dynamo_s_decimal_uses_dest_wire():
     assert _s_key("100") == "100"
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (1, "1"),
+        (1.0, "1"),
+        (Decimal("1.00"), "1"),
+        (Decimal("1E+2"), "100"),
+        (-0.0, "0"),
+        (0.1, "0.1"),
+        (Decimal("12.3400"), "12.34"),
+        ("1.00", "1.00"),
+    ],
+)
+def test_dynamo_s_numeric_objects_use_canonical_numeric_identity(value, expected):
+    assert _s_key(value) == expected
+
+
 def test_dynamo_s_reader_null_still_refuses():
     for wire in (None, SQL_NULL_SENTINEL, "__df_ddb_null__", "", "   "):
         with pytest.raises(ValueError, match="refused"):

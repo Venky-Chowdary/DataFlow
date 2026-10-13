@@ -37,8 +37,15 @@ class ValidationModeWriteRefused(RuntimeError):
     """Execute attempted under a mode that never writes."""
 
 
+#: Names Pilot/MCP advertise that are not modes of their own. ``lenient`` fell
+#: through to the unknown-mode rule and ran as Strict (floor 0.85), stricter
+#: than Balanced (0.75) — QA MX3-13.
+VALIDATION_MODE_ALIASES: dict[str, str] = {"lenient": "balanced"}
+
+
 def normalize_validation_mode(mode: str | None) -> str:
     m = (mode or "strict").strip().lower()
+    m = VALIDATION_MODE_ALIASES.get(m, m)
     if m not in VALIDATION_MODES:
         return "strict"
     return m

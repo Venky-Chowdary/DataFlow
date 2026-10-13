@@ -29,7 +29,7 @@ if (files.length === 0) {
   process.exit(1);
 }
 
-const args = ["--test", ...process.argv.slice(2), ...files];
+const args = ["--tsconfig", path.join(WEB, "tsconfig.tests.json"), "--test", ...process.argv.slice(2), ...files];
 const child = spawn(process.platform === "win32" ? "tsx.cmd" : "tsx", args, {
   cwd: WEB,
   stdio: "inherit",

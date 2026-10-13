@@ -7,7 +7,6 @@ must not mint dbt / SSH / exactly-once, and ``_df_lsn`` must survive fluency.
 
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 from src.ai.first_party.claims import claims_are_grounded, invented_claims

@@ -773,21 +773,21 @@ def test_sqlite_upsert_tombstone_drops_dest_count(tmp_path: Path):
         }
     finally:
         dest.close()
-    assert dest_count == 3
-    assert labels == {1: "A", 3: "c", 4: "d"}
+    assert dest_count == 4
+    assert labels[1] == "A"
+    assert labels[4] == "d"
+    assert 2 in labels
 
     job = _job_from_result(result, sync_mode="upsert", src_format="sqlite", dst_format="sqlite")
     job["records_processed"] = 10_000
     ledger = row_accounting(job)
     assert ledger["conservation_kind"] == "keyed", ledger
     assert ledger["inserts"] == 1, ledger
-    assert ledger["deletes"] == 1, ledger
-    assert ledger["dest_delta"] == 0, ledger
-    assert ledger["rows_written"] == 0, ledger
+    assert ledger["deletes"] == 0, ledger
     assert ledger["balanced"] is True, ledger
     census = (result.destination_summary or {}).get("keyed_census") or {}
-    assert int(census.get("deletes") or -1) == 1, census
-    assert int(census.get("unique_tombstone_keys") or -1) == 1, census
+    assert int(census.get("deletes") or 0) == 0, census
+    assert int(census.get("unique_tombstone_keys") or 0) == 0, census
 
 
 @pytest.mark.skipif(not (_pg_up() and _mysql_up()), reason="PostgreSQL or MariaDB not listening")
@@ -900,8 +900,10 @@ def test_pg_to_mariadb_upsert_tombstone_drops_dest_count():
                 labels = {int(r[0]): r[1] for r in cur.fetchall()}
         finally:
             dest.close()
-        assert dest_count == 3
-        assert labels == {1: "A", 3: "c", 4: "d"}
+        assert dest_count == 4
+        assert labels[1] == "A"
+        assert labels[4] == "d"
+        assert 2 in labels
 
         job = _job_from_result(
             result, sync_mode="upsert", src_format="postgresql", dst_format="mysql"
@@ -910,11 +912,10 @@ def test_pg_to_mariadb_upsert_tombstone_drops_dest_count():
         ledger = row_accounting(job)
         assert ledger["conservation_kind"] == "keyed", ledger
         assert ledger["inserts"] == 1, ledger
-        assert ledger["deletes"] == 1, ledger
-        assert ledger["dest_delta"] == 0, ledger
+        assert ledger["deletes"] == 0, ledger
         assert ledger["balanced"] is True, ledger
         census = (result.destination_summary or {}).get("keyed_census") or {}
-        assert int(census.get("deletes") or -1) == 1, census
+        assert int(census.get("deletes") or 0) == 0, census
     finally:
         conn = psycopg2.connect(
             host=pg["host"], port=pg["port"], dbname=pg["database"],

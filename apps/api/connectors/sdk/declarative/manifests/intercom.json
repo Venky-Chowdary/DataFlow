@@ -1,0 +1,122 @@
+{
+  "name": "intercom",
+  "docs": "https://developer.intercom.com/docs/references/rest-api/api.intercom.io/contacts",
+  "base_url": "https://api.intercom.io",
+  "auth": {
+    "type": "bearer"
+  },
+  "defaults": {
+    "page_size": 150,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "contacts",
+      "path": "contacts",
+      "records_path": "data",
+      "primary_key": [
+        "id"
+      ],
+      "request_headers": {
+        "Intercom-Version": "2.11"
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 150,
+        "page_size_param": "per_page",
+        "cursor_param": "starting_after",
+        "cursor_path": "pages.next.starting_after"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "updated_at": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    {
+      "name": "conversations",
+      "path": "conversations/search",
+      "method": "POST",
+      "records_path": "conversations",
+      "primary_key": [
+        "id"
+      ],
+      "request_headers": {
+        "Intercom-Version": "2.11"
+      },
+      "request_body_template": {
+        "query": {
+          "field": "updated_at",
+          "operator": ">",
+          "value": 0
+        },
+        "pagination": {
+          "per_page": 150
+        }
+      },
+      "cursor": {
+        "field": "updated_at",
+        "request_param": "query.value",
+        "request_location": "body",
+        "format": "epoch_s",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "cursor",
+        "page_size": 150,
+        "page_size_param": "",
+        "cursor_param": "pagination.starting_after",
+        "cursor_location": "body",
+        "cursor_path": "pages.next.starting_after"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "integer"
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  ]
+}

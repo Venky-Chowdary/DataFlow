@@ -354,7 +354,11 @@ def introspect_redis_keys(
 ) -> dict[str, Any]:
     from connectors.redis_reader import read_keys_batch
 
-    batch = read_keys_batch(cfg=cfg, pattern=pattern or "*", offset=0, limit=sample_limit)
+    result = read_keys_batch(cfg=cfg, pattern=pattern or "*", offset=0, limit=sample_limit)
+    # read_keys_batch returns (ReadBatch, RedisScanState). Treating that
+    # tuple as the batch raised 'tuple' object has no attribute 'headers'
+    # on every Redis source introspect.
+    batch = result[0] if isinstance(result, tuple) else result
     profiled = profile_object_batch(batch.headers, batch.rows)
     return {
         **profiled,

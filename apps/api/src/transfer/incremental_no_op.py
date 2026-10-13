@@ -11,6 +11,38 @@ from __future__ import annotations
 from .models import TransferRequest, TransferResult
 
 
+def empty_file_success_result(request: TransferRequest, job_id: str) -> TransferResult:
+    """A file with headers and no data rows is an empty success."""
+    try:
+        from services.mongodb_service import get_mongodb_service
+    except ImportError:  # pragma: no cover - packaging variant
+        from src.services.mongodb_service import get_mongodb_service  # type: ignore
+
+    summary = {
+        "sync_mode": request.sync_mode,
+        "source_row_count": 0,
+        "source_row_count_source": "headers_only",
+        "rejected_rows": 0,
+    }
+    mongo = get_mongodb_service()
+    mongo.update_job_status(
+        job_id,
+        "completed",
+        phase="completed",
+        progress_pct=100,
+        total_rows=0,
+        records_processed=0,
+        message="File has headers and no data rows — nothing to send.",
+    )
+    return TransferResult(
+        success=True,
+        job_id=job_id,
+        records_transferred=0,
+        operation=request.operation,
+        destination_summary=summary,
+    )
+
+
 def incremental_no_op_result(
     request: TransferRequest,
     job_id: str,

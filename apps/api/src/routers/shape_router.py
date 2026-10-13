@@ -52,6 +52,11 @@ class _PreviewBody(_RecipeBody):
     # the scale the writer will actually enforce.
     target_schema: dict[str, str] = Field(default_factory=dict)
     include_profile: bool = True
+    # Multi-table: the sample belongs to one stream. The hash is still the
+    # whole program (every table's steps). Preview applies only this table.
+    focus_table: str = ""
+    source_tables: list[str] = Field(default_factory=list)
+    source_catalog: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class _ProfileBody(BaseModel):
@@ -144,7 +149,7 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     """Apply a recipe to the sampled rows and report exactly what it did."""
     rows = _bounded(body.sample_rows)
     columns = body.source_columns or _columns_of(rows)
-    recipe = _parse(body.recipe, columns)
+    recipe, preview_note, program_hash = _recipe_for_preview(body, columns)
 
     engine = ShapeEngine(recipe)
     shaped: list[dict[str, Any]] = []
@@ -170,8 +175,11 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
         touched=recipe.touched_columns,
         rows=shaped,
     )
+    identity = _identity(recipe, output_columns=out_columns)
+    if program_hash:
+        identity["recipe_hash"] = program_hash
     return {
-        "recipe": _identity(recipe, output_columns=out_columns),
+        "recipe": identity,
         "sampled_rows": len(rows),
         "column_types": out_types,
         "retyped_columns": retyped,
@@ -184,12 +192,101 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
         "suggestions": suggest_steps(profiles, target_schema=body.target_schema)
         if body.include_profile
         else [],
+        "preview_note": preview_note,
     }
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _recipe_for_preview(body: _PreviewBody, columns: list[str]) -> tuple[ShapeRecipe, str, str]:
+    """The recipe to apply to this sample, and a note when other tables wait.
+
+    A multi-table program's hash covers every stream. The sample is one
+    table, so only that table's steps are applied here. Each other table is
+    still parsed against its catalog columns — a step that names a missing
+    column is refused before anyone approves the program.
+    """
+    from services.multi_stream_plan import (
+        enabled_recipe_steps,
+        full_recipe_hash,
+        partition_shape_steps,
+    )
+    from services.rule_compiler.normalize import fold
+
+    tables = [str(name).strip() for name in body.source_tables if str(name).strip()]
+    tagged = any(
+        str(step.get("source_table") or "").strip()
+        for step in enabled_recipe_steps(body.recipe)
+    )
+    if len(tables) < 2 or not tagged:
+        return _parse(body.recipe, columns), "", ""
+
+    grouped, refusal = partition_shape_steps(body.recipe, tables)
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+    catalog = body.source_catalog or {}
+    for name, steps in grouped.items():
+        owned = _catalog_columns(catalog, name)
+        if not owned:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"{name} has transform steps but its columns are not in the "
+                    "source catalog, so the step cannot be proved. Reload that "
+                    "table's schema."
+                ),
+            )
+        _parse({"steps": steps}, owned)
+
+    focus = str(body.focus_table or "").strip()
+    focus_name = ""
+    if focus:
+        want = fold(focus)
+        for name in tables:
+            if fold(name) == want:
+                focus_name = name
+                break
+        if not focus_name:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Preview table “{focus}” is not among the selected streams "
+                    f"({', '.join(tables)})."
+                ),
+            )
+    else:
+        focus_name = tables[0]
+    focus_steps = grouped.get(focus_name) or []
+    applied = (
+        _parse({"steps": focus_steps}, columns)
+        if focus_steps
+        else ShapeRecipe.parse({"steps": []})
+    )
+    # Identity is the whole program. Approving the preview approves every table.
+    digest = full_recipe_hash(body.recipe)
+    others = len(grouped) - (1 if focus_name in grouped else 0)
+    note = (
+        f"Preview shows {focus_name}. "
+        + (
+            f"{others} other stream(s) keep their own steps and run at Execute."
+            if others
+            else "Other selected streams pass through unchanged."
+        )
+    )
+    return applied, note, digest
+
+
+def _catalog_columns(catalog: dict[str, list[str]], name: str) -> list[str]:
+    from services.rule_compiler.normalize import fold
+
+    want = fold(name)
+    for key, cols in catalog.items():
+        if fold(str(key)) == want:
+            return [str(col) for col in cols if str(col).strip()]
+    return []
 
 
 def _parse(payload: Any, columns: list[str]) -> ShapeRecipe:

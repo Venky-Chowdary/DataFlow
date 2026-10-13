@@ -26,6 +26,7 @@ export const PERMISSIONS = {
   scheduleAuthorize: "schedule.authorize",
   workspaceManage: "workspace.manage",
   memberInvite: "member.invite",
+  iamManage: "iam.manage",
 } as const;
 
 export type PermissionName = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -124,10 +125,10 @@ export function PermissionsProvider({
  *
  * ``reason`` is empty when allowed, so it can be passed straight to ``title``.
  */
-export function useWriteGate(permission: PermissionName): { allowed: boolean; reason: string } {
-  const { can, denialReason } = usePermissions();
+export function useWriteGate(permission: PermissionName, action?: string): { allowed: boolean; reason: string } {
+  const { can, role } = usePermissions();
   const allowed = can(permission);
-  return { allowed, reason: allowed ? "" : denialReason(permission) };
+  return { allowed, reason: allowed ? "" : refusalSentence(permission, role, action) };
 }
 
 export function usePermissions(): PermissionsValue {

@@ -205,7 +205,7 @@ def test_live_pg_control_total_mismatch_same_count_fails() -> None:
         _exec(f'DROP TABLE IF EXISTS public."{src}"')
 
 
-def test_live_pg_dest_ri_orphan_fails_after_write() -> None:
+def test_live_pg_dest_ri_orphan_strict_blocks_before_write() -> None:
     """Parent incomplete on dest: child COUNT>0, dest anti-join finds orphans."""
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import EndpointConfig, TransferRequest
@@ -272,25 +272,23 @@ def test_live_pg_dest_ri_orphan_fails_after_write() -> None:
             ),
             uuid.uuid4().hex[:24],
         )
+        # Strict fails closed before an orphan is committed: the FK guard
+        # names the relationship and the orphan key, and nothing lands.
         assert result.success is False, (
-            f"dest orphans must fail Gate-8: {result.error!r} {result.reconciliation!r}"
+            f"dest orphans must fail strict: {result.error!r} {result.reconciliation!r}"
         )
-        blob = f"{result.error or ''} {result.error_details or ''} {result.reconciliation or ''}".lower()
-        assert (
-            "g22" in blob
-            or "referential" in blob
-            or "orphan" in blob
-        ), blob
-        dest_count = int(
-            _fetch(f'SELECT COUNT(*) FROM "{dst_schema}".child')[0][0]
-        )
-        assert dest_count >= 1, "rows landed; dest RI is the closure, not empty dest"
+        err = str(result.error or "")
+        assert "referential integrity failed" in err.lower(), err
+        assert "child.parent_id -> parent.id" in err, err
+        assert "('2',)" in err, err
+        rows = _fetch(f'SELECT id, parent_id FROM "{dst_schema}".child ORDER BY id')
+        assert list(rows) == [], "destination child must equal its pre-run (empty) state"
         orphan = _fetch(
             f'SELECT COUNT(*) FROM "{dst_schema}".child c '
             f'LEFT JOIN "{dst_schema}".parent p ON c.parent_id = p.id '
             "WHERE c.parent_id IS NOT NULL AND p.id IS NULL"
         )
-        assert int(orphan[0][0]) >= 1
+        assert int(orphan[0][0]) == 0
     finally:
         _exec(f'DROP SCHEMA IF EXISTS "{dst_schema}" CASCADE')
         _exec(f'DROP SCHEMA IF EXISTS "{src_schema}" CASCADE')

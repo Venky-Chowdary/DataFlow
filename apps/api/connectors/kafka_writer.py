@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import ssl
 from typing import Any, Callable
 
 from services.value_serializer import json_default
@@ -23,7 +22,6 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     mapped_row_to_json_record,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -230,35 +228,22 @@ def _producer(cfg: dict[str, Any], *, schema_id: int | None = None):
 
     from connectors.confluent_schema_registry import encode_confluent_json
 
-    bootstrap = _bootstrap(
-        str(cfg.get("host") or ""),
-        int(cfg.get("port") or 9092),
-        str(cfg.get("connection_string") or ""),
-    )
-
     def _serialize_value(v: Any) -> bytes:
         if schema_id is not None and schema_id > 0:
             return encode_confluent_json(schema_id, v)
         return json.dumps(v, default=json_default).encode("utf-8")
 
+    from services.copy_kafka_common import kafka_classified_bootstrap, kafka_client_kwargs
+
     kwargs: dict[str, Any] = {
-        "bootstrap_servers": bootstrap.split(","),
+        **kafka_client_kwargs(cfg),
         "value_serializer": _serialize_value,
         "key_serializer": lambda v: v.encode("utf-8") if isinstance(v, str) else v,
         "acks": "all",
         "retries": 3,
     }
-    security = str(cfg.get("schema") or cfg.get("security_protocol") or "").upper()
-    username = str(cfg.get("username") or "")
-    password = str(cfg.get("password") or cfg.get("api_key") or "")
-    if username and password:
-        kwargs["security_protocol"] = security if security in {"SASL_SSL", "SASL_PLAINTEXT"} else "SASL_SSL"
-        kwargs["sasl_mechanism"] = str(cfg.get("database") or "PLAIN")  # PLAIN | SCRAM-SHA-256
-        kwargs["sasl_plain_username"] = username
-        kwargs["sasl_plain_password"] = password
-        if kwargs["security_protocol"] == "SASL_SSL":
-            kwargs["ssl_context"] = ssl.create_default_context()
-    return KafkaProducer(**kwargs)
+    with kafka_classified_bootstrap(cfg):
+        return KafkaProducer(**kwargs)
 
 
 def test_kafka(
@@ -275,17 +260,26 @@ def test_kafka(
     schema: str = "",
     **_kwargs: Any,
 ) -> tuple[bool, str]:
+    cfg = {
+        "host": host,
+        "port": port or 9092,
+        "connection_string": connection_string,
+        "username": username,
+        "password": password or api_key,
+        "api_key": api_key,
+        "schema": schema or ("SASL_SSL" if ssl else ""),
+        "database": database,
+        "security_protocol": str(_kwargs.get("security_protocol") or ""),
+        "sasl_mechanism": str(_kwargs.get("sasl_mechanism") or ""),
+        "extra": _kwargs.get("extra") if isinstance(_kwargs.get("extra"), dict) else {},
+    }
+    from services import copy_kafka_common
+
+    check = copy_kafka_common.kafka_sasl_check(cfg)
+    if check is not None and check.outcome not in {"ok", "inconclusive"}:
+        return False, check.message
     try:
-        producer = _producer({
-            "host": host,
-            "port": port or 9092,
-            "connection_string": connection_string,
-            "username": username,
-            "password": password or api_key,
-            "api_key": api_key,
-            "schema": schema or ("SASL_SSL" if ssl else ""),
-            "database": database,
-        })
+        producer = _producer(cfg)
         producer.close()
         return True, f"Kafka broker reachable at {_bootstrap(host, port or 9092, connection_string)}"
     except Exception as exc:

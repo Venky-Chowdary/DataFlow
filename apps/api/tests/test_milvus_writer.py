@@ -11,6 +11,7 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from connectors.milvus_writer import (
+    _ensure_metadata_field,
     build_milvus_entities,
     scan_source_ids,
     test_milvus as probe_milvus,
@@ -80,6 +81,33 @@ def test_milvus_write_unreachable_fail_closed():
     )
     assert not result.ok
     assert result.error
+
+
+def test_milvus_existing_collection_adds_nullable_metadata_field(monkeypatch):
+    import connectors.milvus_writer as writer
+
+    monkeypatch.setattr(
+        writer,
+        "_milvus_describe_data",
+        lambda *_args, **_kwargs: {"fields": [{"fieldName": "source_id"}]},
+    )
+
+    class FieldAddSession:
+        payload = None
+
+        def post(self, url, *, json, headers, timeout):
+            assert url.endswith("/collections/fields/add")
+            self.payload = json
+            return _FakeResp(200, {"code": 0})
+
+    session = FieldAddSession()
+    _ensure_metadata_field(session, "http://localhost:19530", {}, "chunks")
+    assert session.payload == {
+        "collectionName": "chunks",
+        "fieldName": "metadata",
+        "dataType": "JSON",
+        "nullable": True,
+    }
 
 
 class _FakeResp:

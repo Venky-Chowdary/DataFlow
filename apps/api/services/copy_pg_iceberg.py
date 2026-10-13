@@ -285,8 +285,11 @@ def copy_postgres_to_iceberg(
 
         if dest_occupied and not replace_destination:
             raise FastPathUnavailable(
-                "append into occupied Iceberg dest stays on the row path "
-                "(leftover MERGE / upsert); identity COPY would duplicate"
+                "COPY fast path declined: occupied destination has no identity "
+                "proof; continuing on the row path. Occupied Iceberg table "
+                f"{endpoint.get('schema') or 'default'}.{dest_table} was refused "
+                "because equal row counts are not identity proof and no PK-range "
+                "check is available; use overwrite, upsert with a key, or an empty target"
             )
 
         select_list = ", ".join(_quote(c) for c in source_cols)

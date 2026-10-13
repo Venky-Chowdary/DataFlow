@@ -9,8 +9,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, FrozenSet
 
+from connectors.sdk import list_descriptors
+
 # Driver-level capabilities (implemented in connectors/ + adapters.py)
-_DRIVER_CAPS: dict[str, dict[str, bool]] = {
+_DRIVER_CAPS: dict[str, dict[str, Any]] = {
     "postgresql": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "mysql": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "mongodb": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
@@ -25,9 +27,11 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
         "test": True, "read": True, "write": True, "introspect": True, "preflight": True,
         "certified": False,
     },
-    "pgvector": {"test": True, "read": False, "write": True, "introspect": True, "preflight": True, "dest_only": True},
+    # pgvector is PostgreSQL plus the ``vector`` type: it reads through the
+    # PostgreSQL reader (``source_read_driver``) and writes vectors natively.
+    "pgvector": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "qdrant": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "weaviate": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
+    "weaviate": {"test": True, "read": False, "write": True, "introspect": True, "preflight": True, "dest_only": True},
     "pinecone": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "milvus": {"test": True, "read": False, "write": True, "introspect": False, "preflight": True, "dest_only": True},
     "gcs": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
@@ -54,12 +58,26 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "zendesk": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "notion": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True, "certified": False},
     "airtable": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
-    "rest_api": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "rest_api": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
     "influxdb": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
-    "neo4j": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
+    "neo4j": {"test": True, "read": True, "write": False, "introspect": True, "preflight": False, "source_only": True},
     "couchbase": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
     "singer_tap": {"test": True, "read": True, "write": False, "introspect": False, "preflight": False, "source_only": True},
 }
+
+for _sdk_descriptor in list_descriptors():
+    if "source" not in _sdk_descriptor.roles or not _sdk_descriptor.catalog_ids:
+        continue
+    _DRIVER_CAPS[_sdk_descriptor.id] = {
+        "test": True,
+        "read": True,
+        "write": False,
+        "introspect": False,
+        "preflight": False,
+        "source_only": True,
+        "incremental": False,
+        "evidence": _sdk_descriptor.evidence,
+    }
 
 # File format capabilities (FileParser + registry)
 _FILE_CAPS: dict[str, dict[str, bool]] = {
@@ -123,6 +141,9 @@ def typed_wire_number_locale(source_kind: str, source_format: str) -> str:
 
 # Catalog marketplace id → driver / format type
 CATALOG_ID_ALIASES: dict[str, str] = {
+    # Rows saved by the pre-MXD13 Pilot normaliser, which dropped underscores.
+    "genericsql": "generic_sql",
+    "restapi": "rest_api",
     "csv___tsv": "csv",
     "amazon_s3": "s3",
     "aws_s3": "s3",
@@ -316,11 +337,105 @@ def default_port(driver_type: str) -> int:
     }.get((driver_type or "").lower(), 5432)
 
 
+def effective_port(driver_type: str, port: Any) -> int:
+    """Listen port for a driver: an explicit port, otherwise :func:`default_port`.
+
+    ``0`` and empty mean the caller did not choose a port. A second fallback
+    chain used to send that case to 443, so Redis and Elasticsearch dialed
+    the HTTPS port instead of 6379 and 9200.
+    """
+    parsed = _parse_port(port)
+    return parsed or default_port(_driver_key(driver_type))
+
+
+# The connector store and the transfer form both used to stamp 5432 whenever
+# the operator had not picked a port. Redis, Elasticsearch, Kafka and Neo4j
+# then dialed Postgres. 5432 is a real choice only for drivers that listen there.
+_HISTORICAL_PORT_FALLBACK = 5432
+# This reader speaks HTTP Cypher. A saved Bolt port never answers a health check.
+_NEO4J_BOLT_PORT = 7687
+
+
+def _parse_port(raw: Any) -> int:
+    try:
+        parsed = int(raw) if raw not in (None, "") else 0
+    except (TypeError, ValueError):
+        parsed = 0
+    return 0 if parsed < 0 else parsed
+
+
+def _driver_key(driver_type: str) -> str:
+    resolved = resolve_driver_type(driver_type or "")
+    if resolved in ("", "unknown"):
+        return (driver_type or "").lower()
+    return resolved
+
+
+def port_was_chosen(driver_type: str, raw: Any) -> bool:
+    """True when ``raw`` is a listen port this driver can actually be told to use.
+
+    Missing, ``0``, Neo4j Bolt ``7687``, and the old store-wide ``5432`` are
+    not a choice for a driver that does not listen there. Postgres and
+    pgvector keep ``5432``. An explicit tunnel port such as Redis ``6380``
+    stays chosen.
+    """
+    parsed = _parse_port(raw)
+    if parsed <= 0:
+        return False
+    driver = _driver_key(driver_type)
+    if driver == "neo4j" and parsed == _NEO4J_BOLT_PORT:
+        return False
+    if parsed == _HISTORICAL_PORT_FALLBACK and default_port(driver) != parsed:
+        return False
+    return True
+
+
+def stored_listen_port(driver_type: str, raw: Any) -> int:
+    """Port to persist and to dial.
+
+    One owner for the connector store and ``resolve_connector_config``.
+    Historical ``5432`` and Neo4j ``7687`` become the driver port. Any other
+    explicit port is kept, including Postgres ``5432`` and Redis ``6380``.
+    """
+    parsed = _parse_port(raw)
+    driver = _driver_key(driver_type)
+    if driver == "neo4j" and parsed == _NEO4J_BOLT_PORT:
+        return 7474
+    driver_default = default_port(driver)
+    if parsed in (0, _HISTORICAL_PORT_FALLBACK) and driver_default != parsed:
+        return driver_default
+    return parsed or driver_default
+
+
+def prefer_listen_port(driver_type: str, inline: Any, saved: Any) -> int:
+    """Pick the port the dial will use before the driver default is applied.
+
+    An inline historical ``5432`` must not override a saved tunnel port.
+    A form that stamps the driver default (DynamoDB ``443``, Redis ``6379``)
+    must not override a saved tunnel either. Returns ``0`` when neither side
+    chose a port, so the caller applies :func:`stored_listen_port`.
+    """
+    inline_port = _parse_port(inline) if port_was_chosen(driver_type, inline) else 0
+    saved_port = _parse_port(saved) if port_was_chosen(driver_type, saved) else 0
+    if inline_port and saved_port and inline_port != saved_port:
+        if inline_port == default_port(_driver_key(driver_type)):
+            return saved_port
+        return inline_port
+    if inline_port:
+        return inline_port
+    if saved_port:
+        return saved_port
+    return 0
+
+
 def resolve_driver_type(catalog_id: str) -> str:
     """Map catalog entry id to implemented driver or file format key."""
     cid = (catalog_id or "").lower().strip()
     if not cid:
         return "unknown"
+    for descriptor in list_descriptors():
+        if cid in descriptor.catalog_ids:
+            return descriptor.id
     if cid == "generic_sql":
         return "generic_sql"
     if cid in CATALOG_ID_ALIASES:
@@ -445,6 +560,18 @@ def resolve_driver_type(catalog_id: str) -> str:
     if base in _DRIVER_CAPS or base in _FILE_CAPS or base == "generic_sql":
         return base
     return base
+
+
+# Drivers whose *reads* are another driver's wire protocol. Writes keep the
+# native driver (pgvector upserts embeddings); reads dispatch to the reader that
+# already owns the protocol instead of a second, weaker copy (QA MX2-12).
+_SOURCE_READ_DRIVER: dict[str, str] = {"pgvector": "postgresql"}
+
+
+def source_read_driver(driver_type: str) -> str:
+    """Driver whose reader serves a *source* endpoint of ``driver_type``."""
+    key = (driver_type or "").strip().lower()
+    return _SOURCE_READ_DRIVER.get(key, key)
 
 
 def resolve_bind_dialect(catalog_id: str, *, config_type: str = "") -> str:
@@ -667,7 +794,7 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
     return _module_is_installed(module)
 
 
-def _declared_capabilities(driver_type: str, _catalog_id: str | None = None) -> dict[str, bool]:
+def _declared_capabilities(driver_type: str, _catalog_id: str | None = None) -> dict[str, Any]:
     """Registry capability bitmap, ignoring whether the package is installed.
 
     Runtime ``get_capabilities`` zeroes this when the DBAPI is missing so
@@ -683,7 +810,7 @@ def _declared_capabilities(driver_type: str, _catalog_id: str | None = None) -> 
     return {"test": False, "read": False, "write": False, "introspect": False, "preflight": False}
 
 
-def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[str, bool]:
+def get_capabilities(driver_type: str, catalog_id: str | None = None) -> dict[str, Any]:
     try:
         if driver_type == "generic_sql":
             base = _declared_capabilities("generic_sql", catalog_id)
@@ -738,8 +865,10 @@ def connect_only(caps: dict[str, bool]) -> bool:
     return bool(caps.get("test") and not (transfer_ready(caps) or _source_only_ready(caps) or can_rw))
 
 
-def effective_status(caps: dict[str, bool], catalog_status: str = "") -> str:
+def effective_status(caps: dict[str, Any], catalog_status: str = "") -> str:
     if transfer_ready(caps) or _source_only_ready(caps):
+        if caps.get("evidence") == "synthetic-fixture" and _source_only_ready(caps):
+            return "beta"
         return "live"
     if connect_only(caps):
         return "connect_only"
@@ -1178,6 +1307,8 @@ def transfer_live_driver_types() -> list[str]:
     keys = set(_DRIVER_CAPS) | set(_FILE_CAPS) | {"generic_sql"}
     for k in keys:
         caps = get_capabilities(k)
+        if caps.get("evidence") == "synthetic-fixture":
+            continue
         if transfer_ready(caps) or _source_only_ready(caps):
             live.append(k)
     return sorted(set(live))

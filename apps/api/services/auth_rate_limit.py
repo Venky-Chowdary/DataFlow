@@ -117,6 +117,7 @@ def _maybe_engage_lockout(key: str, *, now: float) -> dict[str, float | bool | s
             "locked": True,
             "retry_after_sec": float(lock_sec),
             "principal": key,
+            "newly_locked": True,
         }
 
 

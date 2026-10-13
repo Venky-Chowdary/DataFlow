@@ -10,9 +10,33 @@ canonical module said otherwise.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from services.password_hash import LEGACY_SHA256_RE as _LEGACY_SHA256_RE
 
 from src.services import auth_service as _canonical
+
+if TYPE_CHECKING:
+    from src.services.auth_service import (
+        _ALLOW_DEV_USER,
+        _DEV_USER,
+        _load_users,
+        _normalize_secret,
+        _REAUTH_SECRET,
+        _REQUIRE_AUTH,
+        _TOKEN_TTL_SEC,
+        _token_secret,
+        _legacy_verify,
+        authenticate,
+        auth_bootstrap_status,
+        auth_required,
+        create_token,
+        hash_password,
+        lookup_user,
+        public_user,
+        verify_password,
+        verify_token,
+    )
 
 __all__ = [
     "_REAUTH_SECRET",

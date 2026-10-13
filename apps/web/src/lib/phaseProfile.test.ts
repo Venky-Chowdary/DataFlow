@@ -123,7 +123,7 @@ describe("buildPhaseProfileView", () => {
     assert.equal(view.rows[0].dominant, true);
     assert.equal(view.rows[1].dominant, false);
     assert.equal(view.dominantLabel, "Reading source");
-    assert.match(view.headline, /Reading source took 12\.0s, 60% of engine time/);
+    assert.match(view.headline, /Reading source took 12\.0s, 60% of measured phase time/);
   });
 
   it("falls back to the slowest phase when none is named dominant", () => {
@@ -137,14 +137,14 @@ describe("buildPhaseProfileView", () => {
     assert.equal(view.overlapNote, "");
   });
 
-  it("explains that shares are of engine time when phases overlapped", () => {
-    // busy 20s inside a 7s wall clock means real concurrency; without the note
-    // the percentages look like they should sum against the wall clock.
+  it("explains that shares are of measured phase time when phases overlapped", () => {
+    // busy 20s inside a 7s profile span means real concurrency; without the note
+    // the percentages look like they should sum against that span.
     const view = buildPhaseProfileView(
       report({ elapsed_seconds: 7, overlap_factor: 2.9 })
     )!;
     assert.match(view.overlapNote, /2\.9× overlap/);
-    assert.match(view.overlapNote, /7\.00s wall clock/);
+    assert.match(view.overlapNote, /7\.00s profile span/);
   });
 
   it("derives busy seconds when the engine omitted the total", () => {

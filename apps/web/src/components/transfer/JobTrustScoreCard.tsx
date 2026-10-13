@@ -9,6 +9,8 @@ interface JobTrustScoreCardProps {
   compact?: boolean;
   onOpenQuarantine?: () => void;
   onOpenValidate?: () => void;
+  /** Multi-table Gate-8 is the last stream. Open that proof; do not leave the next step as prose. */
+  onOpenGate8?: () => void;
   onOpenMap?: () => void;
   onResume?: () => void;
   onOpenPipeline?: () => void;
@@ -31,6 +33,7 @@ export function JobTrustScoreCard({
   compact = false,
   onOpenQuarantine,
   onOpenValidate,
+  onOpenGate8,
   onOpenMap,
   onResume,
   onOpenPipeline,
@@ -46,6 +49,8 @@ export function JobTrustScoreCard({
         ? { label: "Open Validate", onClick: onOpenValidate }
         : action.code === "append_delta" && onOpenValidate
           ? { label: "Review Gate-8 proof", onClick: onOpenValidate }
+        : action.code === "last_stream_checksum" && onOpenGate8
+          ? { label: "Open Gate-8", onClick: onOpenGate8 }
         : action.code === "identity_key" && onOpenMap
           ? { label: "Open Map / Transform", onClick: onOpenMap }
         : action.code === "map" && onOpenMap

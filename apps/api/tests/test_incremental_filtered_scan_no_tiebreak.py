@@ -17,6 +17,7 @@ import pytest
 from connectors.sql_snapshot_scan import FILTERED_SCAN_SOURCES, scan_filter_value
 from connectors.sqlite_reader import read_table_scan_batch
 from services.keyset_pagination import (
+    catalog_incremental_tiebreak,
     cursor_unique_evidence,
     decide_keyset_pagination,
     incremental_read_needs_filtered_scan,
@@ -299,3 +300,43 @@ def test_generic_sql_filtered_scan_keeps_tied_rows_across_page_edges(tmp_path: P
     assert total == 20
     assert len(rows) == 20
     assert sorted(r[1] for r in rows) == sorted(f"r{i}" for i in range(20, 40))
+
+
+def test_catalog_primary_key_is_the_tiebreak_both_owners_seek_on():
+    """E3-002: the first incremental append sought on id while the scan ignored it."""
+    tie = catalog_incremental_tiebreak(
+        "postgresql",
+        "updated_at",
+        contract_pk=[],
+        catalog_pk=["id"],
+    )
+    assert tie == "id"
+    assert catalog_incremental_tiebreak(
+        "mysql", "updated_at", contract_pk=["sku"], catalog_pk=["id"]
+    ) == "sku"
+    assert catalog_incremental_tiebreak(
+        "postgresql", "updated_at", contract_pk=[], catalog_pk=[]
+    ) == ""
+    reason = incremental_read_needs_filtered_scan(
+        src_type="postgresql",
+        incremental=True,
+        cursor_column="updated_at",
+        tiebreak_column=tie,
+        cursor_is_unique=False,
+        callable_source=False,
+    )
+    assert reason == ""
+    decision = decide_keyset_pagination(
+        src_type="postgresql",
+        keyset_order_cols=["updated_at", "id"],
+        keyset_col="updated_at",
+        keyset_tiebreak=tie,
+        incremental=True,
+        offset=0,
+        chunk_index=0,
+        cursor_after=None,
+        snapshot_scan=False,
+        cursor_is_unique=False,
+    )
+    assert decision.use_keyset is True
+    assert decision.seek_refused_reason == ""

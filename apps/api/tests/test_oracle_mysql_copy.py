@@ -297,24 +297,19 @@ def test_live_oracle_mysql_resume_skips_complete_range(monkeypatch):
             mcur.execute(f"DELETE FROM `{dest}` WHERE id = %s", (lo,))
             mcur.execute(f"SELECT COUNT(*) FROM `{dest}`")
             assert int(mcur.fetchone()[0]) == 7999
-        second = copy_oracle_to_mysql(
-            source_cfg=_ora_cfg(),
-            source_table=src,
-            dest_cfg=_mysql_cfg(),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            mysql_ddls=["BIGINT", "VARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_rows == 8000
-        assert second.target_rows == 8000
-        actions = [p["action"] for p in second.source_snapshot["partition_proof"]]
-        assert actions.count("skip") == 3
-        assert actions.count("reload") == 1
-        assert second.source_snapshot.get("partitions_skipped") == 3
+        with pytest.raises(FastPathUnavailable, match="partly"):
+            copy_oracle_to_mysql(
+                source_cfg=_ora_cfg(),
+                source_table=src,
+                dest_cfg=_mysql_cfg(),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                mysql_ddls=["BIGINT", "VARCHAR(32)"],
+                replace_destination=False,
+            )
         with my.cursor() as mcur:
             mcur.execute(f"SELECT COUNT(*) FROM `{dest}`")
-            assert int(mcur.fetchone()[0]) == 8000
+            assert int(mcur.fetchone()[0]) == 7999
     finally:
         _drop_ora(ora.cursor(), src)
         ora.commit()

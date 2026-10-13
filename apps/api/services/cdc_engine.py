@@ -197,6 +197,7 @@ class ChangeBatch:
     ack_barrier: bool = True
     """Rows refused before dest write (e.g. unparsed Oracle SQL_REDO)."""
     rejected: list[dict[str, Any]] = field(default_factory=list)
+    lookup_columns: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def total_changes(self) -> int:

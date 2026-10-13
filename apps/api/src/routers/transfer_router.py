@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from services.brand_env import getenv_brand
+from services.log_redaction import redact_log_text
+from services.mapping_proof import mappings_from_request
+from services.safe_errors import safe_http_exception
 from services.shape_preflight import ShapePreflightRefused
 from pathlib import Path
 from typing import Any, Optional
@@ -22,7 +24,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import FileResponse, PlainTextResponse, Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import cell_to_string
 
@@ -159,7 +161,9 @@ def _validated_read_options(raw: dict | str | None) -> dict:
     try:
         return parse_read_options_payload(raw).to_wire()
     except ReadOptionsError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
 
 
 def _validated_shape_recipe(raw: dict | str | None) -> dict:
@@ -178,15 +182,20 @@ def _validated_shape_recipe(raw: dict | str | None) -> dict:
         try:
             payload = json.loads(text)
         except ValueError as exc:
-            raise HTTPException(
-                status_code=400, detail=f"shape_recipe is not valid JSON: {exc}"
+            raise safe_http_exception(
+                exc,
+                event="transfer.shape_recipe.invalid",
+                public_message="shape_recipe is not valid JSON.",
+                status_code=400,
             ) from exc
     if not payload:
         return {}
     try:
         return ShapeRecipe.parse(payload).to_wire()
     except ShapeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
 
 
 def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
@@ -256,10 +265,23 @@ class ExecuteTransferRequest(BaseModel):
     require_signed_contract: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
+    source_timezone: str = ""
+
+    @field_validator("source_timezone")
+    @classmethod
+    def _validate_source_timezone(cls, value: str) -> str:
+        from services.timezone_policy import validate_source_timezone
+
+        zone, error = validate_source_timezone(value)
+        if error:
+            raise ValueError(error)
+        return zone
+
     # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''.
     number_locale: str = ""
-    # Delivery guarantee — default at_least_once; exactly_once is opt-in.
-    delivery_guarantee: str = "at_least_once"
+    # Delivery guarantee — auto selects dest-owned exactly-once on an eligible
+    # CDC route. Pin at_least_once to keep upsert redelivery.
+    delivery_guarantee: str = "auto"
     # Validate→Execute ack trail (must match Studio Validate acknowledgments).
     compliance_acknowledged: bool = False
     schema_drift_acknowledged: bool = False
@@ -613,7 +635,12 @@ async def update_transfer_plan(plan_id: str, body: UpdatePlanRequest):
         plan = patch_plan(plan_id, body.model_dump(exclude_none=True))
         return {"plan": plan.to_dict()}
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_update.errored",
+            public_message="Could not update transfer plan.",
+            status_code=404,
+        ) from e
 
 
 @router.post("/plans/{plan_id}/mappings")
@@ -624,7 +651,12 @@ async def sync_transfer_plan_mappings(plan_id: str, body: SyncMappingsRequest):
         plan = sync_plan_mappings(plan_id, body.mappings)
         return {"plan": plan.to_dict()}
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_mappings.errored",
+            public_message="Could not update transfer mappings.",
+            status_code=404,
+        ) from e
 
 
 @router.post("/plans/{plan_id}/map")
@@ -639,7 +671,12 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
             source_samples=body.source_samples or None,
         )
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_map.errored",
+            public_message="Could not map transfer plan.",
+            status_code=404,
+        ) from e
 
 
 class PlanPreflightRequest(BaseModel):
@@ -696,7 +733,9 @@ async def preflight_transfer_plan(
             reason=payload.acknowledgment_reason,
         )
     except AcknowledgmentRefused as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(e))
+        ) from e
 
     if payload.async_run:
         job = start_plan_preflight_job(
@@ -716,9 +755,16 @@ async def preflight_transfer_plan(
             shape_recipe=payload.shape_recipe,
         )
     except ShapePreflightRefused as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(e))
+        ) from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_preflight.errored",
+            public_message="Could not run transfer preflight.",
+            status_code=400,
+        ) from e
 
 
 @router.post("/plans/{plan_id}/approve")
@@ -729,7 +775,12 @@ async def approve_transfer_plan(plan_id: str, version: Optional[int] = None):
         plan = approve_plan(plan_id, version)
         return {"plan": plan.to_dict()}
     except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_approve.errored",
+            public_message="Could not approve transfer plan.",
+            status_code=404,
+        ) from e
 
 
 @router.get("/plans/{plan_id}/run-payload")
@@ -740,7 +791,12 @@ async def transfer_plan_run_payload(plan_id: str):
     try:
         return build_run_payload(plan_id)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.plan_run_payload.errored",
+            public_message="Could not build transfer run payload.",
+            status_code=400,
+        ) from e
 
 
 @router.post("/analyze-file")
@@ -765,7 +821,12 @@ async def analyze_file_transfer(
     try:
         columns, schema, row_count = parse_file_route_sample(content, file.filename or "upload.csv")
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.file_sample.invalid",
+            public_message="Could not parse the uploaded file sample.",
+            status_code=400,
+        ) from exc
     dest = EndpointConfig(
         kind=dest_kind,
         format=dest_format,
@@ -805,15 +866,16 @@ async def execute_transfer_json(
     """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
     from services.cdc_exactly_once import (
         ExactlyOnceRouteError,
-        assert_requested_cdc_delivery,
         dest_allow_append_only,
+        route_declares_log_position,
         route_has_cdc_pk,
+        select_route_delivery,
     )
     from services.execution_engine_contract import DeliveryGuaranteeError
     from services.procedure_source import is_callable_source
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
-    from ..transfer.models import EndpointConfig, TransferRequest
+    from ..transfer.models import EndpointConfig, TransferRequest, endpoint_to_dict
 
     src_preview = EndpointConfig.from_dict(
         body.source.kind, body.source.model_dump(by_alias=True)
@@ -822,17 +884,24 @@ async def execute_transfer_json(
         body.destination.kind, body.destination.model_dump(by_alias=True)
     )
     try:
-        assert_requested_cdc_delivery(
+        # auto is the product default. select_route_delivery keeps an explicit
+        # pin and resolves auto. assert_requested_cdc_delivery rejects auto,
+        # which 400s every JSON execute that omits the field.
+        select_route_delivery(
             body.delivery_guarantee,
             sync_mode=body.sync_mode or "",
             dest_type=str(getattr(dst_preview, "format", "") or ""),
             source_type=str(getattr(src_preview, "format", "") or ""),
             has_primary_key=route_has_cdc_pk(body.stream_contracts),
+            has_lsn_column=route_declares_log_position(body.stream_contracts),
             allow_append_only=dest_allow_append_only(dst_preview),
             callable_source=is_callable_source(src_preview),
+            dest_cfg=endpoint_to_dict(dst_preview),
         )
     except (DeliveryGuaranteeError, ExactlyOnceRouteError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
     src = src_preview
@@ -845,6 +914,7 @@ async def execute_transfer_json(
     request_obj = TransferRequest(
         source=src,
         destination=dst,
+        source_timezone=body.source_timezone or "",
         mappings=list(body.mappings or []),
         column_types=dict(body.column_types or {}),
         # Public execute never honors client skip_preflight (enterprise fail-closed).
@@ -869,7 +939,7 @@ async def execute_transfer_json(
         number_locale=body.number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
-        delivery_guarantee=body.delivery_guarantee or "at_least_once",
+        delivery_guarantee=body.delivery_guarantee or "auto",
         compliance_acknowledged=bool(body.compliance_acknowledged),
         schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
         fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
@@ -905,7 +975,12 @@ async def execute_transfer_json(
                 request_obj.column_types = payload.get("column_types") or {}
             plan_payload = payload
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise safe_http_exception(
+                e,
+                event="transfer.plan_execute.errored",
+                public_message="Could not prepare transfer execution.",
+                status_code=400,
+            ) from e
     else:
         plan_payload = None
 
@@ -928,7 +1003,12 @@ async def execute_transfer_json(
             policies=plan_policies if isinstance(plan_policies, dict) else {},
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.plan_execute.errored",
+            public_message="Could not validate the transfer request contract.",
+            status_code=400,
+        ) from exc
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -939,15 +1019,25 @@ async def execute_transfer_json(
             status_code=409,
             detail={
                 "error": "duplicate_transfer",
-                "message": str(exc),
+                "message": redact_log_text(str(exc)),
                 "existing_job_id": exc.existing_job_id,
                 "existing_status": exc.existing_status,
             },
         ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.job_create.invalid",
+            public_message="Could not create transfer job.",
+            status_code=400,
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create transfer job: {exc}") from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.job_create.errored",
+            public_message="Could not create transfer job.",
+            status_code=500,
+        ) from exc
 
     try:
         from services.audit_log import actor_from_request, append_audit_event
@@ -975,7 +1065,7 @@ async def execute_transfer_json(
         job_id,
         plan_id=str(body.plan_id).strip() if body.plan_id else None,
         plan_payload=plan_payload,
-        mappings=list(request_obj.mappings or []),
+        mappings=mappings_from_request(request_obj),
         destination_format=dst.format or "",
         source_kind=src.kind or "",
         dest_kind=dst.kind or "",
@@ -1081,7 +1171,7 @@ async def run_universal_transfer(
     data_region: str = Form(""),
     date_locale: str = Form(""),
     number_locale: str = Form(""),
-    delivery_guarantee: str = Form("at_least_once"),
+    delivery_guarantee: str = Form("auto"),
     compliance_acknowledged: str = Form("false"),
     schema_drift_acknowledged: str = Form("false"),
     fk_risk_acknowledged: str = Form("false"),
@@ -1111,7 +1201,9 @@ async def run_universal_transfer(
     try:
         assert_delivery_guarantee_allowed(delivery_guarantee)
     except DeliveryGuaranteeError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
 
@@ -1235,7 +1327,7 @@ async def run_universal_transfer(
         number_locale=number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
-        delivery_guarantee=delivery_guarantee or "at_least_once",
+        delivery_guarantee=delivery_guarantee or "auto",
         compliance_acknowledged=compliance_acknowledged.lower() in ("true", "1", "yes"),
         schema_drift_acknowledged=schema_drift_acknowledged.lower() in ("true", "1", "yes"),
         fk_risk_acknowledged=fk_risk_acknowledged.lower() in ("true", "1", "yes"),
@@ -1327,7 +1419,12 @@ async def run_universal_transfer(
                     "file_id": plan_fid,
                 }
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e)) from e
+            raise safe_http_exception(
+                e,
+                event="transfer.plan_execute.errored",
+                public_message="Could not prepare transfer execution.",
+                status_code=400,
+            ) from e
     if mappings_json.strip() and not (plan_id and plan_id.strip()):
         try:
             import json as _json
@@ -1376,7 +1473,12 @@ async def run_universal_transfer(
             policies=plan_policies,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.plan_execute.errored",
+            public_message="Could not validate the transfer request contract.",
+            status_code=400,
+        ) from exc
 
     engine = get_transfer_engine()
     try:
@@ -1386,15 +1488,25 @@ async def run_universal_transfer(
             status_code=409,
             detail={
                 "error": "duplicate_transfer",
-                "message": str(exc),
+                "message": redact_log_text(str(exc)),
                 "existing_job_id": exc.existing_job_id,
                 "existing_status": exc.existing_status,
             },
         ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.job_create.invalid",
+            public_message="Could not create transfer job.",
+            status_code=400,
+        ) from exc
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Could not create transfer job: {exc}") from exc
+        raise safe_http_exception(
+            exc,
+            event="transfer.job_create.errored",
+            public_message="Could not create transfer job.",
+            status_code=500,
+        ) from exc
 
     try:
         from services.audit_log import actor_from_request, append_audit_event
@@ -1423,7 +1535,7 @@ async def run_universal_transfer(
         job_id,
         plan_id=plan_id.strip() if plan_id and plan_id.strip() else None,
         plan_payload=plan_payload,
-        mappings=list(request_obj.mappings or []),
+        mappings=mappings_from_request(request_obj),
         destination_format=dest_format or "",
         source_kind=source_kind or "",
         dest_kind=dest_kind or "",
@@ -1488,7 +1600,12 @@ async def get_transfer_explanation(job_id: str, request: Request):
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
     return {
@@ -1511,7 +1628,12 @@ async def get_transfer_mapping_proof(job_id: str, request: Request):
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1564,7 +1686,12 @@ async def get_transfer_proof_pack(job_id: str, request: Request):
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1616,7 +1743,12 @@ async def get_migration_certificate(job_id: str, request: Request, format: str =
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1698,7 +1830,12 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -1756,9 +1893,13 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
             drop_staging_fn=_drop,
         )
     except RollbackContractError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=400, detail=redact_log_text(str(exc))
+        ) from exc
     except RollbackRefuseError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=409, detail=redact_log_text(str(exc))
+        ) from exc
 
     try:
         append_audit_event(
@@ -1795,6 +1936,8 @@ class JobCdcSnapshotBody(BaseModel):
     table: str = ""
     primary_key: str = ""
     chunk_size: int = 1000
+    # Structured filter spec (services/cdc_snapshot_filter.py), never raw SQL.
+    row_filter: dict | list | None = None
 
 
 @router.get("/{job_id}/cdc/snapshots")
@@ -1811,14 +1954,24 @@ async def list_job_cdc_snapshots(job_id: str, request: Request, status: str = ""
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
     try:
         ctx = resolve_job_cdc_snapshot_context(job)
         signals = list_signals_for_job(job, status=status)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.cdc_snapshot.list.invalid",
+            public_message="Could not list CDC snapshots for this job.",
+            status_code=400,
+        ) from e
     return {
         "job_id": job_id,
         "signals": signals,
@@ -1844,7 +1997,12 @@ async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, reques
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
     try:
@@ -1853,9 +2011,15 @@ async def request_job_cdc_snapshot(job_id: str, body: JobCdcSnapshotBody, reques
             table=body.table,
             primary_key=body.primary_key,
             chunk_size=body.chunk_size,
+            row_filter=body.row_filter,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.cdc_snapshot.request.invalid",
+            public_message="Could not request a CDC snapshot.",
+            status_code=400,
+        ) from e
 
 
 @router.post("/{job_id}/cdc/snapshots/{signal_id}/cancel")
@@ -1870,13 +2034,23 @@ async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request)
         mongo = get_mongodb_service()
         job = mongo.get_job(job_id)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.job_lookup.errored",
+            public_message="Could not load job.",
+            status_code=500,
+        ) from e
     if not job or not _can_access_job(request, job):
         raise HTTPException(status_code=404, detail="Job not found")
     try:
         ctx = resolve_job_cdc_snapshot_context(job)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        raise safe_http_exception(
+            e,
+            event="transfer.cdc_snapshot.cancel.invalid",
+            public_message="Could not resolve CDC snapshot context for this job.",
+            status_code=400,
+        ) from e
     sig = get_signal(signal_id)
     if sig is None:
         raise HTTPException(status_code=404, detail="Snapshot signal not found")

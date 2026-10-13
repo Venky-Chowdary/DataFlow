@@ -1,12 +1,20 @@
 /** Per-stream cursor / primary-key overrides for multi-stream Advanced settings. */
 
 import { evaluateCursorSemantics } from "./cursorSemantics";
+import { statementKind } from "./sourceReadMode";
 
 export interface StreamFieldContract {
   cursorField: string;
   primaryKeyField: string;
   /** Declared meaning of the cursor column — never inferred from its name. */
   cursorSemantics?: string;
+  /**
+   * Optional CALL/EXEC that replaces this stream's table extract.
+   * One statement, this stream only — it is not replayed onto the others.
+   */
+  sourceProcedure?: string;
+  /** Optional destination CALL. One execution per row of this stream. */
+  destProcedure?: string;
 }
 
 export interface BuildStreamContractsInput {
@@ -39,6 +47,8 @@ export function resolveStreamFields(
     cursorField: override?.cursorField ?? defaultCursor,
     primaryKeyField: override?.primaryKeyField ?? defaultPrimaryKey,
     cursorSemantics: override?.cursorSemantics ?? defaultCursorSemantics,
+    sourceProcedure: override?.sourceProcedure ?? "",
+    destProcedure: override?.destProcedure ?? "",
   };
 }
 
@@ -55,6 +65,10 @@ export function buildStreamContracts(input: BuildStreamContractsInput & {
       input.defaultCursorSemantics || "",
     );
     const maps = input.streamMappings?.[name];
+    const sourceProcedure = String(fields.sourceProcedure || "").trim();
+    const destProcedure = String(fields.destProcedure || "").trim();
+    const sourceKind = sourceProcedure ? statementKind(sourceProcedure) : "";
+    const destKind = destProcedure ? statementKind(destProcedure) : "";
     return {
       name,
       selected: true,
@@ -65,6 +79,16 @@ export function buildStreamContracts(input: BuildStreamContractsInput & {
       schema_policy: input.schemaPolicy,
       field_count: input.fieldCount,
       validation_mode: input.validationMode,
+      ...(sourceProcedure
+        ? sourceKind === "query"
+          ? { source_read_mode: "query", source_query: sourceProcedure }
+          : { source_read_mode: "procedure", procedure_call: sourceProcedure }
+        : {}),
+      ...(destProcedure
+        ? destKind === "dest_dml"
+          ? { dest_write_mode: "query", dest_query_sql: destProcedure }
+          : { dest_write_mode: "procedure", dest_procedure_call: destProcedure }
+        : {}),
       ...(input.syncMode === "cdc" && input.snapshotMode
         ? { snapshot_mode: input.snapshotMode }
         : {}),
@@ -226,7 +250,12 @@ export function seedStreamFieldsFromCandidates(
       || cursorSemantics !== (cur.cursorSemantics ?? "")
       || !next[name]
     ) {
-      next[name] = { cursorField, primaryKeyField, cursorSemantics };
+      next[name] = {
+        ...cur,
+        cursorField,
+        primaryKeyField,
+        cursorSemantics,
+      };
       changed = true;
     }
   }

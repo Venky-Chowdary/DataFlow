@@ -42,6 +42,20 @@ class WriteResult(_WriteResult):
     driver: str = "google-cloud-storage"
 
 
+def _gcs_key_absent(bucket_obj, key: str) -> bool:
+    try:
+        return not bool(bucket_obj.blob(key).exists())
+    except Exception:
+        return False
+
+
+def _delete_gcs_key(bucket_obj, key: str) -> None:
+    try:
+        bucket_obj.blob(key).delete()
+    except Exception:
+        return
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -103,7 +117,11 @@ def write_mapped_rows(
         "connection_string": connection_string,
         "password": password,
     }
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    # A new object is create-new. Leaving table_exists unset dropped every
+    # pending_dest_schema mapping and the parquet file was 0 columns (DEF-C-043).
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True, table_exists=False
+    )
     dest_types, cov_err = resolve_object_store_write_dest_types(
         target_cols,
         mappings,
@@ -208,6 +226,7 @@ def write_mapped_rows(
                 raise RuntimeError(
                     f"Cannot verify GCS bucket {bucket!r}: {exc}"
                 ) from exc
+        created_here = _gcs_key_absent(bucket_obj, key)
         # Staging→live before any purge: failed upload must not wipe the prior export.
         staging_key = object_staging_key(key)
         threshold, part_size = resolve_multipart_limits(extra)
@@ -254,6 +273,9 @@ def write_mapped_rows(
 
         _final_abort = reject_on_strict_policy(policy, rejected_details, "GCS")
         if _final_abort:
+            if created_here:
+                _delete_gcs_key(bucket_obj, key)
+                _delete_gcs_key(bucket_obj, staging_key)
             return WriteResult(
                 ok=False,
                 rows_written=written,

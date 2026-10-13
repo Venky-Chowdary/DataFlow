@@ -91,7 +91,7 @@ def _schema_yml(project: TransformProject) -> str:
                 for t in tests:
                     if t.test_type == "accepted_values":
                         vals = ", ".join(_yaml_quote(v) for v in t.values)
-                        lines.append(f"          - accepted_values:")
+                        lines.append("          - accepted_values:")
                         lines.append(f"              values: [{vals}]")
                     elif t.test_type == "relationships":
                         lines.append("          - relationships:")

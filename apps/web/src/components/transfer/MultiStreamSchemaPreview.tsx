@@ -37,6 +37,10 @@ export function MultiStreamSchemaPreview({
   const active = streams.find((s) => s.name === internalActive) || streams[0];
   const okCount = streams.filter((s) => s.status === "ok").length;
   const errCount = streams.filter((s) => s.status === "error").length;
+  const failed = streams.filter((s) => s.status === "error");
+  const sameFailure = errCount === streams.length
+    && errCount > 1
+    && new Set(failed.map((s) => (s.error || "").trim())).size === 1;
 
   const select = (name: string) => {
     setInternalActive(name);
@@ -101,7 +105,11 @@ export function MultiStreamSchemaPreview({
             <strong>Could not read <code>{active.name}</code></strong>
             <p>{active.error || "Verify the name exists on this connector and credentials allow access."}</p>
             <p className="df2-muted">
-              Other streams can still be previewed in their tabs. Fix this name or remove it from the comma-separated list.
+              {sameFailure
+                ? `The same read failed on every stream (${failed.map((s) => s.name).join(", ")}).`
+                : errCount === streams.length
+                  ? "Every stream failed. Open each tab for that stream's error."
+                  : "Other streams can still be previewed in their tabs. Fix this name or remove it from the comma-separated list."}
             </p>
           </div>
         </div>

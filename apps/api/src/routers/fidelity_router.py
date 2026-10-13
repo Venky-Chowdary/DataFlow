@@ -16,7 +16,10 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.continuous_fidelity import run_and_record_campaign, run_fidelity_check
-from services.workspace_access import resolve_read_workspace
+from services.workspace_access import (
+    resolve_read_workspace,
+    workspace_resource_is_visible,
+)
 
 from ..transfer.models import EndpointConfig
 
@@ -38,7 +41,38 @@ class _FidelityCheckRequest(BaseModel):
     schedule_id: str = ""
 
 
-def _endpoints_from_schedule(schedule_id: str, workspace_id: str):
+def _deny_cross_workspace(request: Request) -> None:
+    from services.audit_coverage import record_authz_denial
+
+    record_authz_denial(
+        request,
+        required_permission="workspace.resource",
+        effective_role=str(getattr(request.state, "effective_role", "") or "member"),
+        reason="cross_workspace",
+    )
+    raise HTTPException(status_code=403, detail="Resource belongs to another workspace")
+
+
+def _assert_connector_workspace(
+    connector_id: str,
+    workspace_id: str,
+    request: Request,
+) -> None:
+    from services.connector_store import get_connector
+
+    scoped = get_connector(connector_id, workspace_id=workspace_id or None)
+    connector = scoped or get_connector(connector_id)
+    if connector is not None and not workspace_resource_is_visible(
+        getattr(connector, "workspace_id", ""), workspace_id
+    ):
+        _deny_cross_workspace(request)
+
+
+def _endpoints_from_schedule(
+    schedule_id: str,
+    workspace_id: str,
+    request: Request,
+):
     from services.schedule_runner import (
         _resolve_connector,
         build_schedule_request,
@@ -48,8 +82,12 @@ def _endpoints_from_schedule(schedule_id: str, workspace_id: str):
     sched = get_schedule(schedule_id)
     if sched is None:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    if workspace_id and getattr(sched, "workspace_id", "") and sched.workspace_id != workspace_id:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    if not workspace_resource_is_visible(
+        getattr(sched, "workspace_id", ""), workspace_id
+    ):
+        _deny_cross_workspace(request)
+    _assert_connector_workspace(sched.source_connector_id, workspace_id, request)
+    _assert_connector_workspace(sched.dest_connector_id, workspace_id, request)
     src = _resolve_connector(sched.source_connector_id)
     dst = _resolve_connector(sched.dest_connector_id)
     if not src or not dst:
@@ -71,7 +109,7 @@ def check_fidelity(
     ws = resolve_read_workspace(request, workspace_id)
     schedule_id = (body.schedule_id or "").strip()
     if schedule_id:
-        sched, transfer = _endpoints_from_schedule(schedule_id, ws)
+        sched, transfer = _endpoints_from_schedule(schedule_id, ws, request)
         report, campaign = run_and_record_campaign(
             dict(getattr(sched, "fidelity_campaign", None) or {}),
             source=transfer.source,
@@ -90,6 +128,11 @@ def check_fidelity(
         payload["campaign"] = campaign
         payload["schedule_id"] = schedule_id
         return payload
+
+    for endpoint in (body.source, body.destination):
+        connector_id = str(endpoint.get("connector_id") or "").strip()
+        if connector_id:
+            _assert_connector_workspace(connector_id, ws, request)
 
     source = EndpointConfig.from_dict(
         str(body.source.get("kind") or "database"), body.source

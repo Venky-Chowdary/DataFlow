@@ -12,6 +12,10 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from connectors.sdk import list_descriptors
+from services.connector_telemetry import connector_operation, driver_family
+from services.log_redaction import redact_log_text
+
 from .connector_capabilities import _DRIVER_CAPS, default_port, file_source_types
 
 
@@ -218,8 +222,8 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
     ),
     "pgvector": ConnectorModules(
         probe=("connectors.postgresql", "test_postgresql"),
-        reader=None,
-        reader_fn="",
+        reader="connectors.postgresql_reader",
+        reader_fn="read_table_batch",
         writer="connectors.pgvector_writer",
     ),
     "qdrant": ConnectorModules(
@@ -257,6 +261,17 @@ CONNECTOR_MODULES: dict[str, ConnectorModules] = {
     ),
 }
 
+for _sdk_descriptor in list_descriptors():
+    if "source" not in _sdk_descriptor.roles or not _sdk_descriptor.catalog_ids:
+        continue
+    CONNECTOR_MODULES[_sdk_descriptor.id] = ConnectorModules(
+        probe=("connectors.sdk.transfer_bridge", "test_sdk_connector"),
+        reader="connectors.sdk.transfer_bridge",
+        reader_fn="read_object",
+        writer="connectors.saas_common",
+        writer_fn="write_not_supported",
+    )
+
 
 def registered_driver_types() -> list[str]:
     return sorted(CONNECTOR_MODULES.keys())
@@ -274,6 +289,7 @@ def assert_registry_matches_capabilities() -> None:
 
 _OPERATOR_COPY_PREFIXES = (
     "authentication failed",
+    "kafka sasl:",
     "api authentication failed",
     "snowflake ",
     "that account host is a form placeholder",
@@ -293,6 +309,8 @@ _OPERATOR_COPY_PREFIXES = (
     "ssl/tls error",
     "the connection string format is invalid",
     "sftp authentication failed",
+    "sftp host key",
+    "sftp server ",
     "sftp path not found",
     "smtp authentication failed",
     "email recipient is invalid",
@@ -324,11 +342,16 @@ def _already_operator_copy(raw: str) -> bool:
     return any(text.startswith(prefix) for prefix in _OPERATOR_COPY_PREFIXES)
 
 
+def _driver_snippet(raw: str) -> str:
+    snippet = " ".join(str(raw or "").strip().split())
+    if len(snippet) > 120:
+        return snippet[:117] + "..."
+    return snippet
+
+
 def _with_cause(message: str, raw: str) -> str:
     """Keep the driver code visible — never replace 250001/28000 with a slogan."""
-    snippet = " ".join(str(raw or "").strip().split())
-    if len(snippet) > 220:
-        snippet = snippet[:217] + "..."
+    snippet = _driver_snippet(raw)
     if not snippet or snippet.lower() in message.lower():
         return message
     if _already_operator_copy(snippet):
@@ -338,7 +361,7 @@ def _with_cause(message: str, raw: str) -> str:
 
 def humanize_connection_error(driver: str, raw: Any) -> str:
     """Convert low-level driver/connection errors into user-friendly messages."""
-    raw_s = str(raw).strip()
+    raw_s = redact_log_text(str(raw)).strip()
     if _already_operator_copy(raw_s):
         return raw_s
     text = raw_s.lower()
@@ -379,7 +402,10 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
                         "Check the service is running, use private port 3306/5432, and that both "
                         "services share the same Railway project/network."
                     )
-                return f"Connection failed on Railway private network: {raw_s.split(hint)[0].strip()}"
+                return (
+                    "Connection failed on Railway private network: "
+                    f"{_driver_snippet(raw_s.split(hint)[0])}"
+                )
             return (
                 "Cannot reach the Railway private database host from this API service. "
                 "Check project linking, private hostname, and private port (3306/5432)."
@@ -419,7 +445,7 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     if driver == "snowflake":
         from connectors.snowflake_conn import classify_snowflake_connect_error
 
-        classified = classify_snowflake_connect_error(raw)
+        classified = classify_snowflake_connect_error(raw_s)
         if classified:
             return classified
 
@@ -430,6 +456,17 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
             "Use Username & password, or a login URL with an encoded password "
             "(use %40 for @)."
         )
+
+    # SFTP host-key and preauth failures contain "key" / "authentication".
+    # The generic auth rewrite below would tell the operator to rotate a
+    # password that was never sent (DEF-A-001). The probe text already names
+    # the fingerprint or the preauth close.
+    if driver == "sftp" and re.search(
+        r"host key|not trusted|fingerprint|known_hosts|preauth|before authentication",
+        text,
+    ):
+        cleaned = _driver_snippet(raw_s)
+        return cleaned
 
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
@@ -591,7 +628,7 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
         return "SFTP path not found. Check the remote directory and file path."
 
     # Fallback: keep the raw message but prefix it clearly.
-    return f"Connection failed: {raw}"
+    return f"Connection failed: {_driver_snippet(raw_s)}"
 
 
 def probe_file_source(fmt: str, path: str) -> tuple[bool, str]:
@@ -599,36 +636,58 @@ def probe_file_source(fmt: str, path: str) -> tuple[bool, str]:
     kind = (fmt or "").strip().lower()
     location = (path or "").strip()
     label = (kind or "file").upper()
-    if kind not in file_source_types():
-        return False, f"No file-source probe for {label}."
-    if not location:
-        return False, (
-            f"{label} needs a file path or object-store URI before Test can prove a read. "
-            "Catalog support is not a successful connection."
-        )
-    if "://" in location:
-        return False, (
-            f"{label} URI recorded. Test does not download remote objects — "
-            "that would claim Connected without a read. Use Transfer Validate to prove the file."
-        )
-    if not os.path.exists(location):
-        return False, f"Path not found: {location}. Create the file or mount the volume before Test."
-    try:
-        from .file_stream import peek_file_source
+    with connector_operation(
+        "probe",
+        driver_family=driver_family(kind),
+        surface="probe_file_source",
+    ) as op:
+        if kind not in file_source_types():
+            op.failed(category="unsupported")
+            return False, f"No file-source probe for {label}."
+        if not location:
+            op.failed(category="no_input")
+            return False, (
+                f"{label} needs a file path or object-store URI before Test can prove a read. "
+                "Catalog support is not a successful connection."
+            )
+        if "://" in location:
+            op.failed(category="unsupported")
+            return False, (
+                f"{label} URI recorded. Test does not download remote objects — "
+                "that would claim Connected without a read. Use Transfer Validate to prove the file."
+            )
+        if not os.path.exists(location):
+            op.failed(category="not_found")
+            return False, f"Path not found: {location}. Create the file or mount the volume before Test."
+        try:
+            from .file_stream import peek_file_source
 
-        columns, _schema, total, _sample = peek_file_source(location, os.path.basename(location))
-        n_cols = len(columns or [])
-        return True, f"{label} readable — {int(total or 0)} rows, {n_cols} columns."
-    except Exception as exc:
-        return False, humanize_connection_error(kind, exc)
+            columns, _schema, total, _sample = peek_file_source(location, os.path.basename(location))
+            n_cols = len(columns or [])
+            op.succeeded(row_count=int(total or 0), column_count=n_cols)
+            return True, f"{label} readable — {int(total or 0)} rows, {n_cols} columns."
+        except Exception as exc:
+            op.errored(exc)
+            return False, humanize_connection_error(kind, exc)
 
 
 def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     """Execute connectivity probe for a driver using resolved config."""
-    try:
-        return _run_probe_impl(db_type, cfg)
-    except Exception as exc:
-        return False, humanize_connection_error((db_type or "").lower(), exc)
+    with connector_operation(
+        "probe",
+        driver_family=driver_family(db_type),
+        surface="run_probe",
+    ) as op:
+        try:
+            result = _run_probe_impl(db_type, cfg)
+        except Exception as exc:
+            op.errored(exc)
+            return False, humanize_connection_error((db_type or "").lower(), exc)
+        if result[0]:
+            op.succeeded()
+        else:
+            op.failed(category="probe_failed")
+        return result
 
 
 def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
@@ -720,7 +779,11 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         return False, humanize_connection_error(engine_type, raw)
 
     if not spec:
-        return False, f"No connectivity probe for {db_type}"
+        return False, (
+            f"Unsupported connector type '{db_type}' — no connectivity probe or "
+            "transfer driver is registered for it. The type name itself is "
+            "unsupported; host/port/user/password changes will not help."
+        )
 
     if not spec.probe:
         return False, f"No probe configured for {db_type}"

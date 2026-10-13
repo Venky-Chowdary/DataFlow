@@ -86,6 +86,9 @@ def _run_transfer(
 def run_fleet_job(job_id: str) -> None:
     """Worker-fleet handler: reconstruct TransferRequest from the Mongo job and execute."""
     mongo = get_mongodb_service()
+    if mongo.is_cancel_requested(job_id):
+        logger.info("Skipping job %s — cancelled before the worker started it", job_id)
+        return
     job = mongo.get_job(job_id)
     if not job:
         raise ValueError(f"Unknown job {job_id}")
@@ -144,9 +147,15 @@ def run_transfer_async(
         from services.worker_leases import requires_distributed_backend
 
         if fleet_enabled():
+            from services.process_role import workload_for_sync_mode
+
             ok = enqueue_job(
                 job_id,
-                payload={"resume": resume, "resume_from_job_id": resume_from_job_id or ""},
+                payload={
+                    "resume": resume,
+                    "resume_from_job_id": resume_from_job_id or "",
+                    "workload": workload_for_sync_mode(request.sync_mode),
+                },
             )
             if ok:
                 logger.info(

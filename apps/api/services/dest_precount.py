@@ -522,8 +522,18 @@ def destination_row_count(
         if db_type == "sqlite":
             import sqlite3
 
-            database = str(cfg.get("database") or "")
-            if not database:
+            from connectors.sqlite_common import sqlite_file_path
+
+            # Connectors saved from the UI carry only ``connection_string``
+            # (``sqlite:///path``); reading ``database`` alone left every such
+            # destination uncountable, so a quiet incremental poll could never
+            # prove the no-op (QA RT-02).
+            database = sqlite_file_path(
+                str(cfg.get("database") or ""),
+                str(cfg.get("connection_string") or ""),
+                str(cfg.get("host") or ""),
+            )
+            if not database or database == ":memory:":
                 return None
             with closing(sqlite3.connect(database)) as conn:
                 exists = conn.execute(
@@ -1140,7 +1150,7 @@ def destination_key_list(
     return unique
 
 
-def _warehouse_sql_table_ref(
+def warehouse_sql_table_ref(
     dialect: str,
     cfg: Mapping[str, Any],
     schema: str,
@@ -1238,7 +1248,7 @@ def _is_missing_warehouse_column(exc: BaseException, dialect: str) -> bool:
 
 
 @contextmanager
-def _warehouse_sql_engine(db_type: str, cfg: Mapping[str, Any]) -> Iterator[Any]:
+def warehouse_sql_engine(db_type: str, cfg: Mapping[str, Any]) -> Iterator[Any]:
     from connectors.generic_sql import get_sqlalchemy_engine
     from services.engine_pool import release_engine
 
@@ -1264,8 +1274,8 @@ def _warehouse_sql_row_count(
     import sqlalchemy as sa
 
     try:
-        table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
-        with _warehouse_sql_engine(db_type, cfg) as engine:
+        table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+        with warehouse_sql_engine(db_type, cfg) as engine:
             with engine.connect() as conn:
                 n = conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
         return int(n or 0)
@@ -1682,7 +1692,7 @@ def _clickhouse_row_count(
         quote_table_ref(table_name, sch, dialect="clickhouse")
     )
     try:
-        with _warehouse_sql_engine("clickhouse", cfg) as engine:
+        with warehouse_sql_engine("clickhouse", cfg) as engine:
             with engine.connect() as conn:
                 n = conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
         return int(n or 0)
@@ -1717,7 +1727,7 @@ def _clickhouse_key_list(
     col_sql = ", ".join(quote_sql_identifier(c, "`") for c in cols)
     sql = f"SELECT {col_sql} FROM {table_ref}"  # nosec B608
     try:
-        with _warehouse_sql_engine("clickhouse", cfg) as engine:
+        with warehouse_sql_engine("clickhouse", cfg) as engine:
             with engine.connect() as conn:
                 rows = conn.execute(sa.text(sql)).fetchall() or []
     except Exception as exc:
@@ -1815,11 +1825,11 @@ def _warehouse_sql_key_list(
     from services.dialect_profiles import quote_char_for
 
     qchar = quote_char_for(dialect) or '"'
-    table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
     col_sql = ", ".join(quote_sql_identifier(c, qchar) for c in cols)
     sql = f"SELECT {col_sql} FROM {table_ref}"  # nosec B608
     try:
-        with _warehouse_sql_engine(db_type, cfg) as engine:
+        with warehouse_sql_engine(db_type, cfg) as engine:
             with engine.connect() as conn:
                 rows = conn.execute(sa.text(sql)).fetchall() or []
     except Exception as exc:
@@ -1858,13 +1868,13 @@ def _warehouse_sql_key_hits(
     from services.dialect_profiles import quote_char_for
 
     qchar = quote_char_for(dialect) or '"'
-    table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
     qcols = [quote_sql_identifier(c, qchar) for c in cols]
     col_sql = ", ".join(qcols)
     width = len(cols)
     total = 0
     try:
-        with _warehouse_sql_engine(db_type, cfg) as engine:
+        with warehouse_sql_engine(db_type, cfg) as engine:
             with engine.connect() as conn:
                 from services.dest_key_typing import (
                     coerce_key_tuples,
@@ -1938,14 +1948,14 @@ def _warehouse_sql_scd2_populations(
     from services.scd2_engine import IS_CURRENT_COLUMN, scd2_is_current_predicate
 
     qchar = quote_char_for(dialect) or '"'
-    table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
     col = denormalize_result_key(dialect, IS_CURRENT_COLUMN)
     current_q = quote_sql_identifier(col, qchar)
     pred = scd2_is_current_predicate(dialect, current_q)
     history_sql = f"SELECT COUNT(*) FROM {table_ref}"  # nosec B608
     current_sql = f"SELECT COUNT(*) FROM {table_ref} WHERE {pred}"  # nosec B608
     try:
-        with _warehouse_sql_engine(db_type, cfg) as engine:
+        with warehouse_sql_engine(db_type, cfg) as engine:
             with engine.connect() as conn:
                 try:
                     history = conn.execute(sa.text(history_sql)).scalar()
@@ -2321,45 +2331,78 @@ def _resolve_iceberg_data_uri(uri: str, warehouse: str) -> str:
 
 def _iceberg_object_store_cfg(
     endpoint: dict[str, Any], location: Any
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     """Map Iceberg catalog extra (``s3.*`` / ``gcs.*`` / ``adls.*``) onto GET cfg."""
     extra = endpoint.get("extra")
     extra = extra if isinstance(extra, dict) else {}
     cfg = dict(endpoint)
     kind = str(getattr(location, "kind", "") or "")
     if kind == "s3":
-        cfg["username"] = str(
-            extra.get("s3.access-key-id")
-            or extra.get("s3.access-key")
-            or extra.get("client.access-key-id")
-            or cfg.get("username")
-            or ""
-        ).strip()
-        cfg["password"] = str(
-            extra.get("s3.secret-access-key")
-            or extra.get("s3.secret-key")
-            or extra.get("client.secret-access-key")
-            or cfg.get("password")
-            or ""
-        ).strip()
-        cfg["host"] = str(
-            extra.get("s3.region")
-            or extra.get("client.region")
-            or extra.get("region")
-            or cfg.get("host")
-            or "us-east-1"
-        ).strip()
-        endpoint_url = str(
-            extra.get("s3.endpoint") or extra.get("s3.endpoint-url") or ""
-        ).strip()
-        if endpoint_url.startswith(("http://", "https://")):
+        from connectors.iceberg_catalog import parse_iceberg_catalog_config
+
+        try:
+            properties = parse_iceberg_catalog_config(endpoint).get("properties")
+            if not isinstance(properties, dict):
+                raise ValueError("Iceberg catalog properties are unavailable")
+        except Exception as exc:
+            logger.warning(
+                "Iceberg S3 COUNT config unavailable (parse_error:%s)",
+                type(exc).__name__,
+            )
+            return None
+
+        username = (
+            properties.get("s3.access-key-id")
+            or properties.get("s3.access-key")
+            or properties.get("client.access-key-id")
+            or properties.get("client.access-key")
+        )
+        password = (
+            properties.get("s3.secret-access-key")
+            or properties.get("s3.secret-key")
+            or properties.get("client.secret-access-key")
+        )
+        endpoint_url = (
+            properties.get("s3.endpoint")
+            or properties.get("s3.endpoint-url")
+            or properties.get("client.endpoint")
+            or properties.get("client.endpoint-url")
+        )
+        endpoint_url = str(endpoint_url or "").strip()
+        if endpoint_url:
+            if not endpoint_url.startswith(("http://", "https://")):
+                logger.warning(
+                    "Iceberg S3 COUNT config unavailable (non_http_endpoint)"
+                )
+                return None
             cfg["endpoint_url"] = endpoint_url.rstrip("/")
             cfg["connection_string"] = cfg["endpoint_url"]
         else:
-            cs = str(cfg.get("connection_string") or "")
-            if not cs.startswith(("http://", "https://")):
-                cfg["connection_string"] = ""
-        path_style = extra.get("s3.path-style-access")
+            cfg.pop("endpoint_url", None)
+            cfg["connection_string"] = ""
+            logger.warning(
+                "Iceberg S3 COUNT using AWS default endpoint (missing_endpoint)"
+            )
+
+        if username and password:
+            cfg["username"] = str(username).strip()
+            cfg["password"] = str(password).strip()
+            cfg.pop("use_default_aws_credentials", None)
+        else:
+            cfg.pop("username", None)
+            cfg.pop("password", None)
+            cfg["use_default_aws_credentials"] = True
+            logger.warning(
+                "Iceberg S3 COUNT using default credential chain (missing_credentials)"
+            )
+
+        cfg["host"] = str(
+            properties.get("s3.region")
+            or properties.get("client.region")
+            or properties.get("region")
+            or "us-east-1"
+        ).strip()
+        path_style = properties.get("s3.path-style-access")
         if path_style in (True, "true", "True", 1, "1"):
             cfg["path_style"] = True
         return cfg
@@ -2454,6 +2497,8 @@ def _count_iceberg_data_uri(
         logger.info("iceberg catalog data-file not a local path or object URI: %s", uri)
         return None
     store_cfg = _iceberg_object_store_cfg(endpoint, loc)
+    if store_cfg is None:
+        return None
     return _count_object_store_key(
         loc.kind, store_cfg, loc.bucket, loc.key, missing=None
     )
@@ -3399,7 +3444,7 @@ def _object_store_list_keys(
     else:
         return None
 
-    base = normalize_object_base_key(key)
+    base = normalize_object_base_key(key, str(cfg.get("schema") or ""))
     parts_prefix = object_parts_prefix(base)
     try:
         listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
@@ -3533,13 +3578,19 @@ def _redis_prefix_row_count(cfg: dict[str, Any], *, prefix: str) -> int | None:
     absent prefix is 0 (a known-empty destination is a proof); an unreachable
     server stays ``None`` rather than substituting writer acknowledgement.
     """
-    from connectors.redis_reader import _redis_client
+    from connectors.redis_reader import _redis_client, keys_for_prefix
 
+    prefix = (prefix or "").strip()
+    if not prefix:
+        # An unnamed prefix is not "every key in the database".
+        return None
     client = _redis_client(cfg)
-    pattern = f"{prefix}:*" if prefix else "*"
+    pattern = f"{prefix}:*"
     # SCAN guarantees each key at least once, not exactly once (a rehash during
     # the walk repeats slots), so the keys are de-duplicated before counting —
     # an inflated pre-count would understate the delta of the next append.
+    # MATCH is then checked again: a walk that returned unrelated hashes
+    # (dbsize of another prefix) must not count as this destination.
     seen: set[str] = set()
     cursor = 0
     while True:
@@ -3547,7 +3598,7 @@ def _redis_prefix_row_count(cfg: dict[str, Any], *, prefix: str) -> int | None:
         for raw in batch:
             seen.add(raw.decode() if isinstance(raw, bytes) else str(raw))
         if cursor == 0:
-            return len(seen)
+            return len(keys_for_prefix(list(seen), prefix))
 
 
 def _redis_key_hits(
@@ -3749,6 +3800,67 @@ def _search_index_doc_count(cfg: dict[str, Any], *, index: str) -> int | None:
         client.close()
 
 
+def _kafka_topic_catalog(consumer: Any) -> set[str] | None:
+    """Topic names the client can see, or ``None`` when metadata did not load."""
+    try:
+        known = consumer.topics()
+    except Exception:  # noqa: BLE001 — a broker error is unproven, not an empty topic
+        return None
+    if known is None:
+        return None
+    return {str(name) for name in known}
+
+
+def _kafka_refresh_named_topic(consumer: Any, topic_name: str) -> None:
+    """Ask the broker for one topic before calling it absent.
+
+    ``topics()`` can return a catalog fetched before auto-create finished, or
+    an empty set when the first metadata response has not landed. Neither is
+    proof the topic a produce just wrote does not exist.
+    """
+    client = getattr(consumer, "_client", None)
+    loader = getattr(client, "load_metadata_for_topics", None) if client is not None else None
+    if callable(loader):
+        loader(topic_name)
+        return
+    refresh = getattr(consumer, "refresh_topic", None)
+    if callable(refresh):
+        refresh(topic_name)
+
+
+def _kafka_partitions_after_refresh(consumer: Any, topic_name: str) -> set | None:
+    """Partition ids, after a named-topic refresh when the cache is cold.
+
+    ``partitions_for_topic`` returns ``None`` both for "topic does not exist"
+    and for "the client has not loaded metadata yet". A fresh consumer used
+    only for COUNT hits the second case right after a successful produce and
+    used to report 0. ``None`` from this helper means the count is unproven.
+    An empty set means a refresh that actually returned other topics proved
+    this one is absent. An empty catalog is unproven, not an empty topic.
+    """
+    parts = consumer.partitions_for_topic(topic_name)
+    if parts:
+        return set(parts)
+    known = _kafka_topic_catalog(consumer)
+    if known is None:
+        return None
+    if topic_name in known:
+        parts = consumer.partitions_for_topic(topic_name)
+        return set(parts) if parts else None
+    _kafka_refresh_named_topic(consumer, topic_name)
+    parts = consumer.partitions_for_topic(topic_name)
+    if parts:
+        return set(parts)
+    known_after = _kafka_topic_catalog(consumer)
+    if not known_after:
+        # No topic list at all — the broker did not prove absence.
+        return None
+    if topic_name not in known_after:
+        return set()
+    parts = consumer.partitions_for_topic(topic_name)
+    return set(parts) if parts else None
+
+
 def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
     """Log-end minus log-start watermarks. Does not consume the topic.
 
@@ -3762,16 +3874,24 @@ def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
         from kafka import KafkaConsumer, TopicPartition
     except ImportError:
         return None
-    from connectors.kafka_reader import _bootstrap
+    from connectors.kafka_reader import _consumer_configs
+    from services.copy_kafka_common import kafka_classified_bootstrap
 
-    consumer = KafkaConsumer(
-        bootstrap_servers=_bootstrap(cfg),
-        consumer_timeout_ms=2000,
-        request_timeout_ms=8000,
-        enable_auto_commit=False,
-    )
+    with kafka_classified_bootstrap(cfg):
+        consumer = KafkaConsumer(
+            **_consumer_configs(
+                cfg,
+                consumer_timeout_ms=2000,
+                request_timeout_ms=8000,
+                enable_auto_commit=False,
+            )
+        )
     try:
-        parts = consumer.partitions_for_topic(topic_name)
+        parts = _kafka_partitions_after_refresh(consumer, topic_name)
+        if parts is None:
+            # Metadata never loaded. That is not an empty topic — reporting 0
+            # made a produce of 200 messages look like "target 0".
+            return None
         if not parts:
             return 0
         tps = [TopicPartition(topic_name, int(p)) for p in parts]
@@ -3784,7 +3904,7 @@ def _kafka_topic_record_count(cfg: dict[str, Any], *, topic: str) -> int | None:
     finally:
         try:
             consumer.close()
-        except Exception:
+        except Exception:  # noqa: BLE001 — close is best-effort after COUNT
             pass
 
 
@@ -4118,42 +4238,17 @@ def _qdrant_delete_keys(
     cols: list[str],
     keys: Sequence[str],
 ) -> int:
-    """Delete leftover points by the same unsigned-int / UUID5 id the writer uses."""
-    import json
-
-    from connectors.qdrant_writer import qdrant_point_id, qdrant_rest
+    """Compatibility wrapper for the canonical Qdrant document-key delete."""
     from services.row_conservation import parse_delete_keys
-    from services.value_serializer import json_default, present_cell_text
+    from services.vector_sync import qdrant_delete_doc_keys, vector_doc_key
 
     leftover = parse_delete_keys(list(keys), len(cols))
     name = str(collection or "").strip()
     if not leftover or not name:
         return 0
-    ids: list[Any] = []
-    for tup in leftover:
-        parts = [present_cell_text(part) or "" for part in tup]
-        raw = "|".join(parts) if len(parts) > 1 else (parts[0] if parts else "")
-        if raw:
-            ids.append(qdrant_point_id(raw))
-    if not ids:
-        return 0
-    session, base_url, headers = qdrant_rest(dict(cfg))
-    exists = session.get(
-        f"{base_url}/collections/{name}", headers=headers, timeout=10
+    return qdrant_delete_doc_keys(
+        cfg, name, [vector_doc_key(values) for values in leftover]
     )
-    if exists.status_code == 404:
-        return 0
-    resp = session.post(
-        f"{base_url}/collections/{name}/points/delete",
-        data=json.dumps({"points": ids, "wait": True}, default=json_default),
-        headers=headers,
-        timeout=30,
-    )
-    if resp.status_code not in {200, 201}:
-        raise RuntimeError(
-            f"Qdrant leftover DELETE failed: {resp.status_code} {resp.text[:300]}"
-        )
-    return len(ids)
 
 
 def _dynamodb_key_list(

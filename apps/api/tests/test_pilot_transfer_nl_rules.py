@@ -75,6 +75,17 @@ def test_rule_bearing_sentence_keeps_the_route_and_asks_for_the_missing_detail()
     assert "one key" in questions
 
 
+def test_incremental_phrase_binds_the_cursor_column():
+    message = (
+        "transfer orders from Prod to Warehouse incremental on updated_at "
+        "upsert on id cursor semantics modification_timestamp"
+    )
+    args = _tool_args(message, "start_transfer")
+    assert args["upsert_key"] == "id"
+    assert args["cursor_column"] == "updated_at"
+    assert args["cursor_semantics"] == "modification_timestamp"
+
+
 def test_unapplied_rule_downgrades_to_plan_only():
     message = (
         "transfer users from Local PG 5433 to Warehouse by following these rules: "

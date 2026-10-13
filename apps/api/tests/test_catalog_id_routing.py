@@ -19,6 +19,7 @@ from src.transfer.connector_capabilities import (  # noqa: E402
     _DRIVER_CAPS,
     _FILE_CAPS,
     default_port,
+    effective_port,
     dest_ready,
     get_capabilities,
     resolve_driver_type,
@@ -106,3 +107,29 @@ def test_live_catalog_count_matches_health_manifest():
     # Planned brands must never appear under status=live.
     for brand in ("db2", "teradata"):
         assert brand not in live, brand
+
+
+def test_missing_listen_port_uses_the_driver_default(monkeypatch):
+    """Port 0 is unset. Redis, Elasticsearch, and Neo4j must not fall through to 443."""
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.models import EndpointConfig
+
+    monkeypatch.setattr(
+        "src.transfer.adapters._find_implicit_connector_id",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def _cfg(fmt: str, port: int) -> dict:
+        return resolve_connector_config(
+            EndpointConfig(format=fmt, host=f"{fmt}.internal", port=port)
+        )
+
+    assert effective_port("redis", 0) == 6379
+    assert effective_port("elasticsearch", None) == 9200
+    assert effective_port("neo4j", "") == 7474
+    assert effective_port("redis", 6380) == 6380
+    assert _cfg("redis", 0)["port"] == 6379
+    assert _cfg("redis", 6380)["port"] == 6380
+    assert _cfg("elasticsearch", 0)["port"] == 9200
+    assert _cfg("neo4j", 0)["port"] == 7474
+    assert _cfg("influxdb", 0)["port"] == 8086

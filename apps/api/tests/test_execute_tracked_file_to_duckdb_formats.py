@@ -63,9 +63,9 @@ def _to_parquet(rows: list[dict]) -> bytes:
     return buf.getvalue()
 
 
-#: A blank CSV/TSV cell means NULL because the format cannot say anything else;
-#: JSON, JSONL and Parquet all carry a real null, so ``""`` in those is an empty
-#: *string* and is preserved as one (see the companion test below).
+#: A text CSV/TSV cell that is ``""`` stays an empty string. Numeric, temporal,
+#: and boolean blanks are still SQL NULL. JSON, JSONL and Parquet spell a real
+#: null as ``null``, so this fixture writes those cells as None (see below).
 _NULL_CAPABLE = {"json", "jsonl", "parquet"}
 
 
@@ -141,14 +141,15 @@ def test_file_to_duckdb_preserves_types(fmt: str):
             '{"k":"v"}',
             '["a","b"]',
         )
+        text_blank = "" if fmt in {"csv", "tsv"} else None
         assert rows[1] == (
             2,
             Decimal("2000.5000"),
-            None,
+            text_blank,
             datetime(2024, 2, 28, 14, 30, 0),
             False,
-            None,
-            None,
+            text_blank,
+            text_blank,
         )
         assert rows[2] == (
             3,
@@ -169,10 +170,9 @@ def test_file_to_duckdb_preserves_types(fmt: str):
 def test_json_empty_string_reaches_duckdb_as_a_value() -> None:
     """``""`` in a null-capable format is a value, and DuckDB keeps it as one.
 
-    The paired half of the rule the fixture above encodes: a blank CSV cell has
-    no way to mean anything but NULL, while JSON that meant NULL would have said
-    ``null``. Folding ``""`` into NULL here would erase a distinction the source
-    declared.
+    The paired half of the rule the fixture above encodes: a text column keeps
+    ``""``, while JSON that meant NULL would have said ``null``. Folding ``""``
+    into NULL here would erase a distinction the source declared.
     """
     pytest.importorskip("duckdb")
 

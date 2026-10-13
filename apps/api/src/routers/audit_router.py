@@ -5,9 +5,13 @@ from __future__ import annotations
 import csv
 import io
 import json
+import os
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
+
+from services.audit_coverage import record_security_event
 
 router = APIRouter(prefix="/audit", tags=["Audit"])
 
@@ -32,10 +36,10 @@ def audit_export_honesty() -> dict[str, object]:
 
 
 def _scope(request: Request) -> tuple[str, str]:
-    from services.audit_log import workspace_id_from_request
+    from services.audit_log import requested_workspace_id_from_request
     from services.tenant_store import get_tenant_for_workspace
 
-    workspace_id = workspace_id_from_request(request)
+    workspace_id = requested_workspace_id_from_request(request)
     tenant_id = ""
     if workspace_id:
         tenant = get_tenant_for_workspace(workspace_id)
@@ -43,11 +47,76 @@ def _scope(request: Request) -> tuple[str, str]:
     return workspace_id, tenant_id
 
 
+def _next_after_seq(
+    events: list[dict[str, object]], after_seq: int | None
+) -> tuple[int | None, dict[str, str]]:
+    if after_seq is None:
+        return None, {}
+    next_seq = int(events[-1].get("chain_seq") or after_seq) if events else after_seq
+    return next_seq, {"X-Next-After-Seq": str(next_seq)}
+
+
+def _cef_header_escape(value: object) -> str:
+    return str(value).replace("\\", "\\\\").replace("|", "\\|")
+
+
+def _cef_extension_escape(value: object) -> str:
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("=", "\\=")
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .replace("\n", "\\n")
+    )
+
+
+def _cef_time_ms(value: object) -> int:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp() * 1000)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _cef_line(event: dict[str, object]) -> str:
+    """CEF intentionally omits details; the NDJSON export includes them."""
+    action = str(event.get("action") or "")
+    severity = {"info": 3, "success": 1, "warn": 6, "error": 8}.get(
+        str(event.get("level") or "info"), 3
+    )
+    header_action = _cef_header_escape(action)
+    extension = [
+        f"rt={_cef_time_ms(event.get('time'))}",
+        f"suser={_cef_extension_escape(event.get('actor') or '')}",
+        f"act={_cef_extension_escape(action)}",
+        f"request={_cef_extension_escape(event.get('resource') or '')}",
+        "cs1Label=workspace_id",
+        f"cs1={_cef_extension_escape(event.get('workspace_id') or '')}",
+        "cs2Label=event_hash",
+        f"cs2={_cef_extension_escape(event.get('event_hash') or '')}",
+        "cs3Label=prev_hash",
+        f"cs3={_cef_extension_escape(event.get('prev_hash') or '')}",
+        f"cs4Label=actor_type cs4={_cef_extension_escape(event.get('actor_type') or '')} cs5Label=actor_id cs5={_cef_extension_escape(event.get('actor_id') or '')}",
+        "cn1Label=chain_seq",
+        f"cn1={event.get('chain_seq') or 0}",
+        f"externalId={_cef_extension_escape(event.get('id') or '')}",
+    ]
+    device_version = os.getenv("DATAFLOW_VERSION", "1")
+    return (
+        f"CEF:0|Datawrap|Datawrap|{_cef_header_escape(device_version)}|"
+        f"{header_action}|{header_action}|{severity}|{' '.join(extension)}"
+    )
+
+
 @router.get("/events")
 async def list_events(
     request: Request,
     limit: int = Query(50, ge=1, le=500),
     level: str | None = Query(None, description="info | success | warn | error | all"),
+    after_seq: int | None = Query(None, ge=0),
 ):
     from services.audit_log import list_audit_events
 
@@ -59,28 +128,36 @@ async def list_events(
         limit=limit,
         level=level,
         workspace_id=workspace_id or None,
+        after_seq=after_seq,
     )
-    return {
-        "events": events,
-        "count": len(events),
-        "workspace_id": workspace_id or None,
-        "tenant_id": tenant_id or None,
-    }
+    next_seq, cursor_headers = _next_after_seq(events, after_seq)
+    return JSONResponse(
+        {
+            "events": events,
+            "count": len(events),
+            "workspace_id": workspace_id or None,
+            "tenant_id": tenant_id or None,
+            "next_after_seq": next_seq,
+        },
+        headers=cursor_headers,
+    )
 
 
 @router.get("/export")
 async def export_events(
     request: Request,
-    format: str = Query("csv", description="csv | json"),
+    format: str = Query("csv", description="csv | json | ndjson | cef"),
     limit: int = Query(5000, ge=1, le=20000),
     level: str | None = Query(None),
     since: str | None = Query(None, description="ISO-8601 inclusive lower bound"),
     until: str | None = Query(None, description="ISO-8601 inclusive upper bound"),
+    after_seq: int | None = Query(None, ge=0),
 ):
     """Workspace-scoped audit download for an auditor sample.
 
     Requires ``X-Workspace-Id``. Only events stamped with that workspace
-    are included. This is evidence, not a SOC 2 / HIPAA letter.
+    are included. This is evidence, not a SOC 2 / HIPAA letter. CEF omits
+    event details intentionally; use NDJSON when those details are needed.
     """
     from services.audit_log import latest_event_hash, list_audit_events
 
@@ -97,7 +174,9 @@ async def export_events(
         workspace_id=workspace_id,
         since=since,
         until=until,
+        after_seq=after_seq,
     )
+    next_seq, cursor_headers = _next_after_seq(events, after_seq)
     tip = latest_event_hash()
     honesty = audit_export_honesty()
     attestation = {
@@ -106,8 +185,13 @@ async def export_events(
         "note": honesty["note"],
     }
     fmt = (format or "csv").strip().lower()
-    if fmt not in ("csv", "json"):
-        raise HTTPException(status_code=400, detail="format must be csv or json")
+    if fmt not in ("csv", "json", "ndjson", "cef"):
+        raise HTTPException(status_code=400, detail="format must be csv, json, ndjson, or cef")
+    record_security_event(
+        "audit.export.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"format": fmt, "row_count": len(events)},
+    )
     if fmt == "json":
         return JSONResponse(
             {
@@ -119,16 +203,45 @@ async def export_events(
                 "hash_alg": "HMAC-SHA256",
                 "honesty": honesty,
                 "attestation": attestation,
+                "next_after_seq": next_seq,
             },
             headers={
                 "Content-Disposition": (
                     f'attachment; filename="datawrap-audit-{workspace_id}.json"'
                 ),
+                **cursor_headers,
+            },
+        )
+    if fmt == "ndjson":
+        body = "".join(
+            json.dumps(event, ensure_ascii=False, default=str) + "\n"
+            for event in events
+        )
+        return Response(
+            body,
+            media_type="application/x-ndjson",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="datawrap-audit-{workspace_id}.ndjson"'
+                ),
+                **cursor_headers,
+            },
+        )
+    if fmt == "cef":
+        body = "".join(_cef_line(event) + "\n" for event in events)
+        return PlainTextResponse(
+            body,
+            media_type="text/plain",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="datawrap-audit-{workspace_id}.cef"'
+                ),
+                **cursor_headers,
             },
         )
 
     columns = [
-        "id", "time", "actor", "action", "resource", "level",
+        "id", "time", "actor", "actor_type", "actor_id", "action", "resource", "level",
         "workspace_id", "tenant_id", "event_hash", "prev_hash", "hash_alg",
         "details",
     ]
@@ -153,6 +266,7 @@ async def export_events(
             "Content-Disposition": (
                 f'attachment; filename="{filename}"; workspace-id={workspace_id}'
             ),
+            **cursor_headers,
         },
     )
 
@@ -161,6 +275,7 @@ async def export_events(
 async def get_audit_tip():
     """Return the HMAC chain tip plus the latest external anchor receipt."""
     from services.audit_anchor import latest_anchor, list_anchors
+    from services.audit_coverage import audit_access_failure_count
     from services.audit_log import latest_event_hash
 
     tip = latest_event_hash()
@@ -170,11 +285,38 @@ async def get_audit_tip():
         "anchor": anchor,
         "anchors_recent": list_anchors(limit=5),
         "matched": bool(tip and anchor and anchor.get("tip_hash") == tip),
+        "audit_access_failures": audit_access_failure_count(),
         "honesty": (
             "Tip is HMAC-SHA256 chain head. Anchor is a diligence seal "
             "(stub by default — not auditor WORM / TSA until provider configured)."
         ),
     }
+
+
+@router.get("/secret-scan")
+async def scan_audit_secrets(
+    request: Request,
+    limit: int = Query(20000, ge=1, le=20000),
+):
+    from services.audit_log import scan_audit_events_for_secrets
+    from services.team_store import require_workspace_isolation
+
+    workspace_id, _tenant_id = _scope(request)
+    if require_workspace_isolation() and not workspace_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Workspace-Id is required for an audit secret scan.",
+        )
+    result = scan_audit_events_for_secrets(
+        limit=limit,
+        workspace_id=workspace_id or None,
+    )
+    record_security_event(
+        "audit.secret_scan.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"flagged_count": len(result.get("findings") or [])},
+    )
+    return result
 
 
 @router.get("/verify")
@@ -199,11 +341,20 @@ async def verify_audit_chain(
             detail="X-Workspace-Id is required for chain verification. "
             "The walk is platform-wide; findings named here are this workspace.",
         )
-    return verify_chain(limit=limit, workspace_id=workspace_id)
+    result = verify_chain(limit=limit, workspace_id=workspace_id)
+    record_security_event(
+        "audit.verify.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={
+            "ok": bool(result.get("verified")),
+            "verified_count": result.get("checked", 0),
+        },
+    )
+    return result
 
 
 @router.post("/verify-pack")
-async def verify_proof_pack_against_chain(pack: dict):
+async def verify_proof_pack_against_chain(pack: dict, request: Request):
     """Verify an exported proof pack, and whether the chain still holds its record.
 
     Three separable questions, answered separately: is the pack's own signature
@@ -222,6 +373,11 @@ async def verify_proof_pack_against_chain(pack: dict):
     anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
     digest = pack_body_digest_excluding_anchor(pack)
     chain_record = find_anchor(digest) if anchor.get("anchored") else None
+    record_security_event(
+        "audit.verify_pack.read", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"ok": bool(result.get("valid"))},
+    )
     return {
         **result,
         "evidence_sha256": digest,
@@ -248,6 +404,39 @@ async def verify_proof_pack_against_chain(pack: dict):
             "chain record to compare it against."
         ),
     }
+
+
+@router.post("/retention/purge")
+async def purge_audit_retention(
+    request: Request,
+    dry_run: bool = Query(False),
+):
+    from services.audit_log import (
+        AuditConfigError,
+        append_audit_event,
+        purge_expired_audit_events,
+    )
+    from services.audit_log import actor_from_request, workspace_id_from_request
+
+    correlation_id = getattr(request.state, "correlation_id", None)
+    if correlation_id is None:
+        correlation_id = request.headers.get("X-Correlation-ID")
+
+    try:
+        result = purge_expired_audit_events(dry_run=dry_run)
+    except AuditConfigError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    append_audit_event(
+        action="audit.retention.purge",
+        resource=request.url.path,
+        actor=actor_from_request(request),
+        level="warn" if result["removed"] else "info",
+        correlation_id=correlation_id,
+        workspace_id=workspace_id_from_request(request),
+        details=result,
+    )
+    return result
 
 
 @router.post("/tip/anchor")

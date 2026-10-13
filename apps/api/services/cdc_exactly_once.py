@@ -2,8 +2,14 @@
 
 Honesty
 -------
-Platform-wide CDC remains **at-least-once upsert** until a route opts in
-*and* the dest can commit apply + watermark in one transaction.
+Platform-wide CDC is not exactly-once. ``EXACTLY_ONCE_CLAIMED`` stays False.
+
+When the operator leaves delivery on ``auto`` (the product default), an
+eligible CDC route — primary key, durable LSN, transactional dest that
+can commit apply and the watermark together — selects dest-owned
+exactly-once. An ineligible route stays at-least-once and records why.
+An explicit ``at_least_once`` pin is never upgraded. An explicit
+``exactly_once`` on an ineligible route fails closed.
 
 This is not Kafka transactional-id EOS and not XA across heterogeneous
 sinks. It is dest-authoritative fenced materialization — Estuary Open
@@ -71,11 +77,19 @@ Crash after dest COMMIT → dest watermark wins; redelivery is a no-op.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from connectors.lsn_guards import DF_LSN_COL, compare_lsn, extract_cdc_lsn
+from connectors.lsn_guards import (
+    DF_LSN_COL,
+    compare_lsn,
+    extract_cdc_commit_position,
+    extract_cdc_lsn,
+    lsn_family,
+    lsn_sort_key,
+)
 from services.cdc_effectively_once import (
     DELIVERY_CLASS_AT_LEAST_ONCE,
     DELIVERY_CLASS_AT_MOST_ONCE,
@@ -84,6 +98,8 @@ from services.cdc_effectively_once import (
 )
 
 # Platform-wide claim — never flip. Route opt-in is separate.
+_logger = logging.getLogger(__name__)
+
 PLATFORM_EXACTLY_ONCE_CLAIMED = False
 ALGORITHM = "dest_owned_watermark_txn"
 WATERMARK_TABLE = "_df_cdc_eos_watermarks"
@@ -94,6 +110,17 @@ WATERMARK_TABLE = "_df_cdc_eos_watermarks"
 WATERMARK_TABLE_ORACLE = "df_cdc_eos_watermarks"
 DELIVERY_SEMANTICS_EOS = "exactly_once_dest_owned_watermark_txn"
 DELIVERY_SEMANTICS_ALO = "at_least_once_idempotent_apply"
+# Operator did not pin a guarantee. Eligible CDC resolves to dest-owned EOS.
+DELIVERY_AUTO = "auto"
+_AUTO_TOKENS = frozenset({"", "auto", "default"})
+_ICEBERG_EOS_SINKS = frozenset(
+    {"iceberg", "apache_iceberg", "iceberg_rest", "nessie"}
+)
+_ICEBERG_CATALOG_REQUIRED_NOTE = (
+    "Iceberg exactly-once requires a catalog-backed destination "
+    "(REST/Glue/SQL/Hive/Nessie); filesystem/warehouse-path Iceberg remains "
+    "at-least-once."
+)
 
 # Destinations that can host a transactional watermark table in principle.
 # Aliases stay listed so classify never invents a miss on catalog ids.
@@ -150,6 +177,8 @@ REASON_BUNDLE_LSN = "exactly_once_bundle_lsn_divergence"
 REASON_UNVERIFIED = "exactly_once_dest_commit_unverified"
 REASON_STALE_SEQ = "exactly_once_stale_apply_seq"
 REASON_STALE_REPLAY = "exactly_once_quarantine_replay_stale_dest"
+REASON_LSN_FAMILY = "exactly_once_ambiguous_lsn_family"
+REASON_CONCURRENT_COMMIT = "exactly_once_concurrent_watermark_commit"
 REASON_OK = "dest_owned_watermark_txn"
 PROTOCOL = "dest_authoritative_keyset_bundle"
 
@@ -318,7 +347,7 @@ def eos_stream_key(
 
 def batch_lsn(resume_token: Any) -> str | None:
     """Durable LSN for EOS coordination — fail-closed when missing."""
-    return extract_cdc_lsn(resume_token)
+    return extract_cdc_commit_position(resume_token) or extract_cdc_lsn(resume_token)
 
 
 def already_committed(incoming_lsn: str | None, dest_lsn: str | None) -> bool:
@@ -331,10 +360,15 @@ def already_committed(incoming_lsn: str | None, dest_lsn: str | None) -> bool:
 
 
 def assert_writer_fence(incoming_fence: int, dest_fence: int) -> None:
-    """Estuary Open fence — a stolen-lease zombie cannot commit dest EOS.
+    """Refuse a stolen-lease zombie that presents a lower generation.
 
-    Fence 0 means unleased / single-writer tests. A positive dest fence
-    refuses a lower incoming generation.
+    Apply always calls this with the real lease generation. A positive dest
+    fence refuses a lower positive generation, and also refuses 0 — an apply
+    that has not acquired the lease must not commit over a fenced dest.
+
+    Open is different: CDC Open runs before the lease exists and passes 0.
+    ``plan_open_session`` keeps the stored dest fence in that case instead
+    of calling this check. Do not weaken this function for that opener.
     """
     incoming = int(incoming_fence or 0)
     dest = int(dest_fence or 0)
@@ -394,14 +428,14 @@ def clamp_job_resume_to_dest(
         "clamped": False,
         "reason": "no_dest_watermark",
         "dest_lsn": dest_lsn,
-        "job_lsn": extract_cdc_lsn(job_resume),
+        "job_lsn": batch_lsn(job_resume),
         "dest_resume_blob": bool(dest_blob),
     }
     if not dest_lsn or not str(dest_lsn).strip():
         return job_resume, proof
     job_lsn = proof["job_lsn"]
     if dest_blob is not None:
-        blob_lsn = extract_cdc_lsn(dest_blob)
+        blob_lsn = batch_lsn(dest_blob)
         if blob_lsn and compare_lsn(blob_lsn, dest_lsn) == 0:
             if not job_lsn or compare_lsn(job_lsn, dest_lsn) != 0:
                 proof["clamped"] = True
@@ -473,9 +507,25 @@ def plan_open_session(
     incoming_fence: int,
     job_resume: Any,
 ) -> EosOpenResult:
-    """Decide Open fence + dest-authoritative resume (no data)."""
-    assert_writer_fence(incoming_fence, dest.fence_epoch)
-    fence = next_dest_fence(incoming_fence, dest.fence_epoch)
+    """Decide Open fence + dest-authoritative resume (no data).
+
+    Incoming fence 0 is the unleased opener. The lease is acquired after
+    Open, and a finished run deletes it, so the next run also opens at 0.
+    The dest fence from the previous apply (lease generation, at least 1)
+    must be kept. Treating 0 as a stale writer refused every second CDC
+    run on a route that had already committed.
+
+    A positive generation lower than the dest fence is still a zombie and
+    is refused here. Apply (``decide_eos_apply``) always presents the real
+    lease generation and still calls ``assert_writer_fence``.
+    """
+    dest_fence = int(dest.fence_epoch or 0)
+    incoming = int(incoming_fence or 0)
+    if incoming == 0:
+        fence = dest_fence
+    else:
+        assert_writer_fence(incoming, dest_fence)
+        fence = next_dest_fence(incoming, dest_fence)
     resume, _proof = clamp_job_resume_to_dest(
         job_resume, dest.committed_lsn, dest.resume_blob or None
     )
@@ -529,6 +579,7 @@ def combine_change_batch(change: Any, *, pk_cols: list[str]) -> Any:
         resume_token=getattr(change, "resume_token", None),
         table=getattr(change, "table", None),
         ack_barrier=bool(getattr(change, "ack_barrier", True)),
+        lookup_columns=getattr(change, "lookup_columns", None) or {},
     )
 
 
@@ -567,6 +618,46 @@ def incoming_pk_keys(rows: list[dict[str, Any]], pk_cols: list[str]) -> list[str
         if key:
             keys.append(str(key))
     return keys
+
+
+def assert_unambiguous_eos_row_columns(
+    *,
+    incoming_rows: list[dict[str, Any]],
+    mappings: list[dict[str, Any]],
+    target_cols: list[str],
+) -> None:
+    from services.column_case import header_index
+
+    source_to_target = {
+        str(mapping.get("source") or ""): str(
+            mapping.get("target") or mapping.get("source") or ""
+        )
+        for mapping in mappings
+        if mapping.get("source")
+    }
+    for row in incoming_rows:
+        by_target: dict[str, str] = {}
+        for raw_key in row:
+            key = str(raw_key)
+            target = source_to_target.get(key)
+            if target is None:
+                target_index = header_index(target_cols, key)
+                if target_index is None:
+                    continue
+                target = target_cols[target_index]
+            prior = by_target.get(target)
+            if (
+                prior is not None
+                and prior != key
+                and header_index([prior], key) is not None
+            ):
+                raise ExactlyOnceRouteError(
+                    "exactly_once ambiguous source columns "
+                    f"{prior!r} and {key!r} both resolve to destination "
+                    f"column {target!r}.",
+                    reason="exactly_once_ambiguous_column_mapping",
+                )
+            by_target[target] = key
 
 
 def load_reduce_into_dest(
@@ -1103,6 +1194,76 @@ def next_handoff_phase(incoming_phase: str, dest_phase: str | None) -> str:
     return "snapshot"
 
 
+def is_position_heartbeat(change: Any) -> bool:
+    """True when a batch was supplied and it has no data or rejected rows.
+
+    Log readers re-yield the committed file:pos / LSN when the log is idle.
+    ``None`` is not a heartbeat: a caller that passed only checksums still
+    compares them.
+    """
+    if change is None:
+        return False
+    for attr in ("inserts", "updates", "deletes", "rejected"):
+        if list(getattr(change, attr, None) or []):
+            return False
+    return True
+
+
+def committed_apply_checksum(incoming: str, dest: str | None, change: Any) -> str:
+    """Checksum to store with the watermark.
+
+    A position heartbeat has a digest of the empty payload. Writing that
+    digest over the committed batch makes a later redelivery of the real
+    rows look like a conflict. The committed payload identity stays.
+    """
+    kept = dest or ""
+    if is_position_heartbeat(change) and kept:
+        return kept
+    return incoming or kept
+
+
+def _checksum_cell(value: Any) -> Any:
+    """One canonical JSON value so a restart hashes the same row twice.
+
+    A snapshot SELECT and a binlog redelivery of the same LSN do not share
+    a Python type: ``datetime`` versus its ISO text, ``Decimal`` versus
+    digits, SQL NULL versus the extract sentinel. Hashing those spellings
+    separately made MySQL CDC refuse to restart (E3-008) on a row the
+    destination had already committed.
+    """
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    if value is None or value == SQL_NULL_SENTINEL:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        text = format(value, "f")
+        if "." in text:
+            text = text.rstrip("0").rstrip(".")
+        return text or "0"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        import base64
+
+        return base64.b64encode(bytes(value)).decode("ascii")
+    if isinstance(value, str):
+        text = value.strip()
+        if text == SQL_NULL_SENTINEL:
+            return None
+        # Binlog isoformat and a snapshot ``YYYY-MM-DD HH:MM:SS`` are one instant.
+        if len(text) >= 19 and text[4] == "-" and text[7] == "-" and text[10] in {" ", "T"}:
+            return text.replace(" ", "T", 1)
+        return value
+    return value
+
+
 def batch_apply_checksum(
     change: Any,
     *,
@@ -1116,14 +1277,26 @@ def batch_apply_checksum(
     from services.cdc_snapshot_window import _pk_value
 
     combined = combine_change_batch(change, pk_cols=pk_cols)
+    batch_table = str(getattr(change, "table", "") or "").upper()
+    skipped_columns: set[str] = set()
+    for table, columns in (getattr(change, "lookup_columns", None) or {}).items():
+        table_name = str(table or "").upper()
+        if table_name == batch_table or table_name.rsplit(".", 1)[-1] == batch_table:
+            skipped_columns.update(str(column).upper() for column in columns or [])
     updates = []
     for rec in list(combined.inserts or []) + list(combined.updates or []):
         if not isinstance(rec, dict):
             continue
+        cols = {
+            str(k): _checksum_cell(rec.get(k))
+            for k in sorted(rec)
+            if not str(k).startswith("_df_")
+            and str(k).upper() not in skipped_columns
+        }
         updates.append(
             {
                 "pk": _pk_value(rec, pk_cols) or "",
-                "cols": {str(k): rec.get(k) for k in sorted(rec)},
+                "cols": cols,
             }
         )
     updates.sort(key=lambda row: str(row.get("pk") or ""))
@@ -1185,6 +1358,103 @@ class DestWmView:
     window_id: str = ""
     snapshot_signal_id: str = ""
     window_hi_pk: str = ""
+    # True only when the row was read from the dest watermark table. The
+    # writer uses it to pick INSERT (first commit) vs compare-and-set UPDATE.
+    exists: bool = False
+
+
+_legacy_composite_warnings: set[tuple[str, str]] = set()
+
+
+def assert_comparable_lsn(incoming_lsn: str | None, dest_lsn: str | None) -> None:
+    """Refuse a skip/apply decision across LSN families.
+
+    ``compare_lsn`` returns 0 for cross-family values (a WAL LSN against a
+    GTID, an SCN against a binlog offset). Read as "equal", that silently
+    skips the batch as already committed — data loss. Fail closed instead.
+    """
+    inc = str(incoming_lsn or "").strip()
+    cur = str(dest_lsn or "").strip()
+    inc_family = lsn_family(inc) if inc else "empty"
+    cur_family = lsn_family(cur) if cur else "empty"
+    if inc_family == "opaque" or cur_family == "opaque":
+        _logger.error(
+            "cdc_eos: refusing unparseable LSN compare incoming=%r (%s) dest=%r (%s)",
+            inc,
+            inc_family,
+            cur,
+            cur_family,
+        )
+        raise ExactlyOnceRouteError(
+            f"exactly_once cannot compare an unparseable position "
+            f"(incoming={inc!r}, dest={cur!r}). Refusing to skip or apply; "
+            "repair the resume position or re-snapshot.",
+            reason=REASON_LSN_FAMILY,
+        )
+    if not inc or not cur:
+        return
+    if inc_family == cur_family:
+        return
+    _logger.error(
+        "cdc_eos: refusing cross-family LSN compare incoming=%r (%s) dest=%r (%s)",
+        inc,
+        inc_family,
+        cur,
+        cur_family,
+    )
+    raise ExactlyOnceRouteError(
+        f"exactly_once cannot order incoming LSN {inc!r} ({inc_family}) against "
+        f"the dest-committed watermark {cur!r} ({cur_family}). Cross-family "
+        "positions are incomparable; refusing to skip or apply. Reset the "
+        "destination watermark for this stream or re-snapshot.",
+        reason=REASON_LSN_FAMILY,
+    )
+
+
+def concurrent_commit_error(
+    stream_key: str, *, expected_epoch: int, expected_fence: int
+) -> ExactlyOnceRouteError:
+    """Another writer moved the dest watermark between lock-read and write."""
+    _logger.error(
+        "cdc_eos: watermark compare-and-set lost stream_key=%s expected_epoch=%s "
+        "expected_fence=%s — another writer committed; rolling back",
+        stream_key,
+        expected_epoch,
+        expected_fence,
+    )
+    return ExactlyOnceRouteError(
+        f"exactly_once watermark for stream {stream_key!r} changed under this "
+        f"writer (expected epoch={expected_epoch}, fence={expected_fence}). A "
+        "concurrent worker committed first; this transaction is rolled back and "
+        "the batch will be re-decided against the new dest watermark.",
+        reason=REASON_CONCURRENT_COMMIT,
+    )
+
+
+def log_apply_outcome(
+    *, dest_type: str, stream_key: str, result: Any
+) -> None:
+    """Commit at info, redelivery skip at debug (single or bundle result)."""
+    lsn = getattr(result, "committed_lsn", None)
+    if getattr(result, "already_committed", False):
+        _logger.debug(
+            "cdc_eos: skip dest=%s stream_key=%s status=%s dest_lsn=%s "
+            "(already committed at destination)",
+            dest_type,
+            stream_key,
+            getattr(result, "status", "bundle"),
+            lsn,
+        )
+        return
+    _logger.info(
+        "cdc_eos: committed dest=%s stream_key=%s lsn=%s rows=%s deleted=%s fence=%s",
+        dest_type,
+        stream_key,
+        lsn,
+        getattr(result, "rows_written", 0),
+        getattr(result, "deleted", 0),
+        getattr(result, "fence_epoch", 0),
+    )
 
 
 def decide_eos_apply(
@@ -1213,6 +1483,7 @@ def decide_eos_apply(
     | window_closed_skip | chunk_closed_skip
     """
     assert_writer_fence(incoming_fence, dest_fence)
+    assert_comparable_lsn(incoming_lsn, dest_lsn)
     fence = next_dest_fence(incoming_fence, dest_fence)
     if dest_owned_window_closed(
         incoming_window_id=incoming_window_id,
@@ -1241,17 +1512,23 @@ def decide_eos_apply(
         ):
             return "handoff_phase", fence
         # The dest checksum describes the batch dest committed *at* its
-        # watermark, so it is only comparable to a redelivery of that same LSN.
-        # A strictly older LSN is an ordinary at-least-once replay from a
-        # restart, whose payload legitimately differs from the newest committed
-        # batch; comparing it refused every recovery replay as a payload
-        # conflict and failed the job on a correct stream.
-        if compare_lsn(incoming_lsn, dest_lsn or "") == 0:
+        # watermark, so it is only comparable to a redelivery of that same LSN
+        # that still carries rows. A strictly older LSN is an at-least-once
+        # replay of an earlier batch. An idle poll repeats this LSN with no
+        # rows; its empty digest is not a second version of the event.
+        if compare_lsn(incoming_lsn, dest_lsn or "") == 0 and not is_position_heartbeat(
+            change
+        ):
             assert_redelivery_checksum(
                 incoming_checksum,
                 dest_checksum or None,
                 incoming_lsn=incoming_lsn,
                 change=change,
+            )
+        elif compare_lsn(incoming_lsn, dest_lsn or "") == 0:
+            _logger.debug(
+                "cdc_eos: empty heartbeat already committed at position lsn=%s",
+                incoming_lsn,
             )
         return "already_committed", fence
     _ = dest_epoch
@@ -1268,9 +1545,36 @@ def decide_from_view(
     incremental_snapshot: bool = False,
     change: Any = None,
 ) -> tuple[str, int]:
+    dest_lsn = dest.committed_lsn
+    if dest_lsn and dest.resume_blob:
+        dest_resume = decode_resume_blob(dest.resume_blob)
+        if extract_cdc_lsn(dest_resume) == dest_lsn:
+            dest_lsn = batch_lsn(dest_resume) or dest_lsn
+    incoming_family = lsn_family(incoming_lsn)
+    dest_family = lsn_family(dest_lsn) if dest_lsn else "empty"
+    incoming_key = lsn_sort_key(incoming_lsn)
+    dest_key = lsn_sort_key(dest_lsn) if dest_lsn else ()
+    if (
+        incoming_family in {"oracle_scn", "mssql_lsn"}
+        and dest_family == incoming_family
+        and incoming_key[1] == dest_key[1]
+        and incoming_key[2] > 0
+        and dest_key
+        and dest_key[2] == 0
+    ):
+        warning_key = (str(dest_lsn), str(incoming_lsn))
+        if warning_key not in _legacy_composite_warnings:
+            _legacy_composite_warnings.add(warning_key)
+            _logger.warning(
+                "cdc_eos: legacy dest watermark compared with composite incoming "
+                "position; stream_key unavailable, warning deduplicated by dest "
+                "LSN pair dest=%s incoming=%s",
+                dest_lsn,
+                incoming_lsn,
+            )
     return decide_eos_apply(
         incoming_lsn=incoming_lsn,
-        dest_lsn=dest.committed_lsn,
+        dest_lsn=dest_lsn,
         incoming_fence=incoming_fence,
         dest_fence=dest.fence_epoch,
         dest_epoch=dest.epoch,
@@ -1305,8 +1609,9 @@ def classify_exactly_once_route(
     has_lsn_column: bool | None = True,
     callable_source: bool = False,
     source_type: str = "",
+    dest_cfg: dict[str, Any] | None = None,
 ) -> EosEligibility:
-    """Fail-closed eligibility. Default CDC path does not call this for ALO."""
+    """Fail-closed eligibility. ``auto`` calls this; an explicit at-least-once pin does not."""
     dest = (dest_type or "").strip().lower().replace("-", "_")
     if dest == "postgres":
         dest = "postgresql"
@@ -1320,6 +1625,8 @@ def classify_exactly_once_route(
         "oracle_autonomous_warehouse": "oracle",
     }
     sink_dest = _SINK_ALIASES.get(dest, dest)
+    if dest in _ICEBERG_EOS_SINKS:
+        sink_dest = "iceberg"
     mode = (sync_mode or "").strip().lower().replace("-", "_")
     notes: list[str] = [
         "Algorithm: dest-owned watermark in the same dest transaction as apply.",
@@ -1358,9 +1665,30 @@ def classify_exactly_once_route(
         return EosEligibility(
             False, REASON_NO_PK, dest, None, False, tuple(notes)
         )
-    if dest not in EOS_TRANSACTIONAL_DESTS:
+    iceberg_ready = False
+    if dest in _ICEBERG_EOS_SINKS:
+        from connectors.iceberg_eos import iceberg_eos_catalog_ready
+
+        iceberg_ready = iceberg_eos_catalog_ready(dest_cfg)
+        if not iceberg_ready:
+            return EosEligibility(
+                False,
+                REASON_DEST_NOT_WIRED,
+                dest,
+                ALGORITHM,
+                False,
+                (_ICEBERG_CATALOG_REQUIRED_NOTE, *notes),
+            )
+
+    if dest not in EOS_TRANSACTIONAL_DESTS and not iceberg_ready:
         return EosEligibility(
             False, REASON_DEST_NOT_TXN, dest, None, False, tuple(notes)
+        )
+    # False is a measured absence. None/True means the caller already
+    # established a log position (or is proving the algorithm with one).
+    if has_lsn_column is False:
+        return EosEligibility(
+            False, REASON_NO_LSN, dest, None, False, tuple(notes)
         )
     sink = classify_sink_delivery(
         dest_type=sink_dest,
@@ -1372,7 +1700,7 @@ def classify_exactly_once_route(
         return EosEligibility(
             False, REASON_APPEND, dest, None, False, tuple(notes)
         )
-    wired = dest in EOS_TXN_WIRED_DESTS
+    wired = dest in EOS_TXN_WIRED_DESTS or iceberg_ready
     if not wired:
         return EosEligibility(
             False,
@@ -1399,6 +1727,168 @@ def classify_exactly_once_route(
     )
 
 
+# Sinks that must never be classified exactly-once, with the honest reason.
+# They lack multi-statement transactions over target + offset table, or a
+# transactional MERGE, so apply and offset cannot commit atomically.
+EOS_NON_TRANSACTIONAL_DESTS: dict[str, str] = {
+    "clickhouse": "no multi-statement transactions; ReplacingMergeTree dedup is eventual",
+    "athena": "no transactional MERGE across target and offset table",
+    "hive": "no transactional MERGE across target and offset table",
+    "impala": "no transactional MERGE across target and offset table",
+    "bigquery": "offset table and target cannot share one commit on this writer",
+    "redshift": "delete+insert path is not wired to a shared offset transaction",
+    "databricks": "Delta commits are per table; no cross-table atomic offset",
+    "s3": "object store: no transactions",
+    "gcs": "object store: no transactions",
+    "azure_blob": "object store: no transactions",
+    "adls": "object store: no transactions",
+    "csv": "file sink: append-only",
+    "parquet": "file sink: append-only",
+    "json": "file sink: append-only",
+    "kafka": "log sink: producer offsets are not tied to a dest transaction here",
+    "elasticsearch": "no multi-document transactions",
+    "opensearch": "no multi-document transactions",
+    "mongodb": "dest transactions not wired for the offset collection",
+    "dynamodb": "no transactional offset commit wired",
+    "cassandra": "no multi-partition transactions",
+}
+
+# Derived from the existing sets so the honesty list cannot drift from the gate.
+_EOS_CANONICAL_SINKS = tuple(sorted(EOS_TRANSACTIONAL_DESTS & EOS_TXN_WIRED_DESTS))
+
+
+def _canonical_sink(dest_type: str) -> str:
+    return (dest_type or "").strip().lower().replace("-", "_")
+
+
+def classify_sink_exactly_once(
+    *,
+    dest_type: str,
+    has_primary_key: bool,
+    write_mode: str = "upsert",
+    allow_append_only: bool = False,
+    has_lsn_column: bool | None = True,
+    sync_mode: str = "cdc",
+    dest_cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Per-sink delivery class. ``exactly_once`` only for transactional offset sinks.
+
+    Everything else falls back to ``classify_sink_delivery`` (effectively-once
+    PK+_df_lsn or at-least-once) with the reason exactly-once was refused.
+    """
+    eligibility = classify_exactly_once_route(
+        dest_type=dest_type,
+        sync_mode=sync_mode,
+        has_primary_key=has_primary_key,
+        write_mode=write_mode,
+        allow_append_only=allow_append_only,
+        has_lsn_column=has_lsn_column,
+        dest_cfg=dest_cfg,
+    )
+    dest = _canonical_sink(dest_type)
+    if eligibility.eligible:
+        return {
+            "class": "exactly_once_transactional_offset",
+            "delivery_class": DELIVERY_CLASS_EXACTLY_ONCE,
+            "exactly_once": True,
+            "exactly_once_scope": "destination",
+            "at_least_once": False,
+            "at_most_once": False,
+            "effectively_once_pk_sink": True,
+            "duplicates_on_redelivery": False,
+            "duplicate_scenario": None,
+            "dest_type": dest,
+            "algorithm": ALGORITHM,
+            "offset_table": WATERMARK_TABLE,
+            "reason": eligibility.reason,
+            "platform_exactly_once_claimed": PLATFORM_EXACTLY_ONCE_CLAIMED,
+            "notes": [
+                "Apply and dest-owned offset commit in one destination transaction.",
+                "Dest offset is the resume source of truth; control-plane cursor is a cache.",
+                "Redelivery at or below the dest offset is a no-op.",
+                "Scope: this destination only. Log capture upstream is still at-least-once.",
+            ],
+        }
+    fallback = dict(
+        classify_sink_delivery(
+            dest_type=dest,
+            has_primary_key=has_primary_key,
+            write_mode=write_mode,
+            has_lsn_column=has_lsn_column,
+        )
+    )
+    fallback["exactly_once"] = False
+    fallback["exactly_once_reason"] = eligibility.reason
+    why = EOS_NON_TRANSACTIONAL_DESTS.get(dest)
+    if why:
+        fallback["exactly_once_refusal"] = why
+    return fallback
+
+
+def _refusal_detail(dest: str, reason: str) -> str:
+    if dest in _ICEBERG_EOS_SINKS and reason == REASON_DEST_NOT_WIRED:
+        return _ICEBERG_CATALOG_REQUIRED_NOTE
+    if dest in EOS_NON_TRANSACTIONAL_DESTS:
+        return EOS_NON_TRANSACTIONAL_DESTS[dest]
+    return {
+        REASON_NOT_CDC: "exactly-once applies to CDC sync only",
+        REASON_APPEND: "append-only writes duplicate on redelivery",
+        REASON_NO_PK: "a primary key is required to make redelivery idempotent",
+        REASON_DEST_NOT_TXN: "destination cannot commit target rows and offset in one transaction",
+        REASON_DEST_NOT_WIRED: "transactional offset commit is not wired for this writer",
+        REASON_NO_LSN: "route has no durable log position to commit as the offset",
+        REASON_CALLABLE: "callable sources have no durable log position",
+    }.get(reason, "route is not eligible")
+
+
+def require_exactly_once_sink(
+    *,
+    dest_type: str,
+    has_primary_key: bool,
+    write_mode: str = "upsert",
+    allow_append_only: bool = False,
+    has_lsn_column: bool | None = True,
+    sync_mode: str = "cdc",
+    dest_cfg: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """``require_exactly_once=true`` gate: return the EO posture or fail closed."""
+    posture = classify_sink_exactly_once(
+        dest_type=dest_type,
+        has_primary_key=has_primary_key,
+        write_mode=write_mode,
+        allow_append_only=allow_append_only,
+        has_lsn_column=True if has_lsn_column is None else has_lsn_column,
+        sync_mode=sync_mode,
+        dest_cfg=dest_cfg,
+    )
+    if posture.get("delivery_class") == DELIVERY_CLASS_EXACTLY_ONCE:
+        return posture
+    dest = _canonical_sink(dest_type) or "unknown"
+    reason = str(posture.get("exactly_once_reason") or REASON_DEST_NOT_TXN)
+    _logger.warning(
+        "cdc_eos: require_exactly_once refused dest=%s reason=%s", dest, reason
+    )
+    raise ExactlyOnceRouteError(
+        f"require_exactly_once=true but CDC destination '{dest}' cannot provide "
+        f"exactly-once delivery ({reason}: {_refusal_detail(dest, reason)}). "
+        "This route stays at-least-once. Use a transactional SQL sink "
+        f"({', '.join(_EOS_CANONICAL_SINKS)}) with a primary key, or remove "
+        "require_exactly_once.",
+        reason=reason,
+    )
+
+
+def exactly_once_sink_scope() -> dict[str, Any]:
+    """Honesty block: which sinks are exactly-once, and that it is not platform-wide."""
+    return {
+        "exactly_once_scope": "per_destination_transactional_sinks_only",
+        "exactly_once_transactional_sinks": list(_EOS_CANONICAL_SINKS),
+        "exactly_once_never_for": sorted(EOS_NON_TRANSACTIONAL_DESTS),
+        "exactly_once_offset_table": WATERMARK_TABLE,
+        "platform_exactly_once_claimed": PLATFORM_EXACTLY_ONCE_CLAIMED,
+    }
+
+
 def assert_requested_cdc_delivery(
     requested: str | None,
     *,
@@ -1410,6 +1900,7 @@ def assert_requested_cdc_delivery(
     allow_append_only: bool = False,
     callable_source: bool = False,
     has_lsn_column: bool | None = True,
+    dest_cfg: dict[str, Any] | None = None,
 ) -> str:
     """Normalize delivery. Exactly-once is opt-in and fail-closed on the route."""
     from services.execution_engine_contract import DeliveryGuaranteeError
@@ -1436,6 +1927,7 @@ def assert_requested_cdc_delivery(
         has_lsn_column=has_lsn_column,
         callable_source=callable_source,
         source_type=source_type,
+        dest_cfg=dest_cfg,
     )
     if not eligibility.eligible:
         raise ExactlyOnceRouteError(
@@ -1446,6 +1938,91 @@ def assert_requested_cdc_delivery(
             reason=eligibility.reason,
         )
     return raw
+
+
+def select_route_delivery(
+    requested: str | None,
+    *,
+    sync_mode: str = "",
+    dest_type: str = "",
+    source_type: str = "",
+    has_primary_key: bool = False,
+    write_mode: str = "upsert",
+    allow_append_only: bool = False,
+    callable_source: bool = False,
+    has_lsn_column: bool | None = True,
+    dest_cfg: dict[str, Any] | None = None,
+) -> str:
+    """Resolve delivery for one route.
+
+    ``auto`` (and an empty token) selects dest-owned exactly-once when the
+    route can commit apply and the watermark in one transaction. Otherwise
+    it stays at-least-once. An explicit pin is not rewritten. Exactly-once
+    on an ineligible route still fails closed.
+    """
+    raw = (requested or "").strip().lower().replace("-", "_")
+    if raw in {"eos", "exactlyonce"}:
+        raw = DELIVERY_CLASS_EXACTLY_ONCE
+    if raw in _AUTO_TOKENS:
+        eligibility = classify_exactly_once_route(
+            dest_type=dest_type,
+            sync_mode=sync_mode,
+            has_primary_key=has_primary_key,
+            write_mode=write_mode,
+            allow_append_only=allow_append_only,
+            has_lsn_column=has_lsn_column,
+            callable_source=callable_source,
+            source_type=source_type,
+            dest_cfg=dest_cfg,
+        )
+        if eligibility.eligible:
+            return DELIVERY_CLASS_EXACTLY_ONCE
+        return DELIVERY_CLASS_AT_LEAST_ONCE
+    return assert_requested_cdc_delivery(
+        raw,
+        sync_mode=sync_mode,
+        dest_type=dest_type,
+        source_type=source_type,
+        has_primary_key=has_primary_key,
+        write_mode=write_mode,
+        allow_append_only=allow_append_only,
+        callable_source=callable_source,
+        has_lsn_column=has_lsn_column,
+        dest_cfg=dest_cfg,
+    )
+
+
+def operator_pinned_delivery(requested: str | None) -> bool:
+    """True when the operator named a guarantee. ``auto`` / empty is not a pin."""
+    raw = (requested or "").strip().lower().replace("-", "_")
+    if raw in {"eos", "exactlyonce"}:
+        raw = DELIVERY_CLASS_EXACTLY_ONCE
+    return raw not in _AUTO_TOKENS
+
+
+def delivery_for_batch(
+    guarantee: str | None,
+    resume_token: Any,
+    *,
+    pinned: bool,
+) -> str:
+    """One batch's delivery. Unpinned EOS without a log position stays at-least-once.
+
+    ``auto`` may already have been rewritten to ``exactly_once`` because the
+    contract declared ``cdc_position``. That declaration is not a captured
+    LSN, GTID, SCN, or change-stream resume token. Query CDC and a snapshot
+    page that has not captured a log position must not fail the job, and
+    must not invent a position. An operator pin of ``exactly_once`` still
+    fails closed.
+    """
+    raw = normalize_delivery_guarantee(guarantee)
+    if raw != DELIVERY_CLASS_EXACTLY_ONCE:
+        return DELIVERY_CLASS_AT_LEAST_ONCE
+    if batch_lsn(resume_token):
+        return DELIVERY_CLASS_EXACTLY_ONCE
+    if pinned:
+        require_batch_lsn(resume_token)
+    return DELIVERY_CLASS_AT_LEAST_ONCE
 
 
 def require_batch_lsn(resume_token: Any) -> str:
@@ -1621,6 +2198,32 @@ def chaos_crash_after_commit_redelivery(
     return store
 
 
+def route_declares_log_position(stream_contracts: list[Any] | None) -> bool:
+    """True only when every selected contract declares a change-stream position.
+
+    ``modification_timestamp``, ``monotonic_sequence``, ``insert_only``, and a
+    blank declaration are not an LSN/GTID/SCN. Exactly-once compares those
+    positions. A route that has not declared ``cdc_position`` stays
+    at-least-once. One non-log stream keeps the whole route there: the
+    request carries one delivery guarantee.
+    """
+    saw = False
+    for raw in stream_contracts or []:
+        if isinstance(raw, dict):
+            if raw.get("selected", True) is False:
+                continue
+            semantics = raw.get("cursor_semantics") or ""
+        else:
+            if getattr(raw, "selected", True) is False:
+                continue
+            semantics = getattr(raw, "cursor_semantics", "") or ""
+        saw = True
+        token = str(semantics).strip().lower().replace("-", "_").replace(" ", "_")
+        if token != "cdc_position":
+            return False
+    return saw
+
+
 def route_has_cdc_pk(stream_contracts: list[Any] | None, primary_key: str = "") -> bool:
     if (primary_key or "").strip():
         return True
@@ -1648,6 +2251,48 @@ def dest_allow_append_only(destination: Any) -> bool:
     return False
 
 
+def dest_require_exactly_once(destination: Any, dest_cfg: dict[str, Any] | None = None) -> bool:
+    """``require_exactly_once=true`` on the destination (extra, config, or cfg)."""
+    sources = (getattr(destination, "extra", None), getattr(destination, "config", None), dest_cfg)
+    return any(
+        cfg_truthy(src, "require_exactly_once", "cdc_require_exactly_once")
+        for src in sources
+        if isinstance(src, dict)
+    )
+
+
+def cfg_truthy(cfg: dict[str, Any] | None, *keys: str) -> bool:
+    """True when any key is ``True`` or a truthy string ("1", "true", "yes", "on")."""
+    raw = cfg or {}
+    for key in keys:
+        val = raw.get(key)
+        if val is True:
+            return True
+        if isinstance(val, str) and val.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
+    return False
+
+
+def apply_require_exactly_once(
+    delivery_guarantee: str | None, *, required: bool, pinned: bool = False
+) -> str | None:
+    """Promote delivery to exactly_once when the pipeline requires it.
+
+    An explicit at_least_once pin contradicts ``require_exactly_once`` and
+    fails closed instead of silently downgrading.
+    """
+    if not required:
+        return delivery_guarantee
+    raw = normalize_delivery_guarantee(delivery_guarantee)
+    if pinned and raw == DELIVERY_CLASS_AT_LEAST_ONCE:
+        raise ExactlyOnceRouteError(
+            "require_exactly_once=true conflicts with an explicit "
+            "delivery_guarantee=at_least_once pin. Remove one of them.",
+            reason="exactly_once_conflicting_pin",
+        )
+    return DELIVERY_CLASS_EXACTLY_ONCE
+
+
 def preflight_delivery_gate(
     *,
     sync_mode: str,
@@ -1657,11 +2302,60 @@ def preflight_delivery_gate(
     allow_append_only: bool = False,
     callable_source: bool = False,
     source_type: str = "",
+    has_lsn_column: bool | None = True,
+    dest_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Validate-time EOS gate. Absent when the route is not CDC and did not opt in."""
-    requested = normalize_delivery_guarantee(delivery_guarantee)
+    raw = (delivery_guarantee or "").strip().lower().replace("-", "_")
+    if raw in {"eos", "exactlyonce"}:
+        raw = DELIVERY_CLASS_EXACTLY_ONCE
     mode = (sync_mode or "").strip().lower().replace("-", "_")
     is_cdc = mode in {"cdc", "cdc_incremental"}
+    if raw in _AUTO_TOKENS:
+        eligibility = classify_exactly_once_route(
+            dest_type=dest_type,
+            sync_mode=sync_mode,
+            has_primary_key=has_primary_key,
+            allow_append_only=allow_append_only,
+            callable_source=callable_source,
+            source_type=source_type,
+            has_lsn_column=has_lsn_column,
+            dest_cfg=dest_cfg,
+        )
+        if eligibility.eligible:
+            details = eligibility.to_dict()
+            details["delivery_guarantee"] = DELIVERY_CLASS_EXACTLY_ONCE
+            details["selected_by"] = "route_default"
+            return {
+                "id": "g16_cdc_delivery",
+                "status": "pass",
+                "message": (
+                    "This route can commit apply and the watermark together "
+                    "(dest-owned exactly-once) once the source change log is "
+                    "readable. Until that log is readable, delivery stays "
+                    "at-least-once upsert."
+                ),
+                "duration_ms": 0,
+                "details": details,
+            }
+        if not is_cdc:
+            return None
+        details = eligibility.to_dict()
+        details["delivery_guarantee"] = DELIVERY_CLASS_AT_LEAST_ONCE
+        details["selected_by"] = "route_default"
+        return {
+            "id": "g16_cdc_delivery",
+            "status": "pass",
+            "message": (
+                "CDC stays at-least-once upsert "
+                f"({eligibility.reason}). Dest-owned exactly-once is the "
+                "default only when this route can commit apply and the "
+                "watermark together."
+            ),
+            "duration_ms": 0,
+            "details": details,
+        }
+    requested = raw or DELIVERY_CLASS_AT_LEAST_ONCE
     if requested != DELIVERY_CLASS_EXACTLY_ONCE and not is_cdc:
         return None
     if requested != DELIVERY_CLASS_EXACTLY_ONCE:
@@ -1669,14 +2363,16 @@ def preflight_delivery_gate(
             "id": "g16_cdc_delivery",
             "status": "pass",
             "message": (
-                "CDC delivery default is at-least-once upsert — "
-                "exactly-once is opt-in dest-owned watermark, not platform-wide"
+                "Operator pinned at-least-once upsert. Dest-owned exactly-once "
+                "stays available when this route can commit apply and the "
+                "watermark together. The platform does not claim it for every route."
             ),
             "duration_ms": 0,
             "details": {
                 "delivery_guarantee": DELIVERY_CLASS_AT_LEAST_ONCE,
                 "platform_claimed": PLATFORM_EXACTLY_ONCE_CLAIMED,
                 "algorithm": ALGORITHM,
+                "selected_by": "operator_pin",
             },
         }
     eligibility = classify_exactly_once_route(
@@ -1686,6 +2382,8 @@ def preflight_delivery_gate(
         allow_append_only=allow_append_only,
         callable_source=callable_source,
         source_type=source_type,
+        has_lsn_column=has_lsn_column,
+        dest_cfg=dest_cfg,
     )
     details = eligibility.to_dict()
     details["delivery_guarantee"] = DELIVERY_CLASS_EXACTLY_ONCE

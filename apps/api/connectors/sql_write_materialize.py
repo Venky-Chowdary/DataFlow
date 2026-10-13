@@ -180,6 +180,9 @@ class FinishedSqlBundle:
     source_row_count: int
     target_types: list[str] = field(default_factory=list)
     bind_types: list[str] = field(default_factory=list)
+    #: In-bundle last-wins / highest-LSN images that were not written because
+    #: a later image of the same key is in this bundle. They are not quarantine.
+    collapsed_duplicate_rows: int = 0
 
 
 class SqlWriteAccumulator:
@@ -211,7 +214,16 @@ class SqlWriteAccumulator:
         self.transform_errors: list[str] = []
         self.writing = True
         self.accepted_row_count = 0
+        self.collapsed_duplicate_rows = 0
         self.batch_sizes: list[int] = []
+
+    def note_collapsed_duplicates(self, count: int) -> None:
+        """Older images of a key already represented by the survivor.
+
+        Upsert writes the latest row. Charging the earlier image to
+        ``rejected_rows`` quarantines a key that landed.
+        """
+        self.collapsed_duplicate_rows += max(0, int(count or 0))
 
     def note_rejects(
         self,
@@ -269,6 +281,8 @@ class SqlWriteAccumulator:
             conflict_columns=conflict_columns or None,
         )
         meta["source_row_count"] = self.accepted_row_count
+        if self.collapsed_duplicate_rows:
+            meta["collapsed_duplicate_rows"] = self.collapsed_duplicate_rows
         return meta
 
     def abort_error(
@@ -515,10 +529,12 @@ def finish_sql_mapped_bundle(
     )
     sparse: list[tuple] = []
     sparse_nums: list[int] = []
+    collapsed = 0
     if write_mode == "upsert" and conflict_columns:
         mapped, sparse, nums, sparse_nums = split_dense_sparse_rows_with_numbers(
             mapped, source_row_numbers=nums
         )
+        before_dense = len(mapped)
         if DF_LSN_COL in target_cols:
             mapped, nums = dedupe_rows_by_pk_and_lsn_keeping_numbers(
                 mapped, conflict_columns, target_cols, nums
@@ -527,6 +543,9 @@ def finish_sql_mapped_bundle(
             mapped, nums = dedupe_rows_keeping_numbers(
                 mapped, conflict_columns, target_cols, nums
             )
+        # Last-wins (or highest LSN) is the write. The earlier image is not a
+        # rejected row — the destination receives the survivor.
+        collapsed = before_dense - len(mapped)
     return FinishedSqlBundle(
         start=bundle.start,
         dense_rows=mapped,
@@ -538,6 +557,7 @@ def finish_sql_mapped_bundle(
         transform_errors=errors,
         source_row_count=bundle.source_row_count,
         target_types=list(target_types),
+        collapsed_duplicate_rows=collapsed,
     )
 
 

@@ -1,8 +1,8 @@
-"""G19 must still see the doomed live carrier after overwrite type hygiene.
+"""G19 names a carrier only when overwrite really DROP+CREATEs the table.
 
-Execute clears ``destination_column_types`` so G3/G6 do not judge a table the
-run is about to drop. G19 is the one gate that must keep those types — via
-``destination_live_column_types``. Validate now stamps the same kwarg.
+Relational overwrite empties the table and keeps its columns, so a narrower
+INTEGER is a live write (G3/G6), not a silent replacement (G19). Warehouses
+that still replace the object keep the G19 block.
 
 Does not claim Track A 100K, CRM overwrite, or a signed-contract Execute.
 """
@@ -43,40 +43,47 @@ def _by_id(pf: dict) -> dict:
     return {g["id"]: g for g in pf["gates"]}
 
 
-def test_g19_blocks_when_execute_cleared_dest_types_but_kept_live() -> None:
+def _blocks(pf: dict, gate_id: str) -> dict:
+    gate = _by_id(pf)[gate_id]
+    assert gate["status"] == "block", gate
+    return gate
+
+
+def test_g19_skips_when_postgres_overwrite_keeps_the_integer() -> None:
+    """Live INTEGER stays. G19 does not pretend the column will be replaced."""
     pf = run_file_preflight(
         **_BASE,
         destination_column_types={},
         destination_live_column_types={"amt_dec": "INTEGER"},
     )
     gate = _by_id(pf)[GATE]
-    assert gate["status"] == "block", gate
-    assert "amt_dec" in gate["message"]
+    assert gate["status"] == "skip", gate
+    assert "as declared" in gate["message"]
     assert pf["passed"] is False
+    _blocks(pf, "g3_schema_contract")
+    assert "amt_dec" in _by_id(pf)["g6_target_ddl"]["message"]
 
 
-def test_g19_blocks_when_validate_passes_live_types_as_destination_column_types() -> None:
+def test_g19_skips_when_validate_passes_the_live_integer() -> None:
     pf = run_file_preflight(
         **_BASE,
         destination_column_types={"amt_dec": "INTEGER"},
     )
-    gate = _by_id(pf)[GATE]
-    assert gate["status"] == "block", gate
+    assert _by_id(pf)[GATE]["status"] == "skip"
     assert pf["passed"] is False
+    _blocks(pf, "g6_target_ddl")
 
 
-def test_g19_prefers_live_types_over_planned_recreate_ddl() -> None:
-    """Planned NUMERIC(20,9) would pass G19; the standing INTEGER must win."""
+def test_live_integer_wins_over_a_planned_wider_type() -> None:
+    """Planned NUMERIC(20,9) would fit. The standing INTEGER is the contract."""
     pf = run_file_preflight(
         **_BASE,
         destination_column_types={"amt_dec": "NUMERIC(20,9)"},
         destination_live_column_types={"amt_dec": "INTEGER"},
     )
-    gate = _by_id(pf)[GATE]
-    assert gate["status"] == "block", gate
-    assert gate["details"]["replacements"][0]["declared_destination_type"].upper().startswith(
-        "INT"
-    )
+    assert _by_id(pf)[GATE]["status"] == "skip"
+    g6 = _blocks(pf, "g6_target_ddl")
+    assert "INTEGER" in g6["message"].upper()
 
 
 def test_g19_skips_on_append_so_g3_owns_the_live_narrowing() -> None:
@@ -87,32 +94,54 @@ def test_g19_skips_on_append_so_g3_owns_the_live_narrowing() -> None:
     assert _by_id(pf)[GATE]["status"] == "skip"
 
 
+def test_snowflake_overwrite_still_blocks_when_it_replaces_a_narrow_column() -> None:
+    pf = run_file_preflight(
+        **{
+            **_BASE,
+            "columns": ["name"],
+            "column_types": {"name": "VARCHAR(200)"},
+            "mappings": [{"source": "name", "target": "name", "confidence": 0.99}],
+            "sample_rows": [{"name": "x" * 40}],
+            "destination_db_type": "snowflake",
+        },
+        destination_column_types={"name": "VARCHAR(10)"},
+    )
+    gate = _by_id(pf)[GATE]
+    assert gate["status"] == "block", gate
+    assert "name" in gate["message"]
+
+
 def test_signed_continue_contract_demotes_g19_to_warn() -> None:
+    """A signed contract demotes G19 only when the run really replaces the column."""
     from services.migration_risk_contract import create_migration_risk_contract
 
     contract = create_migration_risk_contract(
-        column="amt_dec",
-        source_type="DECIMAL(20,9)",
-        destination_type="NUMERIC(20,9)",
+        column="name",
+        source_type="VARCHAR(200)",
+        destination_type="VARCHAR(200)",
         approved_by="cfo@bank.example",
-        reason="Integer column predates the fractional amounts; finance signed off.",
+        reason="The warehouse recreate widens the standing VARCHAR(10).",
         execution_policy="CAST_AND_CONTINUE",
         table="ledger",
     ).to_dict()
-    kwargs = {
-        **_BASE,
-        "mappings": [
-            {
-                "source": "amt_dec",
-                "target": "amt_dec",
-                "confidence": 0.99,
-                "risk_contract": contract,
-            }
-        ],
-        "destination_column_types": {},
-        "destination_live_column_types": {"amt_dec": "INTEGER"},
-    }
-    pf = run_file_preflight(**kwargs)
+    pf = run_file_preflight(
+        **{
+            **_BASE,
+            "columns": ["name"],
+            "column_types": {"name": "VARCHAR(200)"},
+            "sample_rows": [{"name": "x" * 40}],
+            "destination_db_type": "snowflake",
+            "mappings": [
+                {
+                    "source": "name",
+                    "target": "name",
+                    "confidence": 0.99,
+                    "risk_contract": contract,
+                }
+            ],
+        },
+        destination_column_types={"name": "VARCHAR(10)"},
+    )
     gate = _by_id(pf)[GATE]
     assert gate["status"] == "warn", gate
     assert gate["details"].get("blocks_execute") is False

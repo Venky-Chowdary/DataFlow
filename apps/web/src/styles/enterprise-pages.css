@@ -408,7 +408,7 @@
 }
 
 .df2-docs-flow-particle {
-  filter: drop-shadow(0 0 4px rgba(37, 99, 235, 0.5));
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--df-logo-ink) 55%, transparent));
 }
 
 .df2-docs-flow-particle--lag {
@@ -420,7 +420,7 @@
 }
 
 .df2-docs-pulse-ring {
-  fill: #10b981;
+  fill: var(--df-logo-ink);
   animation: df2-docs-pulse 1.8s ease-out infinite;
 }
 

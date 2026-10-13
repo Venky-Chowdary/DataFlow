@@ -19,7 +19,7 @@ def test_build_and_verify_roundtrip():
     )
     assert pack["content_sha256"]
     assert pack["signature"]["alg"] == "HMAC-SHA256"
-    assert pack["delivery_semantics"]["cdc_default"] == "at_least_once"
+    assert pack["delivery_semantics"]["cdc_default"] == "auto"
     assert pack["delivery_semantics"]["exactly_once"] is False
     assert pack["delivery_semantics"]["at_least_once"] is True
     assert pack["delivery_semantics"]["at_most_once"] is False
@@ -144,8 +144,8 @@ def test_cdc_count_scope_does_not_ladder_veto_leftover_extras():
     assert out["passed"] is True
     assurance = classify_post_write_assurance(out)
     assert assurance["migration_proven"] is False
-    assert assurance["post_write_verified"] is True
-    assert assurance["claim_level"] == CDC_SOURCE_IMAGE_COUNT
+    assert assurance["post_write_verified"] is False
+    assert assurance["claim_level"] == "failed"
 
 
 def test_overwrite_ladder_fail_still_vetoes_when_not_cdc_count_scope():

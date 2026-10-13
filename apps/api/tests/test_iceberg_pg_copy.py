@@ -6,6 +6,7 @@ import os
 import socket
 import sys
 import uuid
+from collections import Counter
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -29,6 +30,9 @@ REST_URI = os.environ.get("DATAFLOW_ICEBERG_REST_URI", "http://127.0.0.1:8181").
 REST_WAREHOUSE = os.environ.get(
     "DATAFLOW_ICEBERG_REST_WAREHOUSE", "file:///tmp/iceberg-rest-wh"
 )
+S3_ENDPOINT = os.environ.get("DATAFLOW_ICEBERG_S3_ENDPOINT", "http://127.0.0.1:9000")
+MINIO_USER = os.environ.get("MINIO_ROOT_USER", "dataflow")
+MINIO_PASSWORD = os.environ.get("MINIO_ROOT_PASSWORD", "dataflowsecret")
 
 
 def _rest_reachable() -> bool:
@@ -76,7 +80,19 @@ def _iceberg_cfg(table: str) -> dict:
         "warehouse": REST_WAREHOUSE,
         "table": table,
         "schema": "default",
-        "extra": {"catalog_type": "rest", "warehouse": REST_WAREHOUSE},
+        "extra": _iceberg_extra(),
+    }
+
+
+def _iceberg_extra() -> dict:
+    return {
+        "catalog_type": "rest",
+        "warehouse": REST_WAREHOUSE,
+        "s3.endpoint": S3_ENDPOINT,
+        "s3.access-key-id": MINIO_USER,
+        "s3.secret-access-key": MINIO_PASSWORD,
+        "s3.path-style-access": "true",
+        "s3.region": "us-east-1",
     }
 
 
@@ -173,6 +189,175 @@ def test_iceberg_pg_copy_kill_switch(monkeypatch):
         )
 
 
+@pytest.mark.parametrize(
+    ("has_table_io", "fail_read"),
+    [(True, False), (False, False), (True, True)],
+)
+def test_arrow_s3_snapshot_uses_catalog_fileio_and_redacts_secrets(
+    monkeypatch, caplog, has_table_io, fail_read
+):
+    import io
+
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    import pyiceberg.io
+
+    from connectors.iceberg_catalog import parse_iceberg_catalog_config
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_iceberg_pg import _arrow_from_iceberg_files
+
+    secret = "s3-read-secret-sentinel"
+    endpoint = {
+        "connection_string": REST_URI,
+        "warehouse": "s3://warehouse",
+        "table": "events",
+        "schema": "default",
+        "extra": {
+            "catalog_type": "rest",
+            "s3.endpoint": S3_ENDPOINT,
+            "s3.access-key-id": "read-access",
+            "s3.secret-access-key": secret,
+            "s3.path-style-access": "true",
+            "s3.region": "us-east-1",
+        },
+    }
+    properties = parse_iceberg_catalog_config(endpoint)["properties"]
+    sink = pa.BufferOutputStream()
+    pq.write_table(pa.table({"id": [1, 2]}), sink)
+    parquet_bytes = sink.getvalue().to_pybytes()
+    opened: list[str] = []
+    loaded_properties: list[dict] = []
+
+    class _Input:
+        def open(self):
+            if fail_read:
+                raise RuntimeError(secret)
+            return io.BytesIO(parquet_bytes)
+
+    class _FileIO:
+        def new_input(self, location):
+            opened.append(location)
+            return _Input()
+
+    class _Field:
+        name = "id"
+        field_type = "long"
+
+    class _Schema:
+        fields = [_Field()]
+
+    class _Table:
+        io = _FileIO() if has_table_io else None
+
+        def schema(self):
+            return _Schema()
+
+    class _Catalog:
+        def load_table(self, _identifier):
+            return _Table()
+
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda *_args, **_kwargs: _Catalog(),
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_catalog_snapshot",
+        lambda _endpoint: (["s3://bucket/data.parquet"], None),
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_data_warehouse",
+        lambda *_args, **_kwargs: "s3://bucket/warehouse",
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_local_path",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        pyiceberg.io,
+        "load_file_io",
+        lambda props, **_kwargs: loaded_properties.append(props) or _FileIO(),
+    )
+
+    caplog.set_level("DEBUG")
+    if fail_read:
+        with pytest.raises(FastPathUnavailable) as exc_info:
+            _arrow_from_iceberg_files(endpoint, ["id"])
+        assert secret not in str(exc_info.value)
+    else:
+        result = _arrow_from_iceberg_files(endpoint, ["id"])
+        assert result.to_pydict() == {"id": [1, 2]}
+        assert secret not in repr(result)
+    assert opened == ["s3://bucket/data.parquet"]
+    assert loaded_properties == ([] if has_table_io else [properties])
+    assert secret not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("uri", "message"),
+    [
+        ("gs://bucket/data.parquet", "scheme gs"),
+        ("s3://bucket/data.parquet", "configured catalog S3 properties"),
+    ],
+)
+def test_arrow_refuses_remote_snapshot_without_supported_fileio(
+    monkeypatch, uri, message
+):
+    pytest.importorskip("pyarrow")
+    import pyiceberg.io
+
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_iceberg_pg import _arrow_from_iceberg_files
+
+    class _Field:
+        name = "id"
+        field_type = "long"
+
+    class _Schema:
+        fields = [_Field()]
+
+    class _Table:
+        io = None
+
+        def schema(self):
+            return _Schema()
+
+    class _Catalog:
+        def load_table(self, _identifier):
+            return _Table()
+
+    endpoint = {
+        "connection_string": REST_URI,
+        "warehouse": "s3://warehouse",
+        "table": "events",
+        "schema": "default",
+        "extra": {"catalog_type": "rest"},
+    }
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda *_args, **_kwargs: _Catalog(),
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_catalog_snapshot",
+        lambda _endpoint: ([uri], None),
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_data_warehouse",
+        lambda *_args, **_kwargs: "s3://bucket/warehouse",
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._iceberg_local_path",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        pyiceberg.io,
+        "load_file_io",
+        lambda *_args, **_kwargs: pytest.fail("unconfigured FileIO was loaded"),
+    )
+
+    with pytest.raises(FastPathUnavailable, match=message):
+        _arrow_from_iceberg_files(endpoint, ["id"])
+
+
 @requires_rest
 def test_live_iceberg_pg_dest_count(monkeypatch):
     pytest.importorskip("pyiceberg")
@@ -206,10 +391,70 @@ def test_live_iceberg_pg_dest_count(monkeypatch):
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
             assert int(cur.fetchone()[0]) == 800
+        from services.million_row_proof import ensure_memory_job_store_if_mongo_down
+        from services.mongodb_service import get_mongodb_service
+        from src.transfer.models import EndpointConfig
+        from src.transfer.stream import stream_database_transfer
+
+        ensure_memory_job_store_if_mongo_down()
+        job_id = f"ice-pg-copy-{tag}"
+        get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
+        source = EndpointConfig.from_dict(
+            "database",
+            {
+                **_iceberg_cfg(ice),
+                "format": "iceberg",
+                "extra": _iceberg_extra(),
+            },
+        )
+        destination = EndpointConfig.from_dict(
+            "database", {**_pg_cfg(), "format": "postgresql", "table": dest}
+        )
+        transferred, _ddl, summary, _columns = stream_database_transfer(
+            source,
+            destination,
+            [
+                {"source": "id", "target": "id", "type": "BIGINT", "transform": "none"},
+                {
+                    "source": "label",
+                    "target": "label",
+                    "type": "VARCHAR(32)",
+                    "transform": "none",
+                },
+            ],
+            {"id": "BIGINT", "label": "VARCHAR(32)"},
+            sync_mode="full_refresh_append",
+            job_id=job_id,
+        )
+        assert transferred == 800
+        assert summary.get("copy_fast_path") == "declined"
+        assert "COPY fast path declined:" in summary.get("copy_decline_reason", "")
+        assert "continuing on the row path" in summary.get("copy_decline_reason", "")
+        with pg.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
+            assert int(cur.fetchone()[0]) == 1600
             cur.execute(f'SELECT id, label FROM public."{dest}" WHERE id = 1')
             row = cur.fetchone()
             assert int(row[0]) == 1
             assert str(row[1]) == "r1"
+            cur.execute(f'SELECT id, label FROM public."{src}" ORDER BY id')
+            source_rows = cur.fetchall()
+            cur.execute(f'SELECT id, label FROM public."{dest}" ORDER BY id')
+            destination_rows = cur.fetchall()
+            source_counts = Counter(
+                (int(source_id), str(label)) for source_id, label in source_rows
+            )
+            expected_destination_counts = Counter(
+                {
+                    row: multiplicity * 2
+                    for row, multiplicity in source_counts.items()
+                }
+            )
+            actual_destination_counts = Counter(
+                (int(destination_id), str(label))
+                for destination_id, label in destination_rows
+            )
+            assert actual_destination_counts == expected_destination_counts
     finally:
         with pg.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS public."{src}"')
@@ -309,19 +554,19 @@ def test_live_iceberg_pg_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_iceberg_to_postgres(
-            source_cfg=_iceberg_cfg(ice),
-            source_schema="default",
-            source_table=ice,
-            dest_cfg=_pg_cfg(),
-            dest_schema="public",
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            pg_ddls=["BIGINT", "VARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        with pytest.raises(FastPathUnavailable) as exc_info:
+            copy_iceberg_to_postgres(
+                source_cfg=_iceberg_cfg(ice),
+                source_schema="default",
+                source_table=ice,
+                dest_cfg=_pg_cfg(),
+                dest_schema="public",
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                pg_ddls=["BIGINT", "VARCHAR(32)"],
+                replace_destination=False,
+            )
+        assert dest in str(exc_info.value)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
             assert int(cur.fetchone()[0]) == 800
@@ -355,7 +600,7 @@ def test_live_iceberg_pg_occupied_mismatch_declines():
                 f'INSERT INTO public."{dest}" (id, label) VALUES (1, \'ghost\')'
             )
         pg.commit()
-        with pytest.raises(FastPathUnavailable, match="occupied PostgreSQL dest"):
+        with pytest.raises(FastPathUnavailable) as exc_info:
             copy_iceberg_to_postgres(
                 source_cfg=_iceberg_cfg(ice),
                 source_schema="default",
@@ -367,6 +612,7 @@ def test_live_iceberg_pg_occupied_mismatch_declines():
                 pg_ddls=["BIGINT", "VARCHAR(32)"],
                 replace_destination=False,
             )
+        assert dest in str(exc_info.value)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM public."{dest}"')
             assert int(cur.fetchone()[0]) == 1
@@ -504,7 +750,7 @@ def test_live_iceberg_pg_stream_load_method(monkeypatch):
                 "warehouse": REST_WAREHOUSE,
                 "table": ice,
                 "schema": "default",
-                "extra": {"catalog_type": "rest", "warehouse": REST_WAREHOUSE},
+                "extra": _iceberg_extra(),
             },
         )
         destination = EndpointConfig.from_dict(

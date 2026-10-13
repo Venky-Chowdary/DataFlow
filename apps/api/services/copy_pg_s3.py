@@ -58,6 +58,25 @@ def _pg_ident(name: str) -> str:
     return _quote(name)
 
 
+def _pg_csv_export_expr(source: str, declared: str, target: str) -> str:
+    """Project one column as operator CSV text.
+
+    PostgreSQL COPY writes a boolean as ``t``/``f``. The file the operator
+    downloads spells ``true``/``false``. NULL is an empty field (the COPY
+    ``NULL ''`` clause), not ``\\N``.
+    """
+    from services.copy_pg_mysql import _pg_base
+
+    ident = _pg_ident(source)
+    alias = f" AS {_pg_ident(target)}" if source != target else ""
+    if _pg_base(declared) in {"BOOLEAN", "BOOL"}:
+        return (
+            f"CASE WHEN {ident} THEN 'true' WHEN NOT {ident} THEN 'false' "
+            f"ELSE NULL END{alias}"
+        )
+    return f"{ident}{alias}"
+
+
 def copy_postgres_to_s3(
     *,
     source_cfg: dict[str, Any],
@@ -141,12 +160,14 @@ def copy_postgres_to_s3(
         created_here = dest_count_before == 0 or replace_destination
 
         select_list = ", ".join(
-            f"{_pg_ident(src)} AS {_pg_ident(tgt)}" if src != tgt else _pg_ident(src)
+            _pg_csv_export_expr(src, live_l.get(src.lower()) or "", tgt)
             for src, tgt in pairs
         )
+        # Operator CSV: an empty field is NULL, a boolean is true/false.
+        # PostgreSQL's default COPY text (\\N and t/f) is not that file.
         copy_sql = (
             f"COPY (SELECT {select_list} FROM {source_ref}) "  # nosec B608
-            f"TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER {delim}, NULL '\\N')"
+            f"TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER {delim}, NULL '')"
         )
         fd, tmp_path = tempfile.mkstemp(prefix="df-pg-s3-", suffix=f".{ext}")
         os.close(fd)

@@ -1,0 +1,14 @@
+{
+  "values": [
+    {
+      "id": "2002",
+      "key": "DOC",
+      "name": "Synthetic Documentation Project",
+      "projectTypeKey": "service_desk",
+      "isPrivate": true
+    }
+  ],
+  "startAt": 1,
+  "maxResults": 100,
+  "isLast": true
+}

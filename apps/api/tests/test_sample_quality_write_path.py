@@ -45,23 +45,34 @@ def test_locale_money_binds_for_iqr():
     assert "non-numeric" not in issues
 
 
-def test_sample_wire_collapses_reader_null():
-    assert _sample_wire(None) == ""
+def test_sample_wire_keeps_null_and_empty_string_distinct():
+    """QA T19: one NULL wire spelling; '' stays a stored value."""
+    assert _sample_wire(None) == SQL_NULL_SENTINEL
+    assert _sample_wire(SQL_NULL_SENTINEL) == SQL_NULL_SENTINEL
     assert _sample_wire("") == ""
-    assert _sample_wire("   ") == ""
-    assert _sample_wire(SQL_NULL_SENTINEL) == ""
     assert _sample_wire("kept") == "kept"
     assert _sample_wire(0) == "0"
 
 
-def test_reader_null_is_absence_not_a_token():
+def test_reader_null_is_absence_and_text_empty_is_data():
     report = analyze_column_quality(
         "note",
-        [SQL_NULL_SENTINEL, "", None, "kept"],
+        [_sample_wire(v) for v in (SQL_NULL_SENTINEL, "", None, "kept")],
         inferred_type="VARCHAR",
     )
-    assert report["null_rate"] == 0.75
+    # Two NULLs of four; '' on a text carrier is stored data, not a null.
+    assert report["null_rate"] == 0.5
     assert report["distinct_count"] == 1
+    assert any("empty string" in i for i in report["issues"])
+
+
+def test_numeric_blank_counts_as_absent():
+    """On numeric carriers a blank wire cell is written as NULL."""
+    report = analyze_column_quality(
+        "amount", [_sample_wire(v) for v in ("", None, "1.5", "2.5")],
+        inferred_type="DECIMAL",
+    )
+    assert report["null_rate"] == 0.5
 
 
 def test_dataset_null_and_duplicate_share_one_absence_wire():

@@ -1,10 +1,12 @@
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
+import { readCoercedNullRows, readJobStreams, readRejectedDetails, readRejectedRows } from "./jobEvidence";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
 import { clearSession, getAuthToken, getSessionActor } from "./session";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
 import { readOptionsPayload } from "./readOptions";
+import type { RuleCompileReport } from "./businessRules";
 import type {
   ShapeCatalog,
   ShapePreviewResponse,
@@ -607,6 +609,10 @@ export async function previewShapeRecipe(payload: {
   column_types?: Record<string, string>;
   target_schema?: Record<string, string>;
   include_profile?: boolean;
+  /** Sample's table when several streams share one recipe. */
+  focus_table?: string;
+  source_tables?: string[];
+  source_catalog?: Record<string, string[]>;
 }): Promise<ShapePreviewResponse> {
   const res = await apiFetch(`${API_BASE}/shape/preview`, {
     method: "POST",
@@ -615,6 +621,42 @@ export async function previewShapeRecipe(payload: {
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw await apiErrorFrom(res, "Shape preview failed");
+  return res.json();
+}
+
+export async function importBusinessRules(payload: {
+  file: File;
+  sourceColumns?: string[];
+  destColumns?: string[];
+  sourceTable?: string;
+  destTable?: string;
+  sourceTables?: string[];
+  sourceCatalog?: Record<string, string[]>;
+  destTables?: string[];
+  destCatalog?: Record<string, string[]>;
+  sourceTypes?: Record<string, string>;
+  destTypes?: Record<string, string>;
+  syncMode?: string;
+}): Promise<RuleCompileReport> {
+  const form = new FormData();
+  form.append("file", payload.file);
+  form.append("source_columns", JSON.stringify(payload.sourceColumns ?? []));
+  form.append("dest_columns", JSON.stringify(payload.destColumns ?? []));
+  form.append("source_table", payload.sourceTable ?? "");
+  form.append("dest_table", payload.destTable ?? "");
+  form.append("source_tables", JSON.stringify(payload.sourceTables ?? []));
+  form.append("source_catalog", JSON.stringify(payload.sourceCatalog ?? {}));
+  form.append("dest_tables", JSON.stringify(payload.destTables ?? []));
+  form.append("dest_catalog", JSON.stringify(payload.destCatalog ?? {}));
+  form.append("source_types", JSON.stringify(payload.sourceTypes ?? {}));
+  form.append("dest_types", JSON.stringify(payload.destTypes ?? {}));
+  form.append("sync_mode", payload.syncMode ?? "");
+  const res = await apiFetch(`${API_BASE}/transfer/rules/import`, {
+    method: "POST",
+    body: form,
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not read the rule file");
   return res.json();
 }
 
@@ -981,6 +1023,11 @@ export async function confirmCopilotAction(payload: {
   preflight_run_id?: string;
   /** run_schedule */
   schedule_id?: string;
+  /** studio_remediation */
+  remediation_kind?: "open_bad_data_fix" | "quarantine_and_rerun";
+  run_id?: string;
+  label?: string;
+  destructive?: boolean;
 }> {
   const res = await apiFetch(`${API_BASE}/copilot/confirm`, {
     method: "POST",
@@ -1128,7 +1175,9 @@ export async function fetchConnectors(): Promise<Connector[]> {
       created_at: String(c.created_at ?? new Date().toISOString()),
       // Preserve tri-state: true / false / undefined (never tested).
       last_test_ok: lastTestOk,
+      last_tested_at: c.last_tested_at ? String(c.last_tested_at) : null,
       last_used_at: c.last_used_at ? String(c.last_used_at) : null,
+      last_transfer_ok_at: c.last_transfer_ok_at ? String(c.last_transfer_ok_at) : null,
     };
   };
 
@@ -1417,6 +1466,14 @@ export function streamJobProgress(
     const ds = raw.destination_summary && typeof raw.destination_summary === "object"
       ? raw.destination_summary as Record<string, unknown>
       : undefined;
+    const evidence = {
+      streams: raw.streams,
+      rejected_rows: raw.rejected_rows,
+      coerced_null_rows: raw.coerced_null_rows,
+      rejected_details: raw.rejected_details,
+      destination_summary: ds,
+    };
+    const streamHealth = readJobStreams(evidence);
     const rpsFromRoot = raw.records_per_second != null ? Number(raw.records_per_second) : undefined;
     const rpsFromDs = ds?.records_per_second != null ? Number(ds.records_per_second) : undefined;
     return {
@@ -1450,9 +1507,9 @@ export function streamJobProgress(
         : ds?.chunk_size != null
           ? Number(ds.chunk_size)
           : undefined,
-      rejected_rows: raw.rejected_rows != null ? Number(raw.rejected_rows) : undefined,
-      coerced_null_rows: raw.coerced_null_rows != null ? Number(raw.coerced_null_rows) : undefined,
-      rejected_details: Array.isArray(raw.rejected_details) ? raw.rejected_details as JobProgress["rejected_details"] : undefined,
+      rejected_rows: readRejectedRows(evidence),
+      coerced_null_rows: readCoercedNullRows(evidence),
+      rejected_details: readRejectedDetails(evidence),
       destination_summary: ds,
       load_history_report: raw.load_history_report && typeof raw.load_history_report === "object"
         ? raw.load_history_report as JobProgress["load_history_report"]
@@ -1582,7 +1639,7 @@ export function streamJobProgress(
       row_accounting: raw.row_accounting && typeof raw.row_accounting === "object"
         ? raw.row_accounting as JobProgress["row_accounting"]
         : undefined,
-      streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
+      streams: streamHealth.length ? streamHealth : undefined,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
         : undefined,
@@ -1645,6 +1702,7 @@ export function streamJobProgress(
       ? `${API_BASE}/connectors/jobs/${jobId}/stream?token=${encodeURIComponent(token)}`
       : `${API_BASE}/connectors/jobs/${jobId}/stream`;
     const es = new EventSource(streamUrl);
+    let closedTerminal = false;
     es.onmessage = (ev) => {
       if (stopped) return;
       try {
@@ -1656,6 +1714,7 @@ export function streamJobProgress(
           || job.status === "failed"
           || job.status === "cancelled"
         ) {
+          closedTerminal = true;
           es.close();
         }
       } catch {
@@ -1664,6 +1723,9 @@ export function streamJobProgress(
     };
     es.onerror = () => {
       es.close();
+      // Closing a completed stream fires onerror in some browsers. Do not
+      // reconnect — that re-appends the last log line and makes it jump.
+      if (stopped || closedTerminal) return;
       startPolling();
     };
     return () => {
@@ -3061,9 +3123,11 @@ export async function fetchMcpLogs(limit = 50): Promise<Array<{
   time: string;
   tool: string;
   client: string;
+  actor?: string | null;
   status: string;
   ms: number;
-  error?: string | null;
+  error_type?: string | null;
+  error_kind?: string | null;
 }>> {
   const res = await apiFetch(`${API_BASE}/mcp/logs?limit=${limit}`);
   if (!res.ok) return [];
@@ -3158,8 +3222,10 @@ export async function fetchAuditEvents(limit = 50, level?: string): Promise<Arra
   return data.events ?? [];
 }
 
+export type AuditExportFormat = "csv" | "json" | "ndjson" | "cef";
+
 /** Server-side tenant-scoped audit download (not the last 100 table rows). */
-export async function exportAuditLog(format: "csv" | "json" = "csv"): Promise<Blob> {
+export async function exportAuditLog(format: AuditExportFormat = "csv"): Promise<Blob> {
   const params = new URLSearchParams({ format, limit: "5000" });
   const res = await apiFetch(`${API_BASE}/audit/export?${params}`);
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export audit log"));
@@ -3319,27 +3385,49 @@ export async function updatePilotEngine(engine: PilotEngineChoice): Promise<Pilo
   return res.json();
 }
 
+export type WorkspaceApiKeyRole = "viewer" | "operator" | "editor" | "admin";
+
+export type WorkspaceApiKeyLifetime = "7d" | "30d" | "60d" | "90d" | "365d" | "never";
+
+export type AuditRetentionPurgeResult = {
+  removed: number;
+  would_remove?: number;
+  oldest_kept_time: string | null;
+  legal_hold: boolean;
+  retention_days: number | null;
+  dry_run: boolean;
+};
+
 export type WorkspaceApiKey = {
   id: string;
   name: string;
   prefix: string;
+  kind?: string;
+  role?: WorkspaceApiKeyRole | string;
   created_at?: string;
   created_by?: string;
   last_used_at?: string | null;
+  expires_at?: string | null;
+  lifetime?: WorkspaceApiKeyLifetime | string;
+  expired?: boolean;
 };
 
 export async function fetchWorkspaceApiKeys(): Promise<WorkspaceApiKey[]> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys`);
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to list API keys"));
   const data = await res.json();
   return data.keys ?? [];
 }
 
-export async function createWorkspaceApiKey(name: string): Promise<WorkspaceApiKey & { key: string }> {
+export async function createWorkspaceApiKey(
+  name: string,
+  role: WorkspaceApiKeyRole = "editor",
+  expiresIn: WorkspaceApiKeyLifetime = "90d",
+): Promise<WorkspaceApiKey & { key: string }> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, role, expires_in: expiresIn }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to create API key"));
   return res.json();
@@ -3348,6 +3436,95 @@ export async function createWorkspaceApiKey(name: string): Promise<WorkspaceApiK
 export async function revokeWorkspaceApiKey(keyId: string): Promise<void> {
   const res = await apiFetch(`${API_BASE}/workspace/api-keys/${keyId}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke API key"));
+}
+
+export type ServiceAccount = WorkspaceApiKey & {
+  scopes?: string[];
+  kind: "service_account" | "scim" | string;
+};
+
+export type ServiceAccountWithSecret = ServiceAccount & { key: string };
+
+export async function fetchServiceAccounts(): Promise<ServiceAccount[]> {
+  const res = await apiFetch(`${API_BASE}/iam/service-accounts`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to list service accounts"));
+  return res.json();
+}
+
+export async function createServiceAccount(input: {
+  name: string;
+  role: WorkspaceApiKeyRole;
+  scopes: string[];
+  expires_in: WorkspaceApiKeyLifetime;
+}): Promise<ServiceAccountWithSecret> {
+  const res = await apiFetch(`${API_BASE}/iam/service-accounts`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create service account"));
+  return res.json();
+}
+
+export async function revokeServiceAccount(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/iam/service-accounts/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke service account"));
+}
+
+export async function rotateApiKey(
+  id: string,
+  overlapSeconds: number,
+): Promise<ServiceAccountWithSecret> {
+  const res = await apiFetch(`${API_BASE}/iam/api-keys/${encodeURIComponent(id)}/rotate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ overlap_seconds: overlapSeconds }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to rotate API key"));
+  return res.json();
+}
+
+export async function createScimToken(input: {
+  name: string;
+  expires_in: WorkspaceApiKeyLifetime;
+}): Promise<ServiceAccountWithSecret> {
+  const res = await apiFetch(`${API_BASE}/iam/scim-token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create SCIM token"));
+  return res.json();
+}
+
+export type ScimGroupMapping = { workspace_id: string; role: string };
+export type ScimGroupMappings = Record<string, ScimGroupMapping>;
+
+export async function fetchScimGroupMappings(): Promise<{ mappings: ScimGroupMappings }> {
+  const res = await apiFetch(`${API_BASE}/iam/scim/group-mappings`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load SCIM group mappings"));
+  return res.json();
+}
+
+export async function saveScimGroupMappings(
+  mappings: ScimGroupMappings,
+): Promise<{ mappings: ScimGroupMappings }> {
+  const res = await apiFetch(`${API_BASE}/iam/scim/group-mappings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mappings }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to save SCIM group mappings"));
+  return res.json();
+}
+
+export async function purgeAuditRetention(dryRun: boolean): Promise<AuditRetentionPurgeResult> {
+  const params = new URLSearchParams({ dry_run: String(dryRun) });
+  const res = await apiFetch(`${API_BASE}/audit/retention/purge?${params}`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to purge audit retention"));
+  return res.json();
 }
 
 export type WorkspaceRole = "admin" | "editor" | "viewer";
@@ -3680,10 +3857,10 @@ export interface QuarantineInfo {
     row?: number;
     column?: string;
     target?: string;
-    value?: string;
+    value?: string | null;
     reason?: string;
     policy?: string;
-    values?: Record<string, string>;
+    values?: Record<string, string | null>;
     chars?: string[];
     suggested_transform?: string;
     suggested_fix?: string;
@@ -4551,6 +4728,7 @@ export interface CdcSnapshotSignal {
   chunk_size?: number;
   last_pk?: string;
   rows_snapshotted?: number;
+  row_filter?: Record<string, unknown> | null;
   created_at?: number;
   updated_at?: number;
   error?: string;
@@ -4583,7 +4761,12 @@ export async function listJobCdcSnapshots(
 
 export async function requestJobCdcSnapshot(
   jobId: string,
-  body?: { table?: string; primary_key?: string; chunk_size?: number },
+  body?: {
+    table?: string;
+    primary_key?: string;
+    chunk_size?: number;
+    row_filter?: Record<string, unknown> | unknown[] | null;
+  },
 ): Promise<CdcSnapshotSignal> {
   const res = await apiFetch(
     `${API_BASE}/transfer/${encodeURIComponent(jobId)}/cdc/snapshots`,
@@ -4798,4 +4981,3 @@ export async function exportTransformProjectDbt(projectId: string): Promise<{
   if (!res.ok) throw new Error(await parseApiError(res, "Could not export dbt pack"));
   return res.json();
 }
-

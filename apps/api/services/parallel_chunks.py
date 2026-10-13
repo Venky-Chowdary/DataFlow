@@ -33,6 +33,12 @@ DEFAULT_WORKERS = int(getenv_brand("PARALLEL_WORKERS", "4") or "4")
 DEFAULT_PREFETCH = int(getenv_brand("PARALLEL_QUEUE", str(max(DEFAULT_WORKERS * 2, 4))))
 
 
+# Marker for a chunk that did not write. Not an exception instance so a
+# successful result that happens to be an exception object cannot be confused
+# with it — process() returns the caller's value, which is not this sentinel.
+_CHUNK_GAP = object()
+
+
 class ChunkAborted(Exception):
     """A queued chunk was dropped before it began because the run was aborted.
 
@@ -192,6 +198,41 @@ class ChunkDispatcher:
                         f"buffer has {sorted(self._buffer.keys())[:5]}"
                     )
 
+    def drain_committed_prefix(self) -> list[tuple[int, R]]:
+        """In-order results that already wrote, stopping at the first gap.
+
+        A source outage aborts chunks that have not started. Chunks that
+        already committed stay ahead of the checkpoint unless the caller
+        applies this prefix before giving up (DEF-C-017: the job showed
+        40,000 rows while the destination held 160,000). A later success
+        is not returned across a missing index — applying it would skip
+        the hole. :meth:`results` still raises :class:`ChunkAborted`.
+        """
+        while self._pending:
+            done, _ = concurrent.futures.wait(
+                set(self._pending),
+                timeout=30,
+                return_when=concurrent.futures.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            for future in done:
+                idx = self._pending.pop(future)
+                try:
+                    self._buffer[idx] = future.result()
+                except ChunkAborted:
+                    self._buffer[idx] = _CHUNK_GAP
+                except BaseException as exc:  # noqa: BLE001 - gap marker, caller re-raises
+                    self._buffer[idx] = exc
+        committed: list[tuple[int, R]] = []
+        while self._next_yield is not None and self._next_yield in self._buffer:
+            item = self._buffer.pop(self._next_yield)
+            if item is _CHUNK_GAP or isinstance(item, BaseException):
+                break
+            committed.append((self._next_yield, item))
+            self._next_yield += 1
+        return committed
+
 
 class OrderedChunkRunner(ChunkDispatcher):
     """Run a per-chunk function in parallel while returning results in order.
@@ -333,3 +374,67 @@ class OrderedChunkRunner(ChunkDispatcher):
                 self._executor.shutdown(wait=True, cancel_futures=True)
                 self._executor = None
             reader_thread.join(timeout=5)
+
+
+def shares_one_destination_connection(max_workers: int) -> bool:
+    """True when later batches must stay on the thread that opened the connection.
+
+    SQLite, Snowflake, Iceberg, and a public TCP proxy each force one writer.
+    ``ChunkDispatcher`` still runs that writer on a pool thread. psycopg2 is
+    not safe there: the next COPY waits forever, and the destination stops
+    growing after the pages that already committed.
+    """
+    try:
+        workers = int(max_workers)
+    except (TypeError, ValueError):
+        return True
+    return workers <= 1
+
+
+def drive_ordered_batches(
+    *,
+    max_workers: int,
+    initial: T,
+    fetch_next: Callable[[T], T | None],
+    prepare: Callable[[int, T], T],
+    process: Callable[[int, T], R],
+    apply_result: Callable[[int, R], None],
+    start_idx: int,
+) -> None:
+    """Write the pages after the synchronous DDL page.
+
+    ``max_workers <= 1`` runs ``process`` on the caller. A shared psycopg2 or
+    Snowflake connection created on that thread must not be handed to the pool.
+    More than one worker keeps the overlapping read/write path.
+    """
+    if shares_one_destination_connection(max_workers):
+        idx = start_idx
+        batch = fetch_next(initial)
+        while batch:
+            prepared = prepare(idx, batch)
+            apply_result(idx, process(idx, prepared))
+            batch = fetch_next(batch)
+            idx += 1
+        return
+
+    idx = start_idx
+    with ChunkDispatcher(max_workers=max_workers) as dispatcher:
+        try:
+            batch = fetch_next(initial)
+            while batch:
+                prepared = prepare(idx, batch)
+                dispatcher.submit(idx, prepared, process)
+                for ready_idx, result in dispatcher.ready():
+                    apply_result(ready_idx, result)
+                batch = fetch_next(batch)
+                idx += 1
+            for ready_idx, result in dispatcher.results():
+                apply_result(ready_idx, result)
+        except BaseException:
+            # A chunk already writing is allowed to finish. Apply that prefix
+            # before the error propagates so the checkpoint matches rows the
+            # destination already holds. Queued chunks still do not write.
+            dispatcher.abort()
+            for ready_idx, result in dispatcher.drain_committed_prefix():
+                apply_result(ready_idx, result)
+            raise

@@ -320,6 +320,190 @@ def test_absent_destination_constraints_block_the_proven_claim() -> None:
     assert any("foreign key(s)" in b and "CHECK" in b for b in verdict["blockers"])
 
 
+def test_unchecked_foreign_key_blocks_without_calling_the_object_absent() -> None:
+    """A stored constraint that did not check rows is not a missing constraint."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": [],
+            "unchecked": ["foreign_keys"],
+            "aspects": {
+                "foreign_keys": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["parent_id->public.parent->id"],
+                    "reasons": [
+                        "Destination stores this foreign key and does not enforce "
+                        "it. A Redshift constraint is visible to the planner and "
+                        "is not proof the loaded rows match."
+                    ],
+                }
+            },
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    assert verdict["headline"] == "NOT PROVEN"
+    assert any("does not enforce" in b and "Redshift" in b for b in verdict["blockers"])
+    assert not any("did not survive" in b for b in verdict["blockers"])
+    page = render_certificate_markdown(build_migration_certificate(job))
+    assert "does not enforce" in page
+    assert "foreign keys | unchecked" in page
+
+
+def test_match_full_reread_as_simple_blocks_without_calling_the_object_absent() -> None:
+    """A stored key with the wrong match rule is not a missing key."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": [],
+            "unchecked": ["foreign_keys"],
+            "aspects": {
+                "foreign_keys": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["parent_id->public.parent->id"],
+                    "reasons": [
+                        "Destination records MATCH SIMPLE; the source rule is MATCH FULL."
+                    ],
+                    "proof_reasons": [],
+                    "match_reasons": [
+                        "Destination records MATCH SIMPLE; the source rule is MATCH FULL."
+                    ],
+                }
+            },
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    blockers = verdict["blockers"]
+    assert any("source match rule" in b and "MATCH FULL" in b for b in blockers)
+    assert not any("did not survive" in b for b in blockers)
+    assert not any("existing rows were checked" in b for b in blockers)
+
+
+def test_cascade_reread_as_no_action_blocks_without_calling_the_object_absent() -> None:
+    """A stored key with a different referential action is not a missing key."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": [],
+            "unchecked": ["foreign_keys"],
+            "aspects": {
+                "foreign_keys": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["parent_id->public.parent->id"],
+                    "reasons": [
+                        "Destination has this relationship with "
+                        "ON DELETE NO ACTION ON UPDATE NO ACTION; "
+                        "the source rule is ON DELETE CASCADE ON UPDATE CASCADE."
+                    ],
+                    "proof_reasons": [],
+                    "match_reasons": [],
+                    "action_reasons": [
+                        "Destination has this relationship with "
+                        "ON DELETE NO ACTION ON UPDATE NO ACTION; "
+                        "the source rule is ON DELETE CASCADE ON UPDATE CASCADE."
+                    ],
+                }
+            },
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    blockers = verdict["blockers"]
+    assert any("referential action" in b and "CASCADE" in b for b in blockers)
+    assert not any("did not survive" in b for b in blockers)
+    assert not any("existing rows were checked" in b for b in blockers)
+
+
+def test_deferred_reread_as_not_deferrable_blocks_without_calling_the_object_absent() -> None:
+    """A stored key that checks at a different time is not a missing key."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": [],
+            "unchecked": ["foreign_keys"],
+            "aspects": {
+                "foreign_keys": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["parent_id->public.parent->id"],
+                    "reasons": [
+                        "Destination checks this relationship as NOT DEFERRABLE; "
+                        "the source rule is DEFERRABLE INITIALLY DEFERRED."
+                    ],
+                    "proof_reasons": [],
+                    "match_reasons": [],
+                    "action_reasons": [],
+                    "deferral_reasons": [
+                        "Destination checks this relationship as NOT DEFERRABLE; "
+                        "the source rule is DEFERRABLE INITIALLY DEFERRED."
+                    ],
+                }
+            },
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    blockers = verdict["blockers"]
+    assert any("deferral mode" in b and "INITIALLY DEFERRED" in b for b in blockers)
+    assert not any("did not survive" in b for b in blockers)
+    assert not any("existing rows were checked" in b for b in blockers)
+
+
+def test_unchecked_primary_key_blocks_without_calling_the_object_absent() -> None:
+    """A stored key that does not reject duplicates is not a missing key."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": [],
+            "unchecked": ["primary_key", "unique_constraints"],
+            "aspects": {
+                "primary_key": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["id"],
+                    "reasons": [
+                        "Destination stores this primary key or unique constraint "
+                        "and does not enforce it. BigQuery accepts only NOT "
+                        "ENFORCED, so the catalog object is not proof the loaded "
+                        "rows are unique."
+                    ],
+                },
+                "unique_constraints": {
+                    "status": "unchecked",
+                    "missing": [],
+                    "unchecked": ["email"],
+                    "reasons": [
+                        "Destination stores this primary key or unique constraint "
+                        "and does not enforce it. A Snowflake key on a standard "
+                        "table is not proof the loaded rows are unique."
+                    ],
+                },
+            },
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    assert verdict["headline"] == "NOT PROVEN"
+    blockers = " ".join(verdict["blockers"])
+    assert "does not enforce" in blockers
+    assert "NOT ENFORCED" in blockers
+    assert "standard table" in blockers
+    assert "did not survive" not in blockers
+    page = render_certificate_markdown(build_migration_certificate(job))
+    assert "| primary key | unchecked |" in page
+    assert "| unique constraints | unchecked |" in page
+    assert "does not enforce" in page
+
+
 def test_unreadable_constraint_catalog_is_unknown_not_a_violation() -> None:
     """Unknown must never be reported as absent."""
     job = _proven_job()

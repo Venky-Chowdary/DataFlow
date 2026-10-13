@@ -116,19 +116,39 @@ class _Connector:
         return dict(CFG)
 
 
-def _wire(monkeypatch, *, job: dict, release):
+def _wire(
+    monkeypatch,
+    *,
+    job: dict | None = None,
+    jobs: dict[str, dict] | None = None,
+    release,
+    derived: list[dict] | None = None,
+    watermark_keys: dict[str, list[str]] | None = None,
+    tmp_path: Path | None = None,
+):
     import services.connector_store as cs
     import services.mongodb_service as ms
+    import services.sync_cursor as sc
     import connectors.postgresql_change_stream as pcs
+
+    by_id = dict(jobs or {})
 
     class _Svc:
         def get_job(self, _id):
-            return job
+            return by_id.get(_id, job) if jobs is not None else job
 
     monkeypatch.setattr(ms, "get_mongodb_service", lambda: _Svc())
     monkeypatch.setattr(cs, "get_connector", lambda _id, _ws=None: _Connector())
     monkeypatch.setattr(pcs, "release_pg_capture", release)
     monkeypatch.setattr(mod, "list_schedules", lambda: [_sched()])
+    monkeypatch.setattr(mod, "_derived_route_identities", lambda _s: list(derived or []))
+    monkeypatch.setattr(
+        sc, "cursor_keys_for_job", lambda jid: list((watermark_keys or {}).get(jid, []))
+    )
+    monkeypatch.setattr(sc, "get_watermark", lambda _k: None)
+    ledger = (tmp_path or Path(__import__("tempfile").mkdtemp())) / "ledger.json"
+    monkeypatch.setattr(mod, "_ledger_path", lambda: ledger)
+    monkeypatch.setattr(mod, "_ledger_coll", lambda: None)
     cleared: list[str] = []
     monkeypatch.setattr(
         mod, "clear_watermark", lambda k: cleared.append(k) or {"cleared": True}
@@ -187,6 +207,165 @@ def test_release_drops_slot_publication_and_watermark(monkeypatch) -> None:
             _publication_name("dataflow", "orders", "route-k"),
         )
     ]
+
+
+def _dropping(calls: list[tuple[str, str]]):
+    def rel(cfg, *, slot_name, publication_name):
+        calls.append((slot_name, publication_name))
+        return {"slot": "dropped", "publication": "dropped"}
+
+    return rel
+
+
+def test_s14_failed_last_job_without_cursor_key_still_releases(monkeypatch, tmp_path) -> None:
+    """QA S14: the last attempt failed before stamping cursor_key. An earlier
+    run in history carries it — that slot must be dropped, not leaked."""
+    calls: list[tuple[str, str]] = []
+    cleared = _wire(
+        monkeypatch,
+        jobs={
+            "job2": {"status": "failed"},
+            "job1": {"cursor_key": "route-k", "cursor_value": "slot=df_real|phase=streaming"},
+        },
+        release=_dropping(calls),
+        tmp_path=tmp_path,
+    )
+    sched = _sched(
+        last_job_id="job2",
+        run_history=[{"job_id": "job1", "status": "completed"}, {"job_id": "job2", "status": "failed"}],
+    )
+    out = mod.release_schedule_cdc_capture(sched)
+    assert out["released"] is True, out
+    assert out["reason"] == "ok"
+    assert [c[0] for c in calls] == ["df_real"]
+    assert cleared == ["route-k"]
+
+
+def test_s14_identity_from_watermark_metadata(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, str]] = []
+    _wire(
+        monkeypatch,
+        jobs={"job1": {"status": "failed"}},
+        release=_dropping(calls),
+        watermark_keys={"job1": ["wm-k"]},
+        tmp_path=tmp_path,
+    )
+    out = mod.release_schedule_cdc_capture(_sched())
+    assert out["released"] is True
+    assert calls == [(_slot_name("dataflow", "orders", "wm-k"), _publication_name("dataflow", "orders", "wm-k"))]
+
+
+def test_s14_identity_rederived_from_route_when_no_job_has_it(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, str]] = []
+    _wire(
+        monkeypatch,
+        jobs={"job1": {"status": "failed"}},
+        release=_dropping(calls),
+        derived=[{"cursor_key": "derived-k", "tables": "orders"}],
+        tmp_path=tmp_path,
+    )
+    out = mod.release_schedule_cdc_capture(_sched())
+    assert out["released"] is True and out["reason"] == "ok"
+    assert calls[0][0] == _slot_name("dataflow", "orders", "derived-k")
+
+
+def test_s14_multi_table_route_releases_shared_and_per_table_slots(monkeypatch, tmp_path) -> None:
+    calls: list[tuple[str, str]] = []
+    _wire(
+        monkeypatch,
+        jobs={"job1": {"status": "failed"}},
+        release=_dropping(calls),
+        derived=[
+            {"cursor_key": "shared-k", "tables": ["orders", "users"]},
+            {"cursor_key": "orders-k", "tables": "orders"},
+            {"cursor_key": "users-k", "tables": "users"},
+        ],
+        tmp_path=tmp_path,
+    )
+    out = mod.release_schedule_cdc_capture(_sched())
+    assert out["released"] is True
+    assert len(calls) == 3
+    assert len(out["slots"]) == 3
+
+
+def test_s14_no_identity_anywhere_is_recorded_not_silent(monkeypatch, tmp_path) -> None:
+    _wire(monkeypatch, jobs={"job1": {}}, release=_dropping([]), tmp_path=tmp_path)
+    out = mod.release_schedule_cdc_capture(_sched())
+    assert out["released"] is False
+    assert out["reason"] == "identity_unknown"
+    assert out["pending_id"]
+    assert mod.list_pending_capture_releases()[0]["schedule_id"] == "s1"
+
+
+def test_s14_unreachable_release_is_retried_by_the_beat(monkeypatch, tmp_path) -> None:
+    import connectors.postgresql_change_stream as pcs
+
+    def boom(cfg, *, slot_name, publication_name):
+        raise psycopg2.OperationalError("connection refused")
+
+    cleared = _wire(
+        monkeypatch,
+        job={"cursor_key": "k", "cursor_value": "slot=df_x|phase=streaming"},
+        release=boom,
+        tmp_path=tmp_path,
+    )
+    out = mod.release_schedule_cdc_capture(_sched())
+    assert out["reason"] == "source_unreachable"
+    pending = mod.list_pending_capture_releases()
+    assert len(pending) == 1 and pending[0]["slots"][0]["slot_name"] == "df_x"
+    assert cleared == []
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(pcs, "release_pg_capture", _dropping(calls))
+    outcomes = mod.retry_pending_capture_releases()
+    assert outcomes == [{"id": pending[0]["id"], "released": True}]
+    assert calls[0][0] == "df_x"
+    assert cleared == ["k"]
+    assert mod.list_pending_capture_releases() == []
+
+
+def test_retry_backs_off_after_a_failed_attempt() -> None:
+    now = mod.datetime.now(mod.timezone.utc)
+    fresh = {"recorded_at": now.isoformat()}
+    assert mod._retry_due(fresh, now) is True
+    tried = {"recorded_at": now.isoformat(), "last_attempt_at": now.isoformat(), "attempts": 1}
+    assert mod._retry_due(tried, now) is False
+    from datetime import timedelta
+
+    assert mod._retry_due(tried, now + timedelta(seconds=121)) is True
+
+
+def test_route_identity_matches_the_cdc_run_paths() -> None:
+    """Release must derive the very key the run opened the slot under."""
+    from services.cdc_multi_table import shared_route_cursor_key
+    from services.sync_cursor import build_cursor_key
+    from src.transfer.cdc_transfer import cdc_route_cursor_keys
+    from src.transfer.models import EndpointConfig
+
+    src = EndpointConfig(kind="database", format="postgresql", database="app", table="orders")
+    dst = EndpointConfig(kind="database", format="postgresql", database="dw", table="orders_wh")
+    single = cdc_route_cursor_keys(src, dst, [{"name": "orders", "selected": True}])
+    assert single == [{
+        "cursor_key": build_cursor_key(
+            source_type="postgresql", source_database="app", source_object="orders",
+            dest_type="postgresql", dest_database="dw", dest_object="orders_wh",
+            stream_name="orders",
+        ),
+        "tables": "orders",
+    }]
+
+    multi = cdc_route_cursor_keys(
+        src, dst,
+        [{"name": "orders", "selected": True}, {"name": "users", "selected": True}],
+    )
+    keys = [m["cursor_key"] for m in multi]
+    assert keys[0] == shared_route_cursor_key(
+        engine="postgresql", database="app", tables=["orders", "users"],
+        dest_type="postgresql", dest_database="dw",
+    )
+    # Sequential fallback opens one slot per table under its own key.
+    assert len(keys) == 3 and len(set(keys)) == 3
+    assert multi[1]["tables"] == "orders" and multi[2]["tables"] == "users"
 
 
 @live

@@ -1,111 +1,322 @@
-/** Official-style brand icons for connector catalog */
+/**
+ * Connector marks.
+ *
+ * Databases and SaaS products use the official single-color brand mark from
+ * Simple Icons (CC0). Products that set is not allowed to redistribute get a
+ * drawn mark in that product's public color. File formats use a document
+ * glyph in the Datawrap logo palette.
+ */
+import type { ReactNode } from "react";
+import type { SimpleIcon } from "simple-icons";
+import {
+  siAirtable,
+  siApachecassandra,
+  siApachekafka,
+  siApacheparquet,
+  siClickhouse,
+  siCouchbase,
+  siDatabricks,
+  siDuckdb,
+  siElasticsearch,
+  siGooglebigquery,
+  siGooglecloudstorage,
+  siHubspot,
+  siInfluxdb,
+  siMariadb,
+  siMinio,
+  siMongodb,
+  siMysql,
+  siNeo4j,
+  siNotion,
+  siPostgresql,
+  siPresto,
+  siQdrant,
+  siRedis,
+  siShopify,
+  siSnowflake,
+  siSqlite,
+  siStripe,
+  siTeradata,
+  siTrino,
+  siZendesk,
+} from "simple-icons";
 
-export const BrandIcons: Record<string, React.FC<{ size?: number }>> = {
-  postgresql: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <path d="M23.56 14.68c-.18-.09-1.6-.87-1.88-.97-.29-.1-.5-.14-.71.15-.21.28-.82 1.03-1 1.24-.19.21-.37.24-.69.08-.31-.16-1.32-.49-2.52-1.56-.93-.83-1.56-1.86-1.74-2.17-.18-.31-.02-.48.14-.64.14-.14.31-.37.47-.56.16-.18.21-.31.31-.52.1-.21.05-.39-.03-.55-.08-.16-.71-1.71-.97-2.34-.26-.63-.52-.54-.71-.55h-.61c-.21 0-.55.08-.84.39-.29.31-1.1 1.08-1.1 2.62 0 1.55 1.13 3.04 1.29 3.25.16.21 2.22 3.39 5.38 4.76.75.32 1.34.52 1.8.66.76.24 1.45.21 1.99.13.61-.09 1.88-.77 2.14-1.51.26-.74.26-1.38.18-1.51-.08-.13-.29-.21-.6-.36z" fill="#336791"/>
-      <path d="M28.78 9.64c-.72-1.77-1.92-3.31-3.42-4.49-1.5-1.18-3.27-1.97-5.16-2.32-1.89-.35-3.86-.25-5.7.31-1.84.56-3.51 1.55-4.83 2.89-1.33 1.33-2.33 2.98-2.92 4.79-.59 1.81-.77 3.75-.52 5.65.25 1.9.92 3.72 1.97 5.31 1.05 1.59 2.46 2.91 4.1 3.87l.13 3.35c.02.47.28.89.69 1.13.41.23.91.24 1.33.02l3.05-1.6c1.69.23 3.42.11 5.05-.35 1.63-.46 3.13-1.27 4.39-2.37 1.26-1.1 2.25-2.47 2.89-4.01.64-1.53.92-3.2.8-4.86-.11-1.66-.61-3.27-1.45-4.68-.24-.4-.51-.79-.8-1.16-.14-.18-.29-.36-.45-.53l-.15-.05z" stroke="#336791" strokeWidth="1.5"/>
-    </svg>
-  ),
-  mysql: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <circle cx="16" cy="16" r="12" fill="#00758F"/>
-      <path d="M12 11h2v10h-2zm6 0h2v10h-2z" fill="white"/>
-    </svg>
-  ),
-  mongodb: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <path d="M16.62 4.41c-.36-.53-.57-.53-.73-.79-.16-.25-.3-.52-.3-.52s-.05.75-.18 1.05c-.51 1.17-3.49 4.36-4.51 8.26-.58 2.22-.22 4.12.73 5.85 1.32 2.4 2.62 3.34 2.77 4.86.03.32.05.64.05.97 0 .12.18.12.22 0 .15-1.52.38-2.61.86-3.63.68-1.44 4.57-4.76 4.97-8.91.27-2.77-1.66-5.57-3.88-7.14z" fill="#00ED64"/>
-    </svg>
-  ),
-  snowflake: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <path d="M16 4v24M4 16h24M7.76 7.76l16.48 16.48M24.24 7.76L7.76 24.24" stroke="#29B5E8" strokeWidth="2" strokeLinecap="round"/>
-      <circle cx="16" cy="16" r="3" fill="#29B5E8"/>
-    </svg>
-  ),
-  dynamodb: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <rect x="4" y="6" width="24" height="20" rx="3" fill="#4053D6"/>
-      <path d="M10 12h12v2H10v-2zm0 4h12v2H10v-2zm0 4h8v2h-8v-2z" fill="white"/>
-    </svg>
-  ),
-  elasticsearch: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <circle cx="16" cy="16" r="12" fill="#FEC514"/>
-      <path d="M12 11h8l-2 10h-4l2-10z" fill="#343741"/>
-    </svg>
-  ),
-  clickhouse: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <rect x="4" y="4" width="24" height="24" rx="4" fill="#FFCC01"/>
-      <path d="M10 10h4v12h-4V10zm8 0h4v12h-4V10z" fill="#1A1A1A"/>
-    </svg>
-  ),
-  redshift: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <path d="M16 4l12 7v10l-12 7L4 21V11l12-7z" fill="#8C4FFF"/>
-    </svg>
-  ),
-  bigquery: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <path d="M6 8v16l10 4V12L6 8z" fill="#4386FA"/>
-      <path d="M16 12v16l10-4V8l-10 4z" fill="#3B78E7"/>
-    </svg>
-  ),
-  s3: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <path d="M16 4l10 3v18l-10 3-10-3V7l10-3z" fill="#569A31"/>
-      <path d="M16 4v24l10-3V7l-10-3z" fill="#4B8A29"/>
-    </svg>
-  ),
-  salesforce: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <path d="M13.3 8.2c1.1-1.2 2.7-1.9 4.4-1.9 2.1 0 4 1.1 5.1 2.7.9-.4 1.9-.6 2.9-.6 4 0 7.3 3.3 7.3 7.3s-3.3 7.3-7.3 7.3c-.5 0-1-.1-1.5-.2-.9 1.6-2.6 2.7-4.6 2.7-1 0-2-.3-2.8-.8-1 1.4-2.6 2.3-4.4 2.3-2.1 0-3.9-1.2-4.8-2.9-.5.1-1 .2-1.5.2-3.3 0-6-2.7-6-6s2.7-6 6-6c.8 0 1.5.2 2.2.4.8-2.4 3.1-4.2 5.7-4.2.3-.1.6-.1.9-.1l-.6-.2z" fill="#00A1E0"/>
-    </svg>
-  ),
-  kafka: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <circle cx="16" cy="16" r="12" fill="#231F20"/>
-      <circle cx="16" cy="11" r="2.5" fill="white"/>
-      <circle cx="12" cy="18" r="2.5" fill="white"/>
-      <circle cx="20" cy="18" r="2.5" fill="white"/>
-    </svg>
-  ),
-  redis: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <path d="M28 16.5c0 2.5-5.37 4.5-12 4.5S4 19 4 16.5 9.37 12 16 12s12 2 12 4.5z" fill="#A41E11"/>
-      <path d="M28 13c0 2.5-5.37 4.5-12 4.5S4 15.5 4 13s5.37-4.5 12-4.5S28 10.5 28 13z" fill="#D82C20"/>
-    </svg>
-  ),
-  csv: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <path d="M6 4h12l8 8v16a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2z" fill="#22A565"/>
-      <path d="M8 16h3v2H8v-2zm5 0h3v2h-3v-2zm5 0h3v2h-3v-2z" fill="white"/>
-    </svg>
-  ),
-  json: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <path d="M6 4h12l8 8v16a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2z" fill="#F7B93E"/>
-    </svg>
-  ),
-  generic_sql: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <ellipse cx="16" cy="10" rx="10" ry="4" fill="#2D65F7"/>
-      <path d="M6 10v12c0 2.2 4.5 4 10 4s10-1.8 10-4V10" stroke="#2D65F7" strokeWidth="2"/>
-      <path d="M6 14c0 2.2 4.5 4 10 4s10-1.8 10-4" stroke="#2D65F7" strokeWidth="2"/>
-      <path d="M6 18c0 2.2 4.5 4 10 4s10-1.8 10-4" stroke="#2D65F7" strokeWidth="2"/>
-    </svg>
-  ),
-  default: ({ size = 32 }) => (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden>
-      <rect x="4" y="4" width="24" height="24" rx="4" fill="#78716c"/>
-      <path d="M12 12h8M12 16h8M12 20h5" stroke="white" strokeWidth="2" strokeLinecap="round"/>
-    </svg>
-  ),
+type Mark = Pick<SimpleIcon, "title" | "hex" | "path">;
+
+const MARKS: Record<string, Mark> = {
+  postgresql: siPostgresql,
+  mysql: siMysql,
+  mariadb: siMariadb,
+  mongodb: siMongodb,
+  snowflake: siSnowflake,
+  bigquery: siGooglebigquery,
+  redis: siRedis,
+  elasticsearch: siElasticsearch,
+  kafka: siApachekafka,
+  sqlite: siSqlite,
+  clickhouse: siClickhouse,
+  databricks: siDatabricks,
+  neo4j: siNeo4j,
+  couchbase: siCouchbase,
+  influxdb: siInfluxdb,
+  hubspot: siHubspot,
+  stripe: siStripe,
+  shopify: siShopify,
+  notion: siNotion,
+  airtable: siAirtable,
+  zendesk: siZendesk,
+  parquet: siApacheparquet,
+  duckdb: siDuckdb,
+  cassandra: siApachecassandra,
+  gcs: siGooglecloudstorage,
+  minio: siMinio,
+  qdrant: siQdrant,
+  presto: siPresto,
+  trino: siTrino,
+  teradata: siTeradata,
 };
 
+/** Catalog ids that share one product mark. */
+const ALIASES: Record<string, string> = {
+  postgres: "postgresql",
+  pg: "postgresql",
+  amazon_rds: "postgresql",
+  amazon_rds_postgres: "postgresql",
+  citus: "postgresql",
+  cockroach: "postgresql",
+  cockroachdb: "postgresql",
+  pgvector: "postgresql",
+  amazon_rds_mysql: "mysql",
+  aurora: "mysql",
+  aurora_mysql: "mysql",
+  sqlserver: "sqlserver",
+  mssql: "sqlserver",
+  microsoft_sql_server: "sqlserver",
+  azure_sql: "sqlserver",
+  azure_sql_database: "sqlserver",
+  amazon_rds_sql_server: "sqlserver",
+  oracle: "oracle",
+  oracle_db: "oracle",
+  s3: "s3",
+  amazon_s3: "s3",
+  aws_s3: "s3",
+  redshift: "redshift",
+  amazon_redshift: "redshift",
+  dynamodb: "dynamodb",
+  dynamo: "dynamodb",
+  salesforce: "salesforce",
+  sfdc: "salesforce",
+  excel: "excel",
+  xlsx: "excel",
+  xls: "excel",
+  google_cloud_storage: "gcs",
+  adls: "azure",
+  azure: "azure",
+  azure_blob: "azure",
+  iceberg: "iceberg",
+  apache_iceberg: "iceberg",
+  weaviate: "weaviate",
+  pinecone: "pinecone",
+  milvus: "milvus",
+  csv: "csv",
+  tsv: "csv",
+  json: "json",
+  jsonl: "json",
+  ndjson: "json",
+  xml: "file",
+  yaml: "file",
+  html: "file",
+  pdf: "pdf",
+  docx: "file",
+  avro: "file",
+  orc: "file",
+  fixed_width: "file",
+  generic_sql: "database",
+  database: "database",
+  file: "file",
+  rest_api: "api",
+  singer_tap: "api",
+  email: "file",
+  sftp: "file",
+};
+
+export function connectorIconKey(id: string): string {
+  const key = String(id || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  return ALIASES[key] || key;
+}
+
+/** Official mark when one exists. Tests use this to prove aliases. */
+export function connectorBrandMark(id: string): Mark | null {
+  return MARKS[connectorIconKey(id)] ?? null;
+}
+
+function OfficialMark({ mark, size }: { mark: Mark; size: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" role="img" aria-hidden>
+      <title>{mark.title}</title>
+      <path d={mark.path} fill={`#${mark.hex}`} />
+    </svg>
+  );
+}
+
+function DrawnMark({
+  size,
+  title,
+  children,
+}: {
+  size: number;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" role="img" aria-hidden>
+      <title>{title}</title>
+      {children}
+    </svg>
+  );
+}
+
+function drawnMark(key: string, size: number) {
+  switch (key) {
+    case "sqlserver":
+      return (
+        <DrawnMark size={size} title="SQL Server">
+          <ellipse cx="12" cy="6" rx="8" ry="3" fill="#0078D4" />
+          <path d="M4 6v9c0 1.7 3.6 3 8 3s8-1.3 8-3V6c0 1.7-3.6 3-8 3s-8-1.3-8-3z" fill="#0078D4" />
+          <path d="M4 11.2c1.8 1.2 4.7 1.8 8 1.8s6.2-.6 8-1.8" stroke="#fff" strokeWidth="1" fill="none" />
+        </DrawnMark>
+      );
+    case "oracle":
+      return (
+        <DrawnMark size={size} title="Oracle">
+          <rect x="3" y="4.5" width="18" height="2.4" rx="1.2" fill="#C74634" />
+          <rect x="3" y="8.7" width="18" height="2.4" rx="1.2" fill="#C74634" />
+          <rect x="3" y="12.9" width="18" height="2.4" rx="1.2" fill="#C74634" />
+          <rect x="5" y="17.1" width="14" height="2.4" rx="1.2" fill="#C74634" />
+        </DrawnMark>
+      );
+    case "s3":
+      return (
+        <DrawnMark size={size} title="Amazon S3">
+          <path d="M6 8.5h12l-1.2 9.2a2 2 0 0 1-2 1.7H9.2a2 2 0 0 1-2-1.7L6 8.5z" fill="#FF9900" />
+          <path d="M5 7.2h14c.4 0 .7.4.6.8l-.3 1H4.7l-.3-1c-.1-.4.2-.8.6-.8z" fill="#232F3E" />
+          <path d="M8.2 16.2c1.2.7 2.4 1 3.8 1s2.6-.3 3.8-1" stroke="#232F3E" strokeWidth="1" fill="none" strokeLinecap="round" />
+        </DrawnMark>
+      );
+    case "salesforce":
+      return (
+        <DrawnMark size={size} title="Salesforce">
+          <path d="M8.2 16.8a3.2 3.2 0 0 1-.6-6.3 4.2 4.2 0 0 1 8.1-1.2 3.4 3.4 0 0 1 .7 6.6 3.6 3.6 0 0 1-6.6.9 3.1 3.1 0 0 1-1.6 0z" fill="#00A1E0" />
+        </DrawnMark>
+      );
+    case "redshift":
+      return (
+        <DrawnMark size={size} title="Amazon Redshift">
+          <path d="M12 3 20 7.5v9L12 21 4 16.5v-9L12 3z" fill="#8C4FFF" />
+          <circle cx="12" cy="12" r="2.2" fill="#fff" />
+        </DrawnMark>
+      );
+    case "dynamodb":
+      return (
+        <DrawnMark size={size} title="DynamoDB">
+          <ellipse cx="12" cy="6" rx="7" ry="2.6" fill="#4053D6" />
+          <path d="M5 6v8.5c0 1.5 3.1 2.6 7 2.6s7-1.1 7-2.6V6" fill="#4053D6" />
+          <path d="M5 10.2c1.6 1.1 4.1 1.7 7 1.7s5.4-.6 7-1.7" stroke="#fff" strokeWidth="1" fill="none" />
+        </DrawnMark>
+      );
+    case "azure":
+      return (
+        <DrawnMark size={size} title="Microsoft Azure">
+          <path d="M10.2 4.2 3.8 18.6h5.2l2.4-4.6 4.8 4.6h4.2L13.6 4.2h-3.4z" fill="#0078D4" />
+        </DrawnMark>
+      );
+    case "excel":
+      return (
+        <DrawnMark size={size} title="Microsoft Excel">
+          <path d="M6 3.5h8l4 4V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V5A1.5 1.5 0 0 1 6 3.5z" fill="#217346" />
+          <path d="M14 3.5v4h4" fill="#185C37" />
+          <path d="M8 12h2.2M8 15h2.2M12.2 12H15M12.2 15H15" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" />
+        </DrawnMark>
+      );
+    case "iceberg":
+      return (
+        <DrawnMark size={size} title="Apache Iceberg">
+          <path d="M12 3 21 18H3L12 3z" fill="#1F4E79" />
+          <path d="M12 8.5 16.5 16h-9L12 8.5z" fill="#7FDBFF" />
+        </DrawnMark>
+      );
+    case "weaviate":
+      return (
+        <DrawnMark size={size} title="Weaviate">
+          <circle cx="12" cy="12" r="8" fill="#1A1A1A" />
+          <circle cx="12" cy="12" r="3" fill="#00D1B2" />
+        </DrawnMark>
+      );
+    case "pinecone":
+      return (
+        <DrawnMark size={size} title="Pinecone">
+          <path d="M12 3.5 18 8v8l-6 4.5L6 16V8l6-4.5z" fill="#0D1B2A" />
+          <path d="M12 8.5 15 10.2v3.6L12 15.5 9 13.8v-3.6L12 8.5z" fill="#F5C518" />
+        </DrawnMark>
+      );
+    case "milvus":
+      return (
+        <DrawnMark size={size} title="Milvus">
+          <circle cx="12" cy="12" r="8" fill="#00A1EA" />
+          <path d="M8 14.5 12 8l4 6.5" stroke="#fff" strokeWidth="1.6" fill="none" strokeLinejoin="round" />
+        </DrawnMark>
+      );
+    case "csv":
+      return (
+        <DrawnMark size={size} title="Delimited file">
+          <path d="M6 3.5h8l4 4V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V5A1.5 1.5 0 0 1 6 3.5z" fill="var(--df-logo-ink)" />
+          <path d="M8 12h2.5M8 15h2.5M12.5 12H16M12.5 15H16" stroke="#fff" strokeWidth="1.2" strokeLinecap="round" />
+        </DrawnMark>
+      );
+    case "json":
+      return (
+        <DrawnMark size={size} title="JSON">
+          <path d="M6 3.5h8l4 4V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V5A1.5 1.5 0 0 1 6 3.5z" fill="var(--df-logo-strap)" />
+          <path d="M9 11c-1 0-1.4.6-1.4 1.5S8 14 9 14M15 11c1 0 1.4.6 1.4 1.5S16 14 15 14" stroke="#fff" strokeWidth="1.2" fill="none" strokeLinecap="round" />
+        </DrawnMark>
+      );
+    case "pdf":
+      return (
+        <DrawnMark size={size} title="PDF">
+          <path d="M6 3.5h8l4 4V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V5A1.5 1.5 0 0 1 6 3.5z" fill="var(--df-danger)" />
+          <path d="M8.2 16.2v-4.2h1.5a1.5 1.5 0 0 1 0 3H8.2" stroke="#fff" strokeWidth="1.1" fill="none" />
+        </DrawnMark>
+      );
+    case "api":
+      return (
+        <DrawnMark size={size} title="API">
+          <rect x="3.5" y="6" width="17" height="12" rx="2" fill="var(--df-logo-tile)" />
+          <path d="M8 10.5 6.2 12 8 13.5M16 10.5 17.8 12 16 13.5M11 14.2l2-4.4" stroke="var(--df-logo-arrow)" strokeWidth="1.3" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+        </DrawnMark>
+      );
+    case "database":
+      return (
+        <DrawnMark size={size} title="Database">
+          <ellipse cx="12" cy="6.5" rx="7" ry="2.6" fill="var(--df-logo-ink)" />
+          <path d="M5 6.5v8c0 1.5 3.1 2.7 7 2.7s7-1.2 7-2.7v-8c0 1.5-3.1 2.7-7 2.7S5 8 5 6.5z" fill="var(--df-logo-tile)" />
+        </DrawnMark>
+      );
+    default:
+      return (
+        <DrawnMark size={size} title="File">
+          <path d="M6 3.5h8l4 4V20a1.5 1.5 0 0 1-1.5 1.5H6A1.5 1.5 0 0 1 4.5 20V5A1.5 1.5 0 0 1 6 3.5z" fill="var(--df-logo-tile)" />
+          <path d="M8 13h8M8 16h5" stroke="var(--df-logo-arrow)" strokeWidth="1.2" strokeLinecap="round" />
+        </DrawnMark>
+      );
+  }
+}
+
 export function ConnectorIcon({ id, size = 32 }: { id: string; size?: number }) {
-  const Icon = BrandIcons[id] || BrandIcons.default;
-  return <Icon size={size} />;
+  const key = connectorIconKey(id);
+  const mark = MARKS[key];
+  if (mark) return <OfficialMark mark={mark} size={size} />;
+  return drawnMark(key, size);
 }

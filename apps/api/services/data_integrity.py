@@ -66,6 +66,7 @@ def _check_coercion_safety(
     validation_mode: str = "strict",
     rows: list[dict[str, Any]] | None = None,
     dest_table_exists: bool | None = None,
+    proven_width_narrowings: dict | None = None,
 ) -> dict[str, Any]:
     from services.coercion_probe import samples_coerce_mapping
     from services.type_coercion_validator import (
@@ -73,6 +74,9 @@ def _check_coercion_safety(
         validate_mapping_coercions,
     )
 
+    from services.timezone_policy import declared_source_column_types
+
+    source_types = declared_source_column_types(source_types, mappings)
     floor = float(_mode_config(validation_mode)["confidence"])
     issues = validate_mapping_coercions(
         mappings,
@@ -83,6 +87,7 @@ def _check_coercion_safety(
         validation_mode=validation_mode,
         dest_db_type=dest_kind or "",
         dest_table_exists=dest_table_exists,
+        proven_width_narrowings=proven_width_narrowings,
     )
     schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
@@ -154,6 +159,9 @@ def _check_coercion_safety(
             tgt_t,
             dest_db=dest_kind,
             dest_table_exists=dest_table_exists,
+            source=str(mapping.get("source") or src),
+            target=str(mapping.get("target") or ""),
+            proven=proven_width_narrowings,
         ):
             hardened.append(issue)
             continue
@@ -168,6 +176,9 @@ def _check_coercion_safety(
                 tgt_t,
                 dest_db=dest_kind,
                 dest_table_exists=dest_table_exists,
+                source=str(mapping.get("source") or src),
+                target=str(mapping.get("target") or ""),
+                proven=proven_width_narrowings,
             )
             and not risk_cleared
         ):
@@ -209,12 +220,18 @@ def _check_transform_dry_run(
     *,
     dest_kind: str = "",
     target_types: dict[str, str] | None = None,
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
 ) -> dict[str, Any]:
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
 
     headers = source_columns or list(rows[0].keys())
-    sample_rows = [project_row_cells(row, headers) for row in rows[:200]]
+    sample_rows = [
+        project_row_cells(row, headers, preserve_sql_null=database_extract)
+        for row in rows[:200]
+    ]
     from services.transform_engine import dry_run_sample
 
     # Ensure each mapping carries target_type so name heuristics (e.g. "date" in
@@ -232,6 +249,9 @@ def _check_transform_dry_run(
         sample_rows=sample_rows,
         mappings=enriched,
         column_types=source_types,
+        empty_cells_as_null=empty_cells_as_null,
+        dest_nullability=dest_nullability,
+        database_extract=database_extract,
     )
     # Parity with G8 / G5: continue-policy contracts demote cast failures to
     # holdouts — they must not keep G9 Data integrity blocked after Accept risk.
@@ -595,19 +615,36 @@ def _sample_unique_constraint_dupes(
     return [f"{label}: duplicate key values ({sample})"]
 
 
+def _key_table_kind(uk: dict[str, Any] | None) -> str:
+    """Table kind stamped on one catalog key, or empty when it was not measured."""
+    if not isinstance(uk, dict) or "table_kind" not in uk:
+        return ""
+    from services.foreign_key_metadata import normalize_snowflake_table_kind
+
+    return normalize_snowflake_table_kind(uk.get("table_kind"))
+
+
 def _destination_constraints_advisory(
     dest_kind: str,
     destination_unique_keys: list[dict[str, Any]] | None = None,
 ) -> bool:
-    """True when dest PK/UNIQUE are optimizer/metadata-only (BQ / Redshift / SF NOT ENFORCED)."""
-    kind = normalize_dest_kind(dest_kind or "")
-    if kind in {"bigquery", "redshift"}:
-        return True
-    # Snowflake hybrid may mix; only advisory when every covering key says so.
-    keys = list(destination_unique_keys or [])
-    if keys and all(uk.get("enforced") is False for uk in keys):
-        return True
-    return False
+    """True when dest PK/UNIQUE are optimizer metadata, not a write rule.
+
+    Redshift, BigQuery, Databricks, and Snowflake standard tables share
+    :func:`services.foreign_key_metadata.uniqueness_proof_gap`. A Snowflake
+    key becomes a write rule only when its measured table kind is hybrid
+    and ``enforced`` is true. A stamped ``enforced`` flag without that kind
+    stays advisory. A key dict that says ``enforced`` false on any other
+    engine is the same answer.
+    """
+    from services.foreign_key_metadata import uniqueness_proof_gap
+
+    keys = [uk for uk in (destination_unique_keys or []) if isinstance(uk, dict)]
+    if not keys:
+        return uniqueness_proof_gap(dest_kind) == "unenforced"
+    return all(
+        not _unique_constraint_enforced(uk, dest_kind=dest_kind) for uk in keys
+    )
 
 
 def _unique_constraint_enforced(
@@ -615,11 +652,26 @@ def _unique_constraint_enforced(
     *,
     dest_kind: str = "",
 ) -> bool:
+    from services.foreign_key_metadata import _dialect_key, uniqueness_proof_gap
+
+    kind = _key_table_kind(uk)
+    if uk is not None and uk.get("index_ready") is False:
+        # PostgreSQL indisready is false. Inserts ignore the index.
+        return False
+    if uk is not None and uk.get("disabled") is True:
+        # SQL Server DISABLE. The index does not reject a new duplicate.
+        return False
+    if uniqueness_proof_gap(dest_kind, table_kind=kind) == "unenforced":
+        return False
+    if _dialect_key(dest_kind) == "snowflake":
+        # Hybrid tables enforce the key. The constraint row still has to say so.
+        return uk is not None and uk.get("enforced") is True
     if uk is not None and uk.get("enforced") is False:
         return False
     if uk is not None and uk.get("enforced") is True:
         return True
-    return not _destination_constraints_advisory(dest_kind, [uk] if uk else None)
+    # An enforcing engine with no separate bit treats the constraint as the check.
+    return True
 
 
 def _advisory_unique_key_warnings(
@@ -642,6 +694,21 @@ def _advisory_unique_key_warnings(
         uk for uk in keys if not _unique_constraint_enforced(uk, dest_kind=dest_kind)
     ]
     kind = normalize_dest_kind(dest_kind or "") or "destination"
+    if any(
+        uk.get("index_valid") is False and uk.get("index_ready") is not False
+        for uk in keys
+    ):
+        warnings.append(
+            f"{kind} unique index is invalid (pg_index.indisvalid is false). "
+            "New duplicates are still rejected while the index is ready for "
+            "inserts. Existing rows were not checked."
+        )
+    if any(uk.get("ignore_dup_key") is True for uk in keys):
+        warnings.append(
+            f"{kind} unique index has IGNORE_DUP_KEY. A duplicate insert "
+            "is dropped with a warning instead of failing the statement. "
+            "Validate still quarantines a duplicate it can see."
+        )
     if not advisory and not _destination_constraints_advisory(dest_kind, keys):
         return warnings
     if advisory:
@@ -655,6 +722,31 @@ def _advisory_unique_key_warnings(
             f"metadata): {', '.join(labels)} — Validate will not invent write "
             "blockers; prove uniqueness with pipeline tests before trusting merges."
         )
+        if any(uk.get("rely") is True for uk in advisory):
+            warnings.append(
+                f"{kind} RELY is an optimizer hint. It does not prove the "
+                "loaded rows are unique."
+            )
+        if any(uk.get("disabled") is True for uk in advisory):
+            from services.foreign_key_metadata import _dialect_key
+
+            if _dialect_key(dest_kind) == "oracle":
+                warnings.append(
+                    f"{kind} primary key or unique constraint has STATUS "
+                    "DISABLED. It does not reject a new duplicate and does "
+                    "not prove the loaded rows are unique."
+                )
+            else:
+                warnings.append(
+                    f"{kind} unique index is disabled. It does not reject a "
+                    "new duplicate and does not prove the loaded rows are unique."
+                )
+        if any(uk.get("index_ready") is False for uk in advisory):
+            warnings.append(
+                f"{kind} unique index is not ready for inserts "
+                "(pg_index.indisready is false). It does not reject a new "
+                "duplicate and does not prove the loaded rows are unique."
+            )
     elif _destination_constraints_advisory(dest_kind, keys):
         warnings.append(
             f"{kind} PRIMARY KEY / UNIQUE constraints are informational "
@@ -806,6 +898,54 @@ def _check_destination_unique_constraints(
     return issues
 
 
+def _inferred_identity_dup_warnings(
+    rows: list[dict[str, Any]], identity_cols: list[str], pk_label: str
+) -> list[str]:
+    """Non-blocking note for duplicates of a heuristically inferred identity."""
+    counts: dict[tuple[str, ...], int] = {}
+    for row in rows:
+        tup = tuple(cell_to_string(row.get(c)) for c in identity_cols)
+        if all(v == "" for v in tup):
+            continue
+        counts[tup] = counts.get(tup, 0) + 1
+    dupes = [(",".join(t), n) for t, n in counts.items() if n > 1]
+    if not dupes:
+        return []
+    sample = ", ".join(f"{v}×{n}" for v, n in dupes[:3])
+    return [
+        f"{pk_label}: duplicate values of an inferred identity ({sample}) — the "
+        "overwrite recreates a table without a declared key, so rows load as-is. "
+        "Declare a primary key to enforce uniqueness."
+    ]
+
+
+def _stream_contracts_declare_identity(stream_contracts: list[dict] | None) -> bool:
+    for contract in stream_contracts or []:
+        if not isinstance(contract, dict):
+            continue
+        for field in ("primary_key", "primary_keys", "upsert_key", "cursor_primary_key"):
+            if contract.get(field):
+                return True
+    return False
+
+
+def _business_identity_columns(identity_cols: list[str], sync: str) -> list[str]:
+    """Drop SCD2 engine-owned history columns from a source identity key.
+
+    An SCD2 destination key is ``(business_key, valid_from)``; the source carries
+    one row per business key and never the history columns, so including them
+    would make every probe tuple incomplete (false green) or compare history
+    versions as duplicates (false block).
+    """
+    if sync != "scd2" or not identity_cols:
+        return identity_cols
+    from services.scd2_engine import SCD2_COLUMNS
+
+    history = {c.lower() for c in SCD2_COLUMNS}
+    business = [c for c in identity_cols if c.lower() not in history]
+    return business or identity_cols
+
+
 def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
@@ -813,6 +953,7 @@ def _check_duplicate_keys(
     *,
     dest_kind: str = "",
     primary_key: str | None = None,
+    primary_key_columns: list[str] | None = None,
     source_duplicate_findings: list[dict[str, Any]] | None = None,
     sync_mode: str = "",
     destination_pk_columns: list[str] | None = None,
@@ -821,13 +962,18 @@ def _check_duplicate_keys(
     source_duplicate_probe_status: str = "",
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
+    identity_declared: bool | None = None,
 ) -> dict[str, Any]:
     """Duplicate check on the resolved identity key (sample + source-side probe).
 
     - Schemaless destinations (Mongo/Redis/Dynamo) and sync modes that require a
       unique identity (upsert/CDC/mirror/SCD2) always enforce duplicates.
-    - Overwrite modes enforce duplicates because the destination table is recreated
-      and the mapped identity key is likely to become the primary key.
+    - Overwrite modes block on duplicates of a *declared* identity (operator /
+      contract / composite key, or a destination key the recreate enforces). A
+      heuristically inferred key only warns — a heap may legally repeat it.
+      ``identity_declared=None`` means only a destination key counts as declared.
+    - SCD2 dedupes on the business key; engine-owned history columns
+      (valid_from/valid_to/is_current/row_hash) are never part of source identity.
     - Append-like modes only enforce duplicates when the destination primary key or
       a UNIQUE index is known to include the mapped target column.
     - Destination CI/AI collations / CITEXT / ``UNIQUE (lower(col))`` equate
@@ -845,6 +991,24 @@ def _check_duplicate_keys(
         sync = normalize_sync_mode(sync_mode)
     except Exception:
         sync = (sync_mode or "").strip().lower()
+    # ACC-03 — full identity columns (composite-aware). A (region,id) contract
+    # must dedupe on the tuple, never on `id` alone: components legitimately
+    # repeat across composite keys, and checking one member false-blocks every
+    # composite-key upsert.
+    identity_cols = [
+        str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()
+    ]
+    if not identity_cols and primary_key:
+        identity_cols = [primary_key]
+    identity_cols = _business_identity_columns(identity_cols, sync)
+    destination_pk_columns = _business_identity_columns(
+        [str(c) for c in (destination_pk_columns or []) if c], sync
+    )
+    composite_identity = len(identity_cols) > 1
+    pk_label = " + ".join(identity_cols) if identity_cols else (primary_key or "")
+    target_cols = [
+        (_target_for_source(c, mappings) or c) for c in identity_cols
+    ]
     target_col = _target_for_source(primary_key, mappings) if primary_key else ""
     advisory_warnings = _advisory_unique_key_warnings(
         dest_kind=dest_kind,
@@ -855,12 +1019,25 @@ def _check_duplicate_keys(
         target_types=target_types,
     )
 
+    dest_has_enforced_key = bool(destination_pk_columns) or any(
+        _unique_constraint_enforced(uk, dest_kind=dest_kind)
+        for uk in (destination_unique_keys or [])
+    )
+    if identity_declared is None:
+        identity_declared = dest_has_enforced_key
+    # A declared identity that repeats in the source cannot become the recreated
+    # table's key, so overwrite blocks. An inferred key on a heap only warns.
+    overwrite_enforces_uniqueness = (
+        _is_overwrite_like(sync)
+        and bool(identity_cols)
+        and bool(identity_declared or dest_has_enforced_key)
+    )
     # Single-column identity enforcement (upsert/CDC/PK/single UNIQUE).
-    enforce_identity = bool(primary_key) and (
+    enforce_identity = bool(identity_cols) and (
         schemaless
         or sync_requires_unique_identity(sync, dest_kind=dest_kind)
-        or _is_overwrite_like(sync)
-        or not _is_append_like(sync)
+        or overwrite_enforces_uniqueness
+        or (not _is_append_like(sync) and not _is_overwrite_like(sync))
     )
     covering_single = False
     covering_composite_only = False
@@ -913,7 +1090,7 @@ def _check_duplicate_keys(
     )
     issues.extend(composite_issues)
 
-    if not primary_key and not issues:
+    if not identity_cols and not issues:
         return {
             "check": "duplicate_keys",
             "passed": True,
@@ -928,25 +1105,31 @@ def _check_duplicate_keys(
     # Quarantine→balanced must not green Validate when write-time DQ will fail.
     probe_authoritative = False
     probe_status = (source_duplicate_probe_status or "").strip().lower()
-    if primary_key:
+    if identity_cols:
         findings = source_duplicate_findings or []
         if findings:
             sample = ", ".join(
                 f"{f.get('value')}×{f.get('count', 1)}" for f in findings[:3]
             )
             issues.append(
-                f"{primary_key}: duplicate key values from source probe ({sample})"
+                f"{pk_label}: duplicate key values from source probe ({sample})"
             )
             probe_authoritative = True
 
+    # Expected but not "ran" is unavailable — including a status nobody set.
+    # Requiring a non-empty status let a probe that never reported pass as
+    # if it had proven uniqueness (QA MX3-22 fail-open).
     probe_unavailable = bool(
         source_duplicate_probe_expected
-        and probe_status
         and probe_status != "ran"
         and not probe_authoritative
     )
 
     if not enforce_identity and not issues and not probe_unavailable:
+        if _is_overwrite_like(sync) and identity_cols:
+            advisory_warnings = advisory_warnings + _inferred_identity_dup_warnings(
+                rows, identity_cols, pk_label
+            )
         return {
             "check": "duplicate_keys",
             "passed": True,
@@ -959,12 +1142,72 @@ def _check_duplicate_keys(
 
     # Single-column sample identity — skip when the only covering constraint is
     # composite (same code under different orgs must not false-fail).
-    run_single = bool(
-        enforce_identity
-        and primary_key
-        and not (covering_composite_only and not covering_single)
+    # Also skip when the destination has a composite PK that includes the identity
+    # column: checking single-column duplicates on a composite PK component is a
+    # false positive (ACC-03: (region,id) composite key has duplicate 'id' values).
+    dest_has_composite_pk = len(destination_pk_columns or []) > 1
+    identity_in_composite_pk = (
+        not composite_identity
+        and dest_has_composite_pk
+        and target_col
+        and target_col.lower() in {str(c).lower() for c in (destination_pk_columns or [])}
     )
-    if run_single and primary_key:
+    run_identity = bool(
+        enforce_identity
+        and identity_cols
+        and not (covering_composite_only and not covering_single)
+        and not identity_in_composite_pk
+    )
+    if run_identity and composite_identity:
+        # ACC-03 — dedupe on the whole tuple. ``composite_unique_equality_key``
+        # applies the same per-cell engine semantics (CI/AI collation, PAD
+        # rules) and joins components with a unit separator so ("ab","c") can
+        # never equal ("a","bc"). A NULL component is SQL-NULL: not a key, so
+        # that row cannot collide and is skipped — MATCH SIMPLE semantics.
+        from services.type_system import (
+            composite_unique_equality_key,
+            unique_key_forces_casefold,
+        )
+
+        comp_ddls = [
+            _lookup_target_ddl(tc, target_types) or _lookup_target_ddl(sc, target_types)
+            for sc, tc in zip(identity_cols, target_cols)
+        ]
+        comp_casefold = [
+            unique_key_forces_casefold(
+                tc, ddl_type=comp_ddls[i], unique_keys=destination_unique_keys or []
+            )
+            for i, tc in enumerate(target_cols)
+        ]
+        seen_t: dict[str, int] = {}
+        examples_t: dict[str, str] = {}
+        for row in rows:
+            key = composite_unique_equality_key(
+                [
+                    (
+                        row.get(col),
+                        comp_ddls[i],
+                        comp_casefold[i],
+                        None,
+                    )
+                    for i, col in enumerate(identity_cols)
+                ],
+                dest_kind=dest_kind,
+            )
+            if not key:
+                continue
+            seen_t[key] = seen_t.get(key, 0) + 1
+            examples_t.setdefault(
+                key,
+                "(" + ", ".join(str(row.get(c)) for c in identity_cols) + ")",
+            )
+        dupes = [(examples_t.get(v, v), c) for v, c in seen_t.items() if c > 1]
+        if dupes:
+            sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
+            issues.append(
+                f"{pk_label}: duplicate composite key values ({sample})"
+            )
+    elif run_identity and primary_key:
         from services.type_system import (
             unique_equality_key,
             unique_key_forces_casefold,
@@ -1041,7 +1284,7 @@ def _check_duplicate_keys(
         or covering_composite_only
         or schemaless
         or sync_requires_unique_identity(sync, dest_kind=dest_kind)
-        or _is_overwrite_like(sync)
+        or overwrite_enforces_uniqueness
     )
     # Probe expected but did not complete → never invent population uniqueness.
     # Upsert/CDC/overwrite/dest-PK routes fail closed; append/create-new warns.
@@ -1110,8 +1353,8 @@ def _check_duplicate_keys(
         must_block = (
             schemaless
             or sync_requires_unique_identity(sync, dest_kind=dest_kind)
-            or _is_overwrite_like(sync)
-            or not _is_append_like(sync)
+            or overwrite_enforces_uniqueness
+            or (not _is_append_like(sync) and not _is_overwrite_like(sync))
         )
         if must_block:
             return {
@@ -1359,6 +1602,12 @@ def run_integrity_audit(
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
     dest_table_exists: bool | None = None,
+    empty_cells_as_null: bool = False,
+    dest_nullability: dict[str, bool] | None = None,
+    database_extract: bool = False,
+    source_measured_empty: bool = False,
+    stream_contracts: list[dict] | None = None,
+    proven_width_narrowings: dict | None = None,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1406,6 +1655,33 @@ def run_integrity_audit(
         destination_pk_columns=destination_pk_columns,
         contract_primary_key=contract_primary_key,
     )
+    # Composite-aware identity (ACC-03): Studio contracts / destination PKs can
+    # name a multi-column key. The sample/probe dedupe must run on the whole
+    # tuple — checking any one component alone reports false duplicates for
+    # values that legitimately repeat inside a composite key.
+    from services.primary_key import resolve_primary_key_source_columns
+
+    pk_columns_uniqueness = resolve_primary_key_source_columns(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=mode,
+        purpose="uniqueness",
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+        stream_contracts=stream_contracts,
+    )
+    if len(pk_columns_uniqueness) > 1 and not pk_uniqueness:
+        # Label for operator output; the check itself reads the column list.
+        pk_uniqueness = pk_columns_uniqueness[0]
+    if len(pk_columns_uniqueness) <= 1:
+        pk_columns_uniqueness = [pk_uniqueness] if pk_uniqueness else []
+    identity_declared = bool(
+        str(contract_primary_key or "").strip()
+        or len(pk_columns_uniqueness) > 1
+        or destination_pk_columns
+        or _stream_contracts_declare_identity(stream_contracts)
+    )
 
     checks: list[dict[str, Any]] = []
 
@@ -1418,7 +1694,15 @@ def run_integrity_audit(
             "blocks_transfer": True,
             "issues": ["No source columns available for integrity validation"],
         })
-    if not rows:
+    if not rows and source_measured_empty:
+        checks.append({
+            "check": "sample_available",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": ["Source holds 0 rows (read, not assumed) — no value to audit"],
+        })
+    elif not rows:
         checks.append({
             "check": "sample_available",
             "passed": False,
@@ -1437,6 +1721,7 @@ def run_integrity_audit(
                 validation_mode=validation_mode,
                 rows=rows,
                 dest_table_exists=dest_table_exists,
+                proven_width_narrowings=proven_width_narrowings,
             )
         )
         checks.append(
@@ -1447,6 +1732,9 @@ def run_integrity_audit(
                 rows,
                 dest_kind=dest_kind,
                 target_types=target_types,
+                empty_cells_as_null=empty_cells_as_null,
+                database_extract=database_extract,
+                dest_nullability=dest_nullability,
             )
         )
         checks.append(_check_financial_precision(mappings, source_types, rows))
@@ -1461,6 +1749,8 @@ def run_integrity_audit(
                 validation_mode,
                 dest_kind=dest_kind,
                 primary_key=pk_uniqueness,
+                primary_key_columns=pk_columns_uniqueness,
+            identity_declared=identity_declared,
                 source_duplicate_findings=source_duplicate_findings,
                 sync_mode=sync_mode,
                 destination_pk_columns=destination_pk_columns,
@@ -1508,6 +1798,7 @@ def run_integrity_audit(
             source_columns,
             source_types,
             primary_key=pk_uniqueness,
+            primary_key_columns=pk_columns_uniqueness,
             dest_kind=dest_kind,
             validation_mode=validation_mode,
             sync_mode=sync_mode,

@@ -14,8 +14,8 @@ Python materializes decoded batches only. Proof is dest ``COUNT(*)`` vs
 the source snapshot taken under ``REPEATABLE READ`` +
 ``pg_export_snapshot()``. A mapped single PK still proves dest COUNT
 per key range. Empty dest COPYs the table once (serial INSERT into a
-PK dest). Occupied dest + mapped PK: skip complete ranges, DELETE+reload
-partial. No mapped single PK on an occupied dest: decline.
+PK dest). Occupied dest + mapped PK: skip a complete range. Append declines a partial range; overwrite may
+DELETE+reload. No mapped single PK on an occupied dest: decline.
 
 Declines (row path keeps quarantine): transforms that change values,
 jsonb/bytea/timestamptz/arrays, public proxy, occupied dest without a
@@ -30,6 +30,7 @@ from typing import Any, Callable
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import (
+    occupied_pk_range_action,
     FastPathResult,
     FastPathUnavailable,
     _quote,
@@ -482,6 +483,7 @@ def copy_postgres_to_sqlserver(
                         elif already == 0:
                             part["action"] = "load"
                         else:
+                            occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                             _ss_delete_range(
                                 dst_cur, dest_ref, dest_ident, part
                             )

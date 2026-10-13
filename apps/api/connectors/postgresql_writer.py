@@ -1356,6 +1356,15 @@ def _copy_upsert_batch(
         except Exception as exc:
             logger.debug("TEMP upsert stage drop skipped: %s", exc)
 
+    def _rollback_aborted() -> None:
+        """A failed COPY aborts the transaction. The values fallback must not run in it."""
+        if conn is None:
+            return
+        try:
+            conn.rollback()
+        except Exception:
+            logger.debug("upsert stage rollback skipped", exc_info=True)
+
     try:
         cur.execute(
             sql_mod.SQL("CREATE TEMP TABLE {} AS SELECT * FROM {}.{} WHERE 0=1").format(
@@ -1404,10 +1413,21 @@ def _copy_upsert_batch(
         cur.execute(merge)
         _drop_stage_best_effort()
         return len(batch)
-    except Exception:
-        # Clear aborted txn + orphan stage, then values-based upsert.
+    except Exception as exc:
+        # COPY or the merge failed. PostgreSQL then rejects every later
+        # statement with "current transaction is aborted" and hides the
+        # first error (MariaDB → Postgres upsert). Roll back, then the
+        # values path. If that path only repeats the aborted-transaction
+        # error, raise the original failure.
+        _rollback_aborted()
         _drop_stage_best_effort()
-        _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
+        try:
+            _execute_values_insert(cur, insert_sql, [tuple(r) for r in batch])
+        except Exception as fallback_exc:
+            fallback = str(fallback_exc).lower()
+            if "current transaction is aborted" in fallback or "infailedsqltransaction" in fallback:
+                raise exc from fallback_exc
+            raise
         return len(batch)
 
 
@@ -1796,7 +1816,12 @@ def write_mapped_rows(
                             placeholders,
                             sql.SQL(", ").join(map(sql.Identifier, conflict)),
                             set_clause,
-                            sql.SQL(postgres_lsn_update_guard_sql(table_name)),
+                            sql.SQL(
+                                postgres_lsn_update_guard_sql(
+                                    table_name,
+                                    allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
+                                )
+                            ),
                         )
                     return sql.SQL(
                         "INSERT INTO {}.{} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {}"
@@ -1896,6 +1921,8 @@ def write_mapped_rows(
                     dest_tablespaces=list_destination_tablespaces(
                         "postgresql", cursor
                     ),
+                    carry_keys=write_mode != "insert"
+                    or bool(_kwargs.get("carry_source_keys")),
                 )
                 if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                     target_cols[:] = list(fidelity_plan.dest_columns)
@@ -1905,6 +1932,15 @@ def write_mapped_rows(
                     plan=(None if pg_table_existed else fidelity_plan),
                     dialect="postgresql",
                 )
+                if not pg_table_existed:
+                    from services.overwrite_keep import append_kept_column_sql
+
+                    body = append_kept_column_sql(
+                        body,
+                        list(_kwargs.get("preserve_columns") or []),
+                        dialect="postgresql",
+                        existing=list(target_cols),
+                    )
                 # Placement (PARTITION BY / TABLESPACE) is part of the CREATE
                 # itself — a table cannot be partitioned after the fact.
                 cursor.execute(
@@ -1985,6 +2021,24 @@ def write_mapped_rows(
                     sql.SQL("{} {}").format(sql.Identifier(c), sql.SQL(t))
                     for c, t in zip(target_cols, target_types)
                 )
+                if not pg_table_existed:
+                    have = {str(c).casefold() for c in target_cols}
+                    extras = []
+                    for col in list(_kwargs.get("preserve_columns") or []):
+                        if not isinstance(col, dict):
+                            continue
+                        name = str(col.get("name") or "").strip()
+                        if not name or name.casefold() in have:
+                            continue
+                        ddl = str(col.get("ddl_type") or "text").strip() or "text"
+                        extras.append(
+                            sql.SQL("{} {} NULL").format(
+                                sql.Identifier(name), sql.SQL(ddl)
+                            )
+                        )
+                        have.add(name.casefold())
+                    if extras:
+                        col_defs = sql.SQL(", ").join([col_defs, *extras])
                 cursor.execute(
                     sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
                         sql.Identifier(schema),
@@ -2151,7 +2205,10 @@ def write_mapped_rows(
                         sql.SQL(", ").join(sql.Identifier(c) for c in conflict_cols),
                     )
                 )
-        conn.commit()
+        # A deferred overwrite already holds TRUNCATE + inserted rows on this
+        # connection. Committing setup here would publish that prefix (R4-D06).
+        if not getattr(conn, "_df_overwrite_txn", False):
+            conn.commit()
 
     try:
         if connection is not None:
@@ -2208,6 +2265,8 @@ def write_mapped_rows(
                     _run_setup(cur)
                     break
                 except Exception as setup_exc:
+                    if getattr(conn, "_df_overwrite_txn", False):
+                        raise
                     try:
                         conn.rollback()
                     except Exception as exc:
@@ -2219,6 +2278,35 @@ def write_mapped_rows(
                         raise
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
                     _reconnect()
+
+            if table_existed and not backfill_new_fields and not additive_refuse:
+                missing_cols: list[str] = []
+                try:
+                    cur.execute(
+                        """SELECT column_name FROM information_schema.columns
+                           WHERE table_schema = %s AND table_name = %s""",
+                        (schema, table_name),
+                    )
+                    existing_cols = {str(row[0]).lower() for row in cur.fetchall()}
+                    missing_cols = [
+                        str(col)
+                        for col in target_cols
+                        if str(col).lower() not in existing_cols
+                    ]
+                except Exception:  # noqa: BLE001 — probe failure must not hide the write
+                    logger.debug(
+                        "PostgreSQL missing-column probe skipped", exc_info=True
+                    )
+                    missing_cols = []
+                if missing_cols:
+                    shown = ", ".join(missing_cols[:8])
+                    additive_refuse = (
+                        f"Destination table {schema}.{table_name} is missing "
+                        f"column(s) {shown}. Schema policy did not add them, so "
+                        "the load stopped before INSERT. Open Validate and approve "
+                        "the new column, or set the schema policy to propagate "
+                        "columns so Execute can ADD COLUMN."
+                    )
 
             if additive_refuse:
                 return WriteResult(
@@ -2368,6 +2456,81 @@ def write_mapped_rows(
                             warnings=transform_errors,
                         )
 
+            if write_mode == "insert" and table_existed and data_rows:
+                from services.destination_key_collision_probe import (
+                    refuse_enforced_append_before_write,
+                )
+
+                refusal = refuse_enforced_append_before_write(
+                    destination_config={
+                        "type": "postgresql",
+                        "host": host,
+                        "port": port,
+                        "database": database,
+                        "username": username,
+                        "password": password,
+                        "schema": schema,
+                        "connection_string": connection_string,
+                        "ssl": ssl,
+                    },
+                    destination_db_type="postgresql",
+                    destination_table=table_name,
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                )
+                if refusal:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=refusal,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
+
+            if (
+                bool(_kwargs.get("pg_overwrite_in_transaction"))
+                and table_existed
+                and port != 5439
+                and not getattr(conn, "_df_overwrite_truncated", False)
+            ):
+                from connectors.sql_identifiers import quote_table_ref
+                from connectors.table_manager import overwrite_empty_statements
+
+                quoted = quote_table_ref(table_name, schema, dialect="postgresql")
+                truncate_sql, delete_sql = overwrite_empty_statements("postgresql", quoted)
+                try:
+                    if truncate_sql:
+                        cur.execute(truncate_sql)
+                    else:
+                        cur.execute(delete_sql)
+                except Exception as trunc_exc:
+                    # A foreign key can refuse TRUNCATE. Roll back that statement
+                    # only — setup already committed — then delete in place.
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        logger.debug("overwrite truncate rollback failed", exc_info=True)
+                    missing = str(trunc_exc).lower()
+                    if any(
+                        token in missing
+                        for token in ("does not exist", "undefined table", "unknown table", "no such table")
+                    ):
+                        pass
+                    else:
+                        logger.info(
+                            "Overwrite TRUNCATE refused for %s (%s); deleting rows in place",
+                            quoted,
+                            trunc_exc,
+                        )
+                        cur.execute(delete_sql)
+                conn._df_overwrite_truncated = True
+                conn._df_overwrite_txn = True
+
             use_copy = (
                 write_mode == "insert"
                 and not conflict_columns
@@ -2470,6 +2633,7 @@ def write_mapped_rows(
                                     target_cols,
                                     quote='"',
                                     placeholder="%s",
+                                    allow_equal_lsn=bool(_kwargs.get("allow_equal_lsn")),
                                 )
                                 rows_skipped += skipped
                             if write_batch:
@@ -2510,7 +2674,8 @@ def write_mapped_rows(
                                 row_end=start + max(landed - 1, 0),
                                 attempt=1,
                             )
-                        conn.commit()
+                        if not getattr(conn, "_df_overwrite_txn", False):
+                            conn.commit()
                         chunk_written = landed
                         break
                     except Exception as chunk_exc:
@@ -2599,11 +2764,17 @@ def write_mapped_rows(
                                         row_end=start + max(chunk_written - 1, 0),
                                         attempt=1,
                                     )
-                                conn.commit()
+                                if not getattr(conn, "_df_overwrite_txn", False):
+                                    conn.commit()
                             except Exception as exc:
                                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                             break
                         attempt += 1
+                        if getattr(conn, "_df_overwrite_txn", False):
+                            # Reconnecting would append onto the pre-truncate
+                            # table. The open transaction rolls back with the
+                            # connection, so the previous rows stay.
+                            raise
                         if not is_connection_lost(chunk_exc) or not should_retry_connection_lost(
                             attempt=attempt, started_at=chunk_started, proxy=proxy_dest
                         ):
@@ -2657,7 +2828,8 @@ def write_mapped_rows(
                                 policy=policy,
                             )
                         )
-                        conn.commit()
+                        if not getattr(conn, "_df_overwrite_txn", False):
+                            conn.commit()
                         written += written_sparse
                         rows_skipped += sparse_skipped
                         write_acc.add_accepted(list(sparse_checksum))
@@ -2710,6 +2882,9 @@ def write_mapped_rows(
                         )
                         _land_dense_chunk(sub, chunk_idx, sub_nums)
                         chunk_idx += 1
+                    write_acc.note_collapsed_duplicates(
+                        finished.collapsed_duplicate_rows
+                    )
                     write_acc.add_accepted(dense)
                 del finished
             chunks = chunk_idx
@@ -2719,6 +2894,7 @@ def write_mapped_rows(
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,
+                collapsed_duplicates=write_acc.collapsed_duplicate_rows,
             )
             coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
@@ -2743,7 +2919,8 @@ def write_mapped_rows(
                 )
             elif child_flush.get("rows_written"):
                 try:
-                    conn.commit()
+                    if not getattr(conn, "_df_overwrite_txn", False):
+                        conn.commit()
                 except Exception as exc:
                     logger.warning("Exception suppressed: %s", exc, exc_info=exc)
                 for t in child_flush.get("tables") or []:
@@ -2753,6 +2930,18 @@ def write_mapped_rows(
                 cur.close()
             except Exception as exc:
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        overwrite_failed = bool(child_flush_error)
+        if getattr(conn, "_df_overwrite_txn", False) and not overwrite_failed:
+            overwrite_failed = bool(
+                reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
+            )
+        if getattr(conn, "_df_overwrite_txn", False) and (overwrite_failed or close_connection):
+            from connectors.write_resilience import finish_held_overwrite
+
+            # This call owns the socket, or the load already failed. The stream
+            # path leaves a successful transaction open until the last batch.
+            finish_held_overwrite(conn, success=bool(close_connection) and not overwrite_failed)
 
         if close_connection:
             close_quietly(conn)
@@ -2810,6 +2999,10 @@ def write_mapped_rows(
             meta=meta_out,
         )
     except Exception as exc:
+        if getattr(conn, "_df_overwrite_txn", False):
+            from connectors.write_resilience import finish_held_overwrite
+
+            finish_held_overwrite(conn, success=False)
         if close_connection:
             close_quietly(conn)
         return WriteResult(

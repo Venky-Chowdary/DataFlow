@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from services.acknowledgment_contract import MIN_ACTOR_LEN
+from services.audit_coverage import record_security_event
 from services.cdc_capture_release import release_schedule_cdc_capture
 from services.schedule_approvals import STATUS_OPEN
 from services.schedule_store import (
@@ -18,12 +19,14 @@ from services.schedule_store import (
     delete_schedule,
     get_schedule,
     list_schedules,
+    project_operator_cadence,
     update_schedule,
 )
 from services.workspace_access import (
     assert_resource_workspace,
     resolve_read_workspace,
     resolve_write_workspace,
+    workspace_resource_is_visible,
 )
 
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
@@ -80,7 +83,7 @@ class ScheduleCreate(BaseModel):
     priority_column: str = ""
     priority_direction: str = "desc"
     row_limit: int = Field(default=0, ge=0)
-    delivery_guarantee: str = "at_least_once"
+    delivery_guarantee: str = "auto"
     snapshot_mode: str = ""
     allow_append_only: bool = False
     cdc_row_filter: str = ""
@@ -118,7 +121,9 @@ class ScheduleUpdate(BaseModel):
     source_table: Optional[str] = None
     dest_connector_id: Optional[str] = None
     dest_table: Optional[str] = None
-    interval: Optional[IntervalPreset] = None
+    interval: Optional[str] = None
+    #: Runner token when ``interval`` is the displayed cadence label.
+    interval_preset: Optional[str] = None
     cron: Optional[str] = None
     timezone: Optional[str] = None
     sync_mode: Optional[SyncMode] = None
@@ -167,6 +172,10 @@ class ScheduleResponse(BaseModel):
     dest_connector_id: str
     dest_table: str
     interval: str
+    #: hourly | daily | weekly. Present even when ``interval`` is a label.
+    interval_preset: str = ""
+    #: Human cadence. Cron wins over the preset.
+    cadence_label: str = ""
     cron: str = ""
     timezone: str = "UTC"
     sync_mode: str = "full_refresh_overwrite"
@@ -235,7 +244,7 @@ class ScheduleResponse(BaseModel):
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleResponse:
-        data = s.to_dict()
+        data = project_operator_cadence(s.to_dict())
         mappings = list(data.get("mappings") or [])
         data["mappings"] = mappings
         data["mapping_count"] = len(mappings)
@@ -253,6 +262,8 @@ class ScheduleSummaryResponse(BaseModel):
     dest_connector_id: str
     dest_table: str
     interval: str
+    interval_preset: str = ""
+    cadence_label: str = ""
     cron: str = ""
     timezone: str = "UTC"
     sync_mode: str = "full_refresh_overwrite"
@@ -307,12 +318,30 @@ class ScheduleSummaryResponse(BaseModel):
     approval_finding: str = ""
     approvable: bool = False
     authorized: bool = False
+    # Due but not started: how late, and exactly what holds the one-writer
+    # claim (schedule + job). "Next run in the past" alone was a dead end.
+    overdue_seconds: int = 0
+    blocked_by: dict[str, Any] = Field(default_factory=dict)
+    blocked_reason: str = ""
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleSummaryResponse:
+        from services.schedule_store import (
+            claim_holder,
+            describe_claim_holder,
+            schedule_overdue_seconds,
+        )
+
         full = ScheduleResponse.from_schedule(s)
         payload = full.model_dump()
         payload.pop("mappings", None)
+        overdue = schedule_overdue_seconds(s)
+        if overdue:
+            holder = claim_holder(s)
+            payload["overdue_seconds"] = overdue
+            if holder:
+                payload["blocked_by"] = holder
+                payload["blocked_reason"] = describe_claim_holder(holder)
         req = dict(s.approval_request or {})
         open_req = str(req.get("status") or "").strip().lower() == STATUS_OPEN
         grant = dict(s.standing_authorization or {})
@@ -364,6 +393,17 @@ def export_dataflow_manifest(
     return artifact
 
 
+def _record_gitops_scope_denial(request: Request) -> None:
+    from services.audit_coverage import record_authz_denial
+
+    record_authz_denial(
+        request,
+        required_permission="workspace.resource",
+        effective_role=str(getattr(request.state, "effective_role", "") or "member"),
+        reason="cross_workspace",
+    )
+
+
 @router.post("/gitops/plan")
 async def gitops_plan_manifest(
     payload: dict[str, Any],
@@ -371,11 +411,14 @@ async def gitops_plan_manifest(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Dry-run a DatawrapManifest / PipelineSchedule / DataContract YAML body."""
-    from services.gitops_manifest import plan_manifest
+    from services.gitops_manifest import WorkspaceScopeError, plan_manifest
 
-    resolve_read_workspace(request, workspace_id)
+    ws = resolve_read_workspace(request, workspace_id)
     try:
-        return plan_manifest(payload)
+        return plan_manifest(payload, workspace_id=ws)
+    except WorkspaceScopeError as exc:
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -394,18 +437,61 @@ async def gitops_apply_manifest(
     Pass ``require_signed_contracts=true`` for CD/staging: every schedule must
     reference a SIGNED contract.
     """
-    from services.gitops_manifest import apply_manifest
+    from services.gitops_manifest import WorkspaceScopeError, apply_manifest
 
     ws = resolve_write_workspace(request, workspace_id)
     try:
-        return apply_manifest(
+        result = apply_manifest(
             payload,
             dry_run=dry_run,
             require_signed_contracts=require_signed_contracts,
             workspace_id=ws,
         )
+    except WorkspaceScopeError as exc:
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if any(
+        item.get("error_code") == "cross_workspace"
+        for item in result.get("results", [])
+    ):
+        _record_gitops_scope_denial(request)
+        raise HTTPException(status_code=403, detail="Resource belongs to another workspace")
+    rows = result.get("results") or result.get("actions") or []
+    successful_schedules = [
+        row for row in rows
+        if row.get("kind") == "PipelineSchedule"
+        and row.get("ok", True)
+        and row.get("action") in {"create", "update", "unchanged"}
+    ]
+    created = sum(1 for row in successful_schedules if row.get("action") == "create")
+    updated = sum(1 for row in successful_schedules if row.get("action") == "update")
+    unchanged = sum(1 for row in successful_schedules if row.get("action") == "unchanged")
+    created_count = result.get("creates")
+    updated_count = result.get("updates")
+    deleted_count = result.get("deletes")
+    unchanged_count = result.get("unchanged")
+    created_count = created_count if isinstance(created_count, int) else created
+    updated_count = updated_count if isinstance(updated_count, int) else updated
+    deleted_count = deleted_count if isinstance(deleted_count, int) else 0
+    unchanged_count = unchanged_count if isinstance(unchanged_count, int) else unchanged
+    schedule_id = successful_schedules[0].get("id") if successful_schedules else None
+    record_security_event(
+        "schedule.gitops.apply",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{schedule_id or 'gitops'}",
+        status=200,
+        details={
+            "created": created_count,
+            "updated": updated_count,
+            "deleted": deleted_count,
+            "unchanged": unchanged_count,
+            "dry_run": bool(dry_run),
+        },
+    )
+    return result
 
 
 @router.get("/", response_model=list[ScheduleSummaryResponse])
@@ -418,12 +504,10 @@ async def list_pipeline_schedules(
     ws = resolve_read_workspace(request, workspace_id)
     schedules = await asyncio.to_thread(list_schedules)
     if ws:
-        from services.team_store import require_workspace_isolation
-
-        if require_workspace_isolation():
-            schedules = [s for s in schedules if s.workspace_id == ws]
-        else:
-            schedules = [s for s in schedules if not s.workspace_id or s.workspace_id == ws]
+        schedules = [
+            s for s in schedules
+            if workspace_resource_is_visible(s.workspace_id, ws)
+        ]
     return [ScheduleSummaryResponse.from_schedule(s) for s in schedules]
 
 
@@ -459,6 +543,22 @@ async def create_pipeline_schedule(
         sched = create_schedule(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_security_event(
+        "schedule.definition.create",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{sched.id}",
+        status=201,
+        details={
+            "id": sched.id,
+            "source_connector_id": sched.source_connector_id,
+            "source_table": sched.source_table,
+            "dest_connector_id": sched.dest_connector_id,
+            "dest_table": sched.dest_table,
+            "sync_mode": sched.sync_mode,
+            "enabled": bool(sched.enabled),
+        },
+    )
     return ScheduleResponse.from_schedule(sched)
 
 
@@ -485,6 +585,22 @@ async def patch_pipeline_schedule(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail="Schedule not found")
+    record_security_event(
+        "schedule.definition.update",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{updated.id}",
+        status=200,
+        details={
+            "id": updated.id,
+            "source_connector_id": updated.source_connector_id,
+            "source_table": updated.source_table,
+            "dest_connector_id": updated.dest_connector_id,
+            "dest_table": updated.dest_table,
+            "sync_mode": updated.sync_mode,
+            "enabled": bool(updated.enabled),
+        },
+    )
     return ScheduleResponse.from_schedule(updated)
 
 
@@ -538,6 +654,22 @@ async def import_pipeline_schedule(
     if not sched:
         raise HTTPException(status_code=500, detail="Schedule imported but not readable")
     assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "")
+    record_security_event(
+        "schedule.definition.import",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{sched.id}",
+        status=201,
+        details={
+            "id": sched.id,
+            "source_connector_id": sched.source_connector_id,
+            "source_table": sched.source_table,
+            "dest_connector_id": sched.dest_connector_id,
+            "dest_table": sched.dest_table,
+            "sync_mode": sched.sync_mode,
+            "enabled": bool(sched.enabled),
+        },
+    )
     return ScheduleResponse.from_schedule(sched)
 
 @router.delete("/{schedule_id}")
@@ -551,6 +683,22 @@ async def remove_pipeline_schedule(
     capture = release_schedule_cdc_capture(sched)
     if not delete_schedule(schedule_id):
         raise HTTPException(status_code=404, detail="Schedule not found")
+    record_security_event(
+        "schedule.definition.delete",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{schedule_id}",
+        status=200,
+        details={
+            "id": sched.id,
+            "source_connector_id": sched.source_connector_id,
+            "source_table": sched.source_table,
+            "dest_connector_id": sched.dest_connector_id,
+            "dest_table": sched.dest_table,
+            "sync_mode": sched.sync_mode,
+            "enabled": bool(sched.enabled),
+        },
+    )
     return {"success": True, "capture_release": capture}
 
 

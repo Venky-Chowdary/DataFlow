@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, localcontext
 from typing import Any
 
 from services.transform_engine import (
@@ -18,7 +18,7 @@ from services.transform_engine import (
     pin_settled_number_locale,
     reset_active_number_locale,
 )
-from services.value_serializer import cell_to_string, is_null_evidence
+from services.value_serializer import cell_to_string
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
@@ -28,19 +28,22 @@ PHONE_RE = re.compile(r"^\+?[\d\s().-]{7,20}$")
 DATE_PATTERN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{2}/\d{2}/\d{4}|^\d{8}$")
 
 
-def _as_str(value: Any) -> str:
+def _as_str(value: Any) -> str | None:
     """One profiler sample. Same spelling as the transfer wire.
 
-    ``str(Decimal('1E+2'))`` invented ``1E+2``. Reader-wired
-    ``SQL_NULL_SENTINEL`` looked like a VARCHAR token. NULL / Missing /
-    blank still collapse to ``""`` so null-rate counts absence, not the
-    sentinel — that polarity is profiler-only, not extract.
+    ``None`` means absence (SQL NULL / Missing / reader-wired sentinel).
+    An empty string ``""`` is a *stored value*: VARCHAR `''` written to the
+    source is not NULL, and counting it as absent misreported null-rate and
+    hid a real column population (QA T19). Empty cells carry no type
+    evidence but still count as present.
     """
-    if value is None or is_null_evidence(value):
-        return ""
+    from services.value_serializer import is_reader_null_cell
+
+    if value is None or is_reader_null_cell(value):
+        return None
     text = cell_to_string(value, preserve_sql_null=True)
-    if is_null_evidence(text):
-        return ""
+    if is_reader_null_cell(text):
+        return None
     return text.strip()
 
 
@@ -69,27 +72,52 @@ def _numeric_values(values: list[str]) -> list[Decimal]:
     return out
 
 
+def _decimal_work_prec(nums: list[Decimal]) -> int:
+    """Precision wide enough for NUMERIC(38,10) under the default context of 28.
+
+    ``quantize`` of a 38-digit coefficient raises ``InvalidOperation`` at
+    precision 28 and the planner used to surface that as a raw exception.
+    """
+    prec = 28
+    for number in nums:
+        digits = number.as_tuple().digits
+        prec = max(prec, len(digits) + 8)
+    return prec
+
+
 def _numeric_stats(values: list[str]) -> dict[str, Any]:
     nums = _numeric_values(values)
     if not nums:
         return {}
     sorted_nums = sorted(nums)
     n = len(nums)
-    mean = sum(nums, Decimal(0)) / Decimal(n)
-    variance = sum((x - mean) ** 2 for x in nums) / Decimal(n)
-    stddev = variance.sqrt() if variance >= 0 else Decimal(0)
-    quantum = Decimal("0.000001")
-    return {
-        "min": sorted_nums[0],
-        "max": sorted_nums[-1],
-        "mean": mean.quantize(quantum) if mean.is_finite() else mean,
-        "stddev": stddev.quantize(quantum) if stddev.is_finite() else stddev,
-        "p25": _percentile(sorted_nums, 0.25),
-        "p50": _percentile(sorted_nums, 0.50),
-        "p75": _percentile(sorted_nums, 0.75),
-        "p95": _percentile(sorted_nums, 0.95),
-        "numeric_parse_rate": round(n / max(len(values), 1), 4),
-    }
+    rate = round(n / max(len(values), 1), 4)
+    try:
+        with localcontext() as ctx:
+            ctx.prec = _decimal_work_prec(nums)
+            mean = sum(nums, Decimal(0)) / Decimal(n)
+            variance = sum((x - mean) ** 2 for x in nums) / Decimal(n)
+            stddev = variance.sqrt() if variance >= 0 else Decimal(0)
+            quantum = Decimal("0.000001")
+            return {
+                "min": sorted_nums[0],
+                "max": sorted_nums[-1],
+                "mean": mean.quantize(quantum) if mean.is_finite() else mean,
+                "stddev": stddev.quantize(quantum) if stddev.is_finite() else stddev,
+                "p25": _percentile(sorted_nums, 0.25),
+                "p50": _percentile(sorted_nums, 0.50),
+                "p75": _percentile(sorted_nums, 0.75),
+                "p95": _percentile(sorted_nums, 0.95),
+                "numeric_parse_rate": rate,
+            }
+    except InvalidOperation:
+        # Stats are not the column type. Omit them rather than crash the plan
+        # or shrink a declared NUMERIC(38,10).
+        return {
+            "min": sorted_nums[0],
+            "max": sorted_nums[-1],
+            "numeric_parse_rate": rate,
+        }
 
 
 def _infer_pattern(values: list[str]) -> str | None:
@@ -114,24 +142,29 @@ def _infer_pattern(values: list[str]) -> str | None:
 def _histogram(values: list[Decimal], buckets: int = 10) -> list[dict[str, Any]]:
     if not values:
         return []
-    lo, hi = min(values), max(values)
-    if lo == hi:
-        return [{"bucket": 0, "low": lo, "high": hi, "count": len(values)}]
-    width = (hi - lo) / buckets
-    counts = [0] * buckets
-    for v in values:
-        idx = min(buckets - 1, int((v - lo) / width))
-        counts[idx] += 1
-    quantum = Decimal("0.0001")
-    return [
-        {
-            "bucket": i,
-            "low": (lo + i * width).quantize(quantum),
-            "high": (lo + (i + 1) * width).quantize(quantum),
-            "count": c,
-        }
-        for i, c in enumerate(counts)
-    ]
+    try:
+        with localcontext() as ctx:
+            ctx.prec = _decimal_work_prec(values)
+            lo, hi = min(values), max(values)
+            if lo == hi:
+                return [{"bucket": 0, "low": lo, "high": hi, "count": len(values)}]
+            width = (hi - lo) / buckets
+            counts = [0] * buckets
+            for v in values:
+                idx = min(buckets - 1, int((v - lo) / width))
+                counts[idx] += 1
+            quantum = Decimal("0.0001")
+            return [
+                {
+                    "bucket": i,
+                    "low": (lo + i * width).quantize(quantum),
+                    "high": (lo + (i + 1) * width).quantize(quantum),
+                    "count": c,
+                }
+                for i, c in enumerate(counts)
+            ]
+    except InvalidOperation:
+        return []
 
 
 def _type_scores(values: list[str]) -> dict[str, float]:
@@ -173,8 +206,11 @@ def _type_scores(values: list[str]) -> dict[str, float]:
 def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> dict[str, Any]:
     """Profile one column: type inference, statistics, patterns, quality signals."""
     strings = [_as_str(v) for v in values[:sample_limit]]
-    non_empty = [s for s in strings if s]
-    null_rate = 1.0 - (len(non_empty) / max(len(strings), 1))
+    # Absence (None) vs presence-without-evidence (""): only the former is a
+    # null. Empty strings contribute to distinct/top-values as real data.
+    present = [s for s in strings if s is not None]
+    non_empty = [s for s in present if s]
+    null_rate = 1.0 - (len(present) / max(len(strings), 1))
     distinct = len(set(non_empty))
     distinct_ratio = distinct / max(len(non_empty), 1)
 
@@ -234,6 +270,9 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
         "likely_primary_key": is_likely_key,
         "sample_count": len(strings),
         "non_empty_count": len(non_empty),
+        # Present = not SQL NULL. A stored '' is present but empty (QA T19).
+        "present_count": len(present),
+        "empty_string_count": len(present) - len(non_empty),
         "likely_pii": pii,
         "detected_pattern": pattern,
         "type_scores": scores,
@@ -349,6 +388,26 @@ UNTYPED_TEXT_LOGICALS = frozenset({"string", "text", "varchar", "unknown"})
 # Families whose *declared* form carries a domain even with no parameters:
 # ``NUMERIC`` / Dynamo ``N`` / BSON ``Decimal128`` accept values no sample bounds.
 _NUMERIC_DOMAIN_LOGICALS = frozenset({"decimal", "integer", "float"})
+
+
+def _inference_would_invent_boolean(declared: str, inferred: str) -> bool:
+    """True when samples would relabel a declared number as BOOLEAN.
+
+    ``is_active`` holding ``0``/``1`` is a boolean on a file. Oracle
+    ``NUMBER(1,0)`` and ``DECIMAL(5,0)`` declared that domain; copying the
+    sample guess onto the destination then blocked ``DECIMAL → BOOLEAN``.
+    """
+    if not declared or not inferred:
+        return False
+    from services.type_system import normalize_logical_type
+
+    try:
+        return (
+            normalize_logical_type(declared) in {"integer", "decimal", "float"}
+            and normalize_logical_type(inferred) == "boolean"
+        )
+    except Exception:  # noqa: BLE001 — an unreadable type token is not a boolean invent
+        return False
 
 
 def _inference_would_demote_to_text(declared: str, inferred: str) -> bool:
@@ -483,6 +542,10 @@ def merge_profiler_schema(
             if declared:
                 continue
             merged[col] = inferred
+            continue
+        if _inference_would_invent_boolean(declared, str(inferred)):
+            # Flag-shaped 0/1 samples promote to BOOLEAN. A declared
+            # NUMBER/DECIMAL is still a number (DEF-B-011).
             continue
         if _inference_would_demote_to_text(declared, str(inferred)):
             continue

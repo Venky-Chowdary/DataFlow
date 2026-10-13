@@ -37,6 +37,10 @@ _MEMBERSHIP_TO_GATE_ROLE = {"admin": "admin", "editor": "editor", "viewer": "vie
 _ROLE_RANK = {"viewer": 0, "operator": 1, "editor": 2, "admin": 3}
 
 
+def membership_role_to_gate_role(role: str) -> str:
+    return _MEMBERSHIP_TO_GATE_ROLE.get((role or "").strip().lower(), "viewer")
+
+
 def _rank(role: str) -> int:
     return _ROLE_RANK.get(role, 0)
 
@@ -107,6 +111,11 @@ def resolve_effective_role(user: dict[str, Any] | None, workspace_id: str = "") 
     # Read through the module so a test that substitutes the role normalizer on
     # ``services.rbac`` is honoured here too.
     platform_role = _rbac.normalize_role(user.get("role"))
+    # A workspace API key is its own principal. The role stored on the key is
+    # the gate. Looking up the creator's membership promoted every key an
+    # admin minted to admin, so an editor key could list and revoke keys.
+    if str(user.get("auth_kind") or "") == "api_key":
+        return platform_role
     if platform_role == "admin":
         return "admin"
     email = str(user.get("email") or "").strip()
@@ -125,7 +134,7 @@ def resolve_effective_role(user: dict[str, Any] | None, workspace_id: str = "") 
 
 
 def effective_permissions(user: dict[str, Any] | None, workspace_id: str = "") -> set[str]:
-    return _rbac.role_permissions(resolve_effective_role(user, workspace_id))
+    return _rbac.principal_permissions(user, resolve_effective_role(user, workspace_id))
 
 
 def workspace_choice_is_ambiguous(user: dict[str, Any] | None, workspace_id: str = "") -> bool:
@@ -148,7 +157,7 @@ def workspace_choice_is_ambiguous(user: dict[str, Any] | None, workspace_id: str
 def permission_summary(user: dict[str, Any] | None, workspace_id: str = "") -> dict[str, Any]:
     """What the client needs to gate its own controls honestly."""
     role = resolve_effective_role(user, workspace_id)
-    granted = sorted(_rbac.role_permissions(role))
+    granted = sorted(_rbac.principal_permissions(user, role))
     return {
         "workspace_choice_ambiguous": workspace_choice_is_ambiguous(user, workspace_id),
         "effective_role": role,

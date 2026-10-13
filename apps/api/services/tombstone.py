@@ -155,12 +155,14 @@ def is_row_tombstone(record: Mapping[str, Any] | None) -> bool:
     row = dict(record or {})
     if not row:
         return False
+    # Business columns (is_deleted, deleted_at) are data on an incremental
+    # upsert. Auto-deleting them removed live destination rows and then
+    # reported the missing key as a duplicate (DEF-C-041). A CDC envelope is
+    # the only implicit hard-delete. A reader that was given an explicit
+    # tombstone column still uses is_tombstone_set on that column.
     if "__deleted" in row:
         return is_tombstone_set(row, "__deleted")
     op = row.get("__op")
     if op is not None and str(op).strip().lower() in _DELETE_OPS:
         return True
-    column = detect_tombstone_column({}, list(row.keys()))
-    if not column:
-        return False
-    return is_tombstone_set(row, column)
+    return False

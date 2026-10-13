@@ -24,9 +24,14 @@ def test_catalog_lists_vector_destinations_live():
         c["id"]: c
         for c in search_catalog(transfer_only=True, limit=2000).get("connectors", [])
     }
-    for cid in ("pgvector", "weaviate", "pinecone", "milvus"):
+    for cid in ("weaviate", "pinecone", "milvus"):
         assert ready[cid].get("transfer_ready") is True
         assert ready[cid].get("capabilities", {}).get("dest_only") is True
+    # pgvector is a PostgreSQL table with a vector column: it reads as a source
+    # through the PostgreSQL reader too (QA MX2-12).
+    assert ready["pgvector"].get("transfer_ready") is True
+    assert ready["pgvector"].get("capabilities", {}).get("read") is True
+    assert ready["pgvector"].get("capabilities", {}).get("dest_only") is not True
     assert ready["qdrant"].get("transfer_ready") is True
     assert ready["qdrant"].get("capabilities", {}).get("read") is True
     assert ready["qdrant"].get("capabilities", {}).get("dest_only") is not True

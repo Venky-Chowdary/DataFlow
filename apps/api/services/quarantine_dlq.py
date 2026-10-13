@@ -35,6 +35,35 @@ from services.value_serializer import json_default, json_loads_exact
 
 logger = logging.getLogger(__name__)
 
+
+# Every ``persist_rejected_rows(source=...)`` caller passes one of these code
+# literals. Anything else (a future caller passing a table/file/object name)
+# is logged as ``other`` so the event can never carry a customer identifier.
+_QUARANTINE_SOURCES = frozenset(
+    {
+        "transfer",
+        "transform",
+        "cdc_batch",
+        "file_stream_batch",
+        "file_stream_batch_abort",
+        "stream_batch",
+        "stream_batch_abort",
+        "buffered_checkpoint",
+        "universal_engine",
+    }
+)
+
+
+def _quarantine_source_kind(source: Any) -> str:
+    value = str(source or "").strip().lower()
+    return value if value in _QUARANTINE_SOURCES else "other"
+
+
+def _quarantine_event(event: str, **fields: Any) -> None:
+    from services.ops_events import emit_event
+
+    emit_event(logger, event, outcome="succeeded", level=logging.INFO, **fields)
+
 DLQ_PATH = data_dir() / "quarantine_dlq.jsonl"
 _MONGO_COLL = "quarantine_dlq"
 # Rotate JSONL before unbounded growth fills the disk (and then silently fails).
@@ -269,6 +298,11 @@ def persist_rejected_rows(
             skip_chunks_written += 1
 
     if not replay:
+        _quarantine_event(
+            "quarantine.rows.persisted", job_id=jid, workspace_id=workspace_id or None,
+            source=_quarantine_source_kind(source), rows=0, chunks=0, skipped_contract=skip_n,
+            skip_audit_chunks=skip_chunks_written,
+        )
         return {
             "rows": 0,
             "chunks": 0,
@@ -326,6 +360,11 @@ def persist_rejected_rows(
         persist_event_on_job(jid, event)
     except Exception:
         logger.debug("quarantine lineage emit skipped", exc_info=True)
+    _quarantine_event(
+        "quarantine.rows.persisted", job_id=jid, workspace_id=workspace_id or None,
+        source=_quarantine_source_kind(source), rows=len(rows), chunks=len(chunks), skipped_contract=skip_n,
+        skip_audit_chunks=skip_chunks_written,
+    )
     return out
 
 
@@ -554,6 +593,71 @@ def open_quarantine_details(
     return [d for d in replay if is_open_retry_status(d.get("retry_status"))]
 
 
+def snapshot_quarantine_cells(
+    details: list[dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Deep copy of the source cells a replay is about to transform.
+
+    A failed replay used to write the transformed image back over the ledger,
+    so the next attempt saw ``1234.50`` instead of ``$1,234.50`` (R4-D04).
+    """
+    import copy
+
+    snaps: dict[str, dict[str, Any]] = {}
+    for detail in details or []:
+        if not isinstance(detail, dict):
+            continue
+        ident = replay_row_identity(detail)
+        snaps[ident] = {
+            "value": copy.deepcopy(detail.get("value")),
+            "values": copy.deepcopy(detail.get("values"))
+            if isinstance(detail.get("values"), dict)
+            else None,
+            "source_values": copy.deepcopy(detail.get("source_values"))
+            if isinstance(detail.get("source_values"), dict)
+            else None,
+        }
+    return snaps
+
+
+def restore_replay_source_cells(
+    findings: list[dict[str, Any]] | None,
+    snaps: dict[str, dict[str, Any]] | None,
+    attempt_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Put the original cells back. The transformed try is ``replay_attempt``."""
+    import copy
+
+    attempts: dict[str, dict[str, Any]] = {}
+    for row in attempt_rows or []:
+        if not isinstance(row, dict):
+            continue
+        attempts[replay_row_identity(row)] = {
+            "value": copy.deepcopy(row.get("value")),
+            "values": copy.deepcopy(row.get("values"))
+            if isinstance(row.get("values"), dict)
+            else None,
+            "reason": row.get("reason") or row.get("failure_reason"),
+        }
+    out: list[dict[str, Any]] = []
+    for row in findings or []:
+        if not isinstance(row, dict):
+            continue
+        stamped = copy.deepcopy(row)
+        snap = (snaps or {}).get(replay_row_identity(stamped))
+        if snap:
+            stamped["value"] = snap.get("value")
+            if snap.get("values") is not None:
+                stamped["values"] = snap["values"]
+            if snap.get("source_values") is not None:
+                stamped["source_values"] = snap["source_values"]
+        attempt = attempts.get(replay_row_identity(stamped))
+        if attempt:
+            stamped["replay_attempt"] = attempt
+        out.append(stamped)
+    return out
+
+
 def stamp_replay_attempt(
     findings: list[dict[str, Any]] | None,
     *,
@@ -744,6 +848,17 @@ def record_replay(
     })
     history = history[-_REPLAY_HISTORY_KEEP:]
     state = evaluate_replay_closure(stamped, last_replay=compact)
+    _quarantine_event(
+        "quarantine.replay.recorded",
+        child_job_id=child_job_id or None,
+        gate8_passed=bool(gate8_passed),
+        rows_written=compact["rows_written"],
+        rejected=compact["rejected"],
+        promoted_count=len(compact["promoted_identities"]),
+        failed_count=len(compact["failed_identities"]),
+        closure_verdict=str(state.get("verdict") or "") or None,
+        open_count=state.get("open_count"),
+    )
     return {
         **state,
         "history": history,
@@ -805,6 +920,41 @@ def apply_replay_overlay(
     return out
 
 
+def closure_with_promotion_outcome(
+    compact: dict[str, Any],
+    promote_meta: dict[str, Any] | None,
+    *,
+    job_id: str = "",
+) -> dict[str, Any]:
+    """A destination DLQ stamp that errored cannot leave the ledger ``closed``.
+
+    Gate-8 proves the rows landed; ``_df_promoted_at`` on the destination
+    quarantine table is the other half of the ledger. When that UPDATE failed
+    (missing table, permissions) the two ledgers disagree, so the verdict is
+    ``diverging`` with the error carried for the operator.
+    """
+    meta = promote_meta if isinstance(promote_meta, dict) else {}
+    error = str(meta.get("error") or "").strip()
+    if not error:
+        return compact
+    out = dict(compact)
+    table = str(meta.get("table") or "the destination quarantine table")
+    logger.warning(
+        "Quarantine closure for job %s held at diverging: DLQ promote stamp on %s failed: %s",
+        job_id or "?",
+        table,
+        error,
+    )
+    out["verdict"] = VERDICT_DIVERGING
+    out["promotion_error"] = error[:300]
+    out["next_action"] = (
+        f"Replayed rows landed (child Gate-8 passed) but stamping them promoted in "
+        f"{table} failed: {error[:200]}. The quarantine ledger is not closed — fix "
+        "the destination quarantine table, then re-run Promote."
+    )
+    return out
+
+
 def compact_replay_closure(closure: dict[str, Any] | None) -> dict[str, Any]:
     """Job-document payload — identities stay in the DLQ event, not Mongo bloat."""
     c = dict(closure or {})
@@ -825,6 +975,71 @@ def compact_replay_closure(closure: dict[str, Any] | None) -> dict[str, Any]:
         "promoted_identities": list(c.get("promoted_identities") or [])[:500],
         "failed_identities": list(c.get("failed_identities") or [])[:500],
     }
+
+
+class MaskedQuarantineReplayError(ValueError):
+    """Replay refused because the only stored cells are operator masks."""
+
+
+def looks_like_stored_mask(value: Any) -> bool:
+    """True for ``mask()`` output, which must never be written as a cell.
+
+    Long tokens become ``head…tail`` (U+2026). Emails and short tokens gain a
+    run of ``*``. A real source value is not rewritten into either shape.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    if "\u2026" in value:
+        return True
+    return "***" in value
+
+
+def _detail_cells(detail: dict[str, Any]) -> list[Any]:
+    cells: list[Any] = [detail.get("value")]
+    for key in ("values", "source_values", "target_values"):
+        blob = detail.get(key)
+        if isinstance(blob, dict):
+            cells.extend(blob.values())
+    return cells
+
+
+def detail_has_masked_cell(detail: dict[str, Any]) -> bool:
+    return any(looks_like_stored_mask(cell) for cell in _detail_cells(detail))
+
+
+def canonical_replay_details(job: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Cells replay may write. The DLQ is canonical; the job document is masked.
+
+    ``redact_destination_summary`` runs before the job is saved, so
+    ``rejected_details`` on the job holds ``j***@***.com`` and ``__DF_S…LL__``.
+    Writing those is silent corruption. The control-plane DLQ is persisted
+    from the writer payload. When that copy is also masked, replay stops.
+    """
+    if not isinstance(job, dict):
+        return []
+    job_id = str(job.get("id") or job.get("job_id") or job.get("_id") or "").strip()
+    dlq_rows = quarantine_details_from_dlq(job_id, include_skip_audit=False) if job_id else []
+    closure = job_quarantine_closure(job)
+    if dlq_rows and not any(detail_has_masked_cell(d) for d in dlq_rows):
+        return apply_replay_overlay(dlq_rows, job_id=job_id, closure=closure)
+
+    from services.quarantine_from_preflight import merge_job_quarantine
+
+    job_rows = [
+        d
+        for d in merge_job_quarantine(job, hydrate_dlq=False)
+        if isinstance(d, dict)
+    ]
+    if job_rows and not any(detail_has_masked_cell(d) for d in job_rows):
+        return apply_replay_overlay(job_rows, job_id=job_id, closure=closure)
+    if dlq_rows or job_rows:
+        raise MaskedQuarantineReplayError(
+            "Quarantine replay refused: the stored cells are masked previews "
+            "(for example j***@***.com or __DF_S…LL__), not source values. "
+            "Writing them would corrupt the destination. Re-run the transfer "
+            "so the ledger keeps the original cells, then replay."
+        )
+    return []
 
 
 def job_quarantine_closure(job: dict[str, Any] | None) -> dict[str, Any] | None:

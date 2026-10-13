@@ -245,6 +245,9 @@ def _to_es_value(value: Any, source_type: str) -> Any:
 
         bound_dec = coerce_decimal_wire(value, ddl_type=declared)
         if isinstance(bound_dec, Decimal):
+            # Fixed-point text, never float: ``10.5000`` is a scale-4 value and
+            # float drops the scale. scaled_float / double mappings coerce the
+            # string on index, so aggregations still see a number.
             text = safe_decimal_text(bound_dec)
             if text is not None:
                 return text

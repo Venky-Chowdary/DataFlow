@@ -44,6 +44,20 @@ def test_railway_is_production_by_default(monkeypatch):
     assert pc.is_production() is True
 
 
+def test_liveness_paths_are_only_the_deploy_probes():
+    from services.platform_config import is_liveness_path
+
+    assert is_liveness_path("/health")
+    assert is_liveness_path("/health/")
+    assert is_liveness_path("/health/ready")
+    assert is_liveness_path("/api/v1/health")
+    assert is_liveness_path("/health/ready?probe=1")
+    assert is_liveness_path("/health/debug") is False
+    assert is_liveness_path("/healthcare") is False
+    assert is_liveness_path("/api/v1/transfer") is False
+    assert is_liveness_path("/api/v1/auth/login") is False
+
+
 def test_dev_mode_skips_production_validation(monkeypatch):
     monkeypatch.setenv("DATAFLOW_ENV", "development")
     monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)

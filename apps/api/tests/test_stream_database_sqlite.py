@@ -96,6 +96,59 @@ def test_stream_sqlite_to_sqlite_basic():
         assert count == 250
 
 
+def test_stream_sqlite_dest_insert_runs_on_the_procedure_writer():
+    """A destination INSERT is the write. COPY must not skip it."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = _make_source(3, tmp_path, text_booleans=False)
+        dst = tmp_path / "dst.db"
+        conn = sqlite3.connect(dst)
+        conn.execute(
+            "CREATE TABLE orders_out (id INTEGER PRIMARY KEY, amount TEXT, active TEXT)"
+        )
+        conn.commit()
+        conn.close()
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database",
+            format="sqlite",
+            database=str(dst),
+            table="orders_out",
+            extra={
+                "dest_write_mode": "query",
+                "dest_query_sql": (
+                    "INSERT INTO orders_out (id, amount, active) "
+                    "VALUES (:id, :amount, :active)"
+                ),
+            },
+        )
+        mappings = [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ]
+        rows_written, ddl, summary, _columns = stream_database_transfer(
+            source,
+            destination,
+            mappings,
+            {"id": "integer", "amount": "text", "active": "text"},
+            job_id="000000000000000000000000",
+            checkpoint_service=CheckpointService(_FakeMongo()),
+        )
+        assert rows_written == 3
+        assert summary.get("load_method") == "dest_procedure"
+        assert summary.get("dest_write_mode") == "query"
+        assert "not a table copy" in str(summary.get("copy_decline_reason") or "")
+        assert any("Dest query row-apply" in line for line in ddl)
+        conn = sqlite3.connect(dst)
+        count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+        conn.close()
+        assert count == 3
+
+
 def test_stream_sqlite_text_booleans_decline_copy_and_land_as_0_1():
     """'true'/'false' text under a BOOLEAN carrier: the identity COPY must not
     move the bytes verbatim — it declines and the row path normalizes to 0/1."""
@@ -178,6 +231,38 @@ def test_stream_sqlite_multibatch_source_count_is_committed_offset(monkeypatch):
         assert summary.get("batches") and summary["batches"] >= 2
         assert summary.get("source_row_count") == 213
         assert summary.get("source_row_count_source") == "committed_offset"
+
+
+def test_stream_sqlite_non_procedure_chunk_uses_batch_writer(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATAFLOW_SQLITE_SQLITE_COPY", "0")
+    src = _make_source(2, tmp_path, text_booleans=False)
+    dst = tmp_path / "dst.db"
+    source = EndpointConfig(
+        kind="database", format="sqlite", database=str(src), table="orders"
+    )
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=str(dst), table="orders_out"
+    )
+
+    rows_written, _ddl, summary, _columns = stream_database_transfer(
+        source,
+        destination,
+        [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ],
+        {"id": "integer", "amount": "decimal", "active": "boolean"},
+        job_id="000000000000000000000002",
+        checkpoint_service=CheckpointService(_FakeMongo()),
+    )
+
+    assert rows_written == 2
+    assert summary.get("load_method") != "attach_insert_select_sqlite"
+    conn = sqlite3.connect(dst)
+    count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]
+    conn.close()
+    assert count == 2
 
 
 def test_stream_sqlite_to_sqlite_resume_from_checkpoint():

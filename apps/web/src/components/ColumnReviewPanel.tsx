@@ -1,5 +1,6 @@
 import { DtIcon } from "./DtIcon";
 import { FilterTabs } from "./ui/FilterTabs";
+import { ReasonDisclosure } from "./transfer/ReasonDisclosure";
 import { StructurePreview } from "./ui/StructurePreview";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -75,6 +76,7 @@ import {
 import {
   mapBandLabel,
   partitionMapBands,
+  shouldCollapseReadyBand,
   shouldCollapseSafeBand,
 } from "../lib/mapSafeBand";
 import { destTypeSelectOptions, normalizeDestTypeValue, typeBadgeClass } from "../lib/typeDisplay";
@@ -143,6 +145,7 @@ const FILTER_TABS: { id: ColumnFilter; label: string }[] = [
   { id: "pii", label: "PII" },
   { id: "new", label: "New" },
   { id: "ready", label: "Ready" },
+  { id: "rules", label: "Rules" },
 ];
 
 export function ColumnReviewPanel({
@@ -213,7 +216,10 @@ export function ColumnReviewPanel({
   const useSafeBands = filter === "all" && !search.trim();
   const mapBands = useMemo(() => partitionMapBands(filtered), [filtered]);
   const collapseSafe = useSafeBands && shouldCollapseSafeBand(mapBands) && !safeBandExpanded;
-  const collapseReady = useSafeBands && mapBands.ready.length >= 2 && !readyBandExpanded;
+  const collapseReady = useSafeBands && shouldCollapseReadyBand(mapBands) && !readyBandExpanded;
+  const foldedReady = collapseReady ? mapBands.ready.length : 0;
+  const foldedSafe = collapseSafe ? mapBands.safe.length : 0;
+  const foldedCount = foldedReady + foldedSafe;
 
   const displayItems = useMemo(() => {
     if (!useSafeBands) return filtered;
@@ -463,12 +469,15 @@ export function ColumnReviewPanel({
 
   const isDialog = presentation === "dialog";
   const showHead = !hideTitle && !isDialog;
+  const createNewCount = mappings.filter((m) => m.createNew && !isIntentionalOmit(m)).length;
   const showPreview = !isDialog && !compact && Boolean(sampleRows && sampleRows.length > 0);
 
-  const filterTabItems = FILTER_TABS.map((tab) => ({
-    ...tab,
-    count: compact && !isDialog ? undefined : filterCounts[tab.id],
-  }));
+  const filterTabItems = FILTER_TABS
+    .filter((tab) => tab.id !== "rules" || filterCounts.rules > 0 || filter === "rules")
+    .map((tab) => ({
+      ...tab,
+      count: compact && !isDialog ? undefined : filterCounts[tab.id],
+    }));
 
   return (
     <div
@@ -568,6 +577,69 @@ export function ColumnReviewPanel({
       )}
 
       <div className="df2-column-review-editor">
+      {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === false && (
+        <div className="df2-column-review-notices">
+          <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
+            <DtIcon name="sparkle" size={16} />
+            <span>
+              <strong>New destination table</strong>
+              {` — ${createNewCount || mappings.length} column${(createNewCount || mappings.length) === 1 ? "" : "s"}. Types CREATE on the first write.`}
+              {" The rows below are the contract: source, sample, destination, and transform."}
+              {destType ? ` DDL is ${destType}-native.` : ""}
+              {mappings.some((m) => hasCreateNewTypeRisk(m)) && (
+                <> Precision, width, or timezone risks are marked on those rows.</>
+              )}
+            </span>
+          </div>
+        </div>
+      )}
+      {!isDialog && !destSchemaLoading && destColumnSet.size > 0 && destTableExists === true && (
+        <div className="df2-column-review-notices">
+          <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
+            <DtIcon name="check" size={16} />
+            <span>
+              <strong>Existing destination table</strong>
+              {` — ${destColumnSet.size} columns already exist. Full append adds rows. It does not replace the table.`}
+            </span>
+          </div>
+        </div>
+      )}
+      {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === true && (
+        <div className="df2-column-review-notices">
+          <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
+            <DtIcon name="alert" size={16} />
+            <span>
+              <strong>Existing destination table</strong>
+              {" — confirmed on the server, but column metadata did not load. Retry Destination, then Map, before treating this as a new table."}
+            </span>
+          </div>
+        </div>
+      )}
+      {!isDialog && !destSchemaLoading && destColumnSet.size === 0 && destTableExists == null && (
+        <div className="df2-column-review-notices">
+          <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
+            <DtIcon name="alert" size={16} />
+            <span>
+              {destConnected === false ? (
+                <>
+                  <strong>Destination connection failed</strong>
+                  {` — ${destConnectionError || "Could not reach the destination."} Open Destination and test the connector.`}
+                </>
+              ) : destConnectionError ? (
+                <>
+                  <strong>Destination schema could not be loaded</strong>
+                  {` — ${destConnectionError} Retry Destination, then Map, or choose a different table.`}
+                </>
+              ) : (
+                <>
+                  <strong>Destination schema unknown</strong>
+                  {" — existence is not confirmed. Retry Destination, then Map. This step will not invent new columns until the table is proven absent."}
+                </>
+              )}
+            </span>
+          </div>
+        </div>
+      )}
       <div className="df2-column-review-chrome">
         {(isDialog || !compact) && (
           <div className="df2-column-workbench-stats" aria-label="Mapping summary">
@@ -674,94 +746,9 @@ export function ColumnReviewPanel({
           </div>
         )}
 
-        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === false && (
-          <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
-            <DtIcon name="sparkle" size={16} />
-            <span>
-              <strong>New destination table</strong>
-              {" — create-new fields; types will CREATE on first write"}
-              {destType ? ` with ${destType}-native DDL` : ""}.
-              {mappings.filter(
-                (m) =>
-                  m.createNew
-                  && (m.fidelity || "").toLowerCase() === "preserve"
-                  && !mappingRequiresRiskAck(m)
-                  && !isIntentionalOmit(m),
-              ).length >= 3 && (
-                <>
-                  {" "}
-                  <strong>
-                    {mappings.filter(
-                      (m) =>
-                        m.createNew
-                        && (m.fidelity || "").toLowerCase() === "preserve"
-                        && !mappingRequiresRiskAck(m)
-                        && !isIntentionalOmit(m),
-                    ).length}{" "}
-                    equivalent
-                  </strong>
-                  {" mappings (lossless type path) — use "}
-                  <strong>Approve eligible</strong>
-                  {" once; no Risk Contract required."}
-                </>
-              )}
-              {mappings.some((m) => hasCreateNewTypeRisk(m)) && (
-                <>
-                  {" "}
-                  Precision / width / timezone risks are stamped on rows — review amber chips before Validate.
-                </>
-              )}
-            </span>
-          </div>
-        )}
-        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size > 0 && destTableExists === true && (
-          <div className="df2-column-review-alert df2-column-review-alert-info" role="status">
-            <DtIcon name="check" size={16} />
-            <span>
-              <strong>Existing destination table</strong>
-              {" — matching "}
-              {destColumnSet.size}
-              {" columns. Full append adds rows; it does not replace the table."}
-            </span>
-          </div>
-        )}
-        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size === 0 && destTableExists === true && (
-          <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
-            <DtIcon name="alert" size={16} />
-            <span>
-              <strong>Existing destination table</strong>
-              {" — confirmed on the server, but column metadata did not load. Retry Destination/Map before treating this as create-new."}
-            </span>
-          </div>
-        )}
-        {!isDialog && !compact && !destSchemaLoading && destColumnSet.size === 0 && destTableExists == null && (
-          <div className="df2-column-review-alert df2-column-review-alert-warn" role="status">
-            <DtIcon name="alert" size={16} />
-            <span>
-              {destConnected === false ? (
-                <>
-                  <strong>Destination connection failed</strong>
-                  {` — ${destConnectionError || "Could not reach the destination."} Open Destination and test the connector.`}
-                </>
-              ) : destConnectionError ? (
-                <>
-                  <strong>Destination schema could not be loaded</strong>
-                  {` — ${destConnectionError} Retry Destination/Map or choose a different table/schema.`}
-                </>
-              ) : (
-                <>
-                  <strong>Destination schema unknown</strong>
-                  {" — existence not confirmed. Retry Destination/Map; Datawrap will not invent create-new fields yet."}
-                </>
-              )}
-            </span>
-          </div>
-        )}
-
-
       </div>
 
-      {useSafeBands && (collapseSafe || collapseReady || safeBandExpanded || readyBandExpanded) && (
+      {useSafeBands && (mapBands.attention.length > 0 || mapBands.safe.length > 0 || mapBands.ready.length >= 2) && (
         <div className="df2-map-band-bar" role="region" aria-label="Map safe-band groups">
           {mapBands.attention.length > 0 && (
             <span className="df2-map-band-chip is-attention">
@@ -817,8 +804,8 @@ export function ColumnReviewPanel({
               <th className="df2-column-th-type" style={{ width: "8%" }}>Type</th>
               <th className="df2-column-th-arrow" aria-hidden style={{ width: "4%" }}>→</th>
               <th className="df2-column-th-destination" style={{ width: showTransforms ? "15%" : "18%" }}>Destination</th>
-              {showTransforms && <th className="df2-column-th-transform" style={{ width: "11%" }}>Transform</th>}
-              <th className="df2-column-th-reason" style={{ width: showTransforms ? "20%" : "23%" }}>Why</th>
+              {showTransforms && <th className="df2-column-th-transform" style={{ width: "15%" }}>Transform</th>}
+              <th className="df2-column-th-reason" style={{ width: showTransforms ? "16%" : "23%" }}>Why</th>
               <th className="df2-column-th-confidence" style={{ width: showTransforms ? "8%" : "10%" }}>Confidence</th>
               <th className="df2-column-th-status" style={{ width: showTransforms ? "9%" : "11%" }}>Status</th>
             </tr>
@@ -826,6 +813,9 @@ export function ColumnReviewPanel({
           <tbody>
             {pageItems.map(({ mapping: m, index }) => {
               const omitted = isIntentionalOmit(m);
+              const heldBusinessRule = Boolean(
+                m.businessRule && m.businessRule.status === "needs_confirmation",
+              );
               const riskOpen = mappingRequiresRiskAck(m) && !m.riskAcknowledged && !omitted;
               const tier = confidenceClass(m.confidence, confidenceThreshold, m.approved, riskOpen);
               const ready = isMappingReady(m, confidenceThreshold);
@@ -842,6 +832,26 @@ export function ColumnReviewPanel({
                   <td className="df2-column-source-cell">
                     <div className="df2-column-cell-content">
                       <span className="df2-column-source">{m.source}</span>
+                      {m.businessRule && (
+                        <span
+                          className={`df2-badge df2-badge-xs df2-rule-chip ${
+                            m.businessRule.status === "executable"
+                              ? "is-applied"
+                              : m.businessRule.status === "conflict"
+                                ? "is-conflict"
+                                : "is-review"
+                          }`}
+                          title={
+                            `${m.businessRule.kindLabel}: ${m.businessRule.text || "direct"}`
+                            + (m.businessRule.row
+                              ? ` · ${m.businessRule.sheet || "sheet"} row ${m.businessRule.row}`
+                              : "")
+                            + (m.businessRule.issues?.length ? ` — ${m.businessRule.issues[0]}` : "")
+                          }
+                        >
+                          {m.businessRule.kindLabel}
+                        </span>
+                      )}
                       {omitted && (
                         <span className="df2-badge df2-badge-muted df2-badge-xs" title="Excluded from write — intentional Map policy">
                           omit
@@ -905,8 +915,12 @@ export function ColumnReviewPanel({
                   </td>
                   <td className="df2-column-sample">
                     <div className="df2-column-sample-stack">
-                      <span title={m.sample}>
-                        {m.sample ? (m.sample.length > 40 ? `${m.sample.slice(0, 40)}…` : m.sample) : "—"}
+                      <span
+                        className="df2-column-sample-value"
+                        title={m.sample}
+                        aria-label={m.sample ? `Sample value for ${m.source}: ${m.sample}` : undefined}
+                      >
+                        {m.sample || "—"}
                       </span>
                       {(() => {
                         const strip = formatColumnProfileStrip(m.columnProfile);
@@ -1059,7 +1073,7 @@ export function ColumnReviewPanel({
                         <label className="df2-column-omit-block" title="G20: every distinct source code in the population must have a target. One unmapped code blocks. A=A is explicit identity — nothing passes through by default.">
                           <span className="df2-column-omit-target">Code crosswalk</span>
                           <textarea
-                            className="df2-input"
+                            className="df2-input df2-column-crosswalk-input"
                             rows={3}
                             placeholder={"OLD=NEW\nA=active\n# comments allowed"}
                             value={formatCodeCrosswalk(m.codeCrosswalk)}
@@ -1309,8 +1323,28 @@ export function ColumnReviewPanel({
                       </div>
                     </td>
                   )}
-                  <td className="df2-column-reason" title={m.reason}>
-                    {m.reason || "Semantic match"}
+                  <td className="df2-column-reason">
+                    <ReasonDisclosure
+                      label={m.target || m.source}
+                      fullText={m.businessRule
+                        ? `${m.businessRule.kindLabel} — ${m.businessRule.text || m.reason}`
+                        : (m.reason || "Semantic match")}
+                    >
+                      {m.businessRule ? (
+                        <div className="df2-column-rule-why">
+                          <span className="df2-column-rule-kind">{m.businessRule.kindLabel}</span>
+                          <span className="df2-column-rule-text" data-clamp>{m.businessRule.text || m.reason || "Direct"}</span>
+                          {m.businessRule.row != null ? (
+                            <span className="df2-column-rule-prov">
+                              {m.businessRule.sheet ? `${m.businessRule.sheet} · ` : ""}
+                              row {m.businessRule.row}
+                            </span>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <span className="df2-column-reason-plain" data-clamp>{m.reason || "Semantic match"}</span>
+                      )}
+                    </ReasonDisclosure>
                   </td>
                   <td className="df2-column-confidence">
                     <span className={`df2-column-conf ${tier}`}>{omitted ? "—" : `${(m.confidence * 100).toFixed(0)}%`}</span>
@@ -1382,6 +1416,12 @@ export function ColumnReviewPanel({
                           type="button"
                           className={`df2-btn df2-btn-sm${mappingAckTier(m) === "accept_risk" ? " df2-btn-danger" : ""}`}
                           onClick={() => approveOne(index)}
+                          aria-label={
+                            heldBusinessRule
+                              ? `Approve mapping for ${m.source}; the held workbook rule stays not applied`
+                              : undefined
+                          }
+                          aria-describedby={heldBusinessRule ? `df2-held-rule-${index}` : undefined}
                           disabled={
                             mappingRequiresRiskAck(m) && !policyBySource[m.source]
                           }
@@ -1399,10 +1439,19 @@ export function ColumnReviewPanel({
                               : undefined
                           }
                         >
-                          {isFalseFriendReview(m)
+                          {heldBusinessRule
+                            ? "Approve mapping"
+                            : isFalseFriendReview(m)
                             ? mappingReviewKindMeta(classifyMappingReview(m) || "generic").confirmLabel
                             : mappingAckLabel(m)}
                         </button>
+                        {heldBusinessRule && (
+                          <span id={`df2-held-rule-${index}`} className="df2-column-approval-help">
+                            {m.businessRule?.ruleId
+                              ? `Held workbook rule ${m.businessRule.ruleId} stays not applied.`
+                              : "Held workbook rule stays not applied."}
+                          </span>
+                        )}
                       </div>
                     )}
                   </td>
@@ -1412,9 +1461,28 @@ export function ColumnReviewPanel({
             {pageItems.length === 0 && (
               <tr>
                 <td colSpan={showTransforms ? 9 : 8} className="df2-column-review-empty-row">
-                  {useSafeBands && collapseSafe && filtered.length > 0
-                    ? "Safe mappings are collapsed — expand the safe band above, or use Issues to focus risk rows."
-                    : "No columns match your search or filter. Try clearing filters or broadening your search."}
+                  {foldedCount > 0 ? (
+                    <div className="df2-column-review-folded">
+                      <p>
+                        {foldedReady > 0 ? `${foldedReady} approved` : ""}
+                        {foldedReady > 0 && foldedSafe > 0 ? " and " : ""}
+                        {foldedSafe > 0 ? `${foldedSafe} safe` : ""}
+                        {` column${foldedCount === 1 ? " is" : "s are"} folded so the rows that need a decision stay in view. Expand to read source, sample, destination, and transform. Nothing was filtered out.`}
+                      </p>
+                      <button
+                        type="button"
+                        className="df2-btn df2-btn-sm"
+                        onClick={() => {
+                          if (collapseReady) setReadyBandExpanded(true);
+                          if (collapseSafe) setSafeBandExpanded(true);
+                        }}
+                      >
+                        Expand columns
+                      </button>
+                    </div>
+                  ) : (
+                    "No columns match your search or filter. Clear the search or choose All."
+                  )}
                 </td>
               </tr>
             )}
@@ -1427,8 +1495,8 @@ export function ColumnReviewPanel({
           {compact && (
             <span>
               {displayItems.length === 0
-                ? (useSafeBands && collapseSafe && filtered.length > 0
-                  ? "Safe band collapsed"
+                ? (foldedCount > 0
+                  ? `${filtered.length.toLocaleString()} columns folded`
                   : "No matching columns")
                 : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${displayItems.length.toLocaleString()}${
                   useSafeBands && (collapseSafe || collapseReady)

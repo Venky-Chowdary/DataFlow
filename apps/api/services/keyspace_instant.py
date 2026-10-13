@@ -21,9 +21,26 @@ from __future__ import annotations
 
 from typing import Final
 
-#: Engines whose rows are written as one JSON document per key through
-#: ``services.value_serializer`` (``connectors.redis_writer.write_mapped_rows``).
-INSTANT_TEXT_WIRE_ENGINES: Final[frozenset[str]] = frozenset({"redis"})
+#: Engines whose temporal wire is offset-preserving text.
+#: Redis writes one JSON document (``isoformat`` via ``json_default``).
+#: DynamoDB ``S`` writes the same ``isoformat`` string — AttributeValue has
+#: no datetime type, and ``TypeSerializer`` rejects a ``datetime`` object.
+#: Kafka JSON produce uses that same ``json_default`` (aware ``datetime`` →
+#: RFC 3339 with the offset). A typed PostgreSQL ``TEXT`` column is not in
+#: this set: there the offset contract really is dropped.
+INSTANT_TEXT_WIRE_ENGINES: Final[frozenset[str]] = frozenset(
+    {"redis", "dynamodb", "kafka"}
+)
+
+_INSTANT_TEXT_ENGINE_ALIASES: Final[dict[str, str]] = {
+    "apache_kafka": "kafka",
+    "confluent_kafka": "kafka",
+    "amazon_msk": "kafka",
+    "redpanda": "kafka",
+    "dynamo": "dynamodb",
+    "redis-kv": "redis",
+    "redis_kv": "redis",
+}
 
 
 def keyspace_instant_text_wire_preserved(
@@ -49,7 +66,9 @@ def keyspace_instant_text_wire_preserved(
         time_timezone_polarity,
     )
 
-    if (dest_db or "").strip().lower() not in INSTANT_TEXT_WIRE_ENGINES:
+    engine = (dest_db or "").strip().lower()
+    engine = _INSTANT_TEXT_ENGINE_ALIASES.get(engine, engine)
+    if engine not in INSTANT_TEXT_WIRE_ENGINES:
         return False
     if normalize_logical_type(target_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
         return False

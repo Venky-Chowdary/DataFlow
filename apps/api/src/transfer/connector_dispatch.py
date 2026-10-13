@@ -10,6 +10,8 @@ from __future__ import annotations
 import importlib
 from typing import Any, Callable
 
+from connectors.sdk import get_descriptor
+
 from .connector_registry import CONNECTOR_MODULES, ConnectorModules
 
 
@@ -179,9 +181,20 @@ def read_via_registry(
     columns: list[str] | None = None,
     cursor_column: str = "",
     cursor_after: Any = None,
+    sdk_state: str | None = None,
 ) -> Any:
     """Invoke the registered batch reader (SQL-style signature or SaaS object)."""
     fn = load_reader(driver)
+    descriptor = get_descriptor(driver)
+    if descriptor and "source" in descriptor.roles and descriptor.catalog_ids:
+        return fn(
+            cfg=cfg,
+            object=table,
+            limit=limit,
+            offset=offset,
+            columns=columns,
+            sdk_state=sdk_state,
+        )
     # SaaS readers use read_object(cfg=, object=, limit=). Iceberg needs the full
     # resolved config (warehouse, region, extra catalog properties) too.
     if driver in {"salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase", "iceberg"}:

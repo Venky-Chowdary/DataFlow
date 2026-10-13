@@ -152,6 +152,7 @@ def test_stream_mirror_sqlite_to_sqlite():
             "c" * 24,
         )
         assert result.success, result.error
+        assert "Duplicate identity keys" not in str(result.error)
         assert result.records_transferred == 50
 
         # Re-run should be idempotent and active row count should stay 50.

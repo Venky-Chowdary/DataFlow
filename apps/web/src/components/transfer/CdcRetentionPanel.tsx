@@ -4,6 +4,7 @@ import { Button } from "../ui/Button";
 import { clearCdcCursor, probeCdcRetention, type CdcRetentionProbe } from "../../lib/api";
 import { useToast } from "../Toast";
 import { useConfirm } from "../ui/ConfirmDialog";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 
 export interface CdcRetentionPanelProps {
   /** When set, show proactive status from a job or Validate probe. */
@@ -51,6 +52,8 @@ export function CdcRetentionPanel({
 }: CdcRetentionPanelProps) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  const runGate = useWriteGate(PERMISSIONS.jobRun);
+  const workspaceManageGate = useWriteGate(PERMISSIONS.workspaceManage);
   const [busy, setBusy] = useState(false);
   const [cleared, setCleared] = useState(false);
   const [live, setLive] = useState<CdcRetentionProbe | null>(null);
@@ -170,7 +173,7 @@ export function CdcRetentionPanel({
         </span>
       </div>
       <div className="df2-theater-v3-next-actions">
-        {probeRequest && (
+        {probeRequest && runGate.allowed && (
           <Button
             size="sm"
             variant="secondary"
@@ -182,7 +185,7 @@ export function CdcRetentionPanel({
             Check retention
           </Button>
         )}
-        {(((status === "gap" && !hideGap) || status === "at_risk") && !cleared) && (
+        {(((status === "gap" && !hideGap) || status === "at_risk") && !cleared && workspaceManageGate.allowed) && (
           <Button
             size="sm"
             variant={status === "gap" ? "danger" : "secondary"}

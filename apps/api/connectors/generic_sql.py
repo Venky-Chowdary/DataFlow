@@ -11,15 +11,14 @@ engine.
 from __future__ import annotations
 
 import base64
-import binascii
 import contextlib
 import json
 import logging
 import re
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
-from decimal import Decimal
+from datetime import date, datetime, time
 from typing import Any, Final
 
 from connectors.base import ReadBatch
@@ -69,22 +68,21 @@ from connectors.write_resilience import (
 )
 from services import reflection_cache
 from services.decision_kernel import (
-    ddl_type,
     materialize_dest_ddl,
-    normalize_logical_type,
 )
 from services.dialect_profiles import denormalize_result_key
 from services.engine_pool import release_engine
 from services.identity_carry import identity_seed_step
-from services.type_system import parse_numeric_precision_scale
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string
+
+_gsql = sys.modules[__name__]
 
 logger = logging.getLogger(__name__)
 
 try:
     import sqlalchemy as sa
     from sqlalchemy import create_engine, inspect
-    from sqlalchemy.dialects import mssql, mysql, oracle, postgresql
+    from sqlalchemy.dialects import mssql, mysql, oracle, postgresql  # noqa: F401
     from sqlalchemy.exc import NoSuchModuleError
 
     SQLALCHEMY_AVAILABLE = True
@@ -135,6 +133,39 @@ try:
     if oracle is not None and "JSON" not in oracle.base.OracleDialect.ischema_names:
         oracle.base.OracleDialect.ischema_names["JSON"] = _OracleJSON
 
+    class _OracleTimestamp(oracle.TIMESTAMP):
+        """Oracle ``TIMESTAMP(n)`` — the stock type compiles with no precision.
+
+        Oracle stores a bare ``TIMESTAMP`` as ``TIMESTAMP(6)``. A plan that
+        named ``TIMESTAMP(7)`` therefore created ``(6)``, and the next
+        incremental run read that as a narrowing of the source.
+        """
+
+        cache_ok = True
+
+        def __init__(
+            self,
+            timezone: bool = False,
+            local_timezone: bool = False,
+            fractional_seconds: int | None = None,
+        ) -> None:
+            super().__init__(timezone=timezone, local_timezone=local_timezone)
+            self.fractional_seconds = fractional_seconds
+
+    from sqlalchemy.ext.compiler import compiles
+
+    @compiles(_OracleTimestamp, "oracle")
+    def _compile_oracle_timestamp(type_, compiler, **_kw):  # noqa: ANN001
+        prec = ""
+        fsp = getattr(type_, "fractional_seconds", None)
+        if fsp is not None:
+            prec = f"({int(fsp)})"
+        if getattr(type_, "local_timezone", False):
+            return f"TIMESTAMP{prec} WITH LOCAL TIME ZONE"
+        if getattr(type_, "timezone", False):
+            return f"TIMESTAMP{prec} WITH TIME ZONE"
+        return f"TIMESTAMP{prec}"
+
 except (ImportError, AttributeError):  # pragma: no cover
     SQLALCHEMY_AVAILABLE = False
     mssql = None  # type: ignore[assignment]
@@ -145,6 +176,7 @@ except (ImportError, AttributeError):  # pragma: no cover
     ChNullable = None
     TrinoTimestamp = None
     _DialectNativeType = None  # type: ignore[misc, assignment]
+    _OracleTimestamp = None  # type: ignore[misc, assignment]
 
 from connectors.writer_common import (
     CHUNK_SIZE,
@@ -153,27 +185,13 @@ from connectors.writer_common import (
     _conflict_key_identity,
     _is_nullish_conflict_key,
     _rejected_row_count,
-    assert_sparse_upsert_has_pk,
     compare_lsn,
     flush_normalized_child_batches,
     materialize_missing_as_null_for_dense_write,
-    quarantine_currency_markers_into_numeric,
-    quarantine_unfit_binaries,
-    quarantine_unfit_bitstrings,
-    quarantine_unfit_booleans,
-    quarantine_unfit_decimals,
-    quarantine_unfit_enum_set,
-    quarantine_unfit_integers,
-    quarantine_unfit_specialty_types,
-    quarantine_unfit_strings,
-    quarantine_unfit_temporals,
-    quarantine_unfit_years,
     quote_sql_identifier,
     reject_on_strict_policy,
     resolve_conflict_targets,
     resolve_target_columns,
-    row_checksum,
-    split_dense_sparse_rows,
     multi_row_insert_written,
     stamp_is_operator_ceiling,
     transform_error_policy,
@@ -237,6 +255,8 @@ _DRIVERNAME_MAP: dict[str, str] = {
     "sqlite": "sqlite",
     # PostgreSQL-wire compatible engines
     "greenplum": "postgresql+psycopg2",
+    # pgvector is the PostgreSQL wire protocol plus the vector type.
+    "pgvector": "postgresql+psycopg2",
     "cratedb": "postgresql+psycopg2",
     "yugabytedb": "postgresql+psycopg2",
     "cockroachdb": "postgresql+psycopg2",
@@ -715,7 +735,15 @@ def with_connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
     connection_string = cfg.get("connection_string") or ""
-    db_type = (cfg.get("type") or "").lower().strip()
+    # EndpointConfig serialises the driver as ``format``. Procedure and query
+    # planning hand that dict to this builder; requiring ``type`` as well
+    # raised "A database type or connection_string is required" on a connector
+    # that already named its engine.
+    db_type = (
+        cfg.get("type") or cfg.get("format") or cfg.get("db_type") or ""
+    ).lower().strip()
+    if db_type and not str(cfg.get("type") or "").strip():
+        cfg["type"] = db_type
 
     if connection_string:
         if connection_string.startswith(("duckdb:", "sqlite:")):
@@ -945,12 +973,72 @@ def _bigquery_creator_dialect_class() -> type:
     return _bq_dialect_cls
 
 
+_SA_TYPE_EXPORTS = frozenset(
+    {
+        "_declared_temporal_fsp",
+        "_is_mysql_wire",
+        "_logical_type_from_sa",
+        "_mysql_character_type",
+        "_mysql_timestamp_instant",
+        "_oracle_timestamp_type",
+        "_sa_type_for_logical",
+        "_sub_second_naive_wire",
+        "_type_repr",
+    }
+)
+
+
 def __getattr__(name: str) -> Any:
     # Resolved by SQLAlchemy's dialect registry; keeps sqlalchemy-bigquery an
     # optional import for deployments that never touch BigQuery.
     if name == "DataFlowBigQueryDialect":
         return _bigquery_creator_dialect_class()
+    if name in _SA_TYPE_EXPORTS:
+        from connectors import generic_sql_sa_types
+
+        value = getattr(generic_sql_sa_types, name)
+        globals()[name] = value
+        return value
     raise AttributeError(name)
+
+
+#: Scheme token → DBAPI kwarg that bounds the TCP/login handshake.
+#: ``connect_timeout`` has long existed as an operator option in
+#: ``CONNECTION_OPTION_KEYS`` but was never forwarded into ``connect_args`` —
+#: a probe against a dead host blocked on the OS TCP timeout (~60s+), past
+#: the MCP request timeout, so the caller got no result at all (QA C07).
+#: SQL_ATTR_LOGIN_TIMEOUT = 103 for pyodbc (its ``timeout`` kwarg is queries).
+_CONNECT_TIMEOUT_KWARGS: tuple[tuple[str, Any], ...] = (
+    ("pymssql", {"login_timeout": 0}),
+    ("pytds", {"login_timeout": 0}),
+    ("pyodbc", {"attrs_before": {103: 0}}),
+    ("pymysql", {"connect_timeout": 0}),
+    ("mysql.connector", {"connection_timeout": 0}),
+    ("psycopg2", {"connect_timeout": 0}),
+    ("psycopg", {"connect_timeout": 0}),
+    ("pg8000", {"timeout": 0}),
+    ("oracledb", {"tcp_connect_timeout": 0}),
+    ("cx_oracle", {"tcp_connect_timeout": 0}),
+)
+
+
+def _connect_args_for(url: Any, cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """Translate ``cfg['connect_timeout']`` seconds into driver connect args."""
+    raw = cfg.get("connect_timeout")
+    try:
+        seconds = int(float(str(raw))) if raw not in (None, "") else 0
+    except (TypeError, ValueError):
+        seconds = 0
+    if seconds <= 0:
+        return {}
+    driver = str(getattr(url, "drivername", "") or "").lower()
+    for token, template in _CONNECT_TIMEOUT_KWARGS:
+        if token in driver:
+            return {
+                key: ({k: seconds for k in value} if isinstance(value, dict) else seconds)
+                for key, value in template.items()
+            }
+    return {}
 
 
 def _build_engine(cfg: dict[str, Any]) -> Any:
@@ -1005,12 +1093,42 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             return engine
         from services.engine_pool import pool_settings
 
-        engine = create_engine(url, pool_pre_ping=True, **pool_settings())
+        driver = str(getattr(url, "drivername", "")).lower()
+        if db_type == "oracle" or driver.startswith("oracle"):
+            from connectors.oracle_numbers import install_oracle_exact_fetch
+
+            # Before the first connect, so NUMBER is text+Decimal, not float64.
+            install_oracle_exact_fetch()
+        if (
+            db_type in {
+                "mssql",
+                "sql_server",
+                "sqlserver",
+                "microsoft_sql_server",
+                "azure_sql_database",
+                "amazon_rds_sql_server",
+                "google_cloud_sql_sql_server",
+                "synapse_analytics",
+                "azure_synapse_dedicated",
+                "azure_synapse_serverless",
+            }
+            or "mssql" in driver
+        ):
+            from connectors.sqlserver_datetime2 import install_sqlserver_datetime2_bind
+
+            # Before the first bind, so DATETIME2(6) is not an ODBC millisecond.
+            install_sqlserver_datetime2_bind()
+
+        engine = create_engine(
+            url,
+            pool_pre_ping=True,
+            connect_args=_connect_args_for(url, cfg),
+            **pool_settings(),
+        )
         from sqlalchemy import event
 
         from services.dest_dialect_facts import _normalize_dest_db
 
-        driver = str(getattr(url, "drivername", "")).lower()
         # SQL Server: refuse silent VARCHAR truncation at the session level.
         if (
             db_type in {
@@ -1192,228 +1310,8 @@ def _qualified_table_ref(cfg: dict[str, Any], table: str, schema: str | None) ->
     return quote_table_ref(table, schema, dialect=_dialect_key(cfg))
 
 
-def _type_repr(type_obj: Any) -> str:
-    try:
-        return str(type_obj).lower()
-    except (TypeError, ValueError):
-        return ""
 
 
-def _logical_type_from_sa(col_type: Any) -> str:
-    """Map a SQLAlchemy type instance to a Datawrap logical type."""
-    from services.type_system import normalize_logical_type
-
-    if col_type is None:
-        return "string"
-
-    repr_ = _type_repr(col_type)
-
-    # Direct dialect UUID types
-    if "uuid" in repr_:
-        return "uuid"
-    if isinstance(col_type, (sa.UUID,)):
-        return "uuid"
-    if isinstance(col_type, postgresql.UUID):
-        return "uuid"
-
-    if isinstance(col_type, (sa.ARRAY,)):
-        return "array"
-
-    if isinstance(col_type, (sa.JSON,)):
-        return "json"
-
-    if isinstance(col_type, (sa.LargeBinary, sa.BINARY)):
-        return "binary"
-
-    if isinstance(col_type, (sa.Boolean,)):
-        return "boolean"
-
-    # MySQL-style TINYINT(1) is conventionally boolean.
-    if "tinyint" in repr_ and getattr(col_type, "display_width", 0) == 1:
-        return "boolean"
-
-    # IEEE floats must stay FLOAT — never collapse into DECIMAL/NUMBER.
-    if isinstance(col_type, (sa.Float, sa.Double, sa.REAL)):
-        return "float"
-    if any(
-        tok in repr_
-        for tok in ("float", "double", "real", "binary_float", "binary_double")
-    ) and "decimal" not in repr_ and "numeric" not in repr_ and "number" not in repr_:
-        return "float"
-
-    # Fixed-point before integer: ``oracle.NUMBER`` subclasses *both* Numeric and
-    # Integer, so an Integer-first check read NUMBER(12,2) money as ``integer``
-    # and dropped the scale — every Oracle source column came back integral and
-    # the create-new target then collapsed to TEXT.
-    if isinstance(col_type, (sa.Numeric,)):
-        from services.type_system import (
-            zero_scale_fits_signed_bigint,
-            zero_scale_numeric_carrier,
-        )
-
-        precision = getattr(col_type, "precision", None)
-        scale = getattr(col_type, "scale", None)
-        if precision is not None and scale is not None:
-            if int(scale) == 0:
-                # Wide NUMERIC(38,0) must stay DECIMAL — never signed BIGINT overflow.
-                if zero_scale_fits_signed_bigint(int(precision)):
-                    return "integer"
-                return zero_scale_numeric_carrier(int(precision))
-            return f"DECIMAL({int(precision)},{int(scale)})"
-        if precision is not None:
-            return f"DECIMAL({int(precision)})"
-        if isinstance(col_type, (sa.Integer,)):
-            # Unconstrained NUMBER — integral wire, no declared scale to keep.
-            return "integer"
-        return "decimal"
-
-    # Integer *width* is declared, so it is reported. Collapsing BIGINT,
-    # INTEGER and SMALLINT onto one "integer" token made every generic-SQL
-    # engine (DuckDB, ClickHouse, Trino, …) describe a BIGINT column as a
-    # 32-bit one: an existing BIGINT destination then read as a narrowing and
-    # blocked a safe route, and a genuinely INT32 destination read the same
-    # way, so a real 2**31 overflow was indistinguishable from a false alarm.
-    # The bind range-checks the stamped token too, so a 64-bit column reflected
-    # as bare "integer" took int4 bounds and refused every value above 2**31
-    # the BIGINT destination stores natively.
-    if isinstance(col_type, sa.BigInteger):
-        return "BIGINT"
-    if isinstance(col_type, sa.SmallInteger):
-        return "SMALLINT"
-    if isinstance(col_type, sa.Integer):
-        return "integer"
-
-    if isinstance(col_type, (sa.DateTime,)):
-        # Preserve TIMESTAMPTZ vs NTZ — collapsing both to "datetime" loses TZ polarity
-        # on generic Postgres/Trino/warehouse reflection (Airbyte-class honesty gap).
-        # mssql.DATETIMEOFFSET subclasses DateTime and leaves ``timezone`` False,
-        # so the flag alone reads an offset-storing carrier as NTZ and the writer
-        # then quarantines every aware value the column exists to hold.
-        if "datetimeoffset" in (
-            f"{type(col_type).__name__} {col_type!r}".lower()
-        ):
-            return "timestamptz"
-        # Oracle TIMESTAMP WITH LOCAL TIME ZONE carries awareness on
-        # ``local_timezone`` and leaves ``timezone`` False, so the flag alone
-        # read an instant carrier as NTZ and the writer quarantined every aware
-        # value the column exists to hold.
-        if getattr(col_type, "local_timezone", False):
-            return "timestamp_ltz"
-        tz = getattr(col_type, "timezone", None)
-        if tz is True:
-            return "timestamptz"
-        if tz is False:
-            return "timestamp_ntz"
-        return "datetime"
-
-    if isinstance(col_type, (sa.Date,)):
-        return "date"
-
-    if isinstance(col_type, (sa.Time,)):
-        return "time"
-
-    if isinstance(col_type, (sa.String, sa.Text, sa.CHAR)):
-        # Preserve VARCHAR(n)/CHAR(n)/NVARCHAR(n) — bare "string" invents
-        # unbounded capacity over live typmod on existing-table overlay.
-        length = getattr(col_type, "length", None)
-        try:
-            n = int(length) if length is not None else None
-        except (TypeError, ValueError):
-            n = None
-        type_name = getattr(getattr(col_type, "__class__", None), "__name__", "").lower()
-        module = getattr(getattr(col_type, "__class__", None), "__module__", "").lower()
-        national = "nvarchar" in type_name or "nchar" in type_name or (
-            "mssql" in module and "national" in repr(col_type).lower()
-        )
-        if isinstance(col_type, sa.Text) and n is None:
-            return "TEXT"
-        if n is not None and n > 0:
-            if national:
-                prefix = "NCHAR" if "char" in type_name and "var" not in type_name else "NVARCHAR"
-                return f"{prefix}({n})"
-            if isinstance(col_type, sa.CHAR) or (
-                "char" in type_name and "var" not in type_name
-            ):
-                return f"CHAR({n})"
-            return f"VARCHAR({n})"
-        return "string"
-
-    # Fallback text matching for dialect-specific types not captured above
-    # SQL Server specifics BEFORE broad timestamp/datetime matching.
-    if "datetimeoffset" in repr_:
-        return "timestamptz"
-    type_name = getattr(getattr(col_type, "__class__", None), "__name__", "").lower()
-    module = getattr(getattr(col_type, "__class__", None), "__module__", "").lower()
-    # Specialty BEFORE broad "variant" → JSON (sql_variant must not invent JSON).
-    if "hierarchyid" in repr_ or type_name == "hierarchyid":
-        return "HIERARCHYID"
-    if "sql_variant" in repr_ or type_name in {"sql_variant", "sqlvariant"}:
-        return "SQL_VARIANT"
-    if type_name == "xml" or (repr_ == "xml" or repr_.endswith(".xml")):
-        return "XML"
-    if "geography" in repr_ or type_name == "geography":
-        return "GEOGRAPHY"
-    if "geometry" in repr_ or type_name == "geometry":
-        return "GEOMETRY"
-    if "rowversion" in repr_ or (
-        "mssql" in module and type_name in {"timestamp", "rowversion"}
-    ):
-        # SQL Server TIMESTAMP is rowversion (binary), not a datetime.
-        return "ROWVERSION"
-    if "json" in repr_ or "super" in repr_:
-        return "json"
-    # Snowflake/Databricks VARIANT (not SQL Server sql_variant — handled above).
-    if "variant" in repr_ and "sql_variant" not in repr_:
-        return "json"
-    if "array" in repr_:
-        return "array"
-    if "uuid" in repr_ or "guid" in repr_ or "uniqueidentifier" in repr_:
-        return "uuid"
-    if any(
-        x in repr_
-        for x in ("binary", "blob", "bytea", "varbinary", "image", "raw", "rowversion")
-    ):
-        return "binary"
-    # FLOAT before DECIMAL — "float" must not fall into the numeric/decimal bucket.
-    if any(
-        x in repr_ for x in ("binary_float", "binary_double", "float", "double", "real")
-    ) and not any(x in repr_ for x in ("numeric", "decimal", "number(", "money")):
-        return "float"
-    if any(x in repr_ for x in ("numeric", "decimal", "number", "money", "smallmoney")):
-        return "decimal"
-    if any(x in repr_ for x in ("int", "serial", "smallint", "tinyint", "bigint")):
-        return "integer"
-    if "bool" in repr_ or "bit" in repr_:
-        return "boolean"
-    if "datetimeoffset" in repr_ or "timestamptz" in repr_ or "with time zone" in repr_:
-        return "timestamptz"
-    if "without time zone" in repr_ or "timestamp_ntz" in repr_:
-        return "timestamp_ntz"
-    # ClickHouse DateTime64 / IPv4 / Tuple — preserve carriers (not bare string).
-    if any(
-        tok in repr_
-        for tok in ("datetime64", "ipv4", "ipv6", "tuple(", "array(", "map(")
-    ) or (
-        "clickhouse" in module
-        and any(tok in repr_ for tok in ("datetime", "date", "uuid", "decimal"))
-    ):
-        from services.schema_introspect import _ch_to_logical
-
-        try:
-            original = str(col_type)
-        except (TypeError, ValueError):
-            original = repr_
-        return _ch_to_logical(original)
-    if "datetime" in repr_ or "timestamp" in repr_:
-        return "datetime"
-    if "date" in repr_:
-        return "date"
-    if "time" in repr_:
-        return "time"
-    if any(x in repr_ for x in ("char", "varchar", "text", "clob", "string")):
-        return "string"
-
-    return normalize_logical_type(repr_)
 
 
 class _ExactJSON(sa.JSON):
@@ -1628,489 +1526,18 @@ def _is_oracle_wire(dialect_name: str, db_type: str) -> bool:
     return (dialect_name or "").lower() == "oracle" or (db_type or "").lower() in _ORACLE_WIRES
 
 
-def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
-    """Naive-datetime carrier that keeps sub-second precision, else ``None``.
-
-    ``sa.DateTime()`` compiles to Oracle ``DATE`` (whole seconds, no fraction),
-    SQL Server ``DATETIME`` (rounded to 1/300 s) and MySQL ``DATETIME``
-    (fsp 0 — the fraction is dropped), so a PostgreSQL microsecond stamp lands
-    altered and a row checksum can only match by luck. On MySQL that also
-    collapsed SCD2 version boundaries: two versions written in the same second
-    got one instant, so ``valid_from == valid_to`` and no as-of query could see
-    the closed version. ``None`` means the dialect's own default already
-    carries fractions.
-    """
-    if _is_oracle_wire(dialect_name, db_type):
-        return oracle.TIMESTAMP()
-    if mssql is not None and (
-        (dialect_name or "").lower() == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
-    ):
-        return mssql.DATETIME2()
-    if mysql is not None and _MYSQL_WIRES & {
-        (dialect_name or "").lower(), (db_type or "").lower()
-    }:
-        return mysql.DATETIME(fsp=6)
-    return None
 
 
-def _sa_type_for_logical(
-    logical: str,
-    dialect_name: str,
-    db_type: str = "",
-    *,
-    nullable: bool = True,
-) -> Any:
-    """Map a Datawrap logical type to a SQLAlchemy type that compiles for the engine.
 
-    Accepts carriers like ``DECIMAL(12,4)`` / ``NUMERIC(38,10)`` — bare
-    ``t == "decimal"`` matching used to fall through to TEXT and strip scale
-    (SQL Server / Oracle / DuckDB greenfield fidelity bug).
-    """
-    from services.decision_kernel import ddl_type, normalize_logical_type
-    from services.type_system import (
-        LOGICAL_ARRAY,
-        LOGICAL_BINARY,
-        LOGICAL_BOOLEAN,
-        LOGICAL_DATE,
-        LOGICAL_DATETIME,
-        LOGICAL_DECIMAL,
-        LOGICAL_FLOAT,
-        LOGICAL_GEOGRAPHY,
-        LOGICAL_INTEGER,
-        LOGICAL_INTERVAL,
-        LOGICAL_JSON,
-        LOGICAL_STRING,
-        LOGICAL_TEXT,
-        LOGICAL_TIME,
-        LOGICAL_UUID,
-        parse_numeric_precision_scale,
-    )
 
-    raw = (logical or "string").strip()
-    raw_lower = raw.lower()
-    t = normalize_logical_type(raw)
 
-    def _maybe_nullable(sa_type: Any) -> Any:
-        # ClickHouse: only Nullable(T) when the column is nullable. PK / ORDER BY
-        # identity cols must stay bare Int64/DateTime — wrapping everything made
-        # empty→NULL legal at DDL and weakened ReplacingMergeTree contracts.
-        if dialect_name == "clickhouse" and ChNullable is not None and nullable:
-            return ChNullable(sa_type)
-        return sa_type
 
-    # TZ polarity from introspection carriers — check before LOGICAL_DATETIME collapse.
-    if (
-        "timestamptz" in raw_lower
-        or "timestamp_tz" in raw_lower
-        or "timestamp_ltz" in raw_lower
-        or "timestamp with time zone" in raw_lower
-        or "timestamp with local time zone" in raw_lower
-        or "datetimeoffset" in raw_lower
-        or raw_lower.endswith(" with time zone")
-        or raw_lower.endswith(" local time zone")
-    ):
-        # SQL Server DATETIMEOFFSET is TZ-aware — never bind as naive DATETIME2.
-        if db_type == "questdb":
-            return _maybe_nullable(sa.DateTime())
-        if db_type == "trino" and TrinoTimestamp is not None:
-            return TrinoTimestamp(precision=3, timezone=True)
-        if _is_oracle_wire(dialect_name, db_type):
-            # sa.DateTime(timezone=True) compiles to Oracle DATE — second
-            # granularity with no zone at all, so a live postgresql->oracle run
-            # created DATE for TIMESTAMPTZ and reconciled green only because the
-            # fixture held whole-second UTC values.
-            local = "local time zone" in raw_lower or "_ltz" in raw_lower
-            return _maybe_nullable(
-                oracle.TIMESTAMP(timezone=not local, local_timezone=local)
-            )
-        if mysql is not None and _MYSQL_WIRES & {
-            (dialect_name or "").lower(), (db_type or "").lower()
-        }:
-            # No MySQL carrier holds an offset, so the zone decision is made
-            # upstream. sa.DateTime(timezone=True) compiles to fsp-0 DATETIME,
-            # dropping the fraction too — a second loss for nothing.
-            return _maybe_nullable(mysql.DATETIME(fsp=6))
-        return sa.DateTime(timezone=True)
-    if (
-        "timestamp_ntz" in raw_lower
-        or "timestamp without time zone" in raw_lower
-        or "datetime_ntz" in raw_lower
-        or " without time zone" in raw_lower
-    ):
-        sub_second = _sub_second_naive_wire(dialect_name, db_type)
-        return _maybe_nullable(sub_second if sub_second is not None else sa.DateTime())
 
-    if t == LOGICAL_INTEGER:
-        # Width SSOT = decision_kernel integer_width_carrier / ddl_type.
-        # Bare logical ``integer`` must invent 64-bit (never sa.Integer INT32).
-        # Explicit INTEGER/INT/INT32 stay 32-bit; BIGINT stays 64-bit.
-        from services.decision_kernel import integer_width_carrier
-        from services.type_system import integer_bit_width
 
-        int_u = raw.upper().split("(", 1)[0].strip().replace(" ", "")
-        if int_u in {"NUMBER", "NUMERIC", "DECIMAL", "DEC"}:
-            from services.type_system import (
-                parse_numeric_precision_scale as _declared_precision,
-            )
 
-            declared, _declared_scale = _declared_precision(raw)
-            if declared is not None:
-                # A declared NUMBER(p,0) carries its own domain. The 64-bit
-                # never-narrower default below is for *ambiguous* widths, and
-                # applying it here widened a planned NUMBER(1) boolean carrier
-                # to NUMBER(19) — CREATE contradicting the stamped plan.
-                return _maybe_nullable(sa.Numeric(int(declared), 0))
-        carrier = integer_width_carrier(raw) or ""
-        width = integer_bit_width(carrier) if carrier else None
-        if int_u in {"INT", "INTEGER"} and db_type:
-            # The bare keyword is ambiguous across engines, so the carrier
-            # widens it to 64-bit. Once the destination engine is named that
-            # ambiguity is gone: SQL Server / PostgreSQL / MySQL INT is int32,
-            # and binding it as BIGINT re-widens a column the operator declared
-            # 32-bit. Oracle/Snowflake report unbounded and keep the widen.
-            from services.numeric_fit import integer_storage_bounds
 
-            bounds = integer_storage_bounds(int_u, dest_db=db_type)
-            if bounds and bounds[1] == 2147483647:
-                return _maybe_nullable(sa.Integer())
-        if int_u in {
-            "BIGINT",
-            "INT64",
-            "LONG",
-            "UBIGINT",
-            "UINT64",
-            "BIGSERIAL",
-        } or width == 64 or (carrier.upper() in {"BIGINT", "INT64", "LONG"}):
-            return _maybe_nullable(sa.BigInteger())
-        # Oracle NUMBER(p,0) normalized as integer — width from precision.
-        if int_u == "NUMBER":
-            from services.type_system import parse_numeric_precision_scale as _pnps
 
-            np, _ns = _pnps(raw)
-            if np is not None and int(np) > 9:
-                return _maybe_nullable(sa.BigInteger())
-            if np is not None and int(np) <= 4:
-                return _maybe_nullable(sa.SmallInteger())
-            return _maybe_nullable(sa.Integer())
-        if int_u in {"SMALLINT", "INT2", "SMALLSERIAL", "SHORT", "INT16"} or width == 16:
-            return _maybe_nullable(sa.SmallInteger())
-        if int_u in {"TINYINT", "INT1", "UINT8", "BYTE"} or (width is not None and width <= 8):
-            return _maybe_nullable(sa.SmallInteger())
-        if int_u in {"INTEGER", "INT", "INT32", "MEDIUMINT", "SERIAL", "SIGNED"} or width == 32:
-            return _maybe_nullable(sa.Integer())
-        # Bare / unknown integer invent — never-narrower 64-bit (audit ITEM 1).
-        return _maybe_nullable(sa.BigInteger())
-    if t == LOGICAL_DECIMAL:
-        precision, scale = parse_numeric_precision_scale(raw)
-        if db_type == "risingwave":
-            return sa.Numeric()
-        # QuestDB lacks true DECIMAL — CREATE uses DOUBLE; ddl_type stamps
-        # DOUBLE so Map/Validate match physical (never silent DECIMAL invent).
-        if db_type == "questdb":
-            return sa.Double()
-        # Preserve source DECIMAL(p,s) when present — never invent TEXT.
-        if precision is not None:
-            out_scale = 0 if scale is None else int(scale)
-            if db_type == "presto":
-                return sa.DECIMAL(int(precision), out_scale)
-            return _maybe_nullable(sa.Numeric(int(precision), out_scale))
-        # Bare DECIMAL/NUMBER — Map≡CREATE must match type_system ddl_type SSOT.
-        # Never invent Numeric(38,15) when the destination default is (38,10)
-        # (SQL Server / Oracle / Databricks / Synapse).
-        dest = (db_type or dialect_name or "").strip() or "generic_sql"
-        wire = ddl_type(dest, raw)
-        wp, ws = parse_numeric_precision_scale(wire)
-        if wp is not None:
-            out_scale = 0 if ws is None else int(ws)
-            if (db_type or "").lower() == "presto" or dialect_name == "presto":
-                return sa.DECIMAL(int(wp), out_scale)
-            return _maybe_nullable(sa.Numeric(int(wp), out_scale))
-        # PostgreSQL-wire: bare NUMERIC (arbitrary scale, no invent).
-        if dialect_name == "postgresql" or (db_type or "").lower() in {
-            "postgresql",
-            "postgres",
-            "cockroachdb",
-            "yugabytedb",
-            "timescale",
-            "supabase",
-            "neon",
-            "risingwave",
-        }:
-            return sa.Numeric()
-        # Destination has no fixed-point wire (e.g. SQLite TEXT) — do not invent
-        # Numeric(38,15); follow ddl_type collapse.
-        wire_logical = normalize_logical_type(wire)
-        if wire_logical in {LOGICAL_TEXT, LOGICAL_STRING}:
-            if "TEXT" in (wire or "").upper():
-                return _maybe_nullable(sa.Text())
-            return _maybe_nullable(sa.String())
-        return _maybe_nullable(sa.Numeric())
-    if t == LOGICAL_FLOAT:
-        # Approximate IEEE float — never rewrite to fixed-point Numeric.
-        # Exact lowercase logical ``float`` → Double (never-narrower invent).
-        # Honor Map REAL/FLOAT4/FLOAT stamps (sa.Double invents mantissa widen).
-        float_u = raw.upper().split("(", 1)[0].strip()
-        if _is_oracle_wire(dialect_name, db_type):
-            # Oracle DOUBLE PRECISION / FLOAT(n) are NUMBER-backed: magnitude
-            # caps near 1e125, so an IEEE-754 double source (1.5e300) will not
-            # fit. BINARY_DOUBLE / BINARY_FLOAT are the true IEEE carriers.
-            single = float_u in {
-                "REAL",
-                "FLOAT4",
-                "HALF",
-                "FLOAT16",
-                "BINARY_FLOAT",
-                "FLOAT32",
-            }
-            return _maybe_nullable(
-                oracle.BINARY_FLOAT() if single else oracle.BINARY_DOUBLE()
-            )
-        if (raw or "").strip() == LOGICAL_FLOAT:
-            return _maybe_nullable(sa.Double())
-        if float_u in {"REAL", "FLOAT4", "HALF", "FLOAT16", "BINARY_FLOAT", "FLOAT32"}:
-            if dialect_name == "postgresql" and hasattr(postgresql, "REAL"):
-                return _maybe_nullable(postgresql.REAL())
-            return _maybe_nullable(sa.Float())
-        if float_u == "FLOAT" and (db_type or "").lower() in {
-            "mysql",
-            "mariadb",
-            "tidb",
-            "sqlserver",
-            "mssql",
-            "databricks",
-            "spark",
-            "delta",
-            "delta_lake",
-            "databricks_sql",
-        }:
-            return _maybe_nullable(sa.Float())
-        return _maybe_nullable(sa.Double())
-    if t == LOGICAL_BOOLEAN:
-        return _maybe_nullable(sa.Boolean())
-    if t == LOGICAL_DATE:
-        return _maybe_nullable(sa.Date())
-    if t == LOGICAL_DATETIME:
-        if db_type == "questdb":
-            return sa.DateTime()
-        # Preserve timezone metadata when the target dialect supports it.
-        if dialect_name == "clickhouse":
-            return _maybe_nullable(
-                ChDateTime64(3) if ChDateTime64 is not None else sa.DateTime()
-            )
-        if db_type == "trino" and TrinoTimestamp is not None:
-            # Trino bare timestamp path — TZ-aware stamps already returned above.
-            return TrinoTimestamp(precision=3, timezone=False)
-        if db_type == "presto":
-            return sa.TIMESTAMP()
-        sub_second = _sub_second_naive_wire(dialect_name, db_type)
-        if sub_second is not None:
-            return _maybe_nullable(sub_second)
-        # Map≡CREATE: LOGICAL_DATETIME without TZ markers is NTZ wall-clock on
-        # Oracle/DuckDB/PG/SQL Server. Databricks TIMESTAMP is session-TZ aware
-        # (TIMESTAMP_NTZ already returned naive above) — never invent the wrong
-        # polarity. TZ-aware carriers (TIMESTAMPTZ, DATETIMEOFFSET, Oracle
-        # WITH [LOCAL] TIME ZONE) already returned timezone=True above.
-        db_l = (db_type or "").strip().lower()
-        if db_l in {
-            "databricks",
-            "spark",
-            "delta",
-            "delta_lake",
-            "databricks_sql",
-        }:
-            base = raw_lower.split("(", 1)[0].strip()
-            if base in {"timestamp", "timestamptz"}:
-                return sa.DateTime(timezone=True)
-        return _maybe_nullable(sa.DateTime())
-    if t == LOGICAL_TIME:
-        # ClickHouse, QuestDB and Presto (PyHive) do not bind Python time objects
-        # reliably; store as string in these engines.
-        if dialect_name == "clickhouse" or db_type in (
-            "clickhouse",
-            "questdb",
-            "presto",
-        ):
-            return _maybe_nullable(sa.String())
-        return _maybe_nullable(sa.Time())
-    if t == LOGICAL_UUID:
-        if db_type == "questdb":
-            return sa.Text()
-        if db_type == "risingwave":
-            return sa.String()
-        # ClickHouse stores UUIDs as variable-length String to avoid
-        # FixedString(36) padding/failure for non-canonical UUIDs.
-        if dialect_name == "clickhouse":
-            return _maybe_nullable(sa.String())
-        if dialect_name == "postgresql":
-            return postgresql.UUID()
-        # CREATE must land the carrier the canonical type map stamped on the
-        # mapping (``services.type_system.ddl_type``), because the bind route
-        # is compiled from that stamp: a UNIQUEIDENTIFIER stamp binds a native
-        # ``uuid.UUID``, and pyodbc silently truncates that to 16 characters
-        # when the column it lands in is VARCHAR(36).
-        if dialect_name == "mssql" and mssql is not None:
-            return _maybe_nullable(mssql.UNIQUEIDENTIFIER())
-        if dialect_name == "mysql":
-            return _maybe_nullable(sa.CHAR(36))
-        return _maybe_nullable(sa.String(36))
-    if t in (LOGICAL_JSON, LOGICAL_ARRAY):
-        # DuckDB: use a custom JSON type that stores compact text and binds
-        # Python None as SQL NULL.  Typed ``ARRAY<...>`` carriers still map to
-        # ``sa.ARRAY`` for callers that introspect the SQLAlchemy type.
-        if db_type == "duckdb":
-            if t == LOGICAL_ARRAY:
-                match = re.match(r"^(?:ARRAY|LIST)<(.+)>$", raw, re.IGNORECASE)
-                if match:
-                    element = match.group(1).strip()
-                    return sa.ARRAY(
-                        _sa_type_for_logical(element, dialect_name, db_type)
-                    )
-            return _ExactJSON(none_as_null=True)
-        if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
-            return _maybe_nullable(sa.Text())
-        if dialect_name == "postgresql":
-            if t == LOGICAL_ARRAY:
-                elem = None
-                match = re.match(r"^(?:ARRAY|LIST)<(.+)>$", raw, re.IGNORECASE)
-                postfix = re.match(r"^(.+?)\s*\[\s*\]\s*$", raw.strip(), re.IGNORECASE)
-                if match:
-                    elem = match.group(1).strip()
-                elif postfix:
-                    elem = postfix.group(1).strip()
-                if elem:
-                    return sa.ARRAY(
-                        _sa_type_for_logical(elem, dialect_name, db_type)
-                    )
-            return postgresql.JSONB()
-        return _ExactJSON(none_as_null=True)
-    if t == LOGICAL_BINARY:
-        if db_type in ("clickhouse", "trino", "questdb", "presto"):
-            return _maybe_nullable(sa.Text())
-        return sa.LargeBinary()
-    if t in (LOGICAL_GEOGRAPHY, LOGICAL_INTERVAL):
-        # Typed specialty DDL — never invent TEXT for Oracle SDO_GEOMETRY / PG INTERVAL.
-        # String carriers (Databricks/Iceberg/MySQL interval→TEXT) stay Text honestly.
-        engine_key = (db_type or dialect_name or "").lower()
-        logical_name = "geography" if t == LOGICAL_GEOGRAPHY else "interval"
-        native = ddl_type(engine_key, logical_name) if engine_key else ""
-        native_logical = normalize_logical_type(native)
-        if (
-            not native
-            or native_logical in {LOGICAL_STRING, LOGICAL_TEXT}
-            or native.upper() in {"STRING", "TEXT", "VARCHAR", "NVARCHAR", "VARCHAR2"}
-        ):
-            return _maybe_nullable(sa.Text())
-        if _DialectNativeType is None:
-            return _maybe_nullable(sa.Text())
-        return _maybe_nullable(_DialectNativeType(native))
-    # Specialty carriers that normalize to STRING (HIERARCHYID, SQL_VARIANT, XML,
-    # ROWVERSION, …) — DialectNativeType / typed wire via ddl_type; never invent
-    # bare Text that rematerializes as Map VARCHAR over live specialty DDL.
-    from services.type_system import (
-        is_fixed_char_carrier,
-        is_national_string_carrier,
-        specialty_carrier_base,
-        string_carrier_length,
-    )
 
-    # Unicode polarity and declared width survive to DDL. Collapsing every string
-    # carrier to sa.Text() made SQL Server CREATE a code-page VARCHAR(MAX) for an
-    # invented NVARCHAR(64), and a live postgresql->mssql read-back came back with
-    # ``中`` rewritten to ``?``. sa.Unicode/UnicodeText are the dialect-neutral
-    # national wires (NVARCHAR on SQL Server, NVARCHAR2 on Oracle, VARCHAR on
-    # engines that are Unicode-only anyway).
-    if is_national_string_carrier(raw):
-        width = string_carrier_length(raw)
-        if width is not None:
-            if is_fixed_char_carrier(raw):
-                return _maybe_nullable(sa.NCHAR(width))
-            if _is_oracle_wire(dialect_name, db_type) and oracle is not None:
-                # sa.Unicode compiles to Oracle VARCHAR2, so an NVARCHAR2 source
-                # column landed as a non-national carrier and the fidelity gate
-                # reported the create-new table as a narrowing.
-                return _maybe_nullable(oracle.NVARCHAR2(width))
-            return _maybe_nullable(sa.Unicode(width))
-        if dialect_name == "mssql" or db_type in {"sqlserver", "mssql", "azure_sql"}:
-            # sa.UnicodeText compiles to deprecated NTEXT; NVARCHAR(max) is the
-            # only supported SQL Server Unicode LOB wire.
-            return _maybe_nullable(sa.Unicode())
-        return _maybe_nullable(sa.UnicodeText())
-
-    # Declared width survives to DDL for the non-national carriers too: every
-    # bounded VARCHAR(n)/CHAR(n) used to land as sa.Text(), so a live
-    # postgresql->oracle CREATE turned VARCHAR(64) into CLOB — unindexable, and
-    # the destination no longer enforces the source's length contract.
-    width = string_carrier_length(raw)
-    if width is not None:
-        if is_fixed_char_carrier(raw):
-            if _is_oracle_wire(dialect_name, db_type) and _DialectNativeType is not None:
-                # Oracle CHAR(n) means n *bytes*: a 36-character UUID key in a
-                # multibyte charset no longer fits, and the fidelity gate reads
-                # the created column back as a narrowing of CHAR(n CHAR).
-                return _maybe_nullable(_DialectNativeType(f"CHAR({width} CHAR)"))
-            return _maybe_nullable(sa.CHAR(width))
-        return _maybe_nullable(sa.String(width))
-
-    spec = specialty_carrier_base(raw)
-    if spec:
-        engine_key = (db_type or dialect_name or "").lower()
-        native = ddl_type(engine_key, raw) if engine_key else spec
-        native_logical = normalize_logical_type(native or "")
-        native_base = (native or "").upper().split("(", 1)[0].strip()
-        # Same-token or remapped specialty (HIERARCHYID, LTREE, SQL_VARIANT, …)
-        # before LOGICAL_STRING collapse invents bare Text.
-        native_spec = specialty_carrier_base(native)
-        if native_spec:
-            if _DialectNativeType is None:
-                return _maybe_nullable(sa.Text())
-            return _maybe_nullable(_DialectNativeType(native))
-        stringish = {
-            "STRING",
-            "TEXT",
-            "VARCHAR",
-            "NVARCHAR",
-            "VARCHAR2",
-            "NVARCHAR2",
-            "CLOB",
-            "NCLOB",
-            "CHAR",
-            "NCHAR",
-        }
-        if (
-            not native
-            or native_logical in {LOGICAL_STRING, LOGICAL_TEXT}
-            or native_base in stringish
-        ):
-            m = re.match(
-                r"^(?:N?VAR)?CHAR2?\s*\(\s*(\d+)\s*\)$",
-                (native or "").strip(),
-                re.IGNORECASE,
-            )
-            if m:
-                return _maybe_nullable(sa.String(int(m.group(1))))
-            return _maybe_nullable(sa.Text())
-        if native_logical == LOGICAL_BINARY:
-            return sa.LargeBinary()
-        if native_logical == LOGICAL_UUID:
-            if dialect_name == "postgresql":
-                return postgresql.UUID()
-            if dialect_name == "mssql" and mssql is not None:
-                return _maybe_nullable(mssql.UNIQUEIDENTIFIER())
-            return _maybe_nullable(sa.String(36))
-        if native_logical == LOGICAL_JSON:
-            if dialect_name == "postgresql":
-                return postgresql.JSONB()
-            return _ExactJSON(none_as_null=True)
-        if _DialectNativeType is None:
-            return _maybe_nullable(sa.Text())
-        return _maybe_nullable(_DialectNativeType(native))
-    if mssql is not None and (
-        dialect_name == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
-    ):
-        # sa.Text() compiles to SQL Server TEXT, deprecated since 2005 and
-        # unusable with most string predicates. VARCHAR(max) is the wire.
-        return _maybe_nullable(mssql.VARCHAR(None))
-    return _maybe_nullable(sa.Text())
 
 
 def _is_string_type(sa_type: Any) -> bool:
@@ -2121,6 +1548,144 @@ def _is_string_type(sa_type: Any) -> bool:
     # Handle ClickHouse Nullable(String) / Nullable(TEXT)
     nested = getattr(sa_type, "nested_type", None)
     return bool(nested is not None and isinstance(nested, (sa.String, sa.Text, sa.CHAR)))
+
+
+def _encoding_dest_type(
+    logical: str,
+    sa_type: Any,
+    *,
+    dialect_name: str,
+    db_type: str,
+) -> str:
+    """Character carrier the encoding gate must judge.
+
+    A collapsed logical ``string`` on SQL Server is the code-page default.
+    The live class is the carrier: NVARCHAR holds U+90CE, VARCHAR does not.
+    """
+    stamp = (logical or "").strip()
+    if sa_type is None:
+        return stamp
+    type_name = getattr(getattr(sa_type, "__class__", None), "__name__", "")
+    upper = str(type_name or "").upper()
+    module = getattr(getattr(sa_type, "__class__", None), "__module__", "")
+    national = upper in {"NVARCHAR", "NCHAR", "UNICODE", "UNICODETEXT"} or (
+        "mssql" in module.lower() and "NATIONAL" in repr(sa_type).upper()
+    )
+    length = getattr(sa_type, "length", None)
+    try:
+        width = int(length) if length is not None else None
+    except (TypeError, ValueError):
+        width = None
+    if national:
+        if "NVARCHAR" in stamp.upper() or "NCHAR" in stamp.upper():
+            return stamp
+        if width and width > 0:
+            prefix = "NCHAR" if upper == "NCHAR" else "NVARCHAR"
+            return f"{prefix}({width})"
+        return "NVARCHAR(MAX)"
+    mssql_code_page = (dialect_name or "").lower() == "mssql" or (
+        db_type or ""
+    ).lower() in _MSSQL_WIRES
+    if mssql_code_page and upper in {"VARCHAR", "CHAR", "TEXT", "STRING", "NTEXT"}:
+        # The physical class is the code page. A Map stamp of NVARCHAR must
+        # not win — ``CHAR`` is a substring of ``NVARCHAR``. A UTF-8 collation
+        # on the VARCHAR stamp is the encoding: dropping it classified
+        # ``Latin1_General_100_CI_AS_SC_UTF8`` as cp1252 and quarantined rows
+        # the column stores.
+        if width and width > 0:
+            prefix = "CHAR" if upper == "CHAR" else "VARCHAR"
+            rebuilt = f"{prefix}({width})"
+            stamp_u = stamp.upper()
+            national_stamp = any(
+                tok in stamp_u for tok in ("NVARCHAR", "NCHAR", "NTEXT")
+            )
+            if not national_stamp:
+                coll = re.search(r"COLLATE\s+(\S+)", stamp, flags=re.IGNORECASE)
+                if coll:
+                    rebuilt = f"{rebuilt} COLLATE {coll.group(1)}"
+            return rebuilt
+        stamp_u = stamp.upper()
+        if "NVARCHAR" in stamp_u or "NCHAR" in stamp_u or "NTEXT" in stamp_u:
+            return "VARCHAR(MAX)"
+        if any(tok in stamp_u for tok in ("VARCHAR", "CHAR", "TEXT")):
+            return stamp
+        return "VARCHAR(MAX)"
+    return stamp
+
+
+def _refuse_sqlserver_datetime_rounding(
+    value: datetime,
+    *,
+    logical: str,
+    sa_type: Any,
+    db_type: str,
+) -> None:
+    """Quarantine a microsecond classic SQL Server DATETIME cannot store.
+
+    DATETIME rounds to .000 / .003 / .007. Binding first and failing the
+    read-back leaves the rounded row committed. DATETIME2 and DATETIMEOFFSET
+    keep the fraction.
+    """
+    engine = (db_type or "").strip().lower()
+    if engine not in _MSSQL_WIRES and engine != "mssql":
+        return
+    type_name = ""
+    if sa_type is not None:
+        type_name = str(getattr(getattr(sa_type, "__class__", None), "__name__", "") or "")
+    logical_u = (logical or "").upper()
+    physical = type_name.upper()
+    # DATETIMEOFFSET keeps the offset and its declared fraction.
+    if physical == "DATETIMEOFFSET" or (
+        "DATETIMEOFFSET" in logical_u and physical != "DATETIME"
+    ):
+        return
+    us = int(value.microsecond or 0)
+    # DATETIME2(p) stores p decimal digits. p>=6 holds a microsecond.
+    # DATETIME2(3) stores milliseconds, so .999999 and .000001 are refused
+    # before the driver rounds them and the read-back rolls the batch back.
+    # Precision omitted on DATETIME2 is SQL Server's default of 7.
+    if physical == "DATETIME2" or (
+        "DATETIME2" in logical_u and physical != "DATETIME"
+    ):
+        prec = getattr(sa_type, "precision", None) if physical == "DATETIME2" else None
+        if prec is None and "DATETIME2" in logical_u:
+            match = re.search(r"DATETIME2\s*\(\s*(\d+)\s*\)", logical_u)
+            prec = int(match.group(1)) if match else 7
+        try:
+            digits = 7 if prec is None else int(prec)
+        except (TypeError, ValueError):
+            digits = 7
+        if digits >= 6:
+            return
+        if digits <= 0:
+            fits = us == 0
+        else:
+            fits = us % (10 ** (6 - digits)) == 0
+        if fits:
+            return
+        raise ValueError(
+            f"SQL Server DATETIME2({digits}) cannot store microsecond {us:06d} "
+            f"({value.isoformat(sep='T')}) — column keeps {digits} fractional "
+            "digits. Quarantine; refuse round-after-commit."
+        )
+    if physical == "SMALLDATETIME" or (
+        logical_u == "SMALLDATETIME" and physical != "DATETIME"
+    ):
+        if us == 0 and int(value.second or 0) == 0:
+            return
+        raise ValueError(
+            f"SQL Server SMALLDATETIME cannot store {value.isoformat(sep='T')} "
+            "— column keeps whole minutes. Quarantine; refuse round-after-commit."
+        )
+    if physical != "DATETIME" and logical_u != "DATETIME":
+        return
+    if us in {0, 3000, 7000}:
+        return
+    raise ValueError(
+        f"SQL Server DATETIME cannot store microsecond {us:06d} "
+        f"({value.isoformat(sep='T')}) — column keeps 1/300 s "
+        "(.000/.003/.007). Quarantine; refuse round-after-commit."
+    )
 
 
 def _to_sa_value(
@@ -2390,8 +1955,23 @@ def _to_sa_value(
             return None
         if isinstance(coerced, datetime):
             if coerced.tzinfo is not None:
-                return coerced.replace(tzinfo=None)
-            return coerced
+                coerced = coerced.replace(tzinfo=None)
+            _refuse_sqlserver_datetime_rounding(
+                coerced,
+                logical=str(logical or ""),
+                sa_type=sa_type,
+                db_type=str(db_type or dialect_name or ""),
+            )
+            from connectors.sqlserver_datetime2 import bind_sqlserver_datetime2
+
+            # ODBC SQL_TIMESTAMP keeps 3 fractional digits. DATETIME2(6)/(7)
+            # must bind as text or the microsecond is stored as milliseconds.
+            return bind_sqlserver_datetime2(
+                coerced,
+                logical=str(logical or ""),
+                sa_type=sa_type,
+                db_type=str(db_type or dialect_name or ""),
+            )
         if isinstance(coerced, date) and not isinstance(coerced, datetime):
             return datetime.combine(coerced, time())
         return value
@@ -2425,6 +2005,7 @@ def _to_sa_value(
         return coerce_float_wire(
             value,
             ddl_type=str(sa_type or logical or "FLOAT"),
+            engine=str(db_type or dialect_name or ""),
         )
 
     if t in (LOGICAL_STRING, LOGICAL_TEXT) or _is_string_type(sa_type):
@@ -2432,10 +2013,19 @@ def _to_sa_value(
 
         # CESU-8 / surrogate leaks become Unicode scalars. Dest that cannot
         # encode a scalar raises — quarantine holds the cell, never '?'.
+        # The encoding decision follows the physical SQLAlchemy class when the
+        # logical stamp collapsed NVARCHAR(MAX) to "string"/"TEXT" (false
+        # varchar quarantine) or stamped NVARCHAR over a live VARCHAR (the
+        # driver then substitutes '?').
         return bind_unicode_text(
             value,
             engine=str(db_type or dialect_name or ""),
-            dest_type=str(logical or ""),
+            dest_type=_encoding_dest_type(
+                str(logical or ""),
+                sa_type,
+                dialect_name=dialect_name,
+                db_type=str(db_type or ""),
+            ),
         )
 
     # uuid leftover; string/text already bound above
@@ -2483,6 +2073,11 @@ def test_generic_sql(**kwargs: Any) -> tuple[bool, str]:
     if not SQLALCHEMY_AVAILABLE:
         return False, "SQLAlchemy is not installed"
     cfg = _cfg_from_params(**kwargs)
+    # A connectivity probe must answer inside the caller's request timeout:
+    # an unconfigured probe gets a 15s handshake bound instead of inheriting
+    # the OS TCP default that outlived the MCP timeout (QA C07).
+    if not cfg.get("connect_timeout"):
+        cfg["connect_timeout"] = 15
     try:
         engine = _engine(cfg)
         with engine.connect() as conn:
@@ -2623,16 +2218,18 @@ def _build_table_for_write(
     db_type: str = "",
     conflict_columns: list[str] | None = None,
     fidelity_plan: Any = None,
+    declare_key: bool = True,
 ) -> sa.Table:
     """Build an explicit Table definition for CREATE/INSERT using the target schema.
 
     When ``conflict_columns`` are supplied for upsert, add a PRIMARY KEY over them
     so native ``ON CONFLICT`` / ``ON DUPLICATE KEY`` upsert has the required
-    unique constraint and retries are truly idempotent.
+    unique constraint and retries are truly idempotent. Append (``declare_key``
+    false) does not copy the source key: a second copy of the same row is legal.
     """
     metadata = sa.MetaData()
     dialect_name = engine.dialect.name if engine.dialect else ""
-    from connectors.writer_common import resolve_conflict_targets
+    from services.dialect_profiles import denormalize_result_key
 
     try:
         conflict_cols = resolve_conflict_targets(
@@ -2646,7 +2243,7 @@ def _build_table_for_write(
             f"against the planned schema ({exc})."
         ) from exc
     pk_set = set()
-    if conflict_cols:
+    if declare_key and conflict_cols:
         pk_set = set(conflict_cols)
 
     # Source semantics come from the one canonical planner, never from a second
@@ -2688,10 +2285,15 @@ def _build_table_for_write(
             [by_fold[c.casefold()] for c in u if c.casefold() in by_fold]
             for u in plan_uniques
         ]
-        if not pk_set and plan_pk and len(plan_pk) == len(
-            getattr(fidelity_plan, "primary_key", []) or []
+        if (
+            declare_key
+            and not pk_set
+            and plan_pk
+            and len(plan_pk) == len(getattr(fidelity_plan, "primary_key", []) or [])
         ):
             pk_set = set(plan_pk)
+        if not declare_key:
+            plan_uniques = []
 
     # dest column -> the generator clause the planner decided, which carries the
     # source's own seed and increment.
@@ -2751,7 +2353,7 @@ def _build_table_for_write(
                 identity_arg.append(
                     sa.Identity(always=False, start=seed, increment=step)
                 )
-        sa_type = _sa_type_for_logical(
+        sa_type = _gsql._sa_type_for_logical(
             logical, dialect_name, db_type, nullable=nullable
         )
         collation = plan_collations.get(col)
@@ -2765,11 +2367,17 @@ def _build_table_for_write(
                 logger.warning(
                     "collation %s could not be applied to %s", collation, col
                 )
+        # Oracle/Snowflake/DB2 fold unquoted names to UPPER. Quoting the
+        # operator's lowercase spelling created "is_active", which unquoted
+        # SQL then could not see (ORA-00904). The Column key stays the
+        # operator spelling so bind dicts do not change.
+        physical = denormalize_result_key(dialect_name, col)
         cols.append(
             sa.Column(
-                col,
+                physical,
                 sa_type,
                 *identity_arg,
+                key=col,
                 primary_key=is_pk,
                 nullable=nullable,
                 autoincrement=autoincrement,
@@ -2781,7 +2389,7 @@ def _build_table_for_write(
         )
 
     constraints: list[Any] = []
-    if conflict_cols and not pk_set.issubset(set(columns)):
+    if declare_key and conflict_cols and not pk_set.issubset(set(columns)):
         # ``quote=`` is a Column kwarg; on a constraint SQLAlchemy rejects it
         # as an unknown dialect argument and the whole CREATE fails.
         constraints.append(sa.UniqueConstraint(*conflict_cols))
@@ -2792,6 +2400,11 @@ def _build_table_for_write(
         constraints.append(
             sa.CheckConstraint(sa.text(predicate), name=check_name or None)
         )
+
+    physical_table = denormalize_result_key(dialect_name, table_name)
+    physical_schema = (
+        denormalize_result_key(dialect_name, schema) if schema else schema
+    )
 
     if dialect_name == "clickhouse" and ch_engines is not None:
         # Airbyte-class: upsert identity is ORDER BY on ReplacingMergeTree, not
@@ -2810,22 +2423,22 @@ def _build_table_for_write(
         else:
             ch_engine = ch_engines.MergeTree(order_by=sa.text("tuple()"))
         return sa.Table(
-            table_name,
+            physical_table,
             metadata,
             *cols,
             *constraints,
             ch_engine,
-            schema=schema,
+            schema=physical_schema,
             quote=True,
             quote_schema=True,
         )
 
     return sa.Table(
-        table_name,
+        physical_table,
         metadata,
         *cols,
         *constraints,
-        schema=schema,
+        schema=physical_schema,
         quote=True,
         quote_schema=True,
     )
@@ -3071,6 +2684,17 @@ def introspect_table_schema(
     try:
         schema = _schema_name(cfg)
         inspector = inspect(engine)
+        if not (table or "").strip():
+            # No object named: this is the catalog list (Pilot "list tables",
+            # Destination pickers). Reflecting columns of "" only ever failed.
+            names = sorted(str(n) for n in inspector.get_table_names(schema=schema))
+            logger.info(
+                "generic_sql listed %d table(s) for %s (schema=%s)",
+                len(names),
+                cfg.get("type") or "generic_sql",
+                schema or "default",
+            )
+            return {"ok": True, "columns": [], "tables": names, "schema": schema or ""}
         try:
             columns = inspector.get_columns(table, schema=schema)
         except Exception:
@@ -3204,7 +2828,7 @@ def introspect_table_schema(
             result.append(
                 {
                     "name": denormalize_result_key(dialect_key, str(col["name"])),
-                    "inferred_type": _logical_type_from_sa(col.get("type")),
+                    "inferred_type": _gsql._logical_type_from_sa(col.get("type")),
                     "nullable": col.get("nullable", True),
                 }
             )
@@ -3240,9 +2864,16 @@ def introspect_table_schema(
         }
     except Exception as exc:
         logger.warning("generic_sql introspect failed", exc_info=True)
+        # Surface the driver's own reason — an operator cannot fix
+        # "OperationalError" with no message attached (QA sqlserver→* routes
+        # all blocked on a bare type name).
+        detail = str(exc).strip()[:300]
         return {
             "ok": False,
-            "error": f"{type(exc).__name__}: SQL schema introspection failed",
+            "error": (
+                f"{type(exc).__name__}: SQL schema introspection failed"
+                + (f" — {detail}" if detail else "")
+            ),
             "columns": [],
             "tables": [],
         }
@@ -4261,7 +3892,6 @@ def _upsert_batch(
 
     Returns the number of destination rows actually written in this batch.
     """
-    from connectors.writer_common import resolve_conflict_targets
 
     try:
         conflict_cols = resolve_conflict_targets(
@@ -4740,7 +4370,6 @@ def _generic_finish_mapped_bundle(
     from connectors.sql_write_materialize import finish_sql_mapped_bundle
     from connectors.writer_common import (
         combined_mapped_rows_for_checksum,
-        materialize_missing_as_null_for_dense_write,
     )
 
     target_types = [str(dest_types.get(c, "") or "") for c in target_cols]
@@ -5315,6 +4944,7 @@ def write_mapped_rows(
         target_column_types,
         db_type=cfg.get("type", ""),
         conflict_columns=conflict_columns,
+        declare_key=write_mode != "insert",
     )
 
     dialect_name = engine.dialect.name if engine.dialect else ""
@@ -5323,7 +4953,6 @@ def write_mapped_rows(
     physical: dict[str, str] = {}
     try:
         from connectors.writer_common import (
-            overlay_physical_bind_types,
             require_physical_types_for_existing_table,
         )
 
@@ -5407,12 +5036,34 @@ def write_mapped_rows(
             typ = col_meta.get("type")
             # Prefer specialty/logical carriers over raw SA str() (e.g. sql_variant
             # must not soft-bind as Map VARCHAR / invent JSON via "variant").
-            ddl = _logical_type_from_sa(typ) if typ is not None else ""
+            ddl = _gsql._logical_type_from_sa(typ) if typ is not None else ""
             if not str(ddl or "").strip():
                 ddl = str(typ) if typ is not None else ""
             physical[name] = ddl
             physical[name.lower()] = ddl
             physical[name.upper()] = ddl
+        from connectors.schema_drift import ensure_product_lsn_column
+
+        lsn_err = ensure_product_lsn_column(
+            engine,
+            table_name,
+            schema_name,
+            list(target_cols or []),
+            physical,
+            table_existed=table_existed,
+        )
+        if lsn_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=lsn_err,
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
         overlay_err = require_physical_types_for_existing_table(
             table_existed=table_existed,
             physical=physical,
@@ -5638,7 +5289,7 @@ def write_mapped_rows(
             )
 
     sa_col_types = {
-        col: _sa_type_for_logical(
+            col: _gsql._sa_type_for_logical(
             str(target_column_types.get(col) or "string"),
             dialect_name,
             cfg.get("type", ""),
@@ -5758,10 +5409,27 @@ def write_mapped_rows(
                 )
 
             if write_mode == "replace" and table_exists:
-                conn.execute(sa.schema.DropTable(table_obj, if_exists=True))
-                conn.commit()
-                table_exists = False
-                reflection_cache.invalidate_table(engine, schema_name, table_name)
+                from connectors.table_manager import (
+                    empty_existing_for_overwrite,
+                    overwrite_clear_kind,
+                )
+
+                # DROP+CREATE threw away PK, unique, NOT NULL, check, FK and
+                # identity (DEF-V7-E1-021). Relational engines empty in place.
+                if overwrite_clear_kind(db_type) == "empty":
+                    outcome = empty_existing_for_overwrite(
+                        db_type, cfg, table_name, schema_name
+                    )
+                    if outcome == "absent":
+                        table_exists = False
+                        reflection_cache.invalidate_table(
+                            engine, schema_name, table_name
+                        )
+                else:
+                    conn.execute(sa.schema.DropTable(table_obj, if_exists=True))
+                    conn.commit()
+                    table_exists = False
+                    reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if not table_exists and not create_table:
                 _cleanup_spool()
@@ -5805,6 +5473,8 @@ def write_mapped_rows(
                         dest_tablespaces=list_destination_tablespaces(
                             _fidelity_dialect(dest_db, dialect_name), conn
                         ),
+                        carry_keys=write_mode != "insert"
+                        or bool(_kwargs.get("carry_source_keys")),
                     )
                     placement_suffix = fidelity_plan.create_suffix
                     table_obj = _build_table_for_write(
@@ -5816,6 +5486,7 @@ def write_mapped_rows(
                         db_type=cfg.get("type", ""),
                         conflict_columns=conflict_columns,
                         fidelity_plan=fidelity_plan,
+                        declare_key=write_mode != "insert",
                     )
                     _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                 except Exception as exc:
@@ -6005,6 +5676,32 @@ def write_mapped_rows(
                 # Drift backfill may have added or widened columns; anything
                 # reflected before this point describes the old shape.
                 reflection_cache.invalidate_table(engine, schema_name, table_name)
+
+            if write_mode == "insert" and table_exists and data_rows:
+                from services.destination_key_collision_probe import (
+                    refuse_enforced_append_before_write,
+                )
+
+                refusal = refuse_enforced_append_before_write(
+                    destination_config=cfg,
+                    destination_db_type=str(cfg.get("type") or ""),
+                    destination_table=table_name,
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                )
+                if refusal:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema_name or (cfg.get("database") or ""),
+                        checksum="",
+                        chunks_completed=0,
+                        error=refusal,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
 
             # The rows carry the source's own key values; on SQL Server an
             # IDENTITY column rejects them unless the session says so.
@@ -6236,6 +5933,9 @@ def write_mapped_rows(
                             chunks_completed, max(chunks, chunk_idx + 1), written
                         )
                     chunk_idx += 1
+                write_acc.note_collapsed_duplicates(
+                    finished.collapsed_duplicate_rows
+                )
                 write_acc.add_accepted(list(finished.dense_rows))
                 row_offset += len(dense_dicts)
                 del finished
@@ -6284,8 +5984,9 @@ def write_mapped_rows(
                         rejected_details,
                         policy,
                         source_row_count=source_row_count or None,
+                        collapsed_duplicates=write_acc.collapsed_duplicate_rows,
                     ),
-                    len(data_rows) - written - rows_skipped if data_rows else 0,
+                    len(data_rows) - written - rows_skipped - write_acc.collapsed_duplicate_rows if data_rows else 0,
                 ),
                 rejected_details=rejected_details,
                 coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
@@ -6317,8 +6018,9 @@ def write_mapped_rows(
                         rejected_details,
                         policy,
                         source_row_count=source_row_count or None,
+                        collapsed_duplicates=write_acc.collapsed_duplicate_rows,
                     ),
-                    len(data_rows) - written - rows_skipped if data_rows else 0,
+                    len(data_rows) - written - rows_skipped - write_acc.collapsed_duplicate_rows if data_rows else 0,
                 ),
                 rejected_details=rejected_details,
                 coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
@@ -6347,8 +6049,9 @@ def write_mapped_rows(
                     rejected_details,
                     policy,
                     source_row_count=source_row_count or None,
+                    collapsed_duplicates=write_acc.collapsed_duplicate_rows,
                 ),
-                len(data_rows) - written - rows_skipped if data_rows else 0,
+                len(data_rows) - written - rows_skipped - write_acc.collapsed_duplicate_rows if data_rows else 0,
             ),
             rejected_details=rejected_details,
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
@@ -6373,6 +6076,7 @@ def write_mapped_rows(
                 rejected_details,
                 policy,
                 source_row_count=source_row_count or None,
+                collapsed_duplicates=write_acc.collapsed_duplicate_rows,
             ),
             rejected_details=rejected_details,
             rows_skipped=rows_skipped,

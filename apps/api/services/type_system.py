@@ -18,10 +18,12 @@ ETL contract (Informatica / Airbyte / Fivetran class)
 from __future__ import annotations
 
 import re
+import sys
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
-from typing import Any, Final
+from typing import Any, Final, Mapping
 
+_ts = sys.modules[__name__]
 from services.dest_dialect_facts import (  # noqa: F401  (re-exported)
     _collation_compatible_with_dest,
     _normalize_dest_db,
@@ -210,7 +212,6 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "smallint unsigned": LOGICAL_INTEGER,
     "int unsigned": LOGICAL_INTEGER,
     "bigint unsigned": LOGICAL_DECIMAL,  # MySQL BIGINT UNSIGNED → DECIMAL (fidelity)
-    "smallserial": LOGICAL_INTEGER,
     "year": LOGICAL_INTEGER,
     "bit": LOGICAL_BOOLEAN,
     "year_month": LOGICAL_INTERVAL,
@@ -265,7 +266,6 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "tinytext": LOGICAL_TEXT,
     "long varchar": LOGICAL_TEXT,
     "national character large object": LOGICAL_TEXT,
-    "timestamp with time zone": LOGICAL_DATETIME,
     "timestamp with local time zone": LOGICAL_DATETIME,
     "timestamp without time zone": LOGICAL_DATETIME,
     "time with time zone": LOGICAL_TIME,
@@ -527,12 +527,15 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_BINARY: "binary",
     },
     # Schemaless / document / KV — wire as string; no SQL DDL contract.
+    # The Redis writer stores each row as one JSON document. JSON carries
+    # integers and booleans natively, so those keep their type; decimal,
+    # temporal, UUID and binary have no JSON type and are stored as exact text.
     "redis": {
         LOGICAL_STRING: "string",
         LOGICAL_TEXT: "string",
-        LOGICAL_INTEGER: "string",
+        LOGICAL_INTEGER: "integer",
         LOGICAL_DECIMAL: "string",
-        LOGICAL_BOOLEAN: "string",
+        LOGICAL_BOOLEAN: "boolean",
         LOGICAL_DATE: "string",
         LOGICAL_DATETIME: "string",
         LOGICAL_TIME: "string",
@@ -1723,15 +1726,12 @@ def is_dialect_native_document_wire(
 # this module is the type SSOT every caller imports from.
 from services.document_instant import (  # noqa: E402
     DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
-    INSTANT_DATE_TOKEN_ENGINES as _INSTANT_DATE_TOKEN_ENGINES,
-    document_instant_wire_preserved,
     instant_date_carrier,
     is_document_instant_token,
 )
 
 # A keyspace store's only carrier is text, and its JSON wire keeps the offset.
 from services.keyspace_instant import (  # noqa: E402
-    INSTANT_TEXT_WIRE_ENGINES as _INSTANT_TEXT_WIRE_ENGINES,
     keyspace_instant_text_wire_preserved,
 )
 
@@ -1927,13 +1927,13 @@ def nested_struct_fields_incompatible(source_type: str, target_type: str, *, des
             return True
         if src_l == tgt_l:
             # Same family — still catch IEEE/time/TZ collapse when helpers exist.
-            if is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_db):
+            if _ts.is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_db):
                 return True
             continue
         if (src_l, tgt_l) not in safe_leaf:
             return True
         # Safe leaf (STRING↔TEXT) must still catch specialty→text / width / IEEE.
-        if is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_db):
+        if _ts.is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_db):
             return True
     return False
 
@@ -1947,7 +1947,7 @@ def nested_array_elements_incompatible(source_type: str, target_type: str, *, de
         return True
     if not src_el or not tgt_el:
         return False
-    if is_precision_collapse_coercion(src_el, tgt_el, dest_db=dest_db):
+    if _ts.is_precision_collapse_coercion(src_el, tgt_el, dest_db=dest_db):
         return True
     if is_nested_shape_collapse(src_el, tgt_el, dest_db=dest_db):
         return True
@@ -1999,7 +1999,9 @@ def is_nested_shape_collapse(source_type: str, target_type: str, *, dest_db: str
                 return True
             if is_nested_shape_collapse(skv[1], tkv[1], dest_db=dest_db):
                 return True
-            if is_precision_collapse_coercion(skv[1], tkv[1], dest_db=dest_db):
+            if _ts.is_precision_collapse_coercion(
+                skv[1], tkv[1], dest_db=dest_db
+            ):
                 return True
             if decimal_params_would_narrow(skv[1], tkv[1], dest_db=dest_db):
                 return True
@@ -3022,17 +3024,22 @@ def _interval_ddl_for_dest(db: str, inferred: str | None) -> str | None:
 
 
 # Destination DDL when source carrier is timezone-aware vs wall-clock NTZ.
+# MySQL create-new for an offset-pinned source. Width 64 holds an RFC-3339
+# instant with a numeric offset and nine fractional digits
+# (``2024-12-31T23:59:59.123456789+05:30`` is 35 characters). A different
+# width is not this stamp.
+MYSQL_OFFSET_TEXT_DDL: Final[str] = "VARCHAR(64)"
 _TZ_AWARE_DDL: Final[dict[str, str]] = {
     "postgresql": "TIMESTAMPTZ",
     "redshift": "TIMESTAMPTZ",
     "snowflake": "TIMESTAMP_TZ",
-    # MySQL TIMESTAMP(6) stores UTC and converts on read, so an aware source
-    # keeps its instant in a self-describing carrier. DATETIME(6) would hold the
-    # same digits with no polarity marker — instant only by convention, which is
-    # why that carrier needs a UTC-normalize contract (services.timezone_policy).
-    # TIMESTAMP is epoch-bounded (1970..2038); out-of-range instants are caught
-    # at Validate and quarantined at write, never silently zeroed.
-    "mysql": "TIMESTAMP(6)",
+    # Cross-engine aware instants land on DATETIME(6). MySQL TIMESTAMP is
+    # epoch-bounded (1970-01-01 .. 2038-01-19); a PostgreSQL TIMESTAMPTZ
+    # outside that window cannot be cast, and the route blocks. DATETIME(6)
+    # holds 1000..9999. Writers pin time_zone to +00:00 and store the
+    # UTC-normalized clock, so the instant survives. A MySQL source's own
+    # TIMESTAMP still round-trips via ``_aware_ddl_for_dest``.
+    "mysql": "DATETIME(6)",
     "sqlserver": "DATETIMEOFFSET",
     "oracle": "TIMESTAMP WITH TIME ZONE",
     "bigquery": "TIMESTAMP",
@@ -3187,11 +3194,9 @@ _TZ_LTZ_DDL: Final[dict[str, str]] = {
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
     "sqlserver": "DATETIMEOFFSET",
-    # MySQL is deliberately absent so this falls through to _TZ_AWARE_DDL.
-    # A session-relative instant (PostgreSQL TIMESTAMPTZ, Snowflake
-    # TIMESTAMP_LTZ) is exactly what MySQL TIMESTAMP is: UTC on disk, converted
-    # with the session time_zone, no offset label on either side. See
-    # _TZ_AWARE_DDL for why TIMESTAMP(6) rather than DATETIME(6).
+    # MySQL is deliberately absent so this falls through to
+    # ``_aware_ddl_for_dest`` / ``_TZ_AWARE_DDL`` (DATETIME(6), or
+    # TIMESTAMP(6) when the source engine is MySQL itself).
     "bigquery": "TIMESTAMP",
     "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
@@ -3207,14 +3212,10 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
     "sqlserver": "DATETIMEOFFSET",
-    # MySQL is deliberately absent so this falls through to _TZ_AWARE_DDL.
-    # MySQL has no offset-label carrier, so the label is unstorable either way
-    # and the only open question is which carrier keeps the *instant*. That
-    # answer belongs in one place (_TZ_AWARE_DDL: TIMESTAMP(6)). Naming
-    # DATETIME(6) here chose the strictly worse of the two — same digits, no
-    # polarity marker, instant recoverable only by writer convention — which
-    # made every aware→MySQL create-new demand a UTC-normalize contract for a
-    # route that needs none.
+    # MySQL is deliberately absent so this falls through to
+    # ``_aware_ddl_for_dest``. MySQL stores no originating offset on either
+    # TIMESTAMP or DATETIME. DATETIME(6) keeps instants outside 1970..2038;
+    # the writer UTC-normalizes before bind.
     "bigquery": "TIMESTAMP",
     "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
@@ -3229,6 +3230,9 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
 # other dialect spells a timestamp this way, which is what makes the default
 # safe to apply without knowing the source engine.
 SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS: Final[int] = 9
+# SQL Server DATETIME2 / DATETIMEOFFSET default. Introspection spells it out
+# on every column, so a ``(7)`` is the dialect default, not declared evidence.
+SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS: Final[int] = 7
 # Microseconds: the best precision mainstream destinations carry, so narrowing
 # an undeclared Snowflake timestamp to it is unavoidable rather than a fault.
 SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR: Final[int] = 6
@@ -3358,6 +3362,54 @@ def _clickhouse_native_datetime_ddl(inferred: str | None) -> str | None:
     return None
 
 
+def _bound_document_instant(inferred: str | None) -> bool:
+    """True when the bound source engine's token is a document-store instant.
+
+    Empty engine stays false: an unbound ``TIMESTAMP`` is not a BSON date.
+    """
+    engine = _normalize_dest_db(active_source_engine() or "")
+    if not engine:
+        return False
+    if not is_document_instant_token(engine, inferred):
+        return False
+    # ``date`` stays a calendar token here. The defect is a BSON datetime
+    # the sampler spelled ``TIMESTAMP`` — that token is an instant.
+    return normalize_logical_type(inferred) == LOGICAL_DATETIME
+
+
+def _mysql_source_timestamp(inferred: str | None) -> bool:
+    """True when a bound MySQL source declared its own TIMESTAMP carrier.
+
+    ``active_source_engine`` is empty outside a transfer, so an unbound
+    ``ddl_type("mysql", "TIMESTAMP")`` stays wall-clock DATETIME(6). MariaDB
+    normalizes to the same engine: its TIMESTAMP is the same UTC instant.
+    """
+    if _normalize_dest_db(active_source_engine()) != "mysql":
+        return False
+    collapsed = re.sub(
+        r"\s*\(\s*\d+\s*\)",
+        "",
+        (inferred or "").strip().upper().replace("_", " "),
+    ).strip()
+    return collapsed == "TIMESTAMP"
+
+
+def _aware_ddl_for_dest(db: str) -> str | None:
+    """MySQL carrier for an aware source instant.
+
+    ``TIMESTAMP(6)`` is a real instant column and the right round-trip when
+    the source is MySQL's own TIMESTAMP (introspected as TIMESTAMPTZ). It
+    cannot hold a PostgreSQL timestamptz outside 1970..2038, so every other
+    source — including an unbound engine — lands on ``DATETIME(6)``. The
+    write path UTC-normalizes the offset into that wall clock.
+    """
+    if db != "mysql":
+        return None
+    if _normalize_dest_db(active_source_engine()) == "mysql":
+        return "TIMESTAMP(6)"
+    return "DATETIME(6)"
+
+
 def _datetime_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     """Return TZ-aware or NTZ DDL when source polarity is knowable; else None.
 
@@ -3377,21 +3429,49 @@ def _datetime_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     # platform default, which is wall-clock NTZ (TIMESTAMP / TIMESTAMP_NTZ /
     # DATETIME). Explicit TIMESTAMPTZ / WITH TIME ZONE keep aware polarity.
     # Inventing TIMESTAMPTZ from bare datetime silently relocates civil times.
+    #
+    # MySQL's own TIMESTAMP is the exception. The catalog spells it
+    # ``timestamp`` (introspect also lifts it to TIMESTAMPTZ) and stores UTC.
+    # Same-engine create-new keeps TIMESTAMP(6). A PostgreSQL or unbound
+    # TIMESTAMP stays NTZ and lands on DATETIME(6), which holds 1000..9999.
+    # This branch runs only for a MySQL destination and a MySQL source engine,
+    # so a MySQL TIMESTAMP heading to PostgreSQL is unchanged.
     polarity = datetime_timezone_polarity(inferred)
+    if polarity == "ntz" and db == "mysql" and _mysql_source_timestamp(inferred):
+        polarity = "ltz"
+    # BSON date is an instant (UTC millis), whatever the sampler spelled.
+    # Bare TIMESTAMP on a relational dest is wall-clock and drops that instant
+    # unless create-new stamps the dest's own instant carrier at millisecond
+    # precision (DEF-B-010).
+    document_instant = _bound_document_instant(inferred)
+    if document_instant:
+        polarity = "ltz"
     fsp = parse_temporal_fractional_precision(inferred)
+    if document_instant and fsp is None:
+        fsp = DOCUMENT_INSTANT_FRACTIONAL_DIGITS
     base: str | None = None
     if polarity == "ltz":
         base = (
-            _TZ_LTZ_DDL.get(db)
+            _aware_ddl_for_dest(db)
+            or _TZ_LTZ_DDL.get(db)
             or _TZ_AWARE_DDL.get(db)
             or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
         )
     elif polarity == "tz":
-        base = (
-            _TZ_OFFSET_DDL.get(db)
-            or _TZ_AWARE_DDL.get(db)
-            or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
-        )
+        # MySQL has no offset-preserving temporal type. DATETIME(6) and
+        # TIMESTAMP(6) drop the offset label (DEF-B-016). Create-new stores
+        # RFC-3339 text, which keeps the offset and more than six fractional
+        # digits. An existing DATETIME or TIMESTAMP column is not rewritten
+        # here — dest-exists stays a collapse until Map remaps it.
+        if db == "mysql":
+            base = MYSQL_OFFSET_TEXT_DDL
+        else:
+            base = (
+                _aware_ddl_for_dest(db)
+                or _TZ_OFFSET_DDL.get(db)
+                or _TZ_AWARE_DDL.get(db)
+                or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
+            )
     elif polarity == "ntz":
         base = _TZ_NAIVE_DDL.get(db) or DDL_TYPES.get(db, {}).get(LOGICAL_DATETIME)
     elif fsp is not None:
@@ -3657,6 +3737,10 @@ def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> st
 
             if _normalize_dest_db(dest_db) in INSTANT_TIMESTAMP_DIALECTS:
                 return "ltz"
+            # SQLite TIMESTAMP is purely naive NTZ (no timezone support)
+            # - TIMESTAMP_NTZ source to TIMESTAMP destination is NOT a lossy strip
+            if _normalize_dest_db(dest_db) == "sqlite":
+                return "ntz"
         return "ntz"
     return None
 
@@ -3756,9 +3840,39 @@ def is_timezone_polarity_loss(
     sink engine's bare TIMESTAMP token is an instant.
     """
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
-    src = datetime_timezone_polarity(source_type)
+    # SQLite has no timezone-aware temporal types; TIMESTAMP/DATETIME are purely NTZ.
+    # NTZ → NTZ is not a polarity loss for SQLite (MX3-09 fix).
+    if dest_db == "sqlite":
+        src = datetime_timezone_polarity(source_type)
+        tgt = datetime_timezone_polarity(target_type, dest_db=dest_db)
+        if src == "ntz" and tgt == "ntz":
+            return False
+    
+    # A Mongo/Elasticsearch temporal token is an instant even when the catalog
+    # spells it ``TIMESTAMP`` / ``date``. Leaving it NTZ made every
+    # TIMESTAMP→TIMESTAMP route into MySQL (whose TIMESTAMP is itself an
+    # instant) a fidelity collapse (DEF-B-010).
+    src_token = source_type
+    document_instant = _bound_document_instant(source_type)
+    if document_instant:
+        src_token = instant_date_carrier(active_source_engine(), source_type)
+    src = datetime_timezone_polarity(src_token)
     tgt = datetime_timezone_polarity(target_type, dest_db=dest_db)
     if src in {"tz", "ltz"} and tgt == "ntz":
+        if document_instant:
+            # BSON date has no offset label. The writer stores the UTC clock.
+            # Fractional-second narrowing is a separate check.
+            return False
+        # MySQL DATETIME(6) is the unbounded stand-in for a session-relative
+        # instant. The writer converts to UTC, then stores the clock;
+        # TIMESTAMP(6) would preserve the token and drop every year outside
+        # 1970..2038. An offset-pinned source (tz) still loses its label.
+        if (
+            src == "ltz"
+            and dest_db == "mysql"
+            and _bare_type_token(target_type) == "DATETIME"
+        ):
+            return False
         return True
     # Naive / NTZ → TZ-aware invents an instant (UTC stamp) — fail-closed.
     if src == "ntz" and tgt in {"tz", "ltz"}:
@@ -3778,6 +3892,98 @@ def is_timezone_polarity_loss(
     # WITH TIME ZONE receives the same instant at +00:00. Surfaced as a normalize
     # note, not a fidelity collapse.
     return False
+
+
+def _code_page_population_fit(
+    population: Any,
+    dest_db: str,
+    target_type: str,
+) -> bool | None:
+    """True when every measured value encodes, False when one does not.
+
+    ``None`` means the population was not measured (missing, empty, or only
+    SQL NULL). An unread column is not proof that the rest of the table is
+    ASCII.
+    """
+    if population is None:
+        return None
+    try:
+        values = list(population)
+    except TypeError:
+        return None
+    if not values:
+        return None
+    from services.encoding_capacity import (
+        cell_encoding,
+        cell_fits_capacity,
+        classify_capacity,
+    )
+
+    cap = classify_capacity(dest_db, target_type)
+    measured = False
+    for value in values:
+        cell = cell_encoding(value)
+        if cell is None:
+            continue
+        measured = True
+        if not cell_fits_capacity(cell.text, cap):
+            return False
+    if not measured:
+        return None
+    return True
+
+
+def code_page_sink_would_collapse(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    source_db: str = "",
+    population: Any = None,
+) -> bool:
+    """True when a Unicode source lands on a code-page CHAR/VARCHAR.
+
+    SQL Server ``VARCHAR`` under ``SQL_Latin1_General_CP1`` stores
+    Windows-1252. The server substitutes ``?`` and the statement still
+    succeeds, so a width-identical pair was graded preserve and the load
+    completed with corrupted cells (DEF-R1-002). A national carrier or a
+    ``_UTF8`` collation is not this sink. A code-page source into the same
+    sink is not a collapse — it never held the scalar.
+
+    ``population`` is the measured cells for this column. When every present
+    value encodes in the destination code page, the pair is not a collapse
+    (DEF-R20-001: ASCII zip_code / sku into an existing Latin-1 VARCHAR).
+    Omit it, or pass only nulls, and the unread type pair stays a collapse —
+    a short sample that was never taken must not green the rest of the table.
+    A scalar outside the page stays a collapse; the writer quarantines it
+    and does not store ``?``.
+    """
+    if not dest_db:
+        return False
+    src_engine = source_db or active_source_engine()
+    if not source_text_is_unicode(src_engine) and not source_column_holds_unicode(
+        src_engine, source_type
+    ):
+        return False
+    if normalize_logical_type(source_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    if normalize_logical_type(target_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    if is_national_string_carrier(target_type):
+        return False
+    if re.search(r"COLLATE\s+\S*_UTF8\b", target_type or "", re.IGNORECASE):
+        return False
+    from services.encoding_capacity import UNICODE_MAX, classify_capacity
+
+    cap = classify_capacity(dest_db, target_type)
+    if cap.form in {"utf8", "utf16", "cesu8", "gb18030"} and cap.max_code_point >= UNICODE_MAX:
+        return False
+    if cap.form not in {"cp1252", "latin1", "ascii"}:
+        return False
+    fit = _code_page_population_fit(population, dest_db, target_type)
+    if fit is None:
+        return True
+    return not fit
 
 
 def _bare_type_token(type_token: str) -> str:
@@ -3812,6 +4018,11 @@ def is_dest_instant_carrier_spelling(stamped: str, *, dest_db: str = "") -> bool
     # DATETIMEOFFSET, and a source TIMESTAMPTZ must keep being reinvented.
     if db == "mysql" and bare.startswith("TIMESTAMPTZ"):
         return datetime_timezone_polarity(stamped, dest_db=db) in {"tz", "ltz"}
+    # Physical TIMESTAMP(p) remains MySQL's own instant column even when
+    # create-new from PostgreSQL now stamps DATETIME(6). A second invent pass
+    # must not retarget that column.
+    if db == "mysql" and bare == "TIMESTAMP":
+        return True
     return False
 
 
@@ -3842,6 +4053,30 @@ def reinvent_would_drop_dest_instant_carrier(
     return datetime_timezone_polarity(reinvented, dest_db=db) != before
 
 
+def mysql_offset_text_preserves(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True only for MySQL's offset-pinned create-new stamp.
+
+    ``VARCHAR(64)`` is that stamp. ``VARCHAR(100)``, ``TEXT``, ``DATETIME(6)``
+    and ``TIMESTAMP(6)`` are not: a name column must not go green just because
+    it is text, and a temporal column still drops the offset label.
+    """
+    if _normalize_dest_db(dest_db) != "mysql":
+        return False
+    if datetime_timezone_polarity(source_type) != "tz":
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_STRING:
+        return False
+    head = strip_identity_qualifier(target_type).upper().strip().split()[0]
+    if not head.startswith("VARCHAR("):
+        return False
+    return parse_string_carrier_width(target_type) == 64
+
+
 def timezone_aware_would_collapse_to_string(
     source_type: str,
     target_type: str,
@@ -3857,6 +4092,8 @@ def timezone_aware_would_collapse_to_string(
     store has no other carrier than text, and its JSON wire writes the offset, so
     there the text *is* the instant.
     """
+    if mysql_offset_text_preserves(source_type, target_type, dest_db=dest_db):
+        return False
     if keyspace_instant_text_wire_preserved(
         source_type, target_type, dest_db=dest_db
     ):
@@ -4293,6 +4530,33 @@ def unicode_safe_target_carrier(
     return f"{'NCHAR' if is_fixed_width_char_carrier(text) else 'NVARCHAR'}({width})"
 
 
+def _collation_proves_foreign_national(stamp: str) -> bool:
+    """True when ``COLLATE`` names a repertoire MySQL's utf8mb3 alias cannot hold.
+
+    SQL Server ``SQL_Latin1_*`` / ``Latin1_General_CI_AS`` are UTF-16. That
+    name is evidence even when the source-engine context was dropped on the
+    way to CREATE. MySQL's own ``utf8*`` / ``latin1_general_ci`` / ``ascii*``
+    names are the column's spelling, not a foreign national source, and a
+    bare ``NVARCHAR`` with no collation stays unmeasured.
+    """
+    name = (parse_collation(stamp) or "").strip().lower()
+    if not name:
+        return False
+    if name.startswith("sql_latin1"):
+        return True
+    # MySQL ships latin1_general_ci/cs/bin. SQL Server's Latin1_General family
+    # adds an accent/width token or a code-page marker those three names lack.
+    if name.startswith("latin1_general") and name not in {
+        "latin1_general_ci",
+        "latin1_general_cs",
+        "latin1_general_bin",
+    }:
+        return True
+    if re.search(r"_(?:ci|cs)_(?:as|ai)\b", name) or name.endswith("_bin2"):
+        return True
+    return False
+
+
 def carry_national_unicode_charset(db: str, inferred: object, result: str) -> str:
     """Widen a MySQL create-new wire fed by a wider national source.
 
@@ -4306,22 +4570,31 @@ def carry_national_unicode_charset(db: str, inferred: object, result: str) -> st
 
     A MySQL-family source keeps its own spelling — its ``NVARCHAR`` really is
     utf8mb3, and re-spelling it would report a widen the source never had.
+    An unbound engine with a bare ``NVARCHAR`` is the same answer: nobody
+    measured a wider repertoire. A SQL Server collation still on the stamp
+    is that measurement, so the widen runs without the engine context.
     """
     if _normalize_dest_db(db) not in {"mysql", "mariadb"}:
         return result
-    raw = strip_identity_qualifier(
-        inferred if isinstance(inferred, str) else str(inferred)
-    )
+    inferred_text = inferred if isinstance(inferred, str) else str(inferred)
+    raw = strip_identity_qualifier(inferred_text)
     if not is_national_string_carrier(raw):
         return result
     src_engine = _normalize_dest_db(active_source_engine() or "")
-    if src_engine in {"mysql", "mariadb", ""}:
+    if src_engine in {"mysql", "mariadb"}:
+        return result
+    if src_engine == "" and not _collation_proves_foreign_national(inferred_text):
         return result
     if re.search(r"(?:CHARACTER\s+SET|CHARSET)\s+", result or "", re.I):
         return result
     parts = re.split(r"\s+COLLATE\s+", result or "", maxsplit=1, flags=re.I)
     head = parts[0].strip()
     collation = parts[1].strip() if len(parts) > 1 else ""
+    # A SQL Server collation name is unknown to MySQL (1273) and is not in
+    # the utf8mb4 family (1253). Capacity is the character set; equality
+    # stays the destination default unless the name is already utf8mb4.
+    if collation and not collation.lower().startswith("utf8mb4"):
+        collation = ""
     if not _is_mysql_character_wire(head):
         return result
     # NCHAR/NVARCHAR *is* the utf8mb3 alias — a charset clause on it is a
@@ -4445,7 +4718,12 @@ def national_charset_would_invent(
     return True
 
 
-def bounded_string_sink_would_truncate(source_type: str, target_type: str) -> bool:
+def bounded_string_sink_would_truncate(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when a scalar/document lands on tight CHAR/VARCHAR(n)/TINYTEXT.
 
     Safe-list ``integer→string`` must not greenwash ``INTEGER→VARCHAR(1)``.
@@ -4466,7 +4744,7 @@ def bounded_string_sink_would_truncate(source_type: str, target_type: str) -> bo
         return False
     src_l = normalize_logical_type(source_type)
     if src_l in {LOGICAL_STRING, LOGICAL_TEXT}:
-        return string_width_would_narrow(source_type, target_type)
+        return string_width_would_narrow(source_type, target_type, dest_db=dest_db)
     # Exact UUID 36-char wire is the industry create-new sink — not truncate.
     if normalize_logical_type(source_type) == LOGICAL_UUID and uuid_exact_wire_carrier(
         target_type
@@ -4483,15 +4761,24 @@ def bounded_string_sink_would_truncate(source_type: str, target_type: str) -> bo
         bits = parse_bitstring_width(source_type)
         if bits is not None and tgt_w >= bits:
             return False
+    # MySQL create-new for an offset-pinned instant is VARCHAR(64). That
+    # width holds the offset. Every other tight string stays a truncation.
+    if mysql_offset_text_preserves(source_type, target_type, dest_db=dest_db):
+        return False
     # Non-string → tight sink — fail closed (Accept risk).
     return True
 
 
-def string_width_would_narrow(source_type: str, target_type: str) -> bool:
+def string_width_would_narrow(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
     """True when source string capacity exceeds destination VARCHAR(n)/TEXT tier.
 
     Cases: ``VARCHAR(255)→VARCHAR(50)``, ``TEXT→VARCHAR(10)``,
     ``LONGTEXT→TINYTEXT``. Bare ``VARCHAR`` without a width stays unknown.
+    The 64 KiB ``TEXT`` tier is MySQL's: a SQLite/Postgres/DuckDB ``TEXT`` is
+    that engine's unbounded carrier, so the tier only ranks the destination
+    when it is MySQL-family or unnamed (unnamed keeps the fail-closed read).
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
@@ -4501,7 +4788,8 @@ def string_width_would_narrow(source_type: str, target_type: str) -> bool:
         return False
     # MySQL LOB tier narrow (LONGTEXT→MEDIUMTEXT) before unlimited early-out.
     src_rank = mysql_text_tier_rank(source_type)
-    tgt_rank = mysql_text_tier_rank(target_type)
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    tgt_rank = mysql_text_tier_rank(target_type) if db in {"", "mysql"} else None
     if src_rank is not None and tgt_rank is not None and src_rank > tgt_rank:
         return True
     # Unlimited / LOB-ceiling sinks (TEXT, NVARCHAR(MAX), VARCHAR(65535)) never narrow.
@@ -4515,6 +4803,21 @@ def string_width_would_narrow(source_type: str, target_type: str) -> bool:
         # Unlimited generic TEXT/CLOB → bounded; bare VARCHAR unknown → no invent.
         return is_unlimited_string_carrier(source_type)
     return src_w > tgt_w
+
+
+def blocking_string_width_narrowing(
+    source: str,
+    target: str,
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    proven: Mapping[tuple[str, str], Any] | None = None,
+) -> bool:
+    """Return whether a string-width narrowing lacks exact population proof."""
+    if not string_width_would_narrow(source_type, target_type, dest_db=dest_db):
+        return False
+    return (str(source).casefold(), str(target).casefold()) not in (proven or {})
 
 
 _BINARY_WIDTH_RE = re.compile(
@@ -6307,19 +6610,20 @@ def unique_key_row_in_scope(
 ) -> bool:
     """True when sample row participates in at least one covering unique key.
 
+    An unfiltered covering key applies to every row. A partial key applies
+    only where its predicate matches. The row is in scope when any of those
+    keys applies, so a full unique sibling is not cancelled by a partial one.
     Rows outside every covering filter are skipped for that column's duplicate
-    probe (partial unique index honesty).
+    probe.
     """
     covering = unique_keys_covering_column(column, unique_keys)
     if not covering:
         return True
-    filtered = [uk for uk in covering if str(uk.get("filter_predicate") or "").strip()]
-    if not filtered:
+    if any(not str(uk.get("filter_predicate") or "").strip() for uk in covering):
         return True
-    # Row is in scope if it matches any covering partial unique (OR of filters).
     return any(
         row_matches_unique_filter(row, str(uk.get("filter_predicate") or ""))
-        for uk in filtered
+        for uk in covering
     )
 
 
@@ -6420,6 +6724,46 @@ def unique_equality_key(
     return text
 
 
+# Unit separator — not a character a coerced key emits — so ("ab","c") and
+# ("a","bc") stay different tuples. One column joins to itself, unchanged.
+_COMPOSITE_KEY_SEP = "\x1f"
+
+
+def composite_unique_equality_key(
+    parts: list[tuple[Any, str | None, bool, str | None]],
+    *,
+    dest_kind: str | None = None,
+) -> str:
+    """Equality key for one identity column or a composite.
+
+    Each part is ``(value, ddl_type, force_casefold, null_sentinel)`` and is
+    normalized by :func:`unique_equality_key`. A single part is returned as
+    that key, with no separator. A composite joins the parts so uniqueness is
+    the tuple, not the first column.
+
+    An empty part is SQL UNIQUE: NULL does not equal NULL, so the row is not
+    a duplicate of another partial tuple. The caller skips an empty key
+    instead of matching on the columns that happened to be filled in.
+    """
+    keys: list[str] = []
+    for value, ddl_type, force_casefold, null_sentinel in parts:
+        key = unique_equality_key(
+            value,
+            ddl_type,
+            force_casefold=bool(force_casefold),
+            null_sentinel=null_sentinel,
+            dest_kind=dest_kind,
+        )
+        if not key:
+            return ""
+        keys.append(key)
+    if not keys:
+        return ""
+    if len(keys) == 1:
+        return keys[0]
+    return _COMPOSITE_KEY_SEP.join(keys)
+
+
 _CI_INDEX_EXPR_RE = re.compile(
     r"\b(?:lower|upper|casefold)\s*\(|::\s*citext\b|\bcitext\s*\("
     r"|\bnlssort\s*\(",
@@ -6492,6 +6836,14 @@ _BARE_TEMPORAL_DIGITS: dict[str, int] = {
     **{e: 0 for e in ("mysql", "mariadb", "maria", "singlestore", "tidb", "vitess")},
     **{e: 7 for e in _MSSQL_TEMPORAL_ENGINES},
     "snowflake": 9,
+    # SQLite has no temporal storage class: the writer binds ``isoformat`` text,
+    # which keeps every microsecond a Python datetime carries. Reading its bare
+    # TIMESTAMP as FSP 0 graded the column DataFlow itself created on run 1 as
+    # a narrowing on run 2 (QA MX3-09).
+    "sqlite": 6,
+    # Redis JSON documents hold temporals as ISO text, which keeps every
+    # microsecond, so run 2's sampled TIMESTAMP is the carrier run 1 wrote.
+    "redis": 6,
     **{
         e: 6
         for e in (
@@ -7031,165 +7383,8 @@ from services.type_polarity_invent import (  # noqa: E402,F401 — re-export
 )
 
 
-def is_precision_collapse_coercion(
-    source_type: str,
-    target_type: str,
-    *,
-    dest_db: str = "",
-    dest_table_exists: bool | None = None,
-) -> bool:
-    """True when source→target collapses precision even if samples appear clean.
 
-    Used by DDL compatibility, schema-drift, G3, and integrity sample soft-pass so
-    Airbyte-style "head sample coerced → green" never hides float→decimal /
-    datetime→date / timestamptz→timestamp_ntz / DECIMAL(p,s) / VARCHAR width /
-    BINARY width / UNSIGNED→signed overflow / ENUM·SET domain shrink /
-    INTERVAL YM↔DS / GEOGRAPHY SRID·polarity / GENERATED ALWAYS overwrite /
-    TIME·TIMESTAMP fractional-second (p) narrow.
 
-    ``dest_db`` threads dialect defaults (document wires, bare TIMESTAMP FSP).
-    """
-    dest_db = _normalize_dest_db(dest_db) if dest_db else ""
-    src = normalize_logical_type(source_type)
-    tgt = normalize_logical_type(target_type)
-    if document_instant_wire_preserved(source_type, target_type, dest_db=dest_db):
-        # A document store's ``date`` keeps the time of day; only sub-millisecond
-        # precision is lost, and a source declaring that much is excluded above
-        # so it still reports below. Without this the (datetime, date) pair read
-        # as dropping the clock and demoted every timestamp mapping.
-        return False
-    if (src, tgt) in PRECISION_COLLAPSE_PAIRS:
-        return True
-    if is_timezone_polarity_loss(source_type, target_type, dest_db=dest_db):
-        return True
-    if time_timezone_polarity_loss(source_type, target_type):
-        return True
-    if timezone_aware_would_collapse_to_string(
-        source_type, target_type, dest_db=dest_db
-    ):
-        return True
-    if long_raw_locator_would_collapse(source_type, target_type):
-        return True
-    if decfloat_domain_would_collapse(source_type, target_type):
-        return True
-    if bignumeric_capacity_would_invent(
-        source_type,
-        target_type,
-        dest_db=dest_db,
-        dest_table_exists=dest_table_exists,
-    ):
-        return True
-    if decimal_fixed_point_would_collapse_to_text(
-        source_type, target_type, dest_db=dest_db
-    ):
-        return True
-    if smalldatetime_domain_would_invent(source_type, target_type):
-        return True
-    if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
-        return True
-    if string_width_would_narrow(source_type, target_type):
-        return True
-    if bounded_string_sink_would_truncate(source_type, target_type):
-        return True
-    if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
-        return True
-    if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
-        return True
-    if binary_width_would_narrow(source_type, target_type):
-        return True
-    if bitstring_width_would_narrow(source_type, target_type):
-        return True
-    if unsigned_integer_would_overflow(source_type, target_type):
-        return True
-    if unsigned_signed_polarity_invent(source_type, target_type):
-        return True
-    if integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
-        return True
-    if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
-        return True
-    if year_domain_would_collapse(source_type, target_type):
-        return True
-    if money_domain_would_collapse(source_type, target_type):
-        return True
-    if bitstring_opaque_bytes_collapse(source_type, target_type):
-        return True
-    if enum_set_domain_would_reject(source_type, target_type):
-        return True
-    if enum_domain_would_collapse(source_type, target_type):
-        return True
-    if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if interval_precision_would_narrow(source_type, target_type):
-        return True
-    if bitstring_pad_polarity_loss(source_type, target_type):
-        return True
-    if oracle_char_byte_polarity_loss(source_type, target_type):
-        return True
-    if oracle_long_numeric_invent(source_type, target_type):
-        return True
-    if geography_contract_would_collapse(source_type, target_type):
-        return True
-    if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if specialty_domain_would_invent(
-        source_type,
-        target_type,
-        dest_db=dest_db,
-        dest_table_exists=dest_table_exists,
-    ):
-        return True
-    if specialty_polarity_mismatch(source_type, target_type):
-        return True
-    if case_fold_polarity_invent(source_type, target_type):
-        return True
-    if accent_polarity_invent(source_type, target_type):
-        return True
-    if width_fold_polarity_invent(source_type, target_type):
-        return True
-    if kana_fold_polarity_invent(source_type, target_type):
-        return True
-    if date_to_tz_aware_invent(source_type, target_type):
-        return True
-    if vector_dim_mismatch(source_type, target_type):
-        return True
-    if vector_encoding_would_collapse(source_type, target_type):
-        return True
-    if rowversion_would_collapse_to_temporal(source_type, target_type):
-        return True
-    if sql_variant_would_collapse(source_type, target_type):
-        return True
-    # ObjectId → VARCHAR(24)/BINARY(12) is the industry create-new wire — not lossy.
-    if (
-        normalize_logical_type(source_type) == LOGICAL_OBJECTID
-        and specialty_wire_preserves_value("OBJECTID", target_type)
-    ):
-        return False
-    if uuid_would_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if objectid_would_collapse(source_type, target_type):
-        return True
-    if generated_always_overwrite_risk(target_type):
-        return True
-    if identity_polarity_would_collapse(source_type, target_type):
-        return True
-    if identity_domain_would_invent(source_type, target_type):
-        return True
-    if bfile_locator_would_collapse(source_type, target_type):
-        return True
-    if document_domain_would_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if document_domain_would_invent(
-        source_type,
-        target_type,
-        dest_db=dest_db,
-        dest_table_exists=dest_table_exists,
-    ):
-        return True
-    if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
-        return True
-    return False
 
 
 
@@ -7251,737 +7446,10 @@ def suggest_remap_target(
     return create_new_mapping_target_type("TEXT", db) or "TEXT"
 
 
-def assess_bson_affinity(
-    source_type: str,
-    target_type: str,
-    *,
-    destination_db_type: str = "",
-) -> list[dict]:
-    """Schemaless G3 semantic contract — type affinity when DDL is absent.
-
-    MongoDB / DynamoDB / Redis do not enforce column DDL, but declared (or
-    inferred) carriers still have BSON/AttributeValue affinity. ObjectId↛NUMBER
-    and DECIMAL↛INTEGER must surface before write — never silent SKIP-as-green.
-    """
-    risks: list[dict] = []
-    src = normalize_logical_type(source_type)
-    tgt = normalize_logical_type(target_type) if (target_type or "").strip() else src
-    db = (destination_db_type or "").strip().lower()
-
-    hard = {
-        (LOGICAL_OBJECTID, LOGICAL_INTEGER),
-        (LOGICAL_OBJECTID, LOGICAL_DECIMAL),
-        (LOGICAL_OBJECTID, LOGICAL_FLOAT),
-        (LOGICAL_OBJECTID, LOGICAL_BOOLEAN),
-        (LOGICAL_UUID, LOGICAL_INTEGER),
-        (LOGICAL_UUID, LOGICAL_DECIMAL),
-        (LOGICAL_BINARY, LOGICAL_INTEGER),
-        (LOGICAL_BINARY, LOGICAL_DECIMAL),
-        (LOGICAL_JSON, LOGICAL_INTEGER),
-        (LOGICAL_JSON, LOGICAL_DECIMAL),
-        (LOGICAL_STRUCT, LOGICAL_INTEGER),
-        (LOGICAL_ARRAY, LOGICAL_INTEGER),
-    }
-    if (src, tgt) in hard:
-        risks.append({
-            "kind": "bson_affinity_block",
-            "severity": "block",
-            "message": (
-                f"Schemaless affinity: {source_type or src} → {target_type or tgt}"
-                + (f" on {db}" if db else "")
-                + " invents a numeric/scalar domain the source never had."
-            ),
-        })
-        return risks
-
-    soft = {
-        (LOGICAL_DECIMAL, LOGICAL_INTEGER),
-        (LOGICAL_FLOAT, LOGICAL_INTEGER),
-        (LOGICAL_FLOAT, LOGICAL_DECIMAL),
-        (LOGICAL_DECIMAL, LOGICAL_FLOAT),
-        (LOGICAL_DATETIME, LOGICAL_DATE),
-        (LOGICAL_STRING, LOGICAL_INTEGER),
-        (LOGICAL_STRING, LOGICAL_DECIMAL),
-        (LOGICAL_STRING, LOGICAL_BOOLEAN),
-        (LOGICAL_TEXT, LOGICAL_INTEGER),
-        (LOGICAL_TEXT, LOGICAL_DECIMAL),
-        # Specialty / domain → open string invents no validation at schemaless sinks.
-        (LOGICAL_UUID, LOGICAL_STRING),
-        (LOGICAL_UUID, LOGICAL_TEXT),
-        # ObjectId → unbounded TEXT/STRING hex wire is value-preserving (not soft risk).
-        (LOGICAL_BINARY, LOGICAL_STRING),
-        (LOGICAL_BINARY, LOGICAL_TEXT),
-        (LOGICAL_JSON, LOGICAL_STRING),
-        (LOGICAL_JSON, LOGICAL_TEXT),
-        (LOGICAL_VECTOR, LOGICAL_ARRAY),
-        (LOGICAL_VECTOR, LOGICAL_STRING),
-        (LOGICAL_VECTOR, LOGICAL_TEXT),
-    }
-    specialty_to_open = (
-        specialty_carrier_base(source_type) is not None
-        and normalize_logical_type(target_type or "") in {
-            LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON, LOGICAL_ARRAY,
-        }
-        and specialty_carrier_base(target_type) is None
-        and not specialty_wire_preserves_value(
-            specialty_carrier_base(source_type) or "", target_type or ""
-        )
-    )
-    if (
-        (src, tgt) in soft
-        or objectid_would_collapse(source_type, target_type or source_type)
-        or specialty_to_open
-    ):
-        risks.append({
-            "kind": "bson_affinity_warn",
-            "severity": "warn",
-            "message": (
-                f"Schemaless affinity risk: {source_type or src} → {target_type or tgt}"
-                + (f" on {db}" if db else "")
-                + ". No DDL contract — confirm samples before write."
-            ),
-        })
-    return risks
 
 
-def assess_create_new_type_risk(
-    source_type: str,
-    target_type: str,
-    *,
-    destination_db_type: str = "",
-    samples: list | None = None,
-) -> list[dict]:
-    """Risk chips for create-new columns before Validate/write.
-
-    Returns a list of ``{kind, severity, message}`` — empty when lossless.
-    """
-    risks: list[dict] = []
-    src = (source_type or "").strip() or "VARCHAR"
-    tgt = (target_type or "").strip() or src
-    db = (destination_db_type or "").strip().lower()
-
-    if samples:
-        from services.decimal_observe import (
-            ieee_float_create_new_risk,
-            observe_numeric_samples,
-        )
-
-        ieee = ieee_float_create_new_risk(observe_numeric_samples(samples))
-        if ieee:
-            risks.append(ieee)
-
-    from services.conversion_contract import invents_unproven_capacity
-
-    if invents_unproven_capacity(src, tgt, dest_db=db):
-        _sp, src_scale = parse_numeric_precision_scale(src)
-        _tp, dest_scale = parse_numeric_precision_scale(tgt)
-        declared_scale = 0 if src_scale is None else int(src_scale)
-        if (
-            dest_scale is not None
-            and int(dest_scale) > declared_scale
-            and not any(r.get("kind") == "invented_decimal_scale" for r in risks)
-        ):
-            # NUMBER(38,10) / DECIMAL(38,15) floors invent zeros after the
-            # decimal the source never declared. Trailing zeros do not change
-            # the value; CREATE still invented the shape.
-            risks.append({
-                "kind": "invented_decimal_scale",
-                "severity": "warn",
-                "message": (
-                    f"Create-new {src} → {tgt} invents destination scale "
-                    f"{int(dest_scale)} the source never declared. Zeros after "
-                    "the decimal do not change the value, but CREATE invented "
-                    "that scale. Use a declared typmod or observed samples — "
-                    "Accept · Risk Contract before Execute if this shape is intended."
-                ),
-            })
-
-    if is_precision_collapse_coercion(src, tgt, dest_db=db):
-        risks.append({
-            "kind": "precision_collapse",
-            "severity": "block",
-            "message": (
-                f"Create-new {src} → {tgt} collapses precision"
-                + (f" on {db}" if db else "")
-                + ". Remap or Accept · Risk Contract before Execute."
-            ),
-        })
-    elif is_lossy_coercion(src, tgt, dest_db=db):
-        risks.append({
-            "kind": "lossy_coercion",
-            "severity": "block",
-            "message": (
-                f"Create-new {src} → {tgt} may lose information"
-                + (f" on {db}" if db else "")
-                + ". Remap or Accept · Risk Contract before Execute."
-            ),
-        })
-
-    # Dialect VARCHAR capacity ceilings that create-new often hit.
-    src_w = parse_string_carrier_width(src)
-    tgt_w = parse_string_carrier_width(tgt)
-    dialect_cap = {
-        "oracle": 4000,
-        "sqlserver": 8000,
-        "mssql": 8000,
-        "redshift": 65535,
-        "mysql": 16383,  # utf8mb4 InnoDB row practical ceiling for VARCHAR
-    }.get(db)
-    # Unbounded TEXT/CLOB/MAX is the honest create-new escape — no width-cap chip.
-    tgt_unlimited = is_unlimited_string_carrier(tgt)
-    if (
-        dialect_cap
-        and (src_w or 0) > dialect_cap
-        and not tgt_unlimited
-        and (tgt_w is not None and tgt_w <= dialect_cap)
-    ):
-        risks.append({
-            "kind": "varchar_width_cap",
-            "severity": "block",
-            "message": (
-                f"Source width {src_w} exceeds {db} VARCHAR capacity (~{dialect_cap}) "
-                f"and create-new stamped bounded {tgt}. Use CLOB/TEXT/MAX or Accept · Risk Contract."
-            ),
-        })
-    if (
-        dest_string_length_is_unenforced(db)
-        and is_fixed_width_char_carrier(src)
-        and normalize_logical_type(tgt) in {LOGICAL_STRING, LOGICAL_TEXT}
-    ):
-        risks.append({
-            "kind": "fixed_width_not_enforced",
-            "severity": "warn",
-            "message": (
-                f"Source {src} declares a fixed width; {db or 'this engine'} stores "
-                "every text carrier as untyped TEXT, so the value lands exactly as "
-                "read but no padding or length is enforced at the destination."
-            ),
-        })
-    if src_w and tgt_w and tgt_w < src_w:
-        risks.append({
-            "kind": "varchar_narrow",
-            "severity": "block",
-            "message": (
-                f"Create-new narrows VARCHAR({src_w}) → VARCHAR({tgt_w}). "
-                "Widen DDL or Accept · Risk Contract before Execute."
-            ),
-        })
-
-    if is_timezone_polarity_loss(src, tgt, dest_db=db) or time_timezone_polarity_loss(src, tgt):
-        risks.append({
-            "kind": "timezone_polarity",
-            "severity": "warn",
-            "message": f"Create-new drops timezone polarity: {src} → {tgt}.",
-        })
-    else:
-        from services.timezone_policy import (
-            MYSQL_TIMESTAMP_RANGE_TEXT,
-            instant_range_would_cap,
-            samples_outside_instant_range,
-        )
-
-        if instant_range_would_cap(src, tgt, dest_db=db):
-            # The carrier keeps the instant, so this is not a polarity loss and
-            # not a Risk Contract — but its domain is 68 years wide, and a row
-            # outside it is rejected at the write, not at Map.
-            outside = samples_outside_instant_range(samples)
-            risks.append({
-                "kind": "instant_range_cap",
-                "severity": "block" if outside else "warn",
-                "message": (
-                    f"Create-new {src} → {tgt} keeps the instant but caps its range "
-                    f"to {MYSQL_TIMESTAMP_RANGE_TEXT}"
-                    + (
-                        f"; sampled value(s) outside it: {', '.join(outside[:3])}. "
-                        if outside
-                        else ". "
-                    )
-                    + "Use DATETIME(6) with a UTC-normalize contract for the full "
-                    "1000..9999 range, or accept that out-of-range rows quarantine."
-                ),
-            })
-    if uuid_would_collapse(src, tgt, dest_db=db):
-        risks.append({
-            "kind": "uuid_domain",
-            "severity": "warn",
-            "message": (
-                f"Create-new stores UUID as {tgt}"
-                + (f" on {db}" if db else "")
-                + " — UUID domain is not enforced at destination."
-            ),
-        })
-    elif uuid_carrier_is_dialect_equivalent(src, tgt, dest_db=db):
-        # The dialect has one untyped text carrier, so this is the widest wire it
-        # can spell — stated as a note, never a refusal the operator cannot act on.
-        risks.append({
-            "kind": "uuid_carrier_equivalent",
-            "severity": "warn",
-            "message": (
-                f"Create-new stores UUID as {tgt}"
-                + (f" on {db}" if db else "")
-                + " — every text carrier on this engine is the same untyped TEXT, "
-                "so values round-trip exactly but the UUID domain is not enforced."
-            ),
-        })
-    elif (
-        normalize_logical_type(src) == LOGICAL_UUID
-        and normalize_logical_type(tgt) != LOGICAL_UUID
-        and uuid_exact_wire_carrier(tgt)
-    ):
-        # Exact CHAR/VARCHAR(36) wire preserves values but invents no UUID type —
-        # Accept risk so Map never looks UUID→UUID while CREATE emits string DDL.
-        risks.append({
-            "kind": "uuid_domain",
-            "severity": "warn",
-            "message": (
-                f"Create-new stores UUID as {tgt}"
-                + (f" on {db}" if db else "")
-                + " — exact 36-char wire; UUID domain is not enforced at destination."
-            ),
-        })
-    if objectid_would_collapse(src, tgt):
-        risks.append({
-            "kind": "objectid_domain",
-            "severity": "warn",
-            "message": (
-                f"Create-new stores ObjectId as {tgt}"
-                + (f" on {db}" if db else "")
-                + " — ObjectId domain is not enforced at destination."
-            ),
-        })
-    elif (
-        normalize_logical_type(src) == LOGICAL_OBJECTID
-        and normalize_logical_type(tgt) != LOGICAL_OBJECTID
-        and specialty_wire_preserves_value("OBJECTID", tgt)
-    ):
-        risks.append({
-            "kind": "objectid_domain",
-            "severity": "warn",
-            "message": (
-                f"Create-new stores ObjectId as {tgt}"
-                + (f" on {db}" if db else "")
-                + " — hex/binary wire; ObjectId domain is not enforced at destination."
-            ),
-        })
-    return risks
 
 
-def is_lossy_coercion(
-    source_type: str,
-    target_type: str,
-    *,
-    dest_db: str = "",
-    dest_table_exists: bool | None = None,
-) -> bool:
-    """True when converting sourceâ†’target may lose precision, fail silently, or
-    change the semantic meaning of a value.
-
-    The allow-list below captures the widening / reversible conversions that the
-    transform engine can perform without losing the original value:
-
-      * any value â†’ string/text/json/array (structural serialization)
-      * integer â†’ decimal/string/text/json (integerâ†’float is lossy â€” IEEE mantissa)
-      * decimal â†’ string/text/json (decimalâ†’float is lossy)
-      * float â†’ string/text/json (floatâ†’decimal and floatâ†’integer are lossy)
-      * boolean â†’ string/text/json/integer/decimal/float
-      * date â†’ datetime/string/text/json
-      * datetime/time â†’ string/text/json
-      * json/array â†’ string/text/json/array
-      * string/text/uuid/json/array â†’ binary (base64 reversible)
-      * binary â†’ string/text/json (base64 reversible)
-
-    Everything else is considered lossy and should be surfaced in preflight.
-
-    Note ``uuid`` -> string/text/json is value-preserving but is still reported
-    lossy: :func:`uuid_would_collapse` treats the lost UUID *domain constraint*
-    as an operator-visible collapse rather than silent green.
-    """
-    dest_db = _normalize_dest_db(dest_db) if dest_db else ""
-    src = normalize_logical_type(source_type)
-    tgt = normalize_logical_type(target_type)
-    if src == tgt:
-        # Same logical family can still drop TZ polarity, DECIMAL params,
-        # VARCHAR width, UNSIGNED range, STRUCT/MAP fields, or ARRAY elements.
-        if is_timezone_polarity_loss(source_type, target_type, dest_db=dest_db):
-            return True
-        if time_timezone_polarity_loss(source_type, target_type):
-            return True
-        if timezone_aware_would_collapse_to_string(
-            source_type, target_type, dest_db=dest_db
-        ):
-            return True
-        if long_raw_locator_would_collapse(source_type, target_type):
-            return True
-        if decfloat_domain_would_collapse(source_type, target_type):
-            return True
-        if bignumeric_capacity_would_invent(
-            source_type,
-            target_type,
-            dest_db=dest_db,
-            dest_table_exists=dest_table_exists,
-        ):
-            return True
-        if decimal_fixed_point_would_collapse_to_text(
-            source_type, target_type, dest_db=dest_db
-        ):
-            return True
-        if smalldatetime_domain_would_invent(source_type, target_type):
-            return True
-        if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
-            return True
-        if string_width_would_narrow(source_type, target_type):
-            return True
-        if bounded_string_sink_would_truncate(source_type, target_type):
-            return True
-        if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
-            return True
-        if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
-            return True
-        if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
-            return True
-        if bitstring_opaque_bytes_collapse(source_type, target_type):
-            return True
-        if binary_width_would_narrow(source_type, target_type):
-            return True
-        if bitstring_width_would_narrow(source_type, target_type):
-            return True
-        if year_domain_would_collapse(source_type, target_type):
-            return True
-        if money_domain_would_collapse(source_type, target_type):
-            return True
-        if unsigned_integer_would_overflow(source_type, target_type):
-            return True
-        if unsigned_signed_polarity_invent(source_type, target_type):
-            return True
-        if integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
-            return True
-        if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
-            return True
-        if enum_set_domain_would_reject(source_type, target_type):
-            return True
-        if enum_domain_would_collapse(source_type, target_type):
-            return True
-        if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
-            return True
-        if interval_precision_would_narrow(source_type, target_type):
-            return True
-        if bitstring_pad_polarity_loss(source_type, target_type):
-            return True
-        if oracle_char_byte_polarity_loss(source_type, target_type):
-            return True
-        if oracle_long_numeric_invent(source_type, target_type):
-            return True
-        if geography_contract_would_collapse(source_type, target_type):
-            return True
-        if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
-            return True
-        if specialty_domain_would_invent(
-            source_type,
-            target_type,
-            dest_db=dest_db,
-            dest_table_exists=dest_table_exists,
-        ):
-            return True
-        if specialty_polarity_mismatch(source_type, target_type):
-            return True
-        if case_fold_polarity_invent(source_type, target_type):
-            return True
-        if accent_polarity_invent(source_type, target_type):
-            return True
-        if width_fold_polarity_invent(source_type, target_type):
-            return True
-        if kana_fold_polarity_invent(source_type, target_type):
-            return True
-        if vector_dim_mismatch(source_type, target_type):
-            return True
-        if vector_encoding_would_collapse(source_type, target_type):
-            return True
-        if rowversion_would_collapse_to_temporal(source_type, target_type):
-            return True
-        if sql_variant_would_collapse(source_type, target_type):
-            return True
-        if uuid_would_collapse(source_type, target_type, dest_db=dest_db):
-            return True
-        if objectid_would_collapse(source_type, target_type):
-            return True
-        if generated_always_overwrite_risk(target_type):
-            return True
-        if identity_polarity_would_collapse(source_type, target_type):
-            return True
-        if identity_domain_would_invent(source_type, target_type):
-            return True
-        if bfile_locator_would_collapse(source_type, target_type):
-            return True
-        if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
-            return True
-        if src == LOGICAL_STRUCT and nested_struct_fields_incompatible(
-            source_type, target_type, dest_db=dest_db
-        ):
-            return True
-        if src in {LOGICAL_MAP, LOGICAL_ARRAY} and is_nested_shape_collapse(
-            source_type, target_type, dest_db=dest_db
-        ):
-            return True
-        return False
-
-    # MySQL SET â†’ TEXT[] is the intentional multi-value sink (not stringâ†’array invent).
-    if set_to_array_polarity_preserved(source_type, target_type):
-        return False
-    # BIT(n) â†’ VARCHAR(n) create-new is 0/1 digit text â€” not opaque BYTEA packing.
-    if is_bitstring_carrier(source_type) and tgt in {LOGICAL_STRING, LOGICAL_TEXT}:
-        return False
-    # ObjectId â†’ VARCHAR(24)/BINARY(12)/STRING(24) is the industry create-new wire.
-    if (
-        normalize_logical_type(source_type) == LOGICAL_OBJECTID
-        and specialty_wire_preserves_value("OBJECTID", target_type)
-    ):
-        return False
-    # VECTOR(n) â†’ ARRAY<FLOAT> lakehouse create-new wire â€” not embedding invent.
-    if vector_to_array_wire_preserved(source_type, target_type, dest_db=dest_db):
-        return False
-    # Document store ``date`` is an instant, not a calendar day — the time of
-    # day survives. Sub-millisecond sources are excluded and fall through to
-    # temporal_precision_would_narrow, which names the truncation.
-    if document_instant_wire_preserved(source_type, target_type, dest_db=dest_db):
-        return False
-    # ARRAY/STRUCT/MAP â†’ dialect create-new JSON/VARIANT/CLOB wire â€” representation.
-    if nested_to_native_document_wire_preserved(
-        source_type, target_type, dest_db=dest_db
-    ):
-        return False
-    # JSON â†’ dialect-native document wire (CLOB/NVARCHAR(MAX)/JSONB/â€¦) â€” not lossy.
-    if src == LOGICAL_JSON and is_dialect_native_document_wire(
-        target_type, dest_db=dest_db
-    ):
-        return False
-    # SQLite TEXT affinity: UUID / CHAR(36) UUID wire / TEXT are one carrier.
-    if uuid_carrier_is_dialect_equivalent(
-        source_type, target_type, dest_db=dest_db
-    ):
-        return False
-    # Existing-table string/text → dialect-native JSON/JSONB is a load (parse at
-    # write), not create-new document invent — must clear before allow-list fallthrough.
-    if (
-        dest_table_exists is True
-        and src in {LOGICAL_STRING, LOGICAL_TEXT}
-        and tgt == LOGICAL_JSON
-        and is_dialect_native_document_wire(target_type, dest_db=dest_db)
-    ):
-        return False
-    # Dialect-aware collapse SSOT â€” same rules as G3/probe (never MySQL-default FSP
-    # when dest_db is postgresql/redshift, never false-collapse JSONâ†’JSONB).
-    if is_precision_collapse_coercion(
-        source_type,
-        target_type,
-        dest_db=dest_db,
-        dest_table_exists=dest_table_exists,
-    ):
-        return True
-    # Fielded STRUCT/MAP â†’ opaque JSON/VARIANT is intentional on many warehouses
-    # (Airbyte V2) but is still a field-DDL collapse â€” treat as lossy so G3 surfaces it.
-    if is_nested_document_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if timezone_aware_would_collapse_to_string(
-        source_type, target_type, dest_db=dest_db
-    ):
-        return True
-    if long_raw_locator_would_collapse(source_type, target_type):
-        return True
-    if decfloat_domain_would_collapse(source_type, target_type):
-        return True
-    if bignumeric_capacity_would_invent(
-        source_type,
-        target_type,
-        dest_db=dest_db,
-        dest_table_exists=dest_table_exists,
-    ):
-        return True
-    if decimal_fixed_point_would_collapse_to_text(
-        source_type, target_type, dest_db=dest_db
-    ):
-        return True
-    if smalldatetime_domain_would_invent(source_type, target_type):
-        return True
-    if year_domain_would_collapse(source_type, target_type):
-        return True
-    if money_domain_would_collapse(source_type, target_type):
-        return True
-    if bitstring_opaque_bytes_collapse(source_type, target_type):
-        return True
-    if unsigned_integer_would_overflow(source_type, target_type):
-        return True
-    if unsigned_signed_polarity_invent(source_type, target_type):
-        return True
-    if integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
-        return True
-    if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
-        return True
-    if string_width_would_narrow(source_type, target_type):
-        return True
-    if bounded_string_sink_would_truncate(source_type, target_type):
-        return True
-    if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
-        return True
-    if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
-        return True
-    if binary_width_would_narrow(source_type, target_type):
-        return True
-    if bitstring_width_would_narrow(source_type, target_type):
-        return True
-    if enum_set_domain_would_reject(source_type, target_type):
-        return True
-    if enum_domain_would_collapse(source_type, target_type):
-        return True
-    if interval_family_would_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if interval_precision_would_narrow(source_type, target_type):
-        return True
-    if bitstring_pad_polarity_loss(source_type, target_type):
-        return True
-    if oracle_char_byte_polarity_loss(source_type, target_type):
-        return True
-    if oracle_long_numeric_invent(source_type, target_type):
-        return True
-    if geography_contract_would_collapse(source_type, target_type):
-        return True
-    if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if specialty_domain_would_invent(
-        source_type,
-        target_type,
-        dest_db=dest_db,
-        dest_table_exists=dest_table_exists,
-    ):
-        return True
-    if specialty_polarity_mismatch(source_type, target_type):
-        return True
-    if case_fold_polarity_invent(source_type, target_type):
-        return True
-    if accent_polarity_invent(source_type, target_type):
-        return True
-    if width_fold_polarity_invent(source_type, target_type):
-        return True
-    if kana_fold_polarity_invent(source_type, target_type):
-        return True
-    if date_to_tz_aware_invent(source_type, target_type):
-        return True
-    if vector_dim_mismatch(source_type, target_type):
-        return True
-    if vector_encoding_would_collapse(source_type, target_type):
-        return True
-    if rowversion_would_collapse_to_temporal(source_type, target_type):
-        return True
-    if sql_variant_would_collapse(source_type, target_type):
-        return True
-    if uuid_would_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if objectid_would_collapse(source_type, target_type):
-        return True
-    if generated_always_overwrite_risk(target_type):
-        return True
-    if identity_polarity_would_collapse(source_type, target_type):
-        return True
-    if identity_domain_would_invent(source_type, target_type):
-        return True
-    if bfile_locator_would_collapse(source_type, target_type):
-        return True
-    if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
-        return True
-    if document_domain_would_collapse(source_type, target_type, dest_db=dest_db):
-        return True
-    if document_domain_would_invent(
-        source_type,
-        target_type,
-        dest_db=dest_db,
-        dest_table_exists=dest_table_exists,
-    ):
-        return True
-    # ARRAYâ†’ARRAY is in the safe allow-list below only when element types widen.
-    if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY and is_nested_shape_collapse(
-        source_type, target_type, dest_db=dest_db
-    ):
-        return True
-    if src == LOGICAL_MAP and tgt == LOGICAL_MAP and is_nested_shape_collapse(
-        source_type, target_type, dest_db=dest_db
-    ):
-        return True
-
-    safe: set[tuple[str, str]] = {
-        # text / structural containers are universal sinks
-        (LOGICAL_STRING, LOGICAL_TEXT),
-        (LOGICAL_TEXT, LOGICAL_STRING),
-        # Open string â†’ JSON invents document domain â€” not allow-listed.
-        # JSON/VARIANT/SUPER â†’ open string drops document domain â€” not allow-listed.
-        (LOGICAL_JSON, LOGICAL_JSON),
-        # ARRAYâ†’JSON/text is document collapse (lossy) â€” not allow-listed.
-        # JSONâ†’ARRAY invents array domain from a document â€” not allow-listed.
-        (LOGICAL_ARRAY, LOGICAL_ARRAY),
-        # numeric widening and text renderings
-        (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-        # integerâ†’float is LOSSY for large ints (IEEE mantissa) â€” not allow-listed
-        (LOGICAL_INTEGER, LOGICAL_STRING),
-        (LOGICAL_INTEGER, LOGICAL_TEXT),
-        (LOGICAL_INTEGER, LOGICAL_JSON),
-        (LOGICAL_DECIMAL, LOGICAL_STRING),
-        (LOGICAL_DECIMAL, LOGICAL_TEXT),
-        (LOGICAL_DECIMAL, LOGICAL_JSON),
-        (LOGICAL_FLOAT, LOGICAL_STRING),
-        (LOGICAL_FLOAT, LOGICAL_TEXT),
-        (LOGICAL_FLOAT, LOGICAL_JSON),
-        # floatâ†’decimal is LOSSY (IEEE â†’ fixed-point) â€” not in this allow-list
-        # boolean renderings and scalar widenings
-        (LOGICAL_BOOLEAN, LOGICAL_STRING),
-        (LOGICAL_BOOLEAN, LOGICAL_TEXT),
-        (LOGICAL_BOOLEAN, LOGICAL_JSON),
-        (LOGICAL_BOOLEAN, LOGICAL_INTEGER),
-        (LOGICAL_BOOLEAN, LOGICAL_DECIMAL),
-        (LOGICAL_BOOLEAN, LOGICAL_FLOAT),
-        # dateâ†’datetime NTZ widening only; DATEâ†’TIMESTAMPTZ invents midnight TZ.
-        (LOGICAL_DATE, LOGICAL_DATETIME),
-        (LOGICAL_DATE, LOGICAL_STRING),
-        (LOGICAL_DATE, LOGICAL_TEXT),
-        (LOGICAL_DATE, LOGICAL_JSON),
-        (LOGICAL_DATETIME, LOGICAL_STRING),
-        (LOGICAL_DATETIME, LOGICAL_TEXT),
-        (LOGICAL_DATETIME, LOGICAL_JSON),
-        (LOGICAL_TIME, LOGICAL_STRING),
-        (LOGICAL_TIME, LOGICAL_TEXT),
-        (LOGICAL_TIME, LOGICAL_JSON),
-        # uuid renderings (domain still collapses via uuid_would_collapse above)
-        (LOGICAL_UUID, LOGICAL_STRING),
-        (LOGICAL_UUID, LOGICAL_TEXT),
-        (LOGICAL_UUID, LOGICAL_JSON),
-        # VECTORâ†’ARRAY drops embedding domain â€” not allow-listed.
-        # STRUCT/MAP â†’ text/JSON is nested document collapse (handled above).
-        (LOGICAL_STRUCT, LOGICAL_STRUCT),
-        (LOGICAL_MAP, LOGICAL_MAP),
-    }
-
-    if (src, tgt) in safe:
-        # DATEâ†’TIMESTAMPTZ / DATETIMEOFFSET invents an instant â€” not a free widen.
-        if date_to_tz_aware_invent(source_type, target_type):
-            return True
-        if case_fold_polarity_invent(source_type, target_type):
-            return True
-        if accent_polarity_invent(source_type, target_type):
-            return True
-        if width_fold_polarity_invent(source_type, target_type):
-            return True
-        if kana_fold_polarity_invent(source_type, target_type):
-            return True
-        if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
-            return True
-        if national_charset_would_invent(source_type, target_type, dest_db=dest_db):
-            return True
-        if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
-            return True
-        # INTEGERâ†’VARCHAR(1) / JSONâ†’CHAR(10) â€” bounded sink truncates.
-        if bounded_string_sink_would_truncate(source_type, target_type):
-            return True
-        return False
-    return True
 
 
 def build_column_types(columns: list[str], schema: dict[str, str]) -> dict[str, str]:
@@ -8024,6 +7492,15 @@ _LAZY_INVENT_EXPORTS = frozenset({
     "_PASS_THROUGH_REJECT_ON_DEST",
 })
 
+_LAZY_COERCION_EXPORTS = frozenset(
+    {
+        "assess_bson_affinity",
+        "assess_create_new_type_risk",
+        "is_lossy_coercion",
+        "is_precision_collapse_coercion",
+    }
+)
+
 
 def __getattr__(name: str):
     """Lazy re-export of invent bodies / pass-through tables (Phase C2).
@@ -8040,6 +7517,12 @@ def __getattr__(name: str):
         from services.decision_kernel import type_invent as _ti
 
         resolved = getattr(_ti, name)
+        globals()[name] = resolved
+        return resolved
+    if name in _LAZY_COERCION_EXPORTS:
+        from services import type_coercion
+
+        resolved = getattr(type_coercion, name)
         globals()[name] = resolved
         return resolved
     # ``from services.type_system import x`` inside a function asks for
@@ -8059,3 +7542,26 @@ from services.type_ddl_specialty import (  # noqa: E402,F401 — re-export
     _vector_ddl_for_dest,
     parse_vector_dimension,
 )
+
+def _dynamodb_number_wire_preserves(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when a numeric source lands on DynamoDB's unbounded ``N`` attribute.
+
+    ``N`` is not ``DECIMAL(p,s)``. The writer binds ``Decimal(str(float))``,
+    which keeps the float's shortest decimal form. A fixed ``DECIMAL(10,2)``
+    stamp is a different target and is still graded as a collapse.
+    """
+    if (dest_db or "").strip().lower() != "dynamodb":
+        return False
+    token = strip_identity_qualifier(target_type).upper().strip()
+    if token != "N":
+        return False
+    return normalize_logical_type(source_type) in {
+        LOGICAL_FLOAT,
+        LOGICAL_DECIMAL,
+        LOGICAL_INTEGER,
+    }

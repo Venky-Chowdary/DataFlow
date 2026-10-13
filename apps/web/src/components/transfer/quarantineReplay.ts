@@ -8,11 +8,11 @@ export type QuarantineRow = {
   row?: number;
   column?: string;
   target?: string;
-  value?: string;
+  value?: string | null;
   reason?: string;
   policy?: string;
-  values?: Record<string, string>;
-  source_values?: Record<string, string>;
+  values?: Record<string, string | null>;
+  source_values?: Record<string, string | null>;
   chars?: string[];
   suggested_transform?: string;
   suggested_fix?: string;
@@ -30,6 +30,24 @@ export type QuarantineRow = {
  * empty record and the request is refused. Offering the control on an open count
  * alone produced a button that answered every click with the same 400.
  */
+/**
+ * Preflight blocks are stored on the job before any write. Those findings are
+ * not a replay payload — the next action is Validate, not Promote.
+ */
+export function quarantineEvidenceSource(
+  details: QuarantineRow[] | undefined,
+  apiSource?: string | null,
+): string {
+  if (apiSource === "preflight" || apiSource === "write" || apiSource === "dlq") {
+    return apiSource;
+  }
+  if (!details?.length) return apiSource || "none";
+  if (details.every((row) => (row.policy || "") === "preflight_quarantine")) {
+    return "preflight";
+  }
+  return "job";
+}
+
 export function isReplayable(row: QuarantineRow): boolean {
   const named = String(row.column || row.target || "").trim();
   if (named) return true;

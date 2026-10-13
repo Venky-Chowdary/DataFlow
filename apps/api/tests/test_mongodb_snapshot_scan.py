@@ -75,7 +75,13 @@ def test_mongodb_scan_reuses_one_cursor_and_never_skips() -> None:
     client.close.side_effect = _close
 
     state: dict = {}
-    with patch("connectors.mongodb_reader._mongo_client", return_value=client):
+    with (
+        patch("connectors.mongodb_reader._new_mongo_client", return_value=client),
+        patch(
+            "connectors.mongodb_reader._mongo_client",
+            side_effect=AssertionError("snapshot scan must not close the shared client"),
+        ),
+    ):
         first = read_collection_scan_batch(
             cfg={"host": "localhost"},
             database="db",
@@ -105,7 +111,7 @@ def test_mongodb_scan_reuses_one_cursor_and_never_skips() -> None:
         )
 
     assert cur.skipped is None
-    assert coll.find.call_count == 1
+    coll.find.assert_called_once_with({}, no_cursor_timeout=True)
     assert [row[first.headers.index("_id")] for row in first.rows] == ["a", "b"]
     assert [row[second.headers.index("_id")] for row in second.rows] == ["c"]
     assert third.rows == []

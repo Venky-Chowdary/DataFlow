@@ -556,6 +556,46 @@ def test_a_signed_continue_contract_forecasts_the_held_out_fractional_rows() -> 
     assert "1 row(s) will be held out" in gate["message"]
 
 
+def test_canonical_boolean_on_number_is_not_forecast_as_quarantine() -> None:
+    """PostgreSQL true/false landing on Oracle NUMBER(38,0) is 1/0.
+
+    A signed continue-policy used to warn that every row would be held out,
+    then the writer stored all of them. Informal yes/no stays unfit and is
+    not widened into 1/0.
+    """
+    mapping = [{"source": "is_active", "target": "IS_ACTIVE", "target_type": "NUMBER(38,0)"}]
+    canonical = [{"is_active": value} for value in ("true", "false", "t", "f", "1", "0") * 34]
+    canonical = canonical[:200]
+    report = scan_population_fit(
+        canonical,
+        mapping,
+        dest_types={"IS_ACTIVE": "NUMBER(38,0)"},
+        source_types={"is_active": "BOOLEAN"},
+        dest_db="oracle",
+        job_error_policy="quarantine",
+        rows_total=200,
+        rows_are_population=True,
+    )
+    gate = build_population_fit_gate(report)
+    assert report.findings == ()
+    assert gate["status"] == "pass"
+    assert "held out" not in gate["message"]
+
+    informal = [{"is_active": value} for value in ("Y", "N", "yes", "no")]
+    refused = scan_population_fit(
+        informal,
+        mapping,
+        dest_types={"IS_ACTIVE": "NUMBER(38,0)"},
+        source_types={"is_active": "BOOLEAN"},
+        dest_db="oracle",
+        job_error_policy="fail",
+        rows_total=4,
+        rows_are_population=True,
+    )
+    assert refused.findings[0].unfit_rows == 4
+    assert set(refused.findings[0].example_values) >= {"Y", "N", "yes", "no"}
+
+
 def test_intentionally_omitted_column_is_not_scanned() -> None:
     targets, _, _ = bounded_targets(
         [

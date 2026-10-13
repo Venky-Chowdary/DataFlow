@@ -13,6 +13,7 @@ import "@fontsource/jetbrains-mono/500.css";
 import "@fontsource/jetbrains-mono/700.css";
 import { DataTransferApp } from "./DataTransferApp";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
+import "./styles/marketing-base.css";
 import "./styles/app-styles.css";
 
 /* ToastProvider lives once inside DataTransferApp — mounting it here too

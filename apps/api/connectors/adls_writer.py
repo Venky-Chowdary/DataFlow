@@ -37,6 +37,20 @@ class WriteResult(_WriteResult):
     driver: str = "azure-storage-blob"
 
 
+def _adls_key_absent(client, container: str, key: str) -> bool:
+    try:
+        return not bool(client.get_blob_client(container, key).exists())
+    except Exception:
+        return False
+
+
+def _delete_adls_key(client, container: str, key: str) -> None:
+    try:
+        client.get_blob_client(container, key).delete_blob()
+    except Exception:
+        return
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -98,7 +112,11 @@ def write_mapped_rows(
         "service_account": service_account,
     }
 
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    # A new object is create-new. Leaving table_exists unset dropped every
+    # pending_dest_schema mapping and the parquet file was 0 columns (DEF-C-043).
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True, table_exists=False
+    )
     dest_types, cov_err = resolve_object_store_write_dest_types(
         target_cols,
         mappings,
@@ -178,6 +196,7 @@ def write_mapped_rows(
                     error=f"ADLS container {container!r} is missing and create_table is disabled",
                 )
             container_client.create_container()
+        created_here = _adls_key_absent(client, container, key)
         # Staging→live before any purge: failed upload must not wipe the prior export.
         staging_key = object_staging_key(key)
         threshold, part_size = resolve_multipart_limits(extra)
@@ -225,6 +244,9 @@ def write_mapped_rows(
 
         _final_abort = reject_on_strict_policy(policy, rejected_details, "ADLS")
         if _final_abort:
+            if created_here:
+                _delete_adls_key(client, container, key)
+                _delete_adls_key(client, container, staging_key)
             return WriteResult(
                 ok=False,
                 rows_written=written,

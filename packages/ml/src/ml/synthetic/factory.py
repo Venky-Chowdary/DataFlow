@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import random
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 
 AMOUNT_ALIASES = ["AMT", "amount", "Amount", "payment_amount", "Amt", "Fld_07", "value", "TXN_AMT"]

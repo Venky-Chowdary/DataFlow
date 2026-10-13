@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from services.tracing import submit_in_context
 from services.value_serializer import json_default
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
 from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
@@ -476,6 +477,17 @@ def _render_schedule_detail(s: dict[str, Any]) -> str:
         f"• next `{s.get('next_run_at') or '—'}` · last **{s.get('last_status') or 'never'}**"
         f" ({s.get('run_count', 0)} runs)."
     )
+    if s.get("needs_approval"):
+        park = (
+            f"• Parked on approval `{s.get('approval_id') or '?'}`"
+            + (f" ({s.get('approval_code')})" if s.get("approval_code") else "")
+            + f": {s.get('approval_finding') or 'finding not recorded'}."
+            + " Scheduled runs are skipped until it is "
+            + ("approved or rejected" if s.get("approvable") else "fixed and re-armed")
+            + " in the approvals inbox."
+        )
+        fix = str(s.get("approval_corrective_action") or "").strip()
+        lines.append(park + (f" Fix: {fix}" if fix else ""))
     return "\n".join(lines)
 
 
@@ -919,7 +931,7 @@ def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
             "cancel_job": "Cancel asks the worker to stop after the current batch; rows already committed stay.",
             "retry_job": "Retry starts a **new** job from zero with the same request; the failed job is kept for audit.",
             "resume_job": "Resume continues from the last committed checkpoint — no rows are re-read before it.",
-            "replay_quarantine": "Replay re-sends the open quarantine rows through the destination writer with the original mapping.",
+            "replay_quarantine": "Replay re-sends the open quarantine rows. Staged transform overrides and edited cells replace the original cast; without them the original mapping is used.",
         }[name]
         return f"{' · '.join(bits)}.\n{effect}\n\nConfirm to proceed: **{label}**."
     if name == "delete_connector":
@@ -933,6 +945,13 @@ def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
             f"**{p.get('name')}** ({p.get('type') or 'connector'}) will be removed from saved connectors. "
             f"Data at the source is untouched.{warn}\n\nConfirm to proceed: **{label}**."
         )
+    if name == "update_connector":
+        changed = ", ".join(f"{k} → {v}" for k, v in (p.get("changes") or {}).items())
+        return (
+            f"**{p.get('name')}** ({p.get('type') or 'connector'}) changes: {changed}. "
+            "Its id and bound pipelines stay the same; test it after saving."
+            f"\n\nConfirm to proceed: **{label}**."
+        )
     if name == "set_schedule_enabled":
         after = "resume on its cadence" if p.get("enabled_after") else "stop firing until resumed"
         return f"Pipeline **{p.get('name')}** will {after}.\n\nConfirm to proceed: **{label}**."
@@ -940,6 +959,18 @@ def _render_lifecycle(name: str, o: dict[str, Any]) -> str:
         return (
             f"Pipeline **{p.get('name')}** ({p.get('sync_mode') or 'sync'}, {p.get('runs_recorded', 0)} runs recorded) "
             f"will be deleted; its jobs stay in Jobs.\n\nConfirm to proceed: **{label}**."
+        )
+    if name == "update_schedule":
+        bits = []
+        if p.get("cadence"):
+            bits.append(f"cadence becomes **{p.get('cadence')}**")
+        if p.get("name_after"):
+            bits.append(f"name becomes **{p.get('name_after')}**")
+        change = " and ".join(bits) or "will be updated"
+        note = f"\n{p['timezone_note']}" if p.get("timezone_note") else ""
+        return (
+            f"Pipeline **{p.get('name')}** {change}. The route and the mapping stay as they are."
+            f"{note}\n\nConfirm to proceed: **{label}**."
         )
     return f"Confirm to proceed: **{label}**."
 
@@ -1403,7 +1434,8 @@ class DataPilotAgent:
         native = self._first_available_native_agent()
         if native is not None:
             llm_futs.append(
-                _executor.submit(
+                submit_in_context(
+                    _executor,
                     bind_current_context(native),
                     message, history or [], system, data_context,
                 )
@@ -1722,6 +1754,16 @@ class DataPilotAgent:
             return
 
         if tr.name == "remediate_validation":
+            if out.get("ui_only") or out.get("requires_confirm") is False:
+                turn.actions.append({
+                    "type": "navigate",
+                    "screen": "transfer",
+                    "risk": "safe",
+                    "label": out.get("label") or "Open Transfer Studio",
+                    "kind": out.get("kind"),
+                    "run_id": out.get("run_id"),
+                })
+                return
             turn.pending_actions.append({
                 "id": f"studio:{out.get('kind')}:{out.get('run_id') or ''}",
                 "type": "studio",
@@ -1729,7 +1771,12 @@ class DataPilotAgent:
                 "label": out.get("label"),
                 "run_id": out.get("run_id"),
                 "risk": "mutate",
-                "payload": {"kind": out.get("kind"), "run_id": out.get("run_id")},
+                "destructive": bool(out.get("destructive")),
+                "payload": {
+                    "ack_id": out.get("ack_id"),
+                    "kind": out.get("kind"),
+                    "run_id": out.get("run_id"),
+                },
             })
             # Ensure Transfer is ready; safe navigate can auto-apply.
             turn.actions.append({
@@ -2411,6 +2458,12 @@ Draft answer:
             ws = str(ctx.get("workspace_id") or "").strip()
             if ws:
                 out.setdefault("workspace_id", ws)
+        if name == "remediate_validation":
+            ws = str(ctx.get("workspace_id") or "").strip()
+            if ws:
+                out["workspace_id"] = ws
+            else:
+                out.pop("workspace_id", None)
         return out
 
     def _openai_agent(
@@ -3141,11 +3194,18 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     lines.append(f"• Suggested: **{rem.get('label')}** (`{rem.get('kind')}`)")
                 parts.append("\n".join(lines))
             elif tr.name == "remediate_validation" and tr.success:
-                parts.append(
-                    f"Proposed Studio remediation: **{tr.output.get('label')}**.\n"
-                    "Confirm opens **Fix bad data** in Transfer Studio — "
-                    "it does not rewrite quarantine rows inside this chat."
-                )
+                label = (tr.output or {}).get("label")
+                if (tr.output or {}).get("ui_only"):
+                    parts.append(
+                        f"**{label}** opens in Transfer Studio. "
+                        "Nothing is written from this chat, and there is no confirm step."
+                    )
+                else:
+                    parts.append(
+                        f"Proposed Studio remediation: **{label}**.\n"
+                        "Confirm opens **Fix bad data** in Transfer Studio — "
+                        "it does not rewrite quarantine rows inside this chat."
+                    )
             elif tr.name in ("plan_transfer", "start_transfer") and tr.success:
                 parts.append(_render_transfer(tr.name, tr.output or {}))
             elif tr.name == "start_transfer" and not tr.success and isinstance(tr.output, dict):
@@ -3206,6 +3266,10 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if sibling_docs and cols <= 0:
                     continue
                 if cols <= 0:
+                    named = str(o.get("message") or "").strip()
+                    if named:
+                        parts.append(named)
+                        continue
                     gates = o.get("preflight_gates") or []
                     gate_line = (
                         f"\n\nValidate runs **{len(gates)} preflight gates**: "
@@ -3462,8 +3526,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     f"Ready to save connector **{prev.get('name') or 'connector'}** "
                     f"({prev.get('type')}) → `{prev.get('host')}:{prev.get('port')}` "
                     f"/ `{prev.get('database') or '—'}`.\n"
-                    f"Connection test: {prev.get('test') or 'ok'}.\n\n"
-                    "Confirm below to save it to **Connectors**."
+                    f"Connection test: {prev.get('test') or 'ok'}.\n"
+                    + (
+                        f"Pins SFTP host key {prev.get('host_key')}, confirm you "
+                        "verified it with the server admin.\n"
+                        if prev.get("host_key")
+                        else ""
+                    )
+                    + "\nConfirm below to save it to **Connectors**."
                 )
             elif tr.name == "list_connectors" and tr.success:
                 conns = tr.output.get("connectors", [])

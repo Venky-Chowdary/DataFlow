@@ -1864,7 +1864,9 @@ def test_what_cant_you_do_answers_with_the_limits():
     agent = get_pilot_agent()
     limits = agent.chat("what can't you do", data_context={"pilot_session_id": "test-limits"})
     assert "will **not** do" in limits.answer
-    assert "Delete connectors, jobs, or data" in limits.answer
+    assert "Delete jobs or warehouse rows from chat" in limits.answer
+    assert "Delete connectors, jobs, or data" not in limits.answer
+    assert "brand-new schedule" not in limits.answer.lower()
 
     can = agent.chat("what can you do", data_context={"pilot_session_id": "test-can"})
     assert "**I can:**" in can.answer
@@ -2101,6 +2103,15 @@ def test_what_broke_recently_reads_the_ledger():
         "is anything broken",
     ):
         assert asks_what_failed_recently(ask), ask
+        assert infer_tools_from_message(ask) == [("list_jobs", {"limit": 10})], ask
+    assert infer_tools_from_message("show the last 5 jobs") == [
+        ("list_jobs", {"limit": 5})
+    ]
+    for ask in (
+        "show jobs in the last 24 hours",
+        "show jobs in 24h",
+        "show jobs in the past 3 days",
+    ):
         assert infer_tools_from_message(ask) == [("list_jobs", {"limit": 10})], ask
     # A documentation question that contains a failure word stays documentation.
     for doc in (

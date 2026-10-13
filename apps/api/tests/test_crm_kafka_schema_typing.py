@@ -85,8 +85,8 @@ def test_kafka_empty_topic_does_not_invent_text_columns(monkeypatch):
 
     monkeypatch.setattr(
         kr,
-        "read_topic_batch",
-        lambda **_kw: (_Empty(), None),
+        "sample_topic_batch",
+        lambda **_kw: _Empty(),
     )
     schema, native, warning = kr.infer_topic_schema({"host": "localhost"}, "empty.topic")
     assert schema == {}

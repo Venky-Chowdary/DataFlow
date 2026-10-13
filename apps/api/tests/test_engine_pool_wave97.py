@@ -7,7 +7,6 @@ times, is a regression of the exact defect this module exists to close.
 
 from __future__ import annotations
 
-import os
 import sys
 import threading
 from pathlib import Path

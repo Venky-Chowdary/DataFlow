@@ -64,6 +64,12 @@ def _suggest_recovery(reason: str, *, transform: str | None = None) -> str:
         return "Fix parent keys / mapping, run sample orphan probe, or acknowledge FK risk with a signed contract."
     if "confidence" in low:
         return "Remap on Map, Approve override, or accept a Risk Contract — G4 owns the hard block."
+    if "empty value cannot coerce" in low:
+        return (
+            "Blank cell. A nullable destination stores SQL NULL and keeps the row. "
+            "A NOT NULL column needs a source value or a nullability change — "
+            "replay cannot invent a typed value from an empty cell."
+        )
     if any(k in low for k in ("cast", "coercion", "lossy", "decimal", "overflow", "truncat")):
         return (
             "Widen destination type, add an explicit transform, or CAST_AND_CONTINUE / "

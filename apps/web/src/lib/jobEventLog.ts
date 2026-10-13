@@ -14,6 +14,12 @@ export function eventLogMessageBody(line: string): string {
   return i >= 0 ? line.slice(i + sep.length) : line;
 }
 
+/** Client-stamped terminal lines — remount must not append a second copy. */
+export function isTerminalJobLogLine(line: string): boolean {
+  const body = eventLogMessageBody(line).trim();
+  return /^(Job completed|Job failed|Job cancelled by user)\b/.test(body);
+}
+
 /** Keep the opening of the run and the live tail. Never drop start-only. */
 export function keepEventLogStartAndTail(lines: string[], max = JOB_EVENT_LOG_MAX_LINES): string[] {
   if (lines.length <= max) return lines;

@@ -55,6 +55,58 @@ def test_population_composite_counts_whole_tuple_orphan(tmp_path: Path):
     assert "2+101" in report["findings"][0]["message"]
 
 
+def test_match_full_counts_a_partial_null_the_simple_scan_skips(tmp_path: Path):
+    """The same rows are clean under unreported match and orphans under FULL."""
+    path = str(tmp_path / "full.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE orders (tenant_id INTEGER, order_no INTEGER, "
+            "PRIMARY KEY (tenant_id, order_no))"
+        )
+        conn.execute("INSERT INTO orders VALUES (1, 100)")
+        conn.execute(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, tenant_id INTEGER, order_no INTEGER)"
+        )
+        conn.execute("INSERT INTO child VALUES (1, 1, 100), (2, NULL, 999), (3, NULL, NULL)")
+    simple = probe_population_fk_orphans(
+        child_table="child",
+        mappings=[],
+        foreign_keys=COMPOSITE_FK,
+        source_config={"type": "sqlite", "database": path},
+        validation_mode="strict",
+    )
+    assert simple["population_proof"] is True
+    assert simple["checks"][0]["match_simple"] is True
+    full = probe_population_fk_orphans(
+        child_table="child",
+        mappings=[],
+        foreign_keys=[{**COMPOSITE_FK[0], "confmatchtype": "f"}],
+        source_config={"type": "sqlite", "database": path},
+        validation_mode="strict",
+    )
+    assert full["population_proof"] is False
+    assert full["orphan_count"] == 1
+    assert full["checks"][0]["match"] == "full"
+    assert full["checks"][0]["match_full"] is True
+    assert "+999" in full["findings"][0]["message"]
+
+
+def test_match_partial_does_not_certify_the_population(tmp_path: Path):
+    path = _db(tmp_path)
+    report = probe_population_fk_orphans(
+        child_table="child",
+        mappings=[],
+        foreign_keys=[{**COMPOSITE_FK[0], "match": "p"}],
+        source_config={"type": "sqlite", "database": path},
+        validation_mode="strict",
+    )
+    assert report["population_proof"] is False
+    assert report["complete"] is False
+    assert report["orphan_count"] == 0
+    assert "MATCH PARTIAL" in report["findings"][0]["message"]
+    assert "not a completed scan" in report["findings"][0]["message"]
+
+
 def test_population_composite_clean_tuples_are_proven(tmp_path: Path):
     path = str(tmp_path / "clean.db")
     with sqlite3.connect(path) as conn:

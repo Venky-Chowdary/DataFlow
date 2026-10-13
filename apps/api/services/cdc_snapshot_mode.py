@@ -26,7 +26,11 @@ then streams from the new tip. That is at-least-once upsert of the live
 population, not continuous CDC across the gap, and never ``migration_proven``.
 
 ``initial`` already spent its one snapshot; a later gap cannot invent another
-without the operator changing mode. ``never`` forbids a snapshot.
+without the operator changing mode. A watermark still in ``phase=snapshot``
+has not finished that dump. ``initial`` and ``when_needed`` resume it from
+the stored table and last primary key. Streaming past that token would skip
+keys that were never loaded. ``never`` forbids a snapshot, including one
+that is still open — that case fails closed instead of streaming.
 
 When dest already has keys **and** the log reader can interleave DDD-3
 chunks, ``when_needed`` + retention gap selects ``incremental_snapshot``
@@ -98,6 +102,31 @@ def watermark_present(watermark: Any) -> bool:
     return bool(text) and text.lower() not in {"none", "null", "~"}
 
 
+def snapshot_dump_open(watermark: Any) -> bool:
+    """True when the stored cursor is still inside the initial table dump.
+
+    Log readers encode that as ``phase=snapshot`` plus the table and last
+    primary key (PostgreSQL slot token, MySQL binlog dict, SQL Server LSN
+    JSON, Oracle LogMiner JSON). The next run must call ``snapshot()`` so
+    the reader continues from that key. A streaming LSN/SCN/binlog position
+    means the dump finished. An incremental-snapshot window is a streaming
+    chunk, not an unfinished initial dump. A query-CDC scalar is not a
+    snapshot phase.
+    """
+    if not watermark_present(watermark):
+        return False
+    from services.cdc_exactly_once import (
+        extract_cdc_phase,
+        is_incremental_snapshot_token,
+    )
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    token = watermark if isinstance(watermark, dict) else unwrap_resume_token(watermark)
+    if is_incremental_snapshot_token(token) or is_incremental_snapshot_token(watermark):
+        return False
+    return extract_cdc_phase(token) == "snapshot"
+
+
 def should_run_snapshot(
     mode: SnapshotMode,
     *,
@@ -114,10 +143,11 @@ def should_run_snapshot(
         return False
     if mode == SnapshotMode.INITIAL_ONLY:
         return True
+    open_dump = snapshot_dump_open(watermark)
     if mode == SnapshotMode.WHEN_NEEDED:
-        return watermark is None or resume_broken
-    # initial
-    return watermark is None
+        return watermark is None or resume_broken or open_dump
+    # initial — a phase=snapshot cursor has not spent the one dump yet
+    return watermark is None or open_dump
 
 
 def should_run_stream(mode: SnapshotMode) -> bool:
@@ -143,6 +173,8 @@ def build_snapshot_mode_preflight_gate(
     stream_contracts: list[dict[str, Any]] | None = None,
     watermark: Any = None,
     request_snapshot_mode: str = "",
+    retention: Any = None,
+    cursor_key: str = "",
 ) -> dict[str, Any] | None:
     """Validate≡Execute: ``never`` without a watermark must block before Execute.
 
@@ -174,6 +206,33 @@ def build_snapshot_mode_preflight_gate(
         }
     present = watermark_present(watermark)
     wm = watermark if present else None
+    from services.cdc_slot_resume import preflight_slot_gate
+
+    slot_gate = preflight_slot_gate(mode, wm, retention, cursor_key=cursor_key)
+    if slot_gate is not None:
+        return slot_gate
+    if mode == SnapshotMode.NEVER and snapshot_dump_open(wm):
+        return {
+            "id": "g18_cdc_snapshot_mode",
+            "status": "block",
+            "message": (
+                "Initial snapshot is unfinished (phase=snapshot). "
+                "snapshot_mode=never will not finish the dump, and streaming "
+                "would skip keys that were never loaded. Set snapshot_mode=initial "
+                "or when_needed."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "snapshot_mode": mode.value,
+                "watermark_present": True,
+                "snapshot_dump_open": True,
+                "run_snapshot": False,
+                "primary_action": "open_advanced",
+                "honesty": (
+                    "CDC remains at-least-once upsert. Not dest-owned exactly-once."
+                ),
+            },
+        }
     try:
         run_snap = should_run_snapshot(mode, watermark=wm)
     except ValueError as exc:
@@ -193,8 +252,15 @@ def build_snapshot_mode_preflight_gate(
                 ),
             },
         }
+    open_dump = snapshot_dump_open(wm)
     if mode == SnapshotMode.NEVER:
         message = "CDC snapshot_mode=never — stream only (watermark present)"
+    elif open_dump and run_snap:
+        message = (
+            f"CDC snapshot_mode={mode.value} — initial dump still open "
+            "(phase=snapshot); resume from the stored table and last primary key, "
+            "then stream (at-least-once upsert)"
+        )
     elif run_snap:
         message = (
             f"CDC snapshot_mode={mode.value} — blocking snapshot then stream "
@@ -210,6 +276,7 @@ def build_snapshot_mode_preflight_gate(
         "details": {
             "snapshot_mode": mode.value,
             "watermark_present": present,
+            "snapshot_dump_open": bool(open_dump),
             "run_snapshot": bool(run_snap),
             "honesty": "at-least-once upsert. not dest-owned exactly-once.",
         },
@@ -279,6 +346,26 @@ def classify_snapshot_plan(
     wm = watermark if present else None
     gap = str(retention_status or "").strip().lower() == "gap"
     resume_broken = gap and present
+    open_dump = snapshot_dump_open(wm)
+    if parsed == SnapshotMode.NEVER and open_dump:
+        return {
+            "kind": KIND_REFUSE,
+            "snapshot_mode": parsed.value,
+            "run_snapshot": False,
+            "run_stream": False,
+            "lost_window": bool(gap),
+            "resume_broken": bool(resume_broken),
+            "migration_proven": False,
+            "snapshot_dump_open": True,
+            "next_action": "set_when_needed",
+            "reason": "never_forbids_open_snapshot",
+            "message": (
+                "Initial snapshot is unfinished (phase=snapshot). "
+                "snapshot_mode=never will not finish the dump, and streaming "
+                "would skip keys that were never loaded. Set snapshot_mode=initial "
+                "or when_needed."
+            ),
+        }
     run_snapshot = should_run_snapshot(
         parsed, watermark=wm, resume_broken=resume_broken
     )
@@ -307,7 +394,7 @@ def classify_snapshot_plan(
                 f"and re-run. {lost_note}"
             ),
         }
-    if resume_broken and parsed == SnapshotMode.INITIAL:
+    if resume_broken and parsed == SnapshotMode.INITIAL and not open_dump:
         return {
             "kind": KIND_REFUSE,
             "snapshot_mode": parsed.value,
@@ -365,6 +452,16 @@ def classify_snapshot_plan(
             f"snapshot_mode=initial_only dumps current source keys and does not stream. "
             f"{lost_note}" if gap else "snapshot_mode=initial_only — snapshot, no stream."
         )
+    elif run_snapshot and open_dump:
+        reason = "snapshot_in_progress"
+        next_action = "snapshot_then_stream" if run_stream else "snapshot_only"
+        message = (
+            "Initial snapshot is unfinished (phase=snapshot). Resume the dump "
+            "from the stored table and last primary key, then stream. "
+            "At-least-once upsert."
+        )
+        if gap:
+            message = f"{message} {lost_note}"
     elif run_snapshot:
         reason = "retention_gap" if gap else ("watermark_missing" if not present else "always")
         next_action = "snapshot_then_stream" if run_stream else "snapshot_only"
@@ -384,6 +481,7 @@ def classify_snapshot_plan(
         "run_stream": bool(run_stream),
         "lost_window": bool(gap),
         "resume_broken": bool(resume_broken),
+        "snapshot_dump_open": bool(open_dump),
         "migration_proven": False if gap else None,
         "next_action": next_action,
         "reason": reason,

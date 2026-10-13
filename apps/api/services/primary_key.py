@@ -255,6 +255,29 @@ def infer_redis_conflict_columns(
     return [picked] if picked else []
 
 
+def identity_source_columns(
+    pk_target_columns: Sequence[str] | None,
+    mappings: Iterable[Any] | None,
+) -> list[str]:
+    """Source column for every destination key component, in key order.
+
+    Batch audits read source-keyed cells, while the write key is named by the
+    destination. A component with no mapping keeps its own name (identity map).
+    """
+    target_to_source: dict[str, str] = {}
+    for src, tgt in _mapping_pairs(mappings or []):
+        target_to_source.setdefault(tgt.lower(), src)
+    out: list[str] = []
+    for col in pk_target_columns or []:
+        name = str(col or "").strip()
+        if not name:
+            continue
+        src = target_to_source.get(name.lower(), name)
+        if src not in out:
+            out.append(src)
+    return out
+
+
 def _mapping_pairs(mappings: Iterable[Any]) -> list[tuple[str, str]]:
     pairs: list[tuple[str, str]] = []
     for m in mappings or []:
@@ -370,6 +393,11 @@ def resolve_identity_key(
 
     # Operator identity (Advanced / stream contract) — never silently swap for ``id``.
     contract = str(contract_primary_key or "").strip()
+    if contract and "," in contract:
+        # "id,tenant_id" is not a column. The composite resolvers own that
+        # string; returning it whole made the uniqueness probe look up a
+        # name that does not exist and then fall through to a guessed id.
+        return None, None
     if contract:
         matched_src = src_lower.get(contract.lower())
         if matched_src:
@@ -514,7 +542,6 @@ def _map_identity_names_to_source(
 ) -> list[str]:
     """Map dest/contract identity names onto source columns when possible."""
     pairs = _mapping_pairs(mappings)
-    tgt_by_src = {s: t for s, t in pairs}
     src_by_tgt = {t: s for s, t in pairs}
     srcs = [s for s, _ in pairs]
     if source_columns:
@@ -548,6 +575,41 @@ def _map_identity_names_to_source(
         seen.add(key)
         deduped.append(c)
     return deduped
+
+
+def mapped_catalog_upsert_key(
+    primary_key_columns: Sequence[str] | None,
+    mappings: Iterable[Any],
+) -> tuple[list[str], list[str]]:
+    """Map a source-catalog primary key through the write mapping.
+
+    Returns ``(source_columns, target_columns)``. Empty when the catalog has
+    no key, or when any key column is unmapped — upserting on a partial key
+    would match rows on the wrong identity. This does not invent ``id``.
+    """
+    from services.sync_cursor import map_source_to_target
+
+    keys = [str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()]
+    mapping_list = [m for m in (mappings or []) if isinstance(m, dict)]
+    if not keys or not mapping_list:
+        return [], []
+    by_lower: dict[str, str] = {}
+    for item in mapping_list:
+        src = str(item.get("source") or "").strip()
+        if src:
+            by_lower.setdefault(src.lower(), src)
+    sources: list[str] = []
+    targets: list[str] = []
+    for key in keys:
+        src = by_lower.get(key.lower())
+        if not src:
+            return [], []
+        tgt = str(map_source_to_target(src, mapping_list) or "").strip()
+        if not tgt:
+            return [], []
+        sources.append(src)
+        targets.append(tgt)
+    return sources, targets
 
 
 def resolve_primary_key_source_columns(
@@ -620,3 +682,88 @@ def resolve_primary_key_source_columns(
         contract_primary_key=contract_primary_key,
     )
     return [src] if src else []
+
+
+def _map_identity_names_to_target(
+    names: list[str],
+    *,
+    mappings: Iterable[Any],
+) -> list[str]:
+    """Map source/contract identity names onto destination columns."""
+    pairs = _mapping_pairs(mappings)
+    tgt_by_src = {s.lower(): t for s, t in pairs}
+    tgt_lower = {t.lower(): t for _, t in pairs}
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in names:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        tgt = tgt_by_src.get(name.lower()) or tgt_lower.get(name.lower()) or name
+        key = tgt.lower()
+        if not tgt or key in seen:
+            continue
+        seen.add(key)
+        out.append(tgt)
+    return out
+
+
+def resolve_primary_key_columns(
+    mappings: Iterable[Any],
+    source_columns: list[str] | None,
+    dest_kind: str,
+    *,
+    validation_mode: str = "strict",
+    purpose: Purpose = "uniqueness",
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
+    stream_contracts: Iterable[Any] | None = None,
+    stream_name: str = "",
+) -> tuple[list[str], list[str]]:
+    """``(source_columns, target_columns)`` for the full identity.
+
+    Same owner as :func:`resolve_primary_key_source_columns`. An unmapped
+    composite part is kept, not dropped, and does not fall through to a
+    guessed ``id``. Empty when no identity can be named.
+    """
+    sources = resolve_primary_key_source_columns(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=validation_mode,
+        purpose=purpose,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+        stream_contracts=stream_contracts,
+        stream_name=stream_name,
+    )
+    if not sources:
+        return [], []
+    return sources, _map_identity_names_to_target(sources, mappings=mappings)
+
+
+def resolve_primary_key_target_columns(
+    mappings: Iterable[Any],
+    source_columns: list[str] | None,
+    dest_kind: str,
+    *,
+    validation_mode: str = "strict",
+    purpose: Purpose = "uniqueness",
+    destination_pk_columns: list[str] | None = None,
+    contract_primary_key: str | None = None,
+    stream_contracts: Iterable[Any] | None = None,
+    stream_name: str = "",
+) -> list[str]:
+    """Target-side composite identity for the sample uniqueness probe (G6)."""
+    _sources, targets = resolve_primary_key_columns(
+        mappings,
+        source_columns,
+        dest_kind,
+        validation_mode=validation_mode,
+        purpose=purpose,
+        destination_pk_columns=destination_pk_columns,
+        contract_primary_key=contract_primary_key,
+        stream_contracts=stream_contracts,
+        stream_name=stream_name,
+    )
+    return targets

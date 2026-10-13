@@ -17,6 +17,40 @@ from __future__ import annotations
 from typing import Any
 
 
+def reader_population(
+    *,
+    committed_offset: int,
+    resume_offset: int = 0,
+    total_rows: int | None = None,
+    cursor_bounded: int = 0,
+) -> int:
+    """Source rows this run actually read, without adding a resume offset twice.
+
+    ``committed_offset`` starts at the checkpoint and then adds every page.
+    A resume that re-reads the whole table (the seek missed, so the pass
+    walked the population again) therefore reports checkpoint + population.
+    A 400k table resumed at 180k becomes 580k, and Gate-8 fails a load that
+    did land. When this pass read at least the probed population, the
+    population is that probe — the checkpoint rows are inside it, not beside it.
+    A tail-only resume reads fewer rows than the probe, so the offset plus
+    the tail stays the count.
+    """
+    population = max(0, int(committed_offset or 0) - int(cursor_bounded or 0))
+    start = max(0, int(resume_offset or 0))
+    if start <= 0 or total_rows is None:
+        return population
+    try:
+        total = int(total_rows)
+    except (TypeError, ValueError):
+        return population
+    if total < 0:
+        return population
+    rows_this_pass = max(0, int(committed_offset or 0) - start)
+    if rows_this_pass >= total and population > total:
+        return total
+    return population
+
+
 def stamp_source_row_count(
     dest_summary: dict[str, Any],
     *,

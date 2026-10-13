@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any, TypeVar
 
 from services.rbac import Permission, normalize_role, role_permissions
@@ -84,9 +84,14 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     # Mutations. Each of these also stages a Confirm ack — permission decides
     # whether the operator may stage it at all.
     "start_transfer": (Permission.JOB_RUN, MUTATE),
+    "start_dataset_transfer": (Permission.JOB_RUN, MUTATE),
     "create_connector": (Permission.CONNECTOR_WRITE, MUTATE),
     "run_schedule_now": (Permission.SCHEDULE_MANAGE, MUTATE),
     "create_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
+    # One permission cannot cover every ack kind (an operator may confirm a
+    # transfer and must not confirm a connector). The dispatcher lets a reader
+    # in; can_confirm_kind refuses the kind before the ack is claimed.
+    "confirm_action": (Permission.WORKSPACE_READ, READ),
     # Lifecycle operations mirror /connectors/jobs/{id}/{cancel,retry,resume,
     # quarantine/replay}, /saved-connectors/{id}/{test,DELETE} and
     # /schedules/{id} PATCH|DELETE.
@@ -95,9 +100,13 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "retry_job": (Permission.JOB_MANAGE, MUTATE),
     "resume_job": (Permission.JOB_MANAGE, MUTATE),
     "replay_quarantine": (Permission.JOB_MANAGE, MUTATE),
+    "repair_cdc_drift": (Permission.JOB_MANAGE, MUTATE),
     "delete_connector": (Permission.CONNECTOR_DELETE, MUTATE),
+    "update_connector": (Permission.CONNECTOR_WRITE, MUTATE),
     "set_schedule_enabled": (Permission.SCHEDULE_MANAGE, MUTATE),
     "delete_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
+    "update_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
+    "prepare_cdc_source": (Permission.JOB_RUN, MUTATE),
 }
 
 
@@ -113,9 +122,14 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "retry_job": Permission.JOB_MANAGE,
     "resume_job": Permission.JOB_MANAGE,
     "replay_quarantine": Permission.JOB_MANAGE,
+    "repair_cdc_drift": Permission.JOB_MANAGE,
     "delete_connector": Permission.CONNECTOR_DELETE,
+    "update_connector": Permission.CONNECTOR_WRITE,
     "set_schedule_enabled": Permission.SCHEDULE_MANAGE,
     "delete_schedule": Permission.SCHEDULE_MANAGE,
+    "update_schedule": Permission.SCHEDULE_MANAGE,
+    "prepare_cdc_source": Permission.JOB_RUN,
+    "studio_remediation": Permission.JOB_RUN,
 }
 
 
@@ -152,6 +166,9 @@ _UNKNOWN_TOOL = (Permission.WORKSPACE_MANAGE, MUTATE)
 _caller_role: contextvars.ContextVar[str] = contextvars.ContextVar(
     "pilot_caller_role", default=""
 )
+_caller_permissions: contextvars.ContextVar[frozenset[str] | None] = contextvars.ContextVar(
+    "pilot_caller_permissions", default=None
+)
 
 T = TypeVar("T")
 
@@ -174,14 +191,41 @@ def current_caller_role() -> str:
     return _caller_role.get()
 
 
+def current_caller_permissions() -> frozenset[str] | None:
+    return _caller_permissions.get()
+
+
+def _granted(role: str) -> set[str]:
+    permissions = role_permissions(role)
+    bound = _caller_permissions.get()
+    return permissions & bound if bound is not None else permissions
+
+
 @contextlib.contextmanager
-def caller_role(role: str) -> Iterator[None]:
-    """Bind ``role`` for the duration of one request, then restore it."""
-    token = set_caller_role(role)
+def caller_role(role: str, permissions: Iterable[str] | None = None) -> Iterator[None]:
+    """Bind the caller role and optional permission scope for one request."""
+    role_token = set_caller_role(role)
+    permissions_token = _caller_permissions.set(
+        frozenset(permissions) if permissions is not None else None
+    )
     try:
         yield
     finally:
-        reset_caller_role(token)
+        _caller_permissions.reset(permissions_token)
+        reset_caller_role(role_token)
+
+
+@contextlib.contextmanager
+def bind_request_principal(http_request: Any, role: str) -> Iterator[None]:
+    """Bind the role and scoped permissions for an HTTP request principal."""
+    from services.rbac import principal_permissions
+
+    user = getattr(http_request.state, "user", None)
+    with caller_role(
+        role,
+        permissions=principal_permissions(user, role) if role else None,
+    ):
+        yield
 
 
 def bind_current_context(fn: Callable[..., T]) -> Callable[..., T]:
@@ -210,14 +254,14 @@ def is_tool_allowed(role: str, name: str) -> bool:
     if not role:
         return True
     permission, _effect = tool_requirement(name)
-    return permission in role_permissions(role)
+    return permission in _granted(role)
 
 
 def allowed_tools(role: str) -> set[str]:
     """Every tool ``role`` may run — used to filter a plan before it executes."""
     if not role:
         return set(TOOL_PERMISSIONS)
-    granted = role_permissions(role)
+    granted = _granted(role)
     return {
         name
         for name, (permission, _effect) in TOOL_PERMISSIONS.items()
@@ -232,7 +276,7 @@ def denial_message(role: str, name: str) -> str:
     role_l = normalize_role(role)
     can = sorted(
         _PERMISSION_WORDS[p]
-        for p in role_permissions(role_l)
+        for p in _granted(role_l)
         if p in _PERMISSION_WORDS
     )
     allowed_words = ", ".join(can[:4]) or "nothing in this workspace"
@@ -258,7 +302,7 @@ def can_confirm_kind(role: str, kind: str) -> bool:
         # An unmapped kind is refused rather than allowed: Confirm is the last
         # gate before a write, so an unknown mutation must never pass it.
         return False
-    return permission in role_permissions(role)
+    return permission in _granted(role)
 
 
 def confirm_denial_message(role: str, kind: str) -> str:

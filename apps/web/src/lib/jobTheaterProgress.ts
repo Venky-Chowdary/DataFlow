@@ -25,6 +25,43 @@ export function earliestJobStartMs(input: {
   return Math.min(...candidates);
 }
 
+/** Wall clock for Theater Elapsed. Terminal jobs freeze — never Date.now() after done. */
+export function theaterElapsedMs(input: {
+  startedAt?: string | null;
+  createdAt?: string | null;
+  completedAt?: string | null;
+  fallbackStartMs?: number | null;
+  nowMs?: number;
+  terminal?: boolean;
+  frozenEndMs?: number | null;
+}): number {
+  const now = input.nowMs ?? Date.now();
+  const start = earliestJobStartMs({
+    startedAt: input.startedAt,
+    createdAt: input.createdAt,
+    fallbackMs: input.fallbackStartMs,
+    nowMs: now,
+  });
+  const completed = parseEpochMs(input.completedAt);
+  const frozen =
+    typeof input.frozenEndMs === "number" && Number.isFinite(input.frozenEndMs) && input.frozenEndMs > 0
+      ? input.frozenEndMs
+      : null;
+  const end = completed ?? (input.terminal ? (frozen ?? now) : now);
+  return Math.max(0, end - start);
+}
+
+/**
+ * Engine monotonic seconds published on the finished run.
+ * Null when the engine did not measure, so Theater keeps the live wall clock.
+ */
+export function publishedEngineElapsedSeconds(value: unknown): number | null {
+  if (typeof value === "boolean" || value == null || value === "") return null;
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n;
+}
+
 /** Job-average rows/s. Refuse a reconnect-window invent (460k / 0.5s). */
 export function jobAverageRowsPerSecond(processed: number, elapsedMs: number): number {
   if (!(processed > 0) || !(elapsedMs >= 5_000)) return 0;

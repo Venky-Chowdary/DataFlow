@@ -14,6 +14,7 @@ from src.ai.copilot.query_tools import (  # noqa: E402
     _SAFE_IDENT,
     _analyze_rows,
     _sample_sql,
+    resolve_table_name,
     run_connector_query,
     sample_connector_object,
 )
@@ -132,6 +133,28 @@ def test_sample_fuzzy_resolves_typo() -> None:
     assert result.output["table"] == "countries"
     assert "countries" in str(result.output.get("resolve_note") or "").lower()
     assert "countries" in str(run_q.call_args).lower()
+
+
+def test_sheet_suffix_is_not_a_fuzzy_typo() -> None:
+    from src.ai.copilot.tools import ToolResult
+
+    def listed(*_a, **_k):
+        return ToolResult(
+            name="list_connector_objects",
+            success=True,
+            output={"objects": [{"name": "qa6a_multisheet.xlsx"}, {"name": "other.xlsx"}]},
+        )
+
+    conn = {"id": "c1", "name": "Files"}
+    with patch("src.ai.copilot.query_tools.list_connector_objects", side_effect=listed):
+        resolved, note, _names = resolve_table_name(conn, "qa6a_multisheet.xlsx#Data")
+    assert resolved == "qa6a_multisheet.xlsx#Data"
+    assert note is None or "closest" not in (note or "").lower()
+
+    with patch("src.ai.copilot.query_tools.list_connector_objects", side_effect=listed):
+        missing, missing_note, _cands = resolve_table_name(conn, "does_not_exist.xlsx#Data")
+    assert missing is None
+    assert missing_note is None or "closest" not in (missing_note or "").lower()
 
 
 def test_sample_missing_table_offers_candidates() -> None:

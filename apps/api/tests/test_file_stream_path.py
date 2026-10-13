@@ -57,10 +57,10 @@ def test_iter_csv_batches_from_path():
 
 @pytest.mark.parametrize("copy_fast_path", ["1", "0"])
 def test_stream_file_to_database_from_path(monkeypatch, copy_fast_path):
-    # Two proof contracts share this route. The local CSV COPY never hashes a
-    # row, so it reports a ``dest_count:<n>`` cardinality token with its
-    # proof_scope; the streamed path fingerprints every written row and stamps
-    # ``inline_write_pass``. Neither may borrow the other's claim.
+    # Two proof contracts share this route. The local CSV COPY still reports a
+    # ``dest_count:<n>`` cardinality token beside the value digest. When the
+    # second parse aligns with that write-pass identity, both paths stamp
+    # ``source_reread``. A forced-off re-read keeps ``inline_write_pass``.
     monkeypatch.setenv("DATAFLOW_CSV_LOCAL_COPY", copy_fast_path)
     with tempfile.TemporaryDirectory() as tmp_str:
         tmp = Path(tmp_str)
@@ -87,15 +87,144 @@ def test_stream_file_to_database_from_path(monkeypatch, copy_fast_path):
             # cardinality proof — the two must never be graded against each other.
             assert len(summary["checksum"]) == 64
             assert not is_count_proof_token(summary["checksum"])
-            assert summary.get("checksum_mode") == "inline_write_pass"
+            assert summary.get("checksum_mode") == "source_reread"
+            assert summary.get("source_independently_reread") is True
+            assert summary.get("identity_hash_aligned") is True
             assert is_count_proof_token(summary["engine_source_checksum"])
             assert is_count_proof_token(summary["engine_target_checksum"])
             assert "dest_count_equals_source_snapshot" in str(summary.get("proof_scope"))
         else:
             assert summary.get("copy_fast_path") != "used"
-            assert summary.get("checksum_mode") == "inline_write_pass"
+            assert summary.get("checksum_mode") == "source_reread"
+            assert summary.get("source_independently_reread") is True
+            assert summary.get("identity_hash_aligned") is True
+            versions = summary.get("connector_versions") or {}
+            assert any(ch.isdigit() for ch in str(versions.get("source") or ""))
+            assert any(ch.isdigit() for ch in str(versions.get("destination") or ""))
             assert not is_count_proof_token(summary["checksum"])
         assert columns == ["id", "amount"]
+
+
+def test_ten_row_csv_reread_aligns_identity_and_captures_versions(monkeypatch):
+    """Named fixture: 10 source rows, second parse, identity match, release strings.
+
+    This is the file→warehouse earn path. It does not re-execute a live
+    Postgres load. ``migration_proven`` still requires Gate-8 dest read-back
+    to match this digest; the stream stamps the three proofs the pack checks.
+    """
+    monkeypatch.setenv("DATAFLOW_CSV_LOCAL_COPY", "0")
+    monkeypatch.delenv("DATAFLOW_RECONCILE_SOURCE_REREAD", raising=False)
+    monkeypatch.delenv("DATAWRAP_RECONCILE_SOURCE_REREAD", raising=False)
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        p = tmp / "datawrap_ten.csv"
+        with open(p, "w", encoding="utf-8", newline="") as f:
+            f.write("id,name,amount\n")
+            for i in range(1, 11):
+                f.write(f"{i},row{i},{i * 10}.00\n")
+        dest = EndpointConfig(
+            kind="database",
+            format="sqlite",
+            database=str(tmp / "out.db"),
+            table="datawrap_ten",
+        )
+        rows, _ddl, summary, columns = stream_file_to_database(
+            str(p),
+            "datawrap_ten.csv",
+            dest,
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "name", "target": "name"},
+                {"source": "amount", "target": "amount"},
+            ],
+            schema={"id": "INTEGER", "name": "VARCHAR", "amount": "DECIMAL"},
+        )
+        assert rows == 10
+        assert columns == ["id", "name", "amount"]
+        assert summary.get("checksum_mode") == "source_reread"
+        assert summary.get("source_independently_reread") is True
+        assert summary.get("identity_hash_aligned") is True
+        alignment = summary.get("identity_alignment") or {}
+        assert alignment.get("write_pass_rows") == 10
+        assert alignment.get("reread_rows") == 10
+        assert alignment.get("write_pass_identity_digest") == alignment.get(
+            "reread_identity_digest"
+        )
+        assert len(summary.get("checksum") or "") == 64
+        assert summary.get("checksum") == summary.get("write_pass_checksum")
+        versions = summary.get("connector_versions") or {}
+        assert "python-csv" in str(versions.get("source"))
+        assert any(ch.isdigit() for ch in str(versions.get("source")))
+        assert "sqlite3" in str(versions.get("destination"))
+        assert any(ch.isdigit() for ch in str(versions.get("destination")))
+        phases = {
+            str(p.get("phase"))
+            for p in (summary.get("phase_profile") or {}).get("phases") or []
+        }
+        assert "transform_write" in phases
+        assert "checksum" in phases
+        assert float((summary.get("phase_profile") or {}).get("busy_seconds") or 0) > 0
+
+        from services.signed_proof_pack import build_signed_proof_pack
+        from src.transfer.reconcile_step import run_reconciliation
+
+        report = run_reconciliation(
+            endpoint=dest,
+            records=[],
+            columns=columns,
+            rows_written=10,
+            writer_checksum=summary["checksum"],
+            dest_summary=summary,
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "name", "target": "name"},
+                {"source": "amount", "target": "amount"},
+            ],
+            source_schema={"id": "INTEGER", "name": "VARCHAR", "amount": "DECIMAL"},
+            validation_mode="strict",
+        )
+        assert report["source_checksum_provenance"] == "independent_source_reread"
+        assert report["coverage"] == "full_checksum"
+        assert report["checksum_match"] is True
+        assert report["source_checksum"] == report["target_checksum"]
+        pack = build_signed_proof_pack(
+            job_id="datawrap-ten",
+            job_success=True,
+            reconciliation=report,
+            ddl_hash="ddl-datawrap-ten",
+            mapping_hash="map-datawrap-ten",
+            connector_versions=versions,
+        )
+        assert pack["assurance"]["migration_proven"] is True
+        assert pack["connector_versions_honesty"] == "provided"
+
+
+def test_file_reread_env_off_keeps_write_pass(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_CSV_LOCAL_COPY", "0")
+    monkeypatch.setenv("DATAFLOW_RECONCILE_SOURCE_REREAD", "0")
+    with tempfile.TemporaryDirectory() as tmp_str:
+        tmp = Path(tmp_str)
+        p = tmp / "two.csv"
+        p.write_text("id,amount\n1,1000.00\n2,2000.50\n", encoding="utf-8")
+        dest = EndpointConfig(
+            kind="database",
+            format="sqlite",
+            database=str(tmp / "out.db"),
+            table="payments",
+        )
+        _rows, _ddl, summary, _columns = stream_file_to_database(
+            str(p),
+            "two.csv",
+            dest,
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "amount", "target": "amount"},
+            ],
+            schema={"id": "INTEGER", "amount": "DECIMAL"},
+        )
+        assert summary.get("checksum_mode") == "inline_write_pass"
+        assert summary.get("source_independently_reread") is False
+        assert summary.get("identity_hash_aligned") is False
 
 
 def test_prepare_stream_content_spills_large_payload():

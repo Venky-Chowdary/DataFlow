@@ -145,13 +145,12 @@ def test_destination_schema_probe_overwrite_keeps_existence_clears_types():
 
 
 def test_destination_schema_probe_overwrite_dest_exists_keeps_nullability():
-    """Dest-exists overwrite: existence and nullability stay, live types do not.
+    """Dest-exists overwrite on Postgres keeps the live table and its types.
 
-    The listed table is dropped and recreated from the source shape, so its
-    current physical types are not this run's carrier — binding them made a
-    stale ``VARCHAR(64)`` refuse a ``TEXT`` source that the CREATE would have
-    declared ``LONGTEXT``. Existence and the nullability catalog stay measured:
-    unknown existence must never become create-new by a failed probe.
+    The table is emptied in place. Primary key, unique, NOT NULL, check,
+    foreign key and identity stay, so the live types are this run's contract.
+    Existence and the nullability catalog stay measured: unknown existence
+    must never become create-new by a failed probe.
     """
     from src.transfer.engine import _destination_schema_probe
     from src.transfer.models import EndpointConfig
@@ -167,8 +166,9 @@ def test_destination_schema_probe_overwrite_dest_exists_keeps_nullability():
     ):
         schema, exists = _destination_schema_probe(dest, sync_mode="full_refresh_overwrite")
     assert exists is True
-    assert schema == {}
+    assert schema == {"id": "INTEGER", "tenant_id": "TEXT"}
     assert (dest.extra or {}).get("schema_nullability") == {"id": False, "tenant_id": False}
+    assert (dest.extra or {}).get("schema_types") == schema
 
 
 def test_destination_schema_probe_stamps_nullability_for_g3():
