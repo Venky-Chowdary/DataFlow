@@ -496,6 +496,24 @@ def _has_explicit_timezone_suffix(value: str) -> bool:
     )
 
 
+def _refuses_numeric_inference(text: str) -> bool:
+    """True when a token must stay text instead of INTEGER/DECIMAL.
+
+    Leading ``+``, internal whitespace, parentheses, and currency markers are
+    identity data (phone, money text). Stripping them and inferring a number
+    drops the marker and then fails or corrupts the column.
+    """
+    if any(ch.isspace() for ch in text):
+        return True
+    if text[:1] in "+(":
+        return True
+    if "%" in text:
+        return True
+    from services.transform_engine import _CURRENCY_RE
+
+    return _CURRENCY_RE.search(text) is not None
+
+
 def classify_value(value: str, *, field_name: str | None = None) -> str:
     s = value.strip()
     if not s or s.lower() in NULL_SENTINELS:
@@ -571,7 +589,16 @@ def classify_value(value: str, *, field_name: str | None = None) -> str:
     if s.rstrip().endswith("%"):
         return "VARCHAR"
 
-    decimal_parsed = _parse_decimal(s)
+    # Phone numbers, accounting parentheses, and currency are not integers.
+    # ``+1 555 010 0001`` and ``(555) 123-4567`` used to survive marker
+    # stripping and land as BIGINT, which then failed the whole job (R4-D01).
+    # A plain ``42`` (outer whitespace already removed) stays numeric. Long
+    # prose still falls through to TEXT — whitespace only blocks the numeric
+    # carrier, it does not shorten a narrative.
+    if not _refuses_numeric_inference(s):
+        decimal_parsed = _parse_decimal(s)
+    else:
+        decimal_parsed = None
     if decimal_parsed is not None:
         from services.transform_engine import numeric_text_without_markers
 

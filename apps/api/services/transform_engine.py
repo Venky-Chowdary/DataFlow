@@ -1092,7 +1092,26 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
     return text
 
 
-def _parse_decimal(value: str) -> str | None:
+def _numeric_text_has_markers(value: str) -> bool:
+    """Percent, currency, or accounting parentheses — not a plain number.
+
+    Grouping (``1,234.56``) and outer whitespace are not markers. Callers that
+    declared ``currency`` / ``percentage`` still parse those shapes; the
+    default integer and decimal transforms do not (R4-D07).
+    """
+    text = unicodedata.normalize("NFKC", value or "").strip()
+    if not text:
+        return False
+    if "%" in text:
+        return True
+    if text.startswith("(") and text.endswith(")"):
+        return True
+    return _CURRENCY_RE.search(text) is not None
+
+
+def _parse_decimal(value: str, *, allow_markers: bool = True) -> str | None:
+    if not allow_markers and _numeric_text_has_markers(value):
+        return None
     text = value.strip()
     # Tuple / point / coordinate strings such as (1,2) or (1, 2) are not numbers.
     if text.startswith("(") and text.endswith(")") and "," in text and "." not in text:
@@ -1151,7 +1170,9 @@ def currency_samples_carry_markers(samples: list[str] | None) -> bool:
 
 
 
-def _parse_integer(value: str) -> int | None:
+def _parse_integer(value: str, *, allow_markers: bool = True) -> int | None:
+    if not allow_markers and _numeric_text_has_markers(value):
+        return None
     plain = value.strip()
     # An unadorned ASCII integer has nothing for NFKC, currency, accounting or
     # separator resolution to change, and its digit count is inside the wire
@@ -1431,6 +1452,12 @@ def _parse_json(value: Any) -> str | None:
             # text, per this codebase's Decimal-to-JSON policy.
             parsed = json_loads_exact(value, parse_constant=_json_reject_nonfinite)
         except json.JSONDecodeError:
+            # ``{bad json`` is a broken document, not a Mongo bare scalar.
+            # Wrapping it as a JSON string rewrote the quarantine ledger and
+            # the next replay saw the wrapped text (R4-D04).
+            stripped = value.strip()
+            if stripped[:1] in "{[":
+                raise ValueError(f"Invalid JSON: {stripped[:120]!r}") from None
             parsed = value  # wrap the raw scalar as a JSON string literal
         except ValueError:
             # Non-finite NaN/Infinity via parse_constant — refuse silent null.
@@ -2122,7 +2149,11 @@ def apply_transform(
     if transform_l in _TYPED_TRANSFORMS:
         low = text.lower()
         if low in NULL_SENTINELS:
-            if transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
+            # JSON literal ``null`` is a value. The missing-cell sentinel
+            # table must not reject it (R4-D03). NaN / Infinity stay rejected.
+            if transform_l == "json" and low == "null":
+                pass
+            elif transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
                 pass  # fall through to typed parsers that reject non-finite
             else:
                 return None, f"Null sentinel {text!r} cannot coerce to {transform_l}"
@@ -2131,7 +2162,7 @@ def apply_transform(
         bool_as_number = canonical_boolean_as_number(text)
         if bool_as_number is not None:
             return Decimal(bool_as_number), None
-        parsed = _parse_decimal(text)
+        parsed = _parse_decimal(text, allow_markers=False)
         if parsed is None:
             return None, strict_decimal_comma_reason(text) or f"Invalid decimal: {text!r}"
         # Return Decimal so bind does not re-apply locale to the canonical
@@ -2148,7 +2179,7 @@ def apply_transform(
         bool_as_number = canonical_boolean_as_number(text)
         if bool_as_number is not None:
             return bool_as_number, None
-        parsed_int = _parse_integer(text)
+        parsed_int = _parse_integer(text, allow_markers=False)
         if parsed_int is None:
             return None, integer_parse_failure_reason(text)
         return parsed_int, None

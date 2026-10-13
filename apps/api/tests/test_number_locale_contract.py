@@ -94,9 +94,6 @@ def _sqlite_amount(monkeypatch, number_locale: str, amount: str) -> tuple[object
 @pytest.mark.parametrize(
     "raw,expected",
     [
-        ("$1,000.00", "1000.00"),
-        ("€2.000,50", "2000.50"),
-        ("USD 1000000.89", "1000000.89"),
         ("1,234,567.89", "1234567.89"),
         ("1.234.567,89", "1234567.89"),
         ("12.34", "12.34"),
@@ -125,7 +122,6 @@ def test_auto_refuses_lone_three_digit_group(raw):
         ("1,234", "1234"),
         ("1.234", "1.234"),
         ("1,234.50", "1234.50"),
-        ("$1,234", "1234"),
     ],
 )
 def test_us_locale_comma_thousands_dot_decimal(raw, expected):
@@ -144,7 +140,6 @@ def test_us_locale_comma_thousands_dot_decimal(raw, expected):
         ("1,234", "1.234"),
         ("1.234", "1234"),
         ("1.234,50", "1234.50"),
-        ("€1.234", "1234"),
     ],
 )
 def test_eu_locale_dot_thousands_comma_decimal(raw, expected):
@@ -158,15 +153,22 @@ def test_eu_locale_dot_thousands_comma_decimal(raw, expected):
 
 
 def test_dollar_cell_disambiguates_without_operator_locale():
+    # The default decimal cast does not strip a currency marker (R4-D07).
     value, err = apply_transform("$1,234", "decimal")
-    assert err is None
-    assert str(value) == "1234"
+    assert value is None
+    assert err
+    parsed, perr = apply_transform("$1,234", "currency")
+    assert perr is None
+    assert str(parsed) == "1234"
 
 
 def test_euro_cell_disambiguates_without_operator_locale():
     value, err = apply_transform("€1.234", "decimal")
-    assert err is None
-    assert str(value) == "1234"
+    assert value is None
+    assert err
+    parsed, perr = apply_transform("€1.234", "currency")
+    assert perr is None
+    assert str(parsed) == "1234"
 
 
 def test_infer_number_locale_from_dollar_column():

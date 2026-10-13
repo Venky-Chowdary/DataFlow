@@ -33,8 +33,11 @@ def test_scale_preserving_text():
 
 def test_locale_money_transform_binds_text():
     set_active_number_locale("")
-    bound, err = apply_transform("$10.00", "decimal")
+    # Default decimal refuses a currency marker (R4-D07). The currency
+    # transform still yields a fixed-point value the SQLite binder can store.
+    text, err = apply_transform("$10.00", "currency")
     assert err is None
+    bound = Decimal(text)
     assert bound == Decimal("10.00")
     assert sqlite_decimal_bind_text(bound) == "10.00"
 
