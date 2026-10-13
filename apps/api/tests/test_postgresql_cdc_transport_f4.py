@@ -49,6 +49,51 @@ def test_streaming_buffer_ack_keeps_interleaved_txn():
     assert [x.lsn for x in buf.items] == ["0/1C71CA8", "0/1C71CA8", "0/1C71E38", "0/1C71EE8"]
 
 
+def test_poll_through_lsn_waits_past_the_first_commit():
+    """A poll that returns on the first COMMIT drops an update already in WAL."""
+    import threading
+    import time
+
+    from connectors.postgresql_cdc_transport import (
+        PeekedChange,
+        StreamingReplicationTransport,
+        lsn_to_int,
+    )
+
+    transport = StreamingReplicationTransport(
+        dsn_kwargs={},
+        slot_name="slot_catchup",
+        publication_name="pub",
+    )
+    transport._started = True
+    transport._buffer.extend(
+        [
+            PeekedChange(lsn="0/10", payload=b"B", is_commit=False),
+            PeekedChange(lsn="0/11", payload=b"I", is_commit=False),
+            PeekedChange(lsn="0/12", payload=b"C", is_commit=True),
+        ]
+    )
+    transport._server_wal_end = lsn_to_int("0/12")
+
+    def _later_update() -> None:
+        time.sleep(0.15)
+        transport._buffer.extend(
+            [
+                PeekedChange(lsn="0/20", payload=b"B", is_commit=False),
+                PeekedChange(lsn="0/21", payload=b"U", is_commit=False),
+                PeekedChange(lsn="0/22", payload=b"C", is_commit=True),
+            ]
+        )
+        transport._server_wal_end = lsn_to_int("0/30")
+        transport._wake.set()
+
+    threading.Thread(target=_later_update, daemon=True).start()
+    changes = transport.poll(limit=1000, through_lsn="0/30")
+    commits = [c for c in changes if c.is_commit]
+    assert len(commits) == 2
+    assert any(c.payload == b"U" for c in changes)
+
+
 def test_streaming_buffer_poll_redelivers_until_ack_and_never_splits_txn():
     from connectors.postgresql_cdc_transport import PeekedChange, StreamingBuffer
 

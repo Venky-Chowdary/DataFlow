@@ -399,16 +399,51 @@ class StreamingReplicationTransport:
                 f"CDC streaming transport for slot {self.slot_name!r} failed: {self._error}"
             ) from self._error
 
-    def poll(self, *, limit: int = 1000) -> list[PeekedChange]:
-        """Complete unacked transactions from the head (not removed until ack)."""
+    def poll(self, *, limit: int = 1000, through_lsn: str | None = None) -> list[PeekedChange]:
+        """Complete unacked transactions from the head (not removed until ack).
+
+        ``through_lsn`` is the WAL head observed when the poll started. Already
+        committed transactions sit in that range. Returning on the first COMMIT
+        drops the rest of that range (the snapshot-then-poll update flake): the
+        insert arrives, ``poll`` returns, and the update/delete are still on
+        the socket. Wait until the server has sent through that LSN, or until
+        the batch is full, before returning.
+        """
         self._raise_if_failed()
         if not self._started:
             self.start()
+        if through_lsn:
+            return self._poll_through(through_lsn, limit=limit)
         if not self._buffer.has_committed():
             self._wake.clear()
             self._wake.wait(self._poll_wait)
             self._raise_if_failed()
         return self._buffer.committed(limit)
+
+    def _poll_through(self, target_lsn: str, *, limit: int) -> list[PeekedChange]:
+        target = lsn_to_int(target_lsn)
+        if target <= 0:
+            return self._buffer.committed(limit)
+        timeout = _env_float("CDC_PG_STREAM_CATCHUP_SEC", 5.0)
+        deadline = time.monotonic() + timeout
+        while True:
+            self._raise_if_failed()
+            got = self._buffer.committed(limit)
+            # A full upto_nchanges batch must return so a large backlog makes
+            # progress. The unread tail stays buffered for the next poll.
+            if len(got) >= limit:
+                return got
+            if self._server_wal_end >= target:
+                return got
+            if time.monotonic() >= deadline:
+                # A late keepalive must not fail the job. The next poll
+                # continues from the same unacked buffer.
+                return got
+            with self._state:
+                self._reply_requested = True
+            self._wake.clear()
+            remaining = deadline - time.monotonic()
+            self._wake.wait(min(0.05, max(0.0, remaining)))
 
     def committed_through(self, target_lsn: str, *, timeout: float = 5.0) -> list[PeekedChange]:
         """Every complete unacked txn, after the stream has reached ``target_lsn``.
