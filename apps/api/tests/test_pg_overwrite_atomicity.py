@@ -269,3 +269,75 @@ def test_live_postgres_new_table_overwrite_commits_once():
         with reader.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS {table}")
         reader.close()
+
+
+def test_parallel_workers_keep_every_overwrite_batch(monkeypatch):
+    """Wide rows used to be one row per batch on a worker pool. Each worker
+    truncated and committed, so a 3-row overwrite left the last row.
+    """
+    _pg_or_skip()
+    monkeypatch.setenv("DATAFLOW_PARALLEL_WORKERS", "4")
+    import src.transfer.stream as stream_mod
+
+    monkeypatch.setattr(stream_mod, "adaptive_chunk_size", lambda *args, **kwargs: 1)
+
+    psycopg2 = pytest.importorskip("psycopg2")
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    suffix = uuid.uuid4().hex[:8]
+    src, dst = f"ow_src_{suffix}", f"ow_dst_{suffix}"
+    conn = psycopg2.connect(**PG)
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f'CREATE TABLE "{src}" (id bigint, label text)')
+        cur.executemany(
+            f'INSERT INTO "{src}" (id, label) VALUES (%s, %s)',
+            [(1, "a"), (2, "b"), (3, "c")],
+        )
+
+    def endpoint(table: str) -> EndpointConfig:
+        return EndpointConfig(
+            kind="database",
+            format="postgresql",
+            host=PG["host"],
+            port=PG["port"],
+            database=PG["database"],
+            username=PG["user"],
+            password=PG["password"],
+            schema="public",
+            table=table,
+        )
+
+    try:
+        result = UniversalTransferEngine().execute_tracked(
+            TransferRequest(
+                source=endpoint(src),
+                destination=endpoint(dst),
+                mappings=[
+                    {"source": "id", "target": "id", "confidence": 0.99},
+                    {"source": "label", "target": "label", "confidence": 0.99},
+                ],
+                sync_mode="full_refresh_overwrite",
+                validation_mode="strict",
+                skip_preflight=True,
+                stream_contracts=[
+                    {
+                        "name": src,
+                        "primary_key": "id",
+                        "selected": True,
+                        "sync_mode": "full_refresh_overwrite",
+                    }
+                ],
+            ),
+            uuid.uuid4().hex[:24],
+        )
+        assert result.success, result.error
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT id, label FROM "{dst}" ORDER BY id')
+            assert cur.fetchall() == [(1, "a"), (2, "b"), (3, "c")]
+    finally:
+        with conn.cursor() as cur:
+            for name in (src, dst):
+                cur.execute(f'DROP TABLE IF EXISTS "{name}"')
+        conn.close()
