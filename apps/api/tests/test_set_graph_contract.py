@@ -261,6 +261,107 @@ def test_schedule_round_trip_keeps_the_graph_on_the_recipe():
     assert restored.shape_recipe["steps"][0]["op"] == "trim"
 
 
+def test_a_legacy_steps_only_recipe_and_schedule_still_run():
+    """Documents saved before set_graph have no key and no approved_set_hash.
+
+    Loading one, shaping it, and previewing it must do what the row engine
+    did: trim the sample, keep recipe_hash, and leave the schedule stamp alone.
+    """
+    from services.schedule_store import PipelineSchedule, drop_blank_validate_identity
+
+    recipe = {"steps": [TRIM]}
+    parsed = ShapeRecipe.parse(recipe, source_columns=["name"])
+    assert parsed.set_graph is None
+    assert parsed.set_hash == ""
+    assert parsed.set_errors == ()
+    assert "set_graph" not in parsed.to_wire()
+    runner = build_shape_runner(
+        recipe,
+        source_columns=["name"],
+        approved_hash=parsed.recipe_hash,
+    )
+    assert runner is not None
+    assert runner.records([{"name": " Ada "}]) == [{"name": "Ada"}]
+    assert runner.report()["recipe_hash"] == parsed.recipe_hash
+    assert runner.report()["set_hash"] == ""
+
+    legacy = {
+        "id": "sched-legacy",
+        "name": "legacy",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders",
+        "shape_recipe": dict(recipe),
+        "approved_shape_recipe_hash": parsed.recipe_hash,
+    }
+    assert "approved_set_hash" not in legacy
+    sched = PipelineSchedule.from_dict(legacy)
+    assert sched.approved_set_hash == ""
+    assert sched.approved_shape_recipe_hash == parsed.recipe_hash
+    assert sched.shape_recipe == recipe
+    restored = PipelineSchedule.from_dict(sched.to_dict())
+    assert restored.approved_set_hash == ""
+    assert restored.shape_recipe == recipe
+    assert "set_graph" not in restored.shape_recipe
+
+    echoed = drop_blank_validate_identity({
+        "name": "legacy",
+        "approved_set_hash": "",
+        "approved_shape_recipe_hash": "",
+    })
+    assert "approved_set_hash" not in echoed
+    assert "approved_shape_recipe_hash" not in echoed
+
+
+def test_preview_of_a_steps_only_recipe_still_returns_the_shaped_rows(client):
+    body = client.post(
+        "/api/v1/shape/preview",
+        json={
+            "sample_rows": [{"name": " Ada "}],
+            "source_columns": ["name"],
+            "recipe": {"steps": [TRIM]},
+        },
+    ).json()
+    assert body["after"] == [{"name": "Ada"}]
+    assert body["refusal"] is None
+    assert body["recipe"]["valid"] is True
+    assert body["recipe"]["set_hash"] == ""
+    assert body["recipe"]["set_errors"] == []
+    assert "set_graph" not in body["recipe"]
+
+
+def test_a_steps_only_execute_still_opens_the_row_runner():
+    from services.execute_shape_route import open_execute_shape
+
+    request = SimpleNamespace(
+        shape_recipe={"steps": [TRIM]},
+        stream_contracts=[],
+        sync_mode="full_refresh_append",
+        approved_shape_recipe_hash="",
+        operation="transfer",
+    )
+    plan = open_execute_shape(request, ["name"], job_id="job-legacy")
+    assert plan.failure is None
+    assert plan.shape_runner is not None
+    assert plan.shape_runner.records([{"name": " Ada "}]) == [{"name": "Ada"}]
+
+
+def test_an_existing_recipe_hash_mismatch_still_raises():
+    """Phase A must not turn a row-recipe approval miss into a sync-mode failure."""
+    from services.execute_shape_route import open_execute_shape
+
+    request = SimpleNamespace(
+        shape_recipe={"steps": [TRIM]},
+        stream_contracts=[],
+        sync_mode="full_refresh_append",
+        approved_shape_recipe_hash="deadbeefdeadbeef",
+        operation="transfer",
+    )
+    with pytest.raises(ShapeError, match="not the one approved"):
+        open_execute_shape(request, ["name"], job_id="job-mismatch")
+
+
 def test_multi_stream_execute_refuses_before_a_steps_only_runner(monkeypatch):
     def _boom(*_args, **_kwargs):
         raise AssertionError("row runner built while the set graph was still on the recipe")

@@ -22,6 +22,17 @@ def _mongo():
     return get_mongodb_service()
 
 
+def _set_graph_refusal(message: str) -> bool:
+    """True only for a set-graph refusal.
+
+    A row-recipe error (approval mismatch, a bad step, invalid JSON) must
+    keep the failure path it had before Phase A. Swallowing it here would
+    mark a production recipe failed for a sync-mode reason it did not have.
+    """
+    text = message.casefold()
+    return "set node" in text or "set graph" in text or "set_graph" in text
+
+
 @dataclass
 class ExecuteShapePlan:
     design_runner: Any = None
@@ -110,7 +121,10 @@ def open_execute_shape(request: Any, columns: list[str], *, job_id: str) -> Exec
             str(getattr(request, "approved_set_hash", "") or ""),
         )
     except ShapeError as exc:
-        shape_refusal = str(exc)
+        message = str(exc)
+        if not _set_graph_refusal(message):
+            raise
+        shape_refusal = message
     if not shape_refusal and len(selected) > 1 and enabled_recipe_steps(recipe_payload):
         shape_refusal = history_shape_refusal(shape_sync)
         if not shape_refusal:
@@ -157,7 +171,10 @@ def open_execute_shape(request: Any, columns: list[str], *, job_id: str) -> Exec
         try:
             plan.shape_runner = _open_shape_runner(request, columns)
         except ShapeError as exc:
-            shape_refusal = str(exc)
+            message = str(exc)
+            if not _set_graph_refusal(message):
+                raise
+            shape_refusal = message
             plan.shape_runner = None
             plan.design_runner = None
         else:
@@ -173,7 +190,7 @@ def open_execute_shape(request: Any, columns: list[str], *, job_id: str) -> Exec
         return plan
     if "source table" in shape_refusal:
         remediation = "Name the source table on each transform step, or run one stream."
-    elif "set node" in shape_refusal or "set graph" in shape_refusal or "set_graph" in shape_refusal:
+    elif _set_graph_refusal(shape_refusal):
         remediation = (
             "Remove the set graph from this recipe. The set engine cannot run "
             "it yet, and row steps in the same recipe were not applied."
