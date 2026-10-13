@@ -249,8 +249,10 @@ def _numeric_risk_route(
         object_store=local_object_store,
         sftp_server=local_sftp,
     )
-    assert _endpoint_reachable(source), f"{route}: source emulator is unreachable"
-    assert _endpoint_reachable(destination), f"{route}: destination is unreachable"
+    if not _endpoint_reachable(source):
+        pytest.skip(f"{route}: source emulator is unreachable")
+    if not _endpoint_reachable(destination):
+        pytest.skip(f"{route}: destination is unreachable")
     if _uses_snowflake(source, destination):
         __import__("fakesnow")
     records = case["approved_records"] if with_contract else case["records"]

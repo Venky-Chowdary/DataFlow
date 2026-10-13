@@ -172,8 +172,11 @@ def test_resumed_sqlite_overwrite_keeps_the_committed_prefix(tmp_path) -> None:
         write_mode="upsert",
         conflict_columns=["id"],
         atomic_overwrite=True,
-        file_batch_idx=1,
-        total_chunks=2,
+        # Stream batches are 1-based, so index 1 is the first chunk and must
+        # open a fresh stage. Index 2 with no stage is a resumed tail: the
+        # prefix is already on the live table.
+        file_batch_idx=2,
+        total_chunks=3,
     )
     assert result.ok, result.error
     seen = sqlite3.connect(path)

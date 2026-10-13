@@ -983,6 +983,7 @@ def test_sqlserver_bit_default_is_zero_or_one():
     assert _normalize_default_sql("false", "oracle", "NUMBER(10)") == "false"
 
 
+@pytest.mark.skipif(not mysql_up("P6"), reason="MySQL/MariaDB not listening on 3306")
 def test_pg_timestamp_default_now_creates_on_mysql_live():
     """The Transfer Studio route the menu sweep failed on: a PG ``timestamp NOT
     NULL DEFAULT now()`` column, create-new MySQL destination."""
