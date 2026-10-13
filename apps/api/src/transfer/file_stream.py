@@ -405,10 +405,7 @@ def peek_file_source(
             if not headers:
                 raise ValueError("CSV file has no header row")
             total = count_csv_rows(raw, options=read_options)
-            sample = [
-                dict(zip(headers, (_csv_empty_to_none(c) for c in row)))
-                for row in rows[:100]
-            ]
+            sample = [dict(zip(headers, row)) for row in rows[:100]]
             schema = FileParser.infer_schema(sample)
             return headers, schema, total, sample
 
@@ -435,7 +432,7 @@ def peek_file_source(
             for row in rows:
                 total += 1
                 if len(preview_rows) < 100:
-                    preview_rows.append([_csv_empty_to_none(c) for c in row])
+                    preview_rows.append(list(row))
         sample = [dict(zip(headers, row)) for row in preview_rows]
         schema = FileParser.infer_schema(sample)
         return headers, schema, total, sample
@@ -689,17 +686,6 @@ def peek_file_source(
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 
-def _csv_empty_to_none(value: Any) -> Any:
-    """Delimited carriers cannot spell NULL — RFC 4180 has no such token, so an
-    empty field is absence.
-
-    Self-describing carriers (JSON, JSONL, Parquet, ORC, Avro, XML) do spell NULL
-    separately and are read verbatim: their ``""`` is a value. Blank cells bound
-    for *typed* columns are still nulled downstream by ``empty_cells_as_null``.
-    """
-    return None if value == "" else value
-
-
 def _parse_jsonl_object(line: str, line_no: int) -> dict:
     """One JSONL object. Numbers use json_loads_exact, not stdlib float()."""
     from services.value_serializer import json_loads_exact
@@ -739,9 +725,7 @@ def _iter_csv_batches(
             record = row_to_record(
                 headers, row, source_label="CSV row", missing=None
             )
-            batch.append(
-                {k: _csv_empty_to_none(v) for k, v in record.items()}
-            )
+            batch.append(record)
             if len(batch) >= chunk_size:
                 yield batch
                 batch = []

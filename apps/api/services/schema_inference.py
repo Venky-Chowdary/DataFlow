@@ -1221,6 +1221,16 @@ def infer_column(
             role = "numeric"
             notes.append("8-digit values without date-ish name — not DATE")
 
+    # A present empty string is a text value. Dropping it as "no evidence"
+    # left a JSON/ARRAY vote, and the write then rejected ``""`` (CSV/TSV
+    # cannot spell NULL). Widen so the empty cell and the JSON text both land.
+    if inferred in {"JSON", "ARRAY"} and any(
+        isinstance(sample, str) and sample.strip() == "" for sample in (samples or [])
+    ):
+        inferred = "VARCHAR"
+        role = "text"
+        notes.append("empty string is a stored text value — not a JSON/ARRAY column")
+
     confidence = 0.99 if len(types) == 1 and not notes else 0.85
     if role == "string_enum":
         confidence = 0.95

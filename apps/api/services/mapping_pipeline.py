@@ -836,6 +836,14 @@ def run_mapping_pipeline(
                 continue
             empty = sum(1 for v in seq if is_null_evidence(v))
             observed_null_rate[col] = round(empty / len(seq), 3)
+        # A present ``""`` is text, not missing evidence. Stripping it before
+        # the profiler let a JSON-looking column forget the empty cell and
+        # then reject that cell at write time.
+        present_empty_text = {
+            col
+            for col, vals in source_samples.items()
+            if any(isinstance(v, str) and not str(v).strip() for v in (vals or []))
+        }
         source_samples = {
             col: evidence_samples(vals) for col, vals in source_samples.items()
         }
@@ -935,6 +943,10 @@ def run_mapping_pipeline(
                         merged_schema[name] = declared
                         continue
                     declared_source_types[name] = str(upgraded)
+            for name in present_empty_text:
+                if normalize_logical_type(merged_schema.get(name)) in {"json", "array"}:
+                    merged_schema[name] = "VARCHAR"
+                    declared_source_types[name] = "VARCHAR"
             source_schemas = [
                 {
                     **s,
