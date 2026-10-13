@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, feature/fix-qa-bug-fixes]
+    branches: [main, feature/fix-qa-bug-fixes, feature/studio-ui-upgrade]
   pull_request:
     branches: [main, "feature/**"]
 
