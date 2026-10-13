@@ -6,6 +6,10 @@ import { openStudio } from "./support";
  * Flags-off pixels against baselines taken from 873bec36.
  * Generate those baselines with PLAYWRIGHT_BASE_URL pointed at that commit.
  * A non-zero diff here means the classic screen moved.
+ *
+ * The destination overflow count follows GET /transfer/capabilities.
+ * A fresh API reports 101 destination engines (+88 in the dropdown).
+ * An older process that still had 100 engines painted +87.
  */
 
 const VIEWS = [
