@@ -266,10 +266,39 @@ test.describe("studio next", () => {
     await page.getByRole("button", { name: "Redo" }).click();
     await expect(page.locator(".react-flow__node")).toHaveCount(count);
 
+    await page.getByRole("button", { name: "Run preview" }).click();
+    await expect(page.getByTestId("canvas-preview").locator("tbody tr").first()).toBeVisible({ timeout: 20_000 });
+    const continueRecipe = page.getByRole("button", { name: "Continue with this transform" });
+    await expect(continueRecipe).toBeEnabled();
+    const continueFit = await continueRecipe.evaluate((node) => node.scrollWidth <= node.clientWidth + 1);
+    expect(continueFit).toBeTruthy();
+
     const primary = page.locator(".df2-studio-next .df2-btn-primary").first();
     await expect(primary).toBeVisible();
     const color = await primary.evaluate((node) => getComputedStyle(node).backgroundColor);
     expect(color).toBe("rgb(10, 61, 58)");
+  });
+
+  test("sample export runs from the canvas recipe", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    await page.locator(".df2-canvas-op[data-op='trim']").dragTo(page.getByTestId("transform-canvas-stage"), {
+      targetPosition: { x: 220, y: 180 },
+    });
+    await expect(page.locator(".react-flow__node")).toHaveCount(1);
+    await page.getByRole("button", { name: "Run preview" }).click();
+    await expect(page.getByTestId("canvas-preview").locator("tbody tr").first()).toBeVisible({ timeout: 20_000 });
+    const toMap = page.getByRole("button", { name: "Continue with this transform" });
+    await expect(toMap).toBeEnabled();
+    await toMap.click();
+    const toValidate = page.getByRole("button", { name: /Continue to Validate/ });
+    await expect(toValidate).toBeEnabled({ timeout: 20_000 });
+    await toValidate.click();
+    const execute = page.getByRole("button", { name: /^Execute/ });
+    await expect(execute).toBeVisible({ timeout: 30_000 });
+    await expect(execute).toBeEnabled({ timeout: 40_000 });
+    await execute.click();
+    await expect(page.getByRole("heading", { name: "Transfer complete" })).toBeVisible({ timeout: 40_000 });
   });
 
   test("database source shows the configured schema tree", async ({ page }) => {
