@@ -5448,59 +5448,14 @@ class IdentityInsertSession:
             )
 
 
-def sqlserver_identity_columns(conn: Any, schema: str, table: str) -> set[str]:
-    """Identity columns of one SQL Server table, read from ``sys.identity_columns``."""
-    import sqlalchemy as sa
-
-    rows = conn.execute(
-        sa.text(
-            "SELECT c.name FROM sys.identity_columns c "
-            "JOIN sys.tables t ON t.object_id = c.object_id "
-            "JOIN sys.schemas s ON s.schema_id = t.schema_id "
-            "WHERE t.name = :t AND s.name = COALESCE(:s, SCHEMA_NAME())"
-        ),
-        {"t": str(table), "s": str(schema) if schema else None},
-    ).fetchall()
-    return {str(r[0]) for r in rows}
-
-
-def begin_identity_insert(
-    conn: Any,
-    *,
-    dialect_name: str,
-    schema: str,
-    table: str,
-    target_cols: list[str],
-) -> IdentityInsertSession | None:
-    """Open an identity-insert session when the load supplies the key itself.
-
-    Returns ``None`` when the destination is not SQL Server, when the table has
-    no identity column, or when no identity column is among the mapped columns
-    (the generator fills it and there is nothing to override). Probe failures
-    return ``None`` too: the write then fails loudly on the first row rather
-    than silently letting the destination renumber the keys.
-    """
-    if (dialect_name or "").lower() not in {"mssql", "sqlserver"}:
-        return None
-    try:
-        identity_cols = sqlserver_identity_columns(conn, schema, table)
-    except Exception as exc:
-        logger.debug("identity column probe failed for %s: %s", table, exc)
-        return None
-    folded = {c.casefold() for c in identity_cols}
-    if not any(str(c).casefold() in folded for c in target_cols):
-        return None
-    session = IdentityInsertSession(
-        conn, quote_table_ref(table, schema=schema, dialect="sqlserver")
-    )
-    session.open()
-    return session
-
-
 # --------------------------------------------------------------------------- #
 # Exotic-carrier quarantine passes live in their own module (Phase F8 size
 # freeze) and are re-exported here so every existing import keeps working.
 # --------------------------------------------------------------------------- #
+from connectors.sqlserver_identity import (  # noqa: E402
+    begin_identity_insert,
+    sqlserver_identity_columns,
+)
 from connectors.write_quarantine_exotic import (  # noqa: E402
     _specialty_column_kind,  # noqa: F401 — re-exported for existing importers
     quarantine_unfit_binaries,
