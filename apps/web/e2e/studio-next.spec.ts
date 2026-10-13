@@ -351,6 +351,54 @@ conn.commit()
     await expectDisjoint(page, schemaBrowser, proceed);
     await expectHitInside(page, proceed, ".df2-wizard-footer");
   });
+
+  test("each node has an icon, a label, and a status, and set operations stay disabled", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    const trim = page.locator(".df2-canvas-op[data-op='trim']");
+    await expect(trim).toHaveAttribute("data-icon", "trim");
+    await expect(trim).toHaveAttribute("data-stripe", "values");
+    await expect(trim).toContainText("Trim");
+    await trim.click();
+    const node = page.locator(".df2-canvas-node").first();
+    await expect(node).toHaveAttribute("data-icon", "trim");
+    await expect(node).toHaveAttribute("data-status", "valid");
+    await expect(node).toContainText("Trim");
+    await expect(node).toContainText("Valid");
+    await expect(node).toContainText("Remove leading and trailing whitespace");
+    await expect(page.locator(".react-flow__minimap")).toBeVisible();
+    await page.getByRole("button", { name: "Fit view", exact: true }).click();
+    await page.getByRole("button", { name: "Arrange" }).click();
+    await expect(node).toBeVisible();
+    await page.getByLabel("Search operations").fill("join");
+    const join = page.locator(".df2-canvas-op[data-op='join']").filter({ visible: true });
+    await expect(join).toHaveAttribute("data-executable", "false");
+    await expect(join).toBeDisabled();
+    await expect(join).toHaveAttribute("data-icon", "join");
+    await page.getByRole("button", { name: "Preview this step" }).click();
+    await expect(page.getByTestId("canvas-node-preview")).toContainText(/sample|Preview|row/i);
+    await expect(page.getByTestId("transform-canvas")).toHaveAttribute("data-document", "chain");
+    await expect(page.getByTestId("transform-canvas")).toHaveAttribute("data-set-hash", "");
+  });
+
+  test("canvas icons and the action bar hold in dark and at 390", async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem("df2.theme", "dark");
+    });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openStudio(page);
+    await reachTransform(page);
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+    const trim = page.locator(".df2-canvas-op[data-op='trim']");
+    await expect(trim).toBeVisible();
+    await trim.click();
+    await expect(page.locator(".df2-canvas-node").first()).toContainText("Valid");
+    await expect(page.locator(".react-flow__minimap")).toBeHidden();
+    await expectActionBarBelowCanvas(page);
+    const node = page.locator(".df2-canvas-node").first();
+    await expectDisjoint(page, node, ".df2-xform-actions");
+    await expectHitInside(page, node, "[data-testid='transform-canvas-stage']");
+  });
 });
 
 test.describe("studio flags off", () => {

@@ -672,6 +672,8 @@ export function TransferTransformStep({
             ledger={ruleReport ? <BusinessRuleLedger report={ruleReport} embedded /> : null}
             previewColumns={columnsAfter}
             previewRows={afterRows.length ? afterRows : beforeRows}
+            sampleRows={beforeRows}
+            onApplySuggestion={applySuggestion}
             previewStatus={
               busy
                 ? "Previewing the recipe…"

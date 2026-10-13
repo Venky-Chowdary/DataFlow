@@ -21,6 +21,7 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
+from services.canvas_capability import set_document_hash  # noqa: E402
 from services.rbac import Permission, _required_permission  # noqa: E402
 from services.shape_suggest import profile_columns, suggest_steps  # noqa: E402
 from src.routers.shape_router import MAX_PREVIEW_ROWS, router  # noqa: E402
@@ -196,8 +197,33 @@ def test_the_catalog_states_the_operations_the_engine_will_accept(client):
     assert {"trim", "round_number", "derive_column", "filter_rows", "unnest_json", "flatten_json"} <= ops
     assert "join" not in ops
     assert "join" in body["post_load_only"]["operations"]
+    assert body["set_operations"] == []
+    assert body["set_engine"]["available"] is False
+    assert body["set_engine"]["set_hash"] == ""
+    nodes = {node["op"]: node for node in body["canvas_nodes"]}
+    assert nodes["join"]["executable"] is False
+    assert [port["id"] for port in nodes["join"]["inputs"]] == ["left", "right"]
+    assert any(port["kind"] == "field" for port in nodes["join"]["field_ports"])
+    assert nodes["router"]["executable"] is False
+    assert len(nodes["router"]["outputs"]) == 3
     assert {p["value"] for p in body["error_policies"]} == {"refuse", "divert", "null"}
     assert body["max_steps"] > 0
+
+
+def test_set_document_hash_is_empty_without_nodes_and_ignores_key_order():
+    assert set_document_hash(None) == ""
+    assert set_document_hash({"nodes": []}) == ""
+    left = set_document_hash({
+        "nodes": [{"op": "Join", "id": "join_orders", "on": "id"}],
+        "edges": [{"target": "b", "source": "a", "id": "e1"}],
+    })
+    right = set_document_hash({
+        "edges": [{"id": "e1", "source": "a", "target": "b"}],
+        "nodes": [{"id": "join_orders", "on": "id", "op": "join"}],
+    })
+    assert left == right
+    assert len(left) == 16
+    assert set_document_hash({"nodes": [{"id": "join_orders", "op": "lookup"}]}) != left
 
 
 def test_catalog_does_not_advertise_yn_boolean_or_iso_only_dates():

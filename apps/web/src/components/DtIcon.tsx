@@ -288,6 +288,179 @@ const paths: Record<string, React.ReactNode> = {
       <path d="M21 12a9 9 0 11-6.5-8.6" />
     </>
   ),
+  /* Recipe canvas. Same stroke, one picture per operation. */
+  filter: <path d="M4 4h16l-6 7v6l-4 2V11L4 4z" />,
+  cast: (
+    <>
+      <path d="M4 7h7M7.5 7v10" />
+      <path d="M14 17l3-10 3 10M15 14h4" />
+    </>
+  ),
+  trim: (
+    <>
+      <path d="M4 8h16M4 16h8" />
+      <path d="M14 13l4 3-4 3" />
+    </>
+  ),
+  mask: (
+    <>
+      <path d="M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12z" />
+      <circle cx="12" cy="12" r="2.5" />
+      <path d="M4 4l16 16" />
+    </>
+  ),
+  hash: (
+    <>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8c-2 2-2 6 0 8M9 10c2 1 4 1 6 0M9 14c2-1 4-1 6 0" />
+    </>
+  ),
+  dedupe: (
+    <>
+      <rect x="8" y="8" width="11" height="11" rx="1.5" />
+      <path d="M5 15V5h10" />
+      <path d="M11 13.5h5" />
+    </>
+  ),
+  split: (
+    <>
+      <path d="M4 6h6l3 6-3 6H4" />
+      <path d="M13 12h7" />
+    </>
+  ),
+  unnest: (
+    <>
+      <rect x="4" y="4" width="16" height="6" rx="1" />
+      <path d="M12 10v3" />
+      <rect x="8" y="15" width="8" height="5" rx="1" />
+    </>
+  ),
+  join: (
+    <>
+      <rect x="3" y="7" width="7" height="10" rx="1" />
+      <rect x="14" y="7" width="7" height="10" rx="1" />
+      <path d="M10 12h4" />
+    </>
+  ),
+  aggregate: (
+    <>
+      <path d="M4 18L12 5l8 13" />
+      <path d="M7.5 13h9" />
+    </>
+  ),
+  sort: (
+    <>
+      <path d="M8 19V5M8 5L5 8M8 5l3 3" />
+      <path d="M16 5v14M16 19l-3-3M16 19l3-3" />
+    </>
+  ),
+  rank: (
+    <>
+      <path d="M6 20V11M12 20V4M18 20v-7" />
+    </>
+  ),
+  window: (
+    <>
+      <rect x="3" y="5" width="18" height="14" rx="1.5" />
+      <path d="M3 9h18" />
+    </>
+  ),
+  router: (
+    <>
+      <path d="M12 4v6" />
+      <path d="M12 10l-7 8M12 10l7 8" />
+      <circle cx="12" cy="10" r="1.5" />
+    </>
+  ),
+  union: (
+    <>
+      <rect x="3" y="7" width="10" height="10" rx="1" />
+      <rect x="11" y="7" width="10" height="10" rx="1" />
+    </>
+  ),
+  normalizer: (
+    <>
+      <path d="M4 6h16M4 12h10M4 18h16" />
+    </>
+  ),
+  mapplet: (
+    <>
+      <rect x="3" y="3" width="8" height="8" rx="1" />
+      <rect x="13" y="13" width="8" height="8" rx="1" />
+      <path d="M11 7h2l2 2" />
+    </>
+  ),
+  flatten: (
+    <>
+      <path d="M4 8h16M4 12h16M4 16h16" />
+    </>
+  ),
+  rename: (
+    <>
+      <path d="M4 18h8" />
+      <path d="M14 6h6M17 6v12" />
+    </>
+  ),
+  concat: <path d="M4 12h6M14 12h6M10 12l2-3 2 3-2 3-2-3z" />,
+  collapse: <path d="M4 8h16M7 12h10M9 16h6" />,
+  case: (
+    <>
+      <path d="M5 17l3-10 3 10M6 14h4" />
+      <path d="M15 17v-7a2 2 0 014 0v7M15 13h4" />
+    </>
+  ),
+  strip: <path d="M5 8h14M8 12h8M10 16h4" />,
+  pad: (
+    <>
+      <path d="M4 12h16" />
+      <path d="M7 8v8M17 8v8" />
+    </>
+  ),
+  replace: (
+    <>
+      <path d="M4 8h8M4 16h6" />
+      <path d="M14 8h6M14 16h6M17 5v6M17 13v6" />
+    </>
+  ),
+  default: (
+    <>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v8M8 12h8" />
+    </>
+  ),
+  null: (
+    <>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M8 12h8" />
+    </>
+  ),
+  round: (
+    <>
+      <circle cx="12" cy="12" r="8" />
+      <path d="M12 8v4l3 2" />
+    </>
+  ),
+  truncate: <path d="M5 12h14M14 8l4 4-4 4" />,
+  absolute: <path d="M7 18V6M7 6h6a4 4 0 010 8H7M17 8v10" />,
+  clamp: (
+    <>
+      <path d="M4 8h16M4 16h16" />
+      <path d="M8 8v8M16 8v8" />
+    </>
+  ),
+  number: <path d="M8 5l-2 14M16 5l2 14M6 10h12M5 14h12" />,
+  pivot: (
+    <>
+      <path d="M4 4v16M4 20h16" />
+      <path d="M8 16V10M12 16V7M16 16v-3" />
+    </>
+  ),
+  unpivot: (
+    <>
+      <path d="M4 4h16M4 4v16" />
+      <path d="M8 8h8M8 12h6M8 16h4" />
+    </>
+  ),
 };
 
 export function DtIcon({

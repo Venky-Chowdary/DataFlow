@@ -60,6 +60,20 @@ export interface ShapeCatalog {
   max_preview_rows: number;
   error_policies: ShapeErrorPolicy[];
   post_load_only: { operations: string[]; reason: string };
+  /** Set ops the engine can run. Empty until one is certified. */
+  set_operations?: string[];
+  set_engine?: { available: boolean; set_hash?: string; reference?: string; pushdown_dialects?: string[] };
+  /** Port contract for nodes the row catalog does not run. */
+  canvas_nodes?: {
+    op: string;
+    summary: string;
+    family: string;
+    executable: boolean;
+    placement: "palette" | "wizard" | "plan";
+    inputs: { id: string; role: "in" | "out"; kind: "row" | "field"; label: string; visible: boolean }[];
+    outputs: { id: string; role: "in" | "out"; kind: "row" | "field"; label: string; visible: boolean }[];
+    field_ports: { id: string; role: "in" | "out"; kind: "row" | "field"; label: string; visible: boolean }[];
+  }[];
 }
 
 export interface ShapeColumnProfile {

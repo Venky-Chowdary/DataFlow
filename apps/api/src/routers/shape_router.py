@@ -22,6 +22,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from services.canvas_capability import canvas_capability
 from services.shape_engine import ShapeEngine, ShapeRowError
 from services.shape_expr import ExpressionError, compile_expression, describe_functions
 from services.shape_models import MAX_STEPS, ShapeError, ShapeRecipe, describe_catalog
@@ -102,6 +103,7 @@ async def shape_catalog() -> dict[str, Any]:
                 "read cannot provide; model them on the Transforms page after the load."
             ),
         },
+        **canvas_capability(),
     }
 
 

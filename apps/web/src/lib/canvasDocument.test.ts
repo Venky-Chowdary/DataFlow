@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  chainDocument,
   classifyChainLink,
+  classifyPortLink,
+  documentKind,
   draftWithDefaults,
+  executableRecipe,
   insertIndexAtPoint,
   insertIndexForDrop,
   layoutFor,
@@ -12,6 +16,7 @@ import {
   stepsToFlow,
   stepsWithoutPlanOps,
 } from "./canvasDocument.js";
+import { streamPorts } from "./canvasRegistry.js";
 import { stepFromDraft, type ShapeOperation, type ShapeStepWire } from "./shape.js";
 
 const trim: ShapeOperation = {
@@ -127,6 +132,69 @@ describe("canvas document", () => {
     assert.equal(filterDraft.column, "");
     assert.equal(filterDraft.options.keep, false);
     assert.equal(filterDraft.options.condition, undefined);
+  });
+
+  it("holds a chain and a dag, and keeps a blocked join out of the recipe", () => {
+    const steps: ShapeStepWire[] = [
+      { op: "trim", column: "name" },
+      { op: "filter_rows", options: { condition: "[name] <> ''" } },
+    ];
+    const chain = chainDocument(steps);
+    assert.equal(documentKind(chain), "chain");
+    assert.equal(chain.edges[0].sourcePort, "out");
+    assert.equal(chain.edges[0].targetPort, "in");
+    assert.equal(executableRecipe(chain, new Set(["trim", "filter_rows"])).length, 2);
+    const flow = stepsToFlow(steps, [trim, filter], "", false);
+    assert.equal(flow.nodes[0].icon, "trim");
+    assert.equal(flow.nodes[0].status, "valid");
+    assert.equal(flow.nodes[1].stripe, "rows");
+    assert.ok(flow.nodes[0].ports.some((port) => port.kind === "field" && port.visible === false));
+    const join = {
+      id: "join-1",
+      op: "join",
+      ports: [
+        { id: "left", role: "in" as const, kind: "row" as const, label: "Left", visible: true },
+        { id: "right", role: "in" as const, kind: "row" as const, label: "Right", visible: true },
+        { id: "out", role: "out" as const, kind: "row" as const, label: "Joined", visible: true },
+      ],
+    };
+    const after = {
+      id: "step-2",
+      op: "trim",
+      ports: streamPorts(),
+      step: { op: "trim", column: "city" },
+    };
+    const dag = {
+      nodes: [...chain.nodes, join, after],
+      edges: [
+        ...chain.edges,
+        { id: "to-join", source: "step-1", sourcePort: "out", target: "join-1", targetPort: "left" },
+        { id: "from-join", source: "join-1", sourcePort: "out", target: "step-2", targetPort: "in" },
+      ],
+    };
+    assert.equal(documentKind(dag), "dag");
+    const recipe = executableRecipe(dag, new Set(["trim", "filter_rows"]));
+    assert.deepEqual(recipe.map((step) => step.op), ["trim", "filter_rows"]);
+    const refused = classifyPortLink({
+      nodes: [
+        { ...flow.nodes[0], executable: false },
+        flow.nodes[1],
+      ],
+      source: "step-0",
+      sourcePort: "out",
+      target: "step-1",
+      targetPort: "in",
+    });
+    assert.equal(refused.ok, false);
+    assert.match(refused.reason, /not executable/);
+    const accepted = classifyPortLink({
+      nodes: flow.nodes,
+      source: "step-0",
+      sourcePort: "out",
+      target: "step-1",
+      targetPort: "in",
+    });
+    assert.equal(accepted.ok, true);
   });
 });
 
