@@ -1386,8 +1386,8 @@
   height: 18px;
   min-width: 18px;
   max-width: 18px;
-  border: 1px solid var(--df-border-strong, #d0d6de);
-  border-radius: 3px;
+  border-radius: 4px;
+  border: 1px dashed var(--df-border-strong, #d0d6de);
   background: transparent;
 }
 .df2-route-bar-endpoint {
@@ -1408,9 +1408,16 @@
 }
 
 .df2-route-bar-arrow {
-  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 12px;
+  width: 12px;
+  height: 18px;
   color: #94a3b8;
-  font-size: 11px;
+}
+.df2-route-bar-arrow svg {
+  display: block;
 }
 
 .df2-route-bar-meta {
