@@ -13,6 +13,23 @@ async function quietChrome(page: Page): Promise<void> {
   });
 }
 
+function channel(value: number): number {
+  const unit = value / 255;
+  return unit <= 0.03928 ? unit / 12.92 : ((unit + 0.055) / 1.055) ** 2.4;
+}
+
+function contrast(foreground: string, background: string): number {
+  const parse = (color: string) => {
+    const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
+    if (!match) return 0;
+    const [red, green, blue] = [Number(match[1]), Number(match[2]), Number(match[3])].map(channel);
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  };
+  const lighter = Math.max(parse(foreground), parse(background));
+  const darker = Math.min(parse(foreground), parse(background));
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
 /** The Back / Continue bar is a flex row under the canvas, flush with the page. */
 async function expectActionBarBelowCanvas(page: Page): Promise<void> {
   const stage = page.getByTestId("transform-canvas-stage");
@@ -414,6 +431,118 @@ conn.commit()
     const node = page.locator(".df2-canvas-node").first();
     await expectDisjoint(page, node, ".df2-xform-actions");
     await expectHitInside(page, node, "[data-testid='transform-canvas-stage']");
+  });
+
+  test("arranged flow stays clear of the minimap and each category has its own color", async ({ page }) => {
+  await openStudio(page);
+  await reachTransform(page);
+  for (const op of ["trim", "drop_column", "filter_rows"]) {
+    await page.locator(`.df2-canvas-op[data-op='${op}']`).click();
+  }
+  await expect(page.locator(".df2-canvas-node")).toHaveCount(3);
+  await page.getByRole("button", { name: "Arrange" }).click();
+  const stage = page.getByTestId("transform-canvas-stage");
+  const minimap = page.locator(".react-flow__minimap");
+  await expect(minimap).toBeVisible();
+  const stageBox = await stage.boundingBox();
+  const mapBox = await minimap.boundingBox();
+  expect(stageBox && mapBox).toBeTruthy();
+  const nodes = page.locator(".react-flow__node");
+  const count = await nodes.count();
+  for (let index = 0; index < count; index += 1) {
+    const box = await nodes.nth(index).boundingBox();
+    expect(box).toBeTruthy();
+    expect(box!.x).toBeGreaterThanOrEqual(stageBox!.x + 4);
+    expect(box!.y).toBeGreaterThanOrEqual(stageBox!.y + 4);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(stageBox!.x + stageBox!.width - 4);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(stageBox!.y + stageBox!.height - 4);
+    const clear = box!.x + box!.width <= mapBox!.x + 1
+      || mapBox!.x + mapBox!.width <= box!.x + 1
+      || box!.y + box!.height <= mapBox!.y + 1
+      || mapBox!.y + mapBox!.height <= box!.y + 1;
+    expect(clear).toBeTruthy();
+  }
+  const stripes = await page.locator(".df2-canvas-node").evaluateAll((cards) => cards.map((card) => card.getAttribute("data-stripe")));
+  expect(stripes).toEqual(["values", "columns", "rows"]);
+  const paints = await page.locator(".df2-canvas-node").evaluateAll((cards) => cards.map((card) => {
+    const band = card.querySelector(".df2-canvas-node-band");
+    const mark = card.querySelector(".df2-canvas-node-mark");
+    const title = card.querySelector(".df2-canvas-node-title");
+    const bandStyle = band ? getComputedStyle(band) : null;
+    const markStyle = mark ? getComputedStyle(mark) : null;
+    const titleStyle = title ? getComputedStyle(title) : null;
+    return {
+      band: bandStyle?.backgroundColor ?? "",
+      mark: markStyle?.backgroundColor ?? "",
+      title: titleStyle?.color ?? "",
+      icon: markStyle?.color ?? "",
+    };
+  }));
+  expect(new Set(paints.map((paint) => paint.band)).size).toBe(3);
+  expect(new Set(paints.map((paint) => paint.mark)).size).toBe(3);
+  for (const paint of paints) {
+    expect(contrast(paint.title, paint.band)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(paint.icon, paint.mark)).toBeGreaterThanOrEqual(4.5);
+  }
+  const stageHeight = stageBox!.height;
+  const dock = await page.getByTestId("canvas-preview").boundingBox();
+  const rail = await page.locator(".df2-canvas-rail").boundingBox();
+  const inspector = await page.locator(".df2-canvas-inspector").boundingBox();
+  expect(dock && rail && inspector).toBeTruthy();
+  expect(stageHeight).toBeGreaterThan(dock!.height);
+  expect(rail!.width).toBeGreaterThanOrEqual(180);
+  expect(inspector!.width).toBeGreaterThanOrEqual(240);
+  expect(inspector!.height).toBeGreaterThanOrEqual(120);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Arrange" }).click();
+  await expect(minimap).toBeHidden();
+  await expect.poll(async () => {
+    const fitted = await stage.boundingBox();
+    const first = await nodes.first().boundingBox();
+    if (!fitted || !first) return false;
+    return first.x >= fitted.x - 1
+      && first.y >= fitted.y - 1
+      && first.x + first.width <= fitted.x + fitted.width + 1
+      && first.y + first.height <= fitted.y + fitted.height + 1;
+  }).toBeTruthy();
+  const phoneStage = await stage.boundingBox();
+  const phoneInspector = await page.locator(".df2-canvas-inspector").boundingBox();
+  const phoneDock = await page.getByTestId("canvas-preview").boundingBox();
+  const phoneRail = await page.locator(".df2-canvas-rail").boundingBox();
+  expect(phoneStage && phoneInspector && phoneDock && phoneRail).toBeTruthy();
+  expect(phoneStage!.height).toBeGreaterThan(120);
+  expect(phoneInspector!.height).toBeGreaterThanOrEqual(72);
+  expect(phoneDock!.height).toBeGreaterThanOrEqual(48);
+  expect(phoneRail!.width).toBeGreaterThanOrEqual(112);
+  expect(phoneRail!.height).toBeGreaterThanOrEqual(phoneInspector!.height);
+  for (let index = 0; index < count; index += 1) {
+    const box = await nodes.nth(index).boundingBox();
+    expect(box).toBeTruthy();
+    expect(box!.x).toBeGreaterThanOrEqual(phoneStage!.x - 1);
+    expect(box!.y).toBeGreaterThanOrEqual(phoneStage!.y - 1);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(phoneStage!.x + phoneStage!.width + 1);
+    expect(box!.y + box!.height).toBeLessThanOrEqual(phoneStage!.y + phoneStage!.height + 1);
+  }
+
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+  const dark = await page.locator(".df2-canvas-node").evaluateAll((cards) => cards.map((card) => {
+    const band = card.querySelector(".df2-canvas-node-band");
+    const mark = card.querySelector(".df2-canvas-node-mark");
+    const title = card.querySelector(".df2-canvas-node-title");
+    return {
+      band: band ? getComputedStyle(band).backgroundColor : "",
+      mark: mark ? getComputedStyle(mark).backgroundColor : "",
+      title: title ? getComputedStyle(title).color : "",
+      icon: mark ? getComputedStyle(mark).color : "",
+    };
+  }));
+  expect(new Set(dark.map((paint) => paint.band)).size).toBe(3);
+  expect(new Set(dark.map((paint) => paint.mark)).size).toBe(3);
+  for (const paint of dark) {
+    expect(contrast(paint.title, paint.band)).toBeGreaterThanOrEqual(4.5);
+    expect(contrast(paint.icon, paint.mark)).toBeGreaterThanOrEqual(4.5);
+  }
   });
 });
 

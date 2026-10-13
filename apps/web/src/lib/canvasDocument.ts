@@ -200,7 +200,7 @@ export function reorderByDrag(
 }
 
 /** Horizontal pitch. Wider than a node so the link between steps stays visible. */
-export const LAYOUT_PITCH = 296;
+export const LAYOUT_PITCH = 320;
 
 /** Where a palette drop lands in the chain, from the flow-axis coordinate. */
 export function insertIndexForDrop(stepCount: number, localY: number, pitch = LAYOUT_PITCH): number {
@@ -210,8 +210,8 @@ export function insertIndexForDrop(stepCount: number, localY: number, pitch = LA
 }
 
 /** Node box the chain layout and the edge-hit test share. Wide enough to read at zoom 1. */
-export const NODE_WIDTH = 232;
-export const NODE_BODY = 128;
+export const NODE_WIDTH = 248;
+export const NODE_BODY = 160;
 
 export interface FlowPoint {
   x: number;

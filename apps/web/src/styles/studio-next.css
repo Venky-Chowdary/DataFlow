@@ -118,6 +118,7 @@
   display: flex;
   flex-direction: column;
   flex: 1 1 0;
+  gap: 8px;
   min-height: 0;
   overflow: hidden;
 }
@@ -130,7 +131,34 @@
 
 .df2-canvas-head {
   justify-content: space-between;
-  align-items: flex-start;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+/* The step title stays, but it must not spend the column the stage needs. */
+.df2-xform.df2-studio-next > .df2-xform-head {
+  position: static;
+  top: auto;
+  margin: 0;
+  gap: 0;
+  padding: 0 0 4px;
+  border-bottom: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.df2-xform.df2-studio-next .df2-xform-title {
+  font-size: 16px;
+}
+
+.df2-xform.df2-studio-next .df2-xform-route {
+  margin-top: 2px;
+}
+
+.df2-xform.df2-studio-next > .df2-alert {
+  flex: 0 1 auto;
+  max-height: 4.5rem;
+  overflow: auto;
 }
 
 .df2-canvas-head h3,
@@ -161,17 +189,17 @@
   flex: 1 1 0;
   min-height: 0;
   align-items: stretch;
-  overflow: hidden;
+  overflow: clip;
 }
 
 .df2-canvas-rail {
-  width: 168px;
-  flex: 0 0 168px;
+  width: 188px;
+  flex: 0 0 188px;
 }
 
 .df2-canvas-inspector {
-  width: 240px;
-  flex: 0 0 240px;
+  width: 252px;
+  flex: 0 0 252px;
 }
 
 .df2-canvas-rail,
@@ -240,38 +268,47 @@
   pointer-events: none;
 }
 
-.df2-canvas-op-icon {
-  width: 32px;
-  height: 32px;
+.df2-canvas-op-icon,
+.df2-canvas-node-mark {
   display: grid;
   place-items: center;
   border-radius: var(--df-radius-md);
-  background: var(--df-brand-tile);
-  color: var(--df-on-tile);
 }
 
-.df2-canvas-op[data-stripe="columns"] .df2-canvas-op-icon {
-  background: var(--df-brand-text);
+.df2-canvas-op-icon {
+  width: 32px;
+  height: 32px;
 }
 
-.df2-canvas-op[data-stripe="rows"] .df2-canvas-op-icon {
+.df2-canvas-node-mark {
+  width: 40px;
+  height: 40px;
+}
+
+/* Band and icon tile use different logo tokens so a category reads twice.
+   Ink on each fill stays at or above 4.5:1 in light and dark. */
+.df2-canvas-op[data-stripe="values"] .df2-canvas-op-icon,
+.df2-canvas-node[data-stripe="values"] .df2-canvas-node-mark {
   background: var(--df-brand-arrow);
   color: var(--df-brand-tile);
 }
 
-.df2-canvas-op[data-stripe="shape"] .df2-canvas-op-icon {
-  background: var(--df-attention);
-  color: var(--df-brand-tile);
+.df2-canvas-op[data-stripe="columns"] .df2-canvas-op-icon,
+.df2-canvas-node[data-stripe="columns"] .df2-canvas-node-mark {
+  background: var(--df-on-tile);
+  color: var(--df-logo-ink);
 }
 
-.df2-canvas-node-mark {
-  width: 36px;
-  height: 36px;
-  display: grid;
-  place-items: center;
-  border-radius: var(--df-radius-md);
-  background: var(--df-surface);
-  color: var(--df-brand-tile);
+.df2-canvas-op[data-stripe="rows"] .df2-canvas-op-icon,
+.df2-canvas-node[data-stripe="rows"] .df2-canvas-node-mark {
+  background: var(--df-brand-tile);
+  color: var(--df-on-tile);
+}
+
+.df2-canvas-op[data-stripe="shape"] .df2-canvas-op-icon,
+.df2-canvas-node[data-stripe="shape"] .df2-canvas-node-mark {
+  background: var(--df-logo-ink);
+  color: var(--df-on-tile);
 }
 
 .df2-canvas-op-copy {
@@ -303,7 +340,7 @@
 }
 
 .df2-canvas-op[data-stripe="columns"] {
-  box-shadow: inset 3px 0 0 var(--df-brand-text);
+  box-shadow: inset 3px 0 0 var(--df-logo-ink);
 }
 
 .df2-canvas-op[data-stripe="rows"] {
@@ -426,9 +463,13 @@
 }
 
 .df2-canvas-stage {
+  --df-minimap-w: 112px;
+  --df-minimap-h: 88px;
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
+  box-sizing: border-box;
+  padding: 0 var(--df-minimap-w) var(--df-minimap-h) 0;
   background: var(--df-bg-canvas);
   border: 1px solid var(--df-border);
   border-radius: var(--df-radius-md);
@@ -460,7 +501,7 @@
   flex-direction: column;
   flex: 0 1 auto;
   min-height: 72px;
-  max-height: 40%;
+  max-height: 16%;
   overflow: hidden;
   border: 1px solid var(--df-border);
   border-radius: var(--df-radius-md);
@@ -557,7 +598,7 @@
 
 .df2-canvas-node {
   width: 100%;
-  min-height: 112px;
+  min-height: 148px;
   padding: 0;
   background: var(--df-surface);
   border: 1px solid var(--df-border-strong);
@@ -568,21 +609,18 @@
 
 .df2-canvas-node-band {
   display: grid;
-  grid-template-columns: 36px minmax(0, 1fr) auto;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--df-space-2);
-  padding: 8px 10px;
+  padding: 10px 12px;
   border-radius: 9px 9px 0 0;
   background: var(--df-brand-tile);
   color: var(--df-on-tile);
 }
 
 .df2-canvas-node[data-stripe="columns"] .df2-canvas-node-band {
-  background: var(--df-brand-text);
-}
-
-.df2-canvas-node[data-stripe="columns"] .df2-canvas-node-mark {
-  color: var(--df-brand-text);
+  background: var(--df-logo-ink);
+  color: var(--df-on-tile);
 }
 
 .df2-canvas-node[data-stripe="rows"] .df2-canvas-node-band {
@@ -590,17 +628,9 @@
   color: var(--df-brand-tile);
 }
 
-.df2-canvas-node[data-stripe="rows"] .df2-canvas-node-mark {
-  color: var(--df-brand-tile);
-}
-
 .df2-canvas-node[data-stripe="shape"] .df2-canvas-node-band {
   background: var(--df-attention);
   color: var(--df-brand-tile);
-}
-
-.df2-canvas-node[data-stripe="shape"] .df2-canvas-node-mark {
-  color: var(--df-attention);
 }
 
 .df2-canvas-node-id {
@@ -671,7 +701,7 @@
 
 .df2-canvas-node-title {
   margin: 0;
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.25;
   font-weight: var(--df-fw-semibold);
   color: inherit;
@@ -719,6 +749,18 @@
 
 .df2-canvas-port.is-count {
   background: var(--df-attention);
+}
+
+.df2-canvas .df2-canvas-minimap.react-flow__panel {
+  width: 96px;
+  height: 68px;
+  margin: 0;
+  right: calc(-1 * var(--df-minimap-w) + 8px);
+  bottom: calc(-1 * var(--df-minimap-h) + 8px);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-md);
+  overflow: hidden;
+  background: var(--df-surface);
 }
 
 .df2-canvas .react-flow__edge-path {
@@ -775,13 +817,16 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
     flex-direction: column;
   }
 
-  /* Keep the stage beside a narrow palette. A full-width stack gives the
-     palette and inspector the height, and the stage collapses to a line
-     that the footer then covers. */
+  /* The stage is the full-width first row. Palette and inspector keep a
+     short band under it so a side rail cannot shrink the flow to a sliver. */
   .df2-canvas-head {
     flex-direction: column;
     align-items: stretch;
-    gap: var(--df-space-2);
+    gap: var(--df-space-1);
+  }
+
+  .df2-canvas-head p {
+    display: none;
   }
 
   .df2-canvas-head-actions {
@@ -791,29 +836,34 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
     flex-wrap: nowrap;
   }
 
+  .df2-canvas-stage {
+    padding: 0;
+  }
+
   .df2-canvas-body {
     display: grid;
-    grid-template-columns: 112px minmax(0, 1fr);
-    grid-template-rows: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(12rem, 1fr) 6.5rem 5.25rem;
     align-items: stretch;
+    flex: 1 1 0;
     min-height: 0;
-    overflow: hidden;
+    overflow: clip;
   }
 
   .df2-canvas-rail {
     grid-column: 1;
-    grid-row: 1;
+    grid-row: 2;
     width: auto;
     flex: none;
     max-height: none;
     min-height: 0;
-    height: auto;
+    height: 100%;
     align-self: stretch;
     overflow: auto;
   }
 
   .df2-canvas-stage-wrap {
-    grid-column: 2;
+    grid-column: 1;
     grid-row: 1;
     flex: none;
     width: auto;
@@ -825,17 +875,18 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
   }
 
   .df2-canvas-inspector {
-    grid-column: 1 / -1;
-    grid-row: 2;
+    grid-column: 1;
+    grid-row: 3;
     width: auto;
     flex: none;
-    max-height: 4.5rem;
+    max-height: none;
+    height: 100%;
     min-height: 0;
     overflow: auto;
   }
 
   .df2-canvas-dock {
-    max-height: 3.5rem;
+    max-height: 3.75rem;
     min-height: 0;
   }
 

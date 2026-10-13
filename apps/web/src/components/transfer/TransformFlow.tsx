@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent } from "react";
 import {
   Background,
   BackgroundVariant,
@@ -10,7 +10,9 @@ import {
   ReactFlow,
   ReactFlowProvider,
   applyNodeChanges,
+  getViewportForBounds,
   useReactFlow,
+  useStore,
   type Connection,
   type Edge,
   type Node,
@@ -71,6 +73,42 @@ export interface StudioNodeData extends Record<string, unknown> {
 
 const nodeTypes = { studio: StudioFlowNode };
 const PITCH = LAYOUT_PITCH;
+/** Inside the flow, clear of the reserved minimap corner. */
+const FIT_PADDING = { top: "28px", right: "28px", bottom: "28px", left: "28px" } as const;
+/** Low enough that a 390px stage can still frame a full chain. */
+const FIT_MIN_ZOOM = 0.08;
+const FIT_MAX_ZOOM = 1.35;
+
+function positive(value: number | undefined): number {
+  return value != null && value > 0 ? value : 0;
+}
+
+/**
+ * xyflow's fitView drops any node whose measured box is still 0, so the last
+ * card in a new chain is framed out and lands under the minimap. Declared
+ * width and height are the card size we already render.
+ */
+function boundsOf(nodes: Node[]): { x: number; y: number; width: number; height: number } | null {
+  if (nodes.length === 0) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const node of nodes) {
+    const width = positive(node.measured?.width) || positive(node.width) || NODE_WIDTH;
+    const height = positive(node.measured?.height) || positive(node.height) || NODE_BODY;
+    minX = Math.min(minX, node.position.x);
+    minY = Math.min(minY, node.position.y);
+    maxX = Math.max(maxX, node.position.x + width);
+    maxY = Math.max(maxY, node.position.y + height);
+  }
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  };
+}
 
 interface TransformFlowProps {
   nodes: FlowNodeModel[];
@@ -117,7 +155,9 @@ function FlowCanvas({
   onPreviewNode,
   fitTick,
 }: TransformFlowProps) {
-  const { screenToFlowPosition, fitView } = useReactFlow();
+  const { screenToFlowPosition, setViewport } = useReactFlow();
+  const paneWidth = useStore((state) => state.width);
+  const paneHeight = useStore((state) => state.height);
   const [hot, setHot] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [theme, setTheme] = useState<"light" | "dark">(readTheme);
@@ -134,12 +174,48 @@ function FlowCanvas({
     [nodes, pending, placed, expanded, onPreviewNode],
   );
   const [flowNodes, setFlowNodes] = useState(built);
+  const placedRef = useRef(placed);
+  placedRef.current = placed;
+  const nodesRef = useRef(flowNodes);
+  nodesRef.current = flowNodes;
+  const paneRef = useRef({ w: paneWidth, h: paneHeight });
+  paneRef.current = { w: paneWidth, h: paneHeight };
+  const autoFitted = useRef(false);
+  const fittedPane = useRef({ w: 0, h: 0 });
   useEffect(() => {
     setFlowNodes(built);
   }, [built]);
-  useEffect(() => {
-    if (fitTick > 0) fitView({ padding: 0.08, duration: 0 });
-  }, [fitTick, fitView]);
+  useLayoutEffect(() => {
+    const explicit = fitTick > 0;
+    // A drop lands on the pointer. Fitting that frame would slide the node
+    // off the point the test and the operator just chose. An explicit Fit or
+    // Arrange still frames every node, including one that was dropped.
+    if (!explicit && placed) return;
+    if (nodesRef.current.length === 0) return;
+    const pane = paneRef.current;
+    if (pane.w < 40 || pane.h < 48) return;
+    const paneChanged = Math.abs(pane.w - fittedPane.current.w) > 16
+      || Math.abs(pane.h - fittedPane.current.h) > 16;
+    // The first measure is often the stage before the column finishes
+    // layout. Fit again when the pane actually grows, or the chain stays
+    // small in the corner. Declared card size is enough, so this runs
+    // before paint instead of waiting on xyflow's measured box.
+    if (!explicit && autoFitted.current && !paneChanged) return;
+    if (!explicit && placedRef.current) return;
+    const bounds = boundsOf(nodesRef.current);
+    if (!bounds) return;
+    if (!explicit) autoFitted.current = true;
+    const viewport = getViewportForBounds(
+      bounds,
+      pane.w,
+      pane.h,
+      FIT_MIN_ZOOM,
+      FIT_MAX_ZOOM,
+      FIT_PADDING,
+    );
+    fittedPane.current = { w: pane.w, h: pane.h };
+    void setViewport(viewport, { duration: 0 });
+  }, [fitTick, flowNodes.length, placed, paneWidth, paneHeight, setViewport]);
   useEffect(() => {
     const read = () => setTheme(readTheme());
     const observer = new MutationObserver(read);
@@ -220,6 +296,8 @@ function FlowCanvas({
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
         fitView={false}
+        minZoom={FIT_MIN_ZOOM}
+        maxZoom={FIT_MAX_ZOOM}
         proOptions={{ hideAttribution: true }}
         nodesDraggable
         nodesConnectable
@@ -261,7 +339,16 @@ function FlowCanvas({
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1.5} color="var(--df-border-strong)" />
         <Controls showInteractive={false} showFitView={false} />
-        <MiniMap pannable={false} zoomable={false} ariaLabel="Canvas overview" />
+        <MiniMap
+          pannable={false}
+          zoomable={false}
+          ariaLabel="Canvas overview"
+          className="df2-canvas-minimap"
+          style={{ width: 96, height: 68 }}
+          bgColor="var(--df-surface)"
+          nodeColor="var(--df-border-strong)"
+          maskColor="color-mix(in srgb, var(--df-brand-tile) 16%, transparent)"
+        />
       </ReactFlow>
     </div>
   );
@@ -284,6 +371,10 @@ function buildNodes(
       id: node.id,
       type: "studio",
       position: anchored ?? positions[slot] ?? { x: 24, y: 28 },
+      width: NODE_WIDTH,
+      height: NODE_BODY,
+      initialWidth: NODE_WIDTH,
+      initialHeight: NODE_BODY,
       style: { width: NODE_WIDTH },
       data: {
         index: node.index,
@@ -317,6 +408,10 @@ function buildNodes(
       id: "pending",
       type: "studio",
       position: anchored ?? positions[slot] ?? { x: 24, y: 28 },
+      width: NODE_WIDTH,
+      height: NODE_BODY,
+      initialWidth: NODE_WIDTH,
+      initialHeight: NODE_BODY,
       style: { width: NODE_WIDTH },
       data: {
         index: -1,
@@ -378,7 +473,7 @@ function StudioFlowNode({ id, data, selected }: NodeProps<Node<StudioNodeData>>)
       ))}
       <div className="df2-canvas-node-band">
         <span className="df2-canvas-node-mark" aria-hidden>
-          <DtIcon name={data.invalid ? "alert" : data.icon} size={22} chrome="product" />
+          <DtIcon name={data.invalid ? "alert" : data.icon} size={24} chrome="product" />
         </span>
         <div className="df2-canvas-node-id">
           <p className="df2-canvas-node-title">{data.title}</p>

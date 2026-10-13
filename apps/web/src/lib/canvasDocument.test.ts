@@ -10,6 +10,7 @@ import {
   insertIndexAtPoint,
   insertIndexForDrop,
   layoutFor,
+  LAYOUT_PITCH,
   NODE_WIDTH,
   planCards,
   reorderByDrag,
@@ -75,7 +76,7 @@ describe("canvas document", () => {
     assert.match(classifyChainLink(3, -1, 0).reason, /not on this recipe/);
     assert.equal(insertIndexForDrop(0, 400), 0);
     assert.equal(insertIndexForDrop(3, 0), 0);
-    assert.equal(insertIndexForDrop(3, 148), 1);
+    assert.equal(insertIndexForDrop(3, LAYOUT_PITCH / 2), 1);
     assert.equal(insertIndexForDrop(3, 0), 0);
     assert.equal(insertIndexForDrop(3, 900), 3);
   });

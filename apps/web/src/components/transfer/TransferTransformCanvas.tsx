@@ -145,7 +145,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const [linkNote, setLinkNote] = useState("");
   const [rulesOpen, setRulesOpen] = useState(false);
   const [templatesOpen, setTemplatesOpen] = useState(false);
-  const [dockHeight, setDockHeight] = useState(168);
+  const [dockHeight, setDockHeight] = useState(96);
   const [fitTick, setFitTick] = useState(0);
   const [runningIndex, setRunningIndex] = useState<number | null>(null);
   const [nodePreview, setNodePreview] = useState<{ index: number; rows: Record<string, unknown>[]; note: string } | null>(null);
@@ -178,7 +178,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   };
 
   const focusInspector = () => {
-    window.setTimeout(() => document.getElementById("canvas-inspector")?.focus(), 0);
+    window.setTimeout(() => document.getElementById("canvas-inspector")?.focus({ preventScroll: true }), 0);
   };
 
   const names = columns.map((column) => column.name);
