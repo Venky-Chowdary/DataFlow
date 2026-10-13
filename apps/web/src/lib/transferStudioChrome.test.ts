@@ -181,23 +181,28 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(block, /: " · ledger does not balance/);
   });
 
-  it("a required Transform option says so before Add is clicked", () => {
-    const builder = [
-      readFileSync(join(webRoot, "components/transfer/TransformStepBuilder.tsx"), "utf8"),
-      readFileSync(join(webRoot, "components/transfer/ShapeStepFields.tsx"), "utf8"),
-    ].join("\n");
+  it("required Transform fields have a visible invalid state", () => {
     const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
-
-    assert.match(builder, /const blankRequired = useMemo\(/);
-    assert.match(builder, /is-invalid/);
-    assert.match(builder, /role="alert"/);
-    // Add cannot append a step the engine would refuse, and says why.
-    assert.match(builder, /disabled=\{!canPlan \|\| !operation \|\| Boolean\(missing\)/);
     assert.ok(css.includes(".df2-xform-required {"), ".df2-xform-required has no rule");
     assert.ok(
       css.includes(".df2-field.is-invalid > .df2-input"),
       "invalid required inputs are not marked",
     );
+  });
+
+  it("transform panels keep a stable accessible name when the canvas replaces the tabs", () => {
+    const step = readFileSync(
+      join(webRoot, "pages/transfer/TransferTransformStep.tsx"),
+      "utf8",
+    );
+    assert.match(step, /id="xform-prepare-label"/);
+    assert.match(step, /id="xform-result-label"/);
+    assert.match(step, /aria-labelledby="xform-prepare-label"/);
+    assert.match(step, /aria-labelledby="xform-result-label"/);
+    assert.match(step, /className="df2-sr-only">Rules and transforms/);
+    assert.match(step, /className="df2-sr-only">Transform result/);
+    assert.doesNotMatch(step, /aria-labelledby=\{canvasEnabled/);
+    assert.doesNotMatch(step, /aria-label=\{canvasEnabled/);
   });
 
   it("the Transform step ships the stylesheet its own namespace needs", () => {

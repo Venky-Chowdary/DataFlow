@@ -32,8 +32,11 @@ describe("studio surfaces", () => {
   it("gates the schema browser and canvas behind both flags", () => {
     const page = read(join(webRoot, "pages/TransferPage.tsx"));
     const step = read(join(webRoot, "pages/transfer/TransferTransformStep.tsx"));
+    const panel = read(join(webRoot, "components/transfer/TransferSourceSchemaPanel.tsx"));
     assert.match(page, /useStudioFlags\(\)/);
-    assert.match(page, /studioFlags\.schemaBrowser && sourceKind === "database"/);
+    assert.match(page, /<TransferSourceSchemaPanel/);
+    assert.match(page, /schemaBrowser=\{studioFlags\.schemaBrowser\}/);
+    assert.match(panel, /!schemaBrowser \|\| sourceKind !== "database" \|\| !connectorId/);
     assert.match(page, /canvasEnabled=\{studioFlags\.canvas\}/);
     assert.match(step, /canvasEnabled \? \([\s\S]*<TransferTransformCanvas/);
     assert.match(step, /<TransformStepBuilder/);

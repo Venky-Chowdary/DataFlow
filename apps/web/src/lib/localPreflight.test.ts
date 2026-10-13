@@ -177,6 +177,52 @@ describe("runLocalPreflight file export honesty", () => {
     );
   });
 
+  it("skips the local dry-run when hash, IBAN, time, or boolean need the server preview", () => {
+    const pf = runLocalPreflight({
+      columns: ["email"],
+      rowCount: 1,
+      mappings: [
+        {
+          source: "email",
+          target: "email",
+          confidence: 0.99,
+          transform: "hash_pii",
+          approved: true,
+          requiresReview: false,
+          isPii: true,
+        },
+      ],
+      sampleRows: [{ email: "a@b.c" }],
+      destKind: "file_export",
+    });
+    const dryRun = pf.gates.find((gate) => gate.id === "g5_dry_run");
+    assert.equal(dryRun?.status, "skip");
+    assert.match(dryRun?.message ?? "", /POST \/shape\/preview/);
+    assert.equal(JSON.stringify(pf).includes("sha256:"), false);
+  });
+
+  it("still dry-runs a trim the browser can apply exactly", () => {
+    const pf = runLocalPreflight({
+      columns: ["name"],
+      rowCount: 1,
+      mappings: [
+        {
+          source: "name",
+          target: "name",
+          confidence: 0.99,
+          transform: "trim",
+          approved: true,
+          requiresReview: false,
+          isPii: false,
+        },
+      ],
+      sampleRows: [{ name: "  ada " }],
+      destKind: "file_export",
+    });
+    const dryRun = pf.gates.find((gate) => gate.id === "g5_dry_run");
+    assert.equal(dryRun?.status, "pass");
+  });
+
   it("does not invent set_locale when date locale is MDY", () => {
     const pf = runLocalPreflight({
       columns: ["event_date"],

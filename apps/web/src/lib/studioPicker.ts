@@ -54,6 +54,39 @@ export function groupStudioOptions(
   return order.map((group) => ({ group, options: buckets.get(group) ?? [] }));
 }
 
+export type StudioPickerKey =
+  | { type: "close" }
+  | { type: "open" }
+  | { type: "move"; index: number }
+  | { type: "choose"; index: number }
+  | { type: "ignore" };
+
+/**
+ * Keyboard contract shared by the single and multi pickers.
+ * Space chooses only when the caller says the target is not a text field.
+ */
+export function studioPickerKey(input: {
+  key: string;
+  open: boolean;
+  activeIndex: number;
+  optionCount: number;
+  spaceChooses: boolean;
+}): StudioPickerKey {
+  const { key, open, activeIndex, optionCount, spaceChooses } = input;
+  const last = Math.max(optionCount - 1, 0);
+  if (key === "Escape") return { type: "close" };
+  if (key === "ArrowDown") {
+    if (!open) return { type: "open" };
+    return { type: "move", index: Math.min(activeIndex + 1, last) };
+  }
+  if (key === "ArrowUp") return { type: "move", index: Math.max(activeIndex - 1, 0) };
+  const choose = key === "Enter" || (key === " " && spaceChooses);
+  if (choose && open && activeIndex >= 0 && activeIndex < optionCount) {
+    return { type: "choose", index: activeIndex };
+  }
+  return { type: "ignore" };
+}
+
 export function studioPickerSelection(
   options: StudioPickerOption[],
   value: string,

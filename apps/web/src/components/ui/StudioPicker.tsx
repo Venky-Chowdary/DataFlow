@@ -14,11 +14,31 @@ import { DtIcon } from "../DtIcon";
 import {
   filterStudioOptions,
   groupStudioOptions,
+  studioPickerKey,
   studioPickerSelection,
   type StudioPickerOption,
 } from "../../lib/studioPicker";
 
 export type { StudioPickerOption };
+
+function handleStudioPickerKey(
+  event: KeyboardEvent,
+  input: { open: boolean; activeIndex: number; optionCount: number; spaceChooses: boolean },
+  apply: {
+    onClose: () => void;
+    onOpen: () => void;
+    onMove: (index: number) => void;
+    onChoose: (index: number) => void;
+  },
+): void {
+  const action = studioPickerKey({ key: event.key, ...input });
+  if (action.type === "ignore") return;
+  event.preventDefault();
+  if (action.type === "close") apply.onClose();
+  else if (action.type === "open") apply.onOpen();
+  else if (action.type === "move") apply.onMove(action.index);
+  else apply.onChoose(action.index);
+}
 
 interface StudioPickerBase {
   id: string;
@@ -175,27 +195,22 @@ export function StudioPicker({
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setOpen(false);
-      controlRef.current?.focus();
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      if (!open) setOpen(true);
-      else setActiveIndex((index) => Math.min(index + 1, Math.max(filtered.length - 1, 0)));
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActiveIndex((index) => Math.max(index - 1, 0));
-      return;
-    }
-    if (event.key === "Enter" && open && filtered[activeIndex]) {
-      event.preventDefault();
-      pick(filtered[activeIndex].value);
-    }
+    handleStudioPickerKey(
+      event,
+      { open, activeIndex, optionCount: filtered.length, spaceChooses: false },
+      {
+        onClose: () => {
+          setOpen(false);
+          controlRef.current?.focus();
+        },
+        onOpen: () => setOpen(true),
+        onMove: setActiveIndex,
+        onChoose: (index) => {
+          const next = filtered[index];
+          if (next) pick(next.value);
+        },
+      },
+    );
   };
 
   const menu = open && box
@@ -357,28 +372,23 @@ export function StudioMultiPicker({
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      setOpen(false);
-      controlRef.current?.focus();
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      if (!open) setOpen(true);
-      else setActiveIndex((index) => Math.min(index + 1, Math.max(filtered.length - 1, 0)));
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      setActiveIndex((index) => Math.max(index - 1, 0));
-      return;
-    }
     const typing = event.target instanceof HTMLInputElement;
-    if ((event.key === "Enter" || (event.key === " " && !typing)) && open && filtered[activeIndex]) {
-      event.preventDefault();
-      toggle(filtered[activeIndex].value);
-    }
+    handleStudioPickerKey(
+      event,
+      { open, activeIndex, optionCount: filtered.length, spaceChooses: !typing },
+      {
+        onClose: () => {
+          setOpen(false);
+          controlRef.current?.focus();
+        },
+        onOpen: () => setOpen(true),
+        onMove: setActiveIndex,
+        onChoose: (index) => {
+          const next = filtered[index];
+          if (next) toggle(next.value);
+        },
+      },
+    );
   };
 
   const menu = open && box

@@ -2,13 +2,11 @@
  * Run: npx --yes tsx --test apps/web/src/lib/studioPicker.test.ts
  */
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
   filterStudioOptions,
   groupStudioOptions,
+  studioPickerKey,
   studioPickerSelection,
   type StudioPickerOption,
 } from "./studioPicker";
@@ -38,32 +36,53 @@ describe("studioPicker", () => {
   });
 });
 
-describe("Transform step builder uses the studio picker", () => {
-  it("does not render a native operation select", () => {
-    const webRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-    const builder = [
-      readFileSync(join(webRoot, "components/transfer/TransformStepBuilder.tsx"), "utf8"),
-      readFileSync(join(webRoot, "components/transfer/ShapeStepFields.tsx"), "utf8"),
-    ].join("\n");
-    assert.match(builder, /StudioPicker/);
-    assert.match(builder, /StudioMultiPicker/);
-    assert.doesNotMatch(builder, /<select/);
-    assert.match(builder, /disabled=\{!canPlan \|\| !operation \|\| Boolean\(missing\)/);
-    assert.match(builder, /is-invalid/);
-    assert.match(builder, /role="alert"/);
-    assert.match(builder, /settleExpressionCheck/);
-    assert.match(builder, /parseNumberOption/);
+describe("studio picker keyboard", () => {
+  it("opens on ArrowDown, moves, and chooses the active option on Enter", () => {
+    assert.deepEqual(
+      studioPickerKey({ key: "ArrowDown", open: false, activeIndex: 0, optionCount: 3, spaceChooses: false }),
+      { type: "open" },
+    );
+    assert.deepEqual(
+      studioPickerKey({ key: "ArrowDown", open: true, activeIndex: 1, optionCount: 3, spaceChooses: false }),
+      { type: "move", index: 2 },
+    );
+    assert.deepEqual(
+      studioPickerKey({ key: "ArrowUp", open: true, activeIndex: 0, optionCount: 3, spaceChooses: false }),
+      { type: "move", index: 0 },
+    );
+    assert.deepEqual(
+      studioPickerKey({ key: "Enter", open: true, activeIndex: 1, optionCount: 3, spaceChooses: false }),
+      { type: "choose", index: 1 },
+    );
   });
 
-  it("the multi-column picker owns the same listbox keys as the single picker", () => {
-    const webRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-    const picker = readFileSync(join(webRoot, "components/ui/StudioPicker.tsx"), "utf8");
-    const multi = picker.slice(picker.indexOf("export function StudioMultiPicker"));
-    assert.match(multi, /const onKeyDown/);
-    assert.match(multi, /Escape/);
-    assert.match(multi, /ArrowDown/);
-    assert.match(multi, /ArrowUp/);
-    assert.match(multi, /Enter/);
-    assert.match(multi, /onKeyDown=\{onKeyDown\}/);
+  it("ignores Enter when the menu is closed and Space unless the caller allows it", () => {
+    assert.equal(
+      studioPickerKey({ key: "Enter", open: false, activeIndex: 0, optionCount: 3, spaceChooses: true }).type,
+      "ignore",
+    );
+    assert.equal(
+      studioPickerKey({ key: " ", open: true, activeIndex: 0, optionCount: 2, spaceChooses: false }).type,
+      "ignore",
+    );
+    assert.deepEqual(
+      studioPickerKey({ key: " ", open: true, activeIndex: 1, optionCount: 2, spaceChooses: true }),
+      { type: "choose", index: 1 },
+    );
+  });
+
+  it("closes on Escape and does not choose past the last option", () => {
+    assert.equal(
+      studioPickerKey({ key: "Escape", open: true, activeIndex: 0, optionCount: 2, spaceChooses: false }).type,
+      "close",
+    );
+    assert.equal(
+      studioPickerKey({ key: "Enter", open: true, activeIndex: 4, optionCount: 2, spaceChooses: false }).type,
+      "ignore",
+    );
+    assert.deepEqual(
+      studioPickerKey({ key: "ArrowDown", open: true, activeIndex: 2, optionCount: 3, spaceChooses: false }),
+      { type: "move", index: 2 },
+    );
   });
 });

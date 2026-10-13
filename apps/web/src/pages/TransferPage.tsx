@@ -20,7 +20,10 @@ import { DestProcedurePanel, type DestWriteMode } from "../components/transfer/D
 import { SqlEditor } from "../components/ui/SqlEditor";
 import { DestinationAdvancedDrawer } from "../components/transfer/DestinationAdvancedDrawer";
 import { ObjectNameCombobox } from "../components/transfer/ObjectNameCombobox";
-import { TransferSchemaBrowser } from "../components/transfer/TransferSchemaBrowser";
+import {
+  TransferSourceSchemaPanel,
+  useSqlInsertTarget,
+} from "../components/transfer/TransferSourceSchemaPanel";
 import { useStudioFlags } from "../lib/useStudioFlags";
 import { Button } from "../components/ui/Button";
 import { HiddenFileInput } from "../components/ui/HiddenFileInput";
@@ -329,10 +332,7 @@ export function TransferPage({
   const [sourceCollection, setSourceCollection] = useState("");
   const [sourceReadMode, setSourceReadMode] = useState<SourceReadMode>("table");
   const studioFlags = useStudioFlags();
-  const sqlInsertRef = useRef<((text: string) => void) | null>(null);
-  const bindSqlInsert = useCallback((insert: (text: string) => void) => {
-    sqlInsertRef.current = insert;
-  }, []);
+  const { bindSqlInsert, insertSql } = useSqlInsertTarget();
   const [procedureCall, setProcedureCall] = useState("");
   const [procedureParams, setProcedureParams] = useState<Record<string, string>>({});
   const [destWriteMode, setDestWriteMode] = useState<DestWriteMode>("table");
@@ -6812,28 +6812,16 @@ export function TransferPage({
                 )}
               </div>
 
-              {studioFlags.schemaBrowser && sourceKind === "database" && sourceConnectorId ? (
-                <TransferSchemaBrowser
-                  connectorId={sourceConnectorId}
-                  mode={
-                    sourceReadMode === "query"
-                      ? "query"
-                      : sourceReadMode === "procedure"
-                        ? "procedure"
-                        : "table"
-                  }
-                  onUseObject={(name) => {
-                    const append = (current: string) => {
-                      const parts = current.split(",").map((part) => part.trim()).filter(Boolean);
-                      if (parts.includes(name)) return current;
-                      return parts.length ? `${parts.join(", ")}, ${name}` : name;
-                    };
-                    if (sourceConnector?.type === "mongodb") setSourceCollection(append);
-                    else setSourceTable(append);
-                  }}
-                  onInsertText={(text) => sqlInsertRef.current?.(text)}
-                />
-              ) : null}
+              <TransferSourceSchemaPanel
+                schemaBrowser={studioFlags.schemaBrowser}
+                sourceKind={sourceKind}
+                connectorId={sourceConnectorId}
+                connectorType={sourceConnector?.type}
+                readMode={sourceReadMode}
+                setSourceTable={setSourceTable}
+                setSourceCollection={setSourceCollection}
+                onInsertText={insertSql}
+              />
 
               {!isCallableSourceMode(sourceReadMode) && (
               <div className="df2-source-multistream">

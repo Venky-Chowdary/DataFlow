@@ -44,6 +44,9 @@ export function applyLocalTransform(
   transform?: string,
   numberLocale: NumberLocale | string = "",
 ): unknown {
+  if (requiresServerPreview(transform)) {
+    throw new UntrustedLocalTransform(transform ?? "");
+  }
   if (value == null || value === "") return value;
   const s = String(value);
   switch (transform) {
@@ -53,16 +56,6 @@ export function applyLocalTransform(
       return s.toUpperCase();
     case "lower":
       return s.toLowerCase();
-    case "hash_pii":
-    case "iban":
-    case "time":
-    case "boolean":
-    case "cast_boolean":
-    case "url":
-    case "postal":
-    case "uuid":
-    case "trim_id":
-      throw new UntrustedLocalTransform(transform);
     case "datetime":
     case "date_iso":
       return s;

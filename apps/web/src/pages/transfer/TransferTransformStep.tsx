@@ -586,11 +586,11 @@ export function TransferTransformStep({
       <div
         role="tabpanel"
         id="xform-panel-prepare"
-        aria-labelledby={canvasEnabled ? undefined : "xform-tab-prepare"}
-        aria-label={canvasEnabled ? "Rules and transforms" : undefined}
+        aria-labelledby="xform-prepare-label"
         hidden={canvasEnabled ? false : pane !== "prepare"}
         className="df2-xform-panel"
       >
+      <h2 id="xform-prepare-label" className="df2-sr-only">Rules and transforms</h2>
       {onApplyRules ? <div className="df2-rule-import">
         <div className="df2-rule-import-copy">
           <strong>Business rules</strong>
@@ -866,11 +866,11 @@ export function TransferTransformStep({
       <div
         role="tabpanel"
         id="xform-panel-result"
-        aria-labelledby={canvasEnabled ? undefined : "xform-tab-result"}
-        aria-label={canvasEnabled ? "Transform result" : undefined}
+        aria-labelledby="xform-result-label"
         hidden={canvasEnabled ? false : pane !== "result"}
         className="df2-xform-panel"
       >
+      <h2 id="xform-result-label" className="df2-sr-only">Transform result</h2>
       <dl className="df2-xform-stats">
         <div>
           <dt>Sampled rows</dt>

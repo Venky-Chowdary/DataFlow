@@ -1,6 +1,6 @@
 import type { EditableMapping } from "./mapping";
 import { mappingRequiresRiskAck } from "./mapping";
-import { applyLocalTransform, UntrustedLocalTransform } from "./localTransform";
+import { applyLocalTransform, requiresServerPreview } from "./localTransform";
 import { GATE_CATALOG } from "./preflightGates";
 import type { NumberLocale } from "./numberLocale";
 import { ambiguousDateColumns, type DateLocale } from "./dateLocale";
@@ -172,39 +172,42 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     });
   }
 
-  let transformOk = true;
-  let untrusted: string | null = null;
-  for (const m of input.mappings) {
-    for (const row of rows.slice(0, 20)) {
-      try {
-        applyLocalTransform(
-          row[m.source],
-          m.transform === "none" ? undefined : m.transform,
-          input.numberLocale,
-        );
-      } catch (err) {
-        if (err instanceof UntrustedLocalTransform) {
-          untrusted = err.message;
-        } else {
-          transformOk = false;
-        }
-        break;
-      }
-    }
-    if (!transformOk || untrusted) break;
-  }
-  if (!transformOk) {
-    block("g5_dry_run", "A transform failed on sample rows.", {
-      kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
-    });
-  } else if (untrusted) {
-    block("g5_dry_run", untrusted, {
-      kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
-    });
+  const serverPreview = input.mappings.some((mapping) =>
+    requiresServerPreview(mapping.transform === "none" ? undefined : mapping.transform),
+  );
+  if (serverPreview) {
+    // A local pass would invent the digest or the cast. The server owns this sample.
+    skip(
+      "g5_dry_run",
+      "Hash, IBAN, time, boolean, and the other server-only casts are computed by POST /shape/preview. This browser does not preview them.",
+      { kind: "dry_run", coverage: "server", note: "POST /shape/preview" },
+    );
   } else {
-    pass("g5_dry_run", `Dry-run transforms passed on ${Math.min(rows.length, 20)} sample row(s).`, {
-      kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
-    });
+    let transformOk = true;
+    for (const m of input.mappings) {
+      for (const row of rows.slice(0, 20)) {
+        try {
+          applyLocalTransform(
+            row[m.source],
+            m.transform === "none" ? undefined : m.transform,
+            input.numberLocale,
+          );
+        } catch {
+          transformOk = false;
+          break;
+        }
+      }
+      if (!transformOk) break;
+    }
+    if (!transformOk) {
+      block("g5_dry_run", "A transform failed on sample rows.", {
+        kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
+      });
+    } else {
+      pass("g5_dry_run", `Dry-run transforms passed on ${Math.min(rows.length, 20)} sample row(s).`, {
+        kind: "dry_run", coverage: "sample", sample_rows: Math.min(rows.length, 20),
+      });
+    }
   }
 
   if (isFileExport) {
