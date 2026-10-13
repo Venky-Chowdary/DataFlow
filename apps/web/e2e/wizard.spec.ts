@@ -41,7 +41,7 @@ test.describe("wizard baseline", () => {
       await trim.click();
       await page.locator("#xform-column").click();
       await page.getByRole("option", { name: "customer_email" }).click();
-      await page.getByRole("button", { name: "Add step", exact: true }).click();
+      await page.locator(".df2-xform-builder-actions").getByRole("button", { name: "Add step", exact: true }).click();
       await expect(page.locator("#xform-step-1")).toContainText(/trim/i);
     }
 

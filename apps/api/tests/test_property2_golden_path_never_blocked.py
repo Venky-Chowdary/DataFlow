@@ -68,6 +68,11 @@ class _FakeMongo:
     def get_job(self, job_id: str) -> dict | None:
         return self.jobs.get(job_id)
 
+    def update_job_fields(self, job_id: str, fields: dict) -> bool:
+        self.jobs.setdefault(job_id, {})
+        self.jobs[job_id].update(fields or {})
+        return True
+
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         self.jobs.setdefault(job_id, {})
         self.jobs[job_id].update(kwargs)

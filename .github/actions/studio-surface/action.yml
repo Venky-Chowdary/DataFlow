@@ -81,12 +81,12 @@ runs:
       run: npx playwright test --project=${{ inputs.playwright_project }}
 
     - name: Production build
-      if: inputs.production_smoke == 'true'
+      if: success() && inputs.production_smoke == 'true'
       shell: bash
       run: npm run build --workspace=@dataflow/web
 
     - name: Start production preview
-      if: inputs.production_smoke == 'true'
+      if: success() && inputs.production_smoke == 'true'
       shell: bash
       working-directory: apps/web
       run: |
@@ -102,7 +102,7 @@ runs:
         exit 1
 
     - name: Production pageerror smoke
-      if: inputs.production_smoke == 'true'
+      if: success() && inputs.production_smoke == 'true'
       shell: bash
       working-directory: apps/web
       env:

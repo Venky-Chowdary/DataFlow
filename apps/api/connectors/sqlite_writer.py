@@ -925,6 +925,22 @@ def write_mapped_rows(
             f"{live_table_name}__df_stage", preserve_case=True
         )
         publish_stage = stage_batch_idx + 1 >= stage_total
+        # A resumed tail (batch index past the first page) must not publish a
+        # stage that only holds this session. If the stage from the first pass
+        # is gone, those rows are already on the live table.
+        if stage_batch_idx > 1:
+            probe = sqlite3.connect(path, timeout=8)
+            try:
+                stage_exists = probe.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                    (table_name,),
+                ).fetchone()
+            finally:
+                probe.close()
+            if stage_exists is None:
+                atomic_overwrite = False
+                publish_stage = False
+                table_name = live_table_name
     table_quoted = quote_sql_identifier(table_name)
     # Prefer Studio-probed live DDL over Map stamps (BOOLEAN→TEXT invent cliff).
     from connectors.writer_common import resolve_studio_or_map_dest_types
