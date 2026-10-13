@@ -10,6 +10,7 @@ import {
   insertIndexAtPoint,
   insertIndexForDrop,
   layoutFor,
+  NODE_WIDTH,
   planCards,
   reorderByDrag,
   spliceIndexAtPoint,
@@ -116,7 +117,7 @@ describe("canvas document", () => {
 
   it("places a drop on an edge between two nodes and defaults a column step", () => {
     const positions = layoutFor(2);
-    const gap = { x: positions[0].x + 40, y: positions[0].y + 100 };
+    const gap = { x: positions[0].x + NODE_WIDTH + 24, y: positions[0].y + 36 };
     assert.equal(spliceIndexAtPoint(positions, gap), 1);
     assert.equal(insertIndexAtPoint(2, gap, positions), 1);
     assert.equal(spliceIndexAtPoint(positions, { x: 48, y: 10 }), null);

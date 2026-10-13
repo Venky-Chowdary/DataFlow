@@ -271,8 +271,12 @@ export function statusLabel(status: NodeStatus): string {
   return "Running";
 }
 
-function familyLabel(family: string): string {
+export function categoryLabel(family: string): string {
   return FAMILY_LABEL[family] || "Values";
+}
+
+function familyLabel(family: string): string {
+  return categoryLabel(family);
 }
 
 function specFromOperation(operation: ShapeOperation): NodeSpec {

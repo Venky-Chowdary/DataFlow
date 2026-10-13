@@ -253,6 +253,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       draftIndex.current = at;
       setSelected(at);
       commit(next);
+      if (!atPoint) setFitTick((tick) => tick + 1);
       focusInspector();
       return;
     }
@@ -381,16 +382,19 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     } else if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "f") {
       event.preventDefault();
       setFitTick((tick) => tick + 1);
-    } else if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "l") {
+    }     else if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "l") {
       event.preventDefault();
-      setPlaced(null);
+      arrange();
     } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
       event.preventDefault();
       applyStack("undo");
     }
   };
 
-  const arrange = () => setPlaced(null);
+  const arrange = () => {
+    setPlaced(null);
+    setFitTick((tick) => tick + 1);
+  };
 
   const previewNode = async (index: number) => {
     const step = steps[index];
@@ -453,6 +457,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       data-testid="transform-canvas"
       data-document={documentKind(graph)}
       data-set-hash={setDocumentHash(setDocumentOf(graph, setOps))}
+      tabIndex={0}
       onKeyDown={onKeyDown}
     >
       <header className="df2-canvas-head">
@@ -527,7 +532,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                       onClick={() => beginAdd(operation.op)}
                     >
                       <span className="df2-canvas-op-icon" aria-hidden>
-                        <DtIcon name={operation.icon} size={16} chrome="product" />
+                        <DtIcon name={operation.icon} size={18} chrome="product" />
                       </span>
                       <span className="df2-canvas-op-copy">
                         <span className="df2-canvas-op-name">{operation.short}</span>
@@ -557,7 +562,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                       data-executable="false"
                     >
                       <span className="df2-canvas-op-icon" aria-hidden>
-                        <DtIcon name={operation.icon} size={16} chrome="product" />
+                        <DtIcon name={operation.icon} size={18} chrome="product" />
                       </span>
                       <span className="df2-canvas-op-copy">
                         <span className="df2-canvas-op-name">{operation.short}</span>
@@ -616,7 +621,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                       data-executable="false"
                     >
                       <span className="df2-canvas-op-icon" aria-hidden>
-                        <DtIcon name={operation.icon} size={16} chrome="product" />
+                        <DtIcon name={operation.icon} size={18} chrome="product" />
                       </span>
                       <span className="df2-canvas-op-copy">
                         <span className="df2-canvas-op-name">{operation.short}</span>
@@ -653,6 +658,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                 setLinkNote(message);
               }}
               onDropOp={(op, at, index) => beginAdd(op, index, at)}
+              onPreviewNode={(index) => void previewNode(index)}
               fitTick={fitTick}
             />
           </Suspense>

@@ -6,6 +6,7 @@
  */
 
 import {
+  categoryLabel,
   iconFor,
   nodeStatus,
   shortName,
@@ -49,6 +50,7 @@ export interface FlowNodeModel {
   status: NodeStatus;
   ports: CanvasPort[];
   family: string;
+  category: string;
   dimmed: boolean;
   disabled: boolean;
   changesRowCount: boolean;
@@ -118,6 +120,7 @@ export function stepsToFlow(
       status: nodeStatus({ disabled, dimmed: otherTable, running: runningIndex === index }),
       ports: streamPorts(),
       family,
+      category: categoryLabel(family),
       dimmed: otherTable,
       disabled,
       changesRowCount: Boolean(operation?.active),
@@ -196,19 +199,19 @@ export function reorderByDrag(
   return next;
 }
 
-/** Vertical pitch. Taller than a node so an invalid reason cannot cover the next port. */
-export const LAYOUT_PITCH = 148;
+/** Horizontal pitch. Wider than a node so the link between steps stays visible. */
+export const LAYOUT_PITCH = 296;
 
-/** Where a palette drop lands in the chain, from the stage-local Y. */
+/** Where a palette drop lands in the chain, from the flow-axis coordinate. */
 export function insertIndexForDrop(stepCount: number, localY: number, pitch = LAYOUT_PITCH): number {
   if (stepCount <= 0) return 0;
   const index = Math.round(Math.max(0, localY) / pitch);
   return Math.max(0, Math.min(stepCount, index));
 }
 
-/** Node box the chain layout and the edge-hit test share. */
-export const NODE_WIDTH = 200;
-export const NODE_BODY = 88;
+/** Node box the chain layout and the edge-hit test share. Wide enough to read at zoom 1. */
+export const NODE_WIDTH = 232;
+export const NODE_BODY = 128;
 
 export interface FlowPoint {
   x: number;
@@ -221,14 +224,14 @@ export interface FlowPoint {
  */
 export function spliceIndexAtPoint(positions: FlowPoint[], point: FlowPoint): number | null {
   for (let index = 0; index < positions.length - 1; index += 1) {
-    const above = positions[index];
-    const below = positions[index + 1];
-    const gapTop = above.y + NODE_BODY;
-    const gapBottom = below.y;
-    if (gapBottom <= gapTop) continue;
-    const left = Math.min(above.x, below.x) - 32;
-    const right = Math.max(above.x, below.x) + NODE_WIDTH + 32;
-    if (point.y >= gapTop && point.y <= gapBottom && point.x >= left && point.x <= right) {
+    const left = positions[index];
+    const right = positions[index + 1];
+    const gapLeft = left.x + NODE_WIDTH;
+    const gapRight = right.x;
+    if (gapRight <= gapLeft) continue;
+    const top = Math.min(left.y, right.y) - 8;
+    const bottom = Math.max(left.y, right.y) + NODE_BODY + 8;
+    if (point.x >= gapLeft && point.x <= gapRight && point.y >= top && point.y <= bottom) {
       return index + 1;
     }
   }
@@ -242,7 +245,7 @@ export function insertIndexAtPoint(stepCount: number, point: FlowPoint, position
   if (stepCount <= 0 || positions.length === 0) return 0;
   let index = 0;
   for (const position of positions) {
-    if (point.y > position.y + NODE_BODY / 2) index += 1;
+    if (point.x > position.x + NODE_WIDTH / 2) index += 1;
   }
   return Math.max(0, Math.min(stepCount, index));
 }
@@ -294,7 +297,7 @@ export function stepsWithoutPlanOps(
 }
 
 export function layoutFor(count: number): { x: number; y: number }[] {
-  return Array.from({ length: count }, (_, index) => ({ x: 48, y: index * LAYOUT_PITCH }));
+  return Array.from({ length: count }, (_, index) => ({ x: 24 + index * LAYOUT_PITCH, y: 28 }));
 }
 
 export interface GraphNodeRecord {

@@ -235,18 +235,19 @@ test.describe("studio next", () => {
     await collapse.click();
     await expect(page.locator(".react-flow__node")).toHaveCount(2);
     const moving = await page.locator(".react-flow__node").nth(1).boundingBox();
-    expect(moving).toBeTruthy();
-    await page.mouse.move(moving!.x + 40, moving!.y + 24);
+    const first = await page.locator(".react-flow__node").nth(0).boundingBox();
+    expect(moving && first).toBeTruthy();
+    await page.mouse.move(moving!.x + moving!.width / 2, moving!.y + 36);
     await page.mouse.down();
-    await page.mouse.move(moving!.x + 40, moving!.y - 200, { steps: 15 });
+    await page.mouse.move(first!.x - 24, moving!.y + 36, { steps: 15 });
     await page.mouse.up();
     await expect(page.locator(".df2-canvas-node").nth(0)).toHaveAttribute("data-op", "collapse_whitespace");
 
-    const source = page.locator(".react-flow__node").nth(0).locator(".react-flow__handle-bottom");
-    const target = page.locator(".react-flow__node").nth(1).locator(".react-flow__handle-top");
-    await source.dragTo(target);
+    const source = page.locator(".react-flow__node").nth(0).locator(".react-flow__handle-right").first();
+    const target = page.locator(".react-flow__node").nth(1).locator(".react-flow__handle-left").first();
+    await source.dragTo(target, { force: true, steps: 12 });
     await expect(page.getByText(/Connected step 1 to step 2/)).toBeVisible();
-    await source.dragTo(page.locator(".react-flow__node").nth(0).locator(".react-flow__handle-top"));
+    await source.dragTo(page.locator(".react-flow__node").nth(0).locator(".react-flow__handle-left").first(), { force: true, steps: 12 });
     await expect(page.getByRole("alert").filter({ hasText: /itself/ })).toBeVisible();
 
     const lower = page.locator(".df2-canvas-op[data-op='absolute']");
@@ -254,9 +255,9 @@ test.describe("studio next", () => {
     const firstBox = await page.locator(".react-flow__node").nth(0).boundingBox();
     const nextBox = await page.locator(".react-flow__node").nth(1).boundingBox();
     expect(firstBox && nextBox && liveStage).toBeTruthy();
-    const midX = (firstBox!.x + firstBox!.width / 2) - liveStage!.x;
-    const gap = nextBox!.y - (firstBox!.y + firstBox!.height);
-    const midY = (firstBox!.y + firstBox!.height + Math.max(gap, 8) / 2) - liveStage!.y;
+    const gap = nextBox!.x - (firstBox!.x + firstBox!.width);
+    const midX = (firstBox!.x + firstBox!.width + Math.max(gap, 8) / 2) - liveStage!.x;
+    const midY = (firstBox!.y + firstBox!.height / 2) - liveStage!.y;
     await lower.dragTo(stage, { targetPosition: { x: Math.max(24, midX), y: Math.max(24, midY) } });
     await expect(page.locator(".df2-canvas-node").nth(1)).toHaveAttribute("data-op", "absolute");
 
@@ -379,6 +380,21 @@ conn.commit()
     await expect(page.getByTestId("canvas-node-preview")).toContainText(/sample|Preview|row/i);
     await expect(page.getByTestId("transform-canvas")).toHaveAttribute("data-document", "chain");
     await expect(page.getByTestId("transform-canvas")).toHaveAttribute("data-set-hash", "");
+
+    await node.getByRole("button", { name: "Show fields" }).click();
+    await expect(node.locator(".df2-canvas-field")).toHaveCount(2);
+    await expect(node.getByRole("button", { name: "Hide fields" })).toHaveAttribute("aria-expanded", "true");
+    await page.locator("#canvas-label").fill("Clean email");
+    await page.locator("#canvas-label").blur();
+    await expect(node).toContainText("Clean email");
+    const beforeUndo = await page.locator(".react-flow__node").count();
+    await page.getByTestId("transform-canvas").focus();
+    await page.keyboard.press("Control+z");
+    await expect(page.locator(".react-flow__node")).toHaveCount(beforeUndo);
+    await page.keyboard.press("Control+z");
+    await expect(page.locator(".react-flow__node")).toHaveCount(0);
+    await page.keyboard.press("Control+Shift+Z");
+    await expect(page.locator(".react-flow__node")).toHaveCount(1);
   });
 
   test("canvas icons and the action bar hold in dark and at 390", async ({ page }) => {

@@ -482,7 +482,7 @@ export function DtIcon({
   if (!known && chrome === "product" && typeof console !== "undefined") {
     console.warn(`DtIcon: unknown icon "${name}"`);
   }
-  const stroke = chrome === "product" ? (size >= 24 ? 2 : 1.75) : (size >= 18 ? 2.15 : 2);
+  const stroke = chrome === "product" ? (size >= 22 ? 2.4 : 2) : (size >= 18 ? 2.15 : 2);
   const svg = (
     <svg
       width={size}

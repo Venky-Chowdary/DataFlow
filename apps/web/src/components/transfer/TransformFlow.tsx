@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState, type DragEvent } from "react";
 import {
   Background,
+  BackgroundVariant,
   Controls,
   Handle,
+  MarkerType,
   MiniMap,
   Position,
   ReactFlow,
@@ -33,6 +35,7 @@ import {
   type PendingStepModel,
 } from "../../lib/canvasDocument";
 import {
+  categoryLabel,
   iconFor,
   nodeStatus,
   shortName,
@@ -54,6 +57,11 @@ export interface StudioNodeData extends Record<string, unknown> {
   status: NodeStatus;
   ports: CanvasPort[];
   family: string;
+  category: string;
+  kind: string;
+  expanded: boolean;
+  onToggleFields: (id: string) => void;
+  onPreview: (index: number) => void;
   dimmed: boolean;
   disabled: boolean;
   changesRowCount: boolean;
@@ -74,6 +82,7 @@ interface TransformFlowProps {
   onInvalidLink: (reason: string) => void;
   onAcceptLink: (message: string) => void;
   onDropOp: (op: string, at: FlowPoint, index: number) => void;
+  onPreviewNode: (index: number) => void;
   fitTick: number;
 }
 
@@ -105,18 +114,31 @@ function FlowCanvas({
   onInvalidLink,
   onAcceptLink,
   onDropOp,
+  onPreviewNode,
   fitTick,
 }: TransformFlowProps) {
   const { screenToFlowPosition, fitView } = useReactFlow();
-  const built = useMemo(() => buildNodes(nodes, pending, placed), [nodes, pending, placed]);
-  const [flowNodes, setFlowNodes] = useState(built);
   const [hot, setHot] = useState(false);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [theme, setTheme] = useState<"light" | "dark">(readTheme);
+  const toggleFields = (id: string) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const built = useMemo(
+    () => buildNodes(nodes, pending, placed, expanded, toggleFields, onPreviewNode),
+    [nodes, pending, placed, expanded, onPreviewNode],
+  );
+  const [flowNodes, setFlowNodes] = useState(built);
   useEffect(() => {
     setFlowNodes(built);
   }, [built]);
   useEffect(() => {
-    if (fitTick > 0) fitView({ padding: 0.2, duration: 0 });
+    if (fitTick > 0) fitView({ padding: 0.08, duration: 0 });
   }, [fitTick, fitView]);
   useEffect(() => {
     const read = () => setTheme(readTheme());
@@ -125,13 +147,15 @@ function FlowCanvas({
     return () => observer.disconnect();
   }, []);
 
+  const linkColor = theme === "dark" ? "#2dd4bf" : "#0f766e";
   const flowEdges: Edge[] = edges.map((edge) => ({
     id: edge.id,
     source: edge.source,
     target: edge.target,
     sourceHandle: edge.sourcePort,
     targetHandle: edge.targetPort,
-    type: "smoothstep",
+    type: "default",
+    markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: linkColor },
   }));
 
   const onNodesChange: OnNodesChange<Node<StudioNodeData>> = (changes) => {
@@ -231,11 +255,11 @@ function FlowCanvas({
             if (hit !== from) onReorder(from, hit);
             return;
           }
-          const to = Math.max(0, Math.min(nodes.length - 1, Math.round(node.position.y / PITCH)));
+          const to = Math.max(0, Math.min(nodes.length - 1, Math.round(node.position.x / PITCH)));
           if (to !== from) onReorder(from, to);
         }}
       >
-        <Background gap={16} color="var(--df-border)" />
+        <Background variant={BackgroundVariant.Dots} gap={18} size={1.5} color="var(--df-border-strong)" />
         <Controls showInteractive={false} showFitView={false} />
         <MiniMap pannable={false} zoomable={false} ariaLabel="Canvas overview" />
       </ReactFlow>
@@ -247,6 +271,9 @@ function buildNodes(
   nodes: FlowNodeModel[],
   pending: PendingStepModel | null,
   placed: { index: number; x: number; y: number } | null,
+  expanded: ReadonlySet<string>,
+  onToggleFields: (id: string) => void,
+  onPreview: (index: number) => void,
 ): Node<StudioNodeData>[] {
   const shift = pending ? 1 : 0;
   const positions = layoutFor(nodes.length + shift);
@@ -256,7 +283,8 @@ function buildNodes(
     return {
       id: node.id,
       type: "studio",
-      position: anchored ?? positions[slot] ?? { x: 48, y: slot * PITCH },
+      position: anchored ?? positions[slot] ?? { x: 24, y: 28 },
+      style: { width: NODE_WIDTH },
       data: {
         index: node.index,
         title: node.title,
@@ -267,6 +295,11 @@ function buildNodes(
         status: node.status,
         ports: node.ports,
         family: node.family,
+        category: node.category,
+        kind: node.short,
+        expanded: expanded.has(node.id),
+        onToggleFields,
+        onPreview,
         dimmed: node.dimmed,
         disabled: node.disabled,
         changesRowCount: node.changesRowCount,
@@ -283,7 +316,8 @@ function buildNodes(
     flowNodes.push({
       id: "pending",
       type: "studio",
-      position: anchored ?? positions[slot] ?? { x: 48, y: slot * PITCH },
+      position: anchored ?? positions[slot] ?? { x: 24, y: 28 },
+      style: { width: NODE_WIDTH },
       data: {
         index: -1,
         title: shortName(pending.op, pending.title),
@@ -294,6 +328,11 @@ function buildNodes(
         status: nodeStatus({ invalid: pending.invalid }),
         ports: streamPorts(),
         family: pending.family,
+        category: categoryLabel(pending.family),
+        kind: shortName(pending.op, pending.title),
+        expanded: false,
+        onToggleFields,
+        onPreview,
         dimmed: false,
         disabled: false,
         changesRowCount: false,
@@ -308,45 +347,81 @@ function buildNodes(
   return flowNodes;
 }
 
-function StudioFlowNode({ data, selected }: NodeProps<Node<StudioNodeData>>) {
+function shownPorts(ports: CanvasPort[], expanded: boolean, role: "in" | "out"): CanvasPort[] {
+  return ports.filter((port) => port.role === role && (port.visible || (expanded && port.kind === "field")));
+}
+
+function StudioFlowNode({ id, data, selected }: NodeProps<Node<StudioNodeData>>) {
   const className = [
     "df2-canvas-node",
     selected ? "is-selected" : "",
+    data.expanded ? "is-expanded" : "",
     data.dimmed ? "is-dimmed" : "",
     data.disabled ? "is-disabled" : "",
     data.invalid ? "is-invalid" : "",
   ].filter(Boolean).join(" ");
-  const inputs = data.ports.filter((port) => port.visible && port.role === "in");
-  const outputs = data.ports.filter((port) => port.visible && port.role === "out");
+  const inputs = shownPorts(data.ports, data.expanded, "in");
+  const outputs = shownPorts(data.ports, data.expanded, "out");
+  const fields = data.ports.filter((port) => port.kind === "field");
   return (
     <div className={className} data-op={data.op} data-index={data.index} data-stripe={data.stripe} data-icon={data.icon} data-status={data.status}>
-      {inputs.map((port) => (
+      {inputs.map((port, index) => (
         <Handle
           key={port.id}
           id={port.id}
           type="target"
-          position={Position.Top}
-          className="df2-canvas-port is-in"
+          position={Position.Left}
+          className={`df2-canvas-port is-in${port.kind === "field" ? " is-field" : ""}`}
+          style={{ top: `${((index + 1) / (inputs.length + 1)) * 100}%` }}
           aria-label={port.label}
         />
       ))}
-      <div className="df2-canvas-node-head">
+      <div className="df2-canvas-node-band">
         <span className="df2-canvas-node-mark" aria-hidden>
-          <DtIcon name={data.invalid ? "alert" : data.icon} size={16} chrome="product" />
+          <DtIcon name={data.invalid ? "alert" : data.icon} size={22} chrome="product" />
         </span>
-        <p className="df2-canvas-node-title">{data.title}</p>
+        <div className="df2-canvas-node-id">
+          <p className="df2-canvas-node-title">{data.title}</p>
+          <p className="df2-canvas-node-type">{data.kind} · {data.category}</p>
+        </div>
         <span className={`df2-canvas-badge is-${data.status}`}>{statusLabel(data.status)}</span>
       </div>
-      <p className="df2-canvas-node-summary">{data.summary}</p>
-      {data.invalid && <p className="df2-canvas-node-invalid">{data.invalidReason}</p>}
-      {outputs.map((port) => (
+      <div className="df2-canvas-node-body">
+        <p className="df2-canvas-node-summary">{data.summary}</p>
+        {data.invalid && <p className="df2-canvas-node-invalid">{data.invalidReason}</p>}
+        {data.index >= 0 && (
+          <div className="df2-canvas-node-tools" role="toolbar" aria-label={`Actions for ${data.title}`}>
+            <button type="button" className="df2-canvas-tool" onClick={() => data.onPreview(data.index)}>
+              Preview step
+            </button>
+            <button
+              type="button"
+              className="df2-canvas-tool"
+              aria-expanded={data.expanded}
+              aria-controls={`${id}-fields`}
+              onClick={() => data.onToggleFields(id)}
+            >
+              {data.expanded ? "Hide fields" : "Show fields"}
+            </button>
+          </div>
+        )}
+        {data.expanded && (
+          <ul className="df2-canvas-fields" id={`${id}-fields`}>
+            {fields.map((port) => (
+              <li key={port.id} className="df2-canvas-field">{port.role === "in" ? "In" : "Out"} · {port.label}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+      {outputs.map((port, index) => (
         <Handle
           key={port.id}
           id={port.id}
           type="source"
-          position={Position.Bottom}
-          className={`df2-canvas-port${data.changesRowCount ? " is-count" : " is-out"}`}
-          aria-label={data.changesRowCount ? `${port.label}. This node changes row count` : port.label}
+          position={Position.Right}
+          className={`df2-canvas-port${port.kind === "field" ? " is-field" : data.changesRowCount ? " is-count" : " is-out"}`}
+          style={{ top: `${((index + 1) / (outputs.length + 1)) * 100}%` }}
+          aria-label={data.changesRowCount && port.kind === "row" ? `${port.label}. This node changes row count` : port.label}
         />
       ))}
     </div>
