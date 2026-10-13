@@ -122,6 +122,10 @@ class TransferRequest:
     # Recipe identity approved at Validate. Execute refuses when the recipe it was
     # handed hashes to anything else (Validate≡Execute).
     approved_shape_recipe_hash: str = ""
+    # Set-graph identity approved at Validate. Empty matches a recipe with no
+    # set nodes. A different graph is refused, the same way a different row
+    # recipe is refused.
+    approved_set_hash: str = ""
     # Priority-first sync: sort source rows by this column before writing.
     priority_column: str = ""
     priority_direction: str = "desc"  # "asc" or "desc"
@@ -303,6 +307,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "read_options": request.read_options,
         "shape_recipe": dict(request.shape_recipe or {}),
         "approved_shape_recipe_hash": request.approved_shape_recipe_hash or "",
+        "approved_set_hash": request.approved_set_hash or "",
         "priority_column": request.priority_column,
         "priority_direction": request.priority_direction,
         "limit": request.limit,
@@ -429,6 +434,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         approved_shape_recipe_hash=str(
             data.get("approved_shape_recipe_hash") or ""
         ).strip(),
+        approved_set_hash=str(data.get("approved_set_hash") or "").strip(),
         priority_column=(data.get("priority_column") or "").strip(),
         priority_direction=(data.get("priority_direction") or "desc").lower(),
         limit=int(data.get("limit") or 0),

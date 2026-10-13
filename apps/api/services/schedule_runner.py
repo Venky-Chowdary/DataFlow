@@ -444,6 +444,7 @@ def build_schedule_request(sched, src: dict, dst: dict):
         approved_shape_recipe_hash=str(
             getattr(sched, "approved_shape_recipe_hash", "") or ""
         ),
+        approved_set_hash=str(getattr(sched, "approved_set_hash", "") or ""),
         approved_decision_artifact_hash=str(
             getattr(sched, "approved_decision_artifact_hash", "") or ""
         ),

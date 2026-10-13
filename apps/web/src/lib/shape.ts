@@ -53,6 +53,31 @@ export interface ShapeErrorPolicy {
   detail: string;
 }
 
+/** A set operation the catalog may publish once it can run. Empty until then. */
+export interface SetOperation {
+  op: string;
+  summary: string;
+  executable: boolean;
+  execution: string[];
+  family: string;
+  inputs: string[];
+  outputs: string[];
+  options: string[];
+  required: string[];
+}
+
+export interface SetEngineCatalog {
+  available: boolean;
+  reference: string;
+  pushdown_dialects: string[];
+}
+
+export interface SetGraphError {
+  node: string;
+  op: string;
+  message: string;
+}
+
 export interface ShapeCatalog {
   operations: ShapeOperation[];
   functions: ShapeFunctionDoc[];
@@ -60,6 +85,9 @@ export interface ShapeCatalog {
   max_preview_rows: number;
   error_policies: ShapeErrorPolicy[];
   post_load_only: { operations: string[]; reason: string };
+  /** Empty until a set node can run. The row builder does not read this list. */
+  set_operations?: SetOperation[];
+  set_engine?: SetEngineCatalog;
 }
 
 export interface ShapeColumnProfile {
@@ -110,6 +138,10 @@ export interface ShapeProfileResponse {
 export interface ShapeIdentity {
   valid: boolean;
   recipe_hash: string;
+  /** Empty when the recipe has no set nodes. Not part of recipe_hash. */
+  set_hash?: string;
+  set_errors?: SetGraphError[];
+  set_graph?: { nodes: Record<string, unknown>[]; main_output?: string };
   step_count: number;
   has_active_step: boolean;
   input_columns: string[];

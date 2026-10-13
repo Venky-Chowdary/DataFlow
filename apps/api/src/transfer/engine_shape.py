@@ -45,6 +45,7 @@ def _open_shape_runner(
         getattr(request, "shape_recipe", None),
         source_columns=list(columns or []),
         approved_hash=str(getattr(request, "approved_shape_recipe_hash", "") or ""),
+        approved_set_hash=str(getattr(request, "approved_set_hash", "") or ""),
     )
 
 
