@@ -39,7 +39,13 @@ export function TransferRouteBar({
         {hasDest ? (
           <ConnectorIcon id={destType} size={18} />
         ) : (
-          <span className="df2-route-bar-placeholder-icon" aria-hidden />
+          // A 1.5px CSS dash snaps onto a different pixel per host and shifts
+          // the label beside it. The mark is a fixed SVG so the bar stays put.
+          <span className="df2-route-bar-placeholder-icon" aria-hidden>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
+              <rect x="1" y="1" width="16" height="16" rx="3" stroke="currentColor" strokeWidth="1" strokeDasharray="2 2" />
+            </svg>
+          </span>
         )}
         <span className="df2-route-bar-label" title={destLabel}>{hasDest ? destLabel : "Choose destination"}</span>
       </div>
