@@ -32,6 +32,13 @@ export async function shoot(
   await panel.evaluate((node) => {
     node.scrollTop = 0;
   });
+  // Toasts are fixed overlays. Masking them paints a magenta box into the
+  // baseline, so a toast that is present in one run and absent in the next
+  // fails the classic screen even when the step list did not move. Hide them
+  // before the shot. The transform id stays masked because the hash changes.
+  await page.locator(".dt-toast").evaluateAll((nodes) => {
+    for (const node of nodes) (node as HTMLElement).style.setProperty("display", "none");
+  });
   const mask = [page.locator(".dt-toast"), page.locator(".df2-xform-identity"), ...extraMask];
   const options = maxDiffPixelRatio == null ? { mask } : { mask, maxDiffPixelRatio };
   const width = page.viewportSize()?.width ?? 1440;

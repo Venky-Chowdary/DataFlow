@@ -7666,7 +7666,9 @@ export function TransferPage({
           </div>
         </div>
         <div className="df2-card-footer df2-wizard-footer">
-          <button type="button" className="df2-btn" onClick={() => setStep(STEP_SOURCE)}>← Back to source</button>
+          <button type="button" className="df2-btn" onClick={() => setStep(STEP_SOURCE)}>
+            <DtIcon name="arrow-left" size={14} /> Back to source
+          </button>
           <div className="df2-btn-row">
           <button
             type="button"

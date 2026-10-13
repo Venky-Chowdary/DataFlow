@@ -621,7 +621,7 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(page, /Continue to Destination/);
     assert.match(page, /Analyze Route/);
     assert.match(page, /Continue to Transform/);
-    assert.match(page, /← Back to source/);
+    assert.match(page, /DtIcon name="arrow-left"[\s\S]{0,40}Back to source/);
     assert.match(xform, /Back to Destination/);
     const shape = readFileSync(join(webRoot, "lib/shape.ts"), "utf8");
     assert.match(shape, /Continue without transforming/);
