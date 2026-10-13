@@ -87,19 +87,27 @@ conn.commit()
         name: "Studio SQLite",
         type: "sqlite",
         role: "both",
-        database: "studio_src",
-        schema: "sales",
-        connection_string: `sqlite:///${dbPath}`,
+        // SQLite has no schema layer. The file path is the database, and
+        // a configured schema name is stored as empty.
+        database: dbPath,
+        connection_string: dbPath,
       },
     });
     expect(created.ok()).toBeTruthy();
 
     await openStudio(page);
     await page.getByRole("radio", { name: "Database" }).click();
-    await page.getByLabel("Source connector").selectOption({ label: "Studio SQLite" });
+    const source = page.getByLabel("Source connector");
+    const sourceValue = await source.evaluate((el) => {
+      const option = [...(el as HTMLSelectElement).options].find((item) => item.label.includes("Studio SQLite"));
+      return option?.value ?? "";
+    });
+    expect(sourceValue).toBeTruthy();
+    await source.selectOption(sourceValue);
     const browser = page.getByTestId("studio-schema-browser");
     await expect(browser).toBeVisible();
-    await expect(browser.getByRole("button", { name: "sales" })).toBeVisible();
+    await expect(browser.getByText(dbPath)).toBeVisible();
+    await expect(browser.getByRole("button", { name: "sales" })).toHaveCount(0);
     await expect(browser.getByText("customers")).toBeVisible();
     await expect(page.getByTestId("transform-canvas")).toHaveCount(0);
   });

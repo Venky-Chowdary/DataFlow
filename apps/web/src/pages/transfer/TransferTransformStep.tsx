@@ -638,7 +638,7 @@ export function TransferTransformStep({
           </button>
         </div>
       </div> : null}
-      <div className="df2-xform-grid">
+      <div className={canvasEnabled ? "df2-xform-grid is-canvas" : "df2-xform-grid"}>
         <section className="df2-xform-card" aria-labelledby="xform-decisions-title">
           <header className="df2-xform-card-head">
             <h3 id="xform-decisions-title">Suggested repairs</h3>

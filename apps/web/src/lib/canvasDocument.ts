@@ -32,9 +32,25 @@ export interface FlowNodeModel {
   index: number;
   op: string;
   title: string;
+  family: string;
   dimmed: boolean;
   disabled: boolean;
   changesRowCount: boolean;
+}
+
+export interface ChainLink {
+  ok: boolean;
+  reason: string;
+}
+
+/** A drop that is visible on the canvas and not yet in the recipe. */
+export interface PendingStepModel {
+  op: string;
+  title: string;
+  family: string;
+  reason: string;
+  atIndex: number;
+  invalid: boolean;
 }
 
 export interface FlowEdgeModel {
@@ -70,6 +86,7 @@ export function stepsToFlow(
       index,
       op: step.op,
       title: describeStep(step, operation),
+      family: operation?.family || "cleanse",
       dimmed: otherTable,
       disabled: syncRefused || step.enabled === false || otherTable,
       changesRowCount: Boolean(operation?.active),
@@ -87,15 +104,80 @@ export function stepsToFlow(
 }
 
 /**
- * Removing the edge between a step and the next one swaps them.
- * The chain is rebuilt from the list, so the graph cannot cycle.
+ * A recipe is one chain. The only legal new link is the one the list
+ * already implies: output of step i to input of step i+1.
+ * Self, backward, and skip links are refused and must not be stored.
  */
-export function reorderOnDisconnect(steps: ShapeStepWire[], sourceIndex: number): ShapeStepWire[] {
-  if (sourceIndex < 0 || sourceIndex >= steps.length - 1) return steps;
+export function classifyChainLink(
+  stepCount: number,
+  sourceIndex: number,
+  targetIndex: number,
+): ChainLink {
+  if (
+    !Number.isInteger(sourceIndex)
+    || !Number.isInteger(targetIndex)
+    || sourceIndex < 0
+    || targetIndex < 0
+    || sourceIndex >= stepCount
+    || targetIndex >= stepCount
+  ) {
+    return { ok: false, reason: "That port is not on this recipe." };
+  }
+  if (sourceIndex === targetIndex) {
+    return { ok: false, reason: "A step cannot connect to itself." };
+  }
+  if (targetIndex === sourceIndex + 1) {
+    return { ok: true, reason: "" };
+  }
+  if (targetIndex < sourceIndex) {
+    return {
+      ok: false,
+      reason: "Data moves forward. Connect an earlier step's output to a later step.",
+    };
+  }
+  return {
+    ok: false,
+    reason: "This recipe is one chain. Drag a node to reorder, or drop a step between two steps. A skip would leave the steps in between unconnected.",
+  };
+}
+
+/** Drag-reorder. The list stays the only order; layout snaps back to it. */
+export function reorderByDrag(
+  steps: ShapeStepWire[],
+  fromIndex: number,
+  toIndex: number,
+): ShapeStepWire[] {
+  if (
+    fromIndex === toIndex
+    || fromIndex < 0
+    || toIndex < 0
+    || fromIndex >= steps.length
+    || toIndex >= steps.length
+  ) {
+    return steps;
+  }
   const next = steps.slice();
-  const [moved] = next.splice(sourceIndex + 1, 1);
-  next.splice(sourceIndex, 0, moved);
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
   return next;
+}
+
+/** Vertical pitch. Taller than a node so an invalid reason cannot cover the next port. */
+export const LAYOUT_PITCH = 148;
+
+/** Where a palette drop lands in the chain, from the stage-local Y. */
+export function insertIndexForDrop(stepCount: number, localY: number, pitch = LAYOUT_PITCH): number {
+  if (stepCount <= 0) return 0;
+  const index = Math.round(Math.max(0, localY) / pitch);
+  return Math.max(0, Math.min(stepCount, index));
+}
+
+/** One icon per family. The palette and the node share this map. */
+export function familyIcon(family: string): "edit" | "layers" | "activity" | "code" {
+  if (family === "structural") return "layers";
+  if (family === "rows") return "activity";
+  if (family === "nested") return "code";
+  return "edit";
 }
 
 export function planCards(postLoadOps: readonly string[]): PlanCardModel[] {
@@ -116,5 +198,5 @@ export function stepsWithoutPlanOps(
 }
 
 export function layoutFor(count: number): { x: number; y: number }[] {
-  return Array.from({ length: count }, (_, index) => ({ x: 48, y: index * 108 }));
+  return Array.from({ length: count }, (_, index) => ({ x: 48, y: index * LAYOUT_PITCH }));
 }

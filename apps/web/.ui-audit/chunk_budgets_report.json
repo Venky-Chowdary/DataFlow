@@ -4,13 +4,13 @@
   "violations": [],
   "chunks": [
     {
-      "file": "index-sPmXHHgi.css",
-      "bytes": 1169213,
+      "file": "index-DoJpJIrd.css",
+      "bytes": 1170746,
       "kind": "css"
     },
     {
-      "file": "transfer-studio-BRRKfqhv.js",
-      "bytes": 1056179,
+      "file": "transfer-studio-hT_T-3s8.js",
+      "bytes": 1058580,
       "kind": "js"
     },
     {
@@ -29,23 +29,23 @@
       "kind": "css"
     },
     {
-      "file": "index-DiDYCFcT.js",
-      "bytes": 178873,
+      "file": "index-CGl_MfVg.js",
+      "bytes": 178876,
       "kind": "js"
     },
     {
-      "file": "studio-canvas-tOD4PX1R.js",
-      "bytes": 125258,
+      "file": "studio-canvas-CeERvG8o.js",
+      "bytes": 126482,
       "kind": "js"
     },
     {
-      "file": "SettingsPage-DPeRPDmo.js",
-      "bytes": 98713,
+      "file": "SettingsPage-CVhFgGhI.js",
+      "bytes": 98719,
       "kind": "js"
     },
     {
-      "file": "SchedulesPage-DxvR86dL.js",
-      "bytes": 74968,
+      "file": "SchedulesPage-BCXI82Xe.js",
+      "bytes": 74971,
       "kind": "js"
     },
     {
@@ -54,32 +54,32 @@
       "kind": "css"
     },
     {
-      "file": "JobsPage-B7o-IgCT.js",
-      "bytes": 51300,
+      "file": "JobsPage-DQCnZDZh.js",
+      "bytes": 51303,
       "kind": "js"
     },
     {
-      "file": "QueryPage-CW5fEuN-.js",
+      "file": "QueryPage-j5wowmeb.js",
       "bytes": 32875,
       "kind": "js"
     },
     {
-      "file": "ConnectorsPage-ChGwNEre.js",
-      "bytes": 27059,
+      "file": "ConnectorsPage-CJFUYqwr.js",
+      "bytes": 27061,
       "kind": "js"
     },
     {
-      "file": "DocsPage-BlN_3xSS.js",
+      "file": "DocsPage-CTgVLOxB.js",
       "bytes": 21771,
       "kind": "js"
     },
     {
-      "file": "TransformsPage-ybC-p-X1.js",
-      "bytes": 20099,
+      "file": "TransformsPage-B5wSnjwF.js",
+      "bytes": 20100,
       "kind": "js"
     },
     {
-      "file": "BenchmarksPage-CZVHZ-TW.js",
+      "file": "BenchmarksPage-QQ26ZZOL.js",
       "bytes": 18590,
       "kind": "js"
     },
@@ -89,17 +89,17 @@
       "kind": "css"
     },
     {
-      "file": "ContractsPage-B9FgDOGs.js",
+      "file": "ContractsPage-DWmHBJSv.js",
       "bytes": 15676,
       "kind": "js"
     },
     {
-      "file": "PilotPage-CTliW2x-.js",
-      "bytes": 12370,
+      "file": "PilotPage-B1UZdFIk.js",
+      "bytes": 12371,
       "kind": "js"
     },
     {
-      "file": "McpPage-BvpAZfNP.js",
+      "file": "McpPage-dO_LQeiJ.js",
       "bytes": 7708,
       "kind": "js"
     },

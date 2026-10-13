@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  classifyChainLink,
+  insertIndexForDrop,
   layoutFor,
   planCards,
-  reorderOnDisconnect,
+  reorderByDrag,
   stepsToFlow,
   stepsWithoutPlanOps,
 } from "./canvasDocument.js";
@@ -43,12 +45,29 @@ describe("canvas document", () => {
     assert.equal(flow.edges.length, 2);
     assert.equal(flow.edges[0].source, "step-0");
     assert.equal(flow.edges[0].target, "step-1");
+    assert.equal(flow.nodes[0].family, "cleanse");
     assert.equal(flow.nodes[1].changesRowCount, false);
     assert.equal(flow.nodes[2].changesRowCount, true);
-    const swapped = reorderOnDisconnect(steps, 0);
-    assert.equal(swapped[0].op, "derive_column");
-    assert.equal(swapped[1].op, "trim");
-    assert.equal(reorderOnDisconnect(steps, 5), steps);
+    assert.equal(flow.nodes[2].family, "rows");
+    const reordered = reorderByDrag(steps, 2, 0);
+    assert.equal(reordered[0].op, "filter_rows");
+    assert.equal(reordered[1].op, "trim");
+    assert.equal(reorderByDrag(steps, 0, 0), steps);
+    assert.equal(reorderByDrag(steps, 5, 0), steps);
+  });
+
+  it("refuses a self, backward, or skip link and accepts only the next step", () => {
+    assert.equal(classifyChainLink(3, 0, 1).ok, true);
+    assert.equal(classifyChainLink(3, 0, 0).ok, false);
+    assert.match(classifyChainLink(3, 0, 0).reason, /itself/);
+    assert.match(classifyChainLink(3, 2, 0).reason, /forward/);
+    assert.match(classifyChainLink(3, 0, 2).reason, /one chain/);
+    assert.match(classifyChainLink(3, -1, 0).reason, /not on this recipe/);
+    assert.equal(insertIndexForDrop(0, 400), 0);
+    assert.equal(insertIndexForDrop(3, 0), 0);
+    assert.equal(insertIndexForDrop(3, 148), 1);
+    assert.equal(insertIndexForDrop(3, 0), 0);
+    assert.equal(insertIndexForDrop(3, 900), 3);
   });
 
   it("dims steps that belong to another table and disables the chain when sync refuses", () => {

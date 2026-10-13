@@ -7,10 +7,13 @@ import { StudioCommandPalette } from "./StudioCommandPalette";
 import { checkShapeExpression } from "../../lib/api";
 import { paletteActions } from "../../lib/canvasPalette";
 import {
+  familyIcon,
+  insertIndexForDrop,
   planCards,
-  reorderOnDisconnect,
+  reorderByDrag,
   stepsToFlow,
   stepsWithoutPlanOps,
+  type PendingStepModel,
 } from "../../lib/canvasDocument";
 import {
   divertMatchingRows,
@@ -105,6 +108,8 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const [helpOpen, setHelpOpen] = useState(false);
   const [templateExpression, setTemplateExpression] = useState("");
   const [templateFormat, setTemplateFormat] = useState("%Y-%m-%d");
+  const [pendingAt, setPendingAt] = useState<number | null>(null);
+  const [linkRefusal, setLinkRefusal] = useState("");
   const expressionGen = useRef(0);
   const draftIndex = useRef<number | null>(null);
   const canEdit = canPlan && !syncRefused;
@@ -163,8 +168,14 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     setFormError("");
   };
 
-  const beginAdd = (op: string) => {
+  const clearPending = () => {
+    setPendingAt(null);
+    if (draftIndex.current == null) setDraftOp("");
+  };
+
+  const beginAdd = (op: string, atIndex = steps.length) => {
     if (!canEdit) return;
+    const operation = catalog?.operations.find((item) => item.op === op);
     draftIndex.current = null;
     setSelected(null);
     setDraftOp(op);
@@ -174,6 +185,19 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     setDraftPolicy("refuse");
     setExpressionError("");
     setFormError("");
+    setLinkRefusal("");
+    if (!operation) return;
+    const built = stepFromDraft(operation, "", {}, "", "refuse");
+    if (built.step) {
+      const next = steps.slice();
+      const at = Math.max(0, Math.min(steps.length, atIndex));
+      next.splice(at, 0, built.step);
+      setPendingAt(null);
+      commit(next);
+      setSelected(at);
+      return;
+    }
+    setPendingAt(Math.max(0, Math.min(steps.length, atIndex)));
   };
 
   const validateExpression = async (text: string) => {
@@ -212,13 +236,18 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       commit(next);
       return;
     }
-    draftIndex.current = steps.length;
-    setSelected(steps.length);
-    commit([...steps, built.step]);
+    const at = pendingAt ?? steps.length;
+    const next = steps.slice();
+    next.splice(at, 0, built.step);
+    draftIndex.current = at;
+    setPendingAt(null);
+    setSelected(at);
+    commit(next);
     setFormError("");
   };
 
   const insertTemplate = (incoming: ShapeStepWire[], error: string) => {
+    setPendingAt(null);
     if (error || incoming.length === 0) {
       setFormError(error || "That template had no steps to add.");
       return;
@@ -266,7 +295,10 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       event.preventDefault();
       filterRef.current?.focus();
     } else if (event.key === "n" || event.key === "N") filterRef.current?.focus();
-    else if (event.key === "Escape") setSelected(null);
+    else if (event.key === "Escape") {
+      setSelected(null);
+      clearPending();
+    }
     else if ((event.key === "Delete" || event.key === "Backspace") && selected != null && canEdit) {
       event.preventDefault();
       commit(removeStep(steps, selected));
@@ -290,6 +322,21 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       applyStack("undo");
     }
   };
+
+  const pending = useMemo<PendingStepModel | null>(() => {
+    if (pendingAt == null || !selectedOperation || selected != null) return null;
+    const built = stepFromDraft(selectedOperation, draftColumn, draftOptions, draftLabel, draftPolicy);
+    return {
+      op: selectedOperation.op,
+      title: selectedOperation.summary,
+      family: selectedOperation.family || "cleanse",
+      reason: built.step
+        ? "Ready. Add step to put it in the recipe."
+        : (built.error || "Finish this step in the inspector. It is not in the recipe yet."),
+      atIndex: pendingAt,
+      invalid: !built.step,
+    };
+  }, [pendingAt, selectedOperation, selected, draftColumn, draftOptions, draftLabel, draftPolicy]);
 
   const actions = paletteActions({
     operations: (catalog?.operations ?? []).map((operation) => ({ op: operation.op, summary: operation.summary })),
@@ -323,8 +370,6 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           </button>
         </div>
       </header>
-      <p className="df2-canvas-banner" role="status">{previewBanner}</p>
-      {effectSummary && <p className="df2-label-hint">{effectSummary}</p>}
       {syncRefused && (
         <p className="df2-canvas-refusal" role="status">{refusalReason} Nodes stay visible and cannot be added.</p>
       )}
@@ -344,7 +389,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           {families.map((group) => (
             <section key={group.family}>
               <h4>{group.label}</h4>
-              <ul>
+              <ul className="df2-canvas-tiles">
                 {group.operations.map((operation) => (
                   <li key={operation.op}>
                     <button
@@ -355,7 +400,9 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                       onDragStart={(event) => event.dataTransfer.setData("application/x-df-op", operation.op)}
                       onClick={() => beginAdd(operation.op)}
                     >
-                      <DtIcon name="layers" size={16} chrome="product" />
+                      <span className="df2-canvas-op-icon" aria-hidden>
+                        <DtIcon name={familyIcon(operation.family || "cleanse")} size={16} chrome="product" />
+                      </span>
                       <span>{operation.summary}</span>
                     </button>
                   </li>
@@ -389,8 +436,9 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
             <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" disabled={!canEdit} onClick={() => runAction("template-hash")}>Hash identity key</button>
           </section>
           {cards.length > 0 && (
-            <section aria-label="After load">
-              <h4>After load</h4>
+            <details className="df2-canvas-sql">
+              <summary>Warehouse SQL</summary>
+              <p className="df2-label-hint">These run after the load. They are not steps on this canvas.</p>
               <ul>
                 {cards.map((card) => (
                   <li key={card.op} className="df2-canvas-plan">
@@ -400,31 +448,46 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                   </li>
                 ))}
               </ul>
-            </section>
+            </details>
           )}
         </aside>
 
-        <div
-          className="df2-canvas-stage"
-          onDragOver={(event) => {
-            if (canEdit) event.preventDefault();
-          }}
-          onDrop={(event) => {
-            const op = event.dataTransfer.getData("application/x-df-op");
-            if (op) beginAdd(op);
-          }}
-        >
-          <Suspense fallback={<p className="df2-label-hint" role="status" aria-busy="true">Loading the canvas…</p>}>
-            <TransformFlow
-              nodes={flow.nodes}
-              edges={flow.edges}
-              onSelect={loadStep}
-              onDisconnect={(index) => {
-                if (!canEdit) return;
-                commit(reorderOnDisconnect(steps, index));
-              }}
-            />
-          </Suspense>
+        <div className="df2-canvas-stage-wrap">
+          <div
+            className="df2-canvas-stage"
+            onDragOver={(event) => {
+              if (canEdit) event.preventDefault();
+            }}
+            onDrop={(event) => {
+              event.preventDefault();
+              const op = event.dataTransfer.getData("application/x-df-op");
+              if (!op) return;
+              const bounds = event.currentTarget.getBoundingClientRect();
+              beginAdd(op, insertIndexForDrop(steps.length, event.clientY - bounds.top));
+            }}
+          >
+            <Suspense fallback={<p className="df2-label-hint" role="status" aria-busy="true">Loading the canvas…</p>}>
+              <TransformFlow
+                nodes={flow.nodes}
+                edges={flow.edges}
+                pending={pending}
+                onSelect={loadStep}
+                onReorder={(from, to) => {
+                  if (!canEdit) return;
+                  setPendingAt(null);
+                  commit(reorderByDrag(steps, from, to));
+                }}
+                onInvalidLink={setLinkRefusal}
+              />
+            </Suspense>
+          </div>
+          {linkRefusal && <p className="df2-canvas-link-refusal" role="alert">{linkRefusal}</p>}
+          <details className="df2-canvas-preview">
+            <summary>Sample preview</summary>
+            <p role="status">{previewBanner}</p>
+            {effectSummary && <p className="df2-label-hint">{effectSummary}</p>}
+            <button type="button" className="df2-btn df2-btn-sm" onClick={onRunPreview}>Run preview</button>
+          </details>
         </div>
 
         <aside className="df2-canvas-inspector" id="canvas-inspector" tabIndex={-1} aria-label="Step inspector">
@@ -468,9 +531,16 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                   onBlur={commitDraft}
                 />
               </label>
-              <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" disabled={!canEdit} onClick={commitDraft}>
-                {selected != null ? "Update step" : "Add step"}
-              </button>
+              <div className="df2-canvas-inspector-actions">
+                <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" disabled={!canEdit} onClick={commitDraft}>
+                  {selected != null ? "Update step" : "Add step"}
+                </button>
+                {pending && (
+                  <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={clearPending}>
+                    Discard
+                  </button>
+                )}
+              </div>
             </>
           )}
         </aside>
