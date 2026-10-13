@@ -76,6 +76,45 @@ def test_mysql_timestamp_zero_is_modified_without_backfill():
     )
     assert any("MODIFY COLUMN" in sql and "DATETIME(3)" in sql for sql in issued)
     assert any("time_zone" in sql for sql in cursor.sql)
+
+
+def test_mysql_modify_restates_not_null_and_clock_default():
+    """A fractional-second MODIFY must not drop a carried NOT NULL default."""
+    from connectors.schema_drift import widen_existing_columns_native
+
+    class _Cursor:
+        def __init__(self) -> None:
+            self.sql: list[str] = []
+            self._rows: list[tuple] = []
+
+        def execute(self, sql, params=None):
+            self.sql.append(sql)
+            lowered = sql.lower()
+            if "is_nullable" in lowered:
+                self._rows = [("NO", "CURRENT_TIMESTAMP(6)", "DEFAULT_GENERATED")]
+            elif "information_schema" in lowered:
+                self._rows = [("updated_at", "timestamp", None, None, None)]
+            else:
+                self._rows = []
+
+        def fetchall(self):
+            return list(self._rows)
+
+    cursor = _Cursor()
+    issued = widen_existing_columns_native(
+        cursor,
+        "mysql",
+        "dataflow",
+        "events",
+        ["updated_at"],
+        ["DATETIME(6)"],
+        backfill=False,
+        source_types={"updated_at": "TIMESTAMP"},
+        temporal_fsp_without_backfill=True,
+    )
+    modify = next(sql for sql in issued if "MODIFY COLUMN" in sql)
+    assert "NOT NULL" in modify
+    assert "DEFAULT CURRENT_TIMESTAMP(6)" in modify
     quiet = _Cursor()
     assert (
         widen_existing_columns_native(
