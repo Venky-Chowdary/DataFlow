@@ -14,40 +14,41 @@ from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
 
-def _claim_once_in_process(path: str, queue) -> None:
-    from services import sso_state
-
-    sso_state.mongo_database = lambda: None
-    sso_state.data_dir = lambda: Path(path).parent
-    queue.put(
-        sso_state.claim_once(
-            "oidc_nonce",
-            "shared-token",
-            datetime.now(timezone.utc) + timedelta(minutes=5),
-        )
-    )
-
-
-def _get_state_in_process(path: str, queue) -> None:
-    from services import sso_state
-
-    sso_state.mongo_database = lambda: None
-    sso_state.STATE_PATH = Path(path)
-    queue.put(sso_state.get_state("shared-state", "oidc") is not None)
+def _ensure_spawn_can_import_services() -> None:
+    """Spawn children import ``services`` by name. Pytest's cwd is on sys.path
+    in the parent, but a fresh interpreter only sees PYTHONPATH."""
+    root = str(Path(__file__).resolve().parents[1])
+    current = os.environ.get("PYTHONPATH", "")
+    parts = [part for part in current.split(os.pathsep) if part]
+    if root not in parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join([root, *parts]) if parts else root
 
 
 def _run_eight_processes(target, path: Path) -> list[bool]:
-    context = multiprocessing.get_context("fork")
+    """Eight fresh interpreters, one flocked file, exactly one winner.
+
+    ``spawn`` (vfork + exec) is required. ``fork`` copies this pytest process.
+    On a GitHub runner the overcommit heuristic charges that copy and
+    ``Process.start`` raises ``OSError: Cannot allocate memory``. The local
+    kernel has overcommit enabled, so the same fork succeeds here and hides
+    the failure.
+    """
+    from services.sso_file_race import RACE_WAIT_SECONDS
+
+    _ensure_spawn_can_import_services()
+    context = multiprocessing.get_context("spawn")
+    assert context.get_start_method() == "spawn"
     queue = context.Queue()
+    barrier = context.Barrier(8)
     processes = [
-        context.Process(target=target, args=(str(path), queue))
+        context.Process(target=target, args=(str(path), queue, barrier))
         for _ in range(8)
     ]
     for process in processes:
         process.start()
-    results = [queue.get(timeout=10) for _ in processes]
+    results = [queue.get(timeout=RACE_WAIT_SECONDS) for _ in processes]
     for process in processes:
-        process.join(timeout=10)
+        process.join(timeout=RACE_WAIT_SECONDS)
         assert process.exitcode == 0
     return results
 
@@ -92,31 +93,20 @@ def test_claim_once_rejects_empty_token_id(tmp_path, monkeypatch):
 
 
 def test_file_claim_once_is_atomic_across_processes(tmp_path):
-    results = _run_eight_processes(
-        _claim_once_in_process,
-        tmp_path / "sso_replay.json",
-    )
+    from services.sso_file_race import claim_once_child
+
+    results = _run_eight_processes(claim_once_child, tmp_path / "sso_replay.json")
     assert sum(results) == 1
 
 
 def test_file_get_state_is_atomic_across_processes(tmp_path):
     from services import sso_state
+    from services.sso_file_race import get_state_child
 
     sso_state.mongo_database = lambda: None
     sso_state.STATE_PATH = tmp_path / "sso_state.json"
     sso_state.set_state("shared-state", "oidc")
-    if hasattr(sso_state, "_load_file"):
-        barrier = multiprocessing.get_context("fork").Barrier(8)
-        load_file = sso_state._load_file
-
-        def synchronized_load():
-            states = load_file()
-            barrier.wait(timeout=10)
-            return states
-
-        sso_state._load_file = synchronized_load
-
-    results = _run_eight_processes(_get_state_in_process, sso_state.STATE_PATH)
+    results = _run_eight_processes(get_state_child, sso_state.STATE_PATH)
     assert sum(results) == 1
 
 
