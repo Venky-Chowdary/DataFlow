@@ -21,6 +21,22 @@ def test_percent_token_stays_varchar() -> None:
     assert classify_value("42") == "INTEGER"
 
 
+def test_mixed_currency_column_infers_decimal() -> None:
+    """Every cell parses and one carries a currency mark, so the column is money.
+
+    A lone ``1,234`` still fails closed and cannot pull a column into DECIMAL.
+    """
+    from services.schema_inference import infer_column
+
+    mixed = infer_column(
+        ["$1,000.00", "€1.000,00", "1 000 000.89", "USD 500", "1,234,567"],
+        field_name="amount",
+    )
+    assert mixed["logical_type"] == "DECIMAL"
+    ambiguous = infer_column(["1,234", "5,678"], field_name="amount")
+    assert ambiguous["logical_type"] != "DECIMAL"
+
+
 def test_trim_does_not_collapse_internal_whitespace() -> None:
     cleaned, err = apply_transform("  pad  ", "trim")
     assert err is None
@@ -263,6 +279,28 @@ def test_unparsed_filter_tail_is_refused() -> None:
     )
     assert "not run" in warning
     assert _unparsed_filter_warning("status = open and amount > 10", "and") == ""
+
+
+def test_injection_tail_is_bound_and_or_tail_is_not() -> None:
+    from src.ai.copilot.aggregate_tools import _absorb_bound_literal
+    from src.ai.copilot.predicates import ParsedFilter
+
+    parsed = ParsedFilter(column="status", op="eq", raw_values=["x"], text="status = x")
+    bound = _absorb_bound_literal(
+        "status = x'; DROP TABLE w91; --",
+        parsed,
+        "DROP TABLE w91; --",
+    )
+    assert bound is not None
+    assert bound.raw_values == ["x'; DROP TABLE w91; --"]
+    assert (
+        _absorb_bound_literal(
+            "STS = POSTED' OR '1'='1",
+            ParsedFilter(column="STS", op="eq", raw_values=["POSTED"], text="STS = POSTED"),
+            "' OR '1'='1",
+        )
+        is None
+    )
 
 
 def test_column_transforms_stamp_an_override() -> None:

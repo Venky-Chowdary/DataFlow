@@ -1000,17 +1000,21 @@ def infer_column(
                 "samples": non_empty[:8],
             }
 
-    # A column of only currency or percent tokens is a decimal the write path
-    # binds. classify_value still reports one token as VARCHAR so a phone or a
-    # stray marker is not inferred as an integer (R4-D07).
+    # A column the decimal write path can bind is a decimal. Every sample must
+    # parse (so a stray word stays text) and at least one must carry a currency
+    # or percent marker (so a plain integer column is not relabeled). A mixed
+    # money column still qualifies: ``$1,000.00`` next to ``1,234,567`` and
+    # ``1 000 000.89``. classify_value still reports one token as VARCHAR so a
+    # phone or a stray marker is not inferred as an integer (R4-D07). A lone
+    # ``1,234`` does not parse, so it cannot pull the column into DECIMAL.
     from services.transform_engine import (
         _numeric_text_has_markers,
         decimal_wire_value,
     )
 
-    if all(
-        _numeric_text_has_markers(sample) and decimal_wire_value(sample) is not None
-        for sample in non_empty
+    parsed_decimals = [decimal_wire_value(sample) for sample in non_empty]
+    if all(value is not None for value in parsed_decimals) and any(
+        _numeric_text_has_markers(sample) for sample in non_empty
     ):
         notes.append(
             "every sample is a currency or percent literal the decimal write path binds"
