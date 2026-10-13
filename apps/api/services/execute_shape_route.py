@@ -101,17 +101,7 @@ def open_execute_shape(request: Any, columns: list[str], *, job_id: str) -> Exec
     )
     recipe_payload = getattr(request, "shape_recipe", None)
     shape_refusal = ""
-    try:
-        from services.set_graph import attach_set_graph, block_message, set_hash_refusal
-
-        graph = attach_set_graph(recipe_payload)
-        shape_refusal = block_message(graph) or set_hash_refusal(
-            "" if graph is None else graph.set_hash,
-            str(getattr(request, "approved_set_hash", "") or ""),
-        )
-    except ShapeError as exc:
-        shape_refusal = str(exc)
-    if not shape_refusal and len(selected) > 1 and enabled_recipe_steps(recipe_payload):
+    if len(selected) > 1 and enabled_recipe_steps(recipe_payload):
         shape_refusal = history_shape_refusal(shape_sync)
         if not shape_refusal:
             plan.shape_by_stream, shape_refusal = partition_shape_steps(
@@ -153,36 +143,26 @@ def open_execute_shape(request: Any, columns: list[str], *, job_id: str) -> Exec
                     cursor_field=shape_cursor,
                     key_columns=shape_keys,
                 )
-    elif not shape_refusal:
-        try:
-            plan.shape_runner = _open_shape_runner(request, columns)
-        except ShapeError as exc:
-            shape_refusal = str(exc)
-            plan.shape_runner = None
-            plan.design_runner = None
-        else:
-            plan.design_runner = plan.shape_runner
-            shape_refusal = _shape_stream_refusal(
-                plan.shape_runner,
-                effective_sync=shape_sync,
-                multi_stream=len(selected) > 1,
-                cursor_field=shape_cursor,
-                key_columns=shape_keys,
-            ) or ""
+    else:
+        plan.shape_runner = _open_shape_runner(request, columns)
+        plan.design_runner = plan.shape_runner
+        shape_refusal = _shape_stream_refusal(
+            plan.shape_runner,
+            effective_sync=shape_sync,
+            multi_stream=len(selected) > 1,
+            cursor_field=shape_cursor,
+            key_columns=shape_keys,
+        ) or ""
     if not shape_refusal:
         return plan
-    if "source table" in shape_refusal:
-        remediation = "Name the source table on each transform step, or run one stream."
-    elif "set node" in shape_refusal or "set graph" in shape_refusal or "set_graph" in shape_refusal:
-        remediation = (
-            "Remove the set graph from this recipe. The set engine cannot run "
-            "it yet, and row steps in the same recipe were not applied."
-        )
-    else:
-        remediation = (
+    remediation = (
+        "Name the source table on each transform step, or run one stream."
+        if "source table" in shape_refusal
+        else (
             "Remove the Shape recipe for this sync mode, or shape "
             "on a full-refresh / incremental-append route."
         )
+    )
     _mongo().update_job_status(
         job_id,
         "failed",

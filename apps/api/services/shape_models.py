@@ -22,8 +22,7 @@ at the screen:
    step definition so the ledger and the UI read the same source of truth.
 3. **One identity.** ``recipe_hash`` is a canonical hash over the parsed steps,
    so Validate and Execute can be proved to have run the same recipe and a
-   whitespace edit does not invalidate an approval. A set graph, when present,
-   has its own ``set_hash`` and is not part of ``recipe_hash``.
+   whitespace edit does not invalidate an approval.
 """
 
 from __future__ import annotations
@@ -34,7 +33,6 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
-from services.set_graph import SetGraph, attach_set_graph
 from services.shape_expr import (
     Expression,
     ExpressionError,
@@ -371,7 +369,6 @@ class ShapeRecipe:
     steps: tuple[ShapeStep, ...] = ()
     input_columns: tuple[str, ...] = ()
     output_columns: tuple[str, ...] = ()
-    set_graph: SetGraph | None = None
 
     def __bool__(self) -> bool:
         return bool(self.enabled_steps)
@@ -433,19 +430,6 @@ class ShapeRecipe:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
     @property
-    def set_hash(self) -> str:
-        """Identity of ``set_graph``. Empty when there are no nodes."""
-        if self.set_graph is None:
-            return ""
-        return self.set_graph.set_hash
-
-    @property
-    def set_errors(self) -> tuple[Any, ...]:
-        if self.set_graph is None:
-            return ()
-        return self.set_graph.errors
-
-    @property
     def touched_columns(self) -> frozenset[str]:
         """Every column an enabled step writes, plus every column it introduced."""
         written: set[str] = set()
@@ -455,10 +439,7 @@ class ShapeRecipe:
         return frozenset(name for name in written if name)
 
     def to_wire(self) -> dict[str, Any]:
-        body: dict[str, Any] = {"steps": [s.to_wire() for s in self.steps]}
-        if self.set_graph is not None and not self.set_graph.is_empty:
-            body["set_graph"] = self.set_graph.to_wire()
-        return body
+        return {"steps": [s.to_wire() for s in self.steps]}
 
     def describe(self) -> str:
         if not self.enabled_steps:
@@ -498,7 +479,6 @@ class ShapeRecipe:
             steps=tuple(steps),
             input_columns=original,
             output_columns=tuple(columns) if columns is not None else (),
-            set_graph=attach_set_graph(payload),
         )
 
 

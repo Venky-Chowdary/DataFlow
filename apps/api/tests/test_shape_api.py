@@ -196,10 +196,6 @@ def test_the_catalog_states_the_operations_the_engine_will_accept(client):
     assert {"trim", "round_number", "derive_column", "filter_rows", "unnest_json", "flatten_json"} <= ops
     assert "join" not in ops
     assert "join" in body["post_load_only"]["operations"]
-    assert body["set_operations"] == []
-    assert body["set_engine"]["available"] is False
-    assert body["set_engine"]["reference"] == "duckdb"
-    assert body["set_engine"]["pushdown_dialects"] == []
     assert {p["value"] for p in body["error_policies"]} == {"refuse", "divert", "null"}
     assert body["max_steps"] > 0
 
