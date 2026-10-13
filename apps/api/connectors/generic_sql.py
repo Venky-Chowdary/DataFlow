@@ -1184,7 +1184,10 @@ def _dialect_unavailable(url: Any, db_type: Any) -> RuntimeError:
         "redshift": "psycopg2-binary (scheme postgresql+psycopg2://)",
         "snowflake": "snowflake-sqlalchemy",
         "bigquery": "sqlalchemy-bigquery",
-        "databricks": "databricks-sqlalchemy",
+        "databricks": (
+            "databricks-sqlalchemy from apps/api/requirements-databricks.txt "
+            "(kept off the default install until the connector accepts oauthlib 4)"
+        ),
     }
     hint = hint_by_dialect.get(dialect_key)
     if not hint:

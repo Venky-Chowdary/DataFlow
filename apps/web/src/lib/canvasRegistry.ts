@@ -316,8 +316,21 @@ function specFromWire(wire: CanvasNodeWire, executableSet: Set<string>, reason: 
   };
 }
 
+/** Certified set ops. The engine publishes objects; the canvas also accepts a name. */
+function certifiedSetOps(catalog: ShapeCatalog | null | undefined): Set<string> {
+  const names = new Set<string>();
+  for (const entry of catalog?.set_operations ?? []) {
+    if (typeof entry === "string") {
+      if (entry) names.add(entry);
+      continue;
+    }
+    if (entry.executable && entry.op) names.add(entry.op);
+  }
+  return names;
+}
+
 export function registryFromCatalog(catalog: ShapeCatalog | null | undefined): NodeSpec[] {
-  const executableSet = new Set(catalog?.set_operations ?? []);
+  const executableSet = certifiedSetOps(catalog);
   const reason = catalog?.post_load_only?.reason || NOT_EXECUTABLE;
   const specs: NodeSpec[] = [];
   const seen = new Set<string>();

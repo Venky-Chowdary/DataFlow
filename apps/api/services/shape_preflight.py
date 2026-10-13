@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from services.schema_inference import infer_schema_map
+from services.set_graph import block_message
 from services.shape_engine import ShapeEngine, ShapeRowError
 from services.shape_models import ShapeError, ShapeRecipe
 
@@ -91,6 +92,9 @@ def shaped_preflight_image(
         raise ShapePreflightRefused(
             f"The approved transform recipe cannot run against this source: {exc}"
         ) from exc
+    blocked = block_message(recipe.set_graph)
+    if blocked:
+        raise ShapePreflightRefused(blocked)
     if not recipe.enabled_steps:
         return passthrough
 

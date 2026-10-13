@@ -23,13 +23,35 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from services.canvas_capability import canvas_capability
-from services.shape_engine import ShapeEngine, ShapeRowError
+from services.set_graph import catalog_set_fields
+from services.shape_engine import ShapeEffect, ShapeEngine, ShapeRowError
 from services.shape_expr import ExpressionError, compile_expression, describe_functions
 from services.shape_models import MAX_STEPS, ShapeError, ShapeRecipe, describe_catalog
 from services.shape_preflight import shaped_column_types
 from services.shape_suggest import profile_columns, suggest_steps
 
 router = APIRouter(prefix="/shape", tags=["Shape"])
+
+
+def _catalog_fields() -> dict[str, Any]:
+    """Engine set-graph fields plus the canvas port contract.
+
+    Shared keys stay with the engine. ``set_hash`` and ``canvas_nodes`` are
+    the canvas additions and are not dropped when the engine dict is applied.
+    """
+    engine = catalog_set_fields()
+    canvas = canvas_capability()
+    engine_block = engine.get("set_engine") or {}
+    canvas_block = canvas.get("set_engine") or {}
+    return {
+        **engine,
+        "set_engine": {
+            **canvas_block,
+            **engine_block,
+            "set_hash": canvas_block.get("set_hash", ""),
+        },
+        "canvas_nodes": canvas["canvas_nodes"],
+    }
 
 # A preview is a design aid, not a load. Bounding it keeps an accidental paste of
 # 100k rows from turning an interactive request into a job.
@@ -96,14 +118,7 @@ async def shape_catalog() -> dict[str, Any]:
                 "detail": "The only policy that discards information; every occurrence is counted.",
             },
         ],
-        "post_load_only": {
-            "operations": ["join", "lookup", "aggregate", "pivot", "unpivot", "sort", "rank", "window", "dedupe"],
-            "reason": (
-                "These need the whole population in one place, which a streaming "
-                "read cannot provide; model them on the Transforms page after the load."
-            ),
-        },
-        **canvas_capability(),
+        **_catalog_fields(),
     }
 
 
@@ -151,6 +166,9 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     """Apply a recipe to the sampled rows and report exactly what it did."""
     rows = _bounded(body.sample_rows)
     columns = body.source_columns or _columns_of(rows)
+    blocked = _blocked_set_preview(body, rows)
+    if blocked is not None:
+        return blocked
     recipe, preview_note, program_hash = _recipe_for_preview(body, columns)
 
     engine = ShapeEngine(recipe)
@@ -303,15 +321,58 @@ def _identity(
     *,
     output_columns: list[str] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "valid": True,
+    body: dict[str, Any] = {
+        "valid": not recipe.set_errors,
         "recipe_hash": recipe.recipe_hash,
+        "set_hash": recipe.set_hash,
+        "set_errors": [error.to_wire() for error in recipe.set_errors],
         "step_count": len(recipe.enabled_steps),
         "has_active_step": recipe.has_active_step,
         "input_columns": list(recipe.input_columns),
         "output_columns": list(output_columns if output_columns is not None else recipe.output_columns),
         "summary": recipe.describe(),
         "steps": [s.to_wire() for s in recipe.steps],
+    }
+    if recipe.set_graph is not None and not recipe.set_graph.is_empty:
+        body["set_graph"] = recipe.set_graph.to_wire()
+    return body
+
+
+def _blocked_set_preview(body: _PreviewBody, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """A set graph that cannot run must not preview as a successful row recipe.
+
+    ``after`` stays empty. Applying trim and then showing those rows would
+    read as a join that succeeded.
+    """
+    try:
+        recipe = ShapeRecipe.parse(body.recipe)
+    except ShapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not recipe.set_errors:
+        return None
+    error = recipe.set_errors[0]
+    return {
+        "recipe": _identity(recipe),
+        "sampled_rows": len(rows),
+        "column_types": dict(body.column_types or {}),
+        "retyped_columns": {},
+        "before": [_wire_row(r) for r in rows[:200]],
+        "after": [],
+        "effect": _wire(ShapeEffect().to_dict()),
+        "changed_cells": [],
+        "refusal": {
+            "step": 0,
+            "op": error.op,
+            "column": "",
+            "row": 0,
+            "message": error.message,
+        },
+        "shaped_profile": [],
+        "suggestions": [],
+        "preview_note": (
+            "The set graph cannot run, so preview did not apply the row recipe. "
+            "After is empty because those rows were not shaped."
+        ),
     }
 
 

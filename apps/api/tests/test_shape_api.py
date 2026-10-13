@@ -200,6 +200,8 @@ def test_the_catalog_states_the_operations_the_engine_will_accept(client):
     assert body["set_operations"] == []
     assert body["set_engine"]["available"] is False
     assert body["set_engine"]["set_hash"] == ""
+    assert body["set_engine"]["reference"] == "duckdb"
+    assert body["set_engine"]["pushdown_dialects"] == []
     nodes = {node["op"]: node for node in body["canvas_nodes"]}
     assert nodes["join"]["executable"] is False
     assert [port["id"] for port in nodes["join"]["inputs"]] == ["left", "right"]

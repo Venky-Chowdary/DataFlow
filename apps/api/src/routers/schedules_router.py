@@ -104,6 +104,7 @@ class ScheduleCreate(BaseModel):
     number_locale: str = ""
     shape_recipe: dict[str, Any] = Field(default_factory=dict)
     approved_shape_recipe_hash: str = ""
+    approved_set_hash: str = ""
     approved_decision_artifact_hash: str = ""
     approved_ddl_identity_hash: str = ""
     max_retries: int = Field(default=0, ge=0, le=10)
@@ -155,6 +156,7 @@ class ScheduleUpdate(BaseModel):
     number_locale: Optional[str] = None
     shape_recipe: Optional[dict[str, Any]] = None
     approved_shape_recipe_hash: Optional[str] = None
+    approved_set_hash: Optional[str] = None
     approved_decision_artifact_hash: Optional[str] = None
     approved_ddl_identity_hash: Optional[str] = None
     max_retries: Optional[int] = Field(default=None, ge=0, le=10)
@@ -206,6 +208,7 @@ class ScheduleResponse(BaseModel):
     number_locale: str = ""
     shape_recipe: dict[str, Any] = Field(default_factory=dict)
     approved_shape_recipe_hash: str = ""
+    approved_set_hash: str = ""
     approved_decision_artifact_hash: str = ""
     approved_ddl_identity_hash: str = ""
     max_retries: int = 0
@@ -308,6 +311,7 @@ class ScheduleSummaryResponse(BaseModel):
     mapping_count: int = 0
     # Validate≡Execute stamps. Hashes only — shape_recipe stays on GET /{id}.
     approved_shape_recipe_hash: str = ""
+    approved_set_hash: str = ""
     approved_decision_artifact_hash: str = ""
     approved_ddl_identity_hash: str = ""
     # A parked schedule reads as "off" from run_count and last_status alone. The

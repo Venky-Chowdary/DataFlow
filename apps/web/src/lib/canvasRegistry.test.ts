@@ -67,6 +67,34 @@ describe("canvas node registry", () => {
     const specs = registryFromCatalog(catalog({ set_operations: ["join"] }));
     const join = specs.find((spec) => spec.op === "join");
     assert.equal(join?.executable, true);
+    const fromEngine = registryFromCatalog(catalog({
+      set_operations: [{
+        op: "join",
+        summary: "Join",
+        executable: true,
+        execution: [],
+        family: "set",
+        inputs: [],
+        outputs: [],
+        options: [],
+        required: [],
+      }],
+    }));
+    assert.equal(fromEngine.find((spec) => spec.op === "join")?.executable, true);
+    const refused = registryFromCatalog(catalog({
+      set_operations: [{
+        op: "join",
+        summary: "Join",
+        executable: false,
+        execution: [],
+        family: "set",
+        inputs: [],
+        outputs: [],
+        options: [],
+        required: [],
+      }],
+    }));
+    assert.equal(refused.find((spec) => spec.op === "join")?.executable, false);
     const found = runnableSpecs(specs, "join");
     assert.equal(found.length, 1);
     assert.equal(specsByFamily(found).map((group) => group.family).join(), "set");

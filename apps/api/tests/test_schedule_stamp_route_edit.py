@@ -74,6 +74,28 @@ def test_an_unrelated_edit_keeps_the_stamp(temp_store):
     assert same.approved_ddl_identity_hash == "b" * 64
 
 
+def test_a_blank_set_hash_is_not_a_new_stamp(temp_store):
+    """Echoing the empty Phase A field must not clear or preserve a route stamp."""
+    stamped = _stamped()
+    same = store.update_schedule(
+        stamped.id,
+        {"name": "Nightly (EU)", "approved_set_hash": ""},
+    )
+    assert same is not None
+    assert same.approved_decision_artifact_hash == "a" * 64
+    assert same.approved_ddl_identity_hash == "b" * 64
+    assert same.approved_set_hash == ""
+
+    moved = store.update_schedule(
+        stamped.id,
+        {"dest_table": "orders_wh_v2", "approved_set_hash": "  "},
+    )
+    assert moved is not None
+    assert moved.dest_table == "orders_wh_v2"
+    assert moved.approved_decision_artifact_hash == ""
+    assert moved.approved_ddl_identity_hash == ""
+
+
 def test_a_re_validate_that_moves_the_route_keeps_its_own_new_stamp(temp_store):
     """Studio re-Validate sends the new route and the hash it just computed."""
     stamped = _stamped()

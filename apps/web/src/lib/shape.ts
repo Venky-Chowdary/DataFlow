@@ -53,6 +53,33 @@ export interface ShapeErrorPolicy {
   detail: string;
 }
 
+/** A set operation the catalog may publish once it can run. Empty until then. */
+export interface SetOperation {
+  op: string;
+  summary: string;
+  executable: boolean;
+  execution: string[];
+  family: string;
+  inputs: string[];
+  outputs: string[];
+  options: string[];
+  required: string[];
+}
+
+export interface SetEngineCatalog {
+  available: boolean;
+  reference: string;
+  pushdown_dialects: string[];
+  /** Empty-document hash from the canvas catalog. The engine omits it. */
+  set_hash?: string;
+}
+
+export interface SetGraphError {
+  node: string;
+  op: string;
+  message: string;
+}
+
 export interface ShapeCatalog {
   operations: ShapeOperation[];
   functions: ShapeFunctionDoc[];
@@ -60,9 +87,12 @@ export interface ShapeCatalog {
   max_preview_rows: number;
   error_policies: ShapeErrorPolicy[];
   post_load_only: { operations: string[]; reason: string };
-  /** Set ops the engine can run. Empty until one is certified. */
-  set_operations?: string[];
-  set_engine?: { available: boolean; set_hash?: string; reference?: string; pushdown_dialects?: string[] };
+  /**
+   * Empty until a set node can run. The engine publishes a SetOperation.
+   * The canvas also accepts the certified op name as a string.
+   */
+  set_operations?: Array<string | SetOperation>;
+  set_engine?: SetEngineCatalog;
   /** Port contract for nodes the row catalog does not run. */
   canvas_nodes?: {
     op: string;
@@ -124,6 +154,10 @@ export interface ShapeProfileResponse {
 export interface ShapeIdentity {
   valid: boolean;
   recipe_hash: string;
+  /** Empty when the recipe has no set nodes. Not part of recipe_hash. */
+  set_hash?: string;
+  set_errors?: SetGraphError[];
+  set_graph?: { nodes: Record<string, unknown>[]; main_output?: string };
   step_count: number;
   has_active_step: boolean;
   input_columns: string[];
