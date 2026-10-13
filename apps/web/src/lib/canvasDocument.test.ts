@@ -4,8 +4,10 @@ import {
   chainDocument,
   classifyChainLink,
   classifyPortLink,
+  columnsBeforeStep,
   documentKind,
   draftWithDefaults,
+  viewportForChain,
   executableRecipe,
   insertIndexAtPoint,
   insertIndexForDrop,
@@ -132,7 +134,7 @@ describe("canvas document", () => {
     assert.deepEqual(draftWithDefaults(trim, ["email", "name"]), { column: "email", options: {} });
     const filterDraft = draftWithDefaults(filter, ["email"]);
     assert.equal(filterDraft.column, "");
-    assert.equal(filterDraft.options.keep, false);
+    assert.equal(filterDraft.options.keep, true);
     assert.equal(filterDraft.options.condition, undefined);
   });
 
@@ -197,6 +199,30 @@ describe("canvas document", () => {
       targetPort: "in",
     });
     assert.equal(accepted.ok, true);
+  });
+});
+
+describe("readable fit and columns still on the row", () => {
+  it("keeps a 248px card at zoom 1 and pans when the chain is wider than the stage", () => {
+    const one = viewportForChain({ x: 24, y: 28, width: 248, height: 160 }, 900, 500);
+    assert.ok(one.zoom >= 1);
+    assert.ok(one.zoom <= 1.35);
+    const chain = viewportForChain({ x: 24, y: 28, width: 888, height: 160 }, 640, 420);
+    assert.equal(chain.zoom, 1);
+    assert.ok(chain.x <= 28);
+  });
+
+  it("hides a column an earlier step dropped, and keeps one a later step still needs", () => {
+    const steps = [
+      { op: "trim", column: "customer_email" },
+      { op: "drop_column", column: "order_id" },
+      { op: "filter_rows", options: { condition: "[status] <> ''", keep: true } },
+    ];
+    const source = ["order_id", "customer_email", "order_amt", "order_date", "status"];
+    assert.deepEqual(columnsBeforeStep(steps, 0, source), source);
+    assert.deepEqual(columnsBeforeStep(steps, 2, source), ["customer_email", "order_amt", "order_date", "status"]);
+    assert.equal(columnsBeforeStep(steps, 2, source).includes("status"), true);
+    assert.equal(columnsBeforeStep(steps, 2, source).includes("order_id"), false);
   });
 });
 

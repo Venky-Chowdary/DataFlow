@@ -12,7 +12,9 @@ import {
   parseNumberOption,
   settleExpressionCheck,
   operationsByFamily,
+  previewErrorForSteps,
   previewSampleNote,
+  unknownExpressionColumn,
   continueTransformState,
   preloadTransformRefused,
   preloadTransformRefusalReason,
@@ -255,6 +257,16 @@ test("Continue waits for a matching balanced preview when a recipe is applied", 
     }).enabled,
     true,
   );
+});
+
+test("a refusal stays with the recipe that caused it", () => {
+  const bad = JSON.stringify([{ op: "filter_rows", options: { condition: "[order_id] <> ''" } }]);
+  const fixed = JSON.stringify([{ op: "filter_rows", options: { condition: "[status] <> ''" } }]);
+  const message = "step 3 condition refers to column 'order_id', which the source does not have";
+  assert.equal(previewErrorForSteps(message, bad, bad), message);
+  assert.equal(previewErrorForSteps(message, bad, fixed), "");
+  assert.match(unknownExpressionColumn("[order_id] <> ''", ["customer_email", "status"]), /order_id/);
+  assert.equal(unknownExpressionColumn("[status] <> ''", ["customer_email", "status"]), "");
 });
 
 test("CDC with a recipe cannot continue — history was not written by this recipe", () => {

@@ -650,6 +650,29 @@ export function stepFromDraft(
   return { step, error: "" };
 }
 
+/**
+ * A bracketed column the expression names that this step cannot see.
+ * Empty when every reference is still on the row.
+ */
+export function unknownExpressionColumn(expression: string, available: readonly string[]): string {
+  const present = new Set(available);
+  const missing = [...expression.matchAll(/\[([^\]\n]+)\]/g)]
+    .map((match) => match[1].trim())
+    .find((name) => name.length > 0 && !present.has(name));
+  if (!missing) return "";
+  const list = available.slice(0, 20).join(", ");
+  return `refers to column '${missing}', which is not available at this step. Available: ${list}`;
+}
+
+/**
+ * A preview refusal belongs to the recipe that produced it. A later edit
+ * must not keep showing that sentence.
+ */
+export function previewErrorForSteps(error: string, errorKey: string, stepsKey: string): string {
+  if (!error || errorKey !== stepsKey) return "";
+  return error;
+}
+
 /** Always-visible sample caption. The preview is not the population. */
 export function samplePopulationBanner(shown: number, population?: number): string {
   const sample = Math.max(0, shown).toLocaleString();

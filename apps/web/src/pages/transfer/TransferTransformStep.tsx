@@ -23,6 +23,7 @@ import {
   preloadTransformRefused,
   kitchenCatalogColumns,
   kitchenSampleValues,
+  previewErrorForSteps,
   previewSampleNote,
   samplePopulationBanner,
   recipePayload,
@@ -154,6 +155,7 @@ export function TransferTransformStep({
   const [profileError, setProfileError] = useState("");
   const [preview, setPreview] = useState<ShapePreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState("");
+  const [previewErrorKey, setPreviewErrorKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const [pane, setPane] = useState<"prepare" | "result">("prepare");
@@ -189,6 +191,7 @@ export function TransferTransformStep({
   const previewRows = usingStreamSample ? (focusedSample?.rows ?? NO_ROWS) : sampleRows;
   const rowsKey = useMemo(() => JSON.stringify(previewRows.slice(0, 200)), [previewRows]);
   const stepsKey = useMemo(() => JSON.stringify(steps), [steps]);
+  const shownPreviewError = previewErrorForSteps(previewError, previewErrorKey, stepsKey);
   const schemaKey = useMemo(() => JSON.stringify(targetSchema), [targetSchema]);
   const sourceSchemaKey = useMemo(() => JSON.stringify(sourceSchema), [sourceSchema]);
   const shapedColumns = preview?.recipe.output_columns ?? previewColumns;
@@ -275,6 +278,7 @@ export function TransferTransformStep({
           if (cancelled) return;
           setPreview(next);
           setPreviewError("");
+          setPreviewErrorKey("");
           setPreviewedStepsKey(stepsKey);
           const image = {
             hash: next.recipe.recipe_hash,
@@ -293,6 +297,7 @@ export function TransferTransformStep({
           setPreview(null);
           setPreviewedStepsKey("");
           setPreviewError(err instanceof Error ? err.message : String(err));
+          setPreviewErrorKey(stepsKey);
           // A recipe the engine refuses has no identity to approve.
           if (viewingPrimary) onIdentity(null);
         })
@@ -376,7 +381,7 @@ export function TransferTransformStep({
   const continueState = continueTransformState({
     steps,
     preview,
-    previewError,
+    previewError: shownPreviewError,
     busy,
     previewMatchesSteps: previewedStepsKey === stepsKey && preview !== null,
     syncMode,
@@ -415,7 +420,7 @@ export function TransferTransformStep({
   const sourceResultColumns = showEveryResultColumn
     ? columnsBefore
     : resultColumns.filter((column) => columnsBefore.includes(column));
-  const resultRefused = Boolean(previewError || preview?.refusal);
+  const resultRefused = Boolean(shownPreviewError || preview?.refusal);
 
   return (
     <section className={canvasEnabled ? "df2-xform df2-studio-next" : "df2-xform"} aria-labelledby="xform-title">
@@ -538,26 +543,26 @@ export function TransferTransformStep({
           <div><p>Profile unavailable: {profileError}</p></div>
         </div>
       )}
-      {previewError && (
+      {shownPreviewError && (
         <div
-          className={`df2-alert ${isTransportTimeout(previewError) ? "df2-alert-warn" : "df2-alert-error"}`}
-          role={isTransportTimeout(previewError) ? "status" : "alert"}
+          className={`df2-alert ${isTransportTimeout(shownPreviewError) ? "df2-alert-warn" : "df2-alert-error"}`}
+          role={isTransportTimeout(shownPreviewError) ? "status" : "alert"}
         >
-          <DtIcon name={isTransportTimeout(previewError) ? "alert" : "x"} size={16} />
+          <DtIcon name={isTransportTimeout(shownPreviewError) ? "alert" : "x"} size={16} />
           <div>
-            <p>{isTransportTimeout(previewError) ? "Preview request timed out." : previewError}</p>
+            <p>{isTransportTimeout(shownPreviewError) ? "Preview request timed out." : shownPreviewError}</p>
             <p className="df2-label-hint">
-              {isTransportTimeout(previewError)
+              {isTransportTimeout(shownPreviewError)
                 ? steps.length
                   ? "The recipe has no identity until preview answers. Retry, or remove the steps and continue without transforming."
                   : "The sample below is still the source. Continue without transforming — Validate still re-checks the whole population. Retry preview if the control plane is back."
                 : "The recipe is refused, so it has no identity to approve. Fix or remove the step."}
             </p>
-            {isTransportTimeout(previewError) && (
+            {isTransportTimeout(shownPreviewError) && (
               <button
                 type="button"
                 className="df2-btn df2-btn-sm"
-                onClick={() => { setPreviewError(""); setPreviewRetry((n) => n + 1); }}
+                onClick={() => { setPreviewError(""); setPreviewErrorKey(""); setPreviewRetry((n) => n + 1); }}
               >
                 Retry preview
               </button>
@@ -644,6 +649,7 @@ export function TransferTransformStep({
             effectSummary={summarizeEffect(effect)}
             onRunPreview={() => {
               setPreviewError("");
+              setPreviewErrorKey("");
               setPreviewRetry((count) => count + 1);
             }}
             onContinue={onContinue}
@@ -677,8 +683,8 @@ export function TransferTransformStep({
             previewStatus={
               busy
                 ? "Previewing the recipe…"
-                : previewError
-                  ? previewError
+                : shownPreviewError
+                  ? shownPreviewError
                   : preview?.recipe.recipe_hash
                     ? `${summarizeEffect(effect) || "Preview matches the recipe."} · ${preview.recipe.recipe_hash}`
                     : samplePopulationBanner(Math.min(PREVIEW_ROWS, beforeRows.length), rowCount)
@@ -977,7 +983,7 @@ export function TransferTransformStep({
             <h4>After the recipe</h4>
             {afterRows.length === 0 ? (
               <p className="df2-xform-empty">
-                {previewError
+                {shownPreviewError
                   ? "The preview did not run. The recipe was refused before any row was removed."
                   : busy
                     ? "Checking this recipe against the sample."

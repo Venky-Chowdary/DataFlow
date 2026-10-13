@@ -436,10 +436,28 @@ conn.commit()
   test("arranged flow stays clear of the minimap and each category has its own color", async ({ page }) => {
   await openStudio(page);
   await reachTransform(page);
-  for (const op of ["trim", "drop_column", "filter_rows"]) {
-    await page.locator(`.df2-canvas-op[data-op='${op}']`).click();
-  }
+  await page.locator(".df2-canvas-op[data-op='trim']").click();
+  await page.locator(".df2-canvas-op[data-op='drop_column']").click();
+  await page.locator(".df2-canvas-op[data-op='filter_rows']").click();
+  await page.locator("#canvas-opt-condition").fill("[status] <> ''");
+  await page.getByRole("button", { name: "Add step" }).click();
   await expect(page.locator(".df2-canvas-node")).toHaveCount(3);
+  await expect(page.locator(".df2-alert-error")).toHaveCount(0);
+  const status = page.getByTestId("canvas-preview-status");
+  await expect.poll(async () => {
+    const text = (await status.innerText()).trim();
+    if (!text || /Previewing/i.test(text)) return "";
+    return text;
+  }, { timeout: 20_000 }).toMatch(/row/);
+  await expect(status).not.toHaveText(/does not have|not available|refused/i);
+  await page.locator(".react-flow__node").last().click();
+  await page.locator("#canvas-opt-condition").fill("[order_id] <> ''");
+  await page.getByRole("button", { name: "Update step" }).click();
+  await expect(page.locator(".df2-qw-schema-error")).toContainText(/order_id/);
+  await expect(page.locator(".df2-alert-error")).toHaveCount(0);
+  await page.locator("#canvas-opt-condition").fill("[status] <> ''");
+  await page.getByRole("button", { name: "Update step" }).click();
+  await expect(page.locator(".df2-alert-error")).toHaveCount(0);
   await page.getByRole("button", { name: "Arrange" }).click();
   const stage = page.getByTestId("transform-canvas-stage");
   const minimap = page.locator(".react-flow__minimap");
@@ -449,13 +467,21 @@ conn.commit()
   expect(stageBox && mapBox).toBeTruthy();
   const nodes = page.locator(".react-flow__node");
   const count = await nodes.count();
+  const scale = await page.locator(".react-flow__viewport").evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a);
+  expect(scale).toBeGreaterThanOrEqual(0.85);
   for (let index = 0; index < count; index += 1) {
     const box = await nodes.nth(index).boundingBox();
     expect(box).toBeTruthy();
-    expect(box!.x).toBeGreaterThanOrEqual(stageBox!.x + 4);
-    expect(box!.y).toBeGreaterThanOrEqual(stageBox!.y + 4);
-    expect(box!.x + box!.width).toBeLessThanOrEqual(stageBox!.x + stageBox!.width - 4);
-    expect(box!.y + box!.height).toBeLessThanOrEqual(stageBox!.y + stageBox!.height - 4);
+    expect(box!.width).toBeGreaterThanOrEqual(248 * 0.85 - 1);
+    const onStage = box!.x < stageBox!.x + stageBox!.width && box!.x + box!.width > stageBox!.x
+      && box!.y < stageBox!.y + stageBox!.height && box!.y + box!.height > stageBox!.y;
+    if (index === 0) {
+      expect(box!.x).toBeGreaterThanOrEqual(stageBox!.x - 1);
+      expect(box!.y).toBeGreaterThanOrEqual(stageBox!.y - 1);
+      expect(box!.x + box!.width).toBeLessThanOrEqual(stageBox!.x + stageBox!.width + 1);
+      expect(box!.y + box!.height).toBeLessThanOrEqual(stageBox!.y + stageBox!.height + 1);
+    }
+    if (!onStage) continue;
     const clear = box!.x + box!.width <= mapBox!.x + 1
       || mapBox!.x + mapBox!.width <= box!.x + 1
       || box!.y + box!.height <= mapBox!.y + 1
@@ -500,8 +526,11 @@ conn.commit()
   await expect.poll(async () => {
     const fitted = await stage.boundingBox();
     const first = await nodes.first().boundingBox();
+    const zoom = await page.locator(".react-flow__viewport").evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a);
     if (!fitted || !first) return false;
-    return first.x >= fitted.x - 1
+    return zoom >= 0.85
+      && first.width >= 248 * 0.85 - 1
+      && first.x >= fitted.x - 1
       && first.y >= fitted.y - 1
       && first.x + first.width <= fitted.x + fitted.width + 1
       && first.y + first.height <= fitted.y + fitted.height + 1;
@@ -519,6 +548,8 @@ conn.commit()
   for (let index = 0; index < count; index += 1) {
     const box = await nodes.nth(index).boundingBox();
     expect(box).toBeTruthy();
+    expect(box!.width).toBeGreaterThanOrEqual(248 * 0.85 - 1);
+    if (index !== 0) continue;
     expect(box!.x).toBeGreaterThanOrEqual(phoneStage!.x - 1);
     expect(box!.y).toBeGreaterThanOrEqual(phoneStage!.y - 1);
     expect(box!.x + box!.width).toBeLessThanOrEqual(phoneStage!.x + phoneStage!.width + 1);

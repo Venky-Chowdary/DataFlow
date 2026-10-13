@@ -9,6 +9,7 @@ import { checkShapeExpression, previewShapeRecipe } from "../../lib/api";
 import { paletteActions } from "../../lib/canvasPalette";
 import {
   chainDocument,
+  columnsBeforeStep,
   documentKind,
   draftWithDefaults,
   reorderByDrag,
@@ -41,6 +42,7 @@ import {
   removeStep,
   settleExpressionCheck,
   stepFromDraft,
+  unknownExpressionColumn,
   type ShapeCatalog,
   type ShapeStepWire,
   type ShapeSuggestion,
@@ -146,6 +148,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const [rulesOpen, setRulesOpen] = useState(false);
   const [templatesOpen, setTemplatesOpen] = useState(false);
   const [dockHeight, setDockHeight] = useState(96);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [fitTick, setFitTick] = useState(0);
   const [runningIndex, setRunningIndex] = useState<number | null>(null);
   const [nodePreview, setNodePreview] = useState<{ index: number; rows: Record<string, unknown>[]; note: string } | null>(null);
@@ -181,7 +184,8 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     window.setTimeout(() => document.getElementById("canvas-inspector")?.focus({ preventScroll: true }), 0);
   };
 
-  const names = columns.map((column) => column.name);
+  const sourceNames = columns.map((column) => column.name);
+  const names = columnsBeforeStep(steps, selected ?? pendingAt ?? steps.length, sourceNames);
   const registry = useMemo(() => registryFromCatalog(catalog), [catalog]);
   const graph = useMemo(() => chainDocument(steps), [steps]);
   const setOps = useMemo(
@@ -231,8 +235,8 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     }
     const operation = catalog?.operations.find((item) => item.op === op);
     if (!operation) return;
-    const defaults = draftWithDefaults(operation, names);
     const at = Math.max(0, Math.min(steps.length, atIndex));
+    const defaults = draftWithDefaults(operation, columnsBeforeStep(steps, at, sourceNames));
     draftIndex.current = null;
     setDraftOp(op);
     setDraftColumn(defaults.column);
@@ -268,6 +272,13 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       setExpressionError("");
       return;
     }
+    const local = unknownExpressionColumn(text, names);
+    if (local) {
+      setExpressionError(local);
+      return;
+    }
+    setExpressionError("");
+    setFormError("");
     try {
       const answer = await checkShapeExpression({ expression: text, source_columns: names });
       const next = settleExpressionCheck(requestId, expressionGen.current, answer);
@@ -282,7 +293,16 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
 
   const commitDraft = () => {
     if (!selectedOperation || !canEdit) return;
-    if (expressionError) {
+    const expressionName = selectedOperation.expression_option;
+    const expression = expressionName ? String(draftOptions[expressionName] ?? "") : "";
+    const columnIssue = expression ? unknownExpressionColumn(expression, names) : "";
+    if (columnIssue) {
+      setExpressionError(columnIssue);
+      setFormError(columnIssue);
+      return;
+    }
+    const leftoverColumn = expressionError.startsWith("refers to column");
+    if (expressionError && !leftoverColumn) {
       setFormError(expressionError);
       return;
     }
@@ -291,6 +311,8 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       setFormError(built.error);
       return;
     }
+    setFormError("");
+    setExpressionError("");
     const index = draftIndex.current;
     if (index != null && steps[index]) {
       const next = steps.slice();
@@ -667,6 +689,8 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           <PreviewDock
             height={dockHeight}
             onHeight={setDockHeight}
+            open={previewOpen}
+            onOpen={setPreviewOpen}
             status={previewStatus || previewBanner}
             effect={effectSummary}
             columns={previewColumns}
@@ -820,6 +844,8 @@ function cellText(value: unknown): string {
 function PreviewDock({
   height,
   onHeight,
+  open,
+  onOpen,
   status,
   effect,
   columns,
@@ -828,6 +854,8 @@ function PreviewDock({
 }: {
   height: number;
   onHeight: (height: number) => void;
+  open: boolean;
+  onOpen: (open: boolean) => void;
   status: string;
   effect: string;
   columns: string[];
@@ -850,29 +878,38 @@ function PreviewDock({
     window.addEventListener("pointerup", up);
   };
   return (
-    <div className="df2-canvas-dock" style={{ height }} data-testid="canvas-preview">
-      <div
-        className="df2-canvas-dock-grip"
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label="Resize preview"
-        aria-valuemin={96}
-        aria-valuemax={420}
-        aria-valuenow={height}
-        tabIndex={0}
-        onPointerDown={gripDown}
-        onKeyDown={(event) => {
-          if (event.key === "ArrowUp") onHeight(Math.min(420, height + 24));
-          if (event.key === "ArrowDown") onHeight(Math.max(96, height - 24));
-        }}
-      />
+    <div
+      className={open ? "df2-canvas-dock" : "df2-canvas-dock is-collapsed"}
+      style={open ? { height } : undefined}
+      data-testid="canvas-preview"
+    >
+      {open && (
+        <div
+          className="df2-canvas-dock-grip"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize preview"
+          aria-valuemin={96}
+          aria-valuemax={420}
+          aria-valuenow={height}
+          tabIndex={0}
+          onPointerDown={gripDown}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowUp") onHeight(Math.min(420, height + 24));
+            if (event.key === "ArrowDown") onHeight(Math.max(96, height - 24));
+          }}
+        />
+      )}
       <div className="df2-canvas-dock-body">
         <div className="df2-canvas-dock-head">
           <p data-testid="canvas-preview-status" role="status">{status}</p>
-          <button type="button" className="df2-btn df2-btn-sm" onClick={onRunPreview}>Run preview</button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => onOpen(!open)}>
+            {open ? "Hide preview" : "Show preview"}
+          </button>
+          <button type="button" className="df2-btn df2-btn-sm" onClick={() => { onOpen(true); onRunPreview(); }}>Run preview</button>
         </div>
-        {effect && <p className="df2-label-hint">{effect}</p>}
-        {rows.length > 0 && shown.length > 0 && (
+        {open && effect && <p className="df2-label-hint">{effect}</p>}
+        {open && rows.length > 0 && shown.length > 0 && (
           <table>
             <thead>
               <tr>{shown.map((column) => <th key={column}>{column}</th>)}</tr>

@@ -10,7 +10,6 @@ import {
   ReactFlow,
   ReactFlowProvider,
   applyNodeChanges,
-  getViewportForBounds,
   useReactFlow,
   useStore,
   type Connection,
@@ -26,10 +25,13 @@ import { DtIcon } from "../DtIcon";
 import {
   classifyPortLink,
   insertIndexAtPoint,
+  FIT_MAX_ZOOM,
+  FIT_MIN_ZOOM,
   LAYOUT_PITCH,
   layoutFor,
   NODE_BODY,
   NODE_WIDTH,
+  viewportForChain,
   spliceIndexAtPoint,
   type FlowEdgeModel,
   type FlowNodeModel,
@@ -73,11 +75,6 @@ export interface StudioNodeData extends Record<string, unknown> {
 
 const nodeTypes = { studio: StudioFlowNode };
 const PITCH = LAYOUT_PITCH;
-/** Inside the flow, clear of the reserved minimap corner. */
-const FIT_PADDING = { top: "28px", right: "28px", bottom: "28px", left: "28px" } as const;
-/** Low enough that a 390px stage can still frame a full chain. */
-const FIT_MIN_ZOOM = 0.08;
-const FIT_MAX_ZOOM = 1.35;
 
 function positive(value: number | undefined): number {
   return value != null && value > 0 ? value : 0;
@@ -205,14 +202,7 @@ function FlowCanvas({
     const bounds = boundsOf(nodesRef.current);
     if (!bounds) return;
     if (!explicit) autoFitted.current = true;
-    const viewport = getViewportForBounds(
-      bounds,
-      pane.w,
-      pane.h,
-      FIT_MIN_ZOOM,
-      FIT_MAX_ZOOM,
-      FIT_PADDING,
-    );
+    const viewport = viewportForChain(bounds, pane.w, pane.h);
     fittedPane.current = { w: pane.w, h: pane.h };
     void setViewport(viewport, { duration: 0 });
   }, [fitTick, flowNodes.length, placed, paneWidth, paneHeight, setViewport]);
@@ -298,6 +288,8 @@ function FlowCanvas({
         fitView={false}
         minZoom={FIT_MIN_ZOOM}
         maxZoom={FIT_MAX_ZOOM}
+        panOnScroll
+        zoomOnScroll={false}
         proOptions={{ hideAttribution: true }}
         nodesDraggable
         nodesConnectable

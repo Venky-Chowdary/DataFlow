@@ -250,9 +250,96 @@ export function insertIndexAtPoint(stepCount: number, point: FlowPoint, position
   return Math.max(0, Math.min(stepCount, index));
 }
 
+/** Readable card size. Below this, fit pans instead of shrinking the type. */
+export const FIT_MIN_ZOOM = 1;
+export const FIT_MAX_ZOOM = 1.35;
+export const FIT_PAD = 28;
+
+/**
+ * Frame the chain at a readable zoom. When the chain is larger than the
+ * stage, pin the start and leave the rest to pan. Centering a clamped zoom
+ * clips both ends.
+ */
+export function viewportForChain(
+  bounds: { x: number; y: number; width: number; height: number },
+  paneWidth: number,
+  paneHeight: number,
+): { x: number; y: number; zoom: number } {
+  const roomW = Math.max(1, paneWidth - FIT_PAD * 2);
+  const roomH = Math.max(1, paneHeight - FIT_PAD * 2);
+  const fitZoom = Math.min(roomW / Math.max(1, bounds.width), roomH / Math.max(1, bounds.height));
+  const zoom = Math.min(FIT_MAX_ZOOM, Math.max(FIT_MIN_ZOOM, fitZoom));
+  const placedW = bounds.width * zoom;
+  const placedH = bounds.height * zoom;
+  const padFor = (pane: number, size: number) => {
+    const room = pane - size;
+    if (room <= 0) return 0;
+    return Math.min(FIT_PAD, room / 2);
+  };
+  const widthFits = placedW + FIT_PAD * 2 <= paneWidth + 0.5;
+  const heightFits = placedH + FIT_PAD * 2 <= paneHeight + 0.5;
+  return {
+    zoom,
+    x: (widthFits ? (paneWidth - placedW) / 2 : padFor(paneWidth, placedW)) - bounds.x * zoom,
+    y: (heightFits ? (paneHeight - placedH) / 2 : padFor(paneHeight, placedH)) - bounds.y * zoom,
+  };
+}
+
+/**
+ * Columns a step can still name. Earlier drops, keeps, and renames have
+ * already changed the row, so a later condition must not see the original list.
+ */
+export function columnsBeforeStep(
+  steps: readonly ShapeStepWire[],
+  index: number,
+  sourceColumns: readonly string[],
+): string[] {
+  const columns = sourceColumns.slice();
+  const prior = steps.slice(0, Math.max(0, Math.min(index, steps.length)));
+  for (const step of prior) applyColumnEffect(step, columns);
+  return columns;
+}
+
+function applyColumnEffect(step: ShapeStepWire, columns: string[]): void {
+  const options = step.options ?? {};
+  if (step.op === "drop_column") {
+    const at = columns.indexOf(step.column ?? "");
+    if (at >= 0) columns.splice(at, 1);
+    return;
+  }
+  if (step.op === "keep_columns") {
+    const wanted = listOption(options.columns);
+    columns.splice(0, columns.length, ...wanted.filter((name) => columns.includes(name)));
+    return;
+  }
+  if (step.op === "rename_column") {
+    const target = typeof options.to === "string" ? options.to : "";
+    const at = columns.indexOf(step.column ?? "");
+    if (at >= 0 && target) columns[at] = target;
+    return;
+  }
+  if (step.op === "split_column") {
+    for (const name of listOption(options.into)) {
+      if (!columns.includes(name)) columns.push(name);
+    }
+    return;
+  }
+  if (step.op === "constant_column" || step.op === "derive_column" || step.op === "concat_columns" || step.op === "hash_identity") {
+    const target = typeof options.to === "string" ? options.to : "";
+    if (target && !columns.includes(target)) columns.push(target);
+  }
+}
+
+function listOption(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item));
+  if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean);
+  return [];
+}
+
 /**
  * Defaults the inspector can open on. A required text or expression stays
- * blank — the engine does not invent a predicate.
+ * blank — the engine does not invent a predicate. `keep` stays on, matching
+ * the engine, so a new filter does not discard every matching row.
  */
 export function draftWithDefaults(
   operation: ShapeOperation,
@@ -260,7 +347,7 @@ export function draftWithDefaults(
 ): { column: string; options: Record<string, unknown> } {
   const options: Record<string, unknown> = {};
   for (const field of fieldsFor(operation)) {
-    if (field.kind === "boolean") options[field.name] = false;
+    if (field.kind === "boolean") options[field.name] = field.name === "keep" || field.name === "keep_parent";
     else if (field.kind === "choice" && field.choices && field.choices.length > 0) {
       options[field.name] = field.choices[0];
     } else if (field.kind === "number" && field.required) options[field.name] = 0;
