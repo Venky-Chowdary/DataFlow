@@ -233,6 +233,7 @@
   "POST /api/v1/query/execute": "query.use",
   "POST /api/v1/query/export": "query.use",
   "POST /api/v1/query/schema": "query.use",
+  "POST /api/v1/query/schemas": "query.use",
   "POST /api/v1/repair/proposals/{proposal_id}/decide": "job.manage",
   "POST /api/v1/repair/propose/preflight": "job.plan",
   "POST /api/v1/repair/propose/quarantine": "job.plan",
