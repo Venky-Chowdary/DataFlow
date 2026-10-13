@@ -78,9 +78,10 @@ export default defineConfig({
             return "studio-canvas";
           }
           if (id.includes("node_modules")) {
-            if (id.includes("react-dom") || id.includes("/react/")) {
-              return "react-vendor";
-            }
+            // React, react-dom, scheduler and every React-dependent package
+            // (zustand, use-sync-external-store, ...) must share one chunk.
+            // Splitting them creates a react-vendor <-> vendor import cycle
+            // and React's CJS exports are undefined at evaluation time.
             return "vendor";
           }
           if (

@@ -4,18 +4,23 @@
   "violations": [],
   "chunks": [
     {
-      "file": "index-KZ9Ji6b_.css",
-      "bytes": 1169153,
+      "file": "index-sPmXHHgi.css",
+      "bytes": 1169213,
       "kind": "css"
     },
     {
-      "file": "transfer-studio-0iUzvU9a.js",
-      "bytes": 1055384,
+      "file": "transfer-studio-DCD3sHEZ.js",
+      "bytes": 1055211,
       "kind": "js"
     },
     {
-      "file": "marketing-CMCOSjaR.js",
-      "bytes": 297782,
+      "file": "marketing-A6L3h4J5.js",
+      "bytes": 297742,
+      "kind": "js"
+    },
+    {
+      "file": "vendor-By2KgMF3.js",
+      "bytes": 295902,
       "kind": "js"
     },
     {
@@ -24,33 +29,23 @@
       "kind": "css"
     },
     {
-      "file": "react-vendor-CSB2Ld-9.js",
-      "bytes": 189880,
+      "file": "index-D1W324W4.js",
+      "bytes": 178873,
       "kind": "js"
     },
     {
-      "file": "index-CUj9tgfi.js",
-      "bytes": 178967,
+      "file": "studio-canvas-B0llsmrT.js",
+      "bytes": 125258,
       "kind": "js"
     },
     {
-      "file": "studio-canvas-DMoXTiYg.js",
-      "bytes": 125298,
+      "file": "SettingsPage-CdVL595I.js",
+      "bytes": 98713,
       "kind": "js"
     },
     {
-      "file": "vendor-B77iCgO_.js",
-      "bytes": 105313,
-      "kind": "js"
-    },
-    {
-      "file": "SettingsPage-oiX5XiU-.js",
-      "bytes": 98748,
-      "kind": "js"
-    },
-    {
-      "file": "SchedulesPage-DjBdLIHJ.js",
-      "bytes": 75003,
+      "file": "SchedulesPage-BU0VwtKv.js",
+      "bytes": 74968,
       "kind": "js"
     },
     {
@@ -59,33 +54,33 @@
       "kind": "css"
     },
     {
-      "file": "JobsPage-Djk1IY_e.js",
-      "bytes": 51335,
+      "file": "JobsPage-DkcNpexj.js",
+      "bytes": 51300,
       "kind": "js"
     },
     {
-      "file": "QueryPage-B3IyeDV9.js",
-      "bytes": 32905,
+      "file": "QueryPage-CzUbPYoX.js",
+      "bytes": 32875,
       "kind": "js"
     },
     {
-      "file": "ConnectorsPage-BXcA8I6Q.js",
-      "bytes": 27094,
+      "file": "ConnectorsPage-DSBYQDOd.js",
+      "bytes": 27059,
       "kind": "js"
     },
     {
-      "file": "DocsPage-BR93uEH7.js",
-      "bytes": 21806,
+      "file": "DocsPage-CLxWRBnS.js",
+      "bytes": 21771,
       "kind": "js"
     },
     {
-      "file": "TransformsPage-PmNjrHeb.js",
-      "bytes": 20134,
+      "file": "TransformsPage-BmSXQIKN.js",
+      "bytes": 20099,
       "kind": "js"
     },
     {
-      "file": "BenchmarksPage-B2QjEEI7.js",
-      "bytes": 18625,
+      "file": "BenchmarksPage-DsRg1BOi.js",
+      "bytes": 18590,
       "kind": "js"
     },
     {
@@ -94,33 +89,33 @@
       "kind": "css"
     },
     {
-      "file": "ContractsPage-DDm4Zbal.js",
-      "bytes": 15711,
+      "file": "ContractsPage-D4WE8sj2.js",
+      "bytes": 15676,
       "kind": "js"
     },
     {
-      "file": "PilotPage-C2D3l62h.js",
-      "bytes": 12405,
+      "file": "PilotPage-CLqYbdpD.js",
+      "bytes": 12370,
       "kind": "js"
     },
     {
-      "file": "McpPage-zU4I3AMt.js",
-      "bytes": 7748,
+      "file": "McpPage-50Wh3C8Z.js",
+      "bytes": 7708,
       "kind": "js"
     },
     {
-      "file": "PageToolbar-BwaJXwS7.js",
-      "bytes": 950,
+      "file": "PageToolbar-B8kA6ea_.js",
+      "bytes": 944,
       "kind": "js"
     },
     {
-      "file": "PageSection-BEauUEnI.js",
-      "bytes": 775,
+      "file": "PageSection-CS_xkFpa.js",
+      "bytes": 769,
       "kind": "js"
     },
     {
-      "file": "StatCard-C9Kb41xT.js",
-      "bytes": 568,
+      "file": "StatCard-DP1vgLUy.js",
+      "bytes": 562,
       "kind": "js"
     }
   ]
