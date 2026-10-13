@@ -1646,6 +1646,10 @@ def _write_destination_database(
         if db_type in {"redshift", "amazon_redshift", "redshift_serverless"}:
             common["port"] = cfg["port"] or 5439
             common["dest_extra"] = dict(cfg.get("extra") or {})
+        if db_type == "postgresql" and (getattr(endpoint, "extra", None) or {}).get(
+            "pg_overwrite_in_transaction"
+        ):
+            common["pg_overwrite_in_transaction"] = True
         for col in columns:
             ddl_log.append(
                 f"{db_type.upper()} COLUMN {col} {ddl_type(db_type, schema.get(col, 'string'))}"

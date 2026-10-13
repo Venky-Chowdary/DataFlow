@@ -344,6 +344,15 @@ def _drop_destination_table(
     if clear_kind == "empty":
         from connectors.table_manager import empty_existing_for_overwrite
 
+        # PostgreSQL TRUNCATE is transactional. Doing it here on autocommit
+        # published an empty table, then each chunk commit published a prefix
+        # (R4-D06). The writer truncates inside the load transaction and
+        # commits once. MySQL TRUNCATE auto-commits and stays on this path.
+        if db_type == "postgresql":
+            extra = dict(destination.extra or {})
+            extra["pg_overwrite_in_transaction"] = True
+            destination.extra = extra
+            return True
         try:
             empty_existing_for_overwrite(db_type, cfg, table_name, schema)
         except TableDropError as exc:
