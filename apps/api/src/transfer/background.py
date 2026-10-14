@@ -96,6 +96,25 @@ def run_fleet_job(job_id: str) -> None:
     if not isinstance(payload, dict) or not payload:
         raise ValueError(f"Job {job_id} has no transfer_request — cannot execute on worker")
     request = transfer_request_from_dict(payload)
+    from services.confirmed_transfer import apply_stored_schema_drift_ack
+
+    nested_was_missing = apply_stored_schema_drift_ack(request, job)
+    if request.schema_drift_acknowledged and (
+        nested_was_missing or not job.get("schema_drift_acknowledged")
+    ):
+        repaired = dict(payload)
+        repaired["schema_drift_acknowledged"] = True
+        repaired["acknowledgment_actor"] = request.acknowledgment_actor
+        repaired["acknowledgment_reason"] = request.acknowledgment_reason
+        mongo.update_job_fields(
+            job_id,
+            {
+                "schema_drift_acknowledged": True,
+                "acknowledgment_actor": request.acknowledgment_actor,
+                "acknowledgment_reason": request.acknowledgment_reason,
+                "transfer_request": repaired,
+            },
+        )
     from services.transfer_file_staging import (
         file_source_bytes_available,
         hydrate_file_source,

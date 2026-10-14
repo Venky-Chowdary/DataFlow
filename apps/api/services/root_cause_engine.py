@@ -445,6 +445,8 @@ def _is_transform_error_signal(
     if kind == "transform_errors":
         return True
     msg_l = (message or "").lower()
+    if "unknown transform" in msg_l:
+        return True
     if "dry-run failed" in msg_l or "transform errors" in msg_l:
         return True
     if "cannot coerce to" in msg_l:
@@ -1265,13 +1267,37 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             biz = (
                 f"Failure class(es): {', '.join(failure_classes)}. " + biz
             )
+        unknown_name = ""
+        for src in xf_gates + xf_blockers:
+            blob = " ".join(
+                str(part)
+                for part in (
+                    src.get("message"),
+                    src.get("details"),
+                )
+            )
+            named = re.search(r"unknown transform:\s*'([^']+)'", blob, re.I)
+            if named:
+                unknown_name = named.group(1)
+                break
+        title = (
+            f"Unknown transform: {unknown_name}"
+            if unknown_name
+            else "Sample transform / cast failures"
+        )
+        summary_head = (
+            f"Unknown transform: {unknown_name}. "
+            if unknown_name
+            else ""
+        )
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("sample_transform", cols, absorbed),
                 kind="sample_transform",
-                title="Sample transform / cast failures",
+                title=title,
                 summary=(
-                    (
+                    summary_head
+                    + (
                         f"{len(cols)} column(s) fail write-path transforms on the "
                         f"Validate sample ({col_label})"
                         if cols

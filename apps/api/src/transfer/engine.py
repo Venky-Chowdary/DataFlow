@@ -1495,6 +1495,25 @@ class UniversalTransferEngine:
                 )
         except Exception:
             logger.debug("job shell bootstrap skipped for %s", job_id, exc_info=True)
+        # Staging can set the ack on the request, the job root, or both.
+        # Execute uses whichever survived (R10-001).
+        try:
+            from services.confirmed_transfer import apply_stored_schema_drift_ack
+
+            stored_job = get_mongodb_service().get_job(job_id) or {}
+            if apply_stored_schema_drift_ack(request, stored_job):
+                repaired = transfer_request_to_dict(request)
+                get_mongodb_service().update_job_fields(
+                    job_id,
+                    {
+                        "schema_drift_acknowledged": True,
+                        "acknowledgment_actor": request.acknowledgment_actor,
+                        "acknowledgment_reason": request.acknowledgment_reason,
+                        "transfer_request": repaired,
+                    },
+                )
+        except Exception:
+            logger.debug("schema-drift ack restore skipped for %s", job_id, exc_info=True)
         # Hard-block Execute when Map still has unresolved requires_review rows —
         # skip_preflight must never green-path ambiguous remaps into a write.
         # auto selects dest-owned exactly-once on an eligible CDC route.

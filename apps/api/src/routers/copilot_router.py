@@ -282,6 +282,15 @@ async def _run_lifecycle_confirm(
         return dict(
             await connectors_router.retry_transfer_job(job_id, background_tasks, http_request)
         )
+    if kind == "rerun_job":
+        return dict(
+            await connectors_router.rerun_transfer_job(
+                job_id,
+                background_tasks,
+                http_request,
+                force=bool(payload.get("force")),
+            )
+        )
     if kind == "resume_job":
         return dict(
             await connectors_router.resume_transfer_job(job_id, background_tasks, http_request)

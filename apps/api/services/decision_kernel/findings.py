@@ -98,6 +98,8 @@ def classify_transform_failure(
 ) -> FailureClass:
     """Map a transform/coercion error string (+ types) to a FailureClass."""
     msg = (reason or "").strip().lower()
+    if "unknown transform" in msg:
+        return FailureClass.SEMANTIC_TRANSFORM_FAILURE
     raw = (source_value or "").strip()
     # Gate error lines often embed the value: Invalid integer: '94.5'
     if not raw:

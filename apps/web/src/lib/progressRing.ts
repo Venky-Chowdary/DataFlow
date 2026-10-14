@@ -6,10 +6,26 @@ export function clampPercent(value: number): number {
 }
 
 /** Dasharray for an SVG circle with pathLength=100. Complete uses 100 0 (no gap). */
-export function ringDasharray(pct: number, opts?: { indeterminate?: boolean }): string {
+export function ringDasharray(pct: number, opts?: { indeterminate?: boolean; exact?: boolean }): string {
   if (opts?.indeterminate) return "28 72";
-  const n = clampPercent(pct);
+  const n = opts?.exact
+    ? Math.max(0, Math.min(100, Number.isFinite(pct) ? pct : 0))
+    : clampPercent(pct);
   return n >= 100 ? "100 0" : `${n} 100`;
+}
+
+/** Jobs-list bar during checksum. Tenths from reconcile_pct, never rounded to 99. */
+export function reconcileBarPercent(
+  progressPct: number | null | undefined,
+  reconcilePct: number | null | undefined,
+  phase?: string | null,
+): number {
+  const reconciling = String(phase || "").toLowerCase() === "reconcile";
+  const scan = Number(reconcilePct);
+  if (reconciling && Number.isFinite(scan) && scan >= 0) {
+    return Math.min(98.99, 98 + Math.min(99, scan) / 100);
+  }
+  return clampPercent(progressPct ?? 0);
 }
 
 /**

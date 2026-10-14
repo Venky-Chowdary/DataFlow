@@ -53,7 +53,7 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
 
     enabled = [s for s in schedules if s.get("enabled")]
     parked = [s for s in schedules if s.get("needs_approval") or s.get("approval_finding")]
-    next_runs = [s for s in enabled if s.get("next_run_at")]
+    next_runs = _future_schedules(enabled)
 
     contract_total, contracts_unsigned_n = _contract_census(workspace_id, contracts)
 
@@ -79,6 +79,10 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
         attention.append(f"{len(failed_connectors)} connector(s) failed their last test")
     if contracts_unsigned_n:
         attention.append(f"{contracts_unsigned_n} contract(s) not signed")
+    if not next_runs and any(s.get("next_run_at") for s in enabled):
+        attention.append(
+            "Enabled pipelines have a next run in the past — open Schedules to refresh the cadence."
+        )
 
     return {
         "connector_count": len(connectors),
@@ -104,6 +108,29 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
         "attention": attention,
         "empty_workspace": not connectors and job_total == 0 and not schedules,
     }
+
+
+def _future_schedules(enabled: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Soonest next_run_at that is still in the future. A past stamp is not next."""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    future: list[tuple[datetime, dict[str, Any]]] = []
+    for sched in enabled:
+        raw = sched.get("next_run_at")
+        if not raw:
+            continue
+        text = str(raw).strip().replace("Z", "+00:00")
+        try:
+            when = datetime.fromisoformat(text)
+        except ValueError:
+            continue
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        if when > now:
+            future.append((when, sched))
+    future.sort(key=lambda pair: pair[0])
+    return [sched for _, sched in future]
 
 
 def _job_line(job: dict[str, Any]) -> str:

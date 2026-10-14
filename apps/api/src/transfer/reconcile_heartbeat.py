@@ -8,6 +8,7 @@ import time
 from contextlib import contextmanager
 from typing import Any, Iterator
 
+from services.batch_progress import reconcile_display_pct, reconcile_scan_pct
 from services.reconcile_progress import (
     ReconcileScan,
     bind_reconcile_scan,
@@ -53,13 +54,18 @@ def reconcile_phase_heartbeat(
     *,
     processed: int,
     total: int,
-    interval_s: float = 8.0,
+    interval_s: float = 1.0,
     proof_kind: str = "full",
     checksum_scope: str = "",
     checksum_table: str = "",
     stream_count: int = 0,
 ) -> Iterator[None]:
-    """Hold progress at 99% and keep live UI messaging fresh during reconcile.
+    """Move progress through 98.0–98.99 while the checksum runs.
+
+    The phase-only percentage stays 99 (``compute_transfer_progress_pct``).
+    This heartbeat paints tenths from hashed rows and stores ``reconcile_pct``
+    (0–99) so the theater and the jobs list move during a long scan. 100 is
+    Gate-8's to publish when the run finishes.
 
     Reconciliation can take minutes on large tables (COUNT + checksum queries).
     Without heartbeats the theater freezes on the last write event and looks stuck.
@@ -103,7 +109,8 @@ def reconcile_phase_heartbeat(
             job_id,
             "running",
             phase="reconcile",
-            progress_pct=99,
+            progress_pct=reconcile_display_pct(0, total),
+            reconcile_pct=0,
             records_processed=processed,
             total_rows=total,
             message=enter_msg,
@@ -115,22 +122,24 @@ def reconcile_phase_heartbeat(
             while not stop.wait(interval_s):
                 elapsed = int(time.monotonic() - started)
                 hashed = scan.rows_hashed
+                scan_pct = reconcile_scan_pct(hashed, total)
                 hashed_phrase = (
                     f" Hashed {hashed:,} row fingerprints so far."
                     if hashed > 0
                     else ""
                 )
+                checksum_phrase = f" Checksum {scan_pct}%."
                 if write_pass:
                     pulse = (
                         f"Reconciling ({elapsed}s) — dest COUNT and fingerprint for "
                         f"{processed:,} rows (write-pass compare, not migration_proven)…"
-                        f"{hashed_phrase}"
+                        f"{hashed_phrase}{checksum_phrase}"
                     )
                 elif last_stream:
                     pulse = (
                         f"Reconciling data ({elapsed}s) — {processed:,} rows written "
                         f"across the job. Checksum is the last stream ({table}), "
-                        f"not the whole job…{hashed_phrase}"
+                        f"not the whole job…{hashed_phrase}{checksum_phrase}"
                     )
                 else:
                     waiting = ""
@@ -143,12 +152,14 @@ def reconcile_phase_heartbeat(
                         f"Reconciling data ({elapsed}s) — checksum scan still "
                         f"running for {processed:,} rows.{hashed_phrase}{waiting} "
                         "The job has not stalled."
+                        f"{checksum_phrase}"
                     )
                 mongo.update_job_status(
                     job_id,
                     "running",
                     phase="reconcile",
-                    progress_pct=99,
+                    progress_pct=reconcile_display_pct(hashed, total),
+                    reconcile_pct=scan_pct,
                     records_processed=processed,
                     total_rows=total,
                     message=pulse,

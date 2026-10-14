@@ -85,15 +85,21 @@ def metadata_endpoint_refusal(*values: str) -> str:
     """Why a connector host is refused before any socket, or ``""``.
 
     ``169.254.169.254`` is the cloud metadata address. A probe that dials it
-    waits on a blackhole timeout instead of refusing (R8-007). Link-local and
-    the metadata hostnames are refused here. RFC1918 stays allowed — customer
-    databases live on those networks.
+    waits on a blackhole timeout instead of refusing (R8-007). Link-local,
+    the metadata hostnames, and ``10.0.0.0/8`` are refused here before any
+    socket (R10-V002). ``172.16.0.0/12`` and ``192.168.0.0/16`` stay allowed —
+    customer databases live on those networks.
     """
     for host in _hosts_from_values(*values):
         if _is_metadata_host(host):
             return (
                 f"Refused connector host {host}: cloud metadata and link-local "
                 "addresses are not connection targets."
+            )
+        if _is_rfc1918_10(host):
+            return (
+                f"Refused connector host {host}: private 10.x addresses are not "
+                "connection targets."
             )
     return ""
 
@@ -103,6 +109,7 @@ _KEYWORD_HOST = re.compile(
     r"(\[[^\]]+\]|[^\s;,]+)"
 )
 _EMBEDDED_LINK_LOCAL = re.compile(r"(?<![0-9])169\.254\.\d{1,3}\.\d{1,3}(?![0-9])")
+_EMBEDDED_10 = re.compile(r"(?<![0-9])10\.\d{1,3}\.\d{1,3}\.\d{1,3}(?![0-9])")
 _EMBEDDED_METADATA_NAME = re.compile(
     r"(?i)(?<![a-z0-9.-])metadata\.google\.(?:internal|com)(?![a-z0-9.-])"
 )
@@ -121,6 +128,7 @@ def _hosts_from_values(*values: str) -> list[str]:
                 found.append(host)
         found.extend(_KEYWORD_HOST.findall(text))
         found.extend(_EMBEDDED_LINK_LOCAL.findall(text))
+        found.extend(_EMBEDDED_10.findall(text))
         found.extend(_EMBEDDED_METADATA_NAME.findall(text))
         if not found:
             host = text
@@ -156,6 +164,21 @@ def _is_metadata_host(host: str) -> bool:
     if ip.is_link_local:
         return True
     return ip in ipaddress.ip_network("169.254.0.0/16")
+
+
+def _is_rfc1918_10(host: str) -> bool:
+    """True for a literal address in ``10.0.0.0/8``. No DNS, no socket."""
+    raw = (host or "").strip().lower().rstrip(".")
+    if raw.startswith("[") and raw.endswith("]"):
+        raw = raw[1:-1]
+    try:
+        ip = ipaddress.ip_address(raw)
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return ip in ipaddress.ip_network("10.0.0.0/8")
 
 
 def egress_url_allowed(url: str) -> bool:

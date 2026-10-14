@@ -645,7 +645,12 @@ def run_connector_query(
 
     try:
         from services.connector_store import get_connector
-        from src.routers.query_router import QueryExecuteRequest, _is_safe_sql, _run_query
+        from src.routers.query_router import (
+            QueryExecuteRequest,
+            _is_safe_sql,
+            _run_query,
+            sql_refusal_message,
+        )
 
         saved = get_connector(cid)
         if not saved:
@@ -663,7 +668,7 @@ def run_connector_query(
                 return _tool_result(
                     tool,
                     success=False,
-                    error="Only read-only SQL is allowed (SELECT / WITH / SHOW / DESCRIBE / EXPLAIN).",
+                    error=sql_refusal_message(sql),
                 )
             # Phase D6 — refuse invented identifiers (LLM cannot probe arbitrary columns).
             head = sql.lstrip().split(None, 1)[0].lower() if sql.strip() else ""

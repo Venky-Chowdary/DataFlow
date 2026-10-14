@@ -359,6 +359,7 @@ def run_transfer_policy_gates(
         "propagate_all",
         "pause_on_change",
         "type_locked",
+        "block_all",
     }
     if schema not in allowed_schema:
         schema_issues.append(f"Unknown schema policy '{schema}'")
@@ -383,6 +384,7 @@ def run_transfer_policy_gates(
         "type_locked": "reject_type_changes",
         "propagate_columns": "auto_add_columns",
         "propagate_all": "auto_propagate_schema",
+        "block_all": "halt_pipeline",
     }.get(schema, "pause_for_manual_review")
 
     if schema_issues:
@@ -625,6 +627,38 @@ def _fit_scan_deadline(
 
 
 # F8: policy-gate merge lives in preflight_policy_gates (single authority).
+
+
+def _drift_column_phrase(evolution: dict[str, Any] | None) -> str:
+    """Name the columns a drift gate is about. A bare 'schema change' is not enough."""
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: object) -> None:
+        name = str(raw or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            return
+        seen.add(key)
+        names.append(name)
+
+    evo = evolution or {}
+    for bucket in ("hard_breaking", "additive", "soft_net_additive"):
+        for item in evo.get(bucket) or []:
+            if isinstance(item, dict):
+                add(item.get("column") or item.get("to") or item.get("from") or item.get("source"))
+            else:
+                add(item)
+    for item in evo.get("unmapped_sources") or []:
+        if isinstance(item, dict):
+            add(item.get("column") or item.get("source"))
+        else:
+            add(item)
+    if not names:
+        return ""
+    shown = ", ".join(names[:8])
+    extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
+    return f" Column(s): {shown}{extra}."
 
 
 
@@ -2512,6 +2546,7 @@ def run_file_preflight(
     # Datawrap rule: hard-breaking ALWAYS pauses (even under propagate_*).
     # Propagate auto-applies additive; manual_review keeps existing mappings.
     evolution = drift.get("schema_evolution") or {}
+    column_phrase = _drift_column_phrase(evolution)
     action = evolution.get("action")
     # Evolution is the sole authority for pause|propagate|review|continue.
     # Fingerprint flags alone must not bypass resolve_schema_evolution.
@@ -2543,6 +2578,7 @@ def run_file_preflight(
                 drift_msg = (
                     f"Breaking schema change: {hard[0].get('kind')} "
                     "— sync paused for review (Datawrap fail-closed)"
+                    f"{column_phrase}"
                 )
             elif drift.get("issues"):
                 drift_msg = str(drift["issues"][0])
@@ -2668,6 +2704,7 @@ def run_file_preflight(
                     f"Schema change detected — policy '{policy}' requires review "
                     "before Execute. Use Acknowledge drift for this run to keep "
                     "the existing mappings, or open Map to include the changed columns."
+                    f"{column_phrase}"
                 )
                 drift_gate = {
                     "id": "schema_drift",

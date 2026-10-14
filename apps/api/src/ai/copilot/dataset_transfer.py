@@ -127,6 +127,7 @@ def stage_dataset_transfer(
     require_signed_contract: Any = None,
     source_timezone: str = "",
     pii_acknowledgement: dict[str, Any] | None = None,
+    schema_drift_acknowledged: bool = False,
 ) -> Any:
     """Stage a file→connector transfer. Returns a tool result. Does not write."""
     tool = "start_dataset_transfer"
@@ -289,6 +290,7 @@ def stage_dataset_transfer(
         source_kind="file",
         known_row_count=int(getattr(parsed, "row_count", 0) or 0),
         pii_ack=pii_ack,
+        schema_drift_acknowledged=bool(schema_drift_acknowledged),
     )
     if not _is_execute_cleared(preflight):
         # The decision reason names what holds Confirm (e.g. which columns a
@@ -332,7 +334,11 @@ def stage_dataset_transfer(
         "preflight_run_id": preflight.get("run_id"),
         "source_path": str(path),
         "source_filename": path.name,
+        "schema_drift_acknowledged": bool(schema_drift_acknowledged),
     }
+    if payload["schema_drift_acknowledged"]:
+        payload["acknowledgment_actor"] = "operator"
+        payload["acknowledgment_reason"] = "Accept drift for this run"
     try:
         payload.update(_stage_bound_contract(contract_id, require_signed_contract))
     except ValueError as exc:

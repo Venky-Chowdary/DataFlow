@@ -58,6 +58,36 @@ def compute_transfer_progress_pct(
     return None
 
 
+def reconcile_display_pct(rows_hashed: int, total: int) -> float:
+    """Paint 98.00–98.99 while Gate-8 checksums. Never 99 or 100.
+
+    ``compute_transfer_progress_pct(phase="reconcile")`` stays 99 for callers
+    that only know the phase. This value moves with hashed rows so a minute-long
+    scan is not a frozen 99.
+    """
+    try:
+        hashed = int(rows_hashed or 0)
+        denom = int(total or 0)
+    except (TypeError, ValueError):
+        return 98.0
+    if hashed <= 0 or denom <= 0:
+        return 98.0
+    ratio = min(1.0, hashed / denom)
+    return round(min(98.99, 98.0 + ratio * 0.99), 2)
+
+
+def reconcile_scan_pct(rows_hashed: int, total: int) -> int:
+    """0–99 checksum completion. 0 until a row has been hashed. Never 100."""
+    try:
+        hashed = int(rows_hashed or 0)
+        denom = int(total or 0)
+    except (TypeError, ValueError):
+        return 0
+    if hashed <= 0 or denom <= 0:
+        return 0
+    return min(99, int(hashed * 100 / denom))
+
+
 def row_count_label(total_rows: int | None) -> str:
     """Operator-facing row count, or ``"an unknown number of"`` when unmeasured.
 

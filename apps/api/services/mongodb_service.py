@@ -1174,8 +1174,10 @@ class MongoDBService:
 
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
         """List recent transfer jobs, optionally filtered to a workspace."""
+        from services.connector_request_limits import bounded_job_list_limit
         from services.job_list_view import slim_job_for_list
 
+        limit = bounded_job_list_limit(limit)
         db = self.get_database()
         collection = db["transfer_jobs"]
 
@@ -1703,8 +1705,10 @@ class MemoryMongoDBService:
         return {"total": sum(by_status.values()), "by_status": by_status}
 
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
+        from services.connector_request_limits import bounded_job_list_limit
         from services.job_list_view import slim_job_for_list
 
+        limit = bounded_job_list_limit(limit)
         items = sorted(
             self._jobs.values(),
             key=lambda j: _created_sort_stamp(j.get("created_at")),

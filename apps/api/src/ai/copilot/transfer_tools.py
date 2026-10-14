@@ -2116,6 +2116,13 @@ def start_transfer(
         payload["compliance_acknowledged"] = True
         payload["acknowledgment_actor"] = pii_ack["approved_by"]
         payload["acknowledgment_reason"] = pii_ack["reason"]
+    if payload.get("schema_drift_acknowledged"):
+        # Studio requires a signed reason. MCP sends the boolean alone.
+        # Confirm and the job record still name who accepted the drift.
+        if not str(payload.get("acknowledgment_actor") or "").strip():
+            payload["acknowledgment_actor"] = "operator"
+        if not str(payload.get("acknowledgment_reason") or "").strip():
+            payload["acknowledgment_reason"] = "Accept drift for this run"
     try:
         bound = _stage_bound_contract(contract_id, require_signed_contract)
     except ValueError as exc:

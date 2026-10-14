@@ -566,6 +566,7 @@ export function JobTheaterView({
     records_processed: processed,
     progress_indeterminate: Boolean(job.progress_indeterminate),
     reconciling,
+    reconcile_pct: job.reconcile_pct,
     isComplete,
     isRunning,
   });
@@ -1009,11 +1010,20 @@ export function JobTheaterView({
                 r="24"
                 className="fill"
                 pathLength={100}
-                strokeDasharray={ringDasharray(progress, { indeterminate: Boolean(indeterminate && isRunning && !reconciling) })}
+                strokeDasharray={ringDasharray(progress, {
+                  indeterminate: Boolean(indeterminate && isRunning && !reconciling),
+                  exact: Boolean(reconciling && progress < 99),
+                })}
                 transform="rotate(-90 28 28)"
               />
             </svg>
-            <strong>{indeterminate && isRunning && !reconciling ? "…" : `${progress}%`}</strong>
+            <strong>
+              {indeterminate && isRunning && !reconciling
+                ? "…"
+                : reconciling && progress < 99
+                  ? `${progress.toFixed(1)}%`
+                  : `${progress}%`}
+            </strong>
           </div>
           <div className="df2-theater-v3-progress-copy">
             <h3>{headline}</h3>

@@ -97,10 +97,12 @@ def job_governance(job: dict[str, Any]) -> dict[str, Any]:
         "approval": dict(confirmation) if isinstance(confirmation, dict) else None,
         "acknowledgments": {
             "compliance": bool(req.get("compliance_acknowledged")),
-            "schema_drift": bool(req.get("schema_drift_acknowledged")),
+            "schema_drift": bool(
+                req.get("schema_drift_acknowledged") or job.get("schema_drift_acknowledged")
+            ),
             "fk_risk": bool(req.get("fk_risk_acknowledged")),
-            "actor": req.get("acknowledgment_actor") or "",
-            "reason": req.get("acknowledgment_reason") or "",
+            "actor": req.get("acknowledgment_actor") or job.get("acknowledgment_actor") or "",
+            "reason": req.get("acknowledgment_reason") or job.get("acknowledgment_reason") or "",
         },
         "risk_contracts": contracts,
         "contract_id": req.get("contract_id") or "",

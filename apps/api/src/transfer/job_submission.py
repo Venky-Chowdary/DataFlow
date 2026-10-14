@@ -68,6 +68,17 @@ def create_pending_job(engine: Any, request: Any) -> str:
         "source_read_mode": source_read_mode_of(request.source),
         "triggered_by": (request.triggered_by or "").strip(),
         "retry_of": None,
+        # Job-root copy. get_job reads this when a rewrite of transfer_request
+        # drops the nested flag (R10-001 / R8-002).
+        "schema_drift_acknowledged": bool(
+            getattr(request, "schema_drift_acknowledged", False)
+        ),
+        "acknowledgment_actor": str(
+            getattr(request, "acknowledgment_actor", "") or ""
+        ).strip(),
+        "acknowledgment_reason": str(
+            getattr(request, "acknowledgment_reason", "") or ""
+        ).strip(),
     }
     proof = engine_module._mapping_proof_for_request(request)
     if proof:

@@ -47,7 +47,7 @@ import {
 import { jobStudioDataRules } from "../lib/studioDataRules";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
 import { blockerTitle } from "../lib/preflightGates";
-import { clampPercent } from "../lib/progressRing";
+import { reconcileBarPercent } from "../lib/progressRing";
 import { nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
@@ -904,8 +904,11 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                           </div>
                           {isLiveRow && job.progress_pct != null && (
                             <div className="df2-job-row-bar" aria-hidden>
-                              <i style={{ width: `${clampPercent(job.progress_pct)}%` }} />
+                              <i style={{ width: `${reconcileBarPercent(job.progress_pct, job.reconcile_pct, job.phase)}%` }} />
                             </div>
+                          )}
+                          {isLiveRow && String(job.phase || "").toLowerCase() === "reconcile" && job.reconcile_pct != null && (
+                            <span className="df2-job-row-rows">Checksum {Math.min(99, Number(job.reconcile_pct))}%</span>
                           )}
                         </div>
                       </button>

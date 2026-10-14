@@ -217,9 +217,12 @@ def test_metadata_address_is_refused_before_a_socket():
     assert metadata_endpoint_refusal("http://169.254.169.254/latest/meta-data")
     assert metadata_endpoint_refusal("host=169.254.169.254;port=80")
     assert metadata_endpoint_refusal("::ffff:169.254.169.254")
-    assert metadata_endpoint_refusal("10.0.0.8") == ""
+    assert metadata_endpoint_refusal("10.0.0.8")
+    assert "10.x" in metadata_endpoint_refusal("10.0.0.8")
+    assert metadata_endpoint_refusal("host=10.0.0.8;port=5432")
+    assert metadata_endpoint_refusal("192.168.1.10") == ""
+    assert metadata_endpoint_refusal("172.16.0.4") == ""
     assert metadata_endpoint_refusal("db.internal.example") == ""
-    assert metadata_endpoint_refusal("host=10.0.0.8;port=5432") == ""
 
     from src.transfer.connector_registry import run_probe
 

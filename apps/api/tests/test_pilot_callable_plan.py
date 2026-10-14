@@ -281,6 +281,6 @@ def test_recommend_sync_mode_refuses_cdc_for_procedure() -> None:
         {"workload": "cdc", "source_read_mode": "procedure"},
     )
     assert res.success
-    assert res.output["recommended_mode"] == "Full Refresh Append"
+    assert res.output["recommended_mode"] == "full_refresh_append"
     assert "snapshot" in res.output["reason"].lower() or "cdc" in res.output["reason"].lower()
     assert res.output["requires"]["cdc_log_access"] is False

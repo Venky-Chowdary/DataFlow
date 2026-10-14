@@ -19,7 +19,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pymongo.errors import PyMongoError
 from services.runtime_estimate import estimate_for_job_doc
 from services.team_store import can_read_workspace, can_write_workspace
@@ -85,6 +85,25 @@ class ConnectorConfig(BaseModel):
     auth_source: Optional[str] = None
     private_key: Optional[str] = Field(default=None, description="PEM private key (Snowflake key-pair / SFTP)")
     role: Optional[str] = Field(default="both", description="Connector role: source | destination | both")
+
+    @model_validator(mode="after")
+    def _request_bounds(self) -> "ConnectorConfig":
+        from services.connector_request_limits import connector_request_errors
+
+        err = connector_request_errors(
+            name=self.name,
+            db_type=self.type,
+            host=self.host,
+            port=self.port,
+            database=self.database,
+            username=self.username,
+            schema=self.db_schema,
+            connection_string=self.connection_string,
+            require_name=True,
+        )
+        if err:
+            raise ValueError(err)
+        return self
 
 
 class ConnectorResponse(BaseModel):
@@ -658,12 +677,36 @@ async def retry_transfer_job(
             decide_retry_from_start,
         )
 
+        status = str(job.get("status") or "").strip().lower()
+        if status in {"completed", "completed_with_quarantine", "success", "succeeded"}:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": (
+                        f"Job is {status}. A finished run is re-run with "
+                        f"POST /api/v1/connectors/jobs/{job_id}/rerun, which keeps preflight."
+                    ),
+                    "primary_action": "rerun",
+                    "rerun_url": f"/api/v1/connectors/jobs/{job_id}/rerun",
+                },
+            )
+        if status not in {"failed", "cancelled"}:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": (
+                        f"Job is {status or 'unknown'}; only a failed or cancelled "
+                        "job can be retried from zero."
+                    ),
+                },
+            )
         rows_committed, rows_known = committed_rows_of(job)
         retry_decision = decide_retry_from_start(
-            status=job.get("status"),
+            status=status,
             sync_mode=getattr(xfer_req, "sync_mode", ""),
             rows_committed=rows_committed,
             rows_committed_known=rows_known,
+            operator_requested=True,
         )
         if not retry_decision["allowed"] and not force:
             emit_event(
@@ -733,7 +776,119 @@ async def retry_transfer_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/jobs/{job_id}/resume")
+@router.post("/jobs/{job_id}/rerun")
+async def rerun_transfer_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    force: bool = False,
+):
+    """Start a finished or cancelled job again as a new job.
+
+    The new job records ``rerun_of`` and keeps preflight (``skip_preflight``
+    stays false), so Execute re-validates. Allowed for completed,
+    completed-with-quarantine, and cancelled. Append that already committed
+    rows is refused unless ``force=true``. A failed job uses ``/retry``.
+    """
+    try:
+        from ..transfer.background import run_transfer_async
+        from ..transfer.engine import get_transfer_engine
+        from ..transfer.models import transfer_request_from_dict
+
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+        if not job or not _can_access_job(request, job):
+            raise HTTPException(status_code=404, detail="Job not found")
+        if not _can_mutate_job(request, job):
+            raise HTTPException(status_code=403, detail="Workspace write access required")
+
+        payload = job.get("transfer_request")
+        if not payload:
+            raise HTTPException(
+                status_code=400,
+                detail="This job has no saved configuration — re-run from Transfer Studio.",
+            )
+        xfer_req = transfer_request_from_dict(payload)
+        from services.transfer_file_staging import (
+            file_source_bytes_available,
+            hydrate_file_source,
+        )
+
+        hydrate_file_source(xfer_req)
+        if xfer_req.source.kind == "file" and not file_source_bytes_available(xfer_req):
+            raise HTTPException(
+                status_code=400,
+                detail="File uploads must be re-submitted from Transfer Studio.",
+            )
+
+        from services.execution_engine_contract import committed_rows_of, decide_job_rerun
+
+        rows_committed, rows_known = committed_rows_of(job)
+        decision = decide_job_rerun(
+            status=job.get("status"),
+            sync_mode=getattr(xfer_req, "sync_mode", ""),
+            rows_committed=rows_committed,
+            rows_committed_known=rows_known,
+        )
+        if not decision["allowed"] and not force:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Re-run refused",
+                    "reason": decision["reason"],
+                    "rows_committed": rows_committed if rows_known else None,
+                    "rows_committed_known": rows_known,
+                    "override": "Re-send with force=true to accept duplicate append rows.",
+                },
+            )
+        xfer_req.skip_preflight = False
+        engine = get_transfer_engine()
+        new_job_id = engine._create_pending_job(xfer_req)
+        forced = bool(force and not decision["allowed"])
+        mongo.update_job_status(
+            new_job_id,
+            "pending",
+            rerun_of=job_id,
+            message=(
+                f"Re-run of job {job_id} (preflight kept)"
+                + (
+                    " — operator accepted duplicate rows: "
+                    f"{decision['reason']}"
+                    if forced
+                    else ""
+                )
+            ),
+            duplicate_risk_acknowledged=forced,
+            retry_decision=decision,
+        )
+        background_tasks.add_task(run_transfer_async, new_job_id, xfer_req, resume=False)
+        emit_event(
+            logger, "job.rerun.requested", outcome="succeeded",
+            job_id=new_job_id, rerun_of=job_id,
+            workspace_id=job.get("workspace_id") or None,
+            duplicate_risk_acknowledged=forced,
+        )
+        return {
+            "success": True,
+            "async": True,
+            "job_id": new_job_id,
+            "rerun_of": job_id,
+            "status": "running",
+            "resume": False,
+            "skip_preflight": False,
+            "duplicate_risk_acknowledged": forced,
+            "retry_decision": decision,
+            "message": (
+                "Re-run — new job linked with rerun_of. Preflight runs again "
+                "(at-least-once)."
+            ),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 def _resume_restarts_from_scratch(xfer_req: Any) -> bool:
     """True when Resume should re-run the transfer rather than continue it.
 
@@ -760,6 +915,7 @@ def _resume_restarts_from_scratch(xfer_req: Any) -> bool:
     )
 
 
+@router.post("/jobs/{job_id}/resume")
 async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
     """Resume a failed or paused transfer from its last durable checkpoint."""
     try:

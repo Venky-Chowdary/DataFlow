@@ -206,10 +206,42 @@ def search_catalog(
         # the number always describes the list the operator is looking at.
         "source_live": source_drivers,
         "dest_live": dest_drivers,
+        **_capability_driver_counts(),
         "role_live": (
             source_drivers if role == "source"
             else dest_drivers if role == "destination"
             else unique_drivers
+        ),
+    }
+
+
+def _capability_driver_counts() -> dict[str, object]:
+    """Driver counts from the same functions get_transfer_capabilities uses.
+
+    ``source_live`` / ``dest_live`` stay the catalog-tile counts. These fields
+    are the transfer-ready driver sets, which are a different population.
+    """
+    try:
+        from src.transfer.connector_capabilities import (
+            dest_live_driver_types,
+            source_live_driver_types,
+            transfer_live_driver_types,
+        )
+    except ImportError:
+        from transfer.connector_capabilities import (
+            dest_live_driver_types,
+            source_live_driver_types,
+            transfer_live_driver_types,
+        )
+    return {
+        "capabilities_source_live": len(source_live_driver_types()),
+        "capabilities_dest_live": len(dest_live_driver_types()),
+        "capabilities_transfer_live": len(transfer_live_driver_types()),
+        "count_note": (
+            "source_live and dest_live count catalog tiles you can pick. "
+            "capabilities_source_live, capabilities_dest_live, and "
+            "capabilities_transfer_live are the transfer-ready driver sets "
+            "get_transfer_capabilities reports. Catalog tiles are not transfer-live drivers."
         ),
     }
 
