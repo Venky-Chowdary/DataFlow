@@ -389,9 +389,18 @@
   --dt-transition: var(--df-dur-fast) var(--df-ease);
   --dt-transition-slow: var(--df-dur) var(--df-ease);
 
-  /* Stacking — single scale (do not use raw 9999/10000 elsewhere) */
+  /* Stacking — one scale. Each layer has one value. */
+  --df-z-floor: 0;
   --df-z-base: 1;
+  --df-z-raised: 2;
+  --df-z-canvas-stage: 3;
+  --df-z-canvas-rail: 4;
+  --df-z-canvas-overview: 5;
+  --df-z-canvas-issues: 6;
+  --df-z-canvas-toolbar: 7;
+  --df-z-canvas-menu: 8;
   --df-z-sticky: 20;
+  --df-z-action: 30;
   --df-z-topbar: 40;
   --df-z-sidebar: 45;
   --df-z-dropdown: 80;

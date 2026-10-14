@@ -11963,3 +11963,37 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
     padding-right: 64px !important;
   }
 }
+
+/* The work column scrolls inside itself. Hidden overflow was slicing the
+   sample, the log, and the properties under the pinned bar. */
+.df2-page-transfer-studio.is-studio-next .df2-transfer-step-viewport,
+.df2-page-transfer-studio.is-studio-next .df2-theater-v3,
+.df2-page-transfer-studio.is-studio-next .df2-map-step-panel {
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+/* xyflow writes z-index inline (a selected node is 1000, the modal layer).
+   Restack it onto the shared scale. */
+.df2-page-transfer-studio.is-studio-next .react-flow__renderer,
+.df2-page-transfer-studio.is-studio-next .react-flow__pane,
+.df2-page-transfer-studio.is-studio-next .react-flow__viewport,
+.df2-page-transfer-studio.is-studio-next .react-flow__edges,
+.df2-page-transfer-studio.is-studio-next .react-flow__edge,
+.df2-page-transfer-studio.is-studio-next .react-flow__handle,
+.df2-page-transfer-studio.is-studio-next .react-flow__edgelabel-renderer {
+  z-index: var(--df-z-base) !important;
+}
+
+.df2-page-transfer-studio.is-studio-next .react-flow__node {
+  z-index: var(--df-z-raised) !important;
+}
+
+.df2-page-transfer-studio.is-studio-next .react-flow__node.selected {
+  z-index: var(--df-z-canvas-stage) !important;
+}
+
+.df2-page-transfer-studio.is-studio-next .react-flow__minimap,
+.df2-page-transfer-studio.is-studio-next .react-flow__panel {
+  z-index: var(--df-z-canvas-overview) !important;
+}

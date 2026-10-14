@@ -91,6 +91,191 @@ export async function expectStackedAbove(page: Page, under: string, over: string
   expect(stacked, `${over} does not cover ${under} at ${x},${y} (hit ${hit})`).toBeTruthy();
 }
 
+/**
+ * Flagged transfer shell. Visible text and controls must not intersect an
+ * unrelated control, overflow:hidden must not slice them, every positioned
+ * z-index must be one of the --df-z-* tokens, and the shell must not scroll
+ * sideways. A scrollport (overflow auto) may hold content that is reached by
+ * scrolling; a fixed bar is not clipped by the step behind it.
+ */
+export async function expectStudioShellClear(page: Page, where: string): Promise<void> {
+  await page.locator(".dt-toast").evaluateAll((nodes) => {
+    for (const node of nodes) (node as HTMLElement).style.setProperty("display", "none");
+  }).catch(() => {});
+  const report = await page.evaluate(() => {
+    const shell = document.querySelector(".df2-transfer-studio-shell");
+    const pageRoot = document.querySelector(".df2-page-transfer-studio");
+    const interactiveSel = 'button, a[href], input, select, textarea, summary, [role="button"], [role="tab"], [role="menuitem"], [role="option"], [role="checkbox"], [role="switch"], [role="link"], [role="radio"], [role="combobox"]';
+    const rootStyle = getComputedStyle(document.documentElement);
+    const tokenNames = ["--df-z-floor", "--df-z-base", "--df-z-raised", "--df-z-canvas-stage", "--df-z-canvas-rail", "--df-z-canvas-overview", "--df-z-canvas-issues", "--df-z-canvas-toolbar", "--df-z-canvas-menu", "--df-z-sticky", "--df-z-action", "--df-z-topbar", "--df-z-sidebar", "--df-z-dropdown", "--df-z-popover", "--df-z-modal", "--df-z-toast", "--df-z-boot"];
+    const tokenValues = new Set(tokenNames.map((name) => String(parseInt(rootStyle.getPropertyValue(name), 10))));
+
+    function label(el: Element): string {
+      const text = (el.getAttribute("aria-label") || el.getAttribute("placeholder") || (el as HTMLElement).innerText || "")
+        .trim().replace(/\s+/g, " ").slice(0, 70);
+      const cls = typeof (el as HTMLElement).className === "string"
+        ? (el as HTMLElement).className.trim().split(/\s+/).slice(0, 2).join(".")
+        : "";
+      return `${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}${text ? ` "${text}"` : ""}`;
+    }
+
+    function visible(el: Element): boolean {
+      if (el.closest("[aria-hidden='true']")) return false;
+      const style = getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) return false;
+      if (r.bottom < 1 || r.right < 1 || r.top > innerHeight - 1 || r.left > innerWidth - 1) return false;
+      return true;
+    }
+
+    const nodes: Element[] = [];
+    const seen = new Set<Element>();
+    const scope = pageRoot || document.body;
+    function add(el: Element | null): void {
+      if (!el || seen.has(el) || !visible(el)) return;
+      seen.add(el);
+      nodes.push(el);
+    }
+    for (const el of scope.querySelectorAll(interactiveSel)) add(el);
+    add(document.querySelector(".df2-copilot-edge-open"));
+    const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT);
+    let textNode = walker.nextNode();
+    while (textNode) {
+      if (textNode.textContent && textNode.textContent.trim()) add(textNode.parentElement);
+      textNode = walker.nextNode();
+    }
+
+    function painted(el: Element): { x: number; y: number; r: number; b: number } {
+      const rect = el.getBoundingClientRect();
+      let left = rect.left;
+      let top = rect.top;
+      let right = rect.right;
+      let bottom = rect.bottom;
+      let node = el.parentElement;
+      while (node) {
+        const style = getComputedStyle(node);
+        if (style.position === "fixed") break;
+        const clipsX = /hidden|clip|auto|scroll/.test(style.overflowX);
+        const clipsY = /hidden|clip|auto|scroll/.test(style.overflowY);
+        if (clipsX || clipsY) {
+          const c = node.getBoundingClientRect();
+          if (clipsX) {
+            left = Math.max(left, c.left);
+            right = Math.min(right, c.right);
+          }
+          if (clipsY) {
+            top = Math.max(top, c.top);
+            bottom = Math.min(bottom, c.bottom);
+          }
+        }
+        node = node.parentElement;
+      }
+      return {
+        x: Math.max(left, 0),
+        y: Math.max(top, 0),
+        r: Math.min(right, innerWidth),
+        b: Math.min(bottom, innerHeight),
+      };
+    }
+
+    function area(a: { x: number; y: number; r: number; b: number }, b: { x: number; y: number; r: number; b: number }): number {
+      const w = Math.min(a.r, b.r) - Math.max(a.x, b.x);
+      const h = Math.min(a.b, b.b) - Math.max(a.y, b.y);
+      if (w <= 1 || h <= 1) return 0;
+      return Math.round(w * h);
+    }
+
+    function related(a: Element, b: Element): boolean {
+      if (a.contains(b) || b.contains(a)) return true;
+      const host = a.closest("button, a, label, li, th, td, [role='button'], [role='tab'], [role='menuitem'], [role='option'], [role='row']");
+      return Boolean(host && host.contains(b));
+    }
+
+    const overlaps: string[] = [];
+    const boxes = nodes.map(painted);
+    for (let i = 0; i < nodes.length; i += 1) {
+      if (boxes[i].r - boxes[i].x <= 1 || boxes[i].b - boxes[i].y <= 1) continue;
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        if (related(nodes[i], nodes[j])) continue;
+        const hit = area(boxes[i], boxes[j]);
+        if (hit > 0) overlaps.push(`${label(nodes[i])} ∩ ${label(nodes[j])} (${hit}px)`);
+      }
+    }
+
+    const clips: string[] = [];
+    for (const el of nodes) {
+      const rect = el.getBoundingClientRect();
+      let node = el.parentElement;
+      let sawScrollX = false;
+      let sawScrollY = false;
+      while (node) {
+        const style = getComputedStyle(node);
+        if (style.position === "fixed") break;
+        const scrollX = style.overflowX === "auto" || style.overflowX === "scroll";
+        const scrollY = style.overflowY === "auto" || style.overflowY === "scroll";
+        const clipX = (style.overflowX === "hidden" || style.overflowX === "clip") && !sawScrollX;
+        const clipY = (style.overflowY === "hidden" || style.overflowY === "clip") && !sawScrollY;
+        if (clipX || clipY) {
+          const c = node.getBoundingClientRect();
+          const sides: string[] = [];
+          if (clipX && rect.left < c.left - 1) sides.push("L");
+          if (clipX && rect.right > c.right + 1) sides.push("R");
+          if (clipY && rect.top < c.top - 1) sides.push("T");
+          if (clipY && rect.bottom > c.bottom + 1) sides.push("B");
+          if (sides.length) {
+            clips.push(`${label(el)} clipped ${sides.join("")} by ${label(node)}`);
+            break;
+          }
+        }
+        if (scrollX) sawScrollX = true;
+        if (scrollY) sawScrollY = true;
+        node = node.parentElement;
+      }
+      const self = getComputedStyle(el);
+      if ((self.overflowX === "hidden" || self.overflowX === "clip") && el.scrollWidth > el.clientWidth + 1) {
+        clips.push(`${label(el)} self-x ${el.scrollWidth}>${el.clientWidth}`);
+      }
+      if ((self.overflowY === "hidden" || self.overflowY === "clip") && el.scrollHeight > el.clientHeight + 1) {
+        clips.push(`${label(el)} self-y ${el.scrollHeight}>${el.clientHeight}`);
+      }
+    }
+
+    const off: string[] = [];
+    const stacked: Element[] = [];
+    for (const el of scope.querySelectorAll("*")) {
+      const style = getComputedStyle(el);
+      if (style.position === "static" || style.zIndex === "auto" || style.display === "none") continue;
+      if (!tokenValues.has(style.zIndex)) off.push(`${label(el)} z=${style.zIndex}`);
+      if (visible(el)) stacked.push(el);
+    }
+    const zHits: string[] = [];
+    for (let i = 0; i < stacked.length; i += 1) {
+      for (let j = i + 1; j < stacked.length; j += 1) {
+        if (getComputedStyle(stacked[i]).zIndex !== getComputedStyle(stacked[j]).zIndex) continue;
+        if (related(stacked[i], stacked[j])) continue;
+        const hit = area(painted(stacked[i]), painted(stacked[j]));
+        if (hit > 0) zHits.push(`${label(stacked[i])} z=${getComputedStyle(stacked[i]).zIndex} ∩ ${label(stacked[j])}`);
+      }
+    }
+
+    return {
+      overlaps,
+      clips,
+      off,
+      zHits,
+      shellH: Boolean(shell && shell.scrollWidth > shell.clientWidth + 1),
+      docH: document.documentElement.scrollWidth > window.innerWidth + 1,
+    };
+  });
+  expect(report.overlaps, `${where} overlap\n${report.overlaps.slice(0, 12).join("\n")}`).toEqual([]);
+  expect(report.clips, `${where} clipped\n${report.clips.slice(0, 12).join("\n")}`).toEqual([]);
+  expect(report.off, `${where} z-index off the token scale\n${report.off.slice(0, 12).join("\n")}`).toEqual([]);
+  expect(report.zHits, `${where} z-index collision\n${report.zHits.slice(0, 12).join("\n")}`).toEqual([]);
+  expect(report.shellH, `${where} shell horizontal scrollbar`).toBe(false);
+  expect(report.docH, `${where} page horizontal scrollbar`).toBe(false);
+}
+
 export async function expectHitInside(page: Page, target: Locator, ancestor: string): Promise<void> {
   const box = await target.boundingBox();
   expect(box, ancestor).toBeTruthy();

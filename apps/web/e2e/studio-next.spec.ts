@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import { expectDisjoint, expectHitInside, expectStackedAbove, expectWithinViewport } from "./layout";
+import { expectDisjoint, expectHitInside, expectStackedAbove, expectStudioShellClear, expectWithinViewport } from "./layout";
 import { openStudio, reachTransform, shoot } from "./support";
 
 /** A toast shifts the narrow page. Remove it before the shot; the mask alone does not. */
@@ -692,6 +692,54 @@ conn.commit()
     expect(contrast(paint.title, paint.band)).toBeGreaterThanOrEqual(4.5);
     expect(contrast(paint.icon, paint.mark)).toBeGreaterThanOrEqual(4.5);
   }
+  });
+
+  test("every step stays clear of overlap, clipping, and a horizontal scrollbar", async ({ page }) => {
+    test.setTimeout(120_000);
+    const sizes = [
+      { width: 1366, height: 768 },
+      { width: 1440, height: 900 },
+      { width: 1920, height: 1080 },
+    ] as const;
+    const check = async (name: string) => {
+      for (const size of sizes) {
+        await page.setViewportSize(size);
+        await expectStudioShellClear(page, `${name} ${size.width}x${size.height}`);
+      }
+      await page.setViewportSize({ width: 1440, height: 900 });
+    };
+
+    await openStudio(page);
+    await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
+    await expect(page.getByRole("button", { name: /Continue to Destination/ })).toBeEnabled();
+    await check("source");
+
+    await page.getByRole("button", { name: /Continue to Destination/ }).click();
+    await page.getByRole("tab", { name: "File export" }).click();
+    await check("destination");
+
+    await page.getByRole("button", { name: /Continue to Transform/ }).click();
+    await expect(page.getByRole("heading", { name: "Transform", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "More actions" }).click();
+    await page.getByRole("menuitem", { name: "Palette", exact: true }).click();
+    await page.locator(".df2-canvas-op[data-op='trim']").click();
+    await expect(page.locator(".react-flow__node")).toHaveCount(1);
+    await check("transform");
+
+    await page.getByRole("button", { name: "Run preview" }).first().click();
+    await expect(page.getByRole("button", { name: /Continue with this transform/ })).toBeEnabled();
+    await page.getByRole("button", { name: /Continue with this transform/ }).click();
+    await expect(page.getByRole("button", { name: /Continue to Validate/ })).toBeVisible();
+    await check("map");
+
+    await page.getByRole("button", { name: /Continue to Validate/ }).click();
+    await expect(page.getByRole("button", { name: /^Execute/ })).toBeVisible();
+    await check("validate");
+
+    const execute = page.getByRole("button", { name: /^Execute/ });
+    if (await execute.isEnabled()) await execute.click();
+    await expect(page.getByRole("heading", { name: /Transfer complete|Run/ }).first()).toBeVisible();
+    await check("run");
   });
 });
 

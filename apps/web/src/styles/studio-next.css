@@ -168,19 +168,18 @@
   display: flex;
   align-items: baseline;
   gap: 10px;
-  flex: 0 1 200px;
-  max-width: 200px;
+  flex: 1 1 auto;
+  max-width: none;
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .df2-canvas-head-title p {
   margin: 0;
   min-width: 0;
   color: var(--df-text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow: visible;
 }
 
 /* The subtitle yields the row on a laptop so every tool stays in view.
@@ -371,7 +370,7 @@ button.df2-canvas-badge {
   flex: 1 1 0;
   min-height: 0;
   align-items: stretch;
-  overflow: clip;
+  overflow: visible;
   position: relative;
 }
 
@@ -436,7 +435,7 @@ button.df2-canvas-badge {
   position: absolute;
   left: calc(100% + var(--df-space-2));
   top: 0;
-  z-index: 6;
+  z-index: var(--df-z-popover);
   width: max-content;
   max-width: 220px;
   padding: var(--df-space-1) var(--df-space-2);
@@ -568,9 +567,8 @@ button.df2-canvas-badge {
   margin: var(--df-space-1) 0 0;
   font-size: 13px;
   color: var(--df-text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
+  overflow: visible;
 }
 
 .df2-canvas-suggest {
@@ -977,7 +975,7 @@ button.df2-canvas-badge {
 }
 
 .df2-canvas-port {
-  z-index: 2;
+  z-index: var(--df-z-raised);
   width: 12px;
   height: 12px;
   border-radius: 50%;
@@ -1076,7 +1074,7 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
   position: absolute;
   top: 52px;
   left: 50%;
-  z-index: 6;
+  z-index: var(--df-z-canvas-issues);
   width: min(440px, calc(100% - 32px));
   max-height: 42%;
   overflow: auto;
@@ -1188,7 +1186,7 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
     top: 0;
     left: 8px;
     bottom: calc(var(--df-split-h, 168px) + 8px);
-    z-index: 4;
+    z-index: var(--df-z-canvas-rail);
     width: 240px;
     flex: none;
     max-height: none;
@@ -1424,7 +1422,7 @@ html.df2-canvas-focus .df2-canvas[data-view="split"] .df2-canvas-properties {
   left: var(--df-sidebar-width, 260px);
   right: 0;
   bottom: 0;
-  z-index: 40;
+  z-index: var(--df-z-action);
   width: auto;
   flex: none;
   height: 48px;
@@ -1577,7 +1575,7 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   position: absolute;
   top: calc(100% + 4px);
   right: 0;
-  z-index: 8;
+  z-index: var(--df-z-canvas-menu);
   display: flex;
   flex-direction: column;
   min-width: 220px;
@@ -1610,7 +1608,7 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   position: absolute;
   top: 8px;
   left: 8px;
-  z-index: 7;
+  z-index: var(--df-z-canvas-toolbar);
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1693,9 +1691,10 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
 
 .df2-canvas-prop-row {
   display: flex;
-  flex: 1 1 auto;
+  flex: 1 1 0;
+  height: 0;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .df2-canvas-tab-rail {
@@ -1813,7 +1812,7 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   position: absolute;
   right: -11px;
   top: 50%;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   display: grid;
   place-items: center;
   width: 22px;
@@ -1861,5 +1860,61 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
     height: 48px;
     max-height: 48px;
     min-height: 0;
+  }
+}
+
+/* A closed disclosure stays closed. Author display rules on its children
+   otherwise beat the user-agent hide and paint the form over the next row. */
+.df2-page-transfer-studio.is-studio-next details:not([open]) > :not(summary) {
+  display: none;
+}
+
+/* The palette is an overlay on the stage. The toolbar sits to its right
+   so the two controls do not share a box. */
+@media (min-width: 768px) {
+  .df2-canvas-body:has(.df2-canvas-rail:not(.is-collapsed)) .df2-canvas-edgebar {
+    left: 256px;
+  }
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-route-bar,
+.df2-page-transfer-studio.is-studio-next .df2-route-bar-endpoint,
+.df2-page-transfer-studio.is-studio-next .df2-route-bar-label {
+  overflow: visible;
+  text-overflow: unset;
+  max-width: none;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-route-bar-label {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-structure-preview,
+.df2-page-transfer-studio.is-studio-next .df2-structure-table-wrap {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-structure-table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-structure-table th,
+.df2-page-transfer-studio.is-studio-next .df2-structure-table td,
+.df2-page-transfer-studio.is-studio-next .df2-structure-table th span,
+.df2-page-transfer-studio.is-studio-next .df2-structure-table .df2-type-badge {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  max-width: none;
+  overflow-wrap: anywhere;
+}
+
+@media (min-width: 1024px) {
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-vd,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-theater-v3 {
+    padding-right: 64px;
   }
 }

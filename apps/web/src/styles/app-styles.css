@@ -1481,4 +1481,30 @@ html:has(.df2-app) #root {
   .df2-app.df2-app-with-edge .df2-content-inner.df2-content-studio:has(.df2-page-transfer-studio.is-studio-next) {
     padding: 0 !important;
   }
+
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-vd,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-theater-v3,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-run-step > .df2-card-body.df2-run-theater-host {
+    padding-right: 64px !important;
+  }
+}
+
+/* Flagged shell: scroll inside the step instead of slicing content, and
+   keep the flow canvas on the shared z-index scale. */
+.df2-page-transfer-studio.is-studio-next .df2-transfer-main-panel,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-step-viewport,
+.df2-page-transfer-studio.is-studio-next .df2-map-step-panel,
+.df2-page-transfer-studio.is-studio-next .df2-run-step > .df2-card-body.df2-run-theater-host,
+.df2-page-transfer-studio.is-studio-next .df2-run-step .df2-theater-v3,
+.df2-page-transfer-studio.is-studio-next .df2-live-log.is-theater {
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+.df2-page-transfer-studio.is-studio-next .react-flow__handle {
+  z-index: var(--df-z-raised) !important;
+}
+
+.df2-page-transfer-studio.is-studio-next .react-flow svg {
+  z-index: auto !important;
 }

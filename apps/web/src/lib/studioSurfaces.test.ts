@@ -25,9 +25,15 @@ describe("studio surfaces", () => {
   it("loads studio tokens only inside the new surfaces", () => {
     const styles = read(join(webRoot, "styles/app-styles.css"));
     const studio = read(join(webRoot, "styles/studio-next.css"));
+    const tokens = read(join(webRoot, "styles/tokens.css"));
     assert.match(styles, /@import "\.\/studio-next\.css"/);
     assert.doesNotMatch(studio, /#[0-9a-fA-F]{3,8}/);
     assert.doesNotMatch(studio, /!important/);
+    assert.doesNotMatch(studio, /z-index:\s*\d/);
+    assert.match(studio, /z-index:\s*var\(--df-z-/);
+    const tokenValues = [...tokens.matchAll(/--df-z-[a-z0-9-]+:\s*(\d+)/g)].map((match) => match[1]);
+    assert.ok(tokenValues.length >= 16);
+    assert.equal(new Set(tokenValues).size, tokenValues.length);
     assert.match(studio, /\.df2-studio-next \.df2-btn-primary[\s\S]*--df-accent:\s*var\(--df-brand-tile\)/);
   });
 
