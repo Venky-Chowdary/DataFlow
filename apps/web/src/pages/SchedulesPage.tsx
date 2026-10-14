@@ -34,8 +34,9 @@ import {
   fetchSchedules,
   planGitopsManifest,
   resetContractBreaker,
+  confirmCopilotAction,
   runScheduleNow,
-  syncScheduleNow,
+  stageScheduleSync,
   updateSchedule,
 } from "../lib/api";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
@@ -339,6 +340,33 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     } catch (e) {
       toast({ title: "Delete failed", tone: "error" });
       console.error(e);
+    }
+  };
+
+  const handleScheduleSync = async (id: string, mode: "sync" | "full") => {
+    if (!allowOrExplain(jobRun)) return;
+    setRunningId(id);
+    try {
+      const staged = await stageScheduleSync(id, mode);
+      const reason = staged.preview?.confirm_reason || (mode === "full" ? "Full re-sync using the signed contract" : "Sync now using the signed contract");
+      const note = staged.preview?.note ? `\n\n${staged.preview.note}` : "";
+      if (!window.confirm(`${reason}${note}`)) return;
+      await confirmCopilotAction({ ack_id: staged.ack_id, reason });
+      await load();
+      onViewJobs?.();
+      toast({
+        title: mode === "full" ? "Full re-sync started" : "Sync started",
+        message: "Track the child job in Job Theater.",
+        tone: "success",
+      });
+    } catch (e) {
+      toast({
+        title: mode === "full" ? "Re-sync failed" : "Sync failed",
+        message: e instanceof Error ? e.message : undefined,
+        tone: "error",
+      });
+    } finally {
+      setRunningId(null);
     }
   };
 
@@ -721,7 +749,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                 freshnessLagSeconds={freshnessLag[sched.id]?.lag ?? null}
                 freshnessSeverity={freshnessLag[sched.id]?.severity ?? null}
                 onSelect={() => openDrawer(sched.id)}
-                onSync={() => void handleRunNow(sched.id)}
+                onSync={() => void handleScheduleSync(sched.id, "sync")}
               />
             ))}
           </div>
@@ -753,23 +781,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         }
         onClose={closeDrawer}
         onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
-        onSync={(mode) => {
-          if (!selectedSchedule) return;
-          if (mode === "delta") {
-            void handleRunNow(selectedSchedule.id);
-            return;
-          }
-          void syncScheduleNow(selectedSchedule.id, "full").then(() => {
-            toast({ title: "Full re-sync started", tone: "success" });
-            onViewJobs?.();
-          }).catch((err: unknown) => {
-            toast({
-              title: "Re-sync unavailable",
-              message: err instanceof Error ? err.message : "The sync API is not on this server yet.",
-              tone: "error",
-            });
-          });
-        }}
+        onSync={() => selectedSchedule && void handleScheduleSync(selectedSchedule.id, "sync")}
+        onFullResync={() => selectedSchedule && void handleScheduleSync(selectedSchedule.id, "full")}
         onEdit={() => {
           if (!selectedSchedule) return;
           setResumeDrawerAfterEdit(true);

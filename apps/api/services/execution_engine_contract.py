@@ -141,6 +141,7 @@ def decide_retry_from_start(
     sync_mode: str | None,
     rows_committed: int = 0,
     rows_committed_known: bool = True,
+    operator_requested: bool = False,
 ) -> dict[str, Any]:
     """Decide whether re-running a finished attempt from zero is safe.
 
@@ -153,8 +154,11 @@ def decide_retry_from_start(
 
     A cancelled run is refused for a different reason: it stopped because
     somebody asked it to, and restarting it silently reverses that decision.
+    The unattended scheduler leaves ``operator_requested`` false. An operator
+    retry (the REST route and the Pilot tool) passes true so the duplicate
+    guard still runs and the cancel is an explicit new attempt.
     """
-    if (status or "").strip().lower() == "cancelled":
+    if (status or "").strip().lower() == "cancelled" and not operator_requested:
         return {
             "kind": ResumeKind.REFUSED.value,
             "allowed": False,
@@ -202,6 +206,53 @@ def decide_retry_from_start(
         ),
         "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
     }
+
+
+_RERUN_STATUSES = frozenset({
+    "completed",
+    "completed_with_quarantine",
+    "cancelled",
+    "success",
+    "succeeded",
+})
+
+
+def decide_job_rerun(
+    *,
+    status: str | None = None,
+    sync_mode: str | None,
+    rows_committed: int = 0,
+    rows_committed_known: bool = True,
+) -> dict[str, Any]:
+    """Whether a finished or cancelled job may be started again as a new job.
+
+    Re-run keeps preflight (the new job does not set ``skip_preflight``).
+    It is not a retry: retry is only for a failed or cancelled attempt that
+    the operator is restarting from zero after a failure. Completed and
+    completed-with-quarantine use this path. Append still refuses when the
+    parent already committed rows, unless the operator passes force on the
+    route that calls this decision.
+    """
+    st = (status or "").strip().lower()
+    if st not in _RERUN_STATUSES:
+        return {
+            "kind": ResumeKind.REFUSED.value,
+            "allowed": False,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": (
+                f"Job status {st or 'unknown'} cannot be re-run. "
+                "Re-run is for completed, completed-with-quarantine, and "
+                "cancelled jobs. A failed job uses retry."
+            ),
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
+    return decide_retry_from_start(
+        status=st,
+        sync_mode=sync_mode,
+        rows_committed=rows_committed,
+        rows_committed_known=rows_committed_known,
+        operator_requested=True,
+    )
 
 
 def assert_retry_from_start_allowed(

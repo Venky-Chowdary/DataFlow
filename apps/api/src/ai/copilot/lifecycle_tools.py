@@ -75,12 +75,34 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "retry_job",
         "description": (
-            "Stage a from-zero re-run of a failed transfer as a new job. Pending "
-            "action; the REST retry rules (duplicate protection) apply on Confirm."
+            "Stage a from-zero re-run of a failed or cancelled transfer as a new job. "
+            "Pending action; the REST retry rules (duplicate protection) apply on Confirm. "
+            "A completed or completed-with-quarantine job uses rerun_job."
         ),
         "input_schema": {
             "type": "object",
             "properties": {"job_id": {"type": "string"}, "selector": {"type": "string"}},
+            "required": [],
+        },
+    },
+    {
+        "name": "rerun_job",
+        "description": (
+            "Stage a new run of a completed, completed-with-quarantine, or cancelled "
+            "job. The new job records rerun_of and keeps preflight (skip_preflight "
+            "stays false). Append that already committed rows is refused unless "
+            "force is true. A failed job uses retry_job."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "selector": {"type": "string"},
+                "force": {
+                    "type": "boolean",
+                    "description": "Accept a second copy of rows an append already committed.",
+                },
+            },
             "required": [],
         },
     },
@@ -283,6 +305,7 @@ LIFECYCLE_TOOL_NAMES: frozenset[str] = frozenset(t["name"] for t in LIFECYCLE_TO
 ACK_KIND_BY_TOOL: dict[str, str] = {
     "cancel_job": "cancel_job",
     "retry_job": "retry_job",
+    "rerun_job": "rerun_job",
     "resume_job": "resume_job",
     "replay_quarantine": "replay_quarantine",
     "repair_cdc_drift": "repair_cdc_drift",
@@ -435,6 +458,7 @@ def _job_tool(
     transform_overrides: Any = None,
     rows: Any = None,
     key_ids: Any = None,
+    force: bool = False,
 ) -> ToolResult:
     if not (job_id or "").strip() and not (selector or "").strip():
         # A mutating call with no target must not fall through to the
@@ -536,12 +560,36 @@ def _job_tool(
         return _stage(tool, payload={"job_id": jid}, preview=brief,
                       label=f"Cancel job {short} ({status})", destructive=False)
     if tool == "retry_job":
+        if status in {"completed", "completed_with_quarantine", "success", "succeeded"}:
+            return _tool_result(tool, success=False, output=None,
+                error=(
+                    f"Job {short} is {status}. A finished run is re-run with "
+                    "rerun_job, which keeps preflight. retry_job is only for a "
+                    "failed or cancelled job."
+                ),
+            )
         if status not in {"failed", "cancelled"}:
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} is {status}; only a failed or cancelled job can be retried from zero. Use resume for a paused job.",
             )
         return _stage(tool, payload={"job_id": jid}, preview=brief,
                       label=f"Retry job {short} from the beginning", destructive=True)
+    if tool == "rerun_job":
+        if status not in {"completed", "completed_with_quarantine", "cancelled", "success", "succeeded"}:
+            return _tool_result(tool, success=False, output=None,
+                error=(
+                    f"Job {short} is {status or 'unknown'}. rerun_job is for a "
+                    "completed, completed-with-quarantine, or cancelled job. "
+                    "A failed job uses retry_job."
+                ),
+            )
+        return _stage(
+            tool,
+            payload={"job_id": jid, "force": bool(force)},
+            preview=brief,
+            label=f"Re-run job {short} (preflight kept)",
+            destructive=True,
+        )
     if tool == "resume_job":
         if status not in {"failed", "paused", "cancelled"}:
             return _tool_result(tool, success=False, output=None,
@@ -908,17 +956,39 @@ def update_connector(  # nosec B107
             ),
         )
     if "name" in changes:
-        try:
-            clash = _connector_dict("", changes["name"])
-        except AmbiguousConnectorError:
-            clash = {"id": "<several>"}
-        if clash and str(clash.get("id") or "") != brief["connector_id"]:
+        # Exact casefold only. A free name that is a prefix of another
+        # connector is not a clash, and a name that matches nothing is free.
+        # ``_connector_dict`` raises when nothing matches; that is not a clash.
+        from services.connector_store import list_connectors
+
+        target = str(changes["name"]).strip().casefold()
+        taken = any(
+            str(getattr(existing, "name", "") or "").strip().casefold() == target
+            and str(getattr(existing, "id", "") or "") != brief["connector_id"]
+            for existing in list_connectors()
+        )
+        if taken:
             return _tool_result(
                 "update_connector",
                 success=False,
                 output=None,
                 error=f"A connector named “{changes['name']}” already exists. Pick another name.",
             )
+    if "port" in changes:
+        from services.connector_request_limits import connector_port_error
+
+        port_err = connector_port_error(changes["port"], str(conn.get("type") or conn.get("db_type") or ""))
+        if port_err:
+            return _tool_result("update_connector", success=False, output=None, error=port_err)
+    if "host" in changes or "connection_string" in changes:
+        from services.egress_guard import metadata_endpoint_refusal
+
+        refusal = metadata_endpoint_refusal(
+            str(changes.get("host") or ""),
+            str(changes.get("connection_string") or ""),
+        )
+        if refusal:
+            return _tool_result("update_connector", success=False, output=None, error=refusal)
     shown = {
         k: ("(changed — hidden)" if k in _CONNECTOR_SECRET_FIELDS else v)
         for k, v in changes.items()

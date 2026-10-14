@@ -34,7 +34,7 @@ def test_near_realtime_updates_and_deletes_recommend_cdc():
         },
     )
     assert res.success
-    assert res.output["recommended_mode"] == "Incremental CDC"
+    assert res.output["recommended_mode"] == "cdc_incremental"
     assert res.output["requires"]["cdc_log_access"] is True
     assert res.output["requires"]["primary_key"] is True
     assert "append" not in res.output["recommended_mode"].lower()
@@ -51,7 +51,7 @@ def test_query_with_deletes_recommends_overwrite_without_a_cursor():
         },
     )
     assert res.success
-    assert res.output["recommended_mode"] == "Full Refresh Overwrite"
+    assert res.output["recommended_mode"] == "full_refresh_overwrite"
     assert res.output["requires"]["cursor"] is False
     assert res.output["requires"]["cdc_log_access"] is False
 
@@ -62,7 +62,7 @@ def test_full_refresh_append_does_not_require_a_cursor():
         {"workload": "nightly file drop", "has_cursor": False, "has_primary_key": False},
     )
     assert res.success
-    assert res.output["recommended_mode"] == "Full Refresh Append"
+    assert res.output["recommended_mode"] == "full_refresh_append"
     assert res.output["requires"]["cursor"] is False
 
 

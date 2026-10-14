@@ -291,7 +291,7 @@ def _normalize_sync_mode(sync_mode: str, primary_key: str) -> str:
     return normalize_sync_mode(mode)
 
 
-def build_schedule_request(sched, src: dict, dst: dict):
+def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""):
     """Build a :class:`TransferRequest` from a persisted schedule.
 
     Threads the per-schedule sync mode, validation mode, mappings, and any
@@ -412,7 +412,7 @@ def build_schedule_request(sched, src: dict, dst: dict):
     # every gate decides exactly as it did before.
     decision = authorization_for(sched)
     acks = decision.acknowledgments
-    return TransferRequest(
+    request = TransferRequest(
         source=source,
         destination=destination,
         mappings=mappings,
@@ -475,6 +475,11 @@ def build_schedule_request(sched, src: dict, dst: dict):
             else str(getattr(sched, "acknowledgment_reason", "") or "")
         ),
     )
+    if resync_mode in {"sync", "full"}:
+        from services.sync_now import apply_resync_to_request
+
+        apply_resync_to_request(request, resync_mode)
+    return request
 
 
 def authorization_for(sched: Any) -> AuthorizationDecision:
@@ -1192,6 +1197,7 @@ def _dispatch_transfer(
     attempt: int = 0,
     *,
     allow_paused: bool = False,
+    resync_mode: str = "",
 ) -> str | None:
     """Build and submit the transfer for a schedule attempt (used for retries too).
 
@@ -1232,7 +1238,7 @@ def _dispatch_transfer(
 
     authorized_drift = False
     try:
-        request = build_schedule_request(sched, src, dst)
+        request = build_schedule_request(sched, src, dst, resync_mode=resync_mode)
         authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
         emit_event(logger, "schedule.run.fire", outcome="held", reason_code="preflight_refused", schedule_id=schedule_id, attempt=attempt + 1, error=exc)
@@ -1316,7 +1322,12 @@ def _claim_backed_off(schedule_id: str) -> bool:
     return bool(entry and _time.monotonic() < entry[0])
 
 
-def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
+def _run_schedule(
+    schedule_id: str,
+    *,
+    manual: bool = False,
+    resync_mode: str = "",
+) -> str | None:
     from services.schedule_store import (
         clear_schedule_running,
         get_schedule,
@@ -1397,6 +1408,7 @@ def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
                 schedule_id,
                 attempt=sched.retry_attempt if sched.retry_at else 0,
                 allow_paused=manual,
+                resync_mode=resync_mode,
             )
     except Exception:
         # Nothing was submitted, so nothing is writing. Holding the claim for

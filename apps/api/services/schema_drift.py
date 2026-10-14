@@ -62,12 +62,35 @@ SCHEMA_POLICY_HONESTY: dict[str, str] = {
         "Widen and destination type changes pause. New columns need review. "
         "Execute does not silent-cast."
     ),
+    "block_all": (
+        "Any source change — including a nullable add — blocks until you "
+        "Accept drift for this run. Destination-only columns that were never "
+        "source-fed stay an audit note. Hard type-narrow cannot be accepted away."
+    ),
 }
+
+
+def normalize_schema_policy(policy: str | None) -> str:
+    """Canonical policy id.
+
+    Empty means ``propagate_columns`` — the product default for a new
+    connection (Fivetran Allow columns). ``block`` is ``block_all``.
+    ``approve`` is the existing ``manual_review`` path. A stored policy is
+    never rewritten.
+    """
+    key = (policy or "").strip().lower()
+    if not key:
+        return "propagate_columns"
+    if key == "block":
+        return "block_all"
+    if key == "approve":
+        return "manual_review"
+    return key
 
 
 def schema_policy_honesty_line(policy: str) -> str:
     """Studio / G10 caption for the Advanced schema-change policy."""
-    key = (policy or "manual_review").strip().lower()
+    key = normalize_schema_policy(policy) if (policy or "").strip() else "manual_review"
     return SCHEMA_POLICY_HONESTY.get(key, SCHEMA_POLICY_HONESTY["manual_review"])
 
 # Always pause — Airbyte breaking + Datawrap type-fidelity (no silent narrow).
@@ -197,6 +220,106 @@ def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     return False
 
 
+def _name_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
+
+
+def _levenshtein(left: str, right: str) -> int:
+    if left == right:
+        return 0
+    if not left:
+        return len(right)
+    if not right:
+        return len(left)
+    prev = list(range(len(right) + 1))
+    for i, ch in enumerate(left, start=1):
+        cur = [i]
+        for j, other in enumerate(right, start=1):
+            cur.append(min(
+                prev[j] + 1,
+                cur[j - 1] + 1,
+                prev[j - 1] + (ch != other),
+            ))
+        prev = cur
+    return prev[-1]
+
+
+def _jaro(left: str, right: str) -> float:
+    if left == right:
+        return 1.0
+    if not left or not right:
+        return 0.0
+    window = max(len(left), len(right)) // 2 - 1
+    window = max(window, 0)
+    left_matches = [False] * len(left)
+    right_matches = [False] * len(right)
+    matches = 0
+    transpositions = 0
+    for i, ch in enumerate(left):
+        start = max(0, i - window)
+        end = min(i + window + 1, len(right))
+        for j in range(start, end):
+            if right_matches[j] or ch != right[j]:
+                continue
+            left_matches[i] = True
+            right_matches[j] = True
+            matches += 1
+            break
+    if matches == 0:
+        return 0.0
+    k = 0
+    for i, matched in enumerate(left_matches):
+        if not matched:
+            continue
+        while not right_matches[k]:
+            k += 1
+        if left[i] != right[k]:
+            transpositions += 1
+        k += 1
+    transpositions /= 2
+    return (
+        matches / len(left)
+        + matches / len(right)
+        + (matches - transpositions) / matches
+    ) / 3
+
+
+def _jaro_winkler(left: str, right: str) -> float:
+    score = _jaro(left, right)
+    prefix = 0
+    for a, b in zip(left, right):
+        if a != b or prefix == 4:
+            break
+        prefix += 1
+    return score + prefix * 0.1 * (1 - score)
+
+
+def _rename_name_evidence(dropped: str, added: str) -> bool:
+    """Similarity evidence for a rename. Type evidence is checked separately.
+
+    Underscore-insensitive equality, or Jaro-Winkler plus a short edit
+    distance. Type-compatible names that are not actually similar
+    (``AMT`` / ``quantity``) stay a drop plus an add.
+    """
+    left = _name_key(dropped)
+    right = _name_key(added)
+    if not left or not right or left == right:
+        return bool(left and left == right)
+    distance = _levenshtein(left, right)
+    longest = max(len(left), len(right))
+    ratio = 1 - (distance / longest)
+    return _jaro_winkler(left, right) >= 0.94 and ratio >= 0.80 and distance <= 3
+
+
+def _types_support_rename(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
+    """Type evidence: same logical type or a widen. A narrow is not a rename."""
+    if _is_type_narrow(old_type, new_type, dest_db=dest_db):
+        return False
+    if normalize_logical_type(old_type) == normalize_logical_type(new_type):
+        return True
+    return _is_type_widen(old_type, new_type, dest_db=dest_db)
+
+
 def _semantic_rename_pairs(
     dropped: list[str],
     added: list[str],
@@ -247,6 +370,35 @@ def _semantic_rename_pairs(
             continue
         pairs.append((d, a))
         used_added.add(a)
+    # Second pass: the mapper misses underscore-only and near renames
+    # (customer_name → customername). Similarity is not enough — the types
+    # must agree, and measure/identity/entity false-friends stay unpaired.
+    for d in list(remaining_dropped):
+        if d in {p[0] for p in pairs}:
+            continue
+        best: str | None = None
+        best_score = 0.0
+        for a in remaining_added:
+            if a in used_added:
+                continue
+            if not _types_support_rename(old_cols[d], new_cols[a], dest_db=dest_db):
+                continue
+            if (
+                _measure_kind_mismatch(d, a)
+                or _identity_leaf_mismatch(d, a)
+                or _entity_conflict_requires_review(d, a)
+            ):
+                continue
+            if not _rename_name_evidence(d, a):
+                continue
+            score = _jaro_winkler(_name_key(d), _name_key(a))
+            if best is None or score > best_score:
+                best = a
+                best_score = score
+        if not best:
+            continue
+        pairs.append((d, best))
+        used_added.add(best)
     remaining_dropped = [c for c in remaining_dropped if c not in {p[0] for p in pairs}]
     remaining_added = [c for c in remaining_added if c not in used_added]
     return remaining_dropped, remaining_added, pairs
@@ -501,10 +653,29 @@ def classify_from_column_maps(
     return report
 
 
+def execute_must_pause(
+    evolution: dict[str, Any] | None,
+    *,
+    schema_drift_acknowledged: bool = False,
+) -> bool:
+    """Whether Execute refuses this evolution.
+
+    Hard-breaking (narrow, PK, compatibility none) cannot be acknowledged
+    away. A non-hard pause (``block_all`` / ``pause_on_change`` on an additive
+    change) yields for one run when the operator accepted drift.
+    """
+    evolution = evolution or {}
+    if not evolution.get("should_pause"):
+        return False
+    if evolution.get("hard_breaking"):
+        return True
+    return not bool(schema_drift_acknowledged)
+
+
 def resolve_schema_evolution(
     classification: dict[str, Any] | None,
     *,
-    schema_policy: str = "manual_review",
+    schema_policy: str = "propagate_columns",
     unmapped_sources: list[str] | None = None,
     source_changed: bool = False,
 ) -> dict[str, Any]:
@@ -513,8 +684,10 @@ def resolve_schema_evolution(
     Airbyte: propagate applies non-breaking; breaking always pauses.
     Fivetran: net-additive drops/renames under propagate (keep dest history).
     Datawrap: also fail-closed on type narrow (no silent airbyte_meta soft-pass).
+    ``block_all`` pauses any real source change. Destination-only columns are
+    not a source change — callers must not pass them as ``source_changed``.
     """
-    policy = (schema_policy or "manual_review").strip().lower()
+    policy = normalize_schema_policy(schema_policy)
     classification = classification or {
         "additive": [],
         "breaking": [],
@@ -551,11 +724,11 @@ def resolve_schema_evolution(
     action = "continue"
     reasons: list[str] = []
 
-    if policy == "pause_on_change" and (
+    if policy in {"pause_on_change", "block_all"} and (
         additive or hard or soft or source_changed or unmapped
     ):
         action = "pause"
-        reasons.append("schema_policy=pause_on_change")
+        reasons.append(f"schema_policy={policy}")
     elif hard:
         action = "pause"
         reasons.append(
@@ -613,6 +786,20 @@ def resolve_schema_evolution(
                 str(a.get("kind")) in {"add_column", "rename"}
                 for a in additive + soft
             )
+        ),
+        "audit": (
+            [{
+                "decision": "auto_pass",
+                "policy": policy,
+                "note": (
+                    "Non-breaking drift auto-passed. Destination history is kept; "
+                    "nothing was dropped."
+                ),
+                "additive": [str(a.get("kind") or "") for a in additive],
+                "soft": [str(a.get("kind") or "") for a in soft],
+            }]
+            if action == "propagate"
+            else []
         ),
     }
 
@@ -748,7 +935,7 @@ def detect_schema_drift(
     previous_primary_key: list[str] | None = None,
     live_primary_key: list[str] | None = None,
     cursor_fields: list[str] | None = None,
-    schema_policy: str = "manual_review",
+    schema_policy: str = "propagate_columns",
     table_exists: bool | None = None,
     declared_source_columns: list[str] | None = None,
     declared_source_schema: dict[str, str] | None = None,
@@ -1148,12 +1335,42 @@ def detect_schema_drift(
             present.add(tgt.lower())
         classification["additive"] = additive
 
+    # Destination-only columns the source never fed are not drift. A stored
+    # fingerprint of the mapped columns alone used to call the extra destination
+    # columns a target change, and manual_review then blocked a job that had
+    # already succeeded (sample-orders.csv → QA_E2E_ds_mixed).
+    dest_only_preserve = [
+        column for column in orphan_targets
+        if column.lower() not in previously_fed_targets
+    ]
+    if target_changed and dest_only_preserve and stored_target_fp:
+        ignored = {column.lower() for column in dest_only_preserve}
+        shared_cols = [c for c in target_columns if c.lower() not in ignored]
+        shared_schema = {
+            k: v
+            for k, v in (target_schema or {}).items()
+            if str(k).lower() not in ignored
+        }
+        if shared_cols and schemas_match(stored_target_fp, shared_cols, shared_schema):
+            target_changed = False
+
     evolution = resolve_schema_evolution(
         classification,
         schema_policy=schema_policy,
         unmapped_sources=evolution_unmapped,
         source_changed=source_changed or target_changed,
     )
+    non_breaking_audit: list[dict[str, Any]] = list(evolution.get("audit") or [])
+    if dest_only_preserve:
+        non_breaking_audit.append({
+            "decision": "auto_pass",
+            "kind": "destination_only",
+            "columns": list(dest_only_preserve),
+            "note": (
+                "Destination-only columns were never fed by the source. "
+                "They stay off the write and do not block."
+            ),
+        })
 
     issues: list[str] = []
     if source_changed:
@@ -1193,6 +1410,8 @@ def detect_schema_drift(
         "unmapped_sources": unmapped_sources,
         "evolution_unmapped_sources": evolution_unmapped,
         "orphan_targets": orphan_targets,
+        "destination_only_columns": dest_only_preserve,
+        "non_breaking_audit": non_breaking_audit,
         "type_mismatches": type_mismatches,
         "risk_acknowledged_pairs": risk_acknowledged,
         "intentional_omits": intentional_omits,

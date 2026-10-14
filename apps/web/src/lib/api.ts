@@ -1452,6 +1452,46 @@ export async function retryJob(
   throw lastError instanceof Error ? lastError : new Error("Retry failed");
 }
 
+export async function stageJobSync(
+  jobId: string,
+  mode: "sync" | "full",
+): Promise<{ ack_id: string; idempotent?: boolean; preview?: { confirm_reason?: string; note?: string; destructive?: boolean } }> {
+  const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const detail = data?.detail;
+    const message = typeof detail === "string"
+      ? detail
+      : (detail?.error || "Sync could not be staged");
+    throw new Error(message);
+  }
+  return data;
+}
+
+export async function stageScheduleSync(
+  scheduleId: string,
+  mode: "sync" | "full",
+): Promise<{ ack_id: string; idempotent?: boolean; preview?: { confirm_reason?: string; note?: string; destructive?: boolean } }> {
+  const res = await apiFetch(`${API_BASE}/schedules/${scheduleId}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const detail = data?.detail;
+    const message = typeof detail === "string"
+      ? detail
+      : (detail?.error || "Sync could not be staged");
+    throw new Error(message);
+  }
+  return data;
+}
+
 /**
  * Resume a job. A full refresh has nothing to resume *into* — it replaces the
  * destination — so the server re-runs it from the beginning and says so with

@@ -99,6 +99,45 @@ def _is_safe_sql(raw_query: str) -> bool:
     return first_keyword in safe_starts
 
 
+_READ_ONLY_REFUSAL = (
+    "Only read-only SQL is allowed (SELECT / WITH / SHOW / DESCRIBE / EXPLAIN)."
+)
+_PLAYGROUND_REFUSAL = "Only safe read/metadata queries are allowed in the playground"
+_STATEMENT_STARTS = frozenset({
+    "select", "with", "explain", "show", "describe", "desc", "analyze", "pragma", "values",
+})
+_DESTRUCTIVE_HEADS = frozenset({
+    "insert", "update", "delete", "drop", "create", "alter", "truncate",
+    "grant", "revoke", "merge", "copy", "call", "exec", "execute", "do",
+})
+
+
+def sql_refusal_message(raw: str, *, playground: bool = False) -> str:
+    """Name a syntax error. Keep the read-only sentence for a real write.
+
+    ``SELEC * FROM t`` is not a write, so it must not be reported as
+    "read-only only". ``DELETE`` and a second statement stay on the
+    read-only refusal.
+    """
+    from services.sql_literals import sql_outside_literals
+
+    readonly = _PLAYGROUND_REFUSAL if playground else _READ_ONLY_REFUSAL
+    code = sql_outside_literals(raw or "").strip()
+    head = ""
+    if code:
+        head = code.split(None, 1)[0].lower().rstrip(";")
+    body = code.rstrip().rstrip(";")
+    if head in _DESTRUCTIVE_HEADS or body.count(";") >= 1:
+        return readonly
+    if head not in _STATEMENT_STARTS:
+        shown = head or (raw or "").strip()[:40]
+        return (
+            f"SQL syntax error: {shown!r} is not a statement the playground can run. "
+            "Start with SELECT, WITH, SHOW, DESCRIBE, or EXPLAIN."
+        )
+    return readonly
+
+
 # SQLite PRAGMA is not in the documented read allowlist. Catalog reads the
 # operator already uses (table_info, index_list) stay. An assignment
 # (writable_schema, journal_mode=WAL) is a write and is refused.
@@ -998,7 +1037,10 @@ def _run_sql_query(connector, body):
     if not raw_query:
         raise HTTPException(status_code=400, detail="SQL query is required")
     if not _is_safe_sql(raw_query):
-        raise HTTPException(status_code=400, detail="Only safe read/metadata queries are allowed in the playground")
+        raise HTTPException(
+            status_code=400,
+            detail=sql_refusal_message(raw_query, playground=True),
+        )
 
     from connectors.generic_sql import get_sqlalchemy_engine
 
@@ -1094,7 +1136,10 @@ def _run_snowflake_query(connector, body):
     if not raw_query:
         raise HTTPException(status_code=400, detail="SQL query is required")
     if not _is_safe_sql(raw_query):
-        raise HTTPException(status_code=400, detail="Only safe read/metadata queries are allowed in the playground")
+        raise HTTPException(
+            status_code=400,
+            detail=sql_refusal_message(raw_query, playground=True),
+        )
 
     from connectors.snowflake_conn import classify_snowflake_connect_error, get_connection
     from services.connector_auth import engine_login_role

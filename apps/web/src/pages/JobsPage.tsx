@@ -15,7 +15,7 @@ import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
-import { fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, syncJobNow, RetryRefusedError } from "../lib/api";
+import { confirmCopilotAction, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, stageJobSync, RetryRefusedError } from "../lib/api";
 import {
   jobFilterCounts,
   jobHistoryFromResponse,
@@ -47,7 +47,7 @@ import {
 import { jobStudioDataRules } from "../lib/studioDataRules";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
 import { blockerTitle } from "../lib/preflightGates";
-import { clampPercent } from "../lib/progressRing";
+import { reconcileBarPercent } from "../lib/progressRing";
 import { nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
@@ -468,23 +468,6 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     onRefresh?.();
   }, [onRefresh]);
 
-  const handleSyncNow = useCallback((mode: "delta" | "full") => {
-    if (!selectedId) return;
-    void syncJobNow(selectedId, mode).then(() => {
-      toast({
-        title: mode === "full" ? "Full re-sync started" : "Sync started",
-        message: "Watching the new run in Job Theater.",
-        tone: "success",
-      });
-    }).catch((err: unknown) => {
-      toast({
-        title: "Sync now unavailable",
-        message: err instanceof Error ? err.message : "The sync API is not on this server yet.",
-        tone: "error",
-      });
-    });
-  }, [selectedId, toast]);
-
   const handleRetry = useCallback(async () => {
     if (!selectedId) return;
     setRetrying(true);
@@ -516,6 +499,31 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
       setRetrying(false);
     }
   }, [selectedId, onRefresh, onStartTransfer, toast]);
+
+  const handleSync = useCallback(async (mode: "sync" | "full") => {
+    if (!selectedId) return;
+    setRetrying(true);
+    try {
+      const staged = await stageJobSync(selectedId, mode);
+      const reason = staged.preview?.confirm_reason || (mode === "full" ? "Full re-sync using the signed contract" : "Sync now using the signed contract");
+      const note = staged.preview?.note ? `\n\n${staged.preview.note}` : "";
+      const destructive = staged.preview?.destructive ? "\n\nThis replaces the destination." : "";
+      const accepted = window.confirm(`${reason}${note}${destructive}`);
+      if (!accepted) return;
+      const confirmed = await confirmCopilotAction({ ack_id: staged.ack_id, reason });
+      if (confirmed.job_id) setSelectedId(confirmed.job_id);
+      toast({
+        title: confirmed.idempotent ? "Sync already started" : (mode === "full" ? "Full re-sync started" : "Sync started"),
+        message: "One child job. A second click does not start another run.",
+        tone: "success",
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Sync failed";
+      toast({ title: "Sync failed", message: msg, tone: "error" });
+    } finally {
+      setRetrying(false);
+    }
+  }, [selectedId, toast]);
 
   const handleResume = useCallback(async () => {
     if (!selectedId) return;
@@ -896,8 +904,11 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                           </div>
                           {isLiveRow && job.progress_pct != null && (
                             <div className="df2-job-row-bar" aria-hidden>
-                              <i style={{ width: `${clampPercent(job.progress_pct)}%` }} />
+                              <i style={{ width: `${reconcileBarPercent(job.progress_pct, job.reconcile_pct, job.phase)}%` }} />
                             </div>
+                          )}
+                          {isLiveRow && String(job.phase || "").toLowerCase() === "reconcile" && job.reconcile_pct != null && (
+                            <span className="df2-job-row-rows">Checksum {Math.min(99, Number(job.reconcile_pct))}%</span>
                           )}
                         </div>
                       </button>
@@ -1467,14 +1478,18 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                             <button
                               type="button"
                               className="df2-btn df2-btn-primary"
-                              onClick={() => handleSyncNow("delta")}
+                              onClick={() => void handleSync("sync")}
+                              disabled={retrying}
+                              title="Reuses the signed contract. One confirm. A second click does not start another run."
                             >
                               <DtIcon name="activity" size={16} /> Sync now
                             </button>
                             <button
                               type="button"
                               className="df2-btn"
-                              onClick={() => handleSyncNow("full")}
+                              onClick={() => void handleSync("full")}
+                              disabled={retrying}
+                              title="Re-reads from the start on the signed contract. Upserts when a key exists."
                             >
                               Re-sync (full)
                             </button>
@@ -1503,13 +1518,6 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                             )}
                             <button
                               type="button"
-                              className="df2-btn"
-                              onClick={() => handleSyncNow("delta")}
-                            >
-                              <DtIcon name="activity" size={16} /> Sync now
-                            </button>
-                            <button
-                              type="button"
                               className={
                                 duplicateKeyFailure
                                   || (liveJob?.checkpoint && (liveJob.checkpoint.rows_processed ?? 0) > 0)
@@ -1525,6 +1533,24 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                 : (
                                   <><DtIcon name="transfer" size={16} /> Retry from start</>
                                 )}
+                            </button>
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => void handleSync("sync")}
+                              disabled={retrying}
+                              title="Reuses the signed contract. One confirm. A second click does not start another run."
+                            >
+                              Sync now
+                            </button>
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => void handleSync("full")}
+                              disabled={retrying}
+                              title="Re-reads from the start on the signed contract. Upserts when a key exists."
+                            >
+                              Re-sync (full)
                             </button>
                             {onStartTransfer && (
                               <button

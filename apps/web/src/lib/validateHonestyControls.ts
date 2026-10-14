@@ -217,6 +217,17 @@ export type SchemaEvolutionStamp = {
  * Hard-breaking (Confluent NONE) must remap or re-sign — Airbyte "approve myself"
  * silently continued on column drop; we refuse that here.
  */
+/** True only when this preflight recorded the schema-drift attestation. */
+export function schemaDriftAckRecorded(preflight: {
+  gates?: Array<{ id?: string; details?: Record<string, unknown> | null }>;
+  schema_drift?: { acknowledged?: boolean } | null;
+} | null | undefined): boolean {
+  if (!preflight) return false;
+  const gate = (preflight.gates || []).find((item) => item?.id === "schema_drift");
+  if (gate?.details?.acknowledged === true) return true;
+  return preflight.schema_drift?.acknowledged === true;
+}
+
 export function schemaDriftAllowsAcknowledge(
   details?: Record<string, unknown> | null,
 ): boolean {

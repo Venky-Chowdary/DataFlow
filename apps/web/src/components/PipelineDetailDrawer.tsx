@@ -53,7 +53,10 @@ interface PipelineDetailDrawerProps {
   breakerHint?: string | null;
   onClose: () => void;
   onRun: () => void;
-  onSync?: (mode: "delta" | "full") => void;
+  /** Delta sync on the signed contract. One confirm. */
+  onSync?: () => void;
+  /** Re-read from the start on the signed contract. One confirm. */
+  onFullResync?: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onToggle: () => void;
@@ -94,6 +97,7 @@ export function PipelineDetailDrawer({
   onClose,
   onRun,
   onSync,
+  onFullResync,
   onEdit,
   onDelete,
   onToggle,
@@ -325,24 +329,29 @@ export function PipelineDetailDrawer({
             {isRunning ? "Running…" : breakerOpen ? "Breaker open" : "Run now"}
           </Button>
           {onSync && (
-            <>
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={isRunning || breakerOpen || Boolean(runRefusal)}
-                onClick={() => onSync("delta")}
-              >
-                Sync now
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={isRunning || breakerOpen || Boolean(runRefusal)}
-                onClick={() => onSync("full")}
-              >
-                Re-sync (full)
-              </Button>
-            </>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={isRunning || breakerOpen || Boolean(runRefusal)}
+              title="Sync the signed contract. One confirm."
+              onClick={onSync}
+            >
+              Sync now
+            </Button>
+          )}
+          {onFullResync && (
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={running}
+              loadingLabel="Staging…"
+              disabled={isRunning || breakerOpen || Boolean(runRefusal)}
+              title="Re-read from the start on the signed contract. One confirm."
+              onClick={onFullResync}
+              leadingIcon={<DtIcon name="transfer" size={14} />}
+            >
+              Re-sync (full)
+            </Button>
           )}
           {breakerOpen && sched.contract_id && onResetBreaker && (
             <Button

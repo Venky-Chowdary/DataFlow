@@ -38,6 +38,42 @@ def _is_public_sso_path(path: str) -> bool:
     return False
 
 
+def _unauthenticated_rate_limit(request: Request):
+    """429 on public routes when the caller has no session.
+
+    Health is excluded inside the limiter. Authenticated calls are not
+    counted. Set DATAFLOW_PUBLIC_RATE_LIMIT=1 on the API service to turn it
+    on (it is off until that flag is set).
+    """
+    if getattr(request.state, "user_email", None):
+        return None
+    path = request.url.path
+    public = (
+        request.method == "OPTIONS"
+        or path == "/"
+        or any(path.startswith(p) for p in _PUBLIC_PREFIXES)
+        or _is_public_sso_path(path)
+        or _is_public_mcp_path(path, request.method)
+    )
+    if not public:
+        return None
+    from services.auth_rate_limit import check_public_rate_limit
+    from services.client_ip import client_ip_from_request
+
+    outcome = check_public_rate_limit(client_ip_from_request(request) or "unknown", path)
+    if outcome.get("allowed", True):
+        return None
+    retry = max(1, int(float(outcome.get("retry_after_sec") or 1)))
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "rate_limited",
+            "detail": "Too many unauthenticated requests.",
+        },
+        headers={"Retry-After": str(retry)},
+    )
+
+
 def _is_public_mcp_path(path: str, method: str) -> bool:
     """MCP discovery + Streamable handshake are public; tool execution is not.
 
@@ -193,6 +229,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     from services.audit_coverage import note_workspace_header
 
                     note_workspace_header(request)
+                limited = _unauthenticated_rate_limit(request)
+                if limited is not None:
+                    return limited
                 return await call_next(request)
 
             path = request.url.path
@@ -220,6 +259,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                     from services.audit_coverage import note_workspace_header
 
                     note_workspace_header(request)
+                limited = _unauthenticated_rate_limit(request)
+                if limited is not None:
+                    return limited
                 return await call_next(request)
 
             reason_code = (

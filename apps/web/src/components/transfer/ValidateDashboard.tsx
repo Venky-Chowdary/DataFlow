@@ -17,7 +17,10 @@ import {
   CORE_ENGINE_GATE_IDS,
   GATE_CATALOG,
   blockerTitle,
+  compareGateDisplayOrder,
+  countGateStatuses,
   gateCatalogEntry,
+  gateDisplayCode,
   gateLabel,
   isInternalGateId,
 } from "../../lib/preflightGates";
@@ -212,13 +215,6 @@ const STATUS_LABEL: Record<string, string> = {
   pending: "Pending",
 };
 
-/** Catalog id → operator code. g9_data_integrity is G9, not its position in the grid. */
-function gateDisplayCode(key: string): string {
-  const match = key.match(/^g(\d+[a-z]?)/i);
-  if (match) return `G${match[1].toUpperCase()}`;
-  return key.replace(/_/g, " ").slice(0, 8).toUpperCase();
-}
-
 interface ValidateDashboardProps {
   preflight: PreflightResult | null;
   running?: boolean;
@@ -294,7 +290,7 @@ interface ValidateDashboardProps {
   onAcknowledgeCompliance?: () => void;
   /**
    * Operator acknowledged schema drift under manual_review for this run.
-   * Re-runs Validate with schema_drift_acknowledged=true.
+   * Re-runs Validate with that attestation so Execute can unlock.
    */
   onAcknowledgeSchemaDrift?: () => void;
   /**
@@ -1165,8 +1161,10 @@ export function ValidateDashboard({
   const decision = proof?.transfer_decision?.decision
     ?? (preflight ? "review" : "pending");
   const readiness = preflight?.readiness_score ?? 0;
-  const totalGates = preflight?.total_gates || GATE_META.length;
-  const passedCount = preflight?.passed_count ?? 0;
+  const gateCounts = countGateStatuses(preflight?.gates);
+  const countsFromGates = (preflight?.gates?.length ?? 0) > 0;
+  const totalGates = countsFromGates ? gateCounts.total : (preflight?.total_gates || GATE_META.length);
+  const passedCount = countsFromGates ? gateCounts.passed : (preflight?.passed_count ?? 0);
 
   const gateByKey = new Map<string, PreflightGate>();
   for (const gate of preflight?.gates ?? []) {
@@ -1174,14 +1172,20 @@ export function ValidateDashboard({
     gateByKey.set(metaForGate(gate.id).key, gate);
   }
   const blockingGateSummaries = buildBlockingGateSummaries(preflight);
-  const blockedCount = blockingGateSummaries.length;
-  const skippedCount = (preflight?.gates ?? []).filter((g) => g.status === "skip").length;
+  const blockedCount = countsFromGates ? gateCounts.blocked : blockingGateSummaries.length;
+  const skippedCount = countsFromGates
+    ? gateCounts.skipped
+    : (preflight?.gates ?? []).filter((g) => g.status === "skip").length;
+  const reviewCount = countsFromGates ? gateCounts.review : 0;
+  const pendingCount = countsFromGates ? gateCounts.pending : 0;
   /** Prefer live engine gates so PENDING cards aren't shown for rules that never ran. */
   const displayGates: GateMeta[] = running
     ? CORE_GATE_META
     : (preflight?.gates?.length
-      ? preflight.gates.map((g) => metaForGate(g.id))
-      : CORE_GATE_META);
+      ? [...preflight.gates]
+        .sort((left, right) => compareGateDisplayOrder(left.id, right.id))
+        .map((g) => metaForGate(g.id))
+      : [...CORE_GATE_META].sort((left, right) => compareGateDisplayOrder(left.key, right.key)));
 
   const decisionTone = decision === "block"
     ? "block"
@@ -1766,6 +1770,16 @@ export function ValidateDashboard({
             >
               <strong>{skippedCount}</strong> skipped
             </span>
+            {reviewCount > 0 && (
+              <span className="df2-vd-count review" title="Review gates need a look and do not block Execute by themselves">
+                <strong>{reviewCount}</strong> review
+              </span>
+            )}
+            {pendingCount > 0 && !running && (
+              <span className="df2-vd-count" title="Gates that have not finished">
+                <strong>{pendingCount}</strong> pending
+              </span>
+            )}
           </div>
 
           {!running && transformImage && (
@@ -3359,7 +3373,7 @@ export function ValidateDashboard({
           <div className="df2-vd-blockers-head">
             <DtIcon name="alert" size={15} />
             <strong>Fix before Run</strong>
-            <span>{blockedCount}</span>
+            <span>{displayBlockers.length}</span>
           </div>
           <p className="df2-vd-blocker-precaution">
             Schema mismatches, bad data, and type hazards are blocked here on purpose.

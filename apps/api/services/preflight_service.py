@@ -359,6 +359,7 @@ def run_transfer_policy_gates(
         "propagate_all",
         "pause_on_change",
         "type_locked",
+        "block_all",
     }
     if schema not in allowed_schema:
         schema_issues.append(f"Unknown schema policy '{schema}'")
@@ -383,6 +384,7 @@ def run_transfer_policy_gates(
         "type_locked": "reject_type_changes",
         "propagate_columns": "auto_add_columns",
         "propagate_all": "auto_propagate_schema",
+        "block_all": "halt_pipeline",
     }.get(schema, "pause_for_manual_review")
 
     if schema_issues:
@@ -627,6 +629,38 @@ def _fit_scan_deadline(
 # F8: policy-gate merge lives in preflight_policy_gates (single authority).
 
 
+def _drift_column_phrase(evolution: dict[str, Any] | None) -> str:
+    """Name the columns a drift gate is about. A bare 'schema change' is not enough."""
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: object) -> None:
+        name = str(raw or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            return
+        seen.add(key)
+        names.append(name)
+
+    evo = evolution or {}
+    for bucket in ("hard_breaking", "additive", "soft_net_additive"):
+        for item in evo.get(bucket) or []:
+            if isinstance(item, dict):
+                add(item.get("column") or item.get("to") or item.get("from") or item.get("source"))
+            else:
+                add(item)
+    for item in evo.get("unmapped_sources") or []:
+        if isinstance(item, dict):
+            add(item.get("column") or item.get("source"))
+        else:
+            add(item)
+    if not names:
+        return ""
+    shown = ", ".join(names[:8])
+    extra = f" (+{len(names) - 8} more)" if len(names) > 8 else ""
+    return f" Column(s): {shown}{extra}."
+
+
 
 
 
@@ -675,6 +709,7 @@ def run_file_preflight(
     source_filename: str = "",
     source_file_id: str = "",
     schema_policy: str = "manual_review",
+    preflight_scope: str = "",
     backfill_new_fields: bool = False,
     stored_source_fp: str = "",
     stored_target_fp: str = "",
@@ -708,6 +743,7 @@ def run_file_preflight(
     fit_scan_seconds: float | None = None,
     on_fit_progress: Any = None,
     skip_population_fit: bool = False,
+    source_population_counted: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
     from services.timezone_policy import declared_source_column_types
@@ -765,6 +801,7 @@ def run_file_preflight(
     # reader's own sample; a read that fails is named on Gate-8, not hidden.
     sample_unavailable_reason = ""
     source_measured_empty = False
+    engine_sample = None
     if not sample_rows:
         from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT as _SAMPLE_LIMIT
         from services.preflight_sample import engine_sample_rows
@@ -807,6 +844,18 @@ def run_file_preflight(
                     "could not read rows from it. Fix the source read (connection, "
                     f"table name, timeout), then re-validate. ({sample_unavailable_reason})"
                 )
+    # A measured COUNT(*) of 0 is the population. Requiring a sample row
+    # blocked an empty table whose catalog count was already 0 (R8-005).
+    # A failed read still blocks — a count of 0 does not excuse a grant error.
+    if (
+        source_population_counted
+        and isinstance(row_count, int)
+        and row_count == 0
+        and not sample_rows
+        and not source_measured_empty
+        and not (engine_sample is not None and engine_sample.read_failed)
+    ):
+        source_measured_empty = True
     if (
         not sample_rows
         and not source_measured_empty
@@ -849,7 +898,9 @@ def run_file_preflight(
     from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT
 
     if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
-        sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
+        from services.sample_strategy import position_reservoir_sample
+
+        sample_rows = position_reservoir_sample(sample_rows, PREFLIGHT_SAMPLE_LIMIT)
 
     # Sign Migration Risk Contract drafts before gates / proof_bundle see them.
     # Stamp destination table onto unsigned drafts (audit field — never invent DDL).
@@ -1554,6 +1605,7 @@ def run_file_preflight(
         compliance_acknowledged=compliance_acknowledged,
         acknowledgment_actor=acknowledgment_actor,
         acknowledgment_reason=acknowledgment_reason,
+        source_measured_empty=source_measured_empty,
     )
     from services.population_fit_narrowing import proof_details
 
@@ -2494,6 +2546,7 @@ def run_file_preflight(
     # Datawrap rule: hard-breaking ALWAYS pauses (even under propagate_*).
     # Propagate auto-applies additive; manual_review keeps existing mappings.
     evolution = drift.get("schema_evolution") or {}
+    column_phrase = _drift_column_phrase(evolution)
     action = evolution.get("action")
     # Evolution is the sole authority for pause|propagate|review|continue.
     # Fingerprint flags alone must not bypass resolve_schema_evolution.
@@ -2519,15 +2572,13 @@ def run_file_preflight(
                     },
                 }
             )
-        elif evolution.get("should_pause") or (
-            drift.get("severity") == "breaking"
-            and policy == "pause_on_change"
-        ):
+        elif evolution.get("should_pause") and evolution.get("hard_breaking"):
             hard = evolution.get("hard_breaking") or []
             if hard and isinstance(hard[0], dict) and hard[0].get("kind"):
                 drift_msg = (
                     f"Breaking schema change: {hard[0].get('kind')} "
                     "— sync paused for review (Datawrap fail-closed)"
+                    f"{column_phrase}"
                 )
             elif drift.get("issues"):
                 drift_msg = str(drift["issues"][0])
@@ -2641,12 +2692,19 @@ def run_file_preflight(
                     },
                 ]
                 out["schema_drift"] = {**drift, "acknowledged": True, "acknowledgment": ack}
+                from services.preflight_policy_gates import finalize_acknowledged_schema_drift
+
+                finalize_acknowledged_schema_drift(
+                    out,
+                    evolution=evolution if isinstance(evolution, dict) else {},
+                    acknowledgment=ack,
+                )
             else:
                 drift_msg = (
                     f"Schema change detected — policy '{policy}' requires review "
-                    "before Execute. Pass schema_drift_acknowledged=true to accept "
-                    "this drift for the run (include new columns, ignore for this "
-                    "run, or update the contract)."
+                    "before Execute. Use Acknowledge drift for this run to keep "
+                    "the existing mappings, or open Map to include the changed columns."
+                    f"{column_phrase}"
                 )
                 drift_gate = {
                     "id": "schema_drift",
@@ -2845,9 +2903,13 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
-    return apply_root_causes_to_preflight(
+    out = apply_root_causes_to_preflight(
         _block_decision_on_hard_gate(apply_readiness_honesty_caps(out))
     )
+    from services.preflight_policy_gates import apply_fast_preflight_scope, stamp_gate_contract
+
+    out = apply_fast_preflight_scope(out, preflight_scope)
+    return stamp_gate_contract(out)
 
 
 # --------------------------------------------------------------------------- #

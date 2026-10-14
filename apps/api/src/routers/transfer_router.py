@@ -217,15 +217,15 @@ class EndpointDTO(BaseModel):
     kind: str = Field(..., description="file | database | file_export")
     format: str = Field("", description="csv, json, mongodb, postgresql, snowflake")
     connector_id: Optional[str] = None
-    host: str = ""
-    port: int = 0
-    database: str = ""
-    db_schema: str = Field("", alias="schema")
+    host: str = Field("", max_length=253)
+    port: int = Field(0, ge=0, le=65535)
+    database: str = Field("", max_length=128)
+    db_schema: str = Field("", alias="schema", max_length=128)
     table: str = ""
     collection: str = ""
-    username: str = ""
+    username: str = Field("", max_length=128)
     password: str = ""
-    connection_string: str = ""
+    connection_string: str = Field("", max_length=4096)
     warehouse: str = ""
     ssl: bool = False
     auth_mode: str = ""
@@ -262,7 +262,7 @@ class ExecuteTransferRequest(BaseModel):
     read_options: dict = Field(default_factory=dict)
     priority_column: str = ""
     priority_direction: str = "desc"
-    limit: int = 0
+    limit: int = Field(default=0, ge=0, le=10_000_000)
     plan_id: Optional[str] = None
     stream_contracts: list[dict] = Field(default_factory=list)
     data_region: str = ""

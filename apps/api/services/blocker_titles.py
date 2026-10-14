@@ -22,6 +22,21 @@ def is_internal_blocker_id(gate_id: str) -> bool:
     return bool(_INTERNAL_ID.match(str(gate_id or "").strip()))
 
 
+def is_schema_drift_echo(message: object) -> bool:
+    """True when this text is the schema-drift gate, not a second root cause.
+
+    The proof bundle copies the gate sentence ("Schema change detected — …")
+    beside the catalog title "Schema drift". Both name the same review.
+    """
+    text = str(message or "").strip().lower()
+    return (
+        text.startswith("schema change detected")
+        or text.startswith("schema drift")
+        or text.startswith("schema change acknowledged")
+        or text.startswith("breaking schema change")
+    )
+
+
 def blocker_title(gate_id: str, message: str = "", *, catalog_title: str = "") -> str:
     """Human title for a blocker, never the internal id.
 

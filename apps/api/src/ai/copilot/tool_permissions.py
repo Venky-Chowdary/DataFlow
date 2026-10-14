@@ -98,6 +98,7 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "test_connector": (Permission.CONNECTOR_READ, READ),
     "cancel_job": (Permission.JOB_MANAGE, MUTATE),
     "retry_job": (Permission.JOB_MANAGE, MUTATE),
+    "rerun_job": (Permission.JOB_MANAGE, MUTATE),
     "resume_job": (Permission.JOB_MANAGE, MUTATE),
     "replay_quarantine": (Permission.JOB_MANAGE, MUTATE),
     "repair_cdc_drift": (Permission.JOB_MANAGE, MUTATE),
@@ -115,11 +116,13 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
 #: a role change between the two must take effect immediately.
 ACK_KIND_PERMISSIONS: dict[str, str] = {
     "start_transfer": Permission.JOB_RUN,
+    "sync_now": Permission.JOB_RUN,
     "create_connector": Permission.CONNECTOR_WRITE,
     "run_schedule": Permission.SCHEDULE_MANAGE,
     "create_schedule": Permission.SCHEDULE_MANAGE,
     "cancel_job": Permission.JOB_MANAGE,
     "retry_job": Permission.JOB_MANAGE,
+    "rerun_job": Permission.JOB_MANAGE,
     "resume_job": Permission.JOB_MANAGE,
     "replay_quarantine": Permission.JOB_MANAGE,
     "repair_cdc_drift": Permission.JOB_MANAGE,

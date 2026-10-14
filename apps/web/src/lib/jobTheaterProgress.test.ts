@@ -90,6 +90,27 @@ describe("theaterProgressPct", () => {
     });
     assert.equal(pct, 99);
   });
+
+  it("paints checksum tenths during reconcile and never reaches 100", () => {
+    const pct = theaterProgressPct({
+      phase: "reconcile",
+      progress_pct: 99,
+      reconcile_pct: 40,
+      total_rows: 1_000_000,
+      records_processed: 1_000_000,
+      reconciling: true,
+      isRunning: true,
+    });
+    assert.equal(pct, 98.4);
+    const done = theaterProgressPct({
+      phase: "reconcile",
+      progress_pct: 98.99,
+      reconcile_pct: 99,
+      reconciling: true,
+      isComplete: true,
+    });
+    assert.equal(done, 100);
+  });
 });
 
 describe("earliestJobStartMs", () => {

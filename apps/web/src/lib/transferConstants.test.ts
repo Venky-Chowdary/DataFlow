@@ -165,4 +165,12 @@ describe("schemaPolicyHonestyLine", () => {
     assert.match(line, /every selected stream/i);
     assert.match(line, /Hard-breaking/i);
   });
+
+  it("block_all pauses a source change and keeps destination-only columns as an audit note", () => {
+    const line = schemaPolicyHonestyLine("block_all");
+    assert.match(line, /nullable add/i);
+    assert.match(line, /Accept drift for this run/i);
+    assert.match(line, /Destination-only/i);
+    assert.match(line, /cannot be accepted away/i);
+  });
 });

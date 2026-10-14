@@ -67,7 +67,64 @@ def transfer_request_from_ack(payload: dict[str, Any]) -> TransferRequest:
         # The operator's PII acknowledgement from staging: Execute re-runs
         # Validate with it, and the job keeps the approver + reason for audit.
         compliance_acknowledged=bool(payload.get("compliance_acknowledged")),
+        # Staging clears schema drift when the operator attests. Confirm used
+        # to drop the flag, so Execute re-ran Validate without it and job
+        # governance read schema_drift as false (R8-002).
+        schema_drift_acknowledged=bool(payload.get("schema_drift_acknowledged")),
+        fk_risk_acknowledged=bool(payload.get("fk_risk_acknowledged")),
         acknowledgment_actor=str(payload.get("acknowledgment_actor") or "").strip(),
         acknowledgment_reason=str(payload.get("acknowledgment_reason") or "").strip(),
     )
+    stamp_schema_drift_ack(request)
     return request
+
+
+def stamp_schema_drift_ack(request: TransferRequest) -> None:
+    """A bare boolean still has an actor and a reason on the job.
+
+    MCP staging sets ``schema_drift_acknowledged`` without the Studio
+    signature. Execute honors the boolean; governance and the audit trail
+    also need a name. Hard-breaking drift is not cleared by this stamp.
+    """
+    if not bool(getattr(request, "schema_drift_acknowledged", False)):
+        return
+    if not str(getattr(request, "acknowledgment_actor", "") or "").strip():
+        request.acknowledgment_actor = "operator"
+    if not str(getattr(request, "acknowledgment_reason", "") or "").strip():
+        request.acknowledgment_reason = "Accept drift for this run"
+
+
+def apply_stored_schema_drift_ack(request: TransferRequest, job: dict[str, Any] | None) -> bool:
+    """Restore an ack the job document has and the in-memory request lost.
+
+    Returns True when the nested transfer request did not already carry the
+    flag, so the caller can write it back before Execute. Either side being
+    true is enough: staging, confirm, and the job root agree.
+    """
+    doc = job or {}
+    stored_req = doc.get("transfer_request") if isinstance(doc.get("transfer_request"), dict) else {}
+    stored = bool(
+        stored_req.get("schema_drift_acknowledged") or doc.get("schema_drift_acknowledged")
+    )
+    if not stored and not bool(getattr(request, "schema_drift_acknowledged", False)):
+        return False
+    request.schema_drift_acknowledged = True
+    if not str(getattr(request, "acknowledgment_actor", "") or "").strip():
+        request.acknowledgment_actor = (
+            str(
+                stored_req.get("acknowledgment_actor")
+                or doc.get("acknowledgment_actor")
+                or "operator"
+            ).strip()
+            or "operator"
+        )
+    if not str(getattr(request, "acknowledgment_reason", "") or "").strip():
+        request.acknowledgment_reason = (
+            str(
+                stored_req.get("acknowledgment_reason")
+                or doc.get("acknowledgment_reason")
+                or "Accept drift for this run"
+            ).strip()
+            or "Accept drift for this run"
+        )
+    return not bool(stored_req.get("schema_drift_acknowledged"))

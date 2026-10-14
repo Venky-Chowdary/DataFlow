@@ -7597,6 +7597,8 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-count.block { background: var(--df-danger-bg); color: var(--df-danger); }
 .df2-vd-count.block strong { color: var(--df-danger); }
 .df2-vd-count.skip { background: var(--df-surface-muted); }
+.df2-vd-count.review { background: var(--df-warning-bg); color: var(--df-warning, #b45309); }
+.df2-vd-count.review strong { color: var(--df-warning, #b45309); }
 
 .df2-vd-hero-summary {
   margin: 0;

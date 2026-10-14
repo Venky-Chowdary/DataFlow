@@ -226,7 +226,12 @@ def _weekly(
 
 def _every_n(unit: str, count: int, tz: str, assumed: bool) -> CadenceSpec:
     if unit.startswith("min"):
-        if not 1 <= count <= 59:
+        if count < 1:
+            return _ask(
+                f"Every {count} minutes is not a cadence. "
+                "A minute step has to be from 1 to 59."
+            )
+        if count > 59:
             return _ask(
                 "A minute cadence has to divide an hour, so I can take every 1–59 "
                 "minutes. For anything longer, say hourly, daily or weekly."

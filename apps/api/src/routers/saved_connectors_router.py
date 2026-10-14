@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
@@ -61,6 +61,25 @@ class ConnectorSaveDTO(BaseModel):
     auth_source: str = ""
     # Optional: persist an in-form Test result so the list matches on first save.
     last_test_ok: bool | None = None
+
+    @model_validator(mode="after")
+    def _request_bounds(self) -> "ConnectorSaveDTO":
+        from services.connector_request_limits import connector_request_errors
+
+        err = connector_request_errors(
+            name=self.name,
+            db_type=self.type,
+            host=self.host,
+            port=self.port,
+            database=self.database,
+            username=self.username,
+            schema=self.db_schema,
+            connection_string=self.connection_string,
+            require_name=True,
+        )
+        if err:
+            raise ValueError(err)
+        return self
 
 
 def _actor_email(request: Request) -> str:

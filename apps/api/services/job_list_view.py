@@ -25,6 +25,7 @@ _LIST_KEEP_KEYS = frozenset({
     "rejected_rows",
     "coerced_null_rows",
     "progress_pct",
+    "reconcile_pct",
     "progress_indeterminate",
     "phase",
     "message",
@@ -47,6 +48,7 @@ _LIST_KEEP_KEYS = frozenset({
     "triggered_by",
     "created_by",
     "retry_of",
+    "rerun_of",
     "cdc_lag_seconds",
     # Independent dest COUNT(*) ledger — small dict, required so Overview /
     # Jobs list never fall dest population back to records_processed.

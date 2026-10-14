@@ -366,6 +366,42 @@ describe("buildExecutiveSummary", () => {
     assert.match(summary!.railLine, /Blocked by 2 gates/);
   });
 
+  it("collapses schema drift and its proof echo into one card", () => {
+    const message = "Schema change detected — policy 'manual_review' requires review before Execute.";
+    const pf = basePreflight({
+      gates: [{
+        id: "schema_drift",
+        status: "block",
+        message,
+        duration_ms: 1,
+        details: { remediation_kind: "acknowledge_schema_drift", ack_required: true },
+      }],
+      blockers: [
+        {
+          id: "proof_0",
+          message,
+          details: { remediation_kind: "fix_proof" },
+        },
+        {
+          id: "schema_drift",
+          message,
+          details: {
+            remediation_kind: "acknowledge_schema_drift",
+            ack_required: true,
+            schema_evolution: { action: "review", should_pause: false, hard_breaking: [] },
+          },
+        },
+      ],
+    });
+    const summaries = buildBlockingGateSummaries(pf);
+    const display = buildDisplayBlockers(pf);
+    assert.equal(summaries.length, 1);
+    assert.equal(summaries[0].title, "Schema drift");
+    assert.equal(display.length, 1);
+    assert.equal(display[0].title, "Schema drift");
+    assert.equal(display[0].source?.id, "schema_drift");
+  });
+
   it("uses the canonical label for known gates instead of a message-shaped title", () => {
     const summaries = buildBlockingGateSummaries(basePreflight({
       gates: [{

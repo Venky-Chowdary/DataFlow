@@ -282,6 +282,15 @@ async def _run_lifecycle_confirm(
         return dict(
             await connectors_router.retry_transfer_job(job_id, background_tasks, http_request)
         )
+    if kind == "rerun_job":
+        return dict(
+            await connectors_router.rerun_transfer_job(
+                job_id,
+                background_tasks,
+                http_request,
+                force=bool(payload.get("force")),
+            )
+        )
     if kind == "resume_job":
         return dict(
             await connectors_router.resume_transfer_job(job_id, background_tasks, http_request)
@@ -558,6 +567,37 @@ async def copilot_confirm(
             actor=actor,
             reason=request.reason or "confirmed",
         )
+        ledger.finalize(
+            ack_id,
+            actor=actor,
+            reason=request.reason or "confirmed",
+            result=result,
+        )
+        return {"ok": True, "idempotent": False, "kind": kind, **result}
+
+    if kind == "sync_now":
+        from services.sync_now import SyncNowRefused, begin_sync_now
+
+        try:
+            result, transfer_request = begin_sync_now(payload)
+        except SyncNowRefused as exc:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=409, detail={"error": str(exc), **exc.details}) from exc
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
+        except Exception as exc:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail=f"Failed to start sync: {exc}") from exc
+        if transfer_request is not None:
+            from ..transfer.background import run_transfer_async
+
+            background_tasks.add_task(
+                run_transfer_async,
+                str(result.get("job_id") or ""),
+                transfer_request,
+                resume=False,
+            )
         ledger.finalize(
             ack_id,
             actor=actor,

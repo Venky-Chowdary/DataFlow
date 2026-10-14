@@ -241,7 +241,7 @@ import {
   isEncodingIntegritySignal,
   rankAndDedupeSuggestedActions,
 } from "../lib/validateIssueGrouping";
-import { schemaDriftRequiresRemap } from "../lib/validateHonestyControls";
+import { schemaDriftAckRecorded, schemaDriftRequiresRemap } from "../lib/validateHonestyControls";
 import {
   promoteBlockedPrimaryFix,
   resolveValidateStudioPrimary,
@@ -467,7 +467,7 @@ export function TransferPage({
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [result, setResult] = useState<TransferResult | null>(null);
   const [syncMode, setSyncMode] = useState<SyncMode>("full_refresh_append");
-  const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("manual_review");
+  const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("propagate_columns");
   const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
   const [complianceAcknowledged, setComplianceAcknowledged] = useState(false);
   const [schemaDriftAcknowledged, setSchemaDriftAcknowledged] = useState(false);
@@ -4406,8 +4406,35 @@ export function TransferPage({
             tone: "error",
           });
       }
-      if (opts?.schemaDriftAcknowledged) setSchemaDriftAcknowledged(Boolean(pf));
+      if (opts?.schemaDriftAcknowledged) {
+        const recorded = schemaDriftAckRecorded(pf);
+        setSchemaDriftAcknowledged(recorded);
+        toast(recorded
+          ? {
+            title: "Schema drift acknowledged",
+            message: pf?.passed && pf.proof_bundle?.transfer_decision?.decision === "approve"
+              ? "Existing mappings kept for this run. Execute is unlocked."
+              : "The attestation is recorded. Remaining blockers still hold Execute.",
+            tone: pf?.passed && pf.proof_bundle?.transfer_decision?.decision === "approve" ? "success" : "warning",
+          }
+          : {
+            title: "Schema drift acknowledgment not recorded",
+            message: "Validate did not accept the attestation — Execute stays locked.",
+            tone: "error",
+          });
+      }
       if (opts?.fkRiskAcknowledged) setFkRiskAcknowledged(Boolean(pf));
+    };
+    const stampValidatedContract = (
+      maps: EditableMapping[],
+      pf: PreflightResult | null | undefined,
+    ) => {
+      const nextDrift = opts?.schemaDriftAcknowledged
+        ? schemaDriftAckRecorded(pf)
+        : schemaDriftAcknowledged;
+      setValidatedContractKey(buildValidateContractKey(maps, {
+        schemaDriftAcknowledged: nextDrift,
+      }));
     };
     const threshold = confidenceThresholdForMode(activeValidation);
     if (
@@ -4610,7 +4637,7 @@ export function TransferPage({
             await approveTransferPlan(planId);
           }
           setPreflight(pf);
-          setValidatedContractKey(buildValidateContractKey(activeMappings));
+          stampValidatedContract(activeMappings, pf as PreflightResult);
           commitAcknowledgments(pf as PreflightResult);
           if (ackClaimed) return;
           if (!pf.passed) {
@@ -4825,7 +4852,7 @@ export function TransferPage({
         );
         setColumnMappings(hydrateMaps);
       }
-      setValidatedContractKey(buildValidateContractKey(hydrateMaps));
+      stampValidatedContract(hydrateMaps, pf);
       if (ackClaimed) return;
       if (!pf.passed) {
         toast({
@@ -4869,7 +4896,7 @@ export function TransferPage({
           dateLocale,
         });
         setPreflight(pf);
-        setValidatedContractKey(buildValidateContractKey(activeMappings));
+        stampValidatedContract(activeMappings, pf);
         if (pf.passed) {
           toast({
             title: "Validated locally",
@@ -5801,7 +5828,7 @@ export function TransferPage({
   });
   /** Map/sync/PK/dest/Advanced edits must invalidate a prior green Validate before Execute. */
   const buildValidateContractKey = useCallback(
-    (maps: EditableMapping[]) =>
+    (maps: EditableMapping[], overrides?: { schemaDriftAcknowledged?: boolean }) =>
       composeValidateContractKey({
         syncMode,
         primaryKeyField,
@@ -5830,7 +5857,7 @@ export function TransferPage({
         shapeSteps,
         multiSubnetFailover,
         cdcRowFilter,
-        schemaDriftAcknowledged,
+        schemaDriftAcknowledged: overrides?.schemaDriftAcknowledged ?? schemaDriftAcknowledged,
       }),
     [
       syncMode,
@@ -6300,7 +6327,7 @@ export function TransferPage({
     setResult(null);
     setExecutedRouteKey(null);
     setSyncMode("full_refresh_append");
-    setSchemaPolicy("manual_review");
+    setSchemaPolicy("propagate_columns");
     setValidationMode("balanced");
     setBackfillNewFields(false);
     setMultiSubnetFailover(false);
@@ -8057,8 +8084,29 @@ export function TransferPage({
                 onContractIdChange={setBoundContractId}
                 onRequireSignedChange={setRequireSignedContract}
                 onBlockReasonChange={setContractBlockReason}
-                sourceLabel={studioFlags.canvas ? sourceLabel : undefined}
-                destLabel={studioFlags.canvas ? destLabelShort : undefined}
+                route={(() => {
+                  const source = buildSourceEndpoint() as {
+                    format?: string;
+                    table?: string;
+                    collection?: string;
+                    filename?: string;
+                  };
+                  return {
+                    source: {
+                      format: String(source.format || ""),
+                      table: source.table,
+                      collection: source.collection,
+                      filename: source.filename,
+                    },
+                    destination: destKindMode === "file_export"
+                      ? { format: exportFormat }
+                      : {
+                        format: destType,
+                        table: destDriverType === "mongodb" ? undefined : targetCollection,
+                        collection: destDriverType === "mongodb" ? targetCollection : undefined,
+                      },
+                  };
+                })()}
                 compact
               />
             )}

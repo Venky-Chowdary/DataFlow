@@ -194,6 +194,8 @@ export interface TransferJob {
   total_rows?: number;
   runtime_estimate?: RuntimeEstimate;
   progress_pct?: number;
+  /** 0–99 checksum completion while phase is reconcile. Absent before Gate-8. */
+  reconcile_pct?: number;
   /** True when job has no finite row denominator (e.g. continuous CDC). */
   progress_indeterminate?: boolean;
   phase?: string;

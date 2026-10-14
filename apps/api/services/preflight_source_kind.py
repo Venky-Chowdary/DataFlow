@@ -10,6 +10,21 @@ from __future__ import annotations
 from typing import Any
 
 
+_RECORD_BATCH_FORMATS = frozenset({"s3", "gcs", "adls", "sftp"})
+
+
+def source_is_record_batch(kind: str | None, db_type: str | None = "") -> bool:
+    """A file or object store is a batch of records, not a database extract.
+
+    S3→S3 was judged as a database extract, so one bad cast blocked the load
+    instead of quarantining that row (R8-003). CSV uploads already took the
+    file path. Object-store formats share it.
+    """
+    if (kind or "").strip().lower() == "file":
+        return True
+    return (db_type or "").strip().lower() in _RECORD_BATCH_FORMATS
+
+
 def destination_nullability(columns: Any) -> dict[str, bool]:
     """Live/create-new nullability. Missing columns stay unknown (nullable)."""
     out: dict[str, bool] = {}

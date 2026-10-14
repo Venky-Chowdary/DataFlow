@@ -78,6 +78,7 @@ export function theaterProgressPct(input: {
   records_processed?: number | null;
   progress_indeterminate?: boolean;
   reconciling?: boolean;
+  reconcile_pct?: number | null;
   isComplete?: boolean;
   isRunning?: boolean;
 }): number {
@@ -91,7 +92,14 @@ export function theaterProgressPct(input: {
 
   let raw: number;
   if (input.reconciling) {
-    raw = Math.max(reported || 99, 99);
+    const scan = Number(input.reconcile_pct);
+    if (Number.isFinite(scan) && scan >= 0) {
+      raw = 98 + Math.min(99, scan) / 100;
+    } else if (reported > 98 && reported < 99) {
+      raw = reported;
+    } else {
+      raw = Math.max(reported || 99, 99);
+    }
   } else if (writing && derived != null) {
     raw = derived;
   } else if (derived != null && processed > 0) {
@@ -104,5 +112,9 @@ export function theaterProgressPct(input: {
   }
 
   if (input.isComplete) return 100;
+  if (input.reconciling && raw < 99) {
+    const painted = Math.min(98.99, Math.max(0, raw));
+    return Math.round(painted * 100) / 100;
+  }
   return Math.min(99, Math.max(input.isRunning ? 1 : 0, Math.round(raw)));
 }

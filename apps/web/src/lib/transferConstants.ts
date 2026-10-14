@@ -22,7 +22,11 @@ export type SchemaPolicyId =
   | "propagate_columns"
   | "propagate_all"
   | "pause_on_change"
-  | "type_locked";
+  | "type_locked"
+  | "block_all";
+
+/** New Studio sessions and new schedules. Stored jobs keep the policy they saved. */
+export const DEFAULT_SCHEMA_POLICY: SchemaPolicyId = "propagate_columns";
 
 export type ValidationModeId =
   | "balanced"
@@ -114,6 +118,11 @@ export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: strin
     id: "type_locked",
     label: "Type locked",
     detail: "Widen and dest type changes pause. New columns need review. No silent cast.",
+  },
+  {
+    id: "block_all",
+    label: "Block all changes",
+    detail: "Any source change blocks until you Accept drift for this run. Destination-only columns do not block.",
   },
 ];
 
@@ -292,6 +301,12 @@ export function schemaPolicyHonestyLine(policy: string): string {
       return (
         "Widen and destination type changes pause. New columns need review. "
         + "Execute does not silent-cast."
+      );
+    case "block_all":
+      return (
+        "Any source change — including a nullable add — blocks until you "
+        + "Accept drift for this run. Destination-only columns stay an audit note. "
+        + "Hard type-narrow cannot be accepted away."
       );
     case "manual_review":
     default:

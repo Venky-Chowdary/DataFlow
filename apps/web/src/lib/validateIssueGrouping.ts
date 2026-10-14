@@ -7,7 +7,7 @@
  * ``validation_assistant._remap_to_type_for_mismatch`` so one-click Fix CTAs
  * do not invent bare VARCHAR for UUID/ObjectId/DECIMAL/temporal blockers.
  */
-import { blockerTitle, GATE_CATALOG, gateLabel } from "./preflightGates.js";
+import { blockerTitle, GATE_CATALOG, gateLabel, isInternalGateId, isSchemaDriftEcho } from "./preflightGates.js";
 import type {
   CoercionColumn,
   CoercionSampleFailure,
@@ -170,6 +170,14 @@ export function buildBlockingGateSummaries(
       continue;
     }
     if (/^proof_\d+$/i.test(blocker.id) && gateWithMessage(blocker.message)) continue;
+    if (
+      /^proof_\d+$/i.test(blocker.id)
+      && isSchemaDriftEcho(blocker.message)
+      && [...messagesByGate.keys()].some((id) => id === "schema_drift" || isSchemaDriftEcho(messagesByGate.get(id)?.[0]))
+    ) {
+      add("schema_drift", blocker.message);
+      continue;
+    }
     add(blocker.id, blocker.message);
   }
   for (const root of preflight.root_causes ?? []) {
@@ -210,6 +218,7 @@ function mergeDuplicateBlockers(
       continue;
     }
     const message = String(item.source?.message || item.message || "").trim();
+    const driftSummaryId = summaries.find((summary) => summary.id === "schema_drift")?.id;
     const messageGate = summaries.find((summary) => {
       const detail = cleanGateDetail(message, summary.title);
       return Boolean(
@@ -222,12 +231,19 @@ function mergeDuplicateBlockers(
         ),
       );
     })?.id;
-    const rawId = knownGateId(item.source?.guidance?.gate)
-      || knownGateId(item.source?.id || item.key)
-      || messageGate
-      || item.source?.id
-      || item.key;
-    const id = canonicalGateId(rawId);
+    const proofEcho = isInternalGateId(String(item.source?.id || item.key))
+      && isSchemaDriftEcho(message)
+      && Boolean(driftSummaryId);
+    const rawId = proofEcho
+      ? (driftSummaryId || "schema_drift")
+      : (
+        knownGateId(item.source?.guidance?.gate)
+        || knownGateId(item.source?.id || item.key)
+        || messageGate
+        || item.source?.id
+        || item.key
+      );
+    const id = canonicalGateId(String(rawId || item.key));
     const summary = byGate.get(id);
     const existing = grouped.get(id);
     if (!existing) {
@@ -238,6 +254,19 @@ function mergeDuplicateBlockers(
         message: summary?.detail || "",
       });
       continue;
+    }
+    if (
+      existing.source
+      && isInternalGateId(String(existing.source.id || ""))
+      && item.source
+      && !isInternalGateId(String(item.source.id || ""))
+    ) {
+      existing.source = item.source;
+      existing.fix = item.fix || existing.fix;
+      existing.why = item.why || existing.why;
+      existing.suggested_actions = item.suggested_actions?.length
+        ? item.suggested_actions
+        : existing.suggested_actions;
     }
     existing.issues = [...new Set([...(existing.issues ?? []), ...(item.issues ?? [])])];
     existing.suggested_actions = [

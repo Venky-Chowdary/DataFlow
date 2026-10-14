@@ -201,7 +201,13 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "limit": {"type": "integer", "description": "Max jobs to return", "default": 10},
+                "limit": {
+                    "type": "integer",
+                    "description": "Max jobs to return. Integer from 1 to 100. Negative and unbounded limits are refused.",
+                    "default": 10,
+                    "minimum": 1,
+                    "maximum": 100,
+                },
                 "scope": {
                     "type": "string",
                     "enum": ["workspace", "all"],
@@ -877,6 +883,14 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "contract_id": {"type": "string"},
                 "require_signed_contract": {"type": "boolean"},
+                "schema_drift_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Accept additive schema drift for this file load. "
+                        "Hard-breaking changes still block. The flag is stored "
+                        "on the staged job and survives Confirm into Execute."
+                    ),
+                },
                 "pii_acknowledgement": {
                     "type": "object",
                     "description": (
@@ -1274,6 +1288,7 @@ TOOL_FAMILIES: list[dict] = [
             "list_connectors",
             "cancel_job",
             "retry_job",
+            "rerun_job",
             "resume_job",
             "replay_quarantine",
             "test_connector",
@@ -1464,6 +1479,7 @@ class DataPilotTools:
             "brief_workspace": self._brief_workspace,
             "cancel_job": self._cancel_job,
             "retry_job": self._retry_job,
+            "rerun_job": self._rerun_job,
             "resume_job": self._resume_job,
             "replay_quarantine": self._replay_quarantine,
             "repair_cdc_drift": self._repair_cdc_drift,
@@ -1776,6 +1792,43 @@ class DataPilotTools:
                 error=connector_name_conflict_message(str(draft.get("name") or "")),
             )
 
+        from services.connector_request_limits import connector_request_errors
+        from services.egress_guard import metadata_endpoint_refusal
+
+        bound_err = connector_request_errors(
+            name=draft.get("name"),
+            db_type=draft.get("type"),
+            host=draft.get("host"),
+            port=draft.get("port") or 0,
+            database=draft.get("database"),
+            username=draft.get("username"),
+            schema=draft.get("schema"),
+            connection_string=draft.get("connection_string"),
+            require_name=True,
+        )
+        if bound_err:
+            from .ack_ledger import redact_payload
+
+            return ToolResult(
+                name="create_connector",
+                success=False,
+                output=redact_payload(draft),
+                error=bound_err,
+            )
+        refusal = metadata_endpoint_refusal(
+            str(draft.get("host") or ""),
+            str(draft.get("connection_string") or ""),
+        )
+        if refusal:
+            from .ack_ledger import redact_payload
+
+            return ToolResult(
+                name="create_connector",
+                success=False,
+                output=redact_payload(draft),
+                error=refusal,
+            )
+
         probe_msg = ""
         if test_first:
             try:
@@ -1948,6 +2001,13 @@ class DataPilotTools:
     def _list_jobs(self, limit: int = 10, scope: str = "workspace") -> ToolResult:
         from .job_reads import job_list_workspace_scope, list_transfer_jobs
 
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 100:
+            return ToolResult(
+                name="list_jobs",
+                success=False,
+                output=None,
+                error="limit must be an integer from 1 to 100.",
+            )
         try:
             workspace_id = job_list_workspace_scope(scope)
         except ValueError as exc:
@@ -2074,6 +2134,8 @@ class DataPilotTools:
                 "quarantine_row_count": quarantine_row_count,
                 "quarantine_samples": samples,
                 "progress_pct": job.get("progress_pct"),
+                "reconcile_pct": job.get("reconcile_pct"),
+                "message": job.get("message"),
                 "error": job.get("error"),
                 "created_at": job_timestamp_iso(job.get("created_at")),
                 "updated_at": job_timestamp_iso(job.get("updated_at")),
@@ -2838,8 +2900,35 @@ class DataPilotTools:
         source_read_mode: str = "",
         row_count: int = 0,
     ) -> ToolResult:
+        for label, value in (
+            ("has_cursor", has_cursor),
+            ("has_primary_key", has_primary_key),
+            ("needs_history", needs_history),
+        ):
+            if not isinstance(value, bool):
+                return ToolResult(
+                    name="recommend_sync_mode",
+                    success=False,
+                    output=None,
+                    error=f"{label} must be a boolean.",
+                )
+        if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+            return ToolResult(
+                name="recommend_sync_mode",
+                success=False,
+                output=None,
+                error="row_count must be an integer that is zero or greater.",
+            )
+        read_mode = (source_read_mode or "").strip().lower()
+        if read_mode not in {"", "table", "query", "procedure"}:
+            return ToolResult(
+                name="recommend_sync_mode",
+                success=False,
+                output=None,
+                error="source_read_mode must be table, query, or procedure.",
+            )
         w = workload.lower()
-        callable_src = (source_read_mode or "").strip().lower() in {"procedure", "query"}
+        callable_src = read_mode in {"procedure", "query"}
         mentions_delete = bool(re.search(r"\bdelet", w))
         mentions_update = bool(re.search(r"\bupdat", w))
         near_realtime = any(
@@ -2864,7 +2953,7 @@ class DataPilotTools:
             and ("lookup" in w or "reference" in w or "dimension" in w or "config" in w)
         )
         if is_lookup_table:
-            mode = "Full Refresh Overwrite"
+            mode = "full_refresh_overwrite"
             reason = (
                 "Lookup/reference tables without a cursor or primary key should use "
                 "Full Refresh Overwrite. Full Refresh Append would accumulate duplicates "
@@ -2875,7 +2964,7 @@ class DataPilotTools:
         # workload says rows disappear: appending that snapshot duplicates the
         # full result and leaves deleted rows behind.
         if callable_src and mentions_delete:
-            mode = "Full Refresh Overwrite"
+            mode = "full_refresh_overwrite"
             reason = (
                 "A query or procedure returns the current result, not a change log. "
                 "Deletes in that result are rows that are no longer present, so the "
@@ -2883,7 +2972,7 @@ class DataPilotTools:
                 "again and leave the deleted rows in place."
             )
         elif callable_src and ("cdc" in w or needs_history or "scd" in w or "mirror" in w):
-            mode = "Full Refresh Append"
+            mode = "full_refresh_append"
             reason = (
                 "CALL/SELECT is a result-set snapshot, not a WAL/binlog or table "
                 "identity. CDC, SCD2, and mirror are refused. Use full refresh, "
@@ -2892,7 +2981,7 @@ class DataPilotTools:
         elif "cdc" in w or (
             near_realtime and has_primary_key and (mentions_delete or mentions_update)
         ):
-            mode = "Incremental CDC"
+            mode = "cdc_incremental"
             reason = (
                 "Updates and deletes at near-real-time have to be read from the "
                 "log. Incremental append inserts new rows only, so a changed row "
@@ -2900,23 +2989,23 @@ class DataPilotTools:
                 "upsert and needs log access plus the primary key."
             )
         elif "upsert" in w or "merge" in w or (has_primary_key and "incremental" in w):
-            mode = "Incremental Upsert"
+            mode = "incremental_deduped"
             reason = (
                 "Primary key (or upsert/merge wording) lets destination rows be "
                 "updated in place without a full reload."
             )
         elif has_cursor and has_primary_key and needs_history:
-            mode = "Incremental Append + Deduped"
+            mode = "incremental_deduped"
             reason = "Cursor and key allow efficient updates while preserving change history."
         elif has_primary_key and mentions_update:
-            mode = "Incremental Upsert"
+            mode = "incremental_deduped"
             reason = (
                 "The workload updates existing rows and a primary key is present. "
                 "Incremental append would insert a second copy of each changed row. "
                 "Incremental upsert updates the destination row in place."
             )
         elif mentions_delete and has_primary_key:
-            mode = "Mirror"
+            mode = "full_refresh_mirror"
             reason = (
                 "Deletes have to remove the destination row. Incremental append "
                 "and upsert leave it. Mirror rewrites the key and deletes "
@@ -2924,7 +3013,7 @@ class DataPilotTools:
                 "not a log capture."
             )
         elif mentions_delete or "snapshot" in w or "full" in w or "overwrite" in w:
-            mode = "Full Refresh Overwrite"
+            mode = "full_refresh_overwrite"
             reason = (
                 "Snapshot workloads should replace the destination with the latest "
                 "source state. Append would keep rows the source has already deleted."
@@ -2932,36 +3021,55 @@ class DataPilotTools:
                 else "Snapshot workloads should replace the destination with the latest source state."
             )
         elif has_cursor:
-            mode = "Incremental Append"
+            mode = "incremental_append"
             reason = "Cursor allows new records to be read without a full scan."
         elif has_primary_key:
-            mode = "Incremental Upsert"
+            mode = "incremental_deduped"
             reason = "A primary key is enough to upsert; add a cursor later to avoid full scans."
         else:
             # S04: No cursor and no key - recommend Overwrite for small tables to avoid
             # duplicate accumulation on reruns. This is safer than Append for static data.
             if row_count > 0 and row_count < 10000:
-                mode = "Full Refresh Overwrite"
+                mode = "full_refresh_overwrite"
                 reason = (
                     "Small tables without cursor or key should use Full Refresh Overwrite "
                     "to avoid duplicate accumulation on reruns. Append would keep adding "
                     "the same rows on each run."
                 )
             else:
-                mode = "Full Refresh Append"
+                mode = "full_refresh_append"
                 reason = "Use append until cursor/key metadata is confirmed."
-        incremental = mode.startswith("Incremental")
+        history_deduped = (
+            mode == "incremental_deduped"
+            and has_cursor
+            and needs_history
+            and "upsert" not in w
+            and "merge" not in w
+        )
+        labels = {
+            "full_refresh_overwrite": "Full Refresh Overwrite",
+            "full_refresh_append": "Full Refresh Append",
+            "incremental_append": "Incremental Append",
+            "incremental_deduped": (
+                "Incremental Append + Deduped" if history_deduped else "Incremental Upsert"
+            ),
+            "cdc_incremental": "Incremental CDC",
+            "full_refresh_mirror": "Mirror",
+        }
         return ToolResult(name="recommend_sync_mode", success=True, output={
             "recommended_mode": mode,
+            "label": labels.get(mode, mode),
             "reason": reason,
             "requires": {
-                # "Full Refresh Append" contains "Append". A cursor is required
-                # only for a mode that advances one. Overwrite does not.
-                "cursor": incremental and "Upsert" not in mode,
-                "primary_key": (
-                    "Upsert" in mode or "Deduped" in mode or "CDC" in mode or mode == "Mirror"
-                ),
-                "cdc_log_access": "CDC" in mode,
+                # A cursor is required only for a mode that advances one.
+                # Upsert (incremental_deduped without history) does not.
+                "cursor": mode in {"incremental_append", "cdc_incremental"} or history_deduped,
+                "primary_key": mode in {
+                    "incremental_deduped",
+                    "cdc_incremental",
+                    "full_refresh_mirror",
+                },
+                "cdc_log_access": mode == "cdc_incremental",
             },
         })
 
@@ -3265,6 +3373,11 @@ class DataPilotTools:
         from .lifecycle_tools import _job_tool
 
         return _job_tool("retry_job", job_id, selector)
+
+    def _rerun_job(self, job_id: str = "", selector: str = "", force: bool = False) -> ToolResult:
+        from .lifecycle_tools import _job_tool
+
+        return _job_tool("rerun_job", job_id, selector, force=bool(force))
 
     def _resume_job(self, job_id: str = "", selector: str = "") -> ToolResult:
         from .lifecycle_tools import _job_tool
@@ -3717,6 +3830,7 @@ class DataPilotTools:
         contract_id: str = "",
         require_signed_contract: Any = None,
         source_timezone: str = "",
+        schema_drift_acknowledged: bool = False,
         pii_acknowledgement: dict | None = None,
     ) -> ToolResult:
         from .dataset_transfer import stage_dataset_transfer
@@ -3733,6 +3847,7 @@ class DataPilotTools:
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
             source_timezone=source_timezone,
+            schema_drift_acknowledged=schema_drift_acknowledged,
             pii_acknowledgement=pii_acknowledgement,
         )
 

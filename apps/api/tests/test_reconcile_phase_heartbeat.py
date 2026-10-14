@@ -39,13 +39,13 @@ def test_reconcile_heartbeat_sets_phase_and_pulses_message():
     assert mongo.calls, "expected at least the enter-reconcile update"
     first = mongo.calls[0]
     assert first["phase"] == "reconcile"
-    assert first["progress_pct"] == 99
+    assert 98 <= first["progress_pct"] < 100
     assert first["records_processed"] == 37_778
     assert "reconcil" in (first.get("message") or "").lower()
 
     # At least one heartbeat pulse after the initial enter update.
     assert len(mongo.calls) >= 2
-    assert all(c["phase"] == "reconcile" and c["progress_pct"] == 99 for c in mongo.calls)
+    assert all(c["phase"] == "reconcile" and 98 <= c["progress_pct"] < 100 for c in mongo.calls)
     assert any("Reconciling data" in (c.get("message") or "") for c in mongo.calls[1:])
 
 
@@ -115,5 +115,6 @@ def test_checksum_publishes_hashed_rows_without_moving_the_job_counter():
     pulses = [c.get("message") or "" for c in mongo.calls[1:]]
     assert any("9,000" in message and "row fingerprints" in message for message in pulses)
     assert any("has not stalled" in message for message in pulses)
-    assert all(c["progress_pct"] == 99 for c in mongo.calls)
+    assert all(98 <= c["progress_pct"] < 100 for c in mongo.calls)
+    assert any(c["progress_pct"] > 98 for c in mongo.calls[1:])
     assert all(c["records_processed"] == 1_000_000 for c in mongo.calls)

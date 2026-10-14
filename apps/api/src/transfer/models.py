@@ -164,6 +164,11 @@ class TransferRequest:
     compliance_acknowledged: bool = False
     schema_drift_acknowledged: bool = False
     fk_risk_acknowledged: bool = False
+    # Sync now / full re-sync. Empty scope runs the full gate set.
+    # ``drift_connectivity`` rechecks only drift and connectivity on a signed contract.
+    preflight_scope: str = ""
+    parent_job_id: str = ""
+    historical_resync: bool = False
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     # Map→DDL fingerprint from Validate (or ledger proof). Required when
@@ -326,6 +331,9 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "compliance_acknowledged": bool(request.compliance_acknowledged),
         "schema_drift_acknowledged": bool(request.schema_drift_acknowledged),
         "fk_risk_acknowledged": bool(request.fk_risk_acknowledged),
+        "preflight_scope": request.preflight_scope or "",
+        "parent_job_id": request.parent_job_id or "",
+        "historical_resync": bool(request.historical_resync),
         "acknowledgment_actor": request.acknowledgment_actor or "",
         "acknowledgment_reason": request.acknowledgment_reason or "",
         "approved_ddl_identity_hash": request.approved_ddl_identity_hash or "",
@@ -457,6 +465,9 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         compliance_acknowledged=bool(data.get("compliance_acknowledged")),
         schema_drift_acknowledged=bool(data.get("schema_drift_acknowledged")),
         fk_risk_acknowledged=bool(data.get("fk_risk_acknowledged")),
+        preflight_scope=str(data.get("preflight_scope") or "").strip(),
+        parent_job_id=str(data.get("parent_job_id") or "").strip(),
+        historical_resync=bool(data.get("historical_resync")),
         acknowledgment_actor=str(data.get("acknowledgment_actor") or "").strip(),
         acknowledgment_reason=str(data.get("acknowledgment_reason") or "").strip(),
         approved_ddl_identity_hash=str(

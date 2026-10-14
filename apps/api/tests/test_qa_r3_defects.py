@@ -536,7 +536,7 @@ def test_sql_expression_create_new_clears_the_confidence_floor() -> None:
 def test_schema_change_detected_is_delegable() -> None:
     scopes = delegable_scopes_for(
         "Schema change detected — policy 'manual_review' requires review "
-        "before Execute. Pass schema_drift_acknowledged=true"
+        "before Execute. Use Acknowledge drift for this run"
     )
     assert scopes
     assert delegable_scopes_for(

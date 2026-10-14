@@ -5,7 +5,12 @@ import {
   resetContractBreaker,
   type DataContractSummary,
 } from "../../lib/api";
-import { contractBindBlocksRun, isSignedContractStatus } from "../../lib/contractBind";
+import {
+  contractBindBlocksRun,
+  contractMatchesRoute,
+  isSignedContractStatus,
+  type ContractRoute,
+} from "../../lib/contractBind";
 import { contractBreakerBlocksRun } from "../../lib/contractBreakerUi";
 import { Button } from "../ui/Button";
 
@@ -17,9 +22,8 @@ interface ContractBindFieldProps {
   onRequireSignedChange: (require: boolean) => void;
   onBlockReasonChange?: (reason: string) => void;
   compact?: boolean;
-  /** When set, the signed list is limited to this route and can be searched. */
-  sourceLabel?: string;
-  destLabel?: string;
+  /** When set, the list is signed contracts for this source and destination. */
+  route?: ContractRoute | null;
 }
 
 export function ContractBindField({
@@ -30,8 +34,7 @@ export function ContractBindField({
   onRequireSignedChange,
   onBlockReasonChange,
   compact = false,
-  sourceLabel = "",
-  destLabel = "",
+  route = null,
 }: ContractBindFieldProps) {
   const [contracts, setContracts] = useState<DataContractSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -57,34 +60,24 @@ export function ContractBindField({
     };
   }, []);
 
-  const signedContracts = useMemo(
-    () => contracts.filter((c) => isSignedContractStatus(c.status)),
-    [contracts],
-  );
-  const routeContracts = useMemo(() => {
-    const tokens = (value: string) => value.toLowerCase().split(/[^a-z0-9._-]+/).filter((part) => part.length > 2);
-    const sourceTokens = tokens(sourceLabel);
-    const destTokens = tokens(destLabel);
+  const signedContracts = useMemo(() => {
+    const signed = contracts.filter((c) => isSignedContractStatus(c.status));
+    if (!route) return signed;
+    return signed.filter((c) => contractMatchesRoute(c, route));
+  }, [contracts, route]);
+  const visibleContracts = useMemo(() => {
     const query = search.trim().toLowerCase();
-    const blobOf = (contract: DataContractSummary) =>
-      `${contract.name} ${JSON.stringify(contract.source || {})} ${JSON.stringify(contract.destination || {})}`.toLowerCase();
-    const pairMatches = signedContracts.filter((contract) => {
-      const blob = blobOf(contract);
-      if (query && !blob.includes(query)) return false;
-      const sourceHit = sourceTokens.length === 0 || sourceTokens.some((token) => blob.includes(token));
-      const destHit = destTokens.length === 0 || destTokens.some((token) => blob.includes(token));
-      return sourceHit && destHit;
+    if (!query) return signedContracts;
+    return signedContracts.filter((contract) => {
+      const blob = `${contract.name} ${JSON.stringify(contract.source || {})} ${JSON.stringify(contract.destination || {})}`.toLowerCase();
+      return blob.includes(query);
     });
-    const shown = pairMatches.length > 0
-      ? pairMatches
-      : signedContracts.filter((contract) => !query || blobOf(contract).includes(query));
-    return [...shown].sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
-  }, [signedContracts, sourceLabel, destLabel, search]);
+  }, [signedContracts, search]);
   useEffect(() => {
-    if (contractId || routeContracts.length !== 1 || (!sourceLabel && !destLabel)) return;
-    onContractIdChange(routeContracts[0].id);
+    if (contractId || !route || search.trim() || visibleContracts.length !== 1) return;
+    onContractIdChange(visibleContracts[0].id);
     onRequireSignedChange(true);
-  }, [contractId, routeContracts, sourceLabel, destLabel, onContractIdChange, onRequireSignedChange]);
+  }, [contractId, route, search, visibleContracts, onContractIdChange, onRequireSignedChange]);
   const selected = useMemo(
     () => contracts.find((c) => c.id === contractId) || null,
     [contracts, contractId],
@@ -123,7 +116,7 @@ export function ContractBindField({
     <div className={compact ? "df2-contract-bind df2-contract-bind--compact" : "df2-contract-bind"}>
       <div className="df2-field">
         <label className="df2-label" htmlFor={`${idPrefix}-contract`}>Contract</label>
-        {(sourceLabel || destLabel) && (
+        {route && (
           <input
             className="df2-input"
             value={search}
@@ -144,11 +137,17 @@ export function ContractBindField({
           disabled={loading}
         >
           <option value="">None — no contract enforcement</option>
-          {(sourceLabel || destLabel ? routeContracts : signedContracts).map((c) => (
+          {visibleContracts.map((c) => (
             <option key={c.id} value={c.id}>
               {c.name} · v{c.version} · SIGNED
             </option>
           ))}
+          {selected && isSignedContractStatus(selected.status)
+            && !signedContracts.some((c) => c.id === selected.id) && (
+            <option value={selected.id}>
+              {selected.name} · v{selected.version} · SIGNED (different route)
+            </option>
+          )}
           {selected && !isSignedContractStatus(selected.status) && (
             <option value={selected.id}>
               {selected.name} · v{selected.version} · {selected.status} (sign required)
@@ -162,8 +161,12 @@ export function ContractBindField({
           {loading
             ? "Loading contracts…"
             : signedContracts.length === 0
-              ? "No signed contracts yet — save + sign one from Validate → Contracts."
-              : "Only SIGNED contracts appear here. Drafts must be signed on the Contracts page first."}
+              ? (route
+                ? "No signed contract matches this source and destination."
+                : "No signed contracts yet — save + sign one from Validate → Contracts.")
+              : (route
+                ? "Signed contracts for this source and destination."
+                : "Only SIGNED contracts appear here. Drafts must be signed on the Contracts page first.")}
         </span>
       </div>
       {contractId && (

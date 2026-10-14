@@ -122,7 +122,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     initial?.procedure_call || initial?.source_query || "",
   );
   const [validationMode, setValidationMode] = useState(initial?.validation_mode ?? "balanced");
-  const [schemaPolicy, setSchemaPolicy] = useState(initial?.schema_policy ?? "manual_review");
+  const [schemaPolicy, setSchemaPolicy] = useState(initial?.schema_policy ?? "propagate_columns");
   const [backfill, setBackfill] = useState(initial?.backfill_new_fields ?? false);
   const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
     namedCdcDeliveryGuarantee(initial?.delivery_guarantee),
