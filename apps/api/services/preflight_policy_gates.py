@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from preflight.models import GateStatus
+from services.blocker_titles import is_schema_drift_echo
 from services.db_type_utils import normalize_dest_kind
 
 
@@ -69,7 +70,31 @@ def apply_policy_gates(
         {"id": b["id"], "message": b["message"], "details": b.get("details", {})}
         for b in result.get("blockers", [])
     ]
+    # A proof string that repeats a gate is one cause. Copying it as proof_N
+    # made Validate say "1 gate" in the header and "Schema drift" plus
+    # "Schema change detected" in the analysis.
+    seen_messages = {
+        str(b.get("message") or "").strip()
+        for b in blockers
+        if str(b.get("message") or "").strip()
+    }
+    seen_messages.update(
+        str(g.get("message") or "").strip()
+        for g in (result.get("gates") or [])
+        if str(g.get("message") or "").strip()
+    )
+    drift_already_listed = any(is_schema_drift_echo(m) for m in seen_messages) or any(
+        str(b.get("id") or "") == "schema_drift" for b in blockers
+    ) or any(
+        str(g.get("id") or "") == "schema_drift" and g.get("status") == GateStatus.BLOCK.value
+        for g in (result.get("gates") or [])
+    )
     for idx, message in enumerate(active_proof_blockers):
+        text = str(message).strip()
+        if text and text in seen_messages:
+            continue
+        if text and drift_already_listed and is_schema_drift_echo(text):
+            continue
         is_compliance = is_compliance_block_message(message)
         blockers.append({
             "id": f"proof_{idx}",
@@ -79,6 +104,8 @@ def apply_policy_gates(
                 "remediation_kind": "acknowledge_compliance" if is_compliance else "fix_proof",
             },
         })
+        if text:
+            seen_messages.add(text)
 
     if policy_gates:
         policy_ids = {str(g.get("id") or "") for g in policy_gates}
@@ -178,3 +205,135 @@ def apply_policy_gates(
         "blockers": enriched_blockers,
         "proof_bundle": proof_bundle,
     })
+
+
+def _drift_column_names(evolution: dict[str, Any]) -> list[str]:
+    """Source columns manual_review keeps off the write when the operator acks."""
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw: object) -> None:
+        name = str(raw or "").strip()
+        key = name.lower()
+        if not name or key in seen:
+            return
+        seen.add(key)
+        names.append(name)
+
+    for item in evolution.get("unmapped_sources") or []:
+        if isinstance(item, str):
+            add(item)
+        elif isinstance(item, dict):
+            add(item.get("column") or item.get("source"))
+    for item in evolution.get("additive") or []:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("kind") or "") not in {"add_column", "rename"}:
+            continue
+        add(item.get("column") or item.get("to") or item.get("source"))
+    return names
+
+
+def _coverage_message_cleared(message: object) -> bool:
+    text = str(message or "").lower()
+    return "neither mapped nor declared omitted" in text
+
+
+def finalize_acknowledged_schema_drift(
+    out: dict[str, Any],
+    *,
+    evolution: dict[str, Any],
+    acknowledgment: dict[str, Any],
+) -> None:
+    """A recorded manual-review ack is the decision to keep existing mappings.
+
+    New source columns named by that drift are an omission for this run, written
+    on the coverage gate. They are not dropped quietly, and they must not leave
+    Execute locked on the same change the operator just accepted. Hard-breaking
+    drift never reaches this helper.
+    """
+    ignored = {name.lower() for name in _drift_column_names(evolution)}
+    cleared_coverage = False
+    for gate in out.get("gates") or []:
+        if str(gate.get("id") or "") != "g13_source_coverage":
+            continue
+        if gate.get("status") != "block":
+            continue
+        details = gate.get("details") if isinstance(gate.get("details"), dict) else {}
+        unaccounted = [str(c) for c in (details.get("unaccounted_sources") or []) if str(c).strip()]
+        if not unaccounted or any(c.lower() not in ignored for c in unaccounted):
+            continue
+        named = ", ".join(unaccounted[:8])
+        extra = f" (+{len(unaccounted) - 8} more)" if len(unaccounted) > 8 else ""
+        gate["status"] = "pass"
+        gate["message"] = (
+            f"Schema drift acknowledged — {len(unaccounted)} new source column(s) "
+            f"stay out of this run: {named}{extra}. The omission is recorded."
+        )
+        gate["details"] = {
+            **details,
+            "unaccounted_sources": [],
+            "omitted_sources": unaccounted,
+            "omission_reason": "schema_drift_acknowledged",
+            "acknowledgment": acknowledgment,
+            "rule_id": "g13_source_coverage.drift_omitted",
+        }
+        cleared_coverage = True
+
+    def _drop_blocker(blocker: dict[str, Any]) -> bool:
+        bid = str(blocker.get("id") or "")
+        message = str(blocker.get("message") or "")
+        if bid == "schema_drift" or is_schema_drift_echo(message):
+            return False
+        if cleared_coverage and (
+            bid == "g13_source_coverage" or _coverage_message_cleared(message)
+        ):
+            return False
+        return True
+
+    out["blockers"] = [b for b in (out.get("blockers") or []) if _drop_blocker(b)]
+    gates = [g for g in (out.get("gates") or []) if isinstance(g, dict)]
+    blocking = [g for g in gates if g.get("status") == "block"]
+    out["passed_count"] = sum(1 for g in gates if g.get("status") == "pass")
+    out["total_gates"] = len(gates)
+    out["readiness_score"] = round(
+        out["passed_count"] / max(out["total_gates"], 1) * 100, 1
+    )
+    out["passed"] = not blocking
+    if blocking:
+        return
+
+    pb = out.get("proof_bundle")
+    if not isinstance(pb, dict):
+        return
+    td = pb.get("transfer_decision")
+    if not isinstance(td, dict):
+        return
+    kept: list[object] = []
+    for message in td.get("blockers") or []:
+        text = str(message or "")
+        if is_schema_drift_echo(text):
+            continue
+        if cleared_coverage and _coverage_message_cleared(text):
+            continue
+        kept.append(message)
+    if kept:
+        out["passed"] = False
+        out["proof_bundle"] = {
+            **pb,
+            "transfer_decision": {**td, "blockers": kept},
+        }
+        return
+    out["proof_bundle"] = {
+        **pb,
+        "passed": True,
+        "transfer_decision": {
+            **td,
+            "decision": "approve",
+            "blockers": [],
+            "compliance_only": False,
+            "reason": (
+                "Schema change acknowledged for this run — existing mappings kept"
+            ),
+        },
+    }

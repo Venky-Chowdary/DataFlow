@@ -2655,12 +2655,18 @@ def run_file_preflight(
                     },
                 ]
                 out["schema_drift"] = {**drift, "acknowledged": True, "acknowledgment": ack}
+                from services.preflight_policy_gates import finalize_acknowledged_schema_drift
+
+                finalize_acknowledged_schema_drift(
+                    out,
+                    evolution=evolution if isinstance(evolution, dict) else {},
+                    acknowledgment=ack,
+                )
             else:
                 drift_msg = (
                     f"Schema change detected — policy '{policy}' requires review "
-                    "before Execute. Pass schema_drift_acknowledged=true to accept "
-                    "this drift for the run (include new columns, ignore for this "
-                    "run, or update the contract)."
+                    "before Execute. Use Acknowledge drift for this run to keep "
+                    "the existing mappings, or open Map to include the changed columns."
                 )
                 drift_gate = {
                     "id": "schema_drift",

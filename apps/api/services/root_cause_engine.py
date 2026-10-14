@@ -1048,9 +1048,9 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 estimated_total_rows=est_n,
                 risk_level="high",
                 recommended_fix=(
-                    "Acknowledge schema drift (schema_drift_acknowledged) if the "
-                    "new type should load as-is, or remap the column to a carrier "
-                    "that preserves the new type, then re-Validate."
+                    "Use Acknowledge drift for this run if the new type should "
+                    "load as-is, or remap the column to a carrier that preserves "
+                    "the new type, then re-Validate."
                 ),
                 alternative_fixes=[
                     "Revert the source column to the previous type",

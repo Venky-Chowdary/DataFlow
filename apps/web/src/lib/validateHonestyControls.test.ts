@@ -11,6 +11,7 @@ import {
   advancedLocaleFieldId,
   dateLocaleValidateAction,
   numberLocaleValidateAction,
+  schemaDriftAckRecorded,
   schemaDriftAllowsAcknowledge,
   schemaDriftRequiresRemap,
 } from "./validateHonestyControls.ts";
@@ -207,6 +208,18 @@ describe("validateHonestyControls", () => {
       }),
       false,
     );
+  });
+
+  it("records schema drift only when the preflight says the ack landed", () => {
+    assert.equal(schemaDriftAckRecorded(null), false);
+    assert.equal(schemaDriftAckRecorded({ gates: [{ id: "schema_drift", details: {} }] }), false);
+    assert.equal(
+      schemaDriftAckRecorded({
+        gates: [{ id: "schema_drift", details: { acknowledged: true } }],
+      }),
+      true,
+    );
+    assert.equal(schemaDriftAckRecorded({ schema_drift: { acknowledged: true } }), true);
   });
 
   it("number locale set_locale names columns and does not invent ok", () => {

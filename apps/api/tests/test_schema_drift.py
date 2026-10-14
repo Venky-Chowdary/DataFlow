@@ -391,6 +391,151 @@ def test_manual_review_still_blocks_real_source_drift():
     )
     assert result["passed"] is False
     assert any(b.get("id") == "schema_drift" for b in result["blockers"])
+    drift_gate = next(g for g in result["gates"] if g["id"] == "schema_drift")
+    assert "schema_drift_acknowledged" not in drift_gate["message"]
+    assert "Acknowledge drift for this run" in drift_gate["message"]
+    assert "Schema change detected" in drift_gate["message"]
+
+
+def _manual_review_drift_kwargs(*, mapped_new_column: bool):
+    from services.schema_fingerprint import fingerprint_schema as fp
+
+    cols = ["id", "email", "new_col"]
+    schema = {"id": "INTEGER", "email": "VARCHAR", "new_col": "VARCHAR"}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99, "transform": "none"},
+        {"source": "email", "target": "email", "confidence": 0.99, "transform": "none"},
+    ]
+    if mapped_new_column:
+        mappings.append(
+            {"source": "new_col", "target": "new_col", "confidence": 0.99, "transform": "none"}
+        )
+    return dict(
+        columns=cols,
+        column_types=schema,
+        row_count=1,
+        mappings=mappings,
+        destination_connected=True,
+        source_connected=True,
+        source_kind="file",
+        sample_rows=[{"id": "1", "email": "a@b.com", "new_col": "x"}],
+        destination_column_types={"id": "INTEGER", "email": "VARCHAR"},
+        destination_table_exists=True,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+        sync_mode="full_refresh_append",
+        estimated_bytes=1000,
+        stored_source_fp=fp(["id", "email"], {"id": "INTEGER", "email": "VARCHAR"}),
+        previous_source_columns=["id", "email"],
+        previous_source_schema={"id": "INTEGER", "email": "VARCHAR"},
+    )
+
+
+def test_acknowledge_drift_is_one_gate_and_unlocks_execute():
+    """Manual-review ack keeps existing mappings and must not echo a second blocker.
+
+    Unmapped new columns are a recorded omission for this run, not a silent drop
+    and not a leftover coverage block. The operator sentence names the Validate
+    control, not an API flag.
+    """
+    from services.preflight_policy_gates import apply_policy_gates
+    from services.preflight_service import run_file_preflight
+    from services.validation_assistant import explain_validation
+
+    blocked = run_file_preflight(**_manual_review_drift_kwargs(mapped_new_column=True))
+    gated = apply_policy_gates(blocked, [], validation_mode="balanced")
+    drift_ids = [
+        b.get("id")
+        for b in gated["blockers"]
+        if b.get("id") == "schema_drift"
+        or (
+            str(b.get("id") or "").startswith("proof_")
+            and "schema change detected" in str(b.get("message") or "").lower()
+        )
+    ]
+    assert drift_ids == ["schema_drift"]
+    explained = explain_validation(gated, use_llm=False)
+    drift_issues = [
+        issue for issue in explained["issues"]
+        if issue.get("gate") == "schema_drift"
+        or str(issue.get("title") or "").lower().startswith("schema change detected")
+        or str(issue.get("what") or "").lower().startswith("schema change detected")
+    ]
+    assert len(drift_issues) == 1
+    drift_message = next(g["message"] for g in blocked["gates"] if g["id"] == "schema_drift")
+    echo = explain_validation(
+        {
+            "passed": False,
+            "gates": [{"id": "schema_drift", "status": "block", "message": drift_message}],
+            "blockers": [
+                {"id": "schema_drift", "message": drift_message, "details": {}},
+                {"id": "proof_0", "message": drift_message, "details": {}},
+            ],
+        },
+        use_llm=False,
+    )
+    assert echo["summary"].startswith("Validation blocked: 1 blocking gate")
+    assert len(echo["issues"]) == 1
+    assert echo["issues"][0]["title"] == "Schema drift"
+
+    acked = run_file_preflight(
+        **_manual_review_drift_kwargs(mapped_new_column=False),
+        schema_drift_acknowledged=True,
+        acknowledgment_actor="qa@example.com",
+        acknowledgment_reason="Keep existing mappings for this run",
+    )
+    acked = apply_policy_gates(acked, [], validation_mode="balanced")
+    assert acked["passed"] is True
+    decision = (acked.get("proof_bundle") or {}).get("transfer_decision") or {}
+    assert decision.get("decision") == "approve"
+    drift_gate = next(g for g in acked["gates"] if g["id"] == "schema_drift")
+    assert drift_gate["status"] == "pass"
+    assert drift_gate["details"]["acknowledged"] is True
+    coverage = next(g for g in acked["gates"] if g["id"] == "g13_source_coverage")
+    assert coverage["status"] == "pass"
+    assert "new_col" in coverage["details"]["omitted_sources"]
+    assert coverage["details"]["omission_reason"] == "schema_drift_acknowledged"
+    blob = " ".join(str(b.get("message") or "") for b in acked.get("blockers") or [])
+    assert "schema_drift_acknowledged" not in blob
+
+
+def test_acknowledge_drift_does_not_clear_a_hard_break():
+    from services.preflight_service import run_file_preflight
+    from services.schema_fingerprint import fingerprint_schema as fp
+
+    result = run_file_preflight(
+        columns=["id", "email"],
+        column_types={"id": "INTEGER", "email": "INTEGER"},
+        row_count=1,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.99, "transform": "none"},
+            {"source": "email", "target": "email", "confidence": 0.99, "transform": "none"},
+        ],
+        destination_connected=True,
+        source_connected=True,
+        source_kind="file",
+        sample_rows=[{"id": "1", "email": "2"}],
+        destination_column_types={"id": "INTEGER", "email": "VARCHAR"},
+        destination_table_exists=True,
+        destination_can_create=True,
+        destination_can_write=True,
+        destination_db_type="postgresql",
+        schema_policy="manual_review",
+        sync_mode="full_refresh_append",
+        estimated_bytes=1000,
+        stored_source_fp=fp(["id", "email"], {"id": "INTEGER", "email": "VARCHAR"}),
+        previous_source_columns=["id", "email"],
+        previous_source_schema={"id": "INTEGER", "email": "VARCHAR"},
+        schema_drift_acknowledged=True,
+        acknowledgment_actor="qa@example.com",
+        acknowledgment_reason="Keep existing mappings for this run",
+    )
+    drift_gate = next(g for g in result["gates"] if g["id"] == "schema_drift")
+    assert drift_gate["status"] == "block"
+    assert drift_gate["details"].get("ack_required") is False
+    assert result["passed"] is False
 
 
 def test_fingerprint_synonyms_do_not_flip_contract():

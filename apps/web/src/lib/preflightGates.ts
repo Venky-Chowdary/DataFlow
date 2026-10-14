@@ -8,6 +8,11 @@ export interface GateCatalogEntry {
   label: string;
   icon: string;
   rule: string;
+  /**
+   * Operator code. Set when the id's leading number collides with another gate
+   * (g9_data_integrity and g9_sync_contract must not both render as G9).
+   */
+  code?: string;
   /** Older UI / local-preflight ids that still appear in stored results. */
   aliases?: string[];
 }
@@ -56,7 +61,7 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     icon: "activity",
     rule: "Pre-write sample: identity mappings keep values; identity-key uniqueness holds. Post-load checksum runs after Execute.",
   },
-  { id: "g9_sync_contract", label: "Sync contract", icon: "transfer", rule: "Cursor and primary-key contract satisfy the sync mode." },
+  { id: "g9_sync_contract", code: "G12", label: "Sync contract", icon: "transfer", rule: "Cursor and primary-key contract satisfy the sync mode." },
   { id: "g10_schema_policy", label: "Schema change policy", icon: "gate", rule: "Detected drift is allowed by the schema policy." },
   { id: "g11_validation_posture", label: "Validation posture", icon: "lock", rule: "Overall posture meets the selected validation mode." },
   { id: "schema_drift", label: "Schema drift", icon: "alert", rule: "Live source/destination schema no longer matches the saved mapping contract." },
@@ -217,4 +222,75 @@ export function blockerTitle(id: string, message?: string): string {
   if (!text) return "Transfer proof blocker";
   const clause = text.split(/[.;\n]|\s—\s/)[0].trim() || text;
   return clause.length > 72 ? `${clause.slice(0, 69).trimEnd()}…` : clause;
+}
+
+/** Catalog id → operator code. g9_data_integrity is G9; sync contract is G12. */
+export function gateDisplayCode(id: string): string {
+  const entry = gateCatalogEntry(id);
+  if (entry.code) return entry.code;
+  const match = entry.id.match(/^g(\d+[a-z]?)/i);
+  if (match) return `G${match[1].toUpperCase()}`;
+  return entry.id.replace(/_/g, " ").slice(0, 8).toUpperCase();
+}
+
+/**
+ * G3 then G3F then G4. Numbered codes sort numerically; a letter suffix stays
+ * with its number. Gates without a G-code follow, in catalog order.
+ */
+export function compareGateDisplayOrder(leftId: string, rightId: string): number {
+  const rank = (id: string): [number, string, number] => {
+    const code = gateDisplayCode(id);
+    const match = /^G(\d+)([A-Z]*)$/.exec(code);
+    const catalogAt = GATE_CATALOG.findIndex((entry) => entry.id === canonicalizeGateId(id));
+    if (!match) return [100000, code, catalogAt < 0 ? 999 : catalogAt];
+    return [Number(match[1]), match[2], catalogAt < 0 ? 999 : catalogAt];
+  };
+  const left = rank(leftId);
+  const right = rank(rightId);
+  if (left[0] !== right[0]) return left[0] - right[0];
+  if (left[1] !== right[1]) return left[1] < right[1] ? -1 : 1;
+  return left[2] - right[2];
+}
+
+export interface GateStatusCounts {
+  total: number;
+  passed: number;
+  blocked: number;
+  skipped: number;
+  review: number;
+  pending: number;
+}
+
+/** One bucket per gate so passed + blocked + skipped + review + pending = total. */
+export function countGateStatuses(
+  gates: Array<{ status?: string | null }> | null | undefined,
+): GateStatusCounts {
+  const counts: GateStatusCounts = {
+    total: 0,
+    passed: 0,
+    blocked: 0,
+    skipped: 0,
+    review: 0,
+    pending: 0,
+  };
+  for (const gate of gates || []) {
+    counts.total += 1;
+    const status = String(gate?.status || "").toLowerCase();
+    if (status === "pass") counts.passed += 1;
+    else if (status === "block") counts.blocked += 1;
+    else if (status === "skip") counts.skipped += 1;
+    else if (status === "warn" || status === "review") counts.review += 1;
+    else counts.pending += 1;
+  }
+  return counts;
+}
+
+export function isSchemaDriftEcho(message?: string | null): boolean {
+  const text = String(message || "").trim().toLowerCase();
+  return (
+    text.startsWith("schema change detected")
+    || text.startsWith("schema drift")
+    || text.startsWith("schema change acknowledged")
+    || text.startsWith("breaking schema change")
+  );
 }

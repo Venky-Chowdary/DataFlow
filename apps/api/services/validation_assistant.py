@@ -19,7 +19,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from services.blocker_titles import blocker_title
+from services.blocker_titles import blocker_title, is_internal_blocker_id, is_schema_drift_echo
 from services.preflight_rules import explain_gate, explain_issue
 
 # POST /preflight/explain used to echo the full Validate result (gates, 1M-scan
@@ -694,6 +694,16 @@ def explain_validation(
     issues: list[dict[str, Any]] = []
     for b in blockers:
         gate_id = b.get("id") or b.get("gate") or "general"
+        message = str(b.get("message") or "")
+        # One schema change is one analysis card. A proof echo of the same
+        # sentence must not become a second "blocking gate".
+        if message and any(str(existing.get("what") or "").strip() == message.strip() for existing in issues):
+            continue
+        if is_internal_blocker_id(str(gate_id)) and is_schema_drift_echo(message) and any(
+            existing.get("gate") == "schema_drift" or is_schema_drift_echo(existing.get("what"))
+            for existing in issues
+        ):
+            continue
         guidance = b.get("guidance") or explain_gate(gate_id, b.get("message", ""), b.get("details"))
         details = b.get("details") or {}
         nested = details.get("issues") or details.get("errors") or []

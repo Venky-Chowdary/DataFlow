@@ -5,7 +5,12 @@ import {
   resetContractBreaker,
   type DataContractSummary,
 } from "../../lib/api";
-import { contractBindBlocksRun, isSignedContractStatus } from "../../lib/contractBind";
+import {
+  contractBindBlocksRun,
+  contractMatchesRoute,
+  isSignedContractStatus,
+  type ContractRoute,
+} from "../../lib/contractBind";
 import { contractBreakerBlocksRun } from "../../lib/contractBreakerUi";
 import { Button } from "../ui/Button";
 
@@ -17,6 +22,8 @@ interface ContractBindFieldProps {
   onRequireSignedChange: (require: boolean) => void;
   onBlockReasonChange?: (reason: string) => void;
   compact?: boolean;
+  /** When set, the list is signed contracts for this source and destination. */
+  route?: ContractRoute | null;
 }
 
 export function ContractBindField({
@@ -27,6 +34,7 @@ export function ContractBindField({
   onRequireSignedChange,
   onBlockReasonChange,
   compact = false,
+  route = null,
 }: ContractBindFieldProps) {
   const [contracts, setContracts] = useState<DataContractSummary[]>([]);
   const [loading, setLoading] = useState(false);
@@ -51,10 +59,11 @@ export function ContractBindField({
     };
   }, []);
 
-  const signedContracts = useMemo(
-    () => contracts.filter((c) => isSignedContractStatus(c.status)),
-    [contracts],
-  );
+  const signedContracts = useMemo(() => {
+    const signed = contracts.filter((c) => isSignedContractStatus(c.status));
+    if (!route) return signed;
+    return signed.filter((c) => contractMatchesRoute(c, route));
+  }, [contracts, route]);
   const selected = useMemo(
     () => contracts.find((c) => c.id === contractId) || null,
     [contracts, contractId],
@@ -110,6 +119,12 @@ export function ContractBindField({
               {c.name} · v{c.version} · SIGNED
             </option>
           ))}
+          {selected && isSignedContractStatus(selected.status)
+            && !signedContracts.some((c) => c.id === selected.id) && (
+            <option value={selected.id}>
+              {selected.name} · v{selected.version} · SIGNED (different route)
+            </option>
+          )}
           {selected && !isSignedContractStatus(selected.status) && (
             <option value={selected.id}>
               {selected.name} · v{selected.version} · {selected.status} (sign required)
@@ -123,8 +138,12 @@ export function ContractBindField({
           {loading
             ? "Loading contracts…"
             : signedContracts.length === 0
-              ? "No signed contracts yet — save + sign one from Validate → Contracts."
-              : "Only SIGNED contracts appear here. Drafts must be signed on the Contracts page first."}
+              ? (route
+                ? "No signed contract matches this source and destination."
+                : "No signed contracts yet — save + sign one from Validate → Contracts.")
+              : (route
+                ? "Signed contracts for this source and destination."
+                : "Only SIGNED contracts appear here. Drafts must be signed on the Contracts page first.")}
         </span>
       </div>
       {contractId && (

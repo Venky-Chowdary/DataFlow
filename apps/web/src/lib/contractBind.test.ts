@@ -7,6 +7,7 @@ import {
   contractBindBlocksRun,
   contractBindFromPolicies,
   contractBindFromPreview,
+  contractMatchesRoute,
   isSignedContractStatus,
 } from "./contractBind.js";
 
@@ -77,6 +78,67 @@ describe("contractBind", () => {
         breaker_state: "closed",
       }),
       { contractId: "dfc-1", requireSigned: true, breakerState: "closed" },
+    );
+  });
+
+  it("keeps signed contracts for the current source and destination", () => {
+    const route = {
+      source: { format: "csv", filename: "sample-orders.csv" },
+      destination: { format: "postgresql", table: "QA_E2E_ds_mixed" },
+    };
+    assert.equal(
+      contractMatchesRoute(
+        {
+          source: { format: "csv", filename: "sample-orders.csv" },
+          destination: { format: "postgres", table: "qa_e2e_ds_mixed" },
+        },
+        route,
+      ),
+      true,
+    );
+    assert.equal(
+      contractMatchesRoute(
+        { source: { format: "csv" }, destination: { format: "postgresql" } },
+        route,
+      ),
+      true,
+    );
+    assert.equal(
+      contractMatchesRoute(
+        {
+          source: { format: "csv", filename: "other.csv" },
+          destination: { format: "postgresql", table: "public.QA_E2E_ds_mixed" },
+        },
+        route,
+      ),
+      false,
+    );
+    assert.equal(
+      contractMatchesRoute(
+        {
+          source: { format: "csv", filename: "sample-orders.csv" },
+          destination: { format: "postgresql", table: "public.QA_E2E_ds_mixed" },
+        },
+        route,
+      ),
+      true,
+    );
+    assert.equal(
+      contractMatchesRoute(
+        {
+          source: { format: "mysql", table: "orders" },
+          destination: { format: "postgresql", table: "QA_E2E_ds_mixed" },
+        },
+        route,
+      ),
+      false,
+    );
+    assert.equal(
+      contractMatchesRoute(
+        { source: { format: "csv" }, destination: { format: "postgresql" } },
+        { source: { format: "" }, destination: { format: "postgresql" } },
+      ),
+      false,
     );
   });
 });

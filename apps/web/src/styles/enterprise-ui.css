@@ -14668,6 +14668,12 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
   background: var(--df-surface-muted);
 }
 
+.df2-app .df2-vd-count.review,
+.df2-app .df2-vd-count.review strong {
+  background: var(--df-warning-bg);
+  color: var(--df-warning, #b45309);
+}
+
 /* Job-timeline leftover paper / mint / status pastels on dots. */
 .df2-app .df2-job-timeline-dot {
   background: var(--df-surface-muted);

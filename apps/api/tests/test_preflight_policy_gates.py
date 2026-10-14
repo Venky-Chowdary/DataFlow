@@ -69,6 +69,37 @@ def test_cdc_policy_blocks_without_cursor_and_primary_key():
     assert "Missing primary key" in str(blockers[0]["details"])
 
 
+def test_proof_copy_does_not_repeat_schema_drift():
+    from services.preflight_policy_gates import apply_policy_gates
+
+    message = (
+        "Schema change detected — policy 'manual_review' requires review "
+        "before Execute. Use Acknowledge drift for this run to keep the "
+        "existing mappings, or open Map to include the changed columns."
+    )
+    merged = apply_policy_gates(
+        {
+            "passed": False,
+            "passed_count": 1,
+            "total_gates": 2,
+            "readiness_score": 50,
+            "gates": [
+                {"id": "g1_source", "status": "pass", "message": "ok"},
+                {"id": "schema_drift", "status": "block", "message": message},
+            ],
+            "blockers": [{"id": "schema_drift", "message": message, "details": {}}],
+            "proof_bundle": {
+                "passed": False,
+                "transfer_decision": {"decision": "block", "blockers": [message]},
+            },
+        },
+        [],
+    )
+    ids = [b["id"] for b in merged["blockers"]]
+    assert ids == ["schema_drift"]
+    assert not any(str(b["id"]).startswith("proof_") for b in merged["blockers"])
+
+
 def test_policy_gates_merge_into_preflight_result():
     base = {
         "passed": True,
