@@ -248,6 +248,23 @@ export function streamPorts(): CanvasPort[] {
   ];
 }
 
+/**
+ * Divert keeps the passing rows on Output's sibling "Kept" and sends matches
+ * out a second labeled port. The chain still continues from Kept.
+ */
+export function stepPorts(op: string): CanvasPort[] {
+  if (op === "divert_rows") {
+    return [
+      row("in", "in", "Input"),
+      row("out", "out", "Kept"),
+      row("diverted", "out", "Diverted"),
+      field("fields-in", "in", "Fields"),
+      field("fields-out", "out", "Fields"),
+    ];
+  }
+  return streamPorts();
+}
+
 export function portsOf(wire: CanvasNodeWire): CanvasPort[] {
   return [...wire.inputs, ...wire.outputs, ...wire.field_ports];
 }

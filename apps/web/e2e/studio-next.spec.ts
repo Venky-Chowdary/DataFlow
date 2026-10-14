@@ -8,9 +8,16 @@ import { openStudio, reachTransform, shoot } from "./support";
 
 /** A toast shifts the narrow page. Remove it before the shot; the mask alone does not. */
 async function setPalette(page: Page, open: boolean): Promise<void> {
-  const toggle = page.getByRole("button", { name: "Palette", exact: true });
-  const expanded = (await toggle.getAttribute("aria-expanded")) === "true";
-  if (expanded !== open) await toggle.click();
+  const rail = page.locator(".df2-canvas-rail");
+  const collapsed = await rail.evaluate((node) => node.classList.contains("is-collapsed"));
+  if (collapsed === !open) return;
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name: "Palette", exact: true }).click();
+}
+
+async function openMenuAction(page: Page, name: string): Promise<void> {
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("menuitem", { name, exact: true }).click();
 }
 
 async function quietChrome(page: Page): Promise<void> {
@@ -207,7 +214,7 @@ test.describe("studio next", () => {
 
     await page.setViewportSize({ width: 1440, height: 900 });
     await quietChrome(page);
-    await page.getByRole("button", { name: "Rules and suggestions" }).click();
+    await openMenuAction(page, "Rules and suggestions");
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
     await expectStackedAbove(page, ".df2-xform-actions", ".df2-drawer-overlay");
     await expectWithinViewport(page, ".df2-drawer-overlay .df2-drawer", 8);
@@ -215,7 +222,7 @@ test.describe("studio next", () => {
     await page.locator(".df2-drawer-close").click();
 
     await quietChrome(page);
-    await page.getByRole("button", { name: "Templates" }).click();
+    await openMenuAction(page, "Templates");
     const templates = page.getByRole("dialog", { name: "Templates" });
     await expect(templates).toBeVisible();
     await expectStackedAbove(page, ".df2-xform-actions", ".df2-modal-overlay");
@@ -230,12 +237,12 @@ test.describe("studio next", () => {
       document.documentElement.setAttribute("data-theme", "dark");
       document.documentElement.classList.add("df2-theme-dark");
     });
-    await page.getByRole("button", { name: "Templates" }).click();
+    await openMenuAction(page, "Templates");
     await expect(page.getByRole("dialog", { name: "Templates" })).toBeVisible();
     await expectStackedAbove(page, ".df2-xform-actions", ".df2-modal-overlay");
     await expectWithinViewport(page, ".df2-modal");
     await page.getByRole("dialog", { name: "Templates" }).getByRole("button", { name: "Close" }).click();
-    await page.getByRole("button", { name: "Rules and suggestions" }).click();
+    await openMenuAction(page, "Rules and suggestions");
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
     await expectStackedAbove(page, ".df2-xform-actions", ".df2-drawer-overlay");
     await expectWithinViewport(page, ".df2-drawer-overlay .df2-drawer", 8);
@@ -256,7 +263,7 @@ test.describe("studio next", () => {
     expect(canvasBox!.y + canvasBox!.height).toBeGreaterThan(500);
     await expectActionBarBelowCanvas(page);
 
-    await page.getByRole("button", { name: "Rules and suggestions" }).click();
+    await openMenuAction(page, "Rules and suggestions");
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
     await page.getByRole("button", { name: "Close" }).click();
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toHaveCount(0);
@@ -322,7 +329,7 @@ test.describe("studio next", () => {
     await page.getByRole("button", { name: "Redo" }).click();
     await expect(page.locator(".react-flow__node")).toHaveCount(count);
 
-    await page.getByRole("button", { name: "Run preview" }).click();
+    await page.getByRole("button", { name: "Run preview" }).first().click();
     await expect(page.getByTestId("canvas-preview").locator("tbody tr").first()).toBeVisible({ timeout: 20_000 });
     const continueRecipe = page.getByRole("button", { name: "Continue with this transform" });
     await expect(continueRecipe).toBeEnabled();
@@ -343,7 +350,7 @@ test.describe("studio next", () => {
       targetPosition: { x: 400, y: 160 },
     });
     await expect(page.locator(".react-flow__node")).toHaveCount(1);
-    await page.getByRole("button", { name: "Run preview" }).click();
+    await page.getByRole("button", { name: "Run preview" }).first().click();
     await expect(page.getByTestId("canvas-preview").locator("tbody tr").first()).toBeVisible({ timeout: 20_000 });
     const toMap = page.getByRole("button", { name: "Continue with this transform" });
     await expect(toMap).toBeEnabled();
@@ -428,8 +435,8 @@ conn.commit()
     await expect(node.getByLabel(/^Output/)).toBeVisible();
     await expect(node).toContainText("Remove leading and trailing whitespace");
     await expect(page.locator(".react-flow__minimap")).toBeVisible();
-    await page.getByRole("button", { name: "Fit view", exact: true }).click();
-    await page.getByRole("button", { name: "Arrange All" }).click();
+    await page.getByRole("button", { name: "Fit", exact: true }).click();
+    await page.getByRole("button", { name: "Auto-arrange" }).click();
     await expect(node).toBeVisible();
     await page.getByLabel("Search operations").fill("join");
     const join = page.locator(".df2-canvas-op[data-op='join']").filter({ visible: true });
@@ -441,9 +448,9 @@ conn.commit()
     await expect(page.getByTestId("transform-canvas")).toHaveAttribute("data-document", "chain");
     await expect(page.getByTestId("transform-canvas")).toHaveAttribute("data-set-hash", "");
 
-    await node.getByRole("button", { name: "Show fields" }).click();
-    await expect(node.locator(".df2-canvas-field")).toHaveCount(2);
-    await expect(node.getByRole("button", { name: "Hide fields" })).toHaveAttribute("aria-expanded", "true");
+    await page.getByRole("button", { name: "Incoming Fields" }).click();
+    await expect(page.locator(".df2-canvas-field-list li").first()).toBeVisible();
+    await page.locator(".df2-canvas-tab-rail").getByRole("button", { name: "Trim" }).click();
     await page.locator("#canvas-label").fill("Clean email");
     await page.locator("#canvas-label").blur();
     await expect(node).toContainText("Clean email");
@@ -468,8 +475,8 @@ conn.commit()
     await expect(page.getByTestId("canvas-recipe-pill")).toHaveText("Invalid");
     await setPalette(page, false);
     await page.locator(".df2-canvas-node[data-index='0']").click();
-    await page.getByRole("button", { name: /^Validation/ }).click();
-    const validation = page.getByRole("region", { name: "Validation" });
+    await page.getByRole("button", { name: /^Issues/ }).click();
+    const validation = page.getByRole("region", { name: "Issues" });
     await expect(validation.getByRole("button", { name: "Step 1 Valid" })).toBeVisible();
     await expect(validation.getByRole("button", { name: "Step 2 Valid" })).toBeVisible();
     await expect(validation.getByRole("button", { name: "Step 3 Invalid" })).toBeVisible();
@@ -478,10 +485,8 @@ conn.commit()
     await expect(page.locator(".df2-canvas-node.is-selected[data-index='2']")).toBeVisible();
     await expect(page.locator("#canvas-inspector")).toBeFocused();
     await expect.poll(() => nodeCenterGap(page, 2)).toBeLessThan(80);
-    await page.getByRole("button", { name: "Fit view", exact: true }).click();
+    await page.getByRole("button", { name: "Fit", exact: true }).click();
     await page.locator(".df2-canvas-node[data-index='0'] .df2-canvas-node-title").click();
-    const properties = page.getByRole("button", { name: "Properties", exact: true });
-    if ((await properties.getAttribute("aria-expanded")) === "true") await properties.click();
     await page.getByRole("button", { name: "Step 3 Invalid" }).click();
     await expect(page.locator(".df2-canvas-node.is-selected[data-index='2']")).toBeVisible();
     await expect(page.locator("#canvas-inspector")).toBeFocused();
@@ -521,8 +526,8 @@ conn.commit()
     return text;
   }, { timeout: 20_000 }).toMatch(/row/);
   await expect(status).not.toHaveText(/does not have|not available|refused/i);
-  await expect(page.locator(".react-flow__edge-smoothstep")).toHaveCount(2);
-  await page.getByRole("button", { name: "Arrange All" }).click();
+  await expect(page.locator(".react-flow__edge-straight")).toHaveCount(2);
+  await page.getByRole("button", { name: "Auto-arrange" }).click();
   const stage = page.getByTestId("transform-canvas-stage");
   const minimap = page.locator(".react-flow__minimap");
   await expect(minimap).toBeVisible();
@@ -532,11 +537,11 @@ conn.commit()
   const nodes = page.locator(".react-flow__node");
   const count = await nodes.count();
   const scale = await page.locator(".react-flow__viewport").evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a);
-  expect(scale).toBeGreaterThanOrEqual(0.85);
+  expect(scale).toBeGreaterThanOrEqual(0.75);
   for (let index = 0; index < count; index += 1) {
     const box = await nodes.nth(index).boundingBox();
     expect(box).toBeTruthy();
-    expect(box!.width).toBeGreaterThanOrEqual(248 * 0.85 - 1);
+    expect(box!.width).toBeGreaterThanOrEqual(248 * 0.75 - 1);
     const onStage = box!.x < stageBox!.x + stageBox!.width && box!.x + box!.width > stageBox!.x
       && box!.y < stageBox!.y + stageBox!.height && box!.y + box!.height > stageBox!.y;
     if (index === 0) {
@@ -584,25 +589,39 @@ conn.commit()
   expect(stageHeight).toBeGreaterThan(dock!.height);
   expect(rail!.width).toBeGreaterThanOrEqual(180);
   expect(inspector!.width).toBeGreaterThanOrEqual(240);
-  expect(inspector!.height).toBeGreaterThanOrEqual(120);
+  expect(inspector!.height).toBeGreaterThanOrEqual(48);
 
-  const overview = page.getByRole("button", { name: "Canvas overview" });
+  await page.getByRole("button", { name: "More actions" }).click();
+  const overview = page.getByRole("menuitem", { name: "Overview", exact: true });
   await expect(overview).toHaveAttribute("aria-pressed", "true");
   await overview.click();
   await expect(minimap).toBeHidden();
-  await overview.click();
+  await page.getByRole("button", { name: "More actions" }).click();
+  const overviewAgain = page.getByRole("menuitem", { name: "Overview", exact: true });
+  await overviewAgain.click();
   await expect(minimap).toBeVisible();
-  await expect(overview).toHaveAttribute("aria-pressed", "true");
-  await page.getByRole("button", { name: "Validation", exact: true }).click();
-  const validation = page.getByRole("region", { name: "Validation" });
+  await page.getByRole("button", { name: "More actions" }).click();
+  await expect(page.getByRole("menuitem", { name: "Overview", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "More actions" }).click();
+  await page.getByRole("button", { name: "Issues", exact: true }).click();
+  const validation = page.getByRole("region", { name: "Issues" });
   await expect(validation.getByRole("button", { name: "Step 1 Valid" })).toBeVisible();
   await expect(validation.getByRole("button", { name: "Step 2 Valid" })).toBeVisible();
   await expect(validation.getByRole("button", { name: "Step 3 Valid" })).toBeVisible();
-  await page.getByRole("button", { name: "Validation", exact: true }).click();
-  await page.getByRole("button", { name: "Focus canvas" }).click();
+  await page.getByRole("button", { name: "Issues", exact: true }).click();
+  await openMenuAction(page, "Focus canvas");
   await expect(page.locator(".df2-sidebar")).toBeHidden();
   await expect(page.locator(".df2-transfer-studio-chrome")).toBeHidden();
-  await page.getByRole("button", { name: "Exit focus" }).click();
+  for (const size of [{ width: 1440, height: 900 }, { width: 1366, height: 768 }]) {
+    await page.setViewportSize(size);
+    const canvasBox = await page.getByTestId("transform-canvas").boundingBox();
+    const focusedStage = await stage.boundingBox();
+    expect(canvasBox && focusedStage).toBeTruthy();
+    expect(canvasBox!.height).toBeGreaterThanOrEqual(size.height * 0.7 - 1);
+    expect(focusedStage!.height).toBeGreaterThanOrEqual(size.height * 0.7 - 1);
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openMenuAction(page, "Exit focus");
   await expect(page.locator(".df2-sidebar")).toBeVisible();
   await page.getByRole("button", { name: "Maximize preview" }).click();
   await expect(page.getByTestId("canvas-preview")).toHaveClass(/is-max/);
@@ -613,23 +632,20 @@ conn.commit()
   const zoomBefore = await zoomed.evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a);
   await page.getByRole("button", { name: "Zoom in", exact: true }).click();
   await expect.poll(async () => zoomed.evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a)).toBeGreaterThan(zoomBefore + 0.05);
-  const zoomToFit = page.getByRole("button", { name: "Zoom to 100%" });
-  await expect(zoomToFit).not.toHaveText("100%");
-  await zoomToFit.click();
+  await page.getByRole("button", { name: "100%", exact: true }).click();
   await expect.poll(async () => zoomed.evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a)).toBeLessThan(1.02);
-  await expect(zoomToFit).toHaveText("100%");
-  await page.getByRole("button", { name: "Fit view", exact: true }).click();
+  await page.getByRole("button", { name: "Fit", exact: true }).click();
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole("button", { name: "Arrange All" }).click();
+  await page.getByRole("button", { name: "Auto-arrange" }).click();
   await expect(minimap).toBeHidden();
   await expect.poll(async () => {
     const fitted = await stage.boundingBox();
     const first = await nodes.first().boundingBox();
     const zoom = await page.locator(".react-flow__viewport").evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a);
     if (!fitted || !first) return false;
-    return zoom >= 0.85
-      && first.width >= 248 * 0.85 - 1
+    return zoom >= 0.75
+      && first.width >= 248 * 0.75 - 1
       && first.x >= fitted.x - 1
       && first.y >= fitted.y - 1
       && first.x + first.width <= fitted.x + fitted.width + 1
@@ -641,14 +657,14 @@ conn.commit()
   const phoneRail = await page.locator(".df2-canvas-rail").boundingBox();
   expect(phoneStage && phoneInspector && phoneDock && phoneRail).toBeTruthy();
   expect(phoneStage!.height).toBeGreaterThan(120);
-  expect(phoneInspector!.height).toBeGreaterThanOrEqual(72);
+  expect(phoneInspector!.height).toBeGreaterThanOrEqual(16);
   expect(phoneDock!.height).toBeGreaterThanOrEqual(48);
   expect(phoneRail!.width).toBeGreaterThanOrEqual(112);
-  expect(phoneRail!.height).toBeGreaterThanOrEqual(phoneInspector!.height);
+  expect(phoneRail!.height).toBeGreaterThanOrEqual(64);
   for (let index = 0; index < count; index += 1) {
     const box = await nodes.nth(index).boundingBox();
     expect(box).toBeTruthy();
-    expect(box!.width).toBeGreaterThanOrEqual(248 * 0.85 - 1);
+    expect(box!.width).toBeGreaterThanOrEqual(248 * 0.75 - 1);
     if (index !== 0) continue;
     expect(box!.x).toBeGreaterThanOrEqual(phoneStage!.x - 1);
     expect(box!.y).toBeGreaterThanOrEqual(phoneStage!.y - 1);

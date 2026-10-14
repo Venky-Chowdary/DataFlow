@@ -364,11 +364,13 @@ button.df2-canvas-badge {
 
 .df2-canvas-body {
   display: flex;
-  gap: var(--df-space-3);
+  flex-direction: column;
+  gap: var(--df-space-2);
   flex: 1 1 0;
   min-height: 0;
   align-items: stretch;
   overflow: clip;
+  position: relative;
 }
 
 .df2-canvas-rail {
@@ -643,13 +645,13 @@ button.df2-canvas-badge {
 }
 
 .df2-canvas-stage {
-  --df-minimap-w: 112px;
-  --df-minimap-h: 88px;
+  --df-minimap-w: 176px;
+  --df-minimap-h: 126px;
   flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   box-sizing: border-box;
-  padding: 0 var(--df-minimap-w) var(--df-minimap-h) 0;
+  padding: 44px 8px 8px;
   background: var(--df-bg-canvas);
   border: 1px solid var(--df-border);
   border-radius: var(--df-radius-md);
@@ -689,10 +691,11 @@ button.df2-canvas-badge {
 }
 
 .df2-canvas-dock.is-collapsed {
-  flex: 0 0 auto;
-  height: auto;
+  flex: 0 0 48px;
+  height: 48px;
   min-height: 48px;
-  max-height: none;
+  max-height: 48px;
+  overflow: hidden;
 }
 
 .df2-canvas-dock.is-collapsed .df2-canvas-dock-body {
@@ -999,11 +1002,11 @@ button.df2-canvas-badge {
 }
 
 .df2-canvas .df2-canvas-minimap.react-flow__panel {
-  width: 96px;
-  height: 68px;
+  width: 160px;
+  height: 110px;
   margin: 0;
-  right: calc(-1 * var(--df-minimap-w) + 8px);
-  bottom: calc(-1 * var(--df-minimap-h) + 8px);
+  right: 8px;
+  bottom: 8px;
   border: 1px solid var(--df-border-strong);
   border-radius: var(--df-radius-md);
   overflow: hidden;
@@ -1011,12 +1014,12 @@ button.df2-canvas-badge {
 }
 
 .df2-canvas .react-flow__edge-path {
-  stroke: var(--df-brand-text);
-  stroke-width: 2;
+  stroke: var(--df-text-muted);
+  stroke-width: 1.5;
 }
 
 html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
-  stroke: var(--df-brand-arrow);
+  stroke: var(--df-text-muted);
 }
 
 .df2-canvas .react-flow__edge.selected .react-flow__edge-path {
@@ -1063,13 +1066,13 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
   display: none;
 }
 
-.df2-canvas-body {
+.df2-canvas-head-actions {
   position: relative;
 }
 
 .df2-canvas-validation {
   position: absolute;
-  top: 8px;
+  top: 52px;
   left: 50%;
   z-index: 6;
   width: min(440px, calc(100% - 32px));
@@ -1169,39 +1172,31 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
   position: relative;
 }
 
-.df2-canvas-dock.is-max {
-  position: absolute;
-  inset: 0;
-  z-index: 8;
+.df2-canvas[data-view="properties"] .df2-canvas-dock.is-max {
+  position: relative;
+  flex: 1 1 auto;
   height: auto;
   max-height: none;
   min-height: 0;
 }
 
 @media (min-width: 768px) {
-  .df2-canvas-rail,
-  .df2-canvas-inspector {
+  .df2-canvas-rail {
     position: absolute;
     top: 0;
-    bottom: var(--df-dock-reserve, 56px);
+    left: 8px;
+    bottom: calc(var(--df-split-h, 168px) + 8px);
     z-index: 4;
+    width: 240px;
+    flex: none;
     max-height: none;
   }
 
-  .df2-canvas-rail {
-    left: 8px;
-    width: 240px;
-    flex: none;
+  .df2-canvas[data-view="canvas"] .df2-canvas-rail {
+    bottom: 0;
   }
 
-  .df2-canvas-inspector {
-    right: 8px;
-    width: min(320px, 38%);
-    flex: none;
-  }
-
-  .df2-canvas-rail.is-collapsed,
-  .df2-canvas-inspector.is-collapsed {
+  .df2-canvas-rail.is-collapsed {
     display: none;
   }
 }
@@ -1222,6 +1217,11 @@ html.df2-canvas-focus .df2-xform.df2-studio-next > .df2-xform-head {
 
 html.df2-canvas-focus .df2-app {
   padding-left: 0;
+}
+
+html.df2-canvas-focus .df2-canvas[data-view="split"] .df2-canvas-properties {
+  height: 72px;
+  max-height: 72px;
 }
 
 @media (max-width: 767px) {
@@ -1266,7 +1266,7 @@ html.df2-canvas-focus .df2-app {
   }
 
   .df2-canvas-stage {
-    padding: 0;
+    padding: 44px 0 0;
     min-height: 168px;
   }
 
@@ -1305,15 +1305,20 @@ html.df2-canvas-focus .df2-app {
     overflow: hidden;
   }
 
-  .df2-canvas-inspector {
+  .df2-canvas-properties {
     grid-column: 1;
     grid-row: 3;
     width: auto;
-    flex: none;
-    max-height: none;
     height: 100%;
+    max-height: none;
     min-height: 0;
-    overflow: auto;
+  }
+
+  .df2-canvas-properties .df2-canvas-inspector {
+    width: auto;
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
   }
 
   .df2-canvas-dock {
@@ -1518,9 +1523,293 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   }
 }
 
+.df2-canvas-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  min-width: 220px;
+  padding: var(--df-space-1);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-md);
+  box-shadow: var(--df-shadow-xs);
+}
+
+.df2-canvas-menu button {
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  color: var(--df-text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--df-radius-sm);
+  min-height: 32px;
+  padding: 0 var(--df-space-2);
+  cursor: pointer;
+}
+
+.df2-canvas-menu button:hover,
+.df2-canvas-menu button[aria-pressed="true"] {
+  background: var(--df-surface-muted);
+}
+
+.df2-canvas-edgebar {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: calc(100% - 16px);
+  padding: 4px;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+}
+
+.df2-canvas-edgebar .df2-canvas-icon-btn {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+}
+
+.df2-canvas-zoom-label select {
+  height: 28px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--df-text-primary);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-sm);
+}
+
+.df2-canvas[data-view="canvas"] .df2-canvas-properties {
+  display: none;
+}
+
+.df2-canvas[data-view="properties"] .df2-canvas-stage-wrap {
+  display: none;
+}
+
+.df2-canvas[data-view="split"] .df2-canvas-properties {
+  height: var(--df-split-h, 168px);
+  max-height: var(--df-split-h, 168px);
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.df2-canvas[data-view="properties"] .df2-canvas-properties {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 0;
+}
+
+.df2-canvas-properties {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--df-surface);
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-md);
+  overflow: hidden;
+}
+
+.df2-canvas-split {
+  height: 8px;
+  flex: 0 0 8px;
+  cursor: ns-resize;
+  background: var(--df-border);
+}
+
+.df2-canvas-split:focus-visible {
+  outline: 2px solid var(--df-brand-tile);
+  outline-offset: -2px;
+}
+
+.df2-canvas-prop-head,
+.df2-canvas-preview-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--df-space-2);
+  flex-wrap: wrap;
+  padding: 4px var(--df-space-2);
+}
+
+.df2-canvas-prop-row {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.df2-canvas-tab-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 0 148px;
+  padding: var(--df-space-2);
+  border-right: 1px solid var(--df-border);
+  overflow: auto;
+}
+
+.df2-canvas-tab-rail button,
+.df2-canvas-preview-tools .df2-canvas-tabs button {
+  text-align: left;
+  font: inherit;
+  font-size: 13px;
+  color: var(--df-text-primary);
+  background: transparent;
+  border: 0;
+  border-radius: var(--df-radius-sm);
+  min-height: 28px;
+  padding: 0 var(--df-space-2);
+  cursor: pointer;
+}
+
+.df2-canvas-tab-rail button[aria-selected="true"],
+.df2-canvas-preview-tools .df2-canvas-tabs button[aria-selected="true"] {
+  background: var(--df-surface-muted);
+  box-shadow: inset 3px 0 0 var(--df-brand-tile);
+}
+
+.df2-canvas-preview-tools .df2-canvas-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.df2-canvas-properties .df2-canvas-inspector {
+  width: auto;
+  flex: 1 1 auto;
+  border: 0;
+  border-radius: 0;
+  max-height: none;
+  overflow: auto;
+}
+
+.df2-canvas-properties .df2-canvas-dock {
+  max-height: none;
+  border: 0;
+  border-top: 1px solid var(--df-border);
+  border-radius: 0;
+}
+
+.df2-canvas-field-list {
+  list-style: none;
+  margin: var(--df-space-2) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.df2-canvas-field-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--df-space-2);
+  font-size: 13px;
+  color: var(--df-text-primary);
+}
+
+.df2-canvas-compare {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--df-space-2);
+}
+
+.df2-canvas-compare caption {
+  text-align: left;
+  font-size: 13px;
+  font-weight: var(--df-fw-semibold);
+  color: var(--df-text-primary);
+}
+
+.df2-canvas-status {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  color: var(--df-brand-text);
+}
+
+.df2-canvas-status.is-error {
+  color: var(--df-danger);
+}
+
+.df2-canvas-status-count {
+  position: absolute;
+  top: -6px;
+  right: -8px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--df-danger);
+  color: var(--df-surface);
+  font-size: 12px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.df2-canvas-insert {
+  position: absolute;
+  right: -11px;
+  top: 50%;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 1px solid var(--df-border-strong);
+  border-radius: 11px;
+  background: var(--df-surface);
+  color: var(--df-brand-text);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.df2-canvas-node:hover .df2-canvas-insert,
+.df2-canvas-node:focus-within .df2-canvas-insert,
+.df2-canvas-insert:focus-visible {
+  opacity: 1;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .df2-canvas .react-flow__edge-path,
   .df2-canvas-node {
     transition: none;
+  }
+}
+
+@media (max-width: 767px) {
+  .df2-canvas-split,
+  .df2-canvas-prop-head {
+    display: none;
+  }
+
+  .df2-canvas[data-view="split"] .df2-canvas-properties,
+  .df2-canvas[data-view="properties"] .df2-canvas-properties {
+    height: 4.5rem;
+    max-height: 4.5rem;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .df2-canvas-properties .df2-canvas-dock.is-collapsed {
+    flex: 0 0 48px;
+    height: 48px;
+    max-height: 48px;
+    min-height: 0;
   }
 }

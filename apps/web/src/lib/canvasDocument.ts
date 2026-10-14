@@ -10,7 +10,7 @@ import {
   iconFor,
   nodeStatus,
   shortName,
-  streamPorts,
+  stepPorts,
   stripeFor,
   type CanvasPort,
   type NodeStatus,
@@ -119,7 +119,7 @@ export function stepsToFlow(
       icon: iconFor(step.op, family),
       stripe: stripeFor(family),
       status: nodeStatus({ disabled, dimmed: otherTable, running: runningIndex === index }),
-      ports: streamPorts(),
+      ports: stepPorts(step.op),
       family,
       category: categoryLabel(family),
       dimmed: otherTable,
@@ -251,9 +251,17 @@ export function insertIndexAtPoint(stepCount: number, point: FlowPoint, position
   return Math.max(0, Math.min(stepCount, index));
 }
 
-/** Readable card size. Below this, fit pans instead of shrinking the type. */
-export const FIT_MIN_ZOOM = 1;
-export const FIT_MAX_ZOOM = 1.35;
+/** Fit will not shrink a card below this. The operator pans the rest. */
+export const FIT_MIN_ZOOM = 0.75;
+export const FIT_MAX_ZOOM = 1.5;
+/** The zoom menu can go wider than fit, from half size to 150%. */
+export const ZOOM_MIN = 0.5;
+export const ZOOM_MAX = 1.5;
+
+/** Links on one row stay straight. A change in row uses a rounded orthogonal path. */
+export function edgeRoute(sourceY: number, targetY: number): "straight" | "smoothstep" {
+  return Math.abs(sourceY - targetY) < 36 ? "straight" : "smoothstep";
+}
 export const FIT_PAD = 28;
 
 /**
@@ -437,7 +445,7 @@ export function chainDocument(steps: ShapeStepWire[]): CanvasGraphDocument {
   const nodes = steps.map((step, index) => ({
     id: stepNodeId(index),
     op: step.op,
-    ports: streamPorts(),
+    ports: stepPorts(step.op),
     step,
   }));
   const edges: GraphEdgeRecord[] = [];

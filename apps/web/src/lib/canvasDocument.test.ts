@@ -8,6 +8,7 @@ import {
   documentKind,
   stepExpressionIssues,
   draftWithDefaults,
+  edgeRoute,
   viewportForChain,
   executableRecipe,
   insertIndexAtPoint,
@@ -204,13 +205,18 @@ describe("canvas document", () => {
 });
 
 describe("readable fit and columns still on the row", () => {
-  it("keeps a 248px card at zoom 1 and pans when the chain is wider than the stage", () => {
+  it("keeps fit at or above 0.75 and pans when the chain is wider than the stage", () => {
     const one = viewportForChain({ x: 24, y: 28, width: 248, height: 160 }, 900, 500);
-    assert.ok(one.zoom >= 1);
-    assert.ok(one.zoom <= 1.35);
+    assert.ok(one.zoom >= 0.75);
+    assert.ok(one.zoom <= 1.5);
     const chain = viewportForChain({ x: 24, y: 28, width: 888, height: 160 }, 640, 420);
-    assert.equal(chain.zoom, 1);
+    assert.equal(chain.zoom, 0.75);
     assert.ok(chain.x <= 28);
+  });
+
+  it("draws a straight edge on one row and a rounded orthogonal edge across rows", () => {
+    assert.equal(edgeRoute(28, 40), "straight");
+    assert.equal(edgeRoute(28, 180), "smoothstep");
   });
 
   it("hides a column an earlier step dropped, and keeps one a later step still needs", () => {

@@ -9,6 +9,7 @@ import {
   setDocumentHash,
   specsByFamily,
   statusLabel,
+  stepPorts,
 } from "./canvasRegistry.js";
 import type { ShapeCatalog, ShapeOperation } from "./shape.js";
 
@@ -116,6 +117,13 @@ describe("canvas node registry", () => {
     });
     assert.equal(again, hash);
     assert.equal(FALLBACK_CANVAS_NODES.some((node) => node.op === "router"), true);
+  });
+
+  it("gives Divert a kept port and a diverted port", () => {
+    const divert = stepPorts("divert_rows").filter((port) => port.kind === "row");
+    assert.deepEqual(divert.map((port) => port.label), ["Input", "Kept", "Diverted"]);
+    const stream = stepPorts("trim").filter((port) => port.kind === "row");
+    assert.deepEqual(stream.map((port) => port.label), ["Input", "Output"]);
   });
 
   it("names a failing node Invalid and a clean node Valid", () => {

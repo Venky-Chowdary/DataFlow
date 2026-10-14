@@ -26,6 +26,7 @@ import {
   registryFromCatalog,
   runnableSpecs,
   setDocumentHash,
+  shortName,
   specByOp,
   specsByFamily,
   statusLabel,
@@ -99,8 +100,26 @@ const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "Ctrl+Shift+Z", action: "Redo" },
   { keys: "Ctrl+K", action: "Command palette" },
   { keys: "Ctrl+Shift+F", action: "Zoom to fit" },
-  { keys: "Ctrl+Shift+L", action: "Arrange All" },
+  { keys: "Ctrl+Shift+L", action: "Auto-arrange" },
 ];
+
+const SPLIT_KEY = "df.canvasSplit";
+type CanvasView = "canvas" | "split" | "properties";
+type PropertyTab = "general" | "fields" | "op" | "preview";
+type PreviewTab = "data" | "compare" | "schema" | "issues";
+
+function readSplit(): { mode: CanvasView; height: number } {
+  try {
+    const raw = localStorage.getItem(SPLIT_KEY);
+    if (!raw) return { mode: "split", height: 168 };
+    const parsed = JSON.parse(raw) as { mode?: string; height?: number };
+    const mode: CanvasView = parsed.mode === "canvas" || parsed.mode === "properties" || parsed.mode === "split" ? parsed.mode : "split";
+    const height = typeof parsed.height === "number" ? Math.min(420, Math.max(96, parsed.height)) : 168;
+    return { mode, height };
+  } catch {
+    return { mode: "split", height: 168 };
+  }
+}
 
 /**
  * Row-local recipe as an ordered chain. Set operations stay plan cards and
@@ -161,16 +180,33 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewMax, setPreviewMax] = useState(false);
   const [paletteDock, setPaletteDock] = useState(false);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
   const [validationOpen, setValidationOpen] = useState(false);
   const [overview, setOverview] = useState(true);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [viewMode, setViewMode] = useState<CanvasView>(() => readSplit().mode);
+  const [propertiesHeight, setPropertiesHeight] = useState(() => readSplit().height);
+  const [propertyTab, setPropertyTab] = useState<PropertyTab>("op");
+  const [previewTab, setPreviewTab] = useState<PreviewTab>("data");
+  const [previewFilter, setPreviewFilter] = useState("");
+  const [outputGroup, setOutputGroup] = useState<"kept" | "diverted">("kept");
+  const [edgeLabels, setEdgeLabels] = useState<Record<string, string>>({});
+  const insertAt = useRef<number | null>(null);
   const [focusMode, setFocusMode] = useState(false);
   const [zoomCommand, setZoomCommand] = useState<{ id: number; delta: number; absolute?: number }>({ id: 0, delta: 0 });
   const [centerCommand, setCenterCommand] = useState({ id: 0, index: 0 });
   const [zoomLevel, setZoomLevel] = useState(1);
   const [fitTick, setFitTick] = useState(0);
   const [runningIndex, setRunningIndex] = useState<number | null>(null);
-  const [nodePreview, setNodePreview] = useState<{ index: number; rows: Record<string, unknown>[]; note: string } | null>(null);
+  const [nodePreview, setNodePreview] = useState<{
+    index: number;
+    rows: Record<string, unknown>[];
+    before: Record<string, unknown>[];
+    diverted: Record<string, unknown>[];
+    columns: string[];
+    types: Record<string, string>;
+    note: string;
+    disabled: boolean;
+  } | null>(null);
   const expressionGen = useRef(0);
   const draftIndex = useRef<number | null>(null);
   const echoStep = useRef<number | null | undefined>(undefined);
@@ -257,12 +293,14 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       setExpressionError("");
       setFormError("");
     }
-    setInspectorOpen(true);
+    setViewMode((mode) => (mode === "canvas" ? "split" : mode));
   };
 
   const revealStep = (index: number) => {
     if (!stepsRef.current[index]) return;
     loadStep(index);
+    setViewMode((mode) => (mode === "canvas" ? "split" : mode));
+    setPropertyTab("op");
     setCenterCommand((current) => ({ id: current.id + 1, index }));
     focusInspector();
   };
@@ -286,7 +324,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
 
   const beginAdd = (op: string, atIndex = steps.length, atPoint?: FlowPoint) => {
     if (!canEdit) return;
-    setInspectorOpen(true);
+    setViewMode((mode) => (mode === "canvas" ? "split" : mode));
     const spec = specByOp(registry, op);
     if (spec && !spec.executable) {
       setFormError(spec.reason);
@@ -485,6 +523,8 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   };
 
   const zoomPercent = Math.round(zoomLevel * 100);
+  const zoomStops = [50, 75, 100, 125, 150];
+  const zoomChoice = zoomStops.reduce((best, stop) => (Math.abs(stop - zoomPercent) < Math.abs(best - zoomPercent) ? stop : best), 100);
 
   const liveIssues = useMemo(() => {
     const local = stepExpressionIssues(steps, catalog?.operations ?? [], sourceNames);
@@ -532,40 +572,116 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const recipeInvalid = liveIssues.length > 0;
   const stepIssue = selected != null ? liveIssues.find((issue) => issue.index === selected) : undefined;
   const inspectorAlert = formError || expressionError || stepIssue?.message || "";
-  const dockReserve = (previewMax ? 0 : (previewOpen ? dockHeight : 48)) + 8;
+  const activePreview = selected != null && nodePreview?.index === selected ? nodePreview : null;
+  const groupRows = activePreview?.disabled
+    ? []
+    : outputGroup === "diverted"
+      ? (activePreview?.diverted ?? [])
+      : (activePreview?.rows?.length ? activePreview.rows : previewRows);
+  const groupColumns = activePreview?.columns?.length ? activePreview.columns : previewColumns;
+  const previewNeedle = previewFilter.trim().toLowerCase();
+  const filteredPreview = previewNeedle
+    ? groupRows.filter((row) => Object.values(row).some((value) => cellText(value).toLowerCase().includes(previewNeedle)))
+    : groupRows;
+  const previewPopulation = Math.max(sampleRows.length, groupRows.length);
 
   const previewNode = async (index: number) => {
-    const step = steps[index];
+    const step = stepsRef.current[index];
     if (!step) return;
+    const upstream = liveIssues.find((issue) => issue.index >= 0 && issue.index < index);
+    if (upstream) {
+      setNodePreview({
+        index,
+        rows: [],
+        before: [],
+        diverted: [],
+        columns: [],
+        types: {},
+        disabled: true,
+        note: `Preview is off because step ${upstream.index + 1} is invalid. ${upstream.message}`,
+      });
+      return;
+    }
     if (sampleRows.length === 0) {
-      setNodePreview({ index, rows: [], note: "No sampled rows to preview through this step." });
+      setNodePreview({
+        index,
+        rows: [],
+        before: [],
+        diverted: [],
+        columns: [],
+        types: {},
+        disabled: true,
+        note: "No sampled rows to preview through this step.",
+      });
       return;
     }
     setRunningIndex(index);
-    setNodePreview({ index, rows: [], note: "Previewing this step…" });
+    setNodePreview({
+      index,
+      rows: [],
+      before: [],
+      diverted: [],
+      columns: [],
+      types: {},
+      disabled: false,
+      note: "Previewing this step…",
+    });
     try {
       const body = await previewShapeRecipe({
-        recipe: { steps: steps.slice(0, index + 1) },
-        sample_rows: sampleRows.slice(0, 12),
-        source_columns: names,
+        recipe: { steps: stepsRef.current.slice(0, index + 1) },
+        sample_rows: sampleRows.slice(0, 50),
+        source_columns: sourceNames,
         focus_table: activeTable,
       });
       const rows = Array.isArray(body.after) ? body.after : [];
+      const before = Array.isArray(body.before) ? body.before : [];
+      const diverted = Array.isArray(body.effect?.diverted_samples) ? body.effect.diverted_samples : [];
+      const labels: Record<string, string> = {};
+      for (const effect of body.effect?.steps ?? []) {
+        const from = effect.step - 1;
+        if (from >= 0) labels[`order-${from}`] = String(effect.rows_out);
+      }
+      setEdgeLabels(labels);
+      const columns = rows[0] ? Object.keys(rows[0]) : before[0] ? Object.keys(before[0]) : [];
       setNodePreview({
         index,
         rows,
-        note: body.refusal?.message || `Through step ${index + 1}. This sample is not the population.`,
+        before,
+        diverted,
+        columns,
+        types: body.column_types ?? {},
+        disabled: false,
+        note: body.refusal?.message || `Through step ${index + 1}. Showing ${Math.min(50, rows.length)} of ${sampleRows.length} rows. This sample is not the population.`,
       });
     } catch (err) {
       setNodePreview({
         index,
         rows: [],
+        before: [],
+        diverted: [],
+        columns: [],
+        types: {},
+        disabled: false,
         note: err instanceof Error ? err.message : "Preview failed.",
       });
     } finally {
       setRunningIndex(null);
     }
   };
+
+  const recipeKey = useMemo(
+    () => steps.map((step) => `${step.op}:${step.column ?? ""}:${JSON.stringify(step.options ?? {})}`).join("|"),
+    [steps],
+  );
+  useEffect(() => {
+    if (selected == null) return;
+    void previewNode(selected);
+    // previewNode reads the latest steps and issues. The key is the recipe.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selected, recipeKey]);
+  useEffect(() => {
+    localStorage.setItem(SPLIT_KEY, JSON.stringify({ mode: viewMode, height: propertiesHeight }));
+  }, [propertiesHeight, viewMode]);
 
   const pending = useMemo<PendingStepModel | null>(() => {
     if (pendingAt == null || !selectedOperation || selected != null) return null;
@@ -592,6 +708,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   return (
     <div
       className="df2-studio-next df2-canvas"
+      data-view={viewMode}
       data-testid="transform-canvas"
       data-document={documentKind(graph)}
       data-set-hash={setDocumentHash(setDocumentOf(graph, setOps))}
@@ -609,57 +726,29 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           </p>
         </div>
         <div className="df2-canvas-head-actions">
-          <div className="df2-canvas-tool-group">
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setRulesOpen(true)}>
-              Rules and suggestions
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setTemplatesOpen(true)}>
-              Templates
-            </button>
-          </div>
-          <div className="df2-canvas-tool-group">
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={paletteDock} onClick={() => setPaletteDock((open) => !open)}>
-              Palette
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={inspectorOpen} onClick={() => setInspectorOpen((open) => !open)}>
-              Properties
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={validationOpen} onClick={() => setValidationOpen((open) => !open)}>
-              Validation{liveIssues.length ? ` (${liveIssues.length})` : ""}
-            </button>
-          </div>
-          <div className="df2-canvas-tool-group">
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => applyStack("undo")} aria-label="Undo" title="Undo">
-              <DtIcon name="arrow-left" size={16} chrome="product" />
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => applyStack("redo")} aria-label="Redo" title="Redo">
-              <DtIcon name="arrow-right" size={16} chrome="product" />
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setFitTick((tick) => tick + 1)} aria-label="Fit view" title="Fit view">
-              <DtIcon name="expand" size={16} chrome="product" />
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => zoomBy(0.15)} aria-label="Zoom in" title="Zoom in">
-              <DtIcon name="plus" size={16} chrome="product" />
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => zoomBy(-0.15)} aria-label="Zoom out" title="Zoom out">
-              <DtIcon name="minus" size={16} chrome="product" />
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-zoom-btn" onClick={() => zoomTo(1)} aria-label="Zoom to 100%" title="Zoom to 100%">
-              {zoomPercent}%
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setFocusMode((on) => !on)} aria-label={focusMode ? "Exit focus" : "Focus canvas"} title={focusMode ? "Exit focus" : "Focus canvas"}>
-              <DtIcon name={focusMode ? "collapse" : "expand"} size={16} chrome="product" />
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={arrange} aria-label="Arrange All" title="Arrange All">
-              <DtIcon name="layers" size={16} chrome="product" />
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setOverview((on) => !on)} aria-label="Canvas overview" aria-pressed={overview} title="Canvas overview">
-              <DtIcon name="window" size={16} chrome="product" />
-            </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setHelpOpen(true)} aria-label="Keyboard shortcuts" title="Keyboard shortcuts">
-              <DtIcon name="menu" size={16} chrome="product" />
-            </button>
-          </div>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={validationOpen} onClick={() => setValidationOpen((open) => !open)}>
+            Issues{liveIssues.length ? ` (${liveIssues.length})` : ""}
+          </button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => { setValidationOpen(true); if (selected != null) void previewNode(selected); }}>
+            Validate
+          </button>
+          <button type="button" className="df2-btn df2-btn-sm" onClick={() => { setViewMode((mode) => (mode === "canvas" ? "split" : mode)); setPropertyTab("preview"); setPreviewOpen(true); onRunPreview(); if (selected != null) void previewNode(selected); }}>
+            Run preview
+          </button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="More actions" aria-expanded={menuOpen} title="More actions" onClick={() => setMenuOpen((open) => !open)}>
+            <DtIcon name="menu" size={16} chrome="product" />
+          </button>
+          {menuOpen && (
+            <div className="df2-canvas-menu" role="menu">
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setRulesOpen(true); }}>Rules and suggestions</button>
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setTemplatesOpen(true); }}>Templates</button>
+              <button type="button" role="menuitem" aria-expanded={paletteDock} onClick={() => { setMenuOpen(false); setPaletteDock((open) => !open); }}>Palette</button>
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setViewMode((mode) => (mode === "split" ? "canvas" : "split")); }}>Properties</button>
+              <button type="button" role="menuitem" aria-pressed={overview} onClick={() => { setMenuOpen(false); setOverview((on) => !on); }}>Overview</button>
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setFocusMode((on) => !on); }}>{focusMode ? "Exit focus" : "Focus canvas"}</button>
+              <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setHelpOpen(true); }}>Keyboard shortcuts</button>
+            </div>
+          )}
         </div>
       </header>
       {syncRefused && (
@@ -667,7 +756,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       )}
       {!canPlan && <p className="df2-label-hint">{disabledReason}</p>}
 
-      <div className="df2-canvas-body">
+      <div className="df2-canvas-body" style={{ ["--df-split-h" as string]: `${viewMode === "split" ? propertiesHeight : 0}px` }}>
         <aside className={paletteDock ? "df2-canvas-rail" : "df2-canvas-rail is-collapsed"} aria-label="Operations">
           <input
             ref={filterRef}
@@ -699,7 +788,11 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                         event.dataTransfer.setData("application/x-df-op", operation.op);
                         event.dataTransfer.effectAllowed = "copy";
                       }}
-                      onClick={() => beginAdd(operation.op)}
+                      onClick={() => {
+                        const at = insertAt.current ?? steps.length;
+                        insertAt.current = null;
+                        beginAdd(operation.op, at);
+                      }}
                     >
                       <span className="df2-canvas-op-icon" aria-hidden>
                         <DtIcon name={operation.icon} size={18} chrome="product" />
@@ -805,7 +898,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           )}
         </aside>
 
-        <div className="df2-canvas-stage-wrap" style={{ ["--df-dock-reserve" as string]: `${dockReserve}px` }}>
+        <div className="df2-canvas-stage-wrap">
           <Suspense fallback={<p className="df2-label-hint" role="status" aria-busy="true">Loading the canvas…</p>}>
             <TransformFlow
               nodes={flow.nodes}
@@ -834,36 +927,58 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                 setLinkNote(message);
               }}
               onDropOp={(op, at, index) => beginAdd(op, index, at)}
+              onInsert={(afterIndex) => {
+                insertAt.current = afterIndex + 1;
+                setPaletteDock(true);
+              }}
+              onDeleteEdge={(targetIndex) => {
+                if (!canEdit || !steps[targetIndex]) return;
+                commit(removeStep(steps, targetIndex));
+                if (selected === targetIndex) chooseStep(null);
+              }}
+              edgeLabels={edgeLabels}
               onPreviewNode={(index) => void previewNode(index)}
               fitTick={fitTick}
               overview={overview}
             />
           </Suspense>
+          <div className="df2-canvas-edgebar" role="toolbar" aria-label="Canvas tools">
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="Auto-arrange" title="Auto-arrange" onClick={arrange}>
+              <DtIcon name="layers" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="Delete" title="Delete" disabled={selected == null || !canEdit} onClick={() => { if (selected == null || !canEdit) return; commit(removeStep(steps, selected)); chooseStep(null); }}>
+              <DtIcon name="trash" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="Undo" title="Undo" onClick={() => applyStack("undo")}>
+              <DtIcon name="arrow-left" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="Redo" title="Redo" onClick={() => applyStack("redo")}>
+              <DtIcon name="arrow-right" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="Zoom out" title="Zoom out" onClick={() => zoomBy(-0.1)}>
+              <DtIcon name="minus" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="Zoom in" title="Zoom in" onClick={() => zoomBy(0.1)}>
+              <DtIcon name="plus" size={16} chrome="product" />
+            </button>
+            <label className="df2-canvas-zoom-label">
+              <span className="df2-sr-only">Zoom percent</span>
+              <select aria-label="Zoom percent" value={String(zoomChoice)} onChange={(event) => zoomTo(Number(event.target.value) / 100)}>
+                {zoomStops.map((stop) => <option key={stop} value={stop}>{stop}%</option>)}
+              </select>
+            </label>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => zoomTo(1)}>100%</button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="Fit" title="Fit" onClick={() => setFitTick((tick) => tick + 1)}>
+              <DtIcon name="expand" size={16} chrome="product" />
+            </button>
+          </div>
           {linkNote && <p className="df2-canvas-link-note" role="status">{linkNote}</p>}
           {linkRefusal && <p className="df2-canvas-link-refusal" role="alert">{linkRefusal}</p>}
-          <PreviewDock
-            height={dockHeight}
-            onHeight={setDockHeight}
-            open={previewOpen}
-            onOpen={setPreviewOpen}
-            maximized={previewMax}
-            onMaximize={() => {
-              setPreviewMax((value) => {
-                if (!value) setPreviewOpen(true);
-                return !value;
-              });
-            }}
-            status={previewStatus || previewBanner}
-            effect={effectSummary}
-            columns={previewColumns}
-            rows={previewRows}
-            onRunPreview={onRunPreview}
-          />
         </div>
 
         {validationOpen && (
-          <div className="df2-canvas-validation" role="region" aria-label="Validation">
-            <h4>Validation</h4>
+          <div className="df2-canvas-validation" role="region" aria-label="Issues">
+            <h4>Issues</h4>
             {validationRows.length === 0 ? (
               <p className="df2-label-hint">No transformations on the canvas.</p>
             ) : (
@@ -879,7 +994,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                           revealStep(row.index);
                           return;
                         }
-                        setInspectorOpen(true);
+                        setViewMode((mode) => (mode === "canvas" ? "split" : mode));
                         focusInspector();
                       }}
                     >
@@ -902,82 +1017,206 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           </div>
         )}
 
-        <aside className={inspectorOpen ? "df2-canvas-inspector" : "df2-canvas-inspector is-collapsed"} id="canvas-inspector" tabIndex={-1} aria-label="Step inspector">
-          <h4>{selected != null ? "Edit step" : draftOp ? "New step" : "Properties"}</h4>
-          {inspectorAlert && <p className="df2-qw-schema-error" role="alert">{inspectorAlert}</p>}
-          {!selectedOperation && <p className="df2-label-hint">Choose an operation, or select a step.</p>}
-          {selectedOperation && (
-            <>
-              <p className="df2-label-hint">{selectedOperation.summary}</p>
-              {selectedOperation.needs_column && (
-                <StudioPicker
-                  id="canvas-column"
-                  label="Column"
-                  value={draftColumn}
-                  options={names.map((name) => ({ value: name, label: name }))}
-                  placeholder="Pick a column…"
-                  disabled={!canEdit}
-                  required
-                  onChange={setDraftColumn}
-                />
-              )}
-              <ShapeStepFields
-                operation={selectedOperation}
-                columns={names}
-                options={draftOptions}
-                onChange={setDraftOptions}
-                onCommit={commitDraft}
-                canPlan={canEdit}
-                expressionError={expressionError}
-                onExpressionChange={(text) => void validateExpression(text)}
-                idPrefix="canvas-opt"
-                blankRequired={blankRequired}
-                conditionBuilder
-              />
-              <label className="df2-label" htmlFor="canvas-label">
-                Step name
-                <input
-                  id="canvas-label"
-                  className="df2-input"
-                  value={draftLabel}
-                  disabled={!canEdit}
-                  onChange={(event) => setDraftLabel(event.target.value)}
-                  onBlur={commitDraft}
-                />
-              </label>
-              <div className="df2-canvas-inspector-actions">
-                {selected != null && (
-                  <button
-                    type="button"
-                    className="df2-btn df2-btn-ghost df2-btn-sm"
-                    disabled={runningIndex != null}
-                    onClick={() => void previewNode(selected)}
-                  >
-                    Preview this step
-                  </button>
-                )}
-                <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" disabled={!canEdit} onClick={commitDraft}>
-                  {selected != null ? "Update step" : "Add step"}
-                </button>
-                {pending && (
-                  <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={clearPending}>
-                    Discard
-                  </button>
-                )}
-              </div>
-              {nodePreview && selected === nodePreview.index && (
-                <div data-testid="canvas-node-preview">
-                  <p className="df2-label-hint">{nodePreview.note}</p>
-                  {nodePreview.rows[0] && (
-                    <p className="df2-canvas-node-summary">
-                      {Object.keys(nodePreview.rows[0]).slice(0, 4).join(", ")} · {nodePreview.rows.length} row(s)
-                    </p>
-                  )}
-                </div>
-              )}
-            </>
+        <section className="df2-canvas-properties" aria-label="Properties">
+          {viewMode === "split" && (
+            <div
+              className="df2-canvas-split"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize properties"
+              aria-valuemin={96}
+              aria-valuemax={420}
+              aria-valuenow={propertiesHeight}
+              tabIndex={0}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                const startY = event.clientY;
+                const startH = propertiesHeight;
+                const move = (next: PointerEvent) => {
+                  setPropertiesHeight(Math.min(420, Math.max(96, startH + (startY - next.clientY))));
+                };
+                const up = () => {
+                  window.removeEventListener("pointermove", move);
+                  window.removeEventListener("pointerup", up);
+                };
+                window.addEventListener("pointermove", move);
+                window.addEventListener("pointerup", up);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowUp") setPropertiesHeight((height) => Math.min(420, height + 24));
+                if (event.key === "ArrowDown") setPropertiesHeight((height) => Math.max(96, height - 24));
+              }}
+            />
           )}
-        </aside>
+          <div className="df2-canvas-prop-head">
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-pressed={viewMode === "canvas"} onClick={() => setViewMode("canvas")}>Canvas only</button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-pressed={viewMode === "split"} onClick={() => { setPreviewMax(false); setViewMode("split"); }}>Split</button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-pressed={viewMode === "properties"} onClick={() => setViewMode("properties")}>Properties only</button>
+          </div>
+          <div className="df2-canvas-prop-row">
+            <nav className="df2-canvas-tab-rail" aria-label="Step properties">
+              <button type="button" aria-selected={propertyTab === "general"} onClick={() => setPropertyTab("general")}>General</button>
+              <button type="button" aria-selected={propertyTab === "fields"} onClick={() => setPropertyTab("fields")}>Incoming Fields</button>
+              <button type="button" aria-selected={propertyTab === "op"} onClick={() => setPropertyTab("op")}>{selectedOperation ? shortName(selectedOperation.op, selectedOperation.summary) : "Step"}</button>
+              <button type="button" aria-selected={propertyTab === "preview"} onClick={() => { setPropertyTab("preview"); setPreviewOpen(true); }}>Preview</button>
+            </nav>
+            <div className="df2-canvas-inspector" id="canvas-inspector" tabIndex={-1} aria-label="Step inspector">
+              {propertyTab === "general" && (
+                <>
+                  <h4>{selected != null ? "Edit step" : draftOp ? "New step" : "Properties"}</h4>
+                  {inspectorAlert && <p className="df2-qw-schema-error" role="alert">{inspectorAlert}</p>}
+                  {!selectedOperation && <p className="df2-label-hint">Choose an operation, or select a step.</p>}
+                  {selectedOperation && <p className="df2-label-hint">{selectedOperation.summary}</p>}
+                  <label className="df2-label" htmlFor="canvas-on-error">
+                    When a row fails
+                    <select id="canvas-on-error" className="df2-input" value={draftPolicy} disabled={!canEdit} onChange={(event) => setDraftPolicy(event.target.value)}>
+                      {(catalog?.error_policies?.length ? catalog.error_policies : [{ value: "refuse", label: "Refuse the step" }]).map((entry) => (
+                        <option key={entry.value} value={entry.value}>{entry.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              )}
+              {propertyTab === "fields" && (
+                <>
+                  <h4>Incoming Fields</h4>
+                  {names.length === 0 ? <p className="df2-label-hint">No columns reach this step.</p> : (
+                    <ul className="df2-canvas-field-list">
+                      {names.map((name) => {
+                        const column = columns.find((item) => item.name === name);
+                        return <li key={name}><span>{name}</span><span>{column?.type || "text"}</span></li>;
+                      })}
+                    </ul>
+                  )}
+                </>
+              )}
+              {propertyTab === "op" && (
+                <>
+                  <h4>{selected != null ? "Edit step" : draftOp ? "New step" : "Properties"}</h4>
+                  {inspectorAlert && <p className="df2-qw-schema-error" role="alert">{inspectorAlert}</p>}
+                  {!selectedOperation && <p className="df2-label-hint">Choose an operation, or select a step.</p>}
+                  {selectedOperation && (
+                    <>
+                      <p className="df2-label-hint">{selectedOperation.summary}</p>
+                      {selectedOperation.needs_column && (
+                        <StudioPicker
+                          id="canvas-column"
+                          label="Column"
+                          value={draftColumn}
+                          options={names.map((name) => ({ value: name, label: name }))}
+                          placeholder="Pick a column…"
+                          disabled={!canEdit}
+                          required
+                          onChange={setDraftColumn}
+                        />
+                      )}
+                      <ShapeStepFields
+                        operation={selectedOperation}
+                        columns={names}
+                        options={draftOptions}
+                        onChange={setDraftOptions}
+                        onCommit={commitDraft}
+                        canPlan={canEdit}
+                        expressionError={expressionError}
+                        onExpressionChange={(text) => void validateExpression(text)}
+                        idPrefix="canvas-opt"
+                        blankRequired={blankRequired}
+                        conditionBuilder
+                      />
+                      <label className="df2-label" htmlFor="canvas-label">
+                        Step name
+                        <input
+                          id="canvas-label"
+                          className="df2-input"
+                          value={draftLabel}
+                          disabled={!canEdit}
+                          onChange={(event) => setDraftLabel(event.target.value)}
+                          onBlur={commitDraft}
+                        />
+                      </label>
+                      <div className="df2-canvas-inspector-actions">
+                        {selected != null && (
+                          <button
+                            type="button"
+                            className="df2-btn df2-btn-ghost df2-btn-sm"
+                            disabled={runningIndex != null}
+                            onClick={() => { setPreviewOpen(true); void previewNode(selected); }}
+                          >
+                            Preview this step
+                          </button>
+                        )}
+                        <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" disabled={!canEdit} onClick={commitDraft}>
+                          {selected != null ? "Update step" : "Add step"}
+                        </button>
+                        {pending && (
+                          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={clearPending}>
+                            Discard
+                          </button>
+                        )}
+                      </div>
+                      {nodePreview && selected === nodePreview.index && (
+                        <div data-testid="canvas-node-preview">
+                          <p className="df2-label-hint">{nodePreview.note}</p>
+                          {nodePreview.rows[0] && (
+                            <p className="df2-canvas-node-summary">
+                              {Object.keys(nodePreview.rows[0]).slice(0, 4).join(", ")} · {nodePreview.rows.length} row(s)
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </>
+              )}
+              {propertyTab === "preview" && (
+                <p className="df2-label-hint">The sample for the selected step is in the preview under this panel.</p>
+              )}
+            </div>
+          </div>
+          <PreviewDock
+            height={dockHeight}
+            onHeight={setDockHeight}
+            open={previewOpen}
+            onOpen={setPreviewOpen}
+            maximized={previewMax}
+            onMaximize={() => {
+              setPreviewMax((value) => {
+                const next = !value;
+                if (next) {
+                  setPreviewOpen(true);
+                  setPropertyTab("preview");
+                  setViewMode("properties");
+                } else {
+                  setViewMode("split");
+                }
+                return next;
+              });
+            }}
+            status={previewStatus || previewBanner || activePreview?.note || ""}
+            effect={activePreview?.note || effectSummary}
+            columns={groupColumns}
+            rows={filteredPreview.slice(0, 50)}
+            population={previewPopulation}
+            disabledReason={activePreview?.disabled ? activePreview.note : ""}
+            filter={previewFilter}
+            onFilter={setPreviewFilter}
+            previewTab={previewTab}
+            onPreviewTab={setPreviewTab}
+            outputGroup={outputGroup}
+            onOutputGroup={setOutputGroup}
+            showGroups={selectedWire?.op === "divert_rows"}
+            beforeRows={activePreview?.before ?? []}
+            types={activePreview?.types ?? {}}
+            issues={selected == null ? liveIssues.map((issue) => issue.message) : liveIssues.filter((issue) => issue.index === selected).map((issue) => issue.message)}
+            onRunPreview={() => {
+              setPreviewOpen(true);
+              setPropertyTab("preview");
+              onRunPreview();
+              if (selected != null) void previewNode(selected);
+            }}
+            onDownload={() => downloadCsv(groupColumns, filteredPreview.slice(0, 50))}
+          />
+        </section>
       </div>
 
       <Drawer
@@ -1046,6 +1285,20 @@ function cellText(value: unknown): string {
   return String(value);
 }
 
+function downloadCsv(columns: string[], rows: Record<string, unknown>[]) {
+  const line = (row: Record<string, unknown> | null, names: string[]) => names.map((name) => {
+    const text = row ? cellText(row[name]) : name;
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  }).join(",");
+  const blob = new Blob([[line(null, columns), ...rows.map((row) => line(row, columns))].join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "step-preview.csv";
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function PreviewDock({
   height,
   onHeight,
@@ -1057,7 +1310,20 @@ function PreviewDock({
   effect,
   columns,
   rows,
+  population,
+  disabledReason,
+  filter,
+  onFilter,
+  previewTab,
+  onPreviewTab,
+  outputGroup,
+  onOutputGroup,
+  showGroups,
+  beforeRows,
+  types,
+  issues,
   onRunPreview,
+  onDownload,
 }: {
   height: number;
   onHeight: (height: number) => void;
@@ -1069,9 +1335,22 @@ function PreviewDock({
   effect: string;
   columns: string[];
   rows: Record<string, unknown>[];
+  population: number;
+  disabledReason: string;
+  filter: string;
+  onFilter: (value: string) => void;
+  previewTab: PreviewTab;
+  onPreviewTab: (tab: PreviewTab) => void;
+  outputGroup: "kept" | "diverted";
+  onOutputGroup: (group: "kept" | "diverted") => void;
+  showGroups: boolean;
+  beforeRows: Record<string, unknown>[];
+  types: Record<string, string>;
+  issues: string[];
   onRunPreview: () => void;
+  onDownload: () => void;
 }) {
-  const shown = columns.slice(0, 6);
+  const shown = columns.slice(0, 8);
   const gripDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     event.preventDefault();
     const startY = event.clientY;
@@ -1087,6 +1366,7 @@ function PreviewDock({
     window.addEventListener("pointerup", up);
   };
   const expanded = open || maximized;
+  const compareColumns = shown.length > 0 ? shown : (beforeRows[0] ? Object.keys(beforeRows[0]).slice(0, 8) : []);
   return (
     <div
       className={`df2-canvas-dock${expanded ? "" : " is-collapsed"}${maximized ? " is-max" : ""}`}
@@ -1132,20 +1412,81 @@ function PreviewDock({
           </button>
           <button type="button" className="df2-btn df2-btn-sm" onClick={() => { onOpen(true); onRunPreview(); }}>Run preview</button>
         </div>
-        {expanded && effect && <p className="df2-label-hint">{effect}</p>}
-        {expanded && rows.length > 0 && shown.length > 0 && (
+        {expanded && (
+          <div className="df2-canvas-preview-tools">
+            <div className="df2-canvas-tabs" role="tablist" aria-label="Preview sections">
+              {([
+                ["data", "Data"],
+                ["compare", "Input vs Output"],
+                ["schema", "Schema"],
+                ["issues", "Issues"],
+              ] as const).map(([id, label]) => (
+                <button key={id} type="button" role="tab" aria-selected={previewTab === id} onClick={() => onPreviewTab(id)}>{label}</button>
+              ))}
+            </div>
+            <p className="df2-label-hint">{Math.min(50, rows.length)} of {population}</p>
+            {showGroups && (
+              <label className="df2-label">
+                Output group
+                <select className="df2-input df2-input-sm" aria-label="Output group" value={outputGroup} onChange={(event) => onOutputGroup(event.target.value === "diverted" ? "diverted" : "kept")}>
+                  <option value="kept">Kept</option>
+                  <option value="diverted">Diverted</option>
+                </select>
+              </label>
+            )}
+            <input className="df2-input df2-input-sm" value={filter} onChange={(event) => onFilter(event.target.value)} placeholder="Filter rows" aria-label="Filter preview rows" />
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onDownload}>Download CSV</button>
+          </div>
+        )}
+        {expanded && disabledReason && <p className="df2-label-hint" role="status">{disabledReason}</p>}
+        {expanded && !disabledReason && effect && previewTab === "data" && <p className="df2-label-hint">{effect}</p>}
+        {expanded && !disabledReason && previewTab === "data" && rows.length > 0 && shown.length > 0 && (
           <table>
             <thead>
               <tr>{shown.map((column) => <th key={column}>{column}</th>)}</tr>
             </thead>
             <tbody>
-              {rows.slice(0, 8).map((row, index) => (
+              {rows.map((row, index) => (
                 <tr key={index}>
                   {shown.map((column) => <td key={column}>{cellText(row[column])}</td>)}
                 </tr>
               ))}
             </tbody>
           </table>
+        )}
+        {expanded && !disabledReason && previewTab === "compare" && (
+          <div className="df2-canvas-compare">
+            <table>
+              <caption>Input</caption>
+              <thead><tr>{compareColumns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
+              <tbody>
+                {beforeRows.slice(0, 50).map((row, index) => (
+                  <tr key={index}>{compareColumns.map((column) => <td key={column}>{cellText(row[column])}</td>)}</tr>
+                ))}
+              </tbody>
+            </table>
+            <table>
+              <caption>Output</caption>
+              <thead><tr>{shown.map((column) => <th key={column}>{column}</th>)}</tr></thead>
+              <tbody>
+                {rows.map((row, index) => (
+                  <tr key={index}>{shown.map((column) => <td key={column}>{cellText(row[column])}</td>)}</tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {expanded && previewTab === "schema" && (
+          <ul className="df2-canvas-field-list">
+            {(shown.length > 0 ? shown : Object.keys(types)).map((column) => (
+              <li key={column}><span>{column}</span><span>{types[column] || "text"}</span></li>
+            ))}
+          </ul>
+        )}
+        {expanded && previewTab === "issues" && (
+          issues.length === 0
+            ? <p className="df2-label-hint">No issues on this step.</p>
+            : <ul className="df2-canvas-field-list">{issues.map((issue) => <li key={issue}>{issue}</li>)}</ul>
         )}
       </div>
     </div>

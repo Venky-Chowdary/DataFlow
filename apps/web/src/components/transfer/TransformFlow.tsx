@@ -2,7 +2,6 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type DragEvent }
 import {
   Background,
   BackgroundVariant,
-  Controls,
   Handle,
   MarkerType,
   MiniMap,
@@ -26,9 +25,10 @@ import { DtIcon } from "../DtIcon";
 import {
   classifyPortLink,
   insertIndexAtPoint,
-  FIT_MAX_ZOOM,
-  FIT_MIN_ZOOM,
   LAYOUT_PITCH,
+  ZOOM_MAX,
+  ZOOM_MIN,
+  edgeRoute,
   layoutFor,
   NODE_BODY,
   NODE_WIDTH,
@@ -44,6 +44,7 @@ import {
   iconFor,
   nodeStatus,
   shortName,
+  statusLabel,
   streamPorts,
   stripeFor,
   type CanvasPort,
@@ -72,6 +73,8 @@ export interface StudioNodeData extends Record<string, unknown> {
   changesRowCount: boolean;
   invalid: boolean;
   invalidReason: string;
+  issueCount: number;
+  onInsert: (index: number) => void;
 }
 
 const nodeTypes = { studio: StudioFlowNode };
@@ -126,6 +129,9 @@ interface TransformFlowProps {
   selectedIndex?: number | null;
   onZoom?: (zoom: number) => void;
   onReveal?: (index: number) => void;
+  onInsert?: (afterIndex: number) => void;
+  onDeleteEdge?: (targetIndex: number) => void;
+  edgeLabels?: Record<string, string>;
   overview?: boolean;
 }
 
@@ -165,6 +171,9 @@ function FlowCanvas({
   selectedIndex = null,
   onZoom,
   onReveal,
+  onInsert,
+  onDeleteEdge,
+  edgeLabels = {},
   overview = true,
 }: TransformFlowProps) {
   const { screenToFlowPosition, getViewport, setViewport, setCenter } = useReactFlow();
@@ -182,19 +191,25 @@ function FlowCanvas({
     });
   };
   const issuesByIndex = useMemo(() => {
-    const map = new Map<number, string>();
+    const map = new Map<number, { text: string; count: number }>();
     for (const issue of issues) {
       if (issue.index < 0 || !issue.message) continue;
       const previous = map.get(issue.index);
-      map.set(issue.index, previous ? `${previous} ${issue.message}` : issue.message);
+      map.set(issue.index, {
+        text: previous ? `${previous.text} ${issue.message}` : issue.message,
+        count: (previous?.count ?? 0) + 1,
+      });
     }
     return map;
   }, [issues]);
   const revealRef = useRef(onReveal ?? onSelect);
   revealRef.current = onReveal ?? onSelect;
   const reveal = (index: number) => revealRef.current(index);
+  const insertRef = useRef(onInsert);
+  insertRef.current = onInsert;
+  const insertAfter = (index: number) => insertRef.current?.(index);
   const built = useMemo(
-    () => buildNodes(nodes, pending, placed, expanded, toggleFields, onPreviewNode, reveal, issuesByIndex),
+    () => buildNodes(nodes, pending, placed, expanded, toggleFields, onPreviewNode, reveal, insertAfter, issuesByIndex),
     // reveal reads a ref, so a new parent callback must not rebuild the chain.
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [nodes, pending, placed, expanded, onPreviewNode, issuesByIndex],
@@ -236,7 +251,9 @@ function FlowCanvas({
     const bounds = boundsOf(nodesRef.current);
     if (!bounds) return;
     if (!explicit) autoFitted.current = true;
-    const viewport = viewportForChain(bounds, pane.w, pane.h);
+    const fitW = overview ? Math.max(40, pane.w - 176) : pane.w;
+    const fitH = overview ? Math.max(48, pane.h - 126) : pane.h;
+    const viewport = viewportForChain(bounds, fitW, fitH);
     fittedPane.current = { w: pane.w, h: pane.h };
     void setViewport(viewport, { duration: 0 });
   }, [fitTick, flowNodes.length, placed, paneWidth, paneHeight, setViewport]);
@@ -247,7 +264,7 @@ function FlowCanvas({
     const current = getViewport();
     const pane = paneRef.current;
     const requested = zoomCommand.absolute != null ? zoomCommand.absolute : current.zoom + zoomCommand.delta;
-    const zoom = Math.min(FIT_MAX_ZOOM, Math.max(FIT_MIN_ZOOM, Math.round(requested * 100) / 100));
+    const zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(requested * 100) / 100));
     const focusX = pane.w > 40 ? (pane.w / 2 - current.x) / current.zoom : 0;
     const focusY = pane.h > 48 ? (pane.h / 2 - current.y) / current.zoom : 0;
     void setViewport({
@@ -263,7 +280,7 @@ function FlowCanvas({
     const node = builtRef.current.find((item) => item.data.index === centerCommand.index)
       ?? nodesRef.current.find((item) => item.data.index === centerCommand.index);
     if (!node) return;
-    const zoom = Math.max(getViewport().zoom, FIT_MIN_ZOOM);
+    const zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, getViewport().zoom));
     void setCenter(
       node.position.x + NODE_WIDTH / 2,
       node.position.y + NODE_BODY / 2,
@@ -281,16 +298,26 @@ function FlowCanvas({
     return () => observer.disconnect();
   }, []);
 
-  const linkColor = theme === "dark" ? "#2dd4bf" : "#0f766e";
-  const flowEdges: Edge[] = edges.map((edge) => ({
-    id: edge.id,
-    source: edge.source,
-    target: edge.target,
-    sourceHandle: edge.sourcePort,
-    targetHandle: edge.targetPort,
-    type: "smoothstep",
-    markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: linkColor },
-  }));
+  const linkColor = "var(--df-text-muted)";
+  const flowEdges: Edge[] = edges.map((edge) => {
+    const source = flowNodes.find((node) => node.id === edge.source);
+    const target = flowNodes.find((node) => node.id === edge.target);
+    const sameRow = source && target ? edgeRoute(source.position.y, target.position.y) : "straight";
+    return {
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      sourceHandle: edge.sourcePort,
+      targetHandle: edge.targetPort,
+      type: sameRow,
+      selectable: true,
+      label: edgeLabels[edge.id] || undefined,
+      labelStyle: { fontSize: 12, fill: "var(--df-text-secondary)" },
+      labelBgStyle: { fill: "var(--df-surface)" },
+      labelBgPadding: [4, 2] as [number, number],
+      markerEnd: { type: MarkerType.Arrow, width: 12, height: 12, color: linkColor },
+    };
+  });
 
   const onNodesChange: OnNodesChange<Node<StudioNodeData>> = (changes) => {
     setFlowNodes((current) => applyNodeChanges(changes, current));
@@ -356,17 +383,24 @@ function FlowCanvas({
         fitView={false}
         connectionLineType={ConnectionLineType.SmoothStep}
         defaultEdgeOptions={{ type: "smoothstep" }}
-        minZoom={FIT_MIN_ZOOM}
-        maxZoom={FIT_MAX_ZOOM}
-        panOnScroll
-        zoomOnScroll={false}
+        minZoom={ZOOM_MIN}
+        maxZoom={ZOOM_MAX}
+        panOnScroll={false}
+        zoomOnScroll
         proOptions={{ hideAttribution: true }}
         nodesDraggable
         nodesConnectable
         elementsSelectable
         connectionRadius={28}
         colorMode={theme}
-        deleteKeyCode={null}
+        deleteKeyCode={["Delete", "Backspace"]}
+        onBeforeDelete={({ nodes: doomed }) => Promise.resolve(doomed.length === 0)}
+        onEdgesDelete={(removed) => {
+          for (const edge of removed) {
+            const index = stepIndex(edge.target);
+            if (index >= 0) onDeleteEdge?.(index);
+          }
+        }}
         isValidConnection={linkOk}
         onConnect={onConnect}
         onConnectEnd={onConnectEnd}
@@ -400,14 +434,13 @@ function FlowCanvas({
         }}
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1.5} color="var(--df-border-strong)" />
-        <Controls showInteractive={false} showFitView={false} className="df2-canvas-controls" />
         {overview && (
           <MiniMap
-            pannable={false}
-            zoomable={false}
-            ariaLabel="Canvas overview"
+            pannable
+            zoomable
+            ariaLabel="Overview"
             className="df2-canvas-minimap"
-            style={{ width: 96, height: 68 }}
+            style={{ width: 160, height: 110 }}
             bgColor="var(--df-surface)"
             nodeColor="var(--df-border-strong)"
             maskColor="color-mix(in srgb, var(--df-brand-tile) 16%, transparent)"
@@ -426,14 +459,16 @@ function buildNodes(
   onToggleFields: (id: string) => void,
   onPreview: (index: number) => void,
   onReveal: (index: number) => void,
-  issuesByIndex: ReadonlyMap<number, string>,
+  onInsert: (index: number) => void,
+  issuesByIndex: ReadonlyMap<number, { text: string; count: number }>,
 ): Node<StudioNodeData>[] {
   const shift = pending ? 1 : 0;
   const positions = layoutFor(nodes.length + shift);
   const flowNodes: Node<StudioNodeData>[] = nodes.map((node) => {
     const slot = pending && node.index >= pending.atIndex ? node.index + 1 : node.index;
     const anchored = placed && placed.index === node.index ? { x: placed.x, y: placed.y } : null;
-    const reason = issuesByIndex.get(node.index) ?? "";
+    const issue = issuesByIndex.get(node.index);
+    const reason = issue?.text ?? "";
     const invalid = Boolean(reason) && node.status !== "running";
     return {
       id: node.id,
@@ -459,6 +494,8 @@ function buildNodes(
         onToggleFields,
         onPreview,
         onReveal,
+        onInsert,
+        issueCount: invalid ? (issue?.count ?? 1) : 0,
         dimmed: node.dimmed,
         disabled: node.disabled,
         changesRowCount: node.changesRowCount,
@@ -498,6 +535,8 @@ function buildNodes(
         onToggleFields,
         onPreview,
         onReveal,
+        onInsert,
+        issueCount: pending.invalid ? 1 : 0,
         dimmed: false,
         disabled: false,
         changesRowCount: false,
@@ -525,7 +564,7 @@ function fieldPorts(ports: CanvasPort[], role: "in" | "out", expanded: boolean):
   return ports.filter((port) => port.role === role && port.kind === "field");
 }
 
-function StudioFlowNode({ id, data, selected }: NodeProps<Node<StudioNodeData>>) {
+function StudioFlowNode({ data, selected }: NodeProps<Node<StudioNodeData>>) {
   const className = [
     "df2-canvas-node",
     selected ? "is-selected" : "",
@@ -539,7 +578,6 @@ function StudioFlowNode({ id, data, selected }: NodeProps<Node<StudioNodeData>>)
   const fieldInputs = fieldPorts(data.ports, "in", data.expanded);
   const fieldOutputs = fieldPorts(data.ports, "out", data.expanded);
   const groups = Math.max(rowInputs.length, rowOutputs.length);
-  const fields = data.ports.filter((port) => port.kind === "field");
   const groupTop = (index: number) => `${GROUP_TOP + index * GROUP_PITCH}px`;
   const fieldTop = (index: number) => `${GROUP_TOP + groups * GROUP_PITCH + 36 + index * 18}px`;
   return (
@@ -574,6 +612,10 @@ function StudioFlowNode({ id, data, selected }: NodeProps<Node<StudioNodeData>>)
         <div className="df2-canvas-node-id">
           <p className="df2-canvas-node-title">{data.title}</p>
         </div>
+        <span className={`df2-canvas-status is-${data.status}`} aria-label={data.issueCount > 0 ? `${data.issueCount} errors` : statusLabel(data.status)}>
+          <DtIcon name={data.invalid ? "alert" : "check"} size={16} chrome="product" />
+          {data.issueCount > 0 && <span className="df2-canvas-status-count">{data.issueCount}</span>}
+        </span>
       </div>
       {groups > 0 && (
         <div className="df2-canvas-node-groups">
@@ -588,30 +630,20 @@ function StudioFlowNode({ id, data, selected }: NodeProps<Node<StudioNodeData>>)
       <div className="df2-canvas-node-body">
         <p className="df2-canvas-node-summary">{data.summary}</p>
         {data.invalid && <p className="df2-canvas-node-invalid">{data.invalidReason}</p>}
-        {data.index >= 0 && (
-          <div className="df2-canvas-node-tools" role="toolbar" aria-label={`Actions for ${data.title}`}>
-            <button type="button" className="df2-canvas-tool" onClick={() => data.onPreview(data.index)}>
-              Preview step
-            </button>
-            <button
-              type="button"
-              className="df2-canvas-tool"
-              aria-expanded={data.expanded}
-              aria-controls={`${id}-fields`}
-              onClick={() => data.onToggleFields(id)}
-            >
-              {data.expanded ? "Hide fields" : "Show fields"}
-            </button>
-          </div>
-        )}
-        {data.expanded && (
-          <ul className="df2-canvas-fields" id={`${id}-fields`}>
-            {fields.map((port) => (
-              <li key={port.id} className="df2-canvas-field">{port.role === "in" ? "In" : "Out"} · {port.label}</li>
-            ))}
-          </ul>
-        )}
       </div>
+      {data.index >= 0 && (
+        <button
+          type="button"
+          className="df2-canvas-insert nodrag nopan"
+          aria-label={`Insert after step ${data.index + 1}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            data.onInsert(data.index);
+          }}
+        >
+          <DtIcon name="plus" size={16} chrome="product" />
+        </button>
+      )}
       {rowOutputs.map((port, index) => (
         <Handle
           key={port.id}
