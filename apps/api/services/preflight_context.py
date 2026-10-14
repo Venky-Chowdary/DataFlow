@@ -168,6 +168,8 @@ class FilePreflightContext(PreflightContext):
                 empty_cells_as_null=self.empty_cells_as_null,
                 dest_nullability=self._dest_nullability(),
                 database_extract=database_extract,
+                file_row_quarantine=not database_extract
+                and str(getattr(self.plan.source, "kind", "") or "").lower() == "file",
             )
         except Exception as exc:
             _ps.logger.debug("dry-run sample failed: %s", exc, exc_info=exc)
@@ -240,6 +242,10 @@ class FilePreflightContext(PreflightContext):
                         getattr(self.plan.source, "kind", "") or ""
                     ).lower()
                     == "database",
+                    file_row_quarantine=str(
+                        getattr(self.plan.source, "kind", "") or ""
+                    ).lower()
+                    == "file",
                     proven_width_narrowings=self.proven_width_narrowings,
                 )
             if isinstance(report, dict):
@@ -404,6 +410,8 @@ class FilePreflightContext(PreflightContext):
             dest_nullability=self._dest_nullability(),
             database_extract=str(getattr(self.plan.source, "kind", "") or "").lower()
             == "database",
+            file_row_quarantine=str(getattr(self.plan.source, "kind", "") or "").lower()
+            == "file",
             source_measured_empty=bool(getattr(self, "source_measured_empty", False)),
             stream_contracts=list(
                 getattr(self.plan, "stream_contracts", None) or []

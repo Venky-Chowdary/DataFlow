@@ -510,6 +510,30 @@ def _document_text(value: Any, *, sort_keys: bool = False) -> str:
     return _document_text(_json_default(value), sort_keys=sort_keys)
 
 
+class JsonNullToken:
+    """JSON null as engine text ``null``, distinct from SQL NULL.
+
+    ``json.dumps`` has no other way to emit a bare null that is not Python
+    ``None``. ``_json_default`` returns ``None`` for this token, which the
+    encoder writes as ``null``.
+    """
+
+    def __repr__(self) -> str:
+        return "null"
+
+    def __str__(self) -> str:
+        return "null"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, JsonNullToken)
+
+    def __hash__(self) -> int:
+        return hash(JsonNullToken)
+
+
+JSON_NULL = JsonNullToken()
+
+
 def _json_default(value: Any) -> Any:
     """Fallback for values that the stdlib json encoder does not understand.
 
@@ -517,7 +541,7 @@ def _json_default(value: Any) -> Any:
     resolves numpy/pandas scalars, boto3 Binary, bson ObjectId/Decimal128,
     UUID, bytes, datetime, Decimal, and containers.
     """
-    if value is None:
+    if value is None or isinstance(value, JsonNullToken):
         return None
 
     # Missing-like values (pd.NA, np.nan, etc.) where value != value.
@@ -741,7 +765,8 @@ def sanitize_json_value(value: Any, *, refuse_nonfinite: bool = True) -> Any:
     must quarantine, never invent JSON null). Pass ``refuse_nonfinite=False``
     for read/display surfaces that need a null placeholder.
     """
-    if value is None:
+    if value is None or isinstance(value, JsonNullToken):
+        # JSON null encodes as bare null. SQL NULL is omitted before sanitize.
         return None
     if is_missing_sentinel(value):
         if refuse_nonfinite:

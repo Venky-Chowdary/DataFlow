@@ -124,6 +124,22 @@ def test_dry_run_reports_multiple_errors_per_mapping():
     assert sum(1 for e in errors if "Invalid decimal" in e) >= 3
 
 
+def test_file_dry_run_holds_out_a_mixed_column():
+    """A file load quarantines the bad rows instead of failing the sample."""
+    rows = [["1.00"], ["2.00"], ["bad-a"], ["3.00"], ["bad-b"], ["bad-c"], ["4.00"]]
+    ok, errors = dry_run_sample(
+        headers=["AMT"],
+        sample_rows=rows,
+        mappings=[{"source": "AMT", "target": "payment_amount", "transform": "decimal"}],
+        column_types={"AMT": "DECIMAL"},
+        file_row_quarantine=True,
+    )
+    assert not ok
+    assert len(errors) == 1
+    assert errors[0].startswith("holdout AMT→payment_amount:")
+    assert "3 sample row(s)" in errors[0]
+
+
 def test_apply_hash_pii_is_deterministic(monkeypatch):
     monkeypatch.setenv("DATAFLOW_PII_HASH_KEY", "unit-test-pii-key")
     val, err = apply_transform("secret@email.com", "hash_pii")

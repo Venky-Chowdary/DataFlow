@@ -214,6 +214,11 @@ def partition_transform_dry_run_errors(
         line = str(raw or "").strip()
         if not line:
             continue
+        # A minority cast failure is a row holdout, not a broken mapping.
+        # The dry-run marks it so G5 does not hard-block the load.
+        if line.lower().startswith("holdout "):
+            contracted.append(line)
+            continue
         # Missing source column is always a hard structural failure.
         if line.lower().startswith("source column missing"):
             hard.append(line)

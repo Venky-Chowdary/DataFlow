@@ -332,6 +332,7 @@ def analyze_coercion(
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
+    file_row_quarantine: bool = False,
     proven_width_narrowings: Any = None,
 ) -> dict[str, Any]:
     """Predict per-value write coercion for each mapping against sampled rows.
@@ -863,11 +864,39 @@ def analyze_coercion(
             # unfit cells hold out to quarantine. Keeping the column at "block"
             # left Validate green while the report it publishes still declared a
             # blocking failure — two answers for one column.
+            # A column that also casts cleanly is the same holdout without a
+            # signature: one bad row near the top of a file must not fail the
+            # load. Every sampled value failing is still a broken mapping.
             from services.migration_risk_contract import (
                 mapping_has_clearing_risk_contract,
             )
 
-            severity = "warn" if mapping_has_clearing_risk_contract(m) else "block"
+            contract_present = isinstance(
+                m.get("risk_contract") or m.get("riskContract"), dict
+            )
+            # Only a mixed numeric cast (Invalid integer / decimal) is a file
+            # holdout. Timezone invent, NOT NULL, and carrier overflow stay
+            # blocking even when other cells in the column succeed.
+            cast_reasons = [
+                str(item.get("reason") or "")
+                for item in sample_failures
+                if isinstance(item, dict)
+            ]
+            numeric_cast = bool(cast_reasons) and all(
+                reason.casefold().startswith(
+                    ("invalid integer", "invalid decimal", "invalid number")
+                )
+                for reason in cast_reasons
+            )
+            if mapping_has_clearing_risk_contract(m) or (
+                file_row_quarantine
+                and ok > 0
+                and not contract_present
+                and numeric_cast
+            ):
+                severity = "warn"
+            else:
+                severity = "block"
         elif sentinel_nulls and strict_null_loss:
             # Non-null → NULL is potential data loss; never green-light under strict.
             severity = "block"

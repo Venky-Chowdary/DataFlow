@@ -223,6 +223,7 @@ def _check_transform_dry_run(
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
+    file_row_quarantine: bool = False,
 ) -> dict[str, Any]:
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
@@ -252,6 +253,7 @@ def _check_transform_dry_run(
         empty_cells_as_null=empty_cells_as_null,
         dest_nullability=dest_nullability,
         database_extract=database_extract,
+        file_row_quarantine=file_row_quarantine,
     )
     # Parity with G8 / G5: continue-policy contracts demote cast failures to
     # holdouts — they must not keep G9 Data integrity blocked after Accept risk.
@@ -315,10 +317,74 @@ def _check_transform_dry_run(
     return result
 
 
+def _column_has_numeric_value(rows: list[dict[str, Any]], column: str) -> bool:
+    """True when at least one sample cell on ``column`` is a real number."""
+    from services.transform_engine import decimal_wire_value
+
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if decimal_wire_value(lookup_row_value(row, column, None)) is not None:
+            return True
+    return False
+
+
+def _demote_mixed_file_numeric_expectations(
+    exp: dict[str, Any],
+    rows: list[dict[str, Any]],
+    mappings: list[dict],
+) -> dict[str, Any]:
+    """A minority non-numeric cell in a file is a quarantine, not a failed load.
+
+    ``expect_column_values_between`` hard-blocks an ``amt`` column when one
+    sample cell does not parse. The file writer quarantines that row and loads
+    the rest, so Validate must not lock Execute. An all-bad column, and any
+    mapping that already carries a Risk Contract, stay blocking.
+    """
+    blocking = list(exp.get("blocking_failures") or [])
+    if not blocking:
+        return exp
+    quarantine_columns: set[str] = set()
+    for mapping in mappings:
+        raw = mapping.get("risk_contract") or mapping.get("riskContract")
+        if isinstance(raw, dict):
+            continue
+        source = str(mapping.get("source") or "")
+        target = str(mapping.get("target") or "")
+        if _column_has_numeric_value(rows, source) or (
+            target and _column_has_numeric_value(rows, target)
+        ):
+            if source:
+                quarantine_columns.add(source)
+            if target:
+                quarantine_columns.add(target)
+    kept: list[dict[str, Any]] = []
+    demoted: list[dict[str, Any]] = []
+    for failure in blocking:
+        column = str(failure.get("column") or "")
+        if (
+            failure.get("expectation") == "expect_column_values_between"
+            and column in quarantine_columns
+        ):
+            demoted.append(failure)
+        else:
+            kept.append(failure)
+    if not demoted:
+        return exp
+    out = dict(exp)
+    out["blocking_failures"] = kept
+    out["warnings"] = list(exp.get("warnings") or []) + demoted
+    out["blocks_transfer"] = len(kept) > 0
+    out["passed"] = len(kept) == 0
+    return out
+
+
 def _check_financial_precision(
     mappings: list[dict],
     source_types: dict[str, str],
     rows: list[dict[str, Any]],
+    *,
+    file_row_quarantine: bool = False,
 ) -> dict[str, Any]:
     """Detect values that could silently lose magnitude (e.g. comma/currency parsing failures)."""
     from services.migration_risk_contract import mapping_has_clearing_risk_contract
@@ -326,6 +392,7 @@ def _check_financial_precision(
 
     issues: list[str] = []
     contracted: list[str] = []
+    file_notes: list[str] = []
     for m in mappings:
         src = m.get("source", "")
         tgt = m.get("target", "")
@@ -348,16 +415,19 @@ def _check_financial_precision(
             for row in rows
             if lookup_row_value(row, src, None) not in (None, "")
         ]
+        unparseable: list[str] = []
+        parsed_ok = 0
         for raw in values[:100]:
             if not raw or raw in {"0", "0.0", "0.00"}:
+                if raw in {"0", "0.0", "0.00"}:
+                    parsed_ok += 1
                 continue
             # Schemaless missing and SQL NULL sentinels are not financial values.
             if raw in {"__DF_MISSING__", "__df_sql_null__"}:
                 continue
             converted, err = apply_transform(raw, transform)
             if err:
-                message = f"{src}: unparseable financial value {raw!r}"
-                (contracted if holdouts_contracted else issues).append(message)
+                unparseable.append(f"{src}: unparseable financial value {raw!r}")
                 continue
             # Null/missing sentinel coerced to None is a valid absence, not a parse failure.
             if converted is None:
@@ -365,8 +435,7 @@ def _check_financial_precision(
             try:
                 original_parsed, original_err = apply_transform(raw, "decimal")
                 if original_err:
-                    message = f"{src}: unparseable financial value {raw!r}"
-                    (contracted if holdouts_contracted else issues).append(message)
+                    unparseable.append(f"{src}: unparseable financial value {raw!r}")
                     continue
                 if original_parsed is None:
                     continue
@@ -382,6 +451,19 @@ def _check_financial_precision(
                         )
             except (InvalidOperation, ZeroDivisionError):
                 pass
+            parsed_ok += 1
+        contract_present = isinstance(
+            m.get("risk_contract") or m.get("riskContract"), dict
+        )
+        # No contract + a file + at least one good amount: quarantine the bad
+        # cells. A present contract (FAIL_JOB, tampered) stays fail-closed.
+        # Magnitude shifts above stay in ``issues`` either way.
+        if holdouts_contracted:
+            contracted.extend(unparseable)
+        elif file_row_quarantine and parsed_ok > 0 and not contract_present:
+            file_notes.extend(unparseable)
+        else:
+            issues.extend(unparseable)
     blocks = len(issues) > 0
     report: dict[str, Any] = {
         "check": "financial_precision",
@@ -389,12 +471,13 @@ def _check_financial_precision(
         "blocks_transfer": blocks,
         "issues": issues[:15],
     }
-    if contracted:
-        report["contracted_holdouts"] = contracted[:15]
-        report["contracted_holdout_count"] = len(contracted)
+    holdout_lines = contracted + file_notes
+    if holdout_lines:
+        report["contracted_holdouts"] = holdout_lines[:15]
+        report["contracted_holdout_count"] = len(holdout_lines)
         report["warnings"] = [
             f"Contracted holdout (continue-policy): {c}" for c in contracted[:5]
-        ]
+        ] + [f"File row quarantine: {c}" for c in file_notes[:5]]
     return report
 
 
@@ -1605,6 +1688,7 @@ def run_integrity_audit(
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
+    file_row_quarantine: bool = False,
     source_measured_empty: bool = False,
     stream_contracts: list[dict] | None = None,
     proven_width_narrowings: dict | None = None,
@@ -1735,9 +1819,17 @@ def run_integrity_audit(
                 empty_cells_as_null=empty_cells_as_null,
                 database_extract=database_extract,
                 dest_nullability=dest_nullability,
+                file_row_quarantine=file_row_quarantine,
             )
         )
-        checks.append(_check_financial_precision(mappings, source_types, rows))
+        checks.append(
+            _check_financial_precision(
+                mappings,
+                source_types,
+                rows,
+                file_row_quarantine=file_row_quarantine,
+            )
+        )
         checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk_nulls, validation_mode=validation_mode))
         # Duplicate identity keys block when the write path will enforce uniqueness:
         # schemaless destinations, upsert/CDC/mirror/SCD2, overwrite (table recreated),
@@ -1803,6 +1895,8 @@ def run_integrity_audit(
             validation_mode=validation_mode,
             sync_mode=sync_mode,
         )
+        if file_row_quarantine:
+            exp = _demote_mixed_file_numeric_expectations(exp, rows, mappings)
         checks.append({
             "check": "expectations_suite",
             "passed": exp.get("passed", True),

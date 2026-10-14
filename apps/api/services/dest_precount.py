@@ -3454,6 +3454,59 @@ def _object_store_list_keys(
     return list(object_store_read_keys(base, listed))
 
 
+def observed_object_export_keys(
+    kind: str, cfg: dict[str, Any], bucket: str, table_name: str
+) -> list[str] | None:
+    """Keys this export actually has. ``[]`` is absent. ``None`` is unknowable.
+
+    ``_object_store_list_keys`` returns ``[base]`` when the parts prefix is
+    empty so Gate-8 will GET the single object. That synthetic key is not
+    proof the object exists. Undo treated it as presence and reported the
+    failed file still in the bucket after the delete left the bucket empty.
+    """
+    from connectors.object_store_common import (
+        normalize_object_base_key,
+        object_parts_prefix,
+    )
+
+    if kind == "s3":
+        from connectors.s3_reader import list_objects
+    elif kind == "gcs":
+        from connectors.gcs_reader import list_objects
+    elif kind == "adls":
+        from connectors.adls_reader import list_objects
+    else:
+        return None
+
+    base = normalize_object_base_key(table_name, str(cfg.get("schema") or ""))
+    parts_prefix = object_parts_prefix(base)
+
+    def _listed(prefix: str) -> list[str] | None:
+        try:
+            return list(list_objects(cfg, bucket, prefix) or [])
+        except Exception as exc:
+            logger.info("object-store list failed while checking %s: %s", prefix, exc)
+            return None
+
+    part_names = _listed(parts_prefix) if parts_prefix else []
+    if part_names is None:
+        return None
+    from connectors.object_store_common import object_store_read_keys
+
+    parts = [
+        key
+        for key in object_store_read_keys(base, part_names)
+        if key != base and key in part_names
+    ]
+    exact = _listed(base)
+    if exact is None:
+        return None
+    observed = list(parts)
+    if base in exact and base not in observed:
+        observed.append(base)
+    return observed
+
+
 def _object_store_footer_kind(obj_key: str) -> str | None:
     """Uncompressed Parquet/ORC — Range-GET the footer. Gzip is not this path."""
     name = str(obj_key or "")
@@ -4514,6 +4567,23 @@ def count_avro_records(content: bytes | str | Path | Any) -> int | None:
         return None
 
 
+def _json_null_cells_as_engine_text(records: Any) -> Any:
+    """A present JSON null is the engine token ``null``, not SQL NULL.
+
+    Postgres projects ``jsonb`` with ``col::text``, so JSON null arrives as
+    the four characters ``null`` and SQL NULL arrives as Python ``None``.
+    The export writes SQL NULL by omitting the key and JSON null as a bare
+    ``null``. ``json.loads`` turns that bare null into ``None``, which
+    Gate-8 then fingerprints as SQL NULL and fails a faithful Postgres → S3
+    load. Missing keys stay missing so a real SQL NULL still compares as NULL.
+    """
+    for rec in records:
+        if not isinstance(rec, dict):
+            yield rec
+            continue
+        yield {key: ("null" if value is None else value) for key, value in rec.items()}
+
+
 def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
     """CSV/JSON/JSONL/XML/Avro records from a forward-only GET."""
     if kind in {"csv", "tsv"}:
@@ -4524,12 +4594,12 @@ def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
     if kind == "jsonl":
         from services.file_parser import iter_jsonl_dicts
 
-        yield from iter_jsonl_dicts(source)
+        yield from _json_null_cells_as_engine_text(iter_jsonl_dicts(source))
         return
     if kind == "json":
         from services.json_tabular import iter_json_dicts
 
-        yield from iter_json_dicts(source)
+        yield from _json_null_cells_as_engine_text(iter_json_dicts(source))
         return
     if kind == "xml":
         from services.file_parser import iter_xml_dicts
