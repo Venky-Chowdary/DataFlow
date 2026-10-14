@@ -1638,8 +1638,21 @@ _ENGINE_ALIASES = {
     "cast_number": "decimal",
     "cast_integer": "integer",
     "cast_int": "integer",
+    "to_integer": "integer",
+    "to_int": "integer",
+    "to_decimal": "decimal",
+    "to_number": "decimal",
+    "to_float": "decimal",
     "cast_boolean": "boolean",
     "cast_bool": "boolean",
+    "to_boolean": "boolean",
+    "to_bool": "boolean",
+    "to_date": "date",
+    "to_datetime": "datetime",
+    "to_timestamp": "datetime",
+    "to_time": "time",
+    "to_text": "none",
+    "to_string": "none",
     "hash": "hash_pii",
     "md5": "hash_pii",
     "sha256": "hash_pii",
@@ -1678,9 +1691,13 @@ def normalize_engine_transform(raw: str | None) -> str | None:
         if not lowered.startswith(prefix):
             continue
         arg = text[len(prefix):]
+        # A missing zone is still this transform. The executor says
+        # "needs a zone" — plan must not relabel it Unknown transform.
+        if prefix == "assume_timezone:":
+            return prefix + arg
         if prefix == "replace:" and ":" not in arg:
             return None
-        if prefix != "replace:" and arg == "":
+        if arg == "":
             return None
         return prefix + arg
     try:

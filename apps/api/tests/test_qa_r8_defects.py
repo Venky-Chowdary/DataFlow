@@ -51,6 +51,18 @@ def test_plan_and_runtime_share_one_transform_registry():
     assert apply_transform("__df_sql_null__", "default:missing") == ("missing", None)
     assert apply_transform("__df_sql_null__", "concat:@masked") == (None, None)
     assert apply_transform("__DF_MISSING__", "replace:-:_") == ("__DF_MISSING__", None)
+    assert normalize_engine_transform("to_integer") == "integer"
+    _zvalue, zerr = apply_transform("2024-01-15 12:00:00", "assume_timezone:")
+    assert zerr and "needs a zone" in zerr
+    direct = {
+        "source": "id",
+        "target": "id",
+        "transform": "direct",
+        "target_type": "INTEGER",
+    }
+    resolved = resolve_transform(direct, column_types={"id": "INTEGER"})
+    assert resolved != "direct"
+    assert "Unknown" not in (apply_transform("7", resolved)[1] or "")
 
     unknown = {"source": "name", "target": "name", "transform": "not_a_transform", "target_type": "VARCHAR"}
     assert resolve_transform(unknown) == "not_a_transform"

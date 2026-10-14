@@ -184,11 +184,11 @@ def resolve_transform(
     dest_types = dest_types or {}
     raw = mapping.get("transform")
     named = str(raw).strip() if raw not in (None, "") else ""
-    # The operator named a transform. Plan and the writer share
-    # normalize_engine_transform: aliases become the engine id, and a name
-    # the registry does not contain is kept so dry-run and Execute both
-    # report Unknown transform instead of Validate inferring a different cast.
-    if named and named.lower() not in {"none", "null"}:
+    # ``direct`` is the rule compiler's "no explicit cast". It is not an
+    # engine id — inference still picks the carrier, the way an empty
+    # transform does. A name the registry does not contain is kept so
+    # dry-run and Execute both report Unknown transform.
+    if named and named.lower() not in {"none", "null", "direct"}:
         canon = normalize_engine_transform(named)
         if canon is None:
             return named
