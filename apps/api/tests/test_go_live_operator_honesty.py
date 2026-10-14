@@ -521,7 +521,7 @@ def test_sql_probe_failure_still_names_host_and_port(monkeypatch):
     res = DataPilotTools()._create_connector(
         name="pg-qa",
         type="postgresql",
-        host="db.internal",
+        host="db.example.com",
         port=5432,
         database="app",
         username="app",
@@ -530,7 +530,7 @@ def test_sql_probe_failure_still_names_host_and_port(monkeypatch):
     )
     assert res.success is False
     assert "Railway" not in (res.error or "")
-    assert "db.internal:5432" in (res.error or "")
+    assert "db.example.com:5432" in (res.error or "")
     assert "host/port/user/password" in (res.error or "")
 
 

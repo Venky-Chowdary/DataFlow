@@ -213,10 +213,10 @@ def test_private_10_and_metadata_are_refused_before_a_dial():
 
     assert metadata_endpoint_refusal("10.0.0.5")
     assert metadata_endpoint_refusal("169.254.169.254")
-    assert metadata_endpoint_refusal("192.168.0.8") == ""
-    assert metadata_endpoint_refusal("172.16.1.4") == ""
+    assert "192.168/16" in metadata_endpoint_refusal("192.168.0.8")
+    assert "172.16/12" in metadata_endpoint_refusal("172.16.1.4")
 
-    for host in ("10.0.0.5", "169.254.169.254"):
+    for host in ("10.0.0.5", "169.254.169.254", "192.168.0.8", "172.16.1.4"):
         started = time.monotonic()
         ok, message = run_probe(
             "postgresql",

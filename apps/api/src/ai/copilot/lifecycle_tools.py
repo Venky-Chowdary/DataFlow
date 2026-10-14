@@ -986,6 +986,7 @@ def update_connector(  # nosec B107
         refusal = metadata_endpoint_refusal(
             str(changes.get("host") or ""),
             str(changes.get("connection_string") or ""),
+            workspace_id=str(conn.get("workspace_id") or ""),
         )
         if refusal:
             return _tool_result("update_connector", success=False, output=None, error=refusal)

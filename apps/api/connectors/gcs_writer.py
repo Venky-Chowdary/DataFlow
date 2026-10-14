@@ -11,6 +11,7 @@ from connectors.gcs_common import gcs_client
 from connectors.object_store_common import (
     object_staging_key,
     purge_object_store_parts,
+    refuse_empty_object_replace,
     resolve_object_store_write_dest_types,
     resolve_object_write_layout,
 )
@@ -155,6 +156,7 @@ def write_mapped_rows(
             spill_max_size=resolve_spill_max(extra),
             batch_size=resolve_materialize_batch(extra),
             dest_db_type="gcs",
+            empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
             **source_from_writer(_kwargs, extra),
         )
     except Exception as exc:
@@ -227,7 +229,25 @@ def write_mapped_rows(
                     f"Cannot verify GCS bucket {bucket!r}: {exc}"
                 ) from exc
         created_here = _gcs_key_absent(bucket_obj, key)
-        # Staging→live before any purge: failed upload must not wipe the prior export.
+        blocked = refuse_empty_object_replace(
+            rows_written=written,
+            live_exists=not created_here,
+            sync_mode=sync_mode,
+            key=key,
+        )
+        if blocked:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=key,
+                target_schema=bucket,
+                checksum="",
+                chunks_completed=0,
+                error=blocked,
+                warnings=errors[:10],
+                rejected_rows=mat.rejected_rows,
+                rejected_details=list(rejected_details),
+            )
         staging_key = object_staging_key(key)
         threshold, part_size = resolve_multipart_limits(extra)
         land_object_store_export(

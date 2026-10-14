@@ -40,6 +40,7 @@ export function TenantSettings() {
   const [mfaRequired, setMfaRequired] = useState(false);
   const [sessionTimeout, setSessionTimeout] = useState(8);
   const [ipAllowlist, setIpAllowlist] = useState("");
+  const [egressAllowlist, setEgressAllowlist] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
 
   const [newKeyLabel, setNewKeyLabel] = useState("");
@@ -93,6 +94,7 @@ export function TenantSettings() {
           setMfaRequired(t.mfa_required);
           setSessionTimeout(t.session_timeout_hours);
           setIpAllowlist((t.ip_allowlist || []).join("\n"));
+          setEgressAllowlist((t.egress_allowlist || []).join("\n"));
           setWorkspaceId(t.workspace_id);
         } else {
           // The workspace this session is working in — the same one the read is
@@ -135,6 +137,7 @@ export function TenantSettings() {
         mfa_required: mfaRequired,
         session_timeout_hours: Math.max(1, Math.min(24, Number(sessionTimeout) || 8)),
         ip_allowlist: ipAllowlist.split("\n").map((s) => s.trim()).filter(Boolean),
+        egress_allowlist: egressAllowlist.split("\n").map((s) => s.trim()).filter(Boolean),
       };
       let next: Tenant;
       if (tenant) {
@@ -276,6 +279,22 @@ export function TenantSettings() {
               placeholder={"one CIDR or IPv4 per line\n203.0.113.0/24"}
             />
             <p className="df2-settings-hint">Evaluated only when Host resolves this tenant via custom domain. The default app host never applies the list.</p>
+          </div>
+
+          <div className="df2-settings-field df2-team-spaced">
+            <label htmlFor="tenant-egress-allowlist">Connector egress allowlist</label>
+            <textarea
+              id="tenant-egress-allowlist"
+              className="df2-input"
+              rows={4}
+              value={egressAllowlist}
+              onChange={(e) => setEgressAllowlist(e.target.value)}
+              placeholder={"off until an admin adds a CIDR\n10.0.0.0/8"}
+            />
+            <p className="df2-settings-hint">
+              Off when empty: connector dials refuse private, loopback, link-local, and cloud metadata addresses.
+              An admin CIDR permits an on-prem or VPC host. Metadata and link-local cannot be listed. This does not change deployment config.
+            </p>
           </div>
         </div>
 

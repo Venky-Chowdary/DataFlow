@@ -1231,12 +1231,18 @@ def get_connection(
     The context manager yields a DBAPI connection with a ``.cursor()`` method so
     callers (e.g. CDC readers) can execute raw SQL and parameterised queries.
     """
-    from services.egress_guard import metadata_endpoint_refusal
+    from services.egress_guard import (
+        EgressRefused,
+        metadata_endpoint_refusal,
+        pinned_egress,
+    )
 
+    workspace_id = str(kwargs.get("workspace_id") or "")
     refusal = metadata_endpoint_refusal(
         host,
         connection_string,
         str(kwargs.get("endpoint_url") or ""),
+        workspace_id=workspace_id,
     )
     if refusal:
         raise ValueError(refusal)
@@ -1254,7 +1260,11 @@ def get_connection(
         "ssl": ssl,
         "type": db_type or kwargs.get("type") or "",
     }
-    conn = _engine(cfg).raw_connection()
+    try:
+        with pinned_egress(workspace_id=workspace_id):
+            conn = _engine(cfg).raw_connection()
+    except EgressRefused as exc:
+        raise ValueError(str(exc)) from exc
     db_type = (cfg.get("type") or "").lower()
     if db_type in {
         "sqlserver",

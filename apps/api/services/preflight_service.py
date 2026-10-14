@@ -1558,10 +1558,15 @@ def run_file_preflight(
         incremental_tiebreak_column=read_scope.primary_key,
     )
 
+    from services.preflight_source_kind import source_is_record_batch
+
     ctx = _ps.FilePreflightContext(
         plan,
         sample_rows,
-        empty_cells_as_null=is_file_source,
+        empty_cells_as_null=(
+            is_file_source
+            or source_is_record_batch(source_kind, source_format)
+        ),
         destination_collision=destination_collision,
         source_duplicate_findings=source_duplicate_findings,
         source_duplicate_probe_ran=source_duplicate_probe_ran,
