@@ -465,6 +465,10 @@ def test_sqlserver_native_lob_transfer_to_postgres_exactly_once():
         **CFG,
         "job_id": job_id,
         "cdc_row_filter": "all update old",
+        # Driver 18 verifies the chain. This lab container is self-signed.
+        # Same declaration the other live SQL Server proofs already use.
+        # The product default stays verify-or-fail.
+        "trust_server_certificate": True,
     }
     reader = SqlServerNativeCdc(
         reader_cfg,
@@ -478,7 +482,10 @@ def test_sqlserver_native_lob_transfer_to_postgres_exactly_once():
         format="sqlserver",
         table=source_table,
         schema="dbo",
-        extra={"cdc_row_filter": "all update old"},
+        extra={
+            "cdc_row_filter": "all update old",
+            "trust_server_certificate": True,
+        },
         **CFG,
     )
     destination = EndpointConfig(
