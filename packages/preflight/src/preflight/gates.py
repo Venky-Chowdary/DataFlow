@@ -60,6 +60,32 @@ def _risk_cleared(m: Any) -> bool:
     return mapping_risk_cleared(m)
 
 
+def _numeric_cast_failure(err: str) -> bool:
+    """A bad literal (``Invalid integer``), not a policy or carrier refusal.
+
+    Timezone invent, NOT NULL, and ``does not fit`` stay hard blocks. A mixed
+    file sample of those is not a quarantine holdout.
+    """
+    text = str(err or "").casefold()
+    return text.startswith(
+        ("invalid integer", "invalid decimal", "invalid number")
+    )
+
+
+def _mapping_contract_present(m: Any) -> bool:
+    """A Risk Contract payload is present, verified or not.
+
+    File loads quarantine a bad cell when the mapping has no contract. A
+    present contract, including FAIL_JOB and a tampered signature, keeps the
+    fail-closed disposition ``resolve_write_action_for_mapping`` already uses.
+    """
+    if isinstance(m, dict):
+        raw = m.get("risk_contract") or m.get("riskContract")
+    else:
+        raw = getattr(m, "risk_contract", None)
+    return isinstance(raw, dict)
+
+
 def _document_instant_sample_truncation(
     ctx: Any, source: str, source_type: str, target_type: str, dest_kind: str
 ) -> Any:
@@ -1784,12 +1810,23 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
             if details.get("sample_rows_scanned")
             else ""
         )
-        return _pass(
-            GateId.G5_DRY_RUN,
-            (
+        engine_holdouts = [
+            line for line in contracted if str(line).lower().startswith("holdout ")
+        ]
+        if engine_holdouts and len(engine_holdouts) == len(contracted):
+            message = (
+                f"Sample cast failures on {len(engine_holdouts)} column(s) will "
+                f"quarantine{rows_bit}; the rest of the file will load — "
+                "not a clean pass"
+            )
+        else:
+            message = (
                 f"Sample transform completed with {len(contracted)} contracted "
                 f"holdout(s){rows_bit} — not a clean pass; holdouts quarantine at write"
-            ),
+            )
+        return _pass(
+            GateId.G5_DRY_RUN,
+            message,
             start,
             details,
         )
@@ -2781,6 +2818,43 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     contracted_holdouts: list[str] = []
     contracted_null_cells: list[str] = []
     file_blank_nulls: list[str] = []
+    # A file is a batch of records. One cast failure among cells that cast is
+    # a quarantine holdout (R4-D02). An all-bad column, a database extract, and
+    # any present Risk Contract stay on the hard-block path.
+    file_load = str(getattr(ctx.plan.source, "kind", "") or "").lower() == "file"
+    file_holdout_targets: set[str] = set()
+    if file_load:
+        for probe in ctx.plan.mappings:
+            if _is_intentional_omit_mapping(probe) or not probe.target:
+                continue
+            if _risk_cleared(probe) or _mapping_contract_present(probe):
+                continue
+            if probe.transform and str(probe.transform).lower().strip() in _NON_DETERMINISTIC:
+                continue
+            ok_cells = 0
+            cast_bad = 0
+            other_bad = 0
+            for probe_row in sample_rows:
+                probe_raw = _serialize_for_write(_row_cell(probe_row, probe.source, ""))
+                _probe_val, probe_err = _apply_write_path_transform(
+                    probe_raw, probe.transform
+                )
+                if probe_err and _spreadsheet_blank_is_sql_null(
+                    ctx, probe_raw, probe_err, probe
+                ):
+                    ok_cells += 1
+                elif probe_err and _numeric_cast_failure(probe_err):
+                    cast_bad += 1
+                elif probe_err:
+                    other_bad += 1
+                else:
+                    ok_cells += 1
+            dest_col = dest_by_name.get(str(probe.target or "").lower())
+            not_null = dest_col is not None and not bool(
+                getattr(dest_col, "nullable", True)
+            )
+            if ok_cells > 0 and cast_bad > 0 and other_bad == 0 and not not_null:
+                file_holdout_targets.add(str(probe.target))
     mapped_rows: list[dict[str, Any]] = []
     # Parallel to mapped_rows: source rows that survive quarantine holdouts.
     # Fingerprint MUST use this list — never sample_rows[i] vs mapped_rows[i]
@@ -2832,6 +2906,9 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     else:
                         contracted_holdouts.append(line)
                         row_holdout = True
+                elif str(m.target) in file_holdout_targets:
+                    contracted_holdouts.append(line)
+                    row_holdout = True
                 else:
                     transform_errors.append(line)
                     mapped[m.target] = None

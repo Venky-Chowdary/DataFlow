@@ -113,7 +113,7 @@ def test_failed_object_batch_is_deleted(monkeypatch) -> None:
     monkeypatch.setattr(
         "connectors.object_store_leftover._delete_object_key", _delete
     )
-    monkeypatch.setattr("services.dest_precount._object_store_list_keys", _list)
+    monkeypatch.setattr("services.dest_precount.observed_object_export_keys", _list)
     from services.batch_undo import undo_failed_batch_if_dest_was_empty
     from services.dest_precount import PRECOUNT_KEY
 
@@ -131,6 +131,207 @@ def test_failed_object_batch_is_deleted(monkeypatch) -> None:
     assert deleted
     assert "still empty" not in note
     assert "removed" in note
+
+
+def test_absent_export_is_not_reported_as_left_in_the_bucket(monkeypatch) -> None:
+    """Gate-8's read set invents ``[base]`` when the prefix is empty.
+
+    Undo used to treat that invented key as a file that survived the delete
+    (R7-001). An empty listing is an absent object.
+    """
+    monkeypatch.setattr(
+        "connectors.s3_reader.list_objects", lambda cfg, bucket, prefix="": []
+    )
+    monkeypatch.setattr(
+        "connectors.object_store_leftover._delete_object_key", lambda *a, **k: None
+    )
+    from services.batch_undo import undo_failed_batch_if_dest_was_empty
+    from services.dest_precount import PRECOUNT_KEY
+
+    note = undo_failed_batch_if_dest_was_empty(
+        destination=EndpointConfig(
+            kind="database",
+            format="s3",
+            database="bucket",
+            table="exports/payments.json",
+        ),
+        dest_summary={PRECOUNT_KEY: 0, "table": "exports/payments.json"},
+        sync_mode="full_refresh_overwrite",
+    )
+    assert "still in the bucket" not in note
+    assert "may still" not in note
+    assert "absent" in note
+
+
+def test_json_null_export_matches_postgres_text_and_sql_null_stays_absent() -> None:
+    """jsonb ``null`` is the text ``null``. SQL NULL is an omitted key (R7-001).
+
+    Parsing the export token back to Python None made Gate-8 fingerprint the
+    destination as SQL NULL (``\\x00NULL\\x00``) against a source cell ``null``,
+    and the undo note then claimed a partial object that the delete had removed.
+    """
+    import json
+
+    from connectors.writer_common import mapped_row_to_json_record
+    from services.dest_precount import _json_null_cells_as_engine_text
+    from services.reconciliation import fingerprint_for_reconcile
+    from services.value_serializer import json_dumps_exact_numbers
+
+    types = {"payload": "JSON"}
+    present = mapped_row_to_json_record(
+        ("null",), ["payload"], types, omit_sql_null=True
+    )
+    absent = mapped_row_to_json_record(
+        (None,), ["payload"], types, omit_sql_null=True
+    )
+    assert present.get("payload") is not None
+    assert "payload" not in absent
+    loaded = json.loads(json_dumps_exact_numbers([present, absent]))
+    reread = list(_json_null_cells_as_engine_text(loaded))
+    assert reread[0]["payload"] == "null"
+    assert "payload" not in reread[1]
+    source_null = fingerprint_for_reconcile(
+        "null", ddl_type="JSON", engine="postgresql"
+    )
+    dest_null = fingerprint_for_reconcile(
+        reread[0]["payload"], ddl_type="JSON", engine="s3"
+    )
+    source_sql = fingerprint_for_reconcile(None, ddl_type="JSON", engine="postgresql")
+    dest_sql = fingerprint_for_reconcile(None, ddl_type="JSON", engine="s3")
+    assert source_null == dest_null
+    assert source_sql == dest_sql
+    assert source_null != source_sql
+
+
+def test_postgres_json_null_exports_to_s3_without_a_false_leftover() -> None:
+    """Postgres → S3 must checksum jsonb null, and a failed undo must not invent a key.
+
+    The wide row is the Round-7 shape: JSON null, SQL NULL, numeric, bytea,
+    uuid, date, time, and a text array. Gate-8 used to stop at 99% on
+    ``payload`` and then claim ``export.json`` was still in the bucket.
+    """
+    import uuid
+
+    try:
+        import moto
+        import psycopg2
+    except ImportError as exc:
+        pytest.skip(f"postgres/moto export proof needs psycopg2 and moto: {exc}")
+
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import TransferRequest
+
+    src_table = "pg_s3_json_null_" + uuid.uuid4().hex[:8]
+    conn = psycopg2.connect(
+        host="127.0.0.1",
+        port=5432,
+        dbname="dataflow",
+        user="dataflow",
+        password="dataflow",
+    )
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute(
+        f"""
+        CREATE TABLE {src_table} (
+            id int PRIMARY KEY,
+            amount numeric(38,10),
+            payload jsonb,
+            raw bytea,
+            uid uuid,
+            day date,
+            clock time,
+            tags text[],
+            blank text
+        )
+        """
+    )
+    cur.execute(
+        f"""
+        INSERT INTO {src_table} VALUES
+        (
+            1,
+            1000.50,
+            'null'::jsonb,
+            decode('00ff', 'hex'),
+            '11111111-1111-1111-1111-111111111111',
+            DATE '2024-01-02',
+            TIME '03:04:05',
+            ARRAY['a','b'],
+            ''
+        ),
+        (
+            2,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL,
+            NULL
+        )
+        """
+    )
+    conn.close()
+    key = f"exports/{src_table}/export.json"
+    try:
+        with moto.mock_aws():
+            request = TransferRequest(
+                source=EndpointConfig(
+                    kind="database",
+                    format="postgresql",
+                    host="127.0.0.1",
+                    port=5432,
+                    database="dataflow",
+                    username="dataflow",
+                    password="dataflow",
+                    schema="public",
+                    table=src_table,
+                ),
+                destination=EndpointConfig(
+                    kind="database",
+                    format="s3",
+                    host="s3.amazonaws.com",
+                    port=443,
+                    database="dataflow-r7",
+                    username="mock",
+                    password="mock",
+                    table=key,
+                    region="us-east-1",
+                ),
+                sync_mode="full_refresh_overwrite",
+                stream_contracts=[
+                    {
+                        "name": "pg_s3",
+                        "sync_mode": "full_refresh_overwrite",
+                        "primary_key": "id",
+                        "selected": True,
+                    }
+                ],
+                skip_preflight=True,
+                validation_mode="strict",
+            )
+            result = UniversalTransferEngine().execute_tracked(
+                request, uuid.uuid4().hex[:24]
+            )
+            error = str(result.error or "")
+            assert "still in the bucket" not in error
+            assert result.success is True, error
+            recon = result.reconciliation or {}
+            assert recon.get("passed") is True, recon
+            assert recon.get("source_checksum") == recon.get("target_checksum")
+    finally:
+        cleanup = psycopg2.connect(
+            host="127.0.0.1",
+            port=5432,
+            dbname="dataflow",
+            user="dataflow",
+            password="dataflow",
+        )
+        cleanup.autocommit = True
+        cleanup.cursor().execute(f"DROP TABLE IF EXISTS {src_table}")
+        cleanup.close()
 
 
 def test_postgres_wal_probe_runs_without_a_primary_key(monkeypatch) -> None:

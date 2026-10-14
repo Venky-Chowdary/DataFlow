@@ -189,7 +189,10 @@ class ObjectStoreEncoder:
         from connectors.writer_common import iter_mapped_json_records
 
         for record in iter_mapped_json_records(
-            list(mapped_rows), self.target_cols, self.dest_types
+            list(mapped_rows),
+            self.target_cols,
+            self.dest_types,
+            omit_sql_null=True,
         ):
             if self._records_written or self._header_written:
                 self._spool.write(b"\n")
@@ -209,7 +212,10 @@ class ObjectStoreEncoder:
         from connectors.writer_common import iter_mapped_json_records
 
         records = iter_mapped_json_records(
-            list(mapped_rows), self.target_cols, self.dest_types
+            list(mapped_rows),
+            self.target_cols,
+            self.dest_types,
+            omit_sql_null=True,
         )
         for record in records:
             if not self._header_written:

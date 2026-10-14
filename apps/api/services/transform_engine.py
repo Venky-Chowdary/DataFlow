@@ -2410,11 +2410,15 @@ def dry_run_sample(
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
     database_extract: bool = False,
+    file_row_quarantine: bool = False,
 ) -> tuple[bool, list[str]]:
     """Apply write-path transforms to the sample window.
 
     Collects up to ``max_errors_per_mapping`` failures per column so sporadic
     bad values mid-sample cannot slip past Validate while early rows look clean.
+    A file load (``file_row_quarantine``) turns a mixed column into one
+    quarantine holdout: the bad rows are named and the rest of the file loads.
+    An all-bad column stays a hard error. Database extracts stay fail-fast.
     """
     if not sample_rows:
         return False, ["No sample rows available for dry-run validation"]
@@ -2442,6 +2446,7 @@ def dry_run_sample(
         dest_nullability=dest_nullability,
         dest_types=dest_types,
         database_extract=database_extract,
+        file_row_quarantine=file_row_quarantine,
     )
 
 
@@ -2457,6 +2462,7 @@ def _dry_run_sample_body(
     dest_nullability: dict[str, bool] | None,
     dest_types: dict[str, str],
     database_extract: bool = False,
+    file_row_quarantine: bool = False,
 ) -> tuple[bool, list[str]]:
     from services.column_case import header_index
     from services.transform_resolver import resolve_transform
@@ -2471,8 +2477,6 @@ def _dry_run_sample_body(
         # Resolve UI aliases (cast_number → decimal) before dry-run — never leave
         # Unknown transform: 'cast_number' as a false quarantine signal.
         transform = resolve_transform(m, column_types=column_types, dest_types=dest_types)
-        mapping_errors = 0
-        scanned = 0
         column_values = [
             row[idx] if idx < len(row) else ""
             for row in sample_rows[:sample_size]
@@ -2480,9 +2484,10 @@ def _dry_run_sample_body(
         column_token = bind_column_date_locale(
             column_values, str(m["source"]), transform=transform
         )
+        bad: list[str] = []
+        ok = 0
         try:
             for row in sample_rows[:sample_size]:
-                scanned += 1
                 raw = row[idx] if idx < len(row) else ""
                 _, err = apply_transform(raw, transform)
                 if _blank_is_nullable_absence(
@@ -2496,20 +2501,35 @@ def _dry_run_sample_body(
                 ):
                     err = None
                 if err:
-                    errors.append(f"{m['source']}→{m['target']}: {err}")
-                    mapping_errors += 1
-                    if mapping_errors >= max_errors_per_mapping:
-                        remaining = max(0, min(len(sample_rows), sample_size) - scanned)
-                        if remaining:
-                            errors.append(
-                                f"{m['source']}→{m['target']}: "
-                                f"+{remaining} sample row(s) not fully reported "
-                                f"(stopped after {max_errors_per_mapping} errors)"
-                            )
-                        break
+                    bad.append(err)
+                else:
+                    ok += 1
         finally:
             if column_token is not None:
                 reset_active_date_locale(column_token)
+        if not bad:
+            continue
+        # A file is a batch of records. One bad cell among cells that cast is
+        # a quarantine holdout — position in the sample must not fail the load
+        # (R4-D02). An all-bad column cannot represent the mapping, and a
+        # database extract stays fail-fast, so both keep the hard error list.
+        if file_row_quarantine and ok > 0:
+            errors.append(
+                f"holdout {m['source']}→{m['target']}: "
+                f"{len(bad)} sample row(s) will quarantine and the rest will load "
+                f"({bad[0]})"
+            )
+            continue
+        shown = bad[:max_errors_per_mapping]
+        for err in shown:
+            errors.append(f"{m['source']}→{m['target']}: {err}")
+        hidden = len(bad) - len(shown)
+        if hidden:
+            errors.append(
+                f"{m['source']}→{m['target']}: "
+                f"+{hidden} sample row(s) not fully reported "
+                f"(stopped after {max_errors_per_mapping} errors)"
+            )
 
     return len(errors) == 0, errors[:40]
 

@@ -172,6 +172,8 @@ def mapped_row_to_json_record(
     row: tuple | list,
     target_cols: list[str],
     dest_types: dict[str, str] | None = None,
+    *,
+    omit_sql_null: bool = False,
 ) -> dict[str, Any]:
     """One object-store JSON record — omit ``DF_MISSING`` keys (Kafka-class)."""
 
@@ -180,7 +182,10 @@ def mapped_row_to_json_record(
     for col, val in zip(target_cols, row):
         if is_missing_sentinel(val):
             continue
-        rec[col] = to_json_value(val, col, dest_types)
+        converted = to_json_value(val, col, dest_types)
+        if omit_sql_null and converted is None:
+            continue
+        rec[col] = converted
     return rec
 
 
@@ -188,10 +193,13 @@ def iter_mapped_json_records(
     mapped_rows: list[tuple],
     target_cols: list[str],
     dest_types: dict[str, str] | None = None,
+    *,
+    omit_sql_null: bool = False,
 ):
     """Yield JSON records without materializing the full list."""
     for row in mapped_rows:
-        yield mapped_row_to_json_record(row, target_cols, dest_types)
+        yield mapped_row_to_json_record(
+            row, target_cols, dest_types, omit_sql_null=omit_sql_null)
 
 
 def iter_mapped_delimited_records(
@@ -646,11 +654,16 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
                 def _reject(name: str) -> None:
                     raise ValueError(f"non-finite JSON constant: {name}")
 
-                return json_loads_exact(text, parse_constant=_reject)
+                parsed = json_loads_exact(text, parse_constant=_reject)
             except ValueError:
                 return value  # leave raw; transform path should have rejected
             except json.JSONDecodeError:
                 return value
+            if parsed is None and text.strip() == "null":
+                from services.value_serializer import JSON_NULL
+
+                return JSON_NULL
+            return parsed
         if ctype in {"text", "string", "varchar", "uuid", "binary", ""}:
             # Empty/unknown logical type: keep string — never invent int/bool/float
             # via json.loads (object-store export type invent).

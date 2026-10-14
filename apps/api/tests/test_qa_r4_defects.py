@@ -29,6 +29,121 @@ from src.transfer.mapping_write_stamp import prefer_approved_column_types
 _EMPTY_SHA = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 
+def test_bad_row_near_the_top_of_a_file_quarantines_and_loads_the_rest(tmp_path):
+    """Balanced file loads quarantine a bad cast and keep the good rows (R4-D02).
+
+    Strict mode still refuses a partial commit. Validate no longer hard-blocks
+    the mixed sample, so that balanced load can run.
+    """
+    from src.transfer.file_stream import stream_file_to_database
+    from src.transfer.models import EndpointConfig
+
+    csv_path = tmp_path / "amt.csv"
+    csv_path.write_text(
+        "id,amt\n1,not-a-number\n2,10\n3,20\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "out.db"
+    written, _ddl, summary, _columns = stream_file_to_database(
+        str(csv_path),
+        "amt.csv",
+        EndpointConfig(
+            kind="database",
+            format="sqlite",
+            database=str(db_path),
+            table="payments",
+        ),
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "INTEGER", "confidence": 0.99},
+            {
+                "source": "amt",
+                "target": "amt",
+                "target_type": "INTEGER",
+                "transform": "integer",
+                "confidence": 0.99,
+            },
+        ],
+        schema={"id": "INTEGER", "amt": "INTEGER"},
+        validation_mode="balanced",
+        skip_preflight=True,
+    )
+    assert written == 2
+    assert int(summary.get("rejected_rows") or 0) == 1
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT id, amt FROM payments ORDER BY id").fetchall()
+    assert rows == [(2, 10), (3, 20)]
+
+
+def test_mixed_sample_does_not_block_on_sample_transform():
+    """A bad first row plus good rows is a holdout, not a blocking sample transform."""
+    from services.preflight_service import run_file_preflight
+
+    result = run_file_preflight(
+        columns=["amt"],
+        column_types={"amt": "INTEGER"},
+        row_count=3,
+        mappings=[
+            {
+                "source": "amt",
+                "target": "amt",
+                "confidence": 0.99,
+                "transform": "integer",
+                "target_type": "INTEGER",
+            }
+        ],
+        destination_connected=True,
+        sample_rows=[{"amt": "not-a-number"}, {"amt": "10"}, {"amt": "20"}],
+        estimated_bytes=64,
+        destination_column_types={"amt": "INTEGER"},
+        destination_table_exists=True,
+        destination_db_type="sqlite",
+        skip_population_fit=True,
+    )
+    decision = (
+        (result.get("proof_bundle") or {}).get("transfer_decision") or {}
+    )
+    reason = str(decision.get("reason") or "")
+    assert "Sample transform / cast failures" not in reason
+    assert decision.get("decision") != "block"
+    kinds = [
+        str((b.get("details") or {}).get("kind") or "")
+        for b in result.get("blockers") or []
+    ]
+    assert "sample_transform" not in kinds
+
+
+def test_database_mixed_sample_still_blocks_on_sample_transform():
+    """A database extract stays fail-fast. File quarantine does not apply."""
+    from services.preflight_service import run_file_preflight
+
+    result = run_file_preflight(
+        columns=["amt"],
+        column_types={"amt": "INTEGER"},
+        row_count=2,
+        mappings=[
+            {
+                "source": "amt",
+                "target": "amt",
+                "confidence": 0.99,
+                "transform": "integer",
+                "target_type": "INTEGER",
+            }
+        ],
+        destination_connected=True,
+        sample_rows=[{"amt": "not-a-number"}, {"amt": "10"}],
+        estimated_bytes=64,
+        destination_column_types={"amt": "INTEGER"},
+        destination_table_exists=True,
+        destination_db_type="sqlite",
+        source_kind="database",
+        skip_population_fit=True,
+    )
+    decision = (result.get("proof_bundle") or {}).get("transfer_decision") or {}
+    assert decision.get("decision") == "block"
+
+
 def test_phone_tokens_stay_text_plain_integer_does_not():
     assert classify_value("+1 555 010 0001") == "VARCHAR"
     assert classify_value("(555) 123-4567") == "VARCHAR"

@@ -161,14 +161,17 @@ def _clear_object_store(
     """
     from connectors.object_store_common import normalize_object_base_key
     from connectors.object_store_leftover import _delete_object_key
-    from services.dest_precount import _object_store_list_keys
+    from services.dest_precount import observed_object_export_keys
 
     bucket = str(cfg.get("database") or "").strip()
     prefix = schema or str(cfg.get("schema") or "")
     base = normalize_object_base_key(table_name, prefix)
-    present = _object_store_list_keys(kind, cfg, bucket, table_name)
+    # Presence is the listing, not the Gate-8 read set. That set invents
+    # ``[base]`` when the parts prefix is empty so a GET is attempted, and
+    # undo used to report that invented key as a file still in the bucket.
+    present = observed_object_export_keys(kind, cfg, bucket, table_name)
     keys = list(present or [])
-    if base not in keys:
+    if present is not None and base not in keys:
         keys.append(base)
     deleted = False
     error = ""
@@ -176,14 +179,18 @@ def _clear_object_store(
         try:
             _delete_object_key(kind, cfg, bucket, obj_key)
             deleted = True
-        except Exception as exc:  # noqa: BLE001 — report the key that stayed
+        except Exception as exc:  # noqa: BLE001 — a missing key is not presence
             error = str(exc)
-    after_keys = _object_store_list_keys(kind, cfg, bucket, table_name)
+    after_keys = observed_object_export_keys(kind, cfg, bucket, table_name)
     dest_summary["partial_batch_rows_after_undo"] = (
         None if after_keys is None else len(after_keys)
     )
     if after_keys == []:
         dest_summary["partial_batch_removed"] = True
+        if present == []:
+            return (
+                "The destination object was absent before this run and is still absent."
+            )
         return (
             "The destination object was absent before this run. "
             "The partial object was removed."
@@ -194,15 +201,16 @@ def _clear_object_store(
             f"could not be removed ({base}). The failed file is still in the bucket."
             + (f" {error}" if error else "")
         )
-    if deleted:
+    if deleted or present == []:
         dest_summary["partial_batch_removed"] = True
         return (
             "The destination object was absent before this run. "
             "The partial object was removed."
         )
     return (
-        "The destination was empty before this run, but the partial object "
-        "could not be removed. The failed file may still be in the bucket."
+        "The destination was empty before this run. The bucket listing did not "
+        "confirm whether the object remains, so this run does not claim the "
+        "failed file is still in the bucket."
     )
 
 
