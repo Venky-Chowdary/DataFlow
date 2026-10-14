@@ -249,6 +249,16 @@ def classify_host(
         pass
     try:
         infos = socket.getaddrinfo(raw, None)
+    except EgressRefused as exc:
+        # The preview check runs inside pinned_egress. A DNS miss there is
+        # raised as EgressRefused; an unresolved name is not a private hit
+        # when the caller asked to fail open. A resolved private address
+        # still propagates.
+        if "DNS did not resolve" not in str(exc):
+            raise
+        if fail_closed_dns:
+            return "DNS did not resolve to a public address"
+        return None
     except (OSError, UnicodeError):
         # UnicodeError is IDNA ("label empty or too long") on a string that
         # is not a hostname. Same outcome as a DNS miss: fail closed when the

@@ -179,6 +179,68 @@ def test_embedded_file_url_is_not_a_dial_target(tmp_path):
     assert calls == [] or all("duckdb" not in item and "sqlite" not in item for item in calls)
 
 
+def test_unresolved_credential_is_not_a_private_hit_inside_the_pin():
+    """A bearer token is not a dial target. DNS failure at preview stays open.
+
+    Salesforce's stub stores the token in connection_string and password.
+    Resolving that string inside pinned_egress used to raise EgressRefused
+    and block the local reverse-ETL stub. A name that resolves to a private
+    address is still refused.
+    """
+    import socket
+
+    from services.egress_guard import (
+        EgressRefused,
+        metadata_endpoint_refusal,
+        pinned_egress,
+    )
+    from tests.saas_desktop_stub import start_saas_stub
+
+    real = socket.getaddrinfo
+
+    def fake(host, port, *args, **kwargs):
+        shown = str(host)
+        if shown == "private.example":
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("10.1.2.3", 0))]
+        if shown in {"127.0.0.1", "localhost"}:
+            return real(host, port, *args, **kwargs)
+        raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+    socket.getaddrinfo = fake
+    server = None
+    try:
+        with pinned_egress(allowlist=()):
+            assert metadata_endpoint_refusal("stub-token", ":stub-token@stub-token") == ""
+            try:
+                metadata_endpoint_refusal("private.example")
+            except EgressRefused as exc:
+                assert "10.x" in str(exc)
+            else:
+                raise AssertionError("private.example was allowed inside the pin")
+        server, url = start_saas_stub()
+        from src.transfer.connector_registry import run_probe
+
+        ok, message = run_probe(
+            "salesforce",
+            {
+                "type": "salesforce",
+                "host": url,
+                "port": 0,
+                "password": "stub-token",
+                "api_key": "stub-token",
+                "connection_string": "stub-token",
+                "table": "Account",
+                "ssl": False,
+            },
+        )
+        assert ok, message
+    finally:
+        socket.getaddrinfo = real
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+
+
 def test_notification_http_post_refuses_private_before_socket(monkeypatch):
     from services.notification_service import _http_post
 
