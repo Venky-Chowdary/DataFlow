@@ -707,6 +707,35 @@ export function previewErrorForSteps(error: string, errorKey: string, stepsKey: 
   return error;
 }
 
+export interface CanvasValidationIssue {
+  /** 0-based step index. -1 is the recipe, not one node. */
+  index: number;
+  message: string;
+}
+
+/**
+ * Where a refusal belongs on the canvas. The step number in the engine
+ * payload and in "step N" prose is 1-based.
+ */
+export function canvasValidationIssues(
+  error: string,
+  refusal: { step: number; message: string } | null | undefined,
+): CanvasValidationIssue[] {
+  const issues: CanvasValidationIssue[] = [];
+  if (refusal?.message) {
+    const index = Number.isFinite(refusal.step) && refusal.step > 0 ? refusal.step - 1 : -1;
+    issues.push({ index, message: refusal.message });
+  }
+  const text = error.trim();
+  if (text && !issues.some((issue) => issue.message === text)) {
+    const match = text.match(/step\s+(\d+)/i);
+    const parsed = match ? Number(match[1]) : 0;
+    const index = match && parsed > 0 ? parsed - 1 : -1;
+    issues.push({ index, message: text });
+  }
+  return issues;
+}
+
 /** Always-visible sample caption. The preview is not the population. */
 export function samplePopulationBanner(shown: number, population?: number): string {
   const sample = Math.max(0, shown).toLocaleString();

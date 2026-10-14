@@ -7,6 +7,12 @@ import { expectDisjoint, expectHitInside, expectStackedAbove, expectWithinViewpo
 import { openStudio, reachTransform, shoot } from "./support";
 
 /** A toast shifts the narrow page. Remove it before the shot; the mask alone does not. */
+async function setPalette(page: Page, open: boolean): Promise<void> {
+  const toggle = page.getByRole("button", { name: "Palette", exact: true });
+  const expanded = (await toggle.getAttribute("aria-expanded")) === "true";
+  if (expanded !== open) await toggle.click();
+}
+
 async function quietChrome(page: Page): Promise<void> {
   await page.locator(".dt-toast").evaluateAll((nodes) => {
     for (const node of nodes) (node as HTMLElement).style.setProperty("display", "none");
@@ -87,6 +93,7 @@ test.describe("studio next", () => {
   test("canvas light and dark stay on the chain layout", async ({ page }) => {
     await openStudio(page);
     await reachTransform(page);
+    await setPalette(page, true);
     await page.locator(".df2-canvas-op[data-op='trim']").click();
     await expect(page.locator(".react-flow__node")).toHaveCount(1);
     const status = page.getByTestId("canvas-preview-status");
@@ -129,6 +136,7 @@ test.describe("studio next", () => {
   test("canvas regions, drawers, and dialogs stay apart", async ({ page }) => {
     await openStudio(page);
     await reachTransform(page);
+    await setPalette(page, true);
     await page.locator(".df2-canvas-op[data-op='trim']").click();
     await expect(page.locator(".react-flow__node")).toHaveCount(1);
     const views = [
@@ -147,16 +155,20 @@ test.describe("studio next", () => {
       await expectActionBarBelowCanvas(page);
       const pairs: Array<[string, string]> = [
         [".df2-canvas-head", ".df2-canvas-body"],
-        [".df2-canvas-rail", "[data-testid='transform-canvas-stage']"],
         ["[data-testid='transform-canvas-stage']", "[data-testid='canvas-preview']"],
         ["[data-testid='canvas-preview']", ".df2-xform-actions"],
         ["[data-testid='transform-canvas']", ".df2-xform-actions"],
         [".df2-canvas-rail", ".df2-canvas-inspector"],
-        ["[data-testid='transform-canvas-stage']", ".df2-canvas-inspector"],
         ["[data-testid='canvas-preview']", ".df2-canvas-inspector"],
         ["[aria-label='Transfer steps']", ".df2-xform-actions"],
         [".df2-canvas-head", ".df2-xform-actions"],
       ];
+      if (view.width < 768) {
+        pairs.push(
+          [".df2-canvas-rail", "[data-testid='transform-canvas-stage']"],
+          ["[data-testid='transform-canvas-stage']", ".df2-canvas-inspector"],
+        );
+      }
       for (const [left, right] of pairs) await expectDisjoint(page, left, right);
       for (const selector of [
         ".df2-xform-actions",
@@ -224,6 +236,7 @@ test.describe("studio next", () => {
     await page.getByRole("button", { name: "Close" }).click();
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toHaveCount(0);
 
+    await setPalette(page, true);
     const sql = page.locator(".df2-canvas-sql");
     await expect(sql).toBeVisible();
     await expect(sql.locator("summary")).toHaveText("Warehouse SQL (runs after load)");
@@ -237,7 +250,7 @@ test.describe("studio next", () => {
     await expect(status).not.toHaveText("Previewing the recipe…", { timeout: 20_000 });
     const statusBefore = (await status.innerText()).trim();
 
-    const drop = { x: 220, y: 180 };
+    const drop = { x: 400, y: 160 };
     await trim.dragTo(stage, { targetPosition: drop });
     await expect(page.locator(".react-flow__node")).toHaveCount(1);
     const stageBox = await stage.boundingBox();
@@ -300,8 +313,9 @@ test.describe("studio next", () => {
   test("sample export runs from the canvas recipe", async ({ page }) => {
     await openStudio(page);
     await reachTransform(page);
+    await setPalette(page, true);
     await page.locator(".df2-canvas-op[data-op='trim']").dragTo(page.getByTestId("transform-canvas-stage"), {
-      targetPosition: { x: 220, y: 180 },
+      targetPosition: { x: 400, y: 160 },
     });
     await expect(page.locator(".react-flow__node")).toHaveCount(1);
     await page.getByRole("button", { name: "Run preview" }).click();
@@ -373,6 +387,7 @@ conn.commit()
   test("each node has an icon, a label, and a status, and set operations stay disabled", async ({ page }) => {
     await openStudio(page);
     await reachTransform(page);
+    await setPalette(page, true);
     const trim = page.locator(".df2-canvas-op[data-op='trim']");
     await expect(trim).toHaveAttribute("data-icon", "trim");
     await expect(trim).toHaveAttribute("data-stripe", "values");
@@ -436,6 +451,7 @@ conn.commit()
   test("arranged flow stays clear of the minimap and each category has its own color", async ({ page }) => {
   await openStudio(page);
   await reachTransform(page);
+  await setPalette(page, true);
   await page.locator(".df2-canvas-op[data-op='trim']").click();
   await page.locator(".df2-canvas-op[data-op='drop_column']").click();
   await page.locator(".df2-canvas-op[data-op='filter_rows']").click();
@@ -519,6 +535,25 @@ conn.commit()
   expect(rail!.width).toBeGreaterThanOrEqual(180);
   expect(inspector!.width).toBeGreaterThanOrEqual(240);
   expect(inspector!.height).toBeGreaterThanOrEqual(120);
+
+  await page.getByRole("button", { name: "Validation", exact: true }).click();
+  await expect(page.getByRole("region", { name: "Validation" })).toContainText("No issues");
+  await page.getByRole("button", { name: "Validation", exact: true }).click();
+  await page.getByRole("button", { name: "Focus canvas" }).click();
+  await expect(page.locator(".df2-sidebar")).toBeHidden();
+  await expect(page.locator(".df2-transfer-studio-chrome")).toBeHidden();
+  await page.getByRole("button", { name: "Exit focus" }).click();
+  await expect(page.locator(".df2-sidebar")).toBeVisible();
+  await page.getByRole("button", { name: "Maximize preview" }).click();
+  await expect(page.getByTestId("canvas-preview")).toHaveClass(/is-max/);
+  await page.getByRole("button", { name: "Restore preview" }).click();
+  await expect(page.getByTestId("canvas-preview")).not.toHaveClass(/is-max/);
+  await page.getByRole("button", { name: "Hide preview" }).click();
+  const zoomed = page.locator(".react-flow__viewport");
+  const zoomBefore = await zoomed.evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a);
+  await page.getByRole("button", { name: "Zoom in", exact: true }).click();
+  await expect.poll(async () => zoomed.evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a)).toBeGreaterThan(zoomBefore + 0.05);
+  await page.getByRole("button", { name: "Fit view", exact: true }).click();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Arrange" }).click();

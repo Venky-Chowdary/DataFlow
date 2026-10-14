@@ -23,6 +23,7 @@ import {
   preloadTransformRefused,
   kitchenCatalogColumns,
   kitchenSampleValues,
+  canvasValidationIssues,
   previewErrorForSteps,
   previewSampleNote,
   samplePopulationBanner,
@@ -192,6 +193,10 @@ export function TransferTransformStep({
   const rowsKey = useMemo(() => JSON.stringify(previewRows.slice(0, 200)), [previewRows]);
   const stepsKey = useMemo(() => JSON.stringify(steps), [steps]);
   const shownPreviewError = previewErrorForSteps(previewError, previewErrorKey, stepsKey);
+  const canvasIssues = useMemo(
+    () => canvasValidationIssues(shownPreviewError, preview?.refusal),
+    [shownPreviewError, preview?.refusal],
+  );
   const schemaKey = useMemo(() => JSON.stringify(targetSchema), [targetSchema]);
   const sourceSchemaKey = useMemo(() => JSON.stringify(sourceSchema), [sourceSchema]);
   const shapedColumns = preview?.recipe.output_columns ?? previewColumns;
@@ -543,7 +548,7 @@ export function TransferTransformStep({
           <div><p>Profile unavailable: {profileError}</p></div>
         </div>
       )}
-      {shownPreviewError && (
+      {!canvasEnabled && shownPreviewError && (
         <div
           className={`df2-alert ${isTransportTimeout(shownPreviewError) ? "df2-alert-warn" : "df2-alert-error"}`}
           role={isTransportTimeout(shownPreviewError) ? "status" : "alert"}
@@ -570,7 +575,7 @@ export function TransferTransformStep({
           </div>
         </div>
       )}
-      {preview?.refusal && (
+      {!canvasEnabled && preview?.refusal && (
         <div className="df2-alert df2-alert-error" role="alert">
           <DtIcon name="x" size={16} />
           <div>
@@ -631,6 +636,7 @@ export function TransferTransformStep({
           <TransferTransformCanvas
             catalog={catalog}
             steps={steps}
+            issues={canvasIssues}
             onChangeSteps={onChangeSteps}
             columns={columnsAfter.map((name) => ({
               name,

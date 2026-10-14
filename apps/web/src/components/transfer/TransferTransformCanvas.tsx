@@ -77,6 +77,8 @@ interface TransferTransformCanvasProps {
   /** Source sample. A node preview runs the recipe through that step only. */
   sampleRows?: Record<string, unknown>[];
   onApplySuggestion?: (suggestion: ShapeSuggestion) => void;
+  /** Refusals for the current recipe. Index is 0-based; -1 is the recipe. */
+  issues?: ReadonlyArray<{ index: number; message: string }>;
 }
 
 const SHORTCUTS: { keys: string; action: string }[] = [
@@ -125,6 +127,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     previewStatus,
     sampleRows = [],
     onApplySuggestion,
+    issues = [],
   } = props;
   const stackRef = useRef(createUndoStack(steps));
   const filterRef = useRef<HTMLInputElement>(null);
@@ -149,6 +152,12 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const [templatesOpen, setTemplatesOpen] = useState(false);
   const [dockHeight, setDockHeight] = useState(96);
   const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewMax, setPreviewMax] = useState(false);
+  const [paletteDock, setPaletteDock] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [validationOpen, setValidationOpen] = useState(false);
+  const [focusMode, setFocusMode] = useState(false);
+  const [zoomCommand, setZoomCommand] = useState({ id: 0, delta: 0 });
   const [fitTick, setFitTick] = useState(0);
   const [runningIndex, setRunningIndex] = useState<number | null>(null);
   const [nodePreview, setNodePreview] = useState<{ index: number; rows: Record<string, unknown>[]; note: string } | null>(null);
@@ -161,6 +170,13 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       stackRef.current = createUndoStack(steps);
     }
   }, [steps]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (focusMode) root.classList.add("df2-canvas-focus");
+    else root.classList.remove("df2-canvas-focus");
+    return () => root.classList.remove("df2-canvas-focus");
+  }, [focusMode]);
 
   const commit = (next: ShapeStepWire[]) => {
     const safe = stepsWithoutPlanOps(next, catalog?.post_load_only.operations ?? []).map((step) => (
@@ -219,6 +235,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     setDraftPolicy(step.on_error ?? "refuse");
     setExpressionError("");
     setFormError("");
+    setInspectorOpen(true);
   };
 
   const clearPending = () => {
@@ -228,6 +245,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
 
   const beginAdd = (op: string, atIndex = steps.length, atPoint?: FlowPoint) => {
     if (!canEdit) return;
+    setInspectorOpen(true);
     const spec = specByOp(registry, op);
     if (spec && !spec.executable) {
       setFormError(spec.reason);
@@ -380,6 +398,10 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       filterRef.current?.focus();
     } else if (event.key === "n" || event.key === "N") filterRef.current?.focus();
     else if (event.key === "Escape") {
+      if (focusMode) {
+        setFocusMode(false);
+        return;
+      }
       setSelected(null);
       clearPending();
     }
@@ -417,6 +439,14 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     setPlaced(null);
     setFitTick((tick) => tick + 1);
   };
+
+  const zoomBy = (delta: number) => {
+    setZoomCommand((current) => ({ id: current.id + 1, delta }));
+  };
+
+  const stepIssue = selected != null ? issues.find((issue) => issue.index === selected) : undefined;
+  const inspectorAlert = formError || stepIssue?.message || "";
+  const dockReserve = (previewMax ? 0 : (previewOpen ? dockHeight : 48)) + 8;
 
   const previewNode = async (index: number) => {
     const step = steps[index];
@@ -502,8 +532,26 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => applyStack("redo")} aria-label="Redo">
             Redo
           </button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={paletteDock} onClick={() => setPaletteDock((open) => !open)}>
+            Palette
+          </button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={inspectorOpen} onClick={() => setInspectorOpen((open) => !open)}>
+            Properties
+          </button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={validationOpen} onClick={() => setValidationOpen((open) => !open)}>
+            Validation{issues.length ? ` (${issues.length})` : ""}
+          </button>
           <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setFitTick((tick) => tick + 1)} aria-label="Fit view">
             Fit
+          </button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => zoomBy(0.15)} aria-label="Zoom in">
+            Zoom in
+          </button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => zoomBy(-0.15)} aria-label="Zoom out">
+            Zoom out
+          </button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setFocusMode((on) => !on)}>
+            {focusMode ? "Exit focus" : "Focus canvas"}
           </button>
           <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={arrange} aria-label="Arrange">
             Arrange
@@ -517,10 +565,9 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
         <p className="df2-canvas-refusal" role="status">{refusalReason} Nodes stay visible and cannot be added.</p>
       )}
       {!canPlan && <p className="df2-label-hint">{disabledReason}</p>}
-      {formError && <p className="df2-qw-schema-error" role="alert">{formError}</p>}
 
       <div className="df2-canvas-body">
-        <aside className="df2-canvas-rail" aria-label="Operations">
+        <aside className={paletteDock ? "df2-canvas-rail" : "df2-canvas-rail is-collapsed"} aria-label="Operations">
           <input
             ref={filterRef}
             className="df2-input df2-input-sm"
@@ -657,13 +704,15 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           )}
         </aside>
 
-        <div className="df2-canvas-stage-wrap">
+        <div className="df2-canvas-stage-wrap" style={{ ["--df-dock-reserve" as string]: `${dockReserve}px` }}>
           <Suspense fallback={<p className="df2-label-hint" role="status" aria-busy="true">Loading the canvas…</p>}>
             <TransformFlow
               nodes={flow.nodes}
               edges={flow.edges}
               pending={pending}
               placed={placed}
+              issues={issues}
+              zoomCommand={zoomCommand}
               onSelect={loadStep}
               onReorder={(from, to) => {
                 if (!canEdit) return;
@@ -691,6 +740,13 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
             onHeight={setDockHeight}
             open={previewOpen}
             onOpen={setPreviewOpen}
+            maximized={previewMax}
+            onMaximize={() => {
+              setPreviewMax((value) => {
+                if (!value) setPreviewOpen(true);
+                return !value;
+              });
+            }}
             status={previewStatus || previewBanner}
             effect={effectSummary}
             columns={previewColumns}
@@ -699,8 +755,38 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           />
         </div>
 
-        <aside className="df2-canvas-inspector" id="canvas-inspector" tabIndex={-1} aria-label="Step inspector">
-          <h4>{selected != null ? "Edit step" : draftOp ? "New step" : "Inspector"}</h4>
+        {validationOpen && (
+          <div className="df2-canvas-validation" role="region" aria-label="Validation">
+            <h4>Validation</h4>
+            {issues.length === 0 ? (
+              <p className="df2-label-hint">No issues. The recipe can be previewed.</p>
+            ) : (
+              <ul>
+                {issues.map((issue, index) => (
+                  <li key={`${issue.index}-${index}`}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (issue.index >= 0 && steps[issue.index]) {
+                          loadStep(issue.index);
+                          setFitTick((tick) => tick + 1);
+                          return;
+                        }
+                        setInspectorOpen(true);
+                      }}
+                    >
+                      {issue.index >= 0 ? `Step ${issue.index + 1}` : "Recipe"}: {issue.message}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
+        <aside className={inspectorOpen ? "df2-canvas-inspector" : "df2-canvas-inspector is-collapsed"} id="canvas-inspector" tabIndex={-1} aria-label="Step inspector">
+          <h4>{selected != null ? "Edit step" : draftOp ? "New step" : "Properties"}</h4>
+          {inspectorAlert && <p className="df2-qw-schema-error" role="alert">{inspectorAlert}</p>}
           {!selectedOperation && <p className="df2-label-hint">Choose an operation, or select a step.</p>}
           {selectedOperation && (
             <>
@@ -846,6 +932,8 @@ function PreviewDock({
   onHeight,
   open,
   onOpen,
+  maximized,
+  onMaximize,
   status,
   effect,
   columns,
@@ -856,6 +944,8 @@ function PreviewDock({
   onHeight: (height: number) => void;
   open: boolean;
   onOpen: (open: boolean) => void;
+  maximized: boolean;
+  onMaximize: () => void;
   status: string;
   effect: string;
   columns: string[];
@@ -877,13 +967,14 @@ function PreviewDock({
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
   };
+  const expanded = open || maximized;
   return (
     <div
-      className={open ? "df2-canvas-dock" : "df2-canvas-dock is-collapsed"}
-      style={open ? { height } : undefined}
+      className={`df2-canvas-dock${expanded ? "" : " is-collapsed"}${maximized ? " is-max" : ""}`}
+      style={open && !maximized ? { height } : undefined}
       data-testid="canvas-preview"
     >
-      {open && (
+      {open && !maximized && (
         <div
           className="df2-canvas-dock-grip"
           role="separator"
@@ -903,13 +994,27 @@ function PreviewDock({
       <div className="df2-canvas-dock-body">
         <div className="df2-canvas-dock-head">
           <p data-testid="canvas-preview-status" role="status">{status}</p>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => onOpen(!open)}>
-            {open ? "Hide preview" : "Show preview"}
+          <button
+            type="button"
+            className="df2-btn df2-btn-ghost df2-btn-sm"
+            onClick={() => {
+              if (maximized) {
+                onMaximize();
+                onOpen(false);
+                return;
+              }
+              onOpen(!open);
+            }}
+          >
+            {expanded ? "Hide preview" : "Show preview"}
+          </button>
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onMaximize}>
+            {maximized ? "Restore preview" : "Maximize preview"}
           </button>
           <button type="button" className="df2-btn df2-btn-sm" onClick={() => { onOpen(true); onRunPreview(); }}>Run preview</button>
         </div>
-        {open && effect && <p className="df2-label-hint">{effect}</p>}
-        {open && rows.length > 0 && shown.length > 0 && (
+        {expanded && effect && <p className="df2-label-hint">{effect}</p>}
+        {expanded && rows.length > 0 && shown.length > 0 && (
           <table>
             <thead>
               <tr>{shown.map((column) => <th key={column}>{column}</th>)}</tr>

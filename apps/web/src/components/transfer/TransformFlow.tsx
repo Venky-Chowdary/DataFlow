@@ -119,6 +119,8 @@ interface TransformFlowProps {
   onDropOp: (op: string, at: FlowPoint, index: number) => void;
   onPreviewNode: (index: number) => void;
   fitTick: number;
+  issues?: ReadonlyArray<{ index: number; message: string }>;
+  zoomCommand?: { id: number; delta: number };
 }
 
 function stepIndex(id: string | null | undefined): number {
@@ -151,8 +153,10 @@ function FlowCanvas({
   onDropOp,
   onPreviewNode,
   fitTick,
+  issues = [],
+  zoomCommand = { id: 0, delta: 0 },
 }: TransformFlowProps) {
-  const { screenToFlowPosition, setViewport } = useReactFlow();
+  const { screenToFlowPosition, getViewport, setViewport } = useReactFlow();
   const paneWidth = useStore((state) => state.width);
   const paneHeight = useStore((state) => state.height);
   const [hot, setHot] = useState(false);
@@ -166,9 +170,18 @@ function FlowCanvas({
       return next;
     });
   };
+  const issuesByIndex = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const issue of issues) {
+      if (issue.index < 0 || !issue.message) continue;
+      const previous = map.get(issue.index);
+      map.set(issue.index, previous ? `${previous} ${issue.message}` : issue.message);
+    }
+    return map;
+  }, [issues]);
   const built = useMemo(
-    () => buildNodes(nodes, pending, placed, expanded, toggleFields, onPreviewNode),
-    [nodes, pending, placed, expanded, onPreviewNode],
+    () => buildNodes(nodes, pending, placed, expanded, toggleFields, onPreviewNode, issuesByIndex),
+    [nodes, pending, placed, expanded, onPreviewNode, issuesByIndex],
   );
   const [flowNodes, setFlowNodes] = useState(built);
   const placedRef = useRef(placed);
@@ -206,6 +219,14 @@ function FlowCanvas({
     fittedPane.current = { w: pane.w, h: pane.h };
     void setViewport(viewport, { duration: 0 });
   }, [fitTick, flowNodes.length, placed, paneWidth, paneHeight, setViewport]);
+  const zoomSeen = useRef(0);
+  useEffect(() => {
+    if (!zoomCommand.id || zoomCommand.id === zoomSeen.current) return;
+    zoomSeen.current = zoomCommand.id;
+    const current = getViewport();
+    const zoom = Math.min(FIT_MAX_ZOOM, Math.max(FIT_MIN_ZOOM, Math.round((current.zoom + zoomCommand.delta) * 100) / 100));
+    void setViewport({ x: current.x, y: current.y, zoom }, { duration: 0 });
+  }, [zoomCommand, getViewport, setViewport]);
   useEffect(() => {
     const read = () => setTheme(readTheme());
     const observer = new MutationObserver(read);
@@ -330,7 +351,7 @@ function FlowCanvas({
         }}
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1.5} color="var(--df-border-strong)" />
-        <Controls showInteractive={false} showFitView={false} />
+        <Controls showInteractive={false} showFitView={false} className="df2-canvas-controls" />
         <MiniMap
           pannable={false}
           zoomable={false}
@@ -353,12 +374,15 @@ function buildNodes(
   expanded: ReadonlySet<string>,
   onToggleFields: (id: string) => void,
   onPreview: (index: number) => void,
+  issuesByIndex: ReadonlyMap<number, string>,
 ): Node<StudioNodeData>[] {
   const shift = pending ? 1 : 0;
   const positions = layoutFor(nodes.length + shift);
   const flowNodes: Node<StudioNodeData>[] = nodes.map((node) => {
     const slot = pending && node.index >= pending.atIndex ? node.index + 1 : node.index;
     const anchored = placed && placed.index === node.index ? { x: placed.x, y: placed.y } : null;
+    const reason = issuesByIndex.get(node.index) ?? "";
+    const invalid = Boolean(reason) && node.status !== "running";
     return {
       id: node.id,
       type: "studio",
@@ -375,7 +399,6 @@ function buildNodes(
         op: node.op,
         icon: node.icon,
         stripe: node.stripe,
-        status: node.status,
         ports: node.ports,
         family: node.family,
         category: node.category,
@@ -386,8 +409,9 @@ function buildNodes(
         dimmed: node.dimmed,
         disabled: node.disabled,
         changesRowCount: node.changesRowCount,
-        invalid: false,
-        invalidReason: "",
+        invalid,
+        invalidReason: invalid ? reason : "",
+        status: invalid ? "error" : node.status,
       },
       draggable: !node.disabled,
       connectable: !node.disabled,

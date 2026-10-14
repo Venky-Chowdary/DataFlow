@@ -12,6 +12,7 @@ import {
   parseNumberOption,
   settleExpressionCheck,
   operationsByFamily,
+  canvasValidationIssues,
   previewErrorForSteps,
   previewSampleNote,
   unknownExpressionColumn,
@@ -267,6 +268,24 @@ test("a refusal stays with the recipe that caused it", () => {
   assert.equal(previewErrorForSteps(message, bad, fixed), "");
   assert.match(unknownExpressionColumn("[order_id] <> ''", ["customer_email", "status"]), /order_id/);
   assert.equal(unknownExpressionColumn("[status] <> ''", ["customer_email", "status"]), "");
+});
+
+test("canvas validation names the step and does not invent a banner", () => {
+  assert.deepEqual(
+    canvasValidationIssues("step 3 condition refers to column 'order_id'", { step: 3, message: "row refused" }),
+    [
+      { index: 2, message: "row refused" },
+      { index: 2, message: "step 3 condition refers to column 'order_id'" },
+    ],
+  );
+  assert.deepEqual(canvasValidationIssues("", null), []);
+  assert.deepEqual(canvasValidationIssues("preview timed out", undefined), [
+    { index: -1, message: "preview timed out" },
+  ]);
+  assert.deepEqual(
+    canvasValidationIssues("row refused", { step: 1, message: "row refused" }),
+    [{ index: 0, message: "row refused" }],
+  );
 });
 
 test("CDC with a recipe cannot continue — history was not written by this recipe", () => {
