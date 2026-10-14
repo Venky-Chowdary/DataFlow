@@ -471,5 +471,10 @@ def test_reading_the_vocabulary_is_a_read_and_designing_a_recipe_is_planning():
     # Profiling describes rows the caller sent and mints no identity, so a viewer
     # told it may inspect the step actually sees the findings.
     assert _required_permission("POST", "/api/v1/shape/profile") == Permission.JOB_READ
+    # Reloading a saved recipe returns what is already stored and mints no
+    # identity, so a viewer can reopen the step. Saving and deleting replace it.
+    assert _required_permission("GET", "/api/v1/shape/drafts") == Permission.JOB_READ
+    assert _required_permission("PUT", "/api/v1/shape/drafts") == Permission.JOB_PLAN
+    assert _required_permission("DELETE", "/api/v1/shape/drafts") == Permission.JOB_PLAN
     assert _required_permission("POST", "/api/v1/shape/preview") == Permission.JOB_PLAN
     assert _required_permission("POST", "/api/v1/shape/validate") == Permission.JOB_PLAN

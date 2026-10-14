@@ -272,12 +272,16 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # a viewer's Transform step renders the real operations it cannot apply
     # instead of an empty panel. Profiling is also a read: it only describes rows
     # the caller sent, touches no route and composes no recipe, so a viewer sees
-    # the same findings it is being told it may inspect. Previewing and validating
-    # mint a recipe identity that Execute is held to — that is design work on a
+    # the same findings it is being told it may inspect. Reloading a saved recipe
+    # is the same kind of read: it returns the draft already stored for the route
+    # and mints no identity. Saving and deleting that draft, and previewing or
+    # validating, mint or replace the recipe Execute is held to — design work on a
     # route, gated by the permission that plans a transfer (an operator runs
-    # approved plans, it does not author the recipe inside one).
+    # approved plans, it does not author the recipe inside one). The draft read
+    # is listed before the shape prefix so first-match does not inherit plan.
     ("GET", "/api/v1/shape/catalog", Permission.JOB_READ),
     ("POST", "/api/v1/shape/profile", Permission.JOB_READ),
+    ("GET", "/api/v1/shape/drafts", Permission.JOB_READ),
     ("*", "/api/v1/shape/", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/run", Permission.JOB_RUN),
     ("POST", "/api/v1/transfer/rules/import", Permission.JOB_PLAN),

@@ -10,6 +10,7 @@
   "DELETE /api/v1/schedules/{schedule_id}/authorization": "schedule.manage",
   "DELETE /api/v1/scim/v2/Groups/{group_id}": "scim.provision",
   "DELETE /api/v1/scim/v2/Users/{user_id}": "scim.provision",
+  "DELETE /api/v1/shape/drafts": "job.plan",
   "DELETE /api/v1/team/users/{email}": "workspace.manage",
   "DELETE /api/v1/team/workspaces/{workspace_id}": "workspace.read",
   "DELETE /api/v1/team/workspaces/{workspace_id}/members/{email}": "workspace.read",
@@ -103,6 +104,7 @@
   "GET /api/v1/scim/v2/Users": "scim.provision",
   "GET /api/v1/scim/v2/Users/{user_id}": "scim.provision",
   "GET /api/v1/shape/catalog": "job.read",
+  "GET /api/v1/shape/drafts": "job.read",
   "GET /api/v1/team/users": "workspace.manage",
   "GET /api/v1/team/workspaces": "workspace.read",
   "GET /api/v1/team/workspaces/{workspace_id}/members": "workspace.read",
@@ -197,8 +199,10 @@
   "POST /api/v1/connectors/jobs/{job_id}/cancel": "connector.write",
   "POST /api/v1/connectors/jobs/{job_id}/quarantine/export": "connector.write",
   "POST /api/v1/connectors/jobs/{job_id}/quarantine/replay": "connector.write",
+  "POST /api/v1/connectors/jobs/{job_id}/rerun": "connector.write",
   "POST /api/v1/connectors/jobs/{job_id}/resume": "connector.write",
   "POST /api/v1/connectors/jobs/{job_id}/retry": "connector.write",
+  "POST /api/v1/connectors/jobs/{job_id}/sync": "connector.write",
   "POST /api/v1/connectors/saved": "connector.write",
   "POST /api/v1/connectors/saved/{connector_id}/rotate-secrets": "connector.write",
   "POST /api/v1/connectors/saved/{connector_id}/test": "connector.write",
@@ -247,6 +251,7 @@
   "POST /api/v1/schedules/{schedule_id}/approvals/{approval_id}/reject": "schedule.manage",
   "POST /api/v1/schedules/{schedule_id}/authorization": "schedule.manage",
   "POST /api/v1/schedules/{schedule_id}/run": "schedule.manage",
+  "POST /api/v1/schedules/{schedule_id}/sync": "schedule.manage",
   "POST /api/v1/scim/v2/Groups": "scim.provision",
   "POST /api/v1/scim/v2/Users": "scim.provision",
   "POST /api/v1/shape/expression": "job.plan",
@@ -301,5 +306,6 @@
   "PUT /api/v1/iam/scim/group-mappings": "iam.manage",
   "PUT /api/v1/mcp/policy": "workspace.manage",
   "PUT /api/v1/scim/v2/Groups/{group_id}": "scim.provision",
-  "PUT /api/v1/scim/v2/Users/{user_id}": "scim.provision"
+  "PUT /api/v1/scim/v2/Users/{user_id}": "scim.provision",
+  "PUT /api/v1/shape/drafts": "job.plan"
 }
