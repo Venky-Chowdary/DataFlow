@@ -1474,4 +1474,11 @@ html:has(.df2-app) #root {
   .df2-app.df2-app-with-edge .df2-content-inner.df2-content-studio {
     padding-right: calc(var(--df-page-gutter, 24px) + var(--df-copilot-edge-w)) !important;
   }
+
+  /* The flagged transfer shell is edge to edge. The reservation above is for
+     every other studio page. This selector is narrower and later, so the
+     work area reaches the viewport and the action bar clears the tab itself. */
+  .df2-app.df2-app-with-edge .df2-content-inner.df2-content-studio:has(.df2-page-transfer-studio.is-studio-next) {
+    padding: 0 !important;
+  }
 }

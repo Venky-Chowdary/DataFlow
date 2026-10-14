@@ -11926,3 +11926,40 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
     overflow-y: auto !important;
   }
 }
+
+/* Flagged shell is flush. These beat the page gutter and the card-body
+   padding lock. A flags-off page does not carry .is-studio-next. */
+.df2-app .df2-content:has(.df2-page-transfer-studio.is-studio-next) {
+  padding: 0 !important;
+}
+
+.df2-app.df2-app-with-edge .df2-content-inner.is-transfer-studio-view:has(.df2-page-transfer-studio.is-studio-next),
+.df2-content-inner.df2-content-studio:has(.df2-page-transfer-studio.is-studio-next) {
+  padding: 0 !important;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-step-viewport > .df2-card-body,
+.df2-page-transfer-studio.is-studio-next .df2-dest-step.df2-transfer-step-viewport > .df2-card-body,
+.df2-page-transfer-studio.is-studio-next .df2-source-step.df2-transfer-step-viewport > .df2-card-body {
+  padding: 0 !important;
+  scrollbar-gutter: auto;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-theater-v3-footer,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+  padding: 0 12px !important;
+  height: 48px !important;
+  min-height: 0 !important;
+  max-height: 48px !important;
+  margin: 0 !important;
+  bottom: 0 !important;
+}
+
+@media (min-width: 1024px) {
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-theater-v3-footer,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+    padding-right: 64px !important;
+  }
+}
