@@ -288,6 +288,8 @@ import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/s
 import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
 import {
   analysisFromPipeline,
+  destinationCatalogLoadsOnStep,
+  destinationCatalogRetriesOnStep,
   fileExtension,
   findColumn,
   formatFileSize,
@@ -2134,14 +2136,16 @@ export function TransferPage({
       return;
     }
     // Load object list as soon as a connector is chosen; refine when table is set.
-    if (step !== STEP_DESTINATION && step !== STEP_MAP && step !== STEP_VALIDATE) return;
+    // Connect stays on Source while the destination panel is on screen, so the
+    // flagged studio must probe there too. Otherwise the table list stays empty.
+    if (!destinationCatalogLoadsOnStep(step, studioFlags.canvas)) return;
     if (!connectorId) {
       void inlineDestinationProbeRef.current?.schedule(currentDestinationEndpoint);
       return () => inlineDestinationProbeRef.current?.cancel();
     }
     const t = window.setTimeout(() => { void loadDestinationSchema(); }, 350);
     return () => window.clearTimeout(t);
-  }, [step, destKindMode, connectorId, currentDestinationProbeKey]);
+  }, [step, destKindMode, connectorId, currentDestinationProbeKey, studioFlags.canvas]);
 
   // An unreachable destination is re-checked on a fixed cadence, not as fast as
   // Map can re-render: the operator gets automatic recovery when the host comes
@@ -2152,7 +2156,7 @@ export function TransferPage({
       destKindMode !== "database"
       || (!connectorId && !isInlineDestinationConfigured(currentDestinationEndpoint))
     ) return;
-    if (step !== STEP_DESTINATION && step !== STEP_MAP) return;
+    if (!destinationCatalogRetriesOnStep(step, studioFlags.canvas)) return;
     if (destConnected !== false || destSchemaLoading) return;
     const t = window.setTimeout(() => {
       void loadDestinationSchema({ force: true }).finally(() => {
@@ -2160,7 +2164,7 @@ export function TransferPage({
       });
     }, DEST_PROBE_FAILURE_COOLDOWN_MS);
     return () => window.clearTimeout(t);
-  }, [step, destKindMode, connectorId, currentDestinationProbeKey, destConnected, destSchemaLoading, destProbeRetryTick]);
+  }, [step, destKindMode, connectorId, currentDestinationProbeKey, destConnected, destSchemaLoading, destProbeRetryTick, studioFlags.canvas]);
 
   useEffect(() => {
     if (cursorCandidate && (!cursorField || !currentSourceColumns.includes(cursorField))) {
@@ -6599,6 +6603,7 @@ export function TransferPage({
         <div className="df2-card-body">
           <div className="df2-transfer-step-split">
             <div className="df2-transfer-step-primary">
+              {studioFlags.canvas && <h2 className="df2-flow-column-title">Source</h2>}
               <div className="df2-field">
                 <label className="df2-label">Where is your data?</label>
                 <SourceKindTiles
@@ -7132,9 +7137,10 @@ export function TransferPage({
         <div className="df2-card-body">
           <div className="df2-dest-step-layout">
             <div className="df2-dest-step-left">
+              {studioFlags.canvas && <h2 className="df2-flow-column-title">Destination</h2>}
               <div className="df2-dest-toolbar">
                 <div className="df2-field df2-dest-mode-field">
-                  <label className="df2-label">Mode</label>
+                  <label className="df2-label">{studioFlags.canvas ? "Write as" : "Mode"}</label>
                   <div className="df2-dest-mode-row">
                     <div className="df2-dest-mode-toggle" role="tablist" aria-label="Destination mode">
                       <button
@@ -7782,9 +7788,11 @@ export function TransferPage({
           </div>
         </div>
         <div className="df2-card-footer df2-wizard-footer">
-          <button type="button" className="df2-btn" onClick={() => setStep(STEP_SOURCE)}>
-            <DtIcon name="arrow-left" size={14} /> Back to source
-          </button>
+          {!(studioFlags.canvas && step === STEP_SOURCE) && (
+            <button type="button" className="df2-btn" onClick={() => setStep(STEP_SOURCE)}>
+              <DtIcon name="arrow-left" size={14} /> Back to source
+            </button>
+          )}
           <div className="df2-btn-row">
           <button
             type="button"

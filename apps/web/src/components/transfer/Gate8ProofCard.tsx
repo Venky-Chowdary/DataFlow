@@ -1,6 +1,7 @@
 /** Gate-8 reconciliation proof — source vs destination rows + checksums. */
 
 import { useEffect, useState } from "react";
+import { useToast } from "../Toast";
 import { HiddenFileInput } from "../ui/HiddenFileInput";
 import {
   controlTotalEvidenceLabel,
@@ -86,7 +87,7 @@ function downloadJson(filename: string, payload: unknown) {
 }
 
 /** Client-facing run report: rows read/written/quarantined, verdict, signature. */
-async function exportMigrationCertificate(jobId: string) {
+async function exportMigrationCertificate(jobId: string, onError: (message: string) => void) {
   try {
     const { fetchMigrationCertificatePdf, fetchMigrationCertificateMarkdown } = await import(
       "../../lib/api"
@@ -108,11 +109,15 @@ async function exportMigrationCertificate(jobId: string) {
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Certificate export failed";
-    window.alert(`Could not export the Migration Certificate.\n${message}`);
+    onError(message);
   }
 }
 
-async function exportGate8Proof(report: Gate8Reconciliation, jobId?: string) {
+async function exportGate8Proof(
+  report: Gate8Reconciliation,
+  jobId: string | undefined,
+  onError: (message: string) => void,
+) {
   if (jobId) {
     try {
       const { fetchSignedProofPack } = await import("../../lib/api");
@@ -122,7 +127,7 @@ async function exportGate8Proof(report: Gate8Reconciliation, jobId?: string) {
     } catch (err) {
       const message = err instanceof Error ? err.message : "Signed proof pack export failed";
       // Do not silently substitute an unsigned snapshot when the CTA promised HMAC.
-      window.alert(`Could not export signed proof pack.\n${message}`);
+      onError(message);
       return;
     }
   }
@@ -157,6 +162,7 @@ export function Gate8ProofCard({
   onRerun,
   onRerunLabel = "Re-run transfer",
 }: Gate8ProofCardProps) {
+  const { toast } = useToast();
   const [verifyState, setVerifyState] = useState<
     | { status: "idle" }
     | { status: "working" }
@@ -802,7 +808,9 @@ export function Gate8ProofCard({
           <button
             type="button"
             className="df2-btn df2-btn-sm df2-btn-secondary"
-            onClick={() => void exportGate8Proof(report, jobId)}
+            onClick={() => void exportGate8Proof(report, jobId, (message) => {
+              toast({ title: "Could not export signed proof pack", message, tone: "error" });
+            })}
           >
             {jobId ? "Export signed proof pack" : "Export proof JSON"}
           </button>
@@ -810,7 +818,9 @@ export function Gate8ProofCard({
             <button
               type="button"
               className="df2-btn df2-btn-sm"
-              onClick={() => void exportMigrationCertificate(jobId)}
+              onClick={() => void exportMigrationCertificate(jobId, (message) => {
+                toast({ title: "Could not export the Migration Certificate", message, tone: "error" });
+              })}
               title="Signed audit PDF: rows read/written/quarantined by reason, reconciliation verdict, destination physical state"
             >
               Download Migration Certificate (PDF)

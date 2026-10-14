@@ -5,6 +5,7 @@ import {
   type EditableMapping,
 } from "../../lib/mapping";
 import type { EnhancedAnalysis } from "../../lib/types";
+import { STEP_DESTINATION, STEP_MAP, STEP_SOURCE, STEP_VALIDATE } from "./studioConstants";
 
 /** Remediations must not clear fidelity/STRUCT risk without Accept risk. */
 export function sealRemediationApproval(m: EditableMapping): EditableMapping {
@@ -75,4 +76,21 @@ export function analysisFromPipeline(
     recommendations: ["Review column mappings before executing."],
     method: "mapping_pipeline",
   };
+}
+
+/** Destination object list loads on Destination, Map, and Validate.
+ *  Connect keeps the operator on Source, so the flagged studio must load it there too.
+ */
+export function destinationCatalogLoadsOnStep(step: number, canvas: boolean): boolean {
+  return (
+    step === STEP_DESTINATION
+    || step === STEP_MAP
+    || step === STEP_VALIDATE
+    || (canvas && step === STEP_SOURCE)
+  );
+}
+
+/** Automatic retry of a failed destination probe. Validate probes on demand. */
+export function destinationCatalogRetriesOnStep(step: number, canvas: boolean): boolean {
+  return step === STEP_DESTINATION || step === STEP_MAP || (canvas && step === STEP_SOURCE);
 }

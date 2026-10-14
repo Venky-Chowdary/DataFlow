@@ -16,7 +16,6 @@ from typing import Any, Optional
 from pymongo import MongoClient
 
 from services.job_status import COMPLETED_STATUSES
-from services.job_status import TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
 from services.ops_events import emit_event
 from services.runtime_estimate import append_throughput_mark
 
@@ -870,17 +869,24 @@ class MongoDBService:
             holder, exp = cls._LOCAL_CLAIMS.get(key, ("", expires_at))
             # A claim whose job already finished is a normal re-run. The
             # caller supplies the status lookup — constructing a service here
-            # would pay a connect timeout inside the lock.
-            if holder and callable(status_lookup):
-                try:
-                    holder_status = status_lookup(holder)
-                except Exception:
-                    holder_status = ""
-                if holder_status in TERMINAL_JOB_STATUSES:
+            # would pay a connect timeout inside the lock. A lookup that
+            # throws stays closed (treat as running) so an outage cannot
+            # start a second writer.
+            if holder:
+                holder_status = "running"
+                if callable(status_lookup):
+                    try:
+                        holder_status = status_lookup(holder)
+                    except Exception:
+                        holder_status = "running"
+                from services.job_idempotency import claim_still_blocks
+
+                if not claim_still_blocks(
+                    holder_id=holder,
+                    holder_status=holder_status,
+                    expired=False,
+                ):
                     holder = ""
-            # Any live holder blocks a new claim — same as the Mongo insert:
-            # claimants all arrive under the shared _PENDING_CLAIM_ID, so an
-            # id-equality pass would admit every second submitter.
             if holder:
                 return False, holder
             cls._LOCAL_CLAIMS[key] = (job_id, expires_at)
@@ -920,7 +926,7 @@ class MongoDBService:
         same transfer later is normal — so it is taken over rather than
         rejected.
         """
-        from services.job_idempotency import claim_expiry
+        from services.job_idempotency import claim_expiry, claim_still_blocks
 
         if not key or not job_id:
             return True, "", ""
@@ -968,14 +974,14 @@ class MongoDBService:
         existing = claims.find_one({"_id": key}) or {}
         holder_id = str(existing.get("job_id") or "")
         holder_status = self._job_status(holder_id) if holder_id else ""
-        expires_at = existing.get("expires_at")
+        expires_raw = existing.get("expires_at")
+        expired = isinstance(expires_raw, datetime) and _as_utc(expires_raw) <= now
 
-        stale = (
-            not holder_id
-            or holder_status in TERMINAL_JOB_STATUSES
-            or (isinstance(expires_at, datetime) and _as_utc(expires_at) <= now)
-        )
-        if stale:
+        if not claim_still_blocks(
+            holder_id=holder_id,
+            holder_status=holder_status,
+            expired=expired,
+        ):
             # Take over: either the previous run finished, or it died without
             # releasing and its claim has aged out.
             result = claims.update_one(
@@ -1061,15 +1067,21 @@ class MongoDBService:
         self._claim_indexes_ready = True
 
     def _job_status(self, job_id: str) -> str:
-        """Current status of a job, or '' when it cannot be read."""
+        """Current status of a job.
+
+        A missing document is ``""`` so the claim can be reaped. A read that
+        throws is ``running`` so a store outage does not start a second writer.
+        """
         key = job_key_filter(job_id)
         if not key:
             return ""
         try:
             doc = self.get_database()["transfer_jobs"].find_one(key, {"status": 1})
         except Exception:
+            return "running"
+        if not doc:
             return ""
-        return str((doc or {}).get("status") or "")
+        return str(doc.get("status") or "")
 
     def update_job_fields(self, job_id: str, fields: dict) -> bool:
         """Patch job metadata without changing status (e.g. rename)."""
@@ -1305,7 +1317,7 @@ class MemoryMongoDBService:
         same way they would against the database, which is what makes the
         single-process test for this defect meaningful.
         """
-        from services.job_idempotency import claim_expiry
+        from services.job_idempotency import claim_expiry, claim_still_blocks
 
         if not key or not job_id:
             return True, "", ""
@@ -1318,12 +1330,12 @@ class MemoryMongoDBService:
                     (self._jobs.get(holder_id) or {}).get("status") or ""
                 )
                 expires_at = existing.get("expires_at")
-                stale = (
-                    not holder_id
-                    or holder_status in TERMINAL_JOB_STATUSES
-                    or (isinstance(expires_at, datetime) and _as_utc(expires_at) <= now)
-                )
-                if not stale:
+                expired = isinstance(expires_at, datetime) and _as_utc(expires_at) <= now
+                if claim_still_blocks(
+                    holder_id=holder_id,
+                    holder_status=holder_status,
+                    expired=expired,
+                ):
                     return False, holder_id, holder_status
             self._claims[key] = {
                 "job_id": job_id,

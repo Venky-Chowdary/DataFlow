@@ -1951,14 +1951,93 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   overflow-wrap: normal;
 }
 
-.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-studio-body,
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-studio-body,
-.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-main-panel,
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-main-panel {
   overflow: auto;
 }
 
-.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-step-viewport,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-studio-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-main-panel {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-btn-primary {
+  --df-accent: var(--df-brand-tile);
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-btn-primary:hover:not(:disabled) {
+  --df-accent: var(--df-brand-text);
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-flow-column-title {
+  margin: 0 0 var(--df-space-2);
+  padding-left: var(--df-space-2);
+  border-left: 3px solid var(--df-brand-arrow);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 16px;
+  color: var(--df-brand-text);
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-main-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(280px, 1fr) auto;
+  gap: var(--df-space-2);
+  align-items: stretch;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step {
+  min-width: 0;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-md);
+}
+
+/* Until the destination can be configured, the source column is the only
+   work surface. A reserved empty track reads as a broken second picker. */
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform):not(:has(.df2-dest-step)) .df2-source-step {
+  grid-column: 1 / -1;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step .df2-transfer-step-split,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step .df2-dest-step-layout {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 0;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step .df2-transfer-step-secondary,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step-right {
+  border-left: 0;
+  border-top: 1px solid var(--df-border);
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-flow-transform {
+  grid-column: 1 / -1;
+  align-self: start;
+  height: auto;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-main-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--df-space-2);
+}
+
+@media (max-width: 1100px) {
+  .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-main-panel {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+  }
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step {
+  min-height: 0;
+  overflow: hidden;
+}
+
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-step-viewport {
   height: auto;
   max-height: none;

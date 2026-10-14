@@ -31,7 +31,7 @@ export interface JobFilterCounts {
 
 export const EMPTY_JOB_HISTORY: JobHistory = { jobs: [], total: 0, statusCounts: {} };
 
-const RUNNING_STATUSES = new Set(["running", "pending"]);
+const RUNNING_STATUSES = new Set(["running", "pending", "queued", "retrying"]);
 
 /** History from a jobs response, falling back to the rows when a server never counted. */
 export function jobHistoryFromResponse(data: {

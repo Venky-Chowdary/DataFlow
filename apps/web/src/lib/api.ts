@@ -1092,7 +1092,18 @@ export async function confirmCopilotAction(payload: {
     body: JSON.stringify(payload),
   });
   if (!res.ok) {
-    throw new Error(await parseApiError(res, "Failed to confirm Pilot action"));
+    const data = await res.json().catch(() => ({} as Record<string, unknown>));
+    const record = data && typeof data === "object" ? data as Record<string, unknown> : {};
+    const detail = record.detail && typeof record.detail === "object"
+      ? record.detail as Record<string, unknown>
+      : record;
+    if (res.status === 409 && (detail.error === "duplicate_transfer" || record.error === "duplicate_transfer")) {
+      throw new SyncAlreadyRunningError(parseDuplicateTransfer(record));
+    }
+    const message = typeof record.detail === "string"
+      ? record.detail
+      : String(detail.error || detail.message || "Failed to confirm Pilot action");
+    throw new Error(message);
   }
   return res.json();
 }
@@ -1455,7 +1466,7 @@ export async function retryJob(
 export async function stageJobSync(
   jobId: string,
   mode: "sync" | "full",
-): Promise<{ ack_id: string; idempotent?: boolean; preview?: { confirm_reason?: string; note?: string; destructive?: boolean } }> {
+): Promise<{ ack_id: string; idempotent?: boolean; preview?: { confirm_reason?: string; note?: string; destructive?: boolean; sync_mode?: string; mode?: string } }> {
   const res = await apiFetch(`${API_BASE}/connectors/jobs/${jobId}/sync`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -3057,8 +3068,25 @@ export type DuplicateTransferResponse = {
   duplicate: true;
   existing_job_id: string;
   existing_status: string;
+  existing_created_at?: string;
   message: string;
 };
+
+/** Sync now / transfer confirm found a live equivalent writer. */
+export class SyncAlreadyRunningError extends Error {
+  readonly existingJobId: string;
+  readonly existingStatus: string;
+  readonly existingCreatedAt: string;
+
+  constructor(parsed: DuplicateTransferResponse) {
+    const id = parsed.existing_job_id || "unknown job";
+    super(`Already running: ${id}`);
+    this.name = "SyncAlreadyRunningError";
+    this.existingJobId = parsed.existing_job_id;
+    this.existingStatus = parsed.existing_status;
+    this.existingCreatedAt = parsed.existing_created_at || "";
+  }
+}
 
 function parseDuplicateTransfer(data: Record<string, unknown>): DuplicateTransferResponse {
   const detail = (data.detail && typeof data.detail === "object"
@@ -3067,6 +3095,9 @@ function parseDuplicateTransfer(data: Record<string, unknown>): DuplicateTransfe
   const existing =
     String(detail.existing_job_id || data.existing_job_id || data.job_id || "").trim();
   const status = String(detail.existing_status || data.existing_status || "in progress").trim();
+  const createdAt = String(
+    detail.existing_created_at || data.existing_created_at || "",
+  ).trim();
   const message = String(
     detail.message ||
       (typeof data.detail === "string" ? data.detail : "") ||
@@ -3079,6 +3110,7 @@ function parseDuplicateTransfer(data: Record<string, unknown>): DuplicateTransfe
     duplicate: true,
     existing_job_id: existing,
     existing_status: status,
+    existing_created_at: createdAt,
     message,
   };
 }

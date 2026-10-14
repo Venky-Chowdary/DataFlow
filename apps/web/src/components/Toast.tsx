@@ -124,7 +124,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 export function useToast() {
   const ctx = useContext(ToastContext);
   if (!ctx) {
-    if (import.meta.env.DEV) {
+    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
       console.warn("useToast called without ToastProvider — toasts are no-ops until provider mounts.");
     }
     return {

@@ -490,7 +490,49 @@
   align-items: center;
 }
 
+.df2-drawer-actions-primary,
+.df2-drawer-actions-extra,
+.df2-drawer-actions-menu-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.df2-drawer-actions .df2-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.df2-drawer-actions-menu {
+  display: none;
+}
+
+.df2-drawer-actions-menu > summary {
+  display: inline-flex;
+  align-items: center;
+  height: var(--df-btn-height-sm, 30px);
+  padding: 0 10px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--df-surface, #fff);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.df2-drawer-actions-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
 .df2-drawer-actions .df2-drawer-action-delete { margin-left: auto; }
+
+@media (max-width: 1100px) {
+  .df2-drawer-actions-extra { display: none; }
+  .df2-drawer-actions-menu { display: block; width: 100%; }
+  .df2-drawer-actions .df2-drawer-action-delete { margin-left: 0; }
+}
 
 /* Workbench embedded in the drawer — remove page-split assumptions */
 .df2-drawer .df2-connection-workbench {

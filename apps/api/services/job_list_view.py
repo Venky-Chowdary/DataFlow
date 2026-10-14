@@ -49,6 +49,8 @@ _LIST_KEEP_KEYS = frozenset({
     "created_by",
     "retry_of",
     "rerun_of",
+    "parent_job_id",
+    "last_sync_job_id",
     "cdc_lag_seconds",
     # Independent dest COUNT(*) ledger — small dict, required so Overview /
     # Jobs list never fall dest population back to records_processed.

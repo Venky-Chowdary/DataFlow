@@ -443,6 +443,7 @@ async def copilot_confirm(
     a write by being unlisted.
     """
     from services.connector_store import create_connector
+    from src.transfer.engine import DuplicateTransferSubmission
 
     from ..ai.copilot.ack_ledger import get_ack_ledger
     from ..ai.copilot.tool_permissions import (
@@ -555,6 +556,9 @@ async def copilot_confirm(
     if kind == "start_transfer":
         try:
             result = await _start_confirmed_transfer(payload)
+        except DuplicateTransferSubmission:
+            ledger.release_claim(ack_id)
+            raise
         except HTTPException:
             ledger.release_claim(ack_id)
             raise
@@ -583,6 +587,12 @@ async def copilot_confirm(
         except SyncNowRefused as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=409, detail={"error": str(exc), **exc.details}) from exc
+        except DuplicateTransferSubmission:
+            # The global handler answers 409 with the blocking job id. Wrapping
+            # this as 400 dropped that id and left the operator with a sentence
+            # and no job to open.
+            ledger.release_claim(ack_id)
+            raise
         except HTTPException:
             ledger.release_claim(ack_id)
             raise

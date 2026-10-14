@@ -792,6 +792,82 @@ conn.commit()
     await expect(page.getByRole("heading", { name: /Transfer complete|Run/ }).first()).toBeVisible();
     await check("run");
   });
+
+  test("connect lists destination tables after a connection is chosen", async ({ page }) => {
+    let introspects = 0;
+    await page.route("**/api/v1/connectors/saved", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          connectors: [{
+            id: "dest-pg",
+            name: "Warehouse",
+            type: "postgresql",
+            host: "db.internal",
+            port: 5432,
+            database: "analytics",
+            role: "destination",
+            last_test_ok: true,
+          }],
+        }),
+      });
+    });
+    await page.route("**/api/v1/transfer/introspect", async (route) => {
+      introspects += 1;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          source: { connected: true, columns: [], schema: {}, objects: [], message: "" },
+          destination: {
+            connected: true,
+            columns: [],
+            schema: {},
+            objects: [{ name: "warehouse_orders" }],
+            table_exists: null,
+            message: "",
+          },
+        }),
+      });
+    });
+    await openStudio(page);
+    await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
+    await expect(page.getByRole("heading", { name: "Destination", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Source", exact: true })).toBeVisible();
+    await page.getByRole("radio", { name: /Warehouse/ }).click();
+    await expect.poll(() => introspects).toBeGreaterThan(0);
+    await page.locator("#dest-col").click();
+    await expect(page.getByRole("option", { name: "warehouse_orders" })).toBeVisible();
+  });
+
+  test("connect source and destination sit on one row at desktop widths", async ({ page }) => {
+    await openStudio(page);
+    await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
+    await expect(page.getByRole("heading", { name: "Destination", exact: true })).toBeVisible();
+    for (const size of [
+      { width: 1366, height: 768 },
+      { width: 1440, height: 900 },
+      { width: 1920, height: 1080 },
+    ]) {
+      await page.setViewportSize(size);
+      const source = page.locator(".df2-source-step");
+      const dest = page.locator(".df2-dest-step");
+      const sourceBox = await source.boundingBox();
+      const destBox = await dest.boundingBox();
+      expect(sourceBox && destBox).toBeTruthy();
+      expect(Math.abs(sourceBox!.y - destBox!.y)).toBeLessThan(4);
+      expect(destBox!.x).toBeGreaterThan(sourceBox!.x + sourceBox!.width - 1);
+      const gap = destBox!.x - (sourceBox!.x + sourceBox!.width);
+      expect(gap).toBeGreaterThanOrEqual(7);
+      expect(gap).toBeLessThanOrEqual(12);
+      await expectDisjoint(page, source, dest);
+    }
+  });
 });
 
 test.describe("studio flags off", () => {
@@ -838,6 +914,159 @@ test.describe("studio flags off", () => {
     await add.click();
     await expect(page.locator("#xform-op")).toBeVisible();
     await shoot(page, "classic-transform-light-1440.png");
+  });
+});
+
+test.describe("schedules sync", () => {
+  const schedule = {
+    id: "sched-orders",
+    name: "Nightly orders",
+    source_connector_id: "src-1",
+    source_table: "orders",
+    dest_connector_id: "dst-1",
+    dest_table: "warehouse_orders",
+    interval: "daily",
+    cadence_label: "Daily",
+    cron: "",
+    timezone: "UTC",
+    sync_mode: "incremental",
+    validation_mode: "strict",
+    schema_policy: "manual_review",
+    backfill_new_fields: false,
+    cursor_column: "updated_at",
+    primary_key: "id",
+    cursor_value: "",
+    workspace_id: "ws",
+    max_retries: 2,
+    retry_backoff_seconds: 30,
+    notify_on_failure: true,
+    notify_on_success: false,
+    enabled: true,
+    last_run_at: null,
+    next_run_at: null,
+    last_job_id: "job-parent-11",
+    last_status: "completed",
+    run_count: 4,
+    running: false,
+    created_at: "2026-10-01T00:00:00Z",
+    contract_id: "contract-orders",
+  };
+
+  async function openSchedules(page: Page): Promise<void> {
+    await page.route("**/api/v1/schedules/**", async (route) => {
+      const url = route.request().url();
+      const method = route.request().method();
+      if (method === "POST" && url.includes("/sync")) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            ack_id: "ack-sched-1",
+            preview: {
+              confirm_reason: "Sync now using the signed contract",
+              note: "One child job from the signed contract.",
+              sync_mode: "incremental",
+            },
+          }),
+        });
+        return;
+      }
+      if (method === "GET" && /\/schedules\/?$/.test(url.split("?")[0])) {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify([schedule]),
+        });
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(schedule),
+      });
+    });
+    await page.route("**/api/v1/copilot/confirm", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ok: true,
+          job_id: "job-child-91ab",
+          schedule_id: schedule.id,
+          idempotent: false,
+        }),
+      });
+    });
+    const childJob = {
+      _id: "job-child-91ab",
+      name: "Nightly orders sync",
+      status: "queued",
+      parent_job_id: "job-parent-11",
+      source_name: "orders",
+      destination_database: "warehouse",
+      destination_collection: "warehouse_orders",
+      sync_mode: "incremental",
+      created_at: "2026-10-14T17:00:00Z",
+    };
+    await page.route("**/api/v1/connectors/jobs**", async (route) => {
+      const url = route.request().url().split("?")[0];
+      const body = /\/jobs\/?$/.test(url)
+        ? { jobs: [childJob], total: 1, status_counts: { queued: 1 } }
+        : childJob;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(body),
+      });
+    });
+    await page.goto("/#/schedules");
+    const preview = page.locator("button", { hasText: "Preview workspace (UI only)" });
+    await expect(preview).toBeAttached();
+    await preview.evaluate((node: HTMLButtonElement) => node.click());
+    await expect(page.getByRole("heading", { name: "Schedules" })).toBeVisible();
+    await expect(page.getByText("Nightly orders")).toBeVisible();
+  }
+
+  test("sync now stays clear of the row and confirms in the app dialog", async ({ page }) => {
+    let nativeDialog = false;
+    page.on("dialog", async (dialog) => {
+      nativeDialog = true;
+      await dialog.dismiss();
+    });
+    await openSchedules(page);
+    for (const width of [1366, 1440, 1920]) {
+      await page.setViewportSize({ width, height: width === 1920 ? 1080 : width === 1440 ? 900 : 768 });
+      const row = page.locator(".df2-pipeline-row").first();
+      const sync = row.getByRole("button", { name: "Sync now" });
+      const opener = row.getByRole("button", { name: "Open Nightly orders details" });
+      const status = row.locator(".df2-badge").last();
+      await expect(sync).toBeVisible();
+      await expectDisjoint(page, sync, opener);
+      await expectDisjoint(page, sync, status);
+      await page.screenshot({
+        path: `/opt/cursor/artifacts/schedules-row-${width}.png`,
+        fullPage: false,
+      });
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.locator(".df2-pipeline-row").first().getByRole("button", { name: "Sync now" }).click();
+    const dialog = page.getByRole("dialog", { name: "Sync now" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("Nightly orders", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("contract-orders", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("orders", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("warehouse_orders", { exact: true })).toBeVisible();
+    await dialog.getByRole("button", { name: "Sync now" }).click();
+    await expect(page.getByText(/Triggered from Nightly orders/)).toBeVisible();
+    await expect(page).toHaveURL(/#\/jobs/);
+    await expect(page.getByRole("heading", { name: "Nightly orders sync" })).toBeVisible();
+    await expect(page.locator("#job-item-job-child-91ab")).toBeVisible();
+    await expect(page.getByRole("button", { name: /Triggered from job-pare/ })).toBeVisible();
+    expect(nativeDialog).toBe(false);
+    await page.screenshot({
+      path: "/opt/cursor/artifacts/schedules-sync-confirmed-1440.png",
+      fullPage: false,
+    });
   });
 });
 

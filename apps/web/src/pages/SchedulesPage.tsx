@@ -37,8 +37,10 @@ import {
   confirmCopilotAction,
   runScheduleNow,
   stageScheduleSync,
+  SyncAlreadyRunningError,
   updateSchedule,
 } from "../lib/api";
+import { formatSyncModeLabel } from "../lib/transferConstants";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { fleetExportBlockedReason } from "../lib/schedulesGitops";
 import { scheduleCreateOpensStudio, scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
@@ -345,21 +347,66 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
 
   const handleScheduleSync = async (id: string, mode: "sync" | "full") => {
     if (!allowOrExplain(jobRun)) return;
+    const sched = schedules.find((row) => row.id === id);
+    const source = connectors.find((row) => row.id === sched?.source_connector_id);
+    const dest = connectors.find((row) => row.id === sched?.dest_connector_id);
     setRunningId(id);
     try {
       const staged = await stageScheduleSync(id, mode);
       const reason = staged.preview?.confirm_reason || (mode === "full" ? "Full re-sync using the signed contract" : "Sync now using the signed contract");
-      const note = staged.preview?.note ? `\n\n${staged.preview.note}` : "";
-      if (!window.confirm(`${reason}${note}`)) return;
-      await confirmCopilotAction({ ack_id: staged.ack_id, reason });
+      const accepted = await confirm({
+        title: mode === "full" ? "Re-sync from the start" : "Sync now",
+        message: [
+          staged.preview?.note || "This starts one child job from the signed contract.",
+          staged.preview?.destructive ? "This replaces the destination." : "",
+        ].filter(Boolean).join(" "),
+        confirmLabel: mode === "full" ? "Re-sync" : "Sync now",
+        cancelLabel: "Cancel",
+        tone: staged.preview?.destructive || mode === "full" ? "danger" : "default",
+        facts: [
+          { label: "Schedule", value: sched?.name || id },
+          { label: "Contract", value: sched?.contract_id || "Signed contract on this schedule" },
+          {
+            label: "Source",
+            value: [source?.name, sched?.source_table].filter(Boolean).join(" · ") || "Source on this schedule",
+          },
+          {
+            label: "Destination",
+            value: [dest?.name, sched?.dest_table].filter(Boolean).join(" · ") || "Destination on this schedule",
+          },
+          {
+            label: "Mode",
+            value: mode === "full" ? "Full re-sync" : formatSyncModeLabel(sched?.sync_mode),
+          },
+        ],
+      });
+      if (!accepted) return;
+      const confirmed = await confirmCopilotAction({ ack_id: staged.ack_id, reason });
       await load();
-      onViewJobs?.();
+      const childId = (confirmed.job_id || "").trim();
+      const shortId = childId.length > 8 ? `${childId.slice(0, 8)}…` : childId;
       toast({
-        title: mode === "full" ? "Full re-sync started" : "Sync started",
-        message: "Track the child job in Job Theater.",
+        title: confirmed.idempotent
+          ? "Sync already started"
+          : (mode === "full" ? "Full re-sync started" : "Sync started"),
+        message: childId
+          ? `Triggered from ${sched?.name || "this schedule"}. Job ${shortId}.`
+          : "Track the child job in Job Theater.",
         tone: "success",
       });
+      if (childId) onOpenJob?.(childId);
+      else onViewJobs?.();
     } catch (e) {
+      if (e instanceof SyncAlreadyRunningError && e.existingJobId) {
+        const shortId = e.existingJobId.length > 8 ? `${e.existingJobId.slice(0, 8)}…` : e.existingJobId;
+        toast({
+          title: "Already running",
+          message: `Already running: ${shortId} (View)`,
+          tone: "warning",
+        });
+        onOpenJob?.(e.existingJobId);
+        return;
+      }
       toast({
         title: mode === "full" ? "Re-sync failed" : "Sync failed",
         message: e instanceof Error ? e.message : undefined,

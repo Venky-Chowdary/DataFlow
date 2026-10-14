@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "node scripts/run-tests.mjs",
+    "lint": "node scripts/check-no-browser-dialogs.mjs",
     "brand:icons": "tsx scripts/export-brand-icons.mjs",
     "brand:social": "node scripts/export-social-brand.mjs"
   },

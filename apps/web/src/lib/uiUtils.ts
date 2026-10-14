@@ -1,11 +1,16 @@
 /** Shared UI helpers — single source for status badges and formatting */
 
 /** Success terminal statuses (data landed in the destination). */
-export const JOB_SUCCESS_STATUSES = ["completed", "completed_with_quarantine"] as const;
+export const JOB_SUCCESS_STATUSES = ["completed", "completed_with_quarantine", "success", "succeeded"] as const;
 
 /** True when the job succeeded — includes the success-with-warnings state. */
 export function isJobSuccess(status: string | undefined): boolean {
-  return status === "completed" || status === "completed_with_quarantine";
+  return (
+    status === "completed"
+    || status === "completed_with_quarantine"
+    || status === "success"
+    || status === "succeeded"
+  );
 }
 
 /** True when the job will no longer emit progress (success, failure, or cancel). */
@@ -13,6 +18,8 @@ export function isJobTerminal(status: string | undefined): boolean {
   return (
     status === "completed"
     || status === "completed_with_quarantine"
+    || status === "success"
+    || status === "succeeded"
     || status === "failed"
     || status === "cancelled"
   );
@@ -22,6 +29,8 @@ export function isJobTerminal(status: string | undefined): boolean {
 export function jobStatusLabel(status: string): string {
   switch (status) {
     case "completed":
+    case "success":
+    case "succeeded":
       return "Completed";
     case "completed_with_quarantine":
       return "Completed with quarantine";

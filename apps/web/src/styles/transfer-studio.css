@@ -12035,3 +12035,24 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
 .df2-page-transfer-studio.is-studio-next .react-flow__panel {
   z-index: var(--df-z-canvas-overview) !important;
 }
+
+/* Flagged Connect fills the shell above the action bar. The list keeps a
+   floor so a flex parent with an indefinite height cannot squash it to 0,
+   and a ceiling so the catalog scrolls instead of covering the bar. */
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-connector-list,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step .df2-transfer-step-secondary {
+  flex: 1 1 auto !important;
+  min-height: 120px !important;
+  max-height: 280px !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-picker,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step-left {
+  flex: 0 1 auto !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}

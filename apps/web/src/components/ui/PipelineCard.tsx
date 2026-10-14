@@ -159,15 +159,32 @@ export function PipelineCard({
         <span className={`df2-badge ${sched.enabled ? "df2-badge-live" : "df2-badge-muted"}`}>
           {sched.enabled ? "Active" : "Paused"}
         </span>
-        <div className="df2-pipeline-row-quick" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="df2-pipeline-row-quick"
+          onClick={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
           {onSync && (
-            <button
-              type="button"
-              className="df2-btn df2-btn-sm"
+            <Button
+              variant="primary"
+              size="sm"
+              className="df2-pipeline-row-sync-label"
               onClick={onSync}
             >
               Sync now
-            </button>
+            </Button>
+          )}
+          {onSync && (
+            <details className="df2-pipeline-row-menu">
+              <summary className="df2-pipeline-row-menu-summary" aria-label={`More actions for ${sched.name}`}>
+                <DtIcon name="menu" size={16} />
+              </summary>
+              <div className="df2-pipeline-row-menu-panel" role="menu">
+                <button type="button" role="menuitem" className="df2-pipeline-row-menu-item" onClick={onSync}>
+                  Sync now
+                </button>
+              </div>
+            </details>
           )}
           <button
             type="button"

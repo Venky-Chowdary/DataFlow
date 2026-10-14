@@ -220,6 +220,10 @@ export interface TransferJob {
   chunk_total?: number;
   checkpoint?: TransferCheckpoint;
   retry_of?: string;
+  /** Job this run was started from (Sync now / re-sync). */
+  parent_job_id?: string;
+  /** Latest child started from this job. */
+  last_sync_job_id?: string;
   updated_at?: string;
   started_at?: string;
   completed_at?: string;

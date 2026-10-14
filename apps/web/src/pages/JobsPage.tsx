@@ -14,8 +14,9 @@ import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
+import { useConfirm } from "../components/ui/ConfirmDialog";
 import { useActiveData } from "../lib/DataContext";
-import { confirmCopilotAction, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, stageJobSync, RetryRefusedError } from "../lib/api";
+import { confirmCopilotAction, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, stageJobSync, RetryRefusedError, SyncAlreadyRunningError } from "../lib/api";
 import {
   jobFilterCounts,
   jobHistoryFromResponse,
@@ -129,6 +130,7 @@ interface JobDetailRecord extends JobProgress {
     }[];
     column_types?: Record<string, string>;
     sync_mode?: string;
+    contract_id?: string;
     validation_mode?: string;
     schema_policy?: string;
     delivery_guarantee?: string;
@@ -248,13 +250,49 @@ function duplicateJobNameError(
   return null;
 }
 
+const LIVE_JOB_STATUSES = new Set(["running", "pending", "queued", "retrying"]);
+
+function shortJobId(id: string): string {
+  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
+}
+
+function JobLineageLinks({
+  parentId,
+  childId,
+  onOpen,
+}: {
+  parentId?: string;
+  childId?: string;
+  onOpen: (id: string) => void;
+}) {
+  const parent = (parentId || "").trim();
+  const child = (childId || "").trim();
+  if (!parent && !child) return null;
+  return (
+    <p className="df2-job-lineage">
+      {parent ? (
+        <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => onOpen(parent)}>
+          Triggered from {shortJobId(parent)}
+        </button>
+      ) : null}
+      {child ? (
+        <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => onOpen(child)}>
+          Sync started {shortJobId(child)} (View)
+        </button>
+      ) : null}
+    </p>
+  );
+}
+
 export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const { setActiveData } = useActiveData();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [liveJob, setLiveJob] = useState<JobDetailRecord | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [retrying, setRetrying] = useState(false);
+  const [blockingJob, setBlockingJob] = useState<{ id: string; status: string; createdAt: string } | null>(null);
   const [resuming, setResuming] = useState(false);
   const [filter, setFilter] = useState<JobFilter>("all");
   const [jobSearch, setJobSearch] = useState("");
@@ -294,7 +332,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
 
   const filtered = useMemo(() => {
     let list = jobs;
-    if (filter === "running") list = jobs.filter((j) => j.status === "running" || j.status === "pending");
+    if (filter === "running") list = jobs.filter((j) => LIVE_JOB_STATUSES.has(j.status));
     else if (filter === "completed") list = jobs.filter((j) => isJobSuccess(j.status));
     else if (filter !== "all") list = jobs.filter((j) => j.status === filter);
 
@@ -372,7 +410,21 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     };
   }, [selectedId, liveJob]);
 
+  const pinnedJobRef = useRef<string | null>(null);
   useEffect(() => {
+    const pin = pinnedJobRef.current;
+    if (pin && selectedId === pin) {
+      if (filtered.some((j) => j._id === pin)) {
+        pinnedJobRef.current = null;
+        window.requestAnimationFrame(() => {
+          document.getElementById(`job-item-${pin}`)?.scrollIntoView({
+            behavior: "smooth",
+            block: "nearest",
+          });
+        });
+      }
+      return;
+    }
     const next = nextListSelection(selectedId, filtered.map((j) => j._id));
     if (next && next !== selectedId) setSelectedId(next);
   }, [filter, filtered, selectedId]);
@@ -456,7 +508,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   }, [jobs, selectedId]);
 
   const selected = jobs.find((j) => j._id === selectedId);
-  const isLive = selected?.status === "running" || selected?.status === "pending";
+  const isLive = Boolean(selected && LIVE_JOB_STATUSES.has(selected.status));
 
   useEffect(() => {
     if (!counts.running || !onRefresh) return;
@@ -500,30 +552,86 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
     }
   }, [selectedId, onRefresh, onStartTransfer, toast]);
 
+  const focusJob = useCallback((jobId: string) => {
+    const id = jobId.trim();
+    if (!id) return;
+    pinnedJobRef.current = id;
+    setFilter("all");
+    setJobSearch("");
+    setSelectedId(id);
+    onRefresh?.();
+    window.requestAnimationFrame(() => {
+      document.getElementById(`job-item-${id}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
+    });
+  }, [onRefresh]);
+
   const handleSync = useCallback(async (mode: "sync" | "full") => {
     if (!selectedId) return;
     setRetrying(true);
     try {
       const staged = await stageJobSync(selectedId, mode);
       const reason = staged.preview?.confirm_reason || (mode === "full" ? "Full re-sync using the signed contract" : "Sync now using the signed contract");
-      const note = staged.preview?.note ? `\n\n${staged.preview.note}` : "";
-      const destructive = staged.preview?.destructive ? "\n\nThis replaces the destination." : "";
-      const accepted = window.confirm(`${reason}${note}${destructive}`);
+      const contractId = String(liveJob?.transfer_request?.contract_id || "").trim();
+      const labels = jobEndpointLabels(liveJob, {
+        source: liveJob?.source_name || "",
+        dest: liveJob
+          ? `${liveJob.destination_database || ""}.${liveJob.destination_collection || ""}`
+          : "",
+      });
+      const accepted = await confirm({
+        title: mode === "full" ? "Re-sync from the start" : "Sync now",
+        message: [
+          staged.preview?.note || "This starts one child job from the signed contract.",
+          staged.preview?.destructive ? "This replaces the destination." : "",
+        ].filter(Boolean).join(" "),
+        confirmLabel: mode === "full" ? "Re-sync" : "Sync now",
+        cancelLabel: "Cancel",
+        tone: staged.preview?.destructive ? "danger" : "default",
+        facts: [
+          { label: "Contract", value: contractId || "Signed contract on this job" },
+          { label: "Source", value: labels.source || "Source on this job" },
+          { label: "Destination", value: labels.dest || "Destination on this job" },
+          {
+            label: "Mode",
+            value: formatSyncModeLabel(staged.preview?.sync_mode || liveJob?.sync_mode || liveJob?.transfer_request?.sync_mode),
+          },
+        ],
+      });
       if (!accepted) return;
       const confirmed = await confirmCopilotAction({ ack_id: staged.ack_id, reason });
-      if (confirmed.job_id) setSelectedId(confirmed.job_id);
+      setBlockingJob(null);
+      if (confirmed.job_id) focusJob(confirmed.job_id);
       toast({
         title: confirmed.idempotent ? "Sync already started" : (mode === "full" ? "Full re-sync started" : "Sync started"),
-        message: "One child job. A second click does not start another run.",
+        message: confirmed.job_id
+          ? `Triggered from ${shortJobId(selectedId)}. Open the new job to follow it.`
+          : "One child job. A second click does not start another run.",
         tone: "success",
       });
     } catch (e) {
+      if (e instanceof SyncAlreadyRunningError && e.existingJobId) {
+        setBlockingJob({
+          id: e.existingJobId,
+          status: e.existingStatus,
+          createdAt: e.existingCreatedAt,
+        });
+        focusJob(e.existingJobId);
+        toast({
+          title: "Already running",
+          message: `Already running: ${shortJobId(e.existingJobId)} (View)`,
+          tone: "warning",
+        });
+        return;
+      }
       const msg = e instanceof Error ? e.message : "Sync failed";
       toast({ title: "Sync failed", message: msg, tone: "error" });
     } finally {
       setRetrying(false);
     }
-  }, [selectedId, toast]);
+  }, [selectedId, toast, confirm, liveJob, focusJob]);
 
   const handleResume = useCallback(async () => {
     if (!selectedId) return;
@@ -853,7 +961,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                     const route = displayName === fullRoute
                       ? `${job.source_type || "source"} → ${job.destination_type || "destination"}`
                       : fullRoute;
-                    const isLiveRow = job.status === "running" || job.status === "pending";
+                    const isLiveRow = LIVE_JOB_STATUSES.has(job.status);
                     return (
                       <button
                         key={uniqueListKey(job._id, index, "job")}
@@ -919,6 +1027,17 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
               </aside>
 
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
+                {blockingJob && (
+                  <p className="df2-job-sync-block" role="status">
+                    Already running: <span title={blockingJob.id}>{shortJobId(blockingJob.id)}</span>
+                    {blockingJob.status ? ` (${jobStatusLabel(blockingJob.status)})` : ""}
+                    {blockingJob.createdAt ? ` · ${blockingJob.createdAt}` : ""}
+                    {" "}
+                    <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => focusJob(blockingJob.id)}>
+                      View
+                    </button>
+                  </p>
+                )}
                 {detailLoading && !selected && !liveJob ? (
                   <LoadingBlock title="Loading job details" size="md" variant="glass" />
                 ) : isLive && selected ? (
@@ -937,6 +1056,11 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                         onDraftChange={(v) => onRenameDraftChange(v, selected._id)}
                         onSave={() => void commitRename(selected._id)}
                         onCancel={cancelRename}
+                      />
+                      <JobLineageLinks
+                        parentId={liveJob?.parent_job_id || selected.parent_job_id}
+                        childId={liveJob?.last_sync_job_id || selected.last_sync_job_id}
+                        onOpen={focusJob}
                       />
                     </div>
                     <JobTheater
@@ -986,6 +1110,11 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                             </strong>
                           </div>
                         </div>
+                        <JobLineageLinks
+                          parentId={liveJob.parent_job_id || selected.parent_job_id}
+                          childId={liveJob.last_sync_job_id || selected.last_sync_job_id}
+                          onOpen={focusJob}
+                        />
                       </div>
                       <div className="df2-jobs-v3-summary-ids">
                         <span className={jobStatusBadgeClass(liveJob.status)}>{jobStatusLabel(liveJob.status)}</span>
@@ -1473,7 +1602,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                       </div>
 
                       <div className="df2-jobs-detail-footer" role="navigation" aria-label="Job actions">
-                        {detailTab === "detail" && (selected.status === "completed" || selected.status === "succeeded") && (
+                        {detailTab === "detail" && isJobSuccess(selected.status) && (
                           <div className="df2-jobs-v3-actions">
                             <button
                               type="button"

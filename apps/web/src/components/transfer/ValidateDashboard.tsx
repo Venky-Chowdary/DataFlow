@@ -2,6 +2,8 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
+import { useConfirm } from "../ui/ConfirmDialog";
+import { useToast } from "../Toast";
 import { explainPreflight, fetchRepairProposal, proposeRepairFromPreflight, type CellPreviewResult, type RepairMapping, type RepairProposal } from "../../lib/api";
 import { readSession } from "../../lib/session";
 import { SYNC_MODE_META } from "../../lib/transferConstants";
@@ -798,6 +800,8 @@ export function ValidateDashboard({
   studioPrimary: _studioPrimary,
   preflightError = "",
 }: ValidateDashboardProps) {
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
   const dashCta = dashboardCtaVariant;
   const [elapsedMs, setElapsedMs] = useState(0);
   const [revealCount, setRevealCount] = useState(0);
@@ -2358,12 +2362,21 @@ export function ValidateDashboard({
                   }
                   const role = (readSession()?.role || "").toLowerCase();
                   if (role && !["admin", "owner", "editor", "operator"].includes(role)) {
-                    window.alert("Reveal requires editor/admin role for this workspace.");
+                    toast({
+                      title: "Reveal requires editor/admin role for this workspace.",
+                      tone: "warning",
+                    });
                     return;
                   }
-                  if (window.confirm("Reveal unmasked cell preview values? Confirm only on a private screen.")) {
-                    setRevealCellPii(true);
-                  }
+                  void confirm({
+                    title: "Reveal unmasked cell preview values?",
+                    message: "Confirm only on a private screen.",
+                    confirmLabel: "Reveal",
+                    cancelLabel: "Cancel",
+                    tone: "warning",
+                  }).then((accepted) => {
+                    if (accepted) setRevealCellPii(true);
+                  });
                 }}
               >
                 {revealCellPii ? "Hide PII" : "Reveal PII"}

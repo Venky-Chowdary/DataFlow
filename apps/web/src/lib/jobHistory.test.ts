@@ -56,6 +56,18 @@ test("an empty history counts zero everywhere", () => {
   assert.deepEqual(counts, { all: 0, running: 0, completed: 0, quarantine: 0, failed: 0 });
 });
 
+test("queued and retrying count as running", () => {
+  const counts = jobFilterCounts(
+    jobHistoryFromResponse({
+      jobs: [],
+      total: 6,
+      status_counts: { running: 1, pending: 1, queued: 2, retrying: 1, completed: 1 },
+    }),
+  );
+  assert.equal(counts.running, 5);
+  assert.equal(counts.completed, 1);
+});
+
 test("statuses the chips do not name still count in the total", () => {
   const counts = jobFilterCounts(
     jobHistoryFromResponse({ jobs: [], total: 4, status_counts: { cancelled: 3, completed: 1 } }),

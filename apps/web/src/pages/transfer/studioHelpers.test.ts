@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { analysisFromPipeline, formatFileSize, sealRemediationApproval, studioSourceLabel } from "./studioHelpers";
+
 import type { EditableMapping } from "../../lib/mapping";
+import { STEP_DESTINATION, STEP_MAP, STEP_SOURCE, STEP_VALIDATE } from "./studioConstants";
+import {
+  analysisFromPipeline,
+  destinationCatalogLoadsOnStep,
+  destinationCatalogRetriesOnStep,
+  formatFileSize,
+  sealRemediationApproval,
+  studioSourceLabel,
+} from "./studioHelpers";
 
 describe("transfer studioHelpers (Phase F9)", () => {
   it("formats file sizes", () => {
@@ -46,5 +55,17 @@ describe("transfer studioHelpers (Phase F9)", () => {
       studioSourceLabel({ sourceKind: "file", fileName: "qa_amb.csv" }),
       "qa_amb.csv",
     );
+  });
+
+  it("loads the destination catalog on flagged connect and on the later steps", () => {
+    assert.equal(destinationCatalogLoadsOnStep(STEP_SOURCE, true), true);
+    assert.equal(destinationCatalogLoadsOnStep(STEP_SOURCE, false), false);
+    assert.equal(destinationCatalogRetriesOnStep(STEP_SOURCE, true), true);
+    assert.equal(destinationCatalogRetriesOnStep(STEP_SOURCE, false), false);
+    for (const step of [STEP_DESTINATION, STEP_MAP, STEP_VALIDATE]) {
+      assert.equal(destinationCatalogLoadsOnStep(step, false), true);
+    }
+    assert.equal(destinationCatalogRetriesOnStep(STEP_VALIDATE, true), false);
+    assert.equal(destinationCatalogRetriesOnStep(STEP_MAP, false), true);
   });
 });

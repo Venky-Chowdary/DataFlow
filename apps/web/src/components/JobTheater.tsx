@@ -42,6 +42,7 @@ import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "./jobs/RunCarryNotes";
 import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
 import { useToast } from "./Toast";
+import { useConfirm } from "./ui/ConfirmDialog";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
@@ -479,6 +480,7 @@ export function JobTheaterView({
   onOpenJob,
 }: JobTheaterViewProps) {
   const { toast } = useToast();
+  const { ask } = useConfirm();
   const routeLabels = jobEndpointLabels(job, { source: sourceLabel, dest: destLabel });
   const total = job.total_rows ?? 0;
   const processed = job.records_processed ?? 0;
@@ -1460,7 +1462,11 @@ export function JobTheaterView({
                         await acknowledgeCdcMappingReview(String(job.mapping_review_id));
                         onBackToValidate();
                       } catch (err) {
-                        window.alert(err instanceof Error ? err.message : "Acknowledge failed");
+                        toast({
+                          title: "Acknowledge failed",
+                          message: err instanceof Error ? err.message : "Acknowledge failed",
+                          tone: "error",
+                        });
                       }
                     })();
                   }}
@@ -1770,19 +1776,36 @@ export function JobTheaterView({
             className="df2-btn df2-btn-sm df2-btn-danger"
             disabled={rollbackBusy}
             onClick={() => {
-              const reason = window.prompt(
-                "Reason for discarding staging (required for audit):",
-                "Operator discarded unused staging after migration review",
-              );
-              if (!reason?.trim()) return;
-              const actor = window.prompt("Approver identity:", "job-theater-operator");
-              if (!actor?.trim()) return;
-              setRollbackBusy(true);
-              void executeJobRollback(jobId, {
-                approved_by: actor.trim(),
-                reason: reason.trim(),
-                plan: rollbackPlan as Record<string, unknown>,
-              })
+              void ask({
+                title: "Discard staging table",
+                message: "Drops staging only. Promoted destination rows stay. Both fields are stored on the audit record.",
+                confirmLabel: "Discard staging",
+                cancelLabel: "Keep staging",
+                tone: "danger",
+                fields: [
+                  {
+                    name: "reason",
+                    label: "Reason for discarding staging",
+                    defaultValue: "Operator discarded unused staging after migration review",
+                    required: true,
+                  },
+                  {
+                    name: "actor",
+                    label: "Approver identity",
+                    defaultValue: "job-theater-operator",
+                    required: true,
+                  },
+                ],
+              }).then((values) => {
+                const reason = values?.reason?.trim() || "";
+                const actor = values?.actor?.trim() || "";
+                if (!reason || !actor) return;
+                setRollbackBusy(true);
+                void executeJobRollback(jobId, {
+                  approved_by: actor,
+                  reason,
+                  plan: rollbackPlan as Record<string, unknown>,
+                })
                 .then((res) => {
                   toast({
                     title: "Staging discarded",
@@ -1802,6 +1825,7 @@ export function JobTheaterView({
                   });
                 })
                 .finally(() => setRollbackBusy(false));
+              });
             }}
           >
             {rollbackBusy ? "Discarding…" : "Discard staging"}

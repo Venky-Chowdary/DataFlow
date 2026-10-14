@@ -6,6 +6,8 @@
 import { useMemo, useState } from "react";
 import { Drawer } from "./ui/Drawer";
 import { Dialog } from "./ui/Dialog";
+import { useConfirm } from "./ui/ConfirmDialog";
+import { useToast } from "./Toast";
 import { DtIcon } from "./DtIcon";
 import type { EditableMapping } from "../lib/mapping";
 import {
@@ -615,6 +617,8 @@ export function MappingProofDrawer({
   sourceLabel,
   destLabel,
 }: MappingProofDrawerProps) {
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
   const [expanded, setExpanded] = useState(false);
   const [filter, setFilter] = useState<"all" | "risks" | "review" | "pii">("all");
   const [query, setQuery] = useState("");
@@ -791,12 +795,21 @@ export function MappingProofDrawer({
                 }
                 const role = (readSession()?.role || "").toLowerCase();
                 if (role && !["admin", "owner", "editor", "operator"].includes(role)) {
-                  window.alert("Reveal requires editor/admin role for this workspace.");
+                  toast({
+                    title: "Reveal requires editor/admin role for this workspace.",
+                    tone: "warning",
+                  });
                   return;
                 }
-                if (window.confirm("Reveal unmasked sample values in this drawer? Confirm only on a private screen.")) {
-                  setRevealPii(true);
-                }
+                void confirm({
+                  title: "Reveal unmasked sample values in this drawer?",
+                  message: "Confirm only on a private screen.",
+                  confirmLabel: "Reveal",
+                  cancelLabel: "Cancel",
+                  tone: "warning",
+                }).then((accepted) => {
+                  if (accepted) setRevealPii(true);
+                });
               }}
             >
               {revealPii ? "Hide PII" : "Reveal PII"}

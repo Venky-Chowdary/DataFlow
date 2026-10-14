@@ -256,6 +256,90 @@ export function PipelineDetailDrawer({
     }
   };
 
+  const secondaryActions = () => (
+    <>
+      {onFullResync && (
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={running}
+          loadingLabel="Staging…"
+          disabled={isRunning || breakerOpen || Boolean(runRefusal)}
+          title="Re-read from the start on the signed contract. One confirm."
+          onClick={onFullResync}
+          leadingIcon={<DtIcon name="transfer" size={14} />}
+        >
+          Re-sync (full)
+        </Button>
+      )}
+      {breakerOpen && sched.contract_id && onResetBreaker && (
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={resettingBreaker}
+          loadingLabel="Resetting…"
+          disabled={!breakerReset.allowed}
+          title={breakerReset.reason || undefined}
+          onClick={() => void handleResetBreaker()}
+          leadingIcon={<DtIcon name="shield" size={14} />}
+        >
+          Reset breaker
+        </Button>
+      )}
+      {sched.last_job_id && onOpenJob && (
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => onOpenJob(sched.last_job_id!)}
+          leadingIcon={<DtIcon name="jobs" size={14} />}
+        >
+          Last job
+        </Button>
+      )}
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={Boolean(manageRefusal)}
+        title={manageRefusal || undefined}
+        onClick={onToggle}
+        leadingIcon={<DtIcon name={sched.enabled ? "pause" : "check"} size={14} />}
+      >
+        {sched.enabled ? "Pause" : "Activate"}
+      </Button>
+      <Button
+        size="sm"
+        variant="ghost"
+        disabled={Boolean(manageRefusal)}
+        title={manageRefusal || undefined}
+        onClick={onEdit}
+        leadingIcon={<DtIcon name="settings" size={14} />}
+      >
+        Edit
+      </Button>
+      {onExportYaml && (
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onExportYaml}
+          leadingIcon={<DtIcon name="download" size={14} />}
+        >
+          Export YAML
+        </Button>
+      )}
+      <Button
+        size="sm"
+        variant="danger"
+        className="df2-drawer-action-delete"
+        disabled={Boolean(manageRefusal)}
+        title={manageRefusal || undefined}
+        onClick={onDelete}
+        leadingIcon={<DtIcon name="trash" size={14} />}
+      >
+        Delete
+      </Button>
+    </>
+  );
+
   return (
     <Drawer
       open={open}
@@ -300,124 +384,56 @@ export function PipelineDetailDrawer({
       }
       footer={
         <div className="df2-drawer-actions">
-          {onOpenStudio && (
+          <div className="df2-drawer-actions-primary">
+            {onOpenStudio && (
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={onOpenStudio}
+                leadingIcon={<DtIcon name="layers" size={14} />}
+              >
+                Open Transfer Studio
+              </Button>
+            )}
             <Button
               size="sm"
-              variant="primary"
-              onClick={onOpenStudio}
-              leadingIcon={<DtIcon name="layers" size={14} />}
-            >
-              Open Transfer Studio
-            </Button>
-          )}
-          <Button
-            size="sm"
-            variant={onOpenStudio ? "ghost" : "primary"}
-            loading={running}
-            loadingLabel="Running…"
-            disabled={isRunning || breakerOpen || Boolean(runRefusal)}
-            title={
-              runRefusal
-                || (breakerOpen ? "Reset the contract breaker before running" : undefined)
-                || (sched.enabled
-                  ? undefined
-                  : "Runs once now. Does not activate the cadence — the schedule stays paused.")
-            }
-            onClick={onRun}
-            leadingIcon={<DtIcon name="activity" size={14} />}
-          >
-            {isRunning ? "Running…" : breakerOpen ? "Breaker open" : "Run now"}
-          </Button>
-          {onSync && (
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={isRunning || breakerOpen || Boolean(runRefusal)}
-              title="Sync the signed contract. One confirm."
-              onClick={onSync}
-            >
-              Sync now
-            </Button>
-          )}
-          {onFullResync && (
-            <Button
-              size="sm"
-              variant="ghost"
+              variant={onOpenStudio ? "ghost" : "primary"}
               loading={running}
-              loadingLabel="Staging…"
+              loadingLabel="Running…"
               disabled={isRunning || breakerOpen || Boolean(runRefusal)}
-              title="Re-read from the start on the signed contract. One confirm."
-              onClick={onFullResync}
-              leadingIcon={<DtIcon name="transfer" size={14} />}
+              title={
+                runRefusal
+                  || (breakerOpen ? "Reset the contract breaker before running" : undefined)
+                  || (sched.enabled
+                    ? undefined
+                    : "Runs once now. Does not activate the cadence — the schedule stays paused.")
+              }
+              onClick={onRun}
+              leadingIcon={<DtIcon name="activity" size={14} />}
             >
-              Re-sync (full)
+              {isRunning ? "Running…" : breakerOpen ? "Breaker open" : "Run now"}
             </Button>
-          )}
-          {breakerOpen && sched.contract_id && onResetBreaker && (
-            <Button
-              size="sm"
-              variant="ghost"
-              loading={resettingBreaker}
-              loadingLabel="Resetting…"
-              disabled={!breakerReset.allowed}
-              title={breakerReset.reason || undefined}
-              onClick={() => void handleResetBreaker()}
-              leadingIcon={<DtIcon name="shield" size={14} />}
-            >
-              Reset breaker
-            </Button>
-          )}
-          {sched.last_job_id && onOpenJob && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => onOpenJob(sched.last_job_id!)}
-              leadingIcon={<DtIcon name="jobs" size={14} />}
-            >
-              Last job
-            </Button>
-          )}
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={Boolean(manageRefusal)}
-            title={manageRefusal || undefined}
-            onClick={onToggle}
-            leadingIcon={<DtIcon name={sched.enabled ? "pause" : "check"} size={14} />}
-          >
-            {sched.enabled ? "Pause" : "Activate"}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={Boolean(manageRefusal)}
-            title={manageRefusal || undefined}
-            onClick={onEdit}
-            leadingIcon={<DtIcon name="settings" size={14} />}
-          >
-            Edit
-          </Button>
-          {onExportYaml && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={onExportYaml}
-              leadingIcon={<DtIcon name="download" size={14} />}
-            >
-              Export YAML
-            </Button>
-          )}
-          <Button
-            size="sm"
-            variant="danger"
-            className="df2-drawer-action-delete"
-            disabled={Boolean(manageRefusal)}
-            title={manageRefusal || undefined}
-            onClick={onDelete}
-            leadingIcon={<DtIcon name="trash" size={14} />}
-          >
-            Delete
-          </Button>
+            {onSync && (
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={isRunning || breakerOpen || Boolean(runRefusal)}
+                title="Sync the signed contract. One confirm."
+                onClick={onSync}
+              >
+                Sync now
+              </Button>
+            )}
+          </div>
+          <div className="df2-drawer-actions-extra">
+            {secondaryActions()}
+          </div>
+          <details className="df2-drawer-actions-menu">
+            <summary>More</summary>
+            <div className="df2-drawer-actions-menu-panel">
+              {secondaryActions()}
+            </div>
+          </details>
         </div>
       }
     >
