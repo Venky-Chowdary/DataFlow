@@ -267,7 +267,7 @@ export function nodeStatus(input: {
 export function statusLabel(status: NodeStatus): string {
   if (status === "valid") return "Valid";
   if (status === "warning") return "Warning";
-  if (status === "error") return "Error";
+  if (status === "error") return "Invalid";
   return "Running";
 }
 

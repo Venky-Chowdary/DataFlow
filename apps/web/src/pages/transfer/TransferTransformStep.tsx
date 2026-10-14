@@ -169,6 +169,7 @@ export function TransferTransformStep({
   const [ruleError, setRuleError] = useState("");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [previewedStepsKey, setPreviewedStepsKey] = useState("");
+  const [canvasStep, setCanvasStep] = useState<number | null>(null);
   const stepsListRef = useRef<HTMLOListElement | null>(null);
 
   const tables = useMemo(
@@ -331,11 +332,19 @@ export function TransferTransformStep({
   ]);
 
   useEffect(() => {
+    if (canvasEnabled) return;
     const step = preview?.refusal?.step;
     if (!step || !stepsListRef.current) return;
     const node = stepsListRef.current.querySelector<HTMLElement>(`#xform-step-${step}`);
     node?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [preview?.refusal?.step]);
+  }, [canvasEnabled, preview?.refusal?.step]);
+
+  useEffect(() => {
+    if (!canvasEnabled) return;
+    const step = preview?.refusal?.step;
+    if (!step || step < 1) return;
+    setCanvasStep(step - 1);
+  }, [canvasEnabled, preview?.refusal?.step, preview?.refusal?.message]);
 
   const operationsByName = useMemo(() => {
     const index = new Map<string, ShapeOperation>();
@@ -637,10 +646,12 @@ export function TransferTransformStep({
             catalog={catalog}
             steps={steps}
             issues={canvasIssues}
+            selectedStep={canvasStep}
+            onSelectedStepChange={setCanvasStep}
             onChangeSteps={onChangeSteps}
-            columns={columnsAfter.map((name) => ({
+            columns={columnsBefore.map((name) => ({
               name,
-              type: String(preview?.column_types?.[name] || previewSchema[name] || ""),
+              type: String(sourceSchema[name] || previewSchema[name] || preview?.column_types?.[name] || ""),
             }))}
             suggestions={openSuggestions}
             canPlan={plan.allowed}

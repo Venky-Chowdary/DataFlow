@@ -36,6 +36,31 @@ function contrast(foreground: string, background: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
+async function buildValidOrdersChain(page: Page): Promise<void> {
+  await setPalette(page, true);
+  await page.locator(".df2-canvas-op[data-op='trim']").click();
+  await page.locator(".df2-canvas-op[data-op='drop_column']").click();
+  await page.locator(".df2-canvas-op[data-op='filter_rows']").click();
+  await page.locator("#canvas-opt-condition-field").click();
+  await page.getByRole("option", { name: "status", exact: true }).click();
+  await page.getByRole("button", { name: "Add step" }).click();
+  await expect(page.locator(".df2-canvas-node")).toHaveCount(3);
+  await expect(page.getByTestId("canvas-recipe-pill")).toHaveText("Valid");
+}
+
+async function nodeCenterGap(page: Page, index: number): Promise<number> {
+  return page.evaluate((step) => {
+    const stage = document.querySelector("[data-testid='transform-canvas-stage']");
+    const node = document.querySelector(`.df2-canvas-node[data-index="${step}"]`);
+    if (!stage || !node) return Number.POSITIVE_INFINITY;
+    const stageBox = stage.getBoundingClientRect();
+    const nodeBox = node.getBoundingClientRect();
+    const dx = (nodeBox.x + nodeBox.width / 2) - (stageBox.x + stageBox.width / 2);
+    const dy = (nodeBox.y + nodeBox.height / 2) - (stageBox.y + stageBox.height / 2);
+    return Math.hypot(dx, dy);
+  }, index);
+}
+
 /** The Back / Continue bar is a flex row under the canvas, flush with the page. */
 async function expectActionBarBelowCanvas(page: Page): Promise<void> {
   const stage = page.getByTestId("transform-canvas-stage");
@@ -429,6 +454,36 @@ conn.commit()
     await expect(page.locator(".react-flow__node")).toHaveCount(1);
   });
 
+  test("a validation error selects, centers, and focuses that node", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    await buildValidOrdersChain(page);
+    await page.locator(".df2-canvas-node[data-index='2']").click();
+    await page.getByRole("button", { name: "Advanced expression" }).click();
+    await page.locator("#canvas-opt-condition").fill("[order_id] <> ''");
+    await page.getByRole("button", { name: "Update step" }).click();
+    await expect(page.getByTestId("canvas-recipe-pill")).toHaveText("Invalid");
+    await expect(page.getByRole("button", { name: "Step 3 Invalid" })).toBeVisible();
+    await setPalette(page, false);
+    await page.locator(".df2-canvas-node[data-index='0']").click();
+    await page.getByRole("button", { name: /^Validation/ }).click();
+    const validation = page.getByRole("region", { name: "Validation" });
+    await expect(validation).toContainText(/order_id/);
+    await validation.getByRole("button", { name: /Step 3/ }).click();
+    await expect(page.locator(".df2-canvas-node.is-selected[data-index='2']")).toBeVisible();
+    await expect(page.locator("#canvas-inspector")).toBeFocused();
+    await expect.poll(() => nodeCenterGap(page, 2)).toBeLessThan(80);
+    await page.getByRole("button", { name: "Fit view", exact: true }).click();
+    await page.locator(".df2-canvas-node[data-index='0'] .df2-canvas-node-title").click();
+    const properties = page.getByRole("button", { name: "Properties", exact: true });
+    if ((await properties.getAttribute("aria-expanded")) === "true") await properties.click();
+    await page.getByRole("button", { name: "Step 3 Invalid" }).click();
+    await expect(page.locator(".df2-canvas-node.is-selected[data-index='2']")).toBeVisible();
+    await expect(page.locator("#canvas-inspector")).toBeFocused();
+    await expect.poll(() => nodeCenterGap(page, 2)).toBeLessThan(80);
+    await expect(page.locator(".df2-alert-error")).toHaveCount(0);
+  });
+
   test("canvas icons and the action bar hold in dark and at 390", async ({ page }) => {
     await page.addInitScript(() => {
       localStorage.setItem("df2.theme", "dark");
@@ -451,13 +506,7 @@ conn.commit()
   test("arranged flow stays clear of the minimap and each category has its own color", async ({ page }) => {
   await openStudio(page);
   await reachTransform(page);
-  await setPalette(page, true);
-  await page.locator(".df2-canvas-op[data-op='trim']").click();
-  await page.locator(".df2-canvas-op[data-op='drop_column']").click();
-  await page.locator(".df2-canvas-op[data-op='filter_rows']").click();
-  await page.locator("#canvas-opt-condition").fill("[status] <> ''");
-  await page.getByRole("button", { name: "Add step" }).click();
-  await expect(page.locator(".df2-canvas-node")).toHaveCount(3);
+  await buildValidOrdersChain(page);
   await expect(page.locator(".df2-alert-error")).toHaveCount(0);
   const status = page.getByTestId("canvas-preview-status");
   await expect.poll(async () => {
@@ -466,14 +515,6 @@ conn.commit()
     return text;
   }, { timeout: 20_000 }).toMatch(/row/);
   await expect(status).not.toHaveText(/does not have|not available|refused/i);
-  await page.locator(".react-flow__node").last().click();
-  await page.locator("#canvas-opt-condition").fill("[order_id] <> ''");
-  await page.getByRole("button", { name: "Update step" }).click();
-  await expect(page.locator(".df2-qw-schema-error")).toContainText(/order_id/);
-  await expect(page.locator(".df2-alert-error")).toHaveCount(0);
-  await page.locator("#canvas-opt-condition").fill("[status] <> ''");
-  await page.getByRole("button", { name: "Update step" }).click();
-  await expect(page.locator(".df2-alert-error")).toHaveCount(0);
   await page.getByRole("button", { name: "Arrange" }).click();
   const stage = page.getByTestId("transform-canvas-stage");
   const minimap = page.locator(".react-flow__minimap");
@@ -553,6 +594,11 @@ conn.commit()
   const zoomBefore = await zoomed.evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a);
   await page.getByRole("button", { name: "Zoom in", exact: true }).click();
   await expect.poll(async () => zoomed.evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a)).toBeGreaterThan(zoomBefore + 0.05);
+  const zoomToFit = page.getByRole("button", { name: "Zoom to 100%" });
+  await expect(zoomToFit).not.toHaveText("100%");
+  await zoomToFit.click();
+  await expect.poll(async () => zoomed.evaluate((node) => new DOMMatrix(getComputedStyle(node).transform).a)).toBeLessThan(1.02);
+  await expect(zoomToFit).toHaveText("100%");
   await page.getByRole("button", { name: "Fit view", exact: true }).click();
 
   await page.setViewportSize({ width: 390, height: 844 });

@@ -6,6 +6,7 @@ import {
   classifyPortLink,
   columnsBeforeStep,
   documentKind,
+  stepExpressionIssues,
   draftWithDefaults,
   viewportForChain,
   executableRecipe,
@@ -223,6 +224,13 @@ describe("readable fit and columns still on the row", () => {
     assert.deepEqual(columnsBeforeStep(steps, 2, source), ["customer_email", "order_amt", "order_date", "status"]);
     assert.equal(columnsBeforeStep(steps, 2, source).includes("status"), true);
     assert.equal(columnsBeforeStep(steps, 2, source).includes("order_id"), false);
+    const dropped = [
+      ...steps.slice(0, 2),
+      { op: "filter_rows", options: { condition: "[order_id] <> ''", keep: true } },
+    ];
+    assert.deepEqual(stepExpressionIssues(steps, [trim, filter], source), []);
+    assert.equal(stepExpressionIssues(dropped, [trim, filter], source)[0]?.index, 2);
+    assert.match(stepExpressionIssues(dropped, [trim, filter], source)[0]?.message ?? "", /order_id/);
   });
 });
 

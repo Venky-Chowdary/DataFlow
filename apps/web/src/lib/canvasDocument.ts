@@ -18,6 +18,7 @@ import {
 } from "./canvasRegistry";
 import {
   fieldsFor,
+  unknownExpressionColumn,
   type ShapeOperation,
   type ShapeStepWire,
 } from "./shape";
@@ -298,6 +299,28 @@ export function columnsBeforeStep(
   const prior = steps.slice(0, Math.max(0, Math.min(index, steps.length)));
   for (const step of prior) applyColumnEffect(step, columns);
   return columns;
+}
+
+/**
+ * Expressions that name a column an earlier step already removed.
+ * The message is the same sentence the inspector shows while typing.
+ */
+export function stepExpressionIssues(
+  steps: readonly ShapeStepWire[],
+  operations: readonly ShapeOperation[],
+  sourceColumns: readonly string[],
+): { index: number; message: string }[] {
+  const byOp = new Map(operations.map((operation) => [operation.op, operation]));
+  const issues: { index: number; message: string }[] = [];
+  steps.forEach((step, index) => {
+    const key = byOp.get(step.op)?.expression_option;
+    if (!key) return;
+    const text = String(step.options?.[key] ?? "");
+    if (!text.trim()) return;
+    const message = unknownExpressionColumn(text, columnsBeforeStep(steps, index, sourceColumns));
+    if (message) issues.push({ index, message });
+  });
+  return issues;
 }
 
 function applyColumnEffect(step: ShapeStepWire, columns: string[]): void {

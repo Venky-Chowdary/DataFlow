@@ -66,6 +66,7 @@ export interface StudioNodeData extends Record<string, unknown> {
   expanded: boolean;
   onToggleFields: (id: string) => void;
   onPreview: (index: number) => void;
+  onReveal: (index: number) => void;
   dimmed: boolean;
   disabled: boolean;
   changesRowCount: boolean;
@@ -120,7 +121,11 @@ interface TransformFlowProps {
   onPreviewNode: (index: number) => void;
   fitTick: number;
   issues?: ReadonlyArray<{ index: number; message: string }>;
-  zoomCommand?: { id: number; delta: number };
+  zoomCommand?: { id: number; delta: number; absolute?: number };
+  centerCommand?: { id: number; index: number };
+  selectedIndex?: number | null;
+  onZoom?: (zoom: number) => void;
+  onReveal?: (index: number) => void;
 }
 
 function stepIndex(id: string | null | undefined): number {
@@ -155,8 +160,12 @@ function FlowCanvas({
   fitTick,
   issues = [],
   zoomCommand = { id: 0, delta: 0 },
+  centerCommand = { id: 0, index: 0 },
+  selectedIndex = null,
+  onZoom,
+  onReveal,
 }: TransformFlowProps) {
-  const { screenToFlowPosition, getViewport, setViewport } = useReactFlow();
+  const { screenToFlowPosition, getViewport, setViewport, setCenter } = useReactFlow();
   const paneWidth = useStore((state) => state.width);
   const paneHeight = useStore((state) => state.height);
   const [hot, setHot] = useState(false);
@@ -179,11 +188,18 @@ function FlowCanvas({
     }
     return map;
   }, [issues]);
+  const revealRef = useRef(onReveal ?? onSelect);
+  revealRef.current = onReveal ?? onSelect;
+  const reveal = (index: number) => revealRef.current(index);
   const built = useMemo(
-    () => buildNodes(nodes, pending, placed, expanded, toggleFields, onPreviewNode, issuesByIndex),
+    () => buildNodes(nodes, pending, placed, expanded, toggleFields, onPreviewNode, reveal, issuesByIndex),
+    // reveal reads a ref, so a new parent callback must not rebuild the chain.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [nodes, pending, placed, expanded, onPreviewNode, issuesByIndex],
   );
   const [flowNodes, setFlowNodes] = useState(built);
+  const builtRef = useRef(built);
+  builtRef.current = built;
   const placedRef = useRef(placed);
   placedRef.current = placed;
   const nodesRef = useRef(flowNodes);
@@ -193,8 +209,11 @@ function FlowCanvas({
   const autoFitted = useRef(false);
   const fittedPane = useRef({ w: 0, h: 0 });
   useEffect(() => {
-    setFlowNodes(built);
-  }, [built]);
+    setFlowNodes(built.map((node) => ({
+      ...node,
+      selected: selectedIndex != null && node.data.index === selectedIndex,
+    })));
+  }, [built, selectedIndex]);
   useLayoutEffect(() => {
     const explicit = fitTick > 0;
     // A drop lands on the pointer. Fitting that frame would slide the node
@@ -224,9 +243,35 @@ function FlowCanvas({
     if (!zoomCommand.id || zoomCommand.id === zoomSeen.current) return;
     zoomSeen.current = zoomCommand.id;
     const current = getViewport();
-    const zoom = Math.min(FIT_MAX_ZOOM, Math.max(FIT_MIN_ZOOM, Math.round((current.zoom + zoomCommand.delta) * 100) / 100));
-    void setViewport({ x: current.x, y: current.y, zoom }, { duration: 0 });
+    const pane = paneRef.current;
+    const requested = zoomCommand.absolute != null ? zoomCommand.absolute : current.zoom + zoomCommand.delta;
+    const zoom = Math.min(FIT_MAX_ZOOM, Math.max(FIT_MIN_ZOOM, Math.round(requested * 100) / 100));
+    const focusX = pane.w > 40 ? (pane.w / 2 - current.x) / current.zoom : 0;
+    const focusY = pane.h > 48 ? (pane.h / 2 - current.y) / current.zoom : 0;
+    void setViewport({
+      zoom,
+      x: pane.w > 40 ? pane.w / 2 - focusX * zoom : current.x,
+      y: pane.h > 48 ? pane.h / 2 - focusY * zoom : current.y,
+    }, { duration: 0 });
   }, [zoomCommand, getViewport, setViewport]);
+  const centerSeen = useRef(0);
+  useEffect(() => {
+    if (!centerCommand.id || centerCommand.id === centerSeen.current) return;
+    centerSeen.current = centerCommand.id;
+    const node = builtRef.current.find((item) => item.data.index === centerCommand.index)
+      ?? nodesRef.current.find((item) => item.data.index === centerCommand.index);
+    if (!node) return;
+    const zoom = Math.max(getViewport().zoom, FIT_MIN_ZOOM);
+    void setCenter(
+      node.position.x + NODE_WIDTH / 2,
+      node.position.y + NODE_BODY / 2,
+      { zoom, duration: 0 },
+    );
+  }, [centerCommand, getViewport, setCenter]);
+  const reportedZoom = useStore((state) => state.transform[2]);
+  useEffect(() => {
+    onZoom?.(reportedZoom);
+  }, [onZoom, reportedZoom]);
   useEffect(() => {
     const read = () => setTheme(readTheme());
     const observer = new MutationObserver(read);
@@ -374,6 +419,7 @@ function buildNodes(
   expanded: ReadonlySet<string>,
   onToggleFields: (id: string) => void,
   onPreview: (index: number) => void,
+  onReveal: (index: number) => void,
   issuesByIndex: ReadonlyMap<number, string>,
 ): Node<StudioNodeData>[] {
   const shift = pending ? 1 : 0;
@@ -406,6 +452,7 @@ function buildNodes(
         expanded: expanded.has(node.id),
         onToggleFields,
         onPreview,
+        onReveal,
         dimmed: node.dimmed,
         disabled: node.disabled,
         changesRowCount: node.changesRowCount,
@@ -444,6 +491,7 @@ function buildNodes(
         expanded: false,
         onToggleFields,
         onPreview,
+        onReveal,
         dimmed: false,
         disabled: false,
         changesRowCount: false,
@@ -495,7 +543,17 @@ function StudioFlowNode({ id, data, selected }: NodeProps<Node<StudioNodeData>>)
           <p className="df2-canvas-node-title">{data.title}</p>
           <p className="df2-canvas-node-type">{data.kind} · {data.category}</p>
         </div>
-        <span className={`df2-canvas-badge is-${data.status}`}>{statusLabel(data.status)}</span>
+        <button
+          type="button"
+          className={`df2-canvas-badge nodrag nopan is-${data.status}`}
+          aria-label={data.index >= 0 ? `Step ${data.index + 1} ${statusLabel(data.status)}` : statusLabel(data.status)}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (data.index >= 0) data.onReveal(data.index);
+          }}
+        >
+          {statusLabel(data.status)}
+        </button>
       </div>
       <div className="df2-canvas-node-body">
         <p className="df2-canvas-node-summary">{data.summary}</p>

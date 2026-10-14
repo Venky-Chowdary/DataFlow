@@ -8,6 +8,7 @@ import {
   runnableSpecs,
   setDocumentHash,
   specsByFamily,
+  statusLabel,
 } from "./canvasRegistry.js";
 import type { ShapeCatalog, ShapeOperation } from "./shape.js";
 
@@ -115,5 +116,12 @@ describe("canvas node registry", () => {
     });
     assert.equal(again, hash);
     assert.equal(FALLBACK_CANVAS_NODES.some((node) => node.op === "router"), true);
+  });
+
+  it("names a failing node Invalid and a clean node Valid", () => {
+    assert.equal(statusLabel("valid"), "Valid");
+    assert.equal(statusLabel("error"), "Invalid");
+    assert.equal(statusLabel("warning"), "Warning");
+    assert.equal(statusLabel("running"), "Running");
   });
 });

@@ -245,6 +245,40 @@
   justify-content: center;
 }
 
+.df2-app .df2-canvas .df2-canvas-zoom-btn.df2-btn {
+  min-width: 4.25rem;
+  padding: 0 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-canvas-head-title .df2-canvas-badge {
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+button.df2-canvas-badge {
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.df2-canvas-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.df2-canvas-filter-advanced {
+  align-self: flex-start;
+}
+
+.df2-app .df2-canvas .df2-studio-picker-trigger {
+  height: 32px;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
 .df2-app .df2-canvas :is(input.df2-input, select.df2-select, select.df2-input) {
   height: 32px;
   min-height: 32px;

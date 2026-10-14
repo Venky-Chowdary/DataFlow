@@ -11,6 +11,7 @@ import {
   chainDocument,
   columnsBeforeStep,
   documentKind,
+  stepExpressionIssues,
   draftWithDefaults,
   reorderByDrag,
   setDocumentOf,
@@ -79,6 +80,9 @@ interface TransferTransformCanvasProps {
   onApplySuggestion?: (suggestion: ShapeSuggestion) => void;
   /** Refusals for the current recipe. Index is 0-based; -1 is the recipe. */
   issues?: ReadonlyArray<{ index: number; message: string }>;
+  /** When set, the parent owns which node is open. Omit it to keep selection local. */
+  selectedStep?: number | null;
+  onSelectedStepChange?: (index: number | null) => void;
 }
 
 const SHORTCUTS: { keys: string; action: string }[] = [
@@ -128,6 +132,8 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     sampleRows = [],
     onApplySuggestion,
     issues = [],
+    selectedStep: selectedStepProp,
+    onSelectedStepChange,
   } = props;
   const stackRef = useRef(createUndoStack(steps));
   const filterRef = useRef<HTMLInputElement>(null);
@@ -157,13 +163,24 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [validationOpen, setValidationOpen] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
-  const [zoomCommand, setZoomCommand] = useState({ id: 0, delta: 0 });
+  const [zoomCommand, setZoomCommand] = useState<{ id: number; delta: number; absolute?: number }>({ id: 0, delta: 0 });
+  const [centerCommand, setCenterCommand] = useState({ id: 0, index: 0 });
+  const [zoomLevel, setZoomLevel] = useState(1);
   const [fitTick, setFitTick] = useState(0);
   const [runningIndex, setRunningIndex] = useState<number | null>(null);
   const [nodePreview, setNodePreview] = useState<{ index: number; rows: Record<string, unknown>[]; note: string } | null>(null);
   const expressionGen = useRef(0);
   const draftIndex = useRef<number | null>(null);
+  const echoStep = useRef<number | null | undefined>(undefined);
+  const stepsRef = useRef(steps);
+  stepsRef.current = steps;
   const canEdit = canPlan && !syncRefused;
+
+  const chooseStep = (index: number | null) => {
+    echoStep.current = index;
+    setSelected(index);
+    onSelectedStepChange?.(index);
+  };
 
   useEffect(() => {
     if (!sameSnapshot(stackRef.current.present, steps)) {
@@ -189,7 +206,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const applyStack = (direction: "undo" | "redo") => {
     stackRef.current = direction === "undo" ? undo(stackRef.current) : redo(stackRef.current);
     onChangeSteps(stackRef.current.present);
-    setSelected(null);
+    chooseStep(null);
     setPendingAt(null);
     setPlaced(null);
     setLinkRefusal("");
@@ -215,28 +232,50 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const families = specsByFamily(runnableSpecs(registry, filter));
   const planned = plannedSpecs(registry);
   const plannedMatches = filter.trim() ? plannedSpecs(registry, filter) : [];
-  const selectedStep = selected != null ? steps[selected] : undefined;
-  const selectedSpec = specByOp(registry, selectedStep?.op ?? draftOp);
-  const selectedOperation = inspectorOperation(selectedSpec) ?? catalog?.operations.find((operation) => operation.op === (selectedStep?.op ?? draftOp)) ?? null;
+  const selectedWire = selected != null ? steps[selected] : undefined;
+  const selectedSpec = specByOp(registry, selectedWire?.op ?? draftOp);
+  const selectedOperation = inspectorOperation(selectedSpec) ?? catalog?.operations.find((operation) => operation.op === (selectedWire?.op ?? draftOp)) ?? null;
   const blankRequired = useMemo(() => {
     if (!selectedOperation) return new Set<string>();
     return new Set(selectedOperation.required.filter((name) => isBlankOption(name, draftOptions[name])));
   }, [selectedOperation, draftOptions]);
 
   const loadStep = (index: number) => {
-    const step = steps[index];
+    const step = stepsRef.current[index];
     if (!step) return;
+    const same = draftIndex.current === index;
     draftIndex.current = index;
-    setSelected(index);
+    chooseStep(index);
     setDraftOp(step.op);
     setDraftColumn(step.column ?? "");
-    setDraftOptions({ ...(step.options ?? {}) });
-    setDraftLabel(step.label ?? "");
-    setDraftPolicy(step.on_error ?? "refuse");
-    setExpressionError("");
-    setFormError("");
+    if (!same) {
+      setDraftOptions({ ...(step.options ?? {}) });
+      setDraftLabel(step.label ?? "");
+      setDraftPolicy(step.on_error ?? "refuse");
+      setExpressionError("");
+      setFormError("");
+    }
     setInspectorOpen(true);
   };
+
+  const revealStep = (index: number) => {
+    if (!stepsRef.current[index]) return;
+    loadStep(index);
+    setCenterCommand((current) => ({ id: current.id + 1, index }));
+    focusInspector();
+  };
+
+  useEffect(() => {
+    if (selectedStepProp === undefined) return;
+    if (selectedStepProp != null && !stepsRef.current[selectedStepProp]) return;
+    if (echoStep.current === selectedStepProp) return;
+    echoStep.current = selectedStepProp;
+    if (selectedStepProp == null) {
+      setSelected(null);
+      return;
+    }
+    revealStep(selectedStepProp);
+  }, [selectedStepProp, steps.length]);
 
   const clearPending = () => {
     setPendingAt(null);
@@ -273,13 +312,13 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       next.splice(at, 0, built.step);
       setPendingAt(null);
       draftIndex.current = at;
-      setSelected(at);
+      chooseStep(at);
       commit(next);
       if (!atPoint) setFitTick((tick) => tick + 1);
       focusInspector();
       return;
     }
-    setSelected(null);
+    chooseStep(null);
     setPendingAt(at);
     focusInspector();
   };
@@ -314,16 +353,11 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     const expressionName = selectedOperation.expression_option;
     const expression = expressionName ? String(draftOptions[expressionName] ?? "") : "";
     const columnIssue = expression ? unknownExpressionColumn(expression, names) : "";
-    if (columnIssue) {
-      setExpressionError(columnIssue);
-      setFormError(columnIssue);
-      return;
-    }
-    const leftoverColumn = expressionError.startsWith("refers to column");
-    if (expressionError && !leftoverColumn) {
+    if (!columnIssue && expressionError && !expressionError.startsWith("refers to column")) {
       setFormError(expressionError);
       return;
     }
+    if (columnIssue) setExpressionError(columnIssue);
     const built = stepFromDraft(selectedOperation, draftColumn, draftOptions, draftLabel, draftPolicy);
     if (!built.step) {
       setFormError(built.error);
@@ -343,7 +377,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     next.splice(at, 0, built.step);
     draftIndex.current = at;
     setPendingAt(null);
-    setSelected(at);
+    chooseStep(at);
     commit(next);
     setFormError("");
   };
@@ -402,13 +436,13 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
         setFocusMode(false);
         return;
       }
-      setSelected(null);
+      chooseStep(null);
       clearPending();
     }
     else if ((event.key === "Delete" || event.key === "Backspace") && selected != null && canEdit) {
       event.preventDefault();
       commit(removeStep(steps, selected));
-      setSelected(null);
+      chooseStep(null);
     } else if (event.key === "ArrowUp" && selected != null && canEdit) {
       event.preventDefault();
       commit(moveStep(steps, selected, -1));
@@ -444,8 +478,24 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     setZoomCommand((current) => ({ id: current.id + 1, delta }));
   };
 
-  const stepIssue = selected != null ? issues.find((issue) => issue.index === selected) : undefined;
-  const inspectorAlert = formError || stepIssue?.message || "";
+  const zoomTo = (absolute: number) => {
+    setZoomCommand((current) => ({ id: current.id + 1, delta: 0, absolute }));
+  };
+
+  const zoomPercent = Math.round(zoomLevel * 100);
+
+  const liveIssues = useMemo(() => {
+    const local = stepExpressionIssues(steps, catalog?.operations ?? [], sourceNames);
+    if (selected != null && expressionError) local.unshift({ index: selected, message: expressionError });
+    const covered = new Set(issues.map((issue) => issue.index));
+    return [
+      ...issues,
+      ...local.filter((issue) => !covered.has(issue.index)),
+    ];
+  }, [catalog?.operations, expressionError, issues, selected, sourceNames, steps]);
+  const recipeInvalid = liveIssues.length > 0;
+  const stepIssue = selected != null ? liveIssues.find((issue) => issue.index === selected) : undefined;
+  const inspectorAlert = formError || expressionError || stepIssue?.message || "";
   const dockReserve = (previewMax ? 0 : (previewOpen ? dockHeight : 48)) + 8;
 
   const previewNode = async (index: number) => {
@@ -515,6 +565,9 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       <header className="df2-canvas-head">
         <div className="df2-canvas-head-title">
           <h3>Recipe</h3>
+          <span className={`df2-canvas-badge is-${recipeInvalid ? "error" : "valid"}`} data-testid="canvas-recipe-pill">
+            {recipeInvalid ? "Invalid" : "Valid"}
+          </span>
           <p>
             {activeTable ? `Steps for ${activeTable}. Other tables stay in the recipe, dimmed.` : "Steps run in order on the read."}
           </p>
@@ -536,7 +589,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
               Properties
             </button>
             <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={validationOpen} onClick={() => setValidationOpen((open) => !open)}>
-              Validation{issues.length ? ` (${issues.length})` : ""}
+              Validation{liveIssues.length ? ` (${liveIssues.length})` : ""}
             </button>
           </div>
           <div className="df2-canvas-tool-group">
@@ -554,6 +607,9 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
             </button>
             <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => zoomBy(-0.15)} aria-label="Zoom out" title="Zoom out">
               <DtIcon name="minus" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-zoom-btn" onClick={() => zoomTo(1)} aria-label="Zoom to 100%" title="Zoom to 100%">
+              {zoomPercent}%
             </button>
             <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setFocusMode((on) => !on)} aria-label={focusMode ? "Exit focus" : "Focus canvas"} title={focusMode ? "Exit focus" : "Focus canvas"}>
               <DtIcon name={focusMode ? "collapse" : "expand"} size={16} chrome="product" />
@@ -717,8 +773,12 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
               edges={flow.edges}
               pending={pending}
               placed={placed}
-              issues={issues}
+              issues={liveIssues}
               zoomCommand={zoomCommand}
+              centerCommand={centerCommand}
+              selectedIndex={selected}
+              onZoom={setZoomLevel}
+              onReveal={revealStep}
               onSelect={loadStep}
               onReorder={(from, to) => {
                 if (!canEdit) return;
@@ -764,21 +824,21 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
         {validationOpen && (
           <div className="df2-canvas-validation" role="region" aria-label="Validation">
             <h4>Validation</h4>
-            {issues.length === 0 ? (
+            {liveIssues.length === 0 ? (
               <p className="df2-label-hint">No issues. The recipe can be previewed.</p>
             ) : (
               <ul>
-                {issues.map((issue, index) => (
+                {liveIssues.map((issue, index) => (
                   <li key={`${issue.index}-${index}`}>
                     <button
                       type="button"
                       onClick={() => {
                         if (issue.index >= 0 && steps[issue.index]) {
-                          loadStep(issue.index);
-                          setFitTick((tick) => tick + 1);
+                          revealStep(issue.index);
                           return;
                         }
                         setInspectorOpen(true);
+                        focusInspector();
                       }}
                     >
                       {issue.index >= 0 ? `Step ${issue.index + 1}` : "Recipe"}: {issue.message}
@@ -820,6 +880,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                 onExpressionChange={(text) => void validateExpression(text)}
                 idPrefix="canvas-opt"
                 blankRequired={blankRequired}
+                conditionBuilder
               />
               <label className="df2-label" htmlFor="canvas-label">
                 Step name
