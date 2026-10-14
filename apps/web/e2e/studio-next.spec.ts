@@ -422,11 +422,14 @@ conn.commit()
     await expect(node).toHaveAttribute("data-icon", "trim");
     await expect(node).toHaveAttribute("data-status", "valid");
     await expect(node).toContainText("Trim");
-    await expect(node).toContainText("Valid");
+    await expect(node.locator(".df2-canvas-group-in")).toHaveText("Input");
+    await expect(node.locator(".df2-canvas-group-out")).toHaveText("Output");
+    await expect(node.getByLabel("Input")).toBeVisible();
+    await expect(node.getByLabel(/^Output/)).toBeVisible();
     await expect(node).toContainText("Remove leading and trailing whitespace");
     await expect(page.locator(".react-flow__minimap")).toBeVisible();
     await page.getByRole("button", { name: "Fit view", exact: true }).click();
-    await page.getByRole("button", { name: "Arrange" }).click();
+    await page.getByRole("button", { name: "Arrange All" }).click();
     await expect(node).toBeVisible();
     await page.getByLabel("Search operations").fill("join");
     const join = page.locator(".df2-canvas-op[data-op='join']").filter({ visible: true });
@@ -463,13 +466,15 @@ conn.commit()
     await page.locator("#canvas-opt-condition").fill("[order_id] <> ''");
     await page.getByRole("button", { name: "Update step" }).click();
     await expect(page.getByTestId("canvas-recipe-pill")).toHaveText("Invalid");
-    await expect(page.getByRole("button", { name: "Step 3 Invalid" })).toBeVisible();
     await setPalette(page, false);
     await page.locator(".df2-canvas-node[data-index='0']").click();
     await page.getByRole("button", { name: /^Validation/ }).click();
     const validation = page.getByRole("region", { name: "Validation" });
+    await expect(validation.getByRole("button", { name: "Step 1 Valid" })).toBeVisible();
+    await expect(validation.getByRole("button", { name: "Step 2 Valid" })).toBeVisible();
+    await expect(validation.getByRole("button", { name: "Step 3 Invalid" })).toBeVisible();
     await expect(validation).toContainText(/order_id/);
-    await validation.getByRole("button", { name: /Step 3/ }).click();
+    await validation.getByRole("button", { name: "Step 3 Invalid" }).click();
     await expect(page.locator(".df2-canvas-node.is-selected[data-index='2']")).toBeVisible();
     await expect(page.locator("#canvas-inspector")).toBeFocused();
     await expect.poll(() => nodeCenterGap(page, 2)).toBeLessThan(80);
@@ -495,7 +500,8 @@ conn.commit()
     const trim = page.locator(".df2-canvas-op[data-op='trim']");
     await expect(trim).toBeVisible();
     await trim.click();
-    await expect(page.locator(".df2-canvas-node").first()).toContainText("Valid");
+    await expect(page.locator(".df2-canvas-node").first()).toHaveAttribute("data-status", "valid");
+    await expect(page.locator(".df2-canvas-group-out").first()).toHaveText("Output");
     await expect(page.locator(".react-flow__minimap")).toBeHidden();
     await expectActionBarBelowCanvas(page);
     const node = page.locator(".df2-canvas-node").first();
@@ -515,7 +521,8 @@ conn.commit()
     return text;
   }, { timeout: 20_000 }).toMatch(/row/);
   await expect(status).not.toHaveText(/does not have|not available|refused/i);
-  await page.getByRole("button", { name: "Arrange" }).click();
+  await expect(page.locator(".react-flow__edge-smoothstep")).toHaveCount(2);
+  await page.getByRole("button", { name: "Arrange All" }).click();
   const stage = page.getByTestId("transform-canvas-stage");
   const minimap = page.locator(".react-flow__minimap");
   await expect(minimap).toBeVisible();
@@ -550,18 +557,20 @@ conn.commit()
   const paints = await page.locator(".df2-canvas-node").evaluateAll((cards) => cards.map((card) => {
     const band = card.querySelector(".df2-canvas-node-band");
     const mark = card.querySelector(".df2-canvas-node-mark");
+    const stripe = card.querySelector(".df2-canvas-node-stripe");
     const title = card.querySelector(".df2-canvas-node-title");
     const bandStyle = band ? getComputedStyle(band) : null;
     const markStyle = mark ? getComputedStyle(mark) : null;
     const titleStyle = title ? getComputedStyle(title) : null;
     return {
       band: bandStyle?.backgroundColor ?? "",
+      stripe: stripe ? getComputedStyle(stripe).backgroundColor : "",
       mark: markStyle?.backgroundColor ?? "",
       title: titleStyle?.color ?? "",
       icon: markStyle?.color ?? "",
     };
   }));
-  expect(new Set(paints.map((paint) => paint.band)).size).toBe(3);
+  expect(new Set(paints.map((paint) => paint.stripe)).size).toBe(3);
   expect(new Set(paints.map((paint) => paint.mark)).size).toBe(3);
   for (const paint of paints) {
     expect(contrast(paint.title, paint.band)).toBeGreaterThanOrEqual(4.5);
@@ -577,8 +586,18 @@ conn.commit()
   expect(inspector!.width).toBeGreaterThanOrEqual(240);
   expect(inspector!.height).toBeGreaterThanOrEqual(120);
 
+  const overview = page.getByRole("button", { name: "Canvas overview" });
+  await expect(overview).toHaveAttribute("aria-pressed", "true");
+  await overview.click();
+  await expect(minimap).toBeHidden();
+  await overview.click();
+  await expect(minimap).toBeVisible();
+  await expect(overview).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Validation", exact: true }).click();
-  await expect(page.getByRole("region", { name: "Validation" })).toContainText("No issues");
+  const validation = page.getByRole("region", { name: "Validation" });
+  await expect(validation.getByRole("button", { name: "Step 1 Valid" })).toBeVisible();
+  await expect(validation.getByRole("button", { name: "Step 2 Valid" })).toBeVisible();
+  await expect(validation.getByRole("button", { name: "Step 3 Valid" })).toBeVisible();
   await page.getByRole("button", { name: "Validation", exact: true }).click();
   await page.getByRole("button", { name: "Focus canvas" }).click();
   await expect(page.locator(".df2-sidebar")).toBeHidden();
@@ -602,7 +621,7 @@ conn.commit()
   await page.getByRole("button", { name: "Fit view", exact: true }).click();
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole("button", { name: "Arrange" }).click();
+  await page.getByRole("button", { name: "Arrange All" }).click();
   await expect(minimap).toBeHidden();
   await expect.poll(async () => {
     const fitted = await stage.boundingBox();
@@ -641,15 +660,17 @@ conn.commit()
   const dark = await page.locator(".df2-canvas-node").evaluateAll((cards) => cards.map((card) => {
     const band = card.querySelector(".df2-canvas-node-band");
     const mark = card.querySelector(".df2-canvas-node-mark");
+    const stripe = card.querySelector(".df2-canvas-node-stripe");
     const title = card.querySelector(".df2-canvas-node-title");
     return {
       band: band ? getComputedStyle(band).backgroundColor : "",
+      stripe: stripe ? getComputedStyle(stripe).backgroundColor : "",
       mark: mark ? getComputedStyle(mark).backgroundColor : "",
       title: title ? getComputedStyle(title).color : "",
       icon: mark ? getComputedStyle(mark).color : "",
     };
   }));
-  expect(new Set(dark.map((paint) => paint.band)).size).toBe(3);
+  expect(new Set(dark.map((paint) => paint.stripe)).size).toBe(3);
   expect(new Set(dark.map((paint) => paint.mark)).size).toBe(3);
   for (const paint of dark) {
     expect(contrast(paint.title, paint.band)).toBeGreaterThanOrEqual(4.5);

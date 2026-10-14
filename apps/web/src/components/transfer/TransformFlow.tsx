@@ -12,7 +12,8 @@ import {
   applyNodeChanges,
   useReactFlow,
   useStore,
-  type Connection,
+  type   Connection,
+  ConnectionLineType,
   type Edge,
   type Node,
   type NodeProps,
@@ -43,7 +44,6 @@ import {
   iconFor,
   nodeStatus,
   shortName,
-  statusLabel,
   streamPorts,
   stripeFor,
   type CanvasPort,
@@ -126,6 +126,7 @@ interface TransformFlowProps {
   selectedIndex?: number | null;
   onZoom?: (zoom: number) => void;
   onReveal?: (index: number) => void;
+  overview?: boolean;
 }
 
 function stepIndex(id: string | null | undefined): number {
@@ -164,6 +165,7 @@ function FlowCanvas({
   selectedIndex = null,
   onZoom,
   onReveal,
+  overview = true,
 }: TransformFlowProps) {
   const { screenToFlowPosition, getViewport, setViewport, setCenter } = useReactFlow();
   const paneWidth = useStore((state) => state.width);
@@ -286,7 +288,7 @@ function FlowCanvas({
     target: edge.target,
     sourceHandle: edge.sourcePort,
     targetHandle: edge.targetPort,
-    type: "default",
+    type: "smoothstep",
     markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16, color: linkColor },
   }));
 
@@ -352,6 +354,8 @@ function FlowCanvas({
         nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
         fitView={false}
+        connectionLineType={ConnectionLineType.SmoothStep}
+        defaultEdgeOptions={{ type: "smoothstep" }}
         minZoom={FIT_MIN_ZOOM}
         maxZoom={FIT_MAX_ZOOM}
         panOnScroll
@@ -397,16 +401,18 @@ function FlowCanvas({
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1.5} color="var(--df-border-strong)" />
         <Controls showInteractive={false} showFitView={false} className="df2-canvas-controls" />
-        <MiniMap
-          pannable={false}
-          zoomable={false}
-          ariaLabel="Canvas overview"
-          className="df2-canvas-minimap"
-          style={{ width: 96, height: 68 }}
-          bgColor="var(--df-surface)"
-          nodeColor="var(--df-border-strong)"
-          maskColor="color-mix(in srgb, var(--df-brand-tile) 16%, transparent)"
-        />
+        {overview && (
+          <MiniMap
+            pannable={false}
+            zoomable={false}
+            ariaLabel="Canvas overview"
+            className="df2-canvas-minimap"
+            style={{ width: 96, height: 68 }}
+            bgColor="var(--df-surface)"
+            nodeColor="var(--df-border-strong)"
+            maskColor="color-mix(in srgb, var(--df-brand-tile) 16%, transparent)"
+          />
+        )}
       </ReactFlow>
     </div>
   );
@@ -506,8 +512,17 @@ function buildNodes(
   return flowNodes;
 }
 
-function shownPorts(ports: CanvasPort[], expanded: boolean, role: "in" | "out"): CanvasPort[] {
-  return ports.filter((port) => port.role === role && (port.visible || (expanded && port.kind === "field")));
+/** Matches `.df2-canvas-node-band` (40px) plus half of `.df2-canvas-node-group` (22px). */
+const GROUP_TOP = 51;
+const GROUP_PITCH = 22;
+
+function rowPorts(ports: CanvasPort[], role: "in" | "out"): CanvasPort[] {
+  return ports.filter((port) => port.role === role && port.kind === "row" && port.visible);
+}
+
+function fieldPorts(ports: CanvasPort[], role: "in" | "out", expanded: boolean): CanvasPort[] {
+  if (!expanded) return [];
+  return ports.filter((port) => port.role === role && port.kind === "field");
 }
 
 function StudioFlowNode({ id, data, selected }: NodeProps<Node<StudioNodeData>>) {
@@ -519,42 +534,57 @@ function StudioFlowNode({ id, data, selected }: NodeProps<Node<StudioNodeData>>)
     data.disabled ? "is-disabled" : "",
     data.invalid ? "is-invalid" : "",
   ].filter(Boolean).join(" ");
-  const inputs = shownPorts(data.ports, data.expanded, "in");
-  const outputs = shownPorts(data.ports, data.expanded, "out");
+  const rowInputs = rowPorts(data.ports, "in");
+  const rowOutputs = rowPorts(data.ports, "out");
+  const fieldInputs = fieldPorts(data.ports, "in", data.expanded);
+  const fieldOutputs = fieldPorts(data.ports, "out", data.expanded);
+  const groups = Math.max(rowInputs.length, rowOutputs.length);
   const fields = data.ports.filter((port) => port.kind === "field");
+  const groupTop = (index: number) => `${GROUP_TOP + index * GROUP_PITCH}px`;
+  const fieldTop = (index: number) => `${GROUP_TOP + groups * GROUP_PITCH + 36 + index * 18}px`;
   return (
     <div className={className} data-op={data.op} data-index={data.index} data-stripe={data.stripe} data-icon={data.icon} data-status={data.status}>
-      {inputs.map((port, index) => (
+      <span className="df2-canvas-node-stripe" aria-hidden />
+      {rowInputs.map((port, index) => (
         <Handle
           key={port.id}
           id={port.id}
           type="target"
           position={Position.Left}
-          className={`df2-canvas-port is-in${port.kind === "field" ? " is-field" : ""}`}
-          style={{ top: `${((index + 1) / (inputs.length + 1)) * 100}%` }}
+          className="df2-canvas-port is-in"
+          style={{ top: groupTop(index) }}
+          aria-label={port.label}
+        />
+      ))}
+      {fieldInputs.map((port, index) => (
+        <Handle
+          key={port.id}
+          id={port.id}
+          type="target"
+          position={Position.Left}
+          className="df2-canvas-port is-in is-field"
+          style={{ top: fieldTop(index) }}
           aria-label={port.label}
         />
       ))}
       <div className="df2-canvas-node-band">
         <span className="df2-canvas-node-mark" aria-hidden>
-          <DtIcon name={data.invalid ? "alert" : data.icon} size={24} chrome="product" />
+          <DtIcon name={data.icon} size={18} chrome="product" />
         </span>
         <div className="df2-canvas-node-id">
           <p className="df2-canvas-node-title">{data.title}</p>
-          <p className="df2-canvas-node-type">{data.kind} · {data.category}</p>
         </div>
-        <button
-          type="button"
-          className={`df2-canvas-badge nodrag nopan is-${data.status}`}
-          aria-label={data.index >= 0 ? `Step ${data.index + 1} ${statusLabel(data.status)}` : statusLabel(data.status)}
-          onClick={(event) => {
-            event.stopPropagation();
-            if (data.index >= 0) data.onReveal(data.index);
-          }}
-        >
-          {statusLabel(data.status)}
-        </button>
       </div>
+      {groups > 0 && (
+        <div className="df2-canvas-node-groups">
+          {Array.from({ length: groups }, (_, index) => (
+            <div className="df2-canvas-node-group" key={rowInputs[index]?.id ?? rowOutputs[index]?.id ?? index}>
+              <span className="df2-canvas-group-in">{rowInputs[index]?.label ?? ""}</span>
+              <span className="df2-canvas-group-out">{rowOutputs[index]?.label ?? ""}</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="df2-canvas-node-body">
         <p className="df2-canvas-node-summary">{data.summary}</p>
         {data.invalid && <p className="df2-canvas-node-invalid">{data.invalidReason}</p>}
@@ -582,15 +612,26 @@ function StudioFlowNode({ id, data, selected }: NodeProps<Node<StudioNodeData>>)
           </ul>
         )}
       </div>
-      {outputs.map((port, index) => (
+      {rowOutputs.map((port, index) => (
         <Handle
           key={port.id}
           id={port.id}
           type="source"
           position={Position.Right}
-          className={`df2-canvas-port${port.kind === "field" ? " is-field" : data.changesRowCount ? " is-count" : " is-out"}`}
-          style={{ top: `${((index + 1) / (outputs.length + 1)) * 100}%` }}
-          aria-label={data.changesRowCount && port.kind === "row" ? `${port.label}. This node changes row count` : port.label}
+          className={`df2-canvas-port${data.changesRowCount ? " is-count" : " is-out"}`}
+          style={{ top: groupTop(index) }}
+          aria-label={data.changesRowCount ? `${port.label}. This node changes row count` : port.label}
+        />
+      ))}
+      {fieldOutputs.map((port, index) => (
+        <Handle
+          key={port.id}
+          id={port.id}
+          type="source"
+          position={Position.Right}
+          className="df2-canvas-port is-out is-field"
+          style={{ top: fieldTop(index) }}
+          aria-label={port.label}
         />
       ))}
     </div>

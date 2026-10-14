@@ -28,6 +28,7 @@ import {
   setDocumentHash,
   specByOp,
   specsByFamily,
+  statusLabel,
 } from "../../lib/canvasRegistry";
 import {
   divertMatchingRows,
@@ -98,7 +99,7 @@ const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "Ctrl+Shift+Z", action: "Redo" },
   { keys: "Ctrl+K", action: "Command palette" },
   { keys: "Ctrl+Shift+F", action: "Zoom to fit" },
-  { keys: "Ctrl+Shift+L", action: "Arrange the chain" },
+  { keys: "Ctrl+Shift+L", action: "Arrange All" },
 ];
 
 /**
@@ -162,6 +163,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const [paletteDock, setPaletteDock] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [validationOpen, setValidationOpen] = useState(false);
+  const [overview, setOverview] = useState(true);
   const [focusMode, setFocusMode] = useState(false);
   const [zoomCommand, setZoomCommand] = useState<{ id: number; delta: number; absolute?: number }>({ id: 0, delta: 0 });
   const [centerCommand, setCenterCommand] = useState({ id: 0, index: 0 });
@@ -493,6 +495,40 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       ...local.filter((issue) => !covered.has(issue.index)),
     ];
   }, [catalog?.operations, expressionError, issues, selected, sourceNames, steps]);
+  const validationRows = useMemo(() => {
+    const messages = new Map<number, string[]>();
+    for (const issue of liveIssues) {
+      const list = messages.get(issue.index) ?? [];
+      list.push(issue.message);
+      messages.set(issue.index, list);
+    }
+    const rows = flow.nodes.map((node) => {
+      const detail = (messages.get(node.index) ?? []).join(" ");
+      const status = detail
+        ? "error" as const
+        : node.status === "error" || node.status === "warning" || node.status === "running"
+          ? node.status
+          : "valid" as const;
+      return {
+        key: node.id,
+        index: node.index,
+        title: node.title,
+        status,
+        detail: detail || statusLabel(status),
+      };
+    });
+    for (const [index, list] of messages) {
+      if (flow.nodes.some((node) => node.index === index)) continue;
+      rows.push({
+        key: `issue-${index}`,
+        index,
+        title: index >= 0 ? `Step ${index + 1}` : "Recipe",
+        status: "error" as const,
+        detail: list.join(" "),
+      });
+    }
+    return rows;
+  }, [flow.nodes, liveIssues]);
   const recipeInvalid = liveIssues.length > 0;
   const stepIssue = selected != null ? liveIssues.find((issue) => issue.index === selected) : undefined;
   const inspectorAlert = formError || expressionError || stepIssue?.message || "";
@@ -614,8 +650,11 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
             <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setFocusMode((on) => !on)} aria-label={focusMode ? "Exit focus" : "Focus canvas"} title={focusMode ? "Exit focus" : "Focus canvas"}>
               <DtIcon name={focusMode ? "collapse" : "expand"} size={16} chrome="product" />
             </button>
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={arrange} aria-label="Arrange" title="Arrange">
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={arrange} aria-label="Arrange All" title="Arrange All">
               <DtIcon name="layers" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setOverview((on) => !on)} aria-label="Canvas overview" aria-pressed={overview} title="Canvas overview">
+              <DtIcon name="window" size={16} chrome="product" />
             </button>
             <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setHelpOpen(true)} aria-label="Keyboard shortcuts" title="Keyboard shortcuts">
               <DtIcon name="menu" size={16} chrome="product" />
@@ -797,6 +836,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
               onDropOp={(op, at, index) => beginAdd(op, index, at)}
               onPreviewNode={(index) => void previewNode(index)}
               fitTick={fitTick}
+              overview={overview}
             />
           </Suspense>
           {linkNote && <p className="df2-canvas-link-note" role="status">{linkNote}</p>}
@@ -824,24 +864,36 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
         {validationOpen && (
           <div className="df2-canvas-validation" role="region" aria-label="Validation">
             <h4>Validation</h4>
-            {liveIssues.length === 0 ? (
-              <p className="df2-label-hint">No issues. The recipe can be previewed.</p>
+            {validationRows.length === 0 ? (
+              <p className="df2-label-hint">No transformations on the canvas.</p>
             ) : (
               <ul>
-                {liveIssues.map((issue, index) => (
-                  <li key={`${issue.index}-${index}`}>
+                {validationRows.map((row) => (
+                  <li key={row.key}>
                     <button
                       type="button"
+                      className={`is-${row.status}${selected === row.index ? " is-current" : ""}`}
+                      aria-label={row.index >= 0 ? `Step ${row.index + 1} ${statusLabel(row.status)}` : `Recipe ${statusLabel(row.status)}`}
                       onClick={() => {
-                        if (issue.index >= 0 && steps[issue.index]) {
-                          revealStep(issue.index);
+                        if (row.index >= 0 && steps[row.index]) {
+                          revealStep(row.index);
                           return;
                         }
                         setInspectorOpen(true);
                         focusInspector();
                       }}
                     >
-                      {issue.index >= 0 ? `Step ${issue.index + 1}` : "Recipe"}: {issue.message}
+                      <span className="df2-canvas-validation-mark" aria-hidden>
+                        <DtIcon
+                          name={row.status === "error" ? "alert" : row.status === "warning" ? "warning" : row.status === "running" ? "activity" : "check"}
+                          size={16}
+                          chrome="product"
+                        />
+                      </span>
+                      <span className="df2-canvas-validation-copy">
+                        <span className="df2-canvas-validation-name">{row.title}</span>
+                        <span className="df2-canvas-validation-state">{row.detail}</span>
+                      </span>
                     </button>
                   </li>
                 ))}

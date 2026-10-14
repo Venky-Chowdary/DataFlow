@@ -245,6 +245,11 @@
   justify-content: center;
 }
 
+.df2-app .df2-canvas .df2-canvas-icon-btn.df2-btn[aria-pressed="true"] {
+  background: var(--df-surface-muted);
+  color: var(--df-brand-text);
+}
+
 .df2-app .df2-canvas .df2-canvas-zoom-btn.df2-btn {
   min-width: 4.25rem;
   padding: 0 8px;
@@ -455,8 +460,9 @@ button.df2-canvas-badge {
 }
 
 .df2-canvas-node-mark {
-  width: 40px;
-  height: 40px;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
 }
 
 /* Band and icon tile use different logo tokens so a category reads twice.
@@ -796,8 +802,9 @@ button.df2-canvas-badge {
 }
 
 .df2-canvas-node {
+  position: relative;
   width: 100%;
-  min-height: 148px;
+  min-height: 160px;
   padding: 0;
   background: var(--df-surface);
   border: 1px solid var(--df-border-strong);
@@ -806,34 +813,71 @@ button.df2-canvas-badge {
   overflow: visible;
 }
 
-.df2-canvas-node-band {
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--df-space-2);
-  padding: 10px 12px;
-  border-radius: 9px 9px 0 0;
+.df2-canvas-node-stripe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  border-radius: 10px 10px 0 0;
   background: var(--df-brand-tile);
-  color: var(--df-on-tile);
+  pointer-events: none;
 }
 
-.df2-canvas-node[data-stripe="columns"] .df2-canvas-node-band {
+.df2-canvas-node[data-stripe="columns"] .df2-canvas-node-stripe {
   background: var(--df-logo-ink);
-  color: var(--df-on-tile);
 }
 
-.df2-canvas-node[data-stripe="rows"] .df2-canvas-node-band {
+.df2-canvas-node[data-stripe="rows"] .df2-canvas-node-stripe {
   background: var(--df-brand-arrow);
-  color: var(--df-brand-tile);
 }
 
-.df2-canvas-node[data-stripe="shape"] .df2-canvas-node-band {
+.df2-canvas-node[data-stripe="shape"] .df2-canvas-node-stripe {
   background: var(--df-attention);
-  color: var(--df-brand-tile);
+}
+
+.df2-canvas-node-band {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 40px;
+  box-sizing: border-box;
+  padding: 0 12px 0 14px;
+  border-radius: 9px 9px 0 0;
+  background: var(--df-surface);
+  color: var(--df-text-primary);
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-canvas-node-groups {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-canvas-node-group {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  height: 22px;
+  box-sizing: border-box;
+  padding: 0 18px;
+  font-size: 13px;
+  line-height: 22px;
+  color: var(--df-text-secondary);
+}
+
+.df2-canvas-group-in,
+.df2-canvas-group-out {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .df2-canvas-node-id {
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 .df2-canvas-node-body {
@@ -906,7 +950,7 @@ button.df2-canvas-badge {
   font-size: 15px;
   line-height: 1.25;
   font-weight: var(--df-fw-semibold);
-  color: inherit;
+  color: var(--df-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -928,6 +972,7 @@ button.df2-canvas-badge {
 }
 
 .df2-canvas-port {
+  z-index: 2;
   width: 12px;
   height: 12px;
   border-radius: 50%;
@@ -1048,16 +1093,76 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
 }
 
 .df2-canvas-validation button {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
   width: 100%;
   min-height: 32px;
   text-align: left;
   font: inherit;
   font-size: 13px;
-  color: var(--df-danger);
-  background: var(--df-danger-bg);
-  border: 1px solid var(--df-danger);
+  color: var(--df-text-primary);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
   border-radius: var(--df-radius-md);
   padding: var(--df-space-2);
+  cursor: pointer;
+}
+
+.df2-canvas-validation button.is-error {
+  color: var(--df-danger);
+  background: var(--df-danger-bg);
+  border-color: var(--df-danger);
+}
+
+.df2-canvas-validation button.is-current {
+  box-shadow: inset 3px 0 0 var(--df-brand-tile);
+}
+
+.df2-canvas-validation-mark {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  margin-top: 1px;
+  color: var(--df-brand-text);
+}
+
+.df2-canvas-validation button.is-warning .df2-canvas-validation-mark {
+  color: var(--df-warning-text);
+}
+
+.df2-canvas-validation button.is-error .df2-canvas-validation-mark {
+  color: var(--df-danger);
+}
+
+.df2-canvas-validation button.is-running .df2-canvas-validation-mark {
+  color: var(--df-brand-tile);
+}
+
+.df2-canvas-validation-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 2px;
+}
+
+.df2-canvas-validation-name {
+  font-weight: var(--df-fw-semibold);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-canvas-validation-state {
+  color: var(--df-text-secondary);
+  white-space: normal;
+}
+
+.df2-canvas-validation button.is-error .df2-canvas-validation-state {
+  color: var(--df-danger);
 }
 
 .df2-canvas-stage-wrap {
