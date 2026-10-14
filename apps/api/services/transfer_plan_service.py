@@ -295,7 +295,9 @@ def run_plan_preflight(
         if fetched and (not sample_rows or len(fetched) >= len(sample_rows)):
             sample_rows = fetched
     if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
-        sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
+        from services.sample_strategy import position_reservoir_sample
+
+        sample_rows = position_reservoir_sample(sample_rows, PREFLIGHT_SAMPLE_LIMIT)
 
     # Previous = revision snapshot (or empty for legacy revisions without snapshot).
     prev_cols = list(rev.source_columns or [])

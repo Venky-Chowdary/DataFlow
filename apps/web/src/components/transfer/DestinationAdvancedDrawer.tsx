@@ -31,7 +31,8 @@ export type DestSchemaPolicy =
   | "propagate_columns"
   | "propagate_all"
   | "pause_on_change"
-  | "type_locked";
+  | "type_locked"
+  | "block_all";
 
 export type DestValidationMode =
   | "balanced"

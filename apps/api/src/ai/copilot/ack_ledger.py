@@ -50,6 +50,8 @@ def approval_restage_message(kind: str | None, *, expired: bool) -> str:
     token = (kind or "").strip()
     if token == "start_transfer":
         action = "plan the transfer again"
+    elif token == "sync_now":
+        action = "stage Sync now again"
     elif token in {
         "create_schedule",
         "run_schedule",

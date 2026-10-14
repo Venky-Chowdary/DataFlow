@@ -181,6 +181,7 @@ def test_previously_fed_destination_column_is_drop_review():
         target_schema={"id": "INTEGER", "legacy_flag": "BOOLEAN"},
         mappings=[{"source": "id", "target": "id", "confidence": 1.0}],
         table_exists=True,
+        schema_policy="manual_review",
         previous_source_columns=["id", "legacy_flag"],
         previous_source_schema={"id": "INTEGER", "legacy_flag": "BOOLEAN"},
     )

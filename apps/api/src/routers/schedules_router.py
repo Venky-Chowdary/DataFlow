@@ -875,6 +875,51 @@ async def accept_source_schema(
     }
 
 
+@router.post("/{schedule_id}/sync")
+async def sync_pipeline(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Stage Sync now or a full re-sync of a schedule's signed contract."""
+    from services.schedule_store import assert_schedule_run_allowed
+    from services.sync_now import SyncNowRefused, prepare_sync
+
+    resolve_write_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
+    try:
+        assert_schedule_run_allowed(sched)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        raw = await request.json()
+    except Exception:
+        raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    mode = str(raw.get("mode") or "sync")
+    parent = {
+        "sync_mode": getattr(sched, "sync_mode", "") or "",
+        "primary_key": getattr(sched, "primary_key", "") or "",
+        "mappings": list(getattr(sched, "mappings", None) or []),
+        "stream_contracts": list(getattr(sched, "stream_contracts", None) or []),
+        "schema_policy": getattr(sched, "schema_policy", "") or "",
+        "contract_id": getattr(sched, "contract_id", "") or "",
+    }
+    try:
+        return prepare_sync(
+            mode=mode,
+            parent_request=parent,
+            parent_id=schedule_id,
+            schedule_id=schedule_id,
+            source_connected=True,
+            destination_connected=True,
+            connectivity_checked=False,
+        )
+    except SyncNowRefused as exc:
+        raise HTTPException(status_code=409, detail={"error": str(exc), **exc.details}) from exc
+
+
 @router.post("/{schedule_id}/run")
 async def run_pipeline_now(
     schedule_id: str,

@@ -346,7 +346,9 @@ def analyze_coercion(
     modes keep them as ``warn`` so operators can proceed after reviewing.
     """
     dest_types = dest_types or {}
-    rows = list(sample_rows or [])[:sample_limit]
+    from services.sample_strategy import position_reservoir_sample
+
+    rows = position_reservoir_sample(list(sample_rows or []), sample_limit)
     mode = (validation_mode or "strict").strip().lower()
     strict_null_loss = mode in {"strict", "maximum"}
     columns: list[dict[str, Any]] = []
@@ -375,6 +377,29 @@ def analyze_coercion(
             m.get("transform"),
         )
         tgt_type = _target_type_for(m, dest_types, source_types, dest_db_type=dest_db_type)
+        if not str(tgt_type or "").strip() and (
+            table_exists is False or bool(m.get("create_new"))
+        ):
+            # The destination object is not there yet. An unread carrier is
+            # "will create", not a fidelity collapse and not a catalog block.
+            entry = {
+                "source": src,
+                "target": str(m.get("target") or src),
+                "source_type": src_type,
+                "target_type": "",
+                "sampled": len(rows),
+                "ok": len(rows),
+                "nulls": 0,
+                "failed": 0,
+                "severity": "pass",
+                "fidelity_collapse": False,
+                "will_create": True,
+                "dest_schema_unloaded": False,
+                "note": "Destination object does not exist yet — column will be created.",
+            }
+            columns.append(entry)
+            by_source[src] = entry
+            continue
         if not str(tgt_type or "").strip():
             # Match-existing without live/Map stamp — refuse source invent green.
             # Blocking, but classified as an unread destination schema rather than

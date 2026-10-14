@@ -53,6 +53,7 @@ interface PipelineDetailDrawerProps {
   breakerHint?: string | null;
   onClose: () => void;
   onRun: () => void;
+  onFullResync?: () => void;
   onEdit: () => void;
   onDelete: () => void;
   onToggle: () => void;
@@ -92,6 +93,7 @@ export function PipelineDetailDrawer({
   breakerHint,
   onClose,
   onRun,
+  onFullResync,
   onEdit,
   onDelete,
   onToggle,
@@ -322,6 +324,20 @@ export function PipelineDetailDrawer({
           >
             {isRunning ? "Running…" : breakerOpen ? "Breaker open" : "Run now"}
           </Button>
+          {onFullResync && (
+            <Button
+              size="sm"
+              variant="ghost"
+              loading={running}
+              loadingLabel="Staging…"
+              disabled={isRunning || breakerOpen || Boolean(runRefusal)}
+              title="Re-read from the start on the signed contract. One confirm."
+              onClick={onFullResync}
+              leadingIcon={<DtIcon name="transfer" size={14} />}
+            >
+              Re-sync (full)
+            </Button>
+          )}
           {breakerOpen && sched.contract_id && onResetBreaker && (
             <Button
               size="sm"

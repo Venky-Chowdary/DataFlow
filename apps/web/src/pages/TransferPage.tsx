@@ -455,7 +455,7 @@ export function TransferPage({
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [result, setResult] = useState<TransferResult | null>(null);
   const [syncMode, setSyncMode] = useState<SyncMode>("full_refresh_append");
-  const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("manual_review");
+  const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("propagate_columns");
   const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
   const [complianceAcknowledged, setComplianceAcknowledged] = useState(false);
   const [schemaDriftAcknowledged, setSchemaDriftAcknowledged] = useState(false);
@@ -6265,7 +6265,7 @@ export function TransferPage({
     setResult(null);
     setExecutedRouteKey(null);
     setSyncMode("full_refresh_append");
-    setSchemaPolicy("manual_review");
+    setSchemaPolicy("propagate_columns");
     setValidationMode("balanced");
     setBackfillNewFields(false);
     setMultiSubnetFailover(false);

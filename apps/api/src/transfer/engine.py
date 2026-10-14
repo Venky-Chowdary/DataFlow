@@ -629,7 +629,9 @@ def _preflight_sample_rows(records: list[dict[str, Any]] | None) -> list[dict[st
 
     rows = list(records or [])
     if len(rows) > PREFLIGHT_SAMPLE_LIMIT:
-        return rows[:PREFLIGHT_SAMPLE_LIMIT]
+        from services.sample_strategy import position_reservoir_sample
+
+        return position_reservoir_sample(rows, PREFLIGHT_SAMPLE_LIMIT)
     return rows
 
 
@@ -855,7 +857,14 @@ def _apply_schema_auto_propagate(
         dest_recreated=dest_recreated,
     )
     evolution = drift.get("schema_evolution") or {}
-    if evolution.get("should_pause"):
+    from services.schema_drift import execute_must_pause
+
+    if execute_must_pause(
+        evolution,
+        schema_drift_acknowledged=bool(
+            getattr(request, "schema_drift_acknowledged", False)
+        ),
+    ):
         raise ValueError(
             (drift.get("issues") or ["Breaking schema change — sync paused"])[0]
         )

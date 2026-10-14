@@ -164,6 +164,7 @@ def _execute_preflight_parity_kwargs(
         "acknowledgment_reason": str(
             getattr(request, "acknowledgment_reason", "") or ""
         ).strip(),
+        "preflight_scope": str(getattr(request, "preflight_scope", "") or "").strip(),
     }
 
 

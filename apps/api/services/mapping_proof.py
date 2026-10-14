@@ -134,6 +134,22 @@ def mapping_fidelity(
     dest = (destination_db_type or "").strip().lower()
     # Existing match without Map/Studio stamp: refuse source_type invent for a
     # false-green preserve verdict (partial Studio honesty).
+    # A confirmed-missing target is create, not an unread collapse.
+    if dest_table_exists is False and not stamp:
+        from services.conversion_contract import ConversionClass
+
+        return {
+            "verdict": "will_create",
+            "reason": (
+                "Destination object does not exist yet — the column will be "
+                "created from the source type. This is not a fidelity collapse."
+            ),
+            "type_narrowing": False,
+            "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.LOSSLESS.value,
+            "invents_capacity": False,
+            "requires_risk_contract": False,
+        }
     if not stamp and not create_new:
         from services.conversion_contract import ConversionClass
 

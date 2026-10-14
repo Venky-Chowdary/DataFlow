@@ -675,6 +675,7 @@ def run_file_preflight(
     source_filename: str = "",
     source_file_id: str = "",
     schema_policy: str = "manual_review",
+    preflight_scope: str = "",
     backfill_new_fields: bool = False,
     stored_source_fp: str = "",
     stored_target_fp: str = "",
@@ -863,7 +864,9 @@ def run_file_preflight(
     from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT
 
     if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
-        sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
+        from services.sample_strategy import position_reservoir_sample
+
+        sample_rows = position_reservoir_sample(sample_rows, PREFLIGHT_SAMPLE_LIMIT)
 
     # Sign Migration Risk Contract drafts before gates / proof_bundle see them.
     # Stamp destination table onto unsigned drafts (audit field — never invent DDL).
@@ -1568,6 +1571,7 @@ def run_file_preflight(
         compliance_acknowledged=compliance_acknowledged,
         acknowledgment_actor=acknowledgment_actor,
         acknowledgment_reason=acknowledgment_reason,
+        source_measured_empty=source_measured_empty,
     )
     from services.population_fit_narrowing import proof_details
 
@@ -2533,10 +2537,7 @@ def run_file_preflight(
                     },
                 }
             )
-        elif evolution.get("should_pause") or (
-            drift.get("severity") == "breaking"
-            and policy == "pause_on_change"
-        ):
+        elif evolution.get("should_pause") and evolution.get("hard_breaking"):
             hard = evolution.get("hard_breaking") or []
             if hard and isinstance(hard[0], dict) and hard[0].get("kind"):
                 drift_msg = (
@@ -2865,9 +2866,13 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
-    return apply_root_causes_to_preflight(
+    out = apply_root_causes_to_preflight(
         _block_decision_on_hard_gate(apply_readiness_honesty_caps(out))
     )
+    from services.preflight_policy_gates import apply_fast_preflight_scope, stamp_gate_contract
+
+    out = apply_fast_preflight_scope(out, preflight_scope)
+    return stamp_gate_contract(out)
 
 
 # --------------------------------------------------------------------------- #

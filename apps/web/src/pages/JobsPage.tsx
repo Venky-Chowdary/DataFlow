@@ -15,7 +15,7 @@ import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
-import { fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, RetryRefusedError } from "../lib/api";
+import { confirmCopilotAction, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, stageJobSync, RetryRefusedError } from "../lib/api";
 import {
   jobFilterCounts,
   jobHistoryFromResponse,
@@ -499,6 +499,31 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
       setRetrying(false);
     }
   }, [selectedId, onRefresh, onStartTransfer, toast]);
+
+  const handleSync = useCallback(async (mode: "sync" | "full") => {
+    if (!selectedId) return;
+    setRetrying(true);
+    try {
+      const staged = await stageJobSync(selectedId, mode);
+      const reason = staged.preview?.confirm_reason || (mode === "full" ? "Full re-sync using the signed contract" : "Sync now using the signed contract");
+      const note = staged.preview?.note ? `\n\n${staged.preview.note}` : "";
+      const destructive = staged.preview?.destructive ? "\n\nThis replaces the destination." : "";
+      const accepted = window.confirm(`${reason}${note}${destructive}`);
+      if (!accepted) return;
+      const confirmed = await confirmCopilotAction({ ack_id: staged.ack_id, reason });
+      if (confirmed.job_id) setSelectedId(confirmed.job_id);
+      toast({
+        title: confirmed.idempotent ? "Sync already started" : (mode === "full" ? "Full re-sync started" : "Sync started"),
+        message: "One child job. A second click does not start another run.",
+        tone: "success",
+      });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Sync failed";
+      toast({ title: "Sync failed", message: msg, tone: "error" });
+    } finally {
+      setRetrying(false);
+    }
+  }, [selectedId, toast]);
 
   const handleResume = useCallback(async () => {
     if (!selectedId) return;
@@ -1483,6 +1508,24 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                 : (
                                   <><DtIcon name="transfer" size={16} /> Retry from start</>
                                 )}
+                            </button>
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => void handleSync("sync")}
+                              disabled={retrying}
+                              title="Reuses the signed contract. One confirm. A second click does not start another run."
+                            >
+                              Sync now
+                            </button>
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => void handleSync("full")}
+                              disabled={retrying}
+                              title="Re-reads from the start on the signed contract. Upserts when a key exists."
+                            >
+                              Re-sync (full)
                             </button>
                             {onStartTransfer && (
                               <button

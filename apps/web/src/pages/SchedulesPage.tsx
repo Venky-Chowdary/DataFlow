@@ -34,7 +34,9 @@ import {
   fetchSchedules,
   planGitopsManifest,
   resetContractBreaker,
+  confirmCopilotAction,
   runScheduleNow,
+  stageScheduleSync,
   updateSchedule,
 } from "../lib/api";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
@@ -338,6 +340,29 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     } catch (e) {
       toast({ title: "Delete failed", tone: "error" });
       console.error(e);
+    }
+  };
+
+  const handleFullResync = async (id: string) => {
+    if (!allowOrExplain(jobRun)) return;
+    setRunningId(id);
+    try {
+      const staged = await stageScheduleSync(id, "full");
+      const reason = staged.preview?.confirm_reason || "Full re-sync using the signed contract";
+      const note = staged.preview?.note ? `\n\n${staged.preview.note}` : "";
+      if (!window.confirm(`${reason}${note}`)) return;
+      await confirmCopilotAction({ ack_id: staged.ack_id, reason });
+      await load();
+      onViewJobs?.();
+      toast({ title: "Full re-sync started", message: "Track the child job in Job Theater.", tone: "success" });
+    } catch (e) {
+      toast({
+        title: "Re-sync failed",
+        message: e instanceof Error ? e.message : undefined,
+        tone: "error",
+      });
+    } finally {
+      setRunningId(null);
     }
   };
 
@@ -751,6 +776,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         }
         onClose={closeDrawer}
         onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
+        onFullResync={() => selectedSchedule && void handleFullResync(selectedSchedule.id)}
         onEdit={() => {
           if (!selectedSchedule) return;
           setResumeDrawerAfterEdit(true);

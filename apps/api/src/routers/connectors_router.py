@@ -559,6 +559,53 @@ async def patch_transfer_job(job_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/jobs/{job_id}/sync")
+async def sync_transfer_job(job_id: str, request: Request):
+    """Stage Sync now or a full re-sync. Confirm the returned ack to start one child job."""
+    from services.sync_now import SyncNowRefused, prepare_sync
+
+    try:
+        try:
+            raw = await request.json()
+        except Exception:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+        if not job or not _can_access_job(request, job):
+            raise HTTPException(status_code=404, detail="Job not found")
+        if not _can_mutate_job(request, job):
+            raise HTTPException(status_code=403, detail="Workspace write access required")
+        payload = job.get("transfer_request")
+        if not isinstance(payload, dict) or not payload:
+            raise HTTPException(
+                status_code=400,
+                detail="This job has no saved configuration — re-run from Transfer Studio.",
+            )
+        mode = str(raw.get("mode") or "sync")
+        try:
+            staged = prepare_sync(
+                mode=mode,
+                parent_request=payload,
+                parent_id=job_id,
+                source_connected=True,
+                destination_connected=True,
+                connectivity_checked=False,
+                drift=None,
+            )
+        except SyncNowRefused as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"error": str(exc), **exc.details},
+            ) from exc
+        return staged
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/jobs/{job_id}/retry")
 async def retry_transfer_job(
     job_id: str,

@@ -137,6 +137,7 @@ def build_preflight_proof_bundle(
     compliance_acknowledged: bool = False,
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
+    source_measured_empty: bool = False,
 ) -> dict[str, Any]:
     """Assemble the unified proof bundle for a transfer preflight decision."""
     mappings = mappings or []
@@ -230,7 +231,13 @@ def build_preflight_proof_bundle(
             decision = "review"
 
     confidence_band = "high" if min_confidence >= 0.9 else "medium" if min_confidence >= 0.75 else "low"
-    if quality_score is None:
+    if quality_score is None and source_measured_empty:
+        # A counted zero-row source has nothing to profile. That is a vacuous
+        # pass with a note, not a fidelity or sample-quality block (R8-005).
+        quality_grade = "vacuous"
+        quality_display = "0 rows (counted)"
+        quality_score = 1.0
+    elif quality_score is None:
         quality_grade = "not_profiled"
         quality_display = "not profiled"
         # No sample profile ⇒ never Execute-ready approve. Operators must re-sample

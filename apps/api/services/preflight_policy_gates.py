@@ -337,3 +337,125 @@ def finalize_acknowledged_schema_drift(
             ),
         },
     }
+
+
+_FAST_SCOPE = "drift_connectivity"
+_FAST_CAUSE_IDS = frozenset({
+    "g1_source",
+    "g2_destination",
+    "schema_drift",
+    "connectivity_source",
+    "connectivity_destination",
+})
+
+# Stable operator codes. g9_data_integrity stays G9; the sync contract is G12
+# so the two never share a number. G3F sorts after G3.
+_GATE_CODES = {
+    "g9_sync_contract": "G12",
+    "g3f_population_fit": "G3F",
+}
+
+
+def gate_operator_code(gate_id: str) -> str:
+    gid = str(gate_id or "")
+    if gid in _GATE_CODES:
+        return _GATE_CODES[gid]
+    import re
+
+    match = re.match(r"^g(\d+[a-z]?)", gid, re.I)
+    if match:
+        return f"G{match.group(1).upper()}"
+    return gid.replace("_", " ")[:8].upper() or "GATE"
+
+
+def _cause_id(gate: dict[str, Any]) -> str:
+    gid = str(gate.get("id") or "")
+    # Only proof-bundle copies fold into schema drift. A real gate (G13 coverage,
+    # G3, …) keeps its own cause even when its sentence mentions a schema change.
+    if gid == "schema_drift" or (
+        gid.startswith("proof_") and is_schema_drift_echo(str(gate.get("message") or ""))
+    ):
+        return "schema_drift"
+    return gid or "ungrouped"
+
+
+def _status_bucket(status: str) -> str:
+    text = (status or "").strip().lower()
+    if text == "pass":
+        return "passed"
+    if text == "block":
+        return "blocked"
+    if text == "skip":
+        return "skipped"
+    if text in {"warn", "review"}:
+        return "review"
+    return "pending"
+
+
+def stamp_gate_contract(out: dict[str, Any]) -> dict[str, Any]:
+    """One cause id per gate, a stable code, and counts that sum to the list.
+
+    A proof echo of schema drift folds into the schema_drift cause so the
+    header and the analysis cannot disagree.
+    """
+    gates = [g for g in (out.get("gates") or []) if isinstance(g, dict)]
+    stamped: list[dict[str, Any]] = []
+    drift_at: int | None = None
+    for gate in gates:
+        cause = _cause_id(gate)
+        row = dict(gate)
+        row["cause_id"] = cause
+        row["code"] = str(row.get("code") or gate_operator_code(str(row.get("id") or cause)))
+        if cause == "schema_drift":
+            if drift_at is None:
+                drift_at = len(stamped)
+                stamped.append(row)
+            elif str(row.get("id") or "") == "schema_drift":
+                stamped[drift_at] = row
+            continue
+        stamped.append(row)
+    counts = {"total": 0, "passed": 0, "blocked": 0, "skipped": 0, "review": 0, "pending": 0}
+    for gate in stamped:
+        counts["total"] += 1
+        counts[_status_bucket(str(gate.get("status") or ""))] += 1
+    out["gates"] = stamped
+    out["gate_summary"] = counts
+    out["passed_count"] = counts["passed"]
+    out["total_gates"] = counts["total"]
+    return out
+
+
+def apply_fast_preflight_scope(out: dict[str, Any], scope: str) -> dict[str, Any]:
+    """Signed-contract re-run: decide on drift and connectivity only.
+
+    Other gates stay on ``scoped_out_gates`` so the evidence is not deleted.
+    They do not block this run — the signed contract already cleared them.
+    """
+    if (scope or "").strip().lower() != _FAST_SCOPE:
+        return out
+    kept: list[dict[str, Any]] = []
+    scoped_out: list[dict[str, Any]] = []
+    for gate in out.get("gates") or []:
+        if not isinstance(gate, dict):
+            continue
+        cause = str(gate.get("cause_id") or gate.get("id") or "")
+        if cause in _FAST_CAUSE_IDS or is_schema_drift_echo(str(gate.get("message") or "")):
+            kept.append(gate)
+        else:
+            scoped_out.append(gate)
+    blocking = [
+        g for g in kept
+        if str(g.get("status") or "").lower() == "block"
+    ]
+    out["gates"] = kept
+    out["scoped_out_gates"] = scoped_out
+    out["preflight_scope"] = _FAST_SCOPE
+    out["blockers"] = [
+        b for b in (out.get("blockers") or [])
+        if str((b or {}).get("id") or "") in _FAST_CAUSE_IDS
+        or is_schema_drift_echo(str((b or {}).get("message") or ""))
+    ] if all(isinstance(b, dict) for b in (out.get("blockers") or [])) else (
+        out.get("blockers") if blocking else []
+    )
+    out["passed"] = not blocking
+    return out

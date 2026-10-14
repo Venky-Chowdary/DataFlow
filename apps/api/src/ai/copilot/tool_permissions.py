@@ -115,6 +115,7 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
 #: a role change between the two must take effect immediately.
 ACK_KIND_PERMISSIONS: dict[str, str] = {
     "start_transfer": Permission.JOB_RUN,
+    "sync_now": Permission.JOB_RUN,
     "create_connector": Permission.CONNECTOR_WRITE,
     "run_schedule": Permission.SCHEDULE_MANAGE,
     "create_schedule": Permission.SCHEDULE_MANAGE,
