@@ -5,7 +5,21 @@ from typing import Any
 
 from preflight.models import PreflightContext, TransferPlan
 from services import preflight_service as _ps
+from services.preflight_source_kind import source_is_record_batch
 from services.value_serializer import cell_to_string, project_row_cells
+
+
+def _source_is_record_batch(ctx: FilePreflightContext) -> bool:
+    source = ctx.plan.source
+    return source_is_record_batch(
+        getattr(source, "kind", ""),
+        getattr(source, "db_type", ""),
+    )
+
+
+def _database_extract(ctx: FilePreflightContext) -> bool:
+    kind = str(getattr(ctx.plan.source, "kind", "") or "").lower()
+    return kind == "database" and not _source_is_record_batch(ctx)
 
 class FilePreflightContext(PreflightContext):
     """Preflight context for file → database transfers."""
@@ -136,9 +150,7 @@ class FilePreflightContext(PreflightContext):
         scanned = self.sample_rows[:sample_size]
         # A database NULL is None or the reader sentinel. Flattening it to ""
         # made G5 report EMPTY_VALUE_NOT_NULLABLE on nullable amount/ts.
-        database_extract = (
-            str(getattr(self.plan.source, "kind", "") or "").lower() == "database"
-        )
+        database_extract = _database_extract(self)
         rows = [
             project_row_cells(row, headers, preserve_sql_null=database_extract)
             for row in scanned
@@ -168,8 +180,7 @@ class FilePreflightContext(PreflightContext):
                 empty_cells_as_null=self.empty_cells_as_null,
                 dest_nullability=self._dest_nullability(),
                 database_extract=database_extract,
-                file_row_quarantine=not database_extract
-                and str(getattr(self.plan.source, "kind", "") or "").lower() == "file",
+                file_row_quarantine=_source_is_record_batch(self),
             )
         except Exception as exc:
             _ps.logger.debug("dry-run sample failed: %s", exc, exc_info=exc)
@@ -238,14 +249,8 @@ class FilePreflightContext(PreflightContext):
                     validation_mode=getattr(self.plan, "validation_mode", None) or "strict",
                     empty_cells_as_null=self.empty_cells_as_null,
                     dest_nullability=self._dest_nullability(),
-                    database_extract=str(
-                        getattr(self.plan.source, "kind", "") or ""
-                    ).lower()
-                    == "database",
-                    file_row_quarantine=str(
-                        getattr(self.plan.source, "kind", "") or ""
-                    ).lower()
-                    == "file",
+                    database_extract=_database_extract(self),
+                    file_row_quarantine=_source_is_record_batch(self),
                     proven_width_narrowings=self.proven_width_narrowings,
                 )
             if isinstance(report, dict):
@@ -408,10 +413,8 @@ class FilePreflightContext(PreflightContext):
             dest_table_exists=getattr(self.plan.destination, "table_exists", None),
             empty_cells_as_null=self.empty_cells_as_null,
             dest_nullability=self._dest_nullability(),
-            database_extract=str(getattr(self.plan.source, "kind", "") or "").lower()
-            == "database",
-            file_row_quarantine=str(getattr(self.plan.source, "kind", "") or "").lower()
-            == "file",
+            database_extract=_database_extract(self),
+            file_row_quarantine=_source_is_record_batch(self),
             source_measured_empty=bool(getattr(self, "source_measured_empty", False)),
             stream_contracts=list(
                 getattr(self.plan, "stream_contracts", None) or []

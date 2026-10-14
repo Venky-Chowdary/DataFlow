@@ -535,12 +535,37 @@ async def _add_timing_header_response(request: Request, call_next):
     response.headers["X-Correlation-ID"] = correlation_id
     if trace_id:
         response.headers["X-Trace-Id"] = trace_id
-    # Baseline security headers for the enterprise API.  HSTS is intentionally
-    # omitted here so TLS termination (Cloudflare, AWS ALB, etc.) can add it.
+    # Baseline security headers for the enterprise API.
+    # HSTS is set when the request is HTTPS or the proxy says it is
+    # (X-Forwarded-Proto). If TLS terminates in front of this process and that
+    # header is not forwarded, set DATAFLOW_HSTS=1 on the API service.
+    # DATAFLOW_HSTS=0 turns it off. CSP is an API policy (no document origin).
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    if request.url.path.startswith(("/docs", "/redoc")):
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "frame-ancestors 'none'; base-uri 'self'",
+        )
+    else:
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+        )
+    hsts_flag = os.getenv("DATAFLOW_HSTS", "").strip().lower()
+    forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    https = request.url.scheme == "https" or forwarded == "https"
+    if hsts_flag in {"1", "true", "on", "yes"}:
+        https = True
+    elif hsts_flag in {"0", "false", "off", "no"}:
+        https = False
+    if https:
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
 
     path = request.url.path
     if (

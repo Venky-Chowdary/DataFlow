@@ -1466,8 +1466,10 @@ def _run_preflight(
     column_types = {r["name"]: r["inferred_type"] for r in src_rows}
     # G7 capacity sizes batches from the real volume, so send the exact count
     # rather than the sample size, which would understate a large table.
+    population_counted = False
     if known_row_count is not None:
         row_count = max(0, int(known_row_count))
+        population_counted = True
     elif (source_read_mode or "").strip().lower() in {"procedure", "query"}:
         # COUNT(*) against a procedure stream name would hit a colliding table.
         row_count = len(sample_rows)
@@ -1475,6 +1477,8 @@ def _run_preflight(
         row_count = _exact_row_count(src_conn, src_table)
         if row_count is None:
             row_count = len(sample_rows)
+        else:
+            population_counted = True
 
     try:
         policy_gates = run_transfer_policy_gates(
@@ -1592,6 +1596,7 @@ def _run_preflight(
             acknowledgment_actor=(pii_ack or {}).get("approved_by", ""),
             acknowledgment_reason=(pii_ack or {}).get("reason", ""),
             schema_drift_acknowledged=bool(schema_drift_acknowledged),
+            source_population_counted=population_counted,
             rows_are_population=(
                 (source_read_mode or "").strip().lower() in {"query", "procedure"}
                 and not sample_rows

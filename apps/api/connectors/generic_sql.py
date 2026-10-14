@@ -1231,6 +1231,15 @@ def get_connection(
     The context manager yields a DBAPI connection with a ``.cursor()`` method so
     callers (e.g. CDC readers) can execute raw SQL and parameterised queries.
     """
+    from services.egress_guard import metadata_endpoint_refusal
+
+    refusal = metadata_endpoint_refusal(
+        host,
+        connection_string,
+        str(kwargs.get("endpoint_url") or ""),
+    )
+    if refusal:
+        raise ValueError(refusal)
     cfg = {
         # TLS / Oracle addressing / MSSQL driver keywords decide which server is
         # reached and whether the handshake succeeds — a raw connection that

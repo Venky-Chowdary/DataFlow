@@ -67,6 +67,11 @@ def transfer_request_from_ack(payload: dict[str, Any]) -> TransferRequest:
         # The operator's PII acknowledgement from staging: Execute re-runs
         # Validate with it, and the job keeps the approver + reason for audit.
         compliance_acknowledged=bool(payload.get("compliance_acknowledged")),
+        # Staging clears schema drift when the operator attests. Confirm used
+        # to drop the flag, so Execute re-ran Validate without it and job
+        # governance read schema_drift as false (R8-002).
+        schema_drift_acknowledged=bool(payload.get("schema_drift_acknowledged")),
+        fk_risk_acknowledged=bool(payload.get("fk_risk_acknowledged")),
         acknowledgment_actor=str(payload.get("acknowledgment_actor") or "").strip(),
         acknowledgment_reason=str(payload.get("acknowledgment_reason") or "").strip(),
     )

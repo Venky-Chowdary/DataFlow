@@ -694,8 +694,17 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     import importlib
 
     from services.connector_auth import engine_login_role
+    from services.egress_guard import metadata_endpoint_refusal
 
     from .connector_capabilities import resolve_driver_type
+
+    refusal = metadata_endpoint_refusal(
+        str(cfg.get("host") or ""),
+        str(cfg.get("endpoint_url") or ""),
+        str(cfg.get("connection_string") or ""),
+    )
+    if refusal:
+        return False, refusal
 
     db_type = (db_type or "").lower()
     catalog_id = db_type

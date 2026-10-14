@@ -190,11 +190,21 @@ class SavedConnector:
         return d
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> SavedConnector:
+    def from_dict(cls, data: dict[str, Any], *, secrets_encrypted: bool = True) -> SavedConnector:
         workspace_id = data.get("workspace_id", "") or ""
         tenant_id = tenant_id_from_workspace(workspace_id)
-        password = decrypt_secret(data.get("password", "") or "", tenant_id=tenant_id)
-        conn_str = decrypt_secret(data.get("connection_string", "") or "", tenant_id=tenant_id)
+
+        def _secret(key: str) -> str:
+            raw = str(data.get(key, "") or "")
+            # In-memory merges already hold the decrypted secret. Decrypting
+            # that plaintext again is what made update_connector raise a Fernet
+            # error on a connector that had just been created (R8-004).
+            if not secrets_encrypted:
+                return raw
+            return decrypt_secret(raw, tenant_id=tenant_id)
+
+        password = _secret("password")
+        conn_str = _secret("connection_string")
         conn_type = data["type"]
         from connectors.sftp_common import apply_sftp_uri_endpoint
 
@@ -226,9 +236,9 @@ class SavedConnector:
             warehouse=data.get("warehouse", ""),
             auth_mode=data.get("auth_mode", ""),
             auth_role=data.get("auth_role", ""),
-            api_key=decrypt_secret(data.get("api_key", "") or "", tenant_id=tenant_id),
-            service_account=decrypt_secret(data.get("service_account", "") or "", tenant_id=tenant_id),
-            private_key=decrypt_secret(data.get("private_key", "") or "", tenant_id=tenant_id),
+            api_key=_secret("api_key"),
+            service_account=_secret("service_account"),
+            private_key=_secret("private_key"),
             endpoint_url=data.get("endpoint_url", ""),
             path_style=bool(data.get("path_style", False)),
             auth_source=data.get("auth_source", ""),
@@ -619,7 +629,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             str(merged.get("type") or existing.type),
             merged.get("role"),
         )
-        return SavedConnector.from_dict(merged)
+        return SavedConnector.from_dict(merged, secrets_encrypted=False)
 
     if _use_mongo():
         try:
@@ -687,7 +697,7 @@ def mark_tested(connector_id: str, ok: bool) -> None:
                 connectors = _load_all()
                 for i, c in enumerate(connectors):
                     if c.id == connector_id:
-                        connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
+                        connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
                         _save_all(connectors)
                         break
             except Exception as mirror_exc:
@@ -699,7 +709,7 @@ def mark_tested(connector_id: str, ok: bool) -> None:
     connectors = _load_all()
     for i, c in enumerate(connectors):
         if c.id == connector_id:
-            connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
+            connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
             _save_all(connectors)
             return
 
@@ -731,7 +741,7 @@ def note_transfer_succeeded(*connector_ids: str | None) -> int:
         connectors = _load_all()
         for i, c in enumerate(connectors):
             if c.id == cid:
-                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
+                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
                 _save_all(connectors)
                 stamped += 1
                 break
@@ -799,7 +809,7 @@ def mark_used(*connector_ids: str | None) -> int:
                         connectors = _load_all()
                         for i, c in enumerate(connectors):
                             if c.id == cid:
-                                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
+                                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
                                 _save_all(connectors)
                                 break
                     except Exception as mirror_exc:
@@ -810,7 +820,7 @@ def mark_used(*connector_ids: str | None) -> int:
         connectors = _load_all()
         for i, c in enumerate(connectors):
             if c.id == cid:
-                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
+                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch}, secrets_encrypted=False)
                 _save_all(connectors)
                 stamped += 1
                 break

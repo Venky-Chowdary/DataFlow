@@ -8,7 +8,11 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from services.decision_kernel.findings import typed_cast_incompatible_with_text_sink
-from services.transform_engine import infer_transform_for_mapping
+from services.transform_engine import (
+    infer_transform_for_mapping,
+    is_parameterized_transform,
+    normalize_engine_transform,
+)
 from services.type_system import normalize_logical_type
 
 
@@ -179,7 +183,19 @@ def resolve_transform(
     column_types = column_types or {}
     dest_types = dest_types or {}
     raw = mapping.get("transform")
-    if raw in UI_TO_ENGINE:
+    named = str(raw).strip() if raw not in (None, "") else ""
+    # The operator named a transform. Plan and the writer share
+    # normalize_engine_transform: aliases become the engine id, and a name
+    # the registry does not contain is kept so dry-run and Execute both
+    # report Unknown transform instead of Validate inferring a different cast.
+    if named and named.lower() not in {"none", "null"}:
+        canon = normalize_engine_transform(named)
+        if canon is None:
+            return named
+        if is_parameterized_transform(canon):
+            return canon
+        raw = canon
+    elif raw in UI_TO_ENGINE:
         raw = UI_TO_ENGINE[raw]
     # Replay / Map sent this transform on purpose. Do not replace it with an
     # inferred cast: that turned a valid IBAN, time, or id into NULL when the

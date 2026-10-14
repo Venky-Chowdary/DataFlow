@@ -2821,7 +2821,12 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     # A file is a batch of records. One cast failure among cells that cast is
     # a quarantine holdout (R4-D02). An all-bad column, a database extract, and
     # any present Risk Contract stay on the hard-block path.
-    file_load = str(getattr(ctx.plan.source, "kind", "") or "").lower() == "file"
+    from services.preflight_source_kind import source_is_record_batch
+
+    file_load = source_is_record_batch(
+        getattr(ctx.plan.source, "kind", ""),
+        getattr(ctx.plan.source, "db_type", ""),
+    )
     file_holdout_targets: set[str] = set()
     if file_load:
         for probe in ctx.plan.mappings:

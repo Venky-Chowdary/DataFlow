@@ -708,6 +708,7 @@ def run_file_preflight(
     fit_scan_seconds: float | None = None,
     on_fit_progress: Any = None,
     skip_population_fit: bool = False,
+    source_population_counted: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
     from services.timezone_policy import declared_source_column_types
@@ -765,6 +766,7 @@ def run_file_preflight(
     # reader's own sample; a read that fails is named on Gate-8, not hidden.
     sample_unavailable_reason = ""
     source_measured_empty = False
+    engine_sample = None
     if not sample_rows:
         from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT as _SAMPLE_LIMIT
         from services.preflight_sample import engine_sample_rows
@@ -807,6 +809,18 @@ def run_file_preflight(
                     "could not read rows from it. Fix the source read (connection, "
                     f"table name, timeout), then re-validate. ({sample_unavailable_reason})"
                 )
+    # A measured COUNT(*) of 0 is the population. Requiring a sample row
+    # blocked an empty table whose catalog count was already 0 (R8-005).
+    # A failed read still blocks — a count of 0 does not excuse a grant error.
+    if (
+        source_population_counted
+        and isinstance(row_count, int)
+        and row_count == 0
+        and not sample_rows
+        and not source_measured_empty
+        and not (engine_sample is not None and engine_sample.read_failed)
+    ):
+        source_measured_empty = True
     if (
         not sample_rows
         and not source_measured_empty

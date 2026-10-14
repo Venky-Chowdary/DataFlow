@@ -1624,12 +1624,77 @@ REDACTED_PLACEHOLDER = "<redacted>"
 KNOWN_TRANSFORMS = frozenset({
     "decimal", "integer", "boolean", "date", "datetime", "time", "json", "binary",
     "trim", "trim_id", "uuid", "upper", "lower", "hash_pii", "mask_pii", "redact",
-    "none", "identity",
+    "none", "identity", "omit", "vector",
     # Logical-type aliases Studio / DDL inference sometimes stamp as the transform id.
     "passthrough", "string", "varchar", "text",
     "phone", "email", "url", "iban", "currency", "percentage", "postal", "base64",
     "strip_controls", "normalize_unicode",
 })
+
+# Names plan/preflight and apply_transform both accept. One map — a synonym
+# Validate allows cannot fail later as "Unknown transform" (R8-001).
+_ENGINE_ALIASES = {
+    "cast_decimal": "decimal",
+    "cast_number": "decimal",
+    "cast_integer": "integer",
+    "cast_int": "integer",
+    "cast_boolean": "boolean",
+    "cast_bool": "boolean",
+    "hash": "hash_pii",
+    "md5": "hash_pii",
+    "sha256": "hash_pii",
+    "parse_json": "json",
+    "to_json": "json",
+    "date_iso": "datetime",
+    "time_iso": "time",
+}
+
+_PARAMETERIZED_PREFIXES = (
+    "assume_timezone:",
+    "replace:",
+    "concat:",
+    "default:",
+)
+
+
+def is_parameterized_transform(name: str | None) -> bool:
+    text = str(name or "").strip().lower()
+    return any(text.startswith(prefix) for prefix in _PARAMETERIZED_PREFIXES)
+
+
+def normalize_engine_transform(raw: str | None) -> str | None:
+    """Canonical engine id, or None when neither side of the registry knows it.
+
+    Plan, preflight dry-run, and ``apply_transform`` call this. An alias such
+    as ``cast_decimal`` or ``hash`` becomes the id the writer dispatches.
+    ``replace:``, ``concat:``, and ``default:`` keep their argument. Anything
+    else is unknown to both validation and the write path.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return "none"
+    lowered = text.lower()
+    for prefix in _PARAMETERIZED_PREFIXES:
+        if not lowered.startswith(prefix):
+            continue
+        arg = text[len(prefix):]
+        if prefix == "replace:" and ":" not in arg:
+            return None
+        if prefix != "replace:" and arg == "":
+            return None
+        return prefix + arg
+    try:
+        from services.transform_resolver import UI_TO_ENGINE
+
+        mapped = UI_TO_ENGINE.get(lowered, UI_TO_ENGINE.get(text))
+        if mapped:
+            lowered = str(mapped).strip().lower()
+    except Exception:
+        pass
+    lowered = _ENGINE_ALIASES.get(lowered, lowered)
+    if lowered in KNOWN_TRANSFORMS:
+        return lowered
+    return None
 
 def transform_override_refusal(
     overrides: dict[str, str],
@@ -1641,13 +1706,11 @@ def transform_override_refusal(
     the job never mapped, was staged and then silently ignored — the replay
     re-ran the original cast (QA MX3-15). UI aliases are resolved first.
     """
-    from services.transform_resolver import UI_TO_ENGINE
-
     mapped = {str(c).strip().lower() for c in mapped_sources or [] if str(c).strip()}
     for column, transform in (overrides or {}).items():
         name = str(transform or "").strip()
-        engine = str(UI_TO_ENGINE.get(name, UI_TO_ENGINE.get(name.lower(), name))).lower()
-        if engine not in KNOWN_TRANSFORMS:
+        engine = normalize_engine_transform(name)
+        if engine is None:
             hint = (
                 " To write NULL, send the edited row with that cell set to null."
                 if name.lower() in {"null", "none_null", "set_null", "nullify"}
@@ -2092,6 +2155,24 @@ def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
     return _format_datetime(first), None
 
 
+def _engine_cell_sentinel(raw: Any) -> str:
+    """``missing``, ``null``, or ``""`` for a cell the reader marked specially."""
+    if type(raw) is str:
+        text = raw
+    elif raw is None:
+        return ""
+    else:
+        text = str(raw)
+    if "_" not in text:
+        return ""
+    lowered = text.strip().lower()
+    if lowered == "__df_missing__" or text == "__DF_MISSING__":
+        return "missing"
+    if lowered in {"__df_sql_null__", "__df_ddb_null__"}:
+        return "null"
+    return ""
+
+
 def apply_transform(
     raw: str | None,
     transform: str,
@@ -2104,8 +2185,35 @@ def apply_transform(
     identity/string transforms so ``''`` ≠ SQL NULL on VARCHAR round-trips;
     typed transforms still coerce empty → None.
     """
+    canon = normalize_engine_transform(transform)
+    if str(transform or "").strip() and canon is None:
+        return None, f"Unknown transform: {transform!r}"
+    transform = canon or "none"
+    transform_key = transform.lower()
+    # Parameterised ops share the registry with plan. Empty is a real input
+    # for default/concat/replace — not a typed-cast failure. Sentinels are
+    # resolved first so default/concat/replace cannot write the sentinel text.
+    if transform_key.startswith(("default:", "concat:", "replace:")):
+        sentinel = _engine_cell_sentinel(raw)
+        if sentinel == "missing":
+            from services.value_serializer import DF_MISSING_SENTINEL
+
+            return DF_MISSING_SENTINEL, None
+        if sentinel == "null":
+            raw = None
+    if transform_key.startswith("default:"):
+        if raw is None or str(raw).strip() == "":
+            return transform.split(":", 1)[1], None
+        return raw if type(raw) is str else str(raw), None
     if raw is None:
         return None, None
+    if transform_key.startswith("concat:"):
+        base = raw if type(raw) is str else str(raw)
+        return base + transform[len("concat:"):], None
+    if transform_key.startswith("replace:"):
+        base = raw if type(raw) is str else str(raw)
+        search, _, repl = transform[len("replace:"):].partition(":")
+        return base.replace(search, repl), None
     raw_s = raw if type(raw) is str else str(raw)
     # Every engine sentinel is underscore-delimited, so a value without an
     # underscore cannot be one. The check keeps the identity path — the most
