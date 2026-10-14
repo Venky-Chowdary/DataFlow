@@ -15,7 +15,8 @@ from typing import Any, Optional
 
 from pymongo import MongoClient
 
-from services.job_status import COMPLETED_STATUSES
+# Callers import the terminal-status set from this module (cancel-race guard).
+from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
 from services.ops_events import emit_event
 from services.runtime_estimate import append_throughput_mark
 
