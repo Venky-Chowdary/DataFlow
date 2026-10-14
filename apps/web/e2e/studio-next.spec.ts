@@ -98,6 +98,20 @@ async function apiUp(page: Page): Promise<boolean> {
 
 test.describe("studio next", () => {
   test.beforeEach(async ({ page }) => {
+    // The recipe store is keyed by source and destination, and these tests
+    // all load the same sample. A draft saved by one test would come back as
+    // extra canvas nodes in the next. Layout checks start from an empty recipe.
+    await page.route("**/api/v1/shape/drafts**", async (route) => {
+      if (route.request().method() === "GET") {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ draft: null }),
+        });
+        return;
+      }
+      await route.continue();
+    });
     await page.addInitScript(() => {
       localStorage.setItem("df.studioSchemaBrowser", "1");
       localStorage.setItem("df.studioCanvas", "1");
@@ -814,6 +828,11 @@ test.describe("studio flags off", () => {
     await expect(page.getByRole("heading", { name: "Steps, in order" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Business rules", exact: true }).or(page.getByText("Business rules", { exact: true }))).toBeVisible();
+    // The baseline is the settled editor. A stable "Previewing…" frame is
+    // what CI compared: shorter identity mask, empty repair list.
+    await expect(page.getByText("every sampled row is accounted for")).toBeVisible();
+    await expect(page.locator(".df2-xform-identity")).toHaveText("No transform declared");
+    await expect(page.getByText(/Parse 'order_date' as a date/)).toBeVisible();
     const add = page.getByRole("button", { name: "Add a step" });
     await expect(add).toBeVisible();
     await add.click();
