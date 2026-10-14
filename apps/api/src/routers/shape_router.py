@@ -437,6 +437,45 @@ def _wire_row(row: dict[str, Any]) -> dict[str, Any]:
     return {key: _wire(value) for key, value in row.items()}
 
 
+class _DraftBody(BaseModel):
+    route_key: str = ""
+    recipe: dict[str, Any] = Field(default_factory=dict)
+    source_columns: list[str] = Field(default_factory=list)
+    canvas_layout: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.get("/drafts")
+async def get_shape_draft(route_key: str = "") -> dict[str, Any]:
+    from services.shape_draft_store import load_shape_draft
+
+    found = load_shape_draft(route_key)
+    return {"draft": found}
+
+
+@router.put("/drafts")
+async def put_shape_draft(body: _DraftBody) -> dict[str, Any]:
+    from services.shape_draft_store import save_shape_draft
+
+    try:
+        draft = save_shape_draft(
+            route_key=body.route_key,
+            recipe=body.recipe,
+            source_columns=body.source_columns,
+            canvas_layout=body.canvas_layout,
+        )
+    except ShapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"draft": draft}
+
+
+@router.delete("/drafts")
+async def delete_shape_draft(route_key: str = "") -> dict[str, Any]:
+    from services.shape_draft_store import delete_shape_draft as drop
+
+    drop(route_key)
+    return {"deleted": True}
+
+
 def _wire(value: Any) -> Any:
     """JSON without losing a decimal to a float on the way out."""
     if isinstance(value, Decimal):
