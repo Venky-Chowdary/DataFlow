@@ -249,7 +249,10 @@ def classify_host(
         pass
     try:
         infos = socket.getaddrinfo(raw, None)
-    except OSError:
+    except (OSError, UnicodeError):
+        # UnicodeError is IDNA ("label empty or too long") on a string that
+        # is not a hostname. Same outcome as a DNS miss: fail closed when the
+        # caller asked for it, otherwise leave the dial to recheck.
         if fail_closed_dns:
             return "DNS did not resolve to a public address"
         return None
@@ -340,6 +343,23 @@ def egress_allowlist_error(entries: Sequence[str]) -> str:
     return ""
 
 
+def _authority_host(text: str) -> str:
+    """Hostname of a URL, including one nested scheme (``jdbc:postgresql://host``).
+
+    An empty result means there is no dial target. ``duckdb:///abs/file`` and
+    ``sqlite:///abs/file`` are file engines: the path is not a DNS name.
+    """
+    if "://" not in text:
+        return ""
+    parsed = urllib.parse.urlparse(text)
+    if parsed.hostname:
+        return parsed.hostname
+    path = parsed.path or ""
+    if "://" in path:
+        return urllib.parse.urlparse(path).hostname or ""
+    return ""
+
+
 def _hosts_from_values(*values: str) -> list[str]:
     hosts: list[str] = []
     for raw in values:
@@ -347,16 +367,25 @@ def _hosts_from_values(*values: str) -> list[str]:
         if not text:
             continue
         found: list[str] = []
+        if text.startswith("/") and "://" not in text:
+            # A filesystem path (sqlite database=/tmp/lab.db). Not a host,
+            # even when a directory name looks like an address.
+            continue
         if "://" in text:
-            host = urllib.parse.urlparse(text).hostname or ""
+            parsed = urllib.parse.urlparse(text)
+            host = _authority_host(text)
             if host:
                 found.append(host)
+            elif (parsed.path or "").startswith("/") and "://" not in (parsed.path or ""):
+                # Embedded file URL. Do not scan the path for addresses and
+                # do not DNS the URL string (IDNA: label empty or too long).
+                continue
         found.extend(_KEYWORD_HOST.findall(text))
         found.extend(_EMBEDDED_IPV4.findall(text))
         found.extend(_EMBEDDED_METADATA_NAME.findall(text))
         found.extend(_EMBEDDED_V6_META.findall(text))
         found.extend(_BRACKET_V6.findall(text))
-        if not found:
+        if not found and "://" not in text and not text.startswith("/"):
             host = text
             if host.startswith("[") and "]" in host:
                 host = host[1 : host.index("]")]
@@ -389,6 +418,13 @@ def pinned_egress(
 
         def guarded(host, port, *args, **kwargs):
             if host is None or str(host) == "":
+                return real(host, port, *args, **kwargs)
+            # A file URL is not a dial. Passing it to IDNA raises
+            # "label empty or too long" and the probe reports that as the
+            # driver error. Let the real resolver answer; file engines do
+            # not use this name as a host.
+            raw_host = str(host)
+            if "://" in raw_host or raw_host.startswith(("/", "\\")):
                 return real(host, port, *args, **kwargs)
             shown = _normalize_host(str(host))
             if _name_is_non_overridable(shown):

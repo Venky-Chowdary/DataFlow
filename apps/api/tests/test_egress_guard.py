@@ -126,6 +126,59 @@ def test_each_private_range_and_a_dns_rebind_are_refused():
     )
 
 
+def test_embedded_file_url_is_not_a_dial_target(tmp_path):
+    """duckdb:/// and sqlite:/// have an empty host. They must not be resolved.
+
+    A long absolute path used to be classified as a DNS name. IDNA then raised
+    "label empty or too long", and the desktop-lab DuckDB seed failed with
+    Destination unreachable.
+    """
+    import socket
+
+    from services.egress_guard import _hosts_from_values, metadata_endpoint_refusal, pinned_egress
+
+    duck = tmp_path / ("segment_" * 12 + "lab.duckdb")
+    sqlite = tmp_path / "lab.db"
+    duck_url = f"duckdb:///{duck}"
+    sqlite_url = f"sqlite:///{sqlite}"
+    bare = str(tmp_path / "192.168.1.50" / "lab.db")
+    assert _hosts_from_values(duck_url, sqlite_url, bare, "") == []
+    assert metadata_endpoint_refusal("", duck_url, sqlite_url, bare) == ""
+    # A nested authority is still a dial, including inside a JDBC wrapper.
+    assert "192.168.1.9" in _hosts_from_values("jdbc:postgresql://192.168.1.9:5432/db")
+    assert "192.168/16" in metadata_endpoint_refusal("jdbc:postgresql://192.168.1.9:5432/db")
+    assert "db.internal" in _hosts_from_values("jdbc:postgresql://db.internal:5432/db")
+    assert "cloud metadata" in metadata_endpoint_refusal("jdbc:postgresql://db.internal:5432/db")
+
+    calls: list[str] = []
+    real = socket.getaddrinfo
+
+    def wrap(host, port, *args, **kwargs):
+        calls.append(str(host))
+        return real(host, port, *args, **kwargs)
+
+    socket.getaddrinfo = wrap
+    try:
+        with pinned_egress(allowlist=()):
+            assert metadata_endpoint_refusal("", duck_url) == ""
+        from connectors.generic_sql import get_connection
+
+        conn = get_connection(
+            database=str(duck),
+            connection_string=duck_url,
+            db_type="duckdb",
+        )
+        try:
+            cur = conn.cursor()
+            cur.execute("select 1")
+            assert cur.fetchone()[0] == 1
+        finally:
+            conn.close()
+    finally:
+        socket.getaddrinfo = real
+    assert calls == [] or all("duckdb" not in item and "sqlite" not in item for item in calls)
+
+
 def test_notification_http_post_refuses_private_before_socket(monkeypatch):
     from services.notification_service import _http_post
 
