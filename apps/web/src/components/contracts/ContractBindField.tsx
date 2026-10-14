@@ -17,6 +17,9 @@ interface ContractBindFieldProps {
   onRequireSignedChange: (require: boolean) => void;
   onBlockReasonChange?: (reason: string) => void;
   compact?: boolean;
+  /** When set, the signed list is limited to this route and can be searched. */
+  sourceLabel?: string;
+  destLabel?: string;
 }
 
 export function ContractBindField({
@@ -27,10 +30,13 @@ export function ContractBindField({
   onRequireSignedChange,
   onBlockReasonChange,
   compact = false,
+  sourceLabel = "",
+  destLabel = "",
 }: ContractBindFieldProps) {
   const [contracts, setContracts] = useState<DataContractSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [breakerState, setBreakerState] = useState("");
+  const [search, setSearch] = useState("");
   const [resettingBreaker, setResettingBreaker] = useState(false);
 
   useEffect(() => {
@@ -55,6 +61,30 @@ export function ContractBindField({
     () => contracts.filter((c) => isSignedContractStatus(c.status)),
     [contracts],
   );
+  const routeContracts = useMemo(() => {
+    const tokens = (value: string) => value.toLowerCase().split(/[^a-z0-9._-]+/).filter((part) => part.length > 2);
+    const sourceTokens = tokens(sourceLabel);
+    const destTokens = tokens(destLabel);
+    const query = search.trim().toLowerCase();
+    const blobOf = (contract: DataContractSummary) =>
+      `${contract.name} ${JSON.stringify(contract.source || {})} ${JSON.stringify(contract.destination || {})}`.toLowerCase();
+    const pairMatches = signedContracts.filter((contract) => {
+      const blob = blobOf(contract);
+      if (query && !blob.includes(query)) return false;
+      const sourceHit = sourceTokens.length === 0 || sourceTokens.some((token) => blob.includes(token));
+      const destHit = destTokens.length === 0 || destTokens.some((token) => blob.includes(token));
+      return sourceHit && destHit;
+    });
+    const shown = pairMatches.length > 0
+      ? pairMatches
+      : signedContracts.filter((contract) => !query || blobOf(contract).includes(query));
+    return [...shown].sort((a, b) => (b.updated_at || "").localeCompare(a.updated_at || ""));
+  }, [signedContracts, sourceLabel, destLabel, search]);
+  useEffect(() => {
+    if (contractId || routeContracts.length !== 1 || (!sourceLabel && !destLabel)) return;
+    onContractIdChange(routeContracts[0].id);
+    onRequireSignedChange(true);
+  }, [contractId, routeContracts, sourceLabel, destLabel, onContractIdChange, onRequireSignedChange]);
   const selected = useMemo(
     () => contracts.find((c) => c.id === contractId) || null,
     [contracts, contractId],
@@ -93,6 +123,15 @@ export function ContractBindField({
     <div className={compact ? "df2-contract-bind df2-contract-bind--compact" : "df2-contract-bind"}>
       <div className="df2-field">
         <label className="df2-label" htmlFor={`${idPrefix}-contract`}>Contract</label>
+        {(sourceLabel || destLabel) && (
+          <input
+            className="df2-input"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search contracts for this route"
+            aria-label="Search contracts"
+          />
+        )}
         <select
           id={`${idPrefix}-contract`}
           className="df2-input"
@@ -105,7 +144,7 @@ export function ContractBindField({
           disabled={loading}
         >
           <option value="">None — no contract enforcement</option>
-          {signedContracts.map((c) => (
+          {(sourceLabel || destLabel ? routeContracts : signedContracts).map((c) => (
             <option key={c.id} value={c.id}>
               {c.name} · v{c.version} · SIGNED
             </option>

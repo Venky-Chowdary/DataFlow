@@ -12,6 +12,7 @@ import type {
   ShapePreviewResponse,
   ShapeProfileResponse,
   ShapeRecipeWire,
+  ShapeStepWire,
 } from "./shape";
 import { slimPreflightForExplain } from "./slimPreflightForExplain";
 
@@ -599,6 +600,61 @@ export async function profileShapeSource(payload: {
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw await apiErrorFrom(res, "Profile failed");
+  return res.json();
+}
+
+export async function fetchShapeDraft(routeKey: string): Promise<{
+  draft: { steps?: ShapeStepWire[]; recipe_hash?: string; canvas_layout?: Record<string, unknown> } | null;
+}> {
+  const res = await apiFetch(`${API_BASE}/shape/drafts?route_key=${encodeURIComponent(routeKey)}`);
+  if (!res.ok) throw await apiErrorFrom(res, "Could not load the transform draft");
+  return res.json();
+}
+
+export async function saveShapeDraft(body: {
+  route_key: string;
+  recipe: ShapeRecipeWire;
+  source_columns?: string[];
+  canvas_layout?: Record<string, unknown>;
+}): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/shape/drafts`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not save the transform draft");
+}
+
+export async function deleteShapeDraft(routeKey: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/shape/drafts?route_key=${encodeURIComponent(routeKey)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Could not clear the transform draft");
+}
+
+export async function syncJobNow(
+  jobId: string,
+  mode: "delta" | "full" = "delta",
+): Promise<{ job_id?: string }> {
+  const res = await apiFetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Sync now is not available on this API yet");
+  return res.json();
+}
+
+export async function syncScheduleNow(
+  id: string,
+  mode: "delta" | "full" = "delta",
+): Promise<{ job_id?: string }> {
+  const res = await apiFetch(`${API_BASE}/schedules/${encodeURIComponent(id)}/sync`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Sync now is not available on this API yet");
   return res.json();
 }
 

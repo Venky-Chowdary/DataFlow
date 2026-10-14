@@ -179,7 +179,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const [dockHeight, setDockHeight] = useState(96);
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewMax, setPreviewMax] = useState(false);
-  const [paletteDock, setPaletteDock] = useState(false);
+  const [paletteDock, setPaletteDock] = useState(true);
   const [validationOpen, setValidationOpen] = useState(false);
   const [overview, setOverview] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -682,6 +682,16 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   useEffect(() => {
     localStorage.setItem(SPLIT_KEY, JSON.stringify({ mode: viewMode, height: propertiesHeight }));
   }, [propertiesHeight, viewMode]);
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setPaletteOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   const pending = useMemo<PendingStepModel | null>(() => {
     if (pendingAt == null || !selectedOperation || selected != null) return null;
@@ -756,6 +766,14 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       )}
       {!canPlan && <p className="df2-label-hint">{disabledReason}</p>}
 
+      {suggestions[0] && canEdit && onApplySuggestion && (
+        <p className="df2-canvas-inline-suggest" role="status">
+          <span>Suggested</span>
+          <button type="button" className="df2-btn df2-btn-sm" onClick={() => onApplySuggestion(suggestions[0])}>
+            {suggestions[0].title}
+          </button>
+        </p>
+      )}
       <div className="df2-canvas-body" style={{ ["--df-split-h" as string]: `${viewMode === "split" ? propertiesHeight : 0}px` }}>
         <aside className={paletteDock ? "df2-canvas-rail" : "df2-canvas-rail is-collapsed"} aria-label="Operations">
           <input
@@ -1157,10 +1175,27 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
                       {nodePreview && selected === nodePreview.index && (
                         <div data-testid="canvas-node-preview">
                           <p className="df2-label-hint">{nodePreview.note}</p>
-                          {nodePreview.rows[0] && (
-                            <p className="df2-canvas-node-summary">
-                              {Object.keys(nodePreview.rows[0]).slice(0, 4).join(", ")} · {nodePreview.rows.length} row(s)
-                            </p>
+                          {nodePreview.rows.length > 0 && (
+                            <div className="df2-structure-table-wrap">
+                              <table className="df2-structure-table">
+                                <thead>
+                                  <tr>
+                                    {nodePreview.columns.slice(0, 6).map((column) => (
+                                      <th key={column}>{column}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {nodePreview.rows.slice(0, 5).map((row, rowIndex) => (
+                                    <tr key={rowIndex}>
+                                      {nodePreview.columns.slice(0, 6).map((column) => (
+                                        <td key={column}>{String(row[column] ?? "")}</td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
                           )}
                         </div>
                       )}

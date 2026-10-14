@@ -27,6 +27,7 @@ interface PipelineCardProps {
   onSelect?: () => void;
   onToggle?: () => void;
   onRun?: () => void;
+  onSync?: () => void;
   onEdit?: () => void;
   onDelete?: () => void;
   onToggleHistory?: () => void;
@@ -57,6 +58,7 @@ export function PipelineCard({
   onSelect,
   onToggle,
   onRun,
+  onSync,
   onEdit,
   onDelete,
   onToggleHistory,
@@ -158,6 +160,15 @@ export function PipelineCard({
           {sched.enabled ? "Active" : "Paused"}
         </span>
         <div className="df2-pipeline-row-quick" onClick={(e) => e.stopPropagation()}>
+          {onSync && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm"
+              onClick={onSync}
+            >
+              Sync now
+            </button>
+          )}
           <button
             type="button"
             className="df2-pipeline-row-open"

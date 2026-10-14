@@ -53,6 +53,7 @@ interface PipelineDetailDrawerProps {
   breakerHint?: string | null;
   onClose: () => void;
   onRun: () => void;
+  onSync?: (mode: "delta" | "full") => void;
   onEdit: () => void;
   onDelete: () => void;
   onToggle: () => void;
@@ -92,6 +93,7 @@ export function PipelineDetailDrawer({
   breakerHint,
   onClose,
   onRun,
+  onSync,
   onEdit,
   onDelete,
   onToggle,
@@ -322,6 +324,26 @@ export function PipelineDetailDrawer({
           >
             {isRunning ? "Running…" : breakerOpen ? "Breaker open" : "Run now"}
           </Button>
+          {onSync && (
+            <>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={isRunning || breakerOpen || Boolean(runRefusal)}
+                onClick={() => onSync("delta")}
+              >
+                Sync now
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={isRunning || breakerOpen || Boolean(runRefusal)}
+                onClick={() => onSync("full")}
+              >
+                Re-sync (full)
+              </Button>
+            </>
+          )}
           {breakerOpen && sched.contract_id && onResetBreaker && (
             <Button
               size="sm"

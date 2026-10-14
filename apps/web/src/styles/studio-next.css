@@ -1181,19 +1181,46 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
 }
 
 @media (min-width: 768px) {
+  .df2-canvas-body {
+    display: grid;
+    grid-template-columns: 240px minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    align-items: stretch;
+  }
+
+  .df2-canvas-body:has(.df2-canvas-rail.is-collapsed) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .df2-canvas-rail {
-    position: absolute;
-    top: 0;
-    left: 8px;
-    bottom: calc(var(--df-split-h, 168px) + 8px);
+    position: relative;
+    top: auto;
+    left: auto;
+    bottom: auto;
     z-index: var(--df-z-canvas-rail);
+    grid-column: 1;
+    grid-row: 1 / span 2;
     width: 240px;
     flex: none;
     max-height: none;
+    height: auto;
+  }
+
+  .df2-canvas-stage-wrap {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  .df2-canvas-properties {
+    grid-column: 2;
+    grid-row: 2;
+    min-width: 0;
   }
 
   .df2-canvas[data-view="canvas"] .df2-canvas-rail {
-    bottom: 0;
+    grid-row: 1 / span 2;
   }
 
   .df2-canvas-rail.is-collapsed {
@@ -1211,7 +1238,8 @@ html.df2-canvas-focus .df2-sidebar {
 
 html.df2-canvas-focus .df2-topbar,
 html.df2-canvas-focus .df2-transfer-studio-chrome,
-html.df2-canvas-focus .df2-xform.df2-studio-next > .df2-xform-head {
+html.df2-canvas-focus .df2-xform.df2-studio-next > .df2-xform-head,
+html.df2-canvas-focus .df2-flow-transform {
   display: none;
 }
 
@@ -1222,6 +1250,10 @@ html.df2-canvas-focus .df2-app {
 html.df2-canvas-focus .df2-canvas[data-view="split"] .df2-canvas-properties {
   height: 72px;
   max-height: 72px;
+}
+
+html.df2-canvas-focus .df2-canvas-stage {
+  min-height: 70vh;
 }
 
 @media (max-width: 767px) {
@@ -1505,7 +1537,7 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
 .df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-split,
 .df2-page-transfer-studio.is-studio-next .df2-dest-step .df2-dest-step-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 320px;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 42%);
   gap: 0;
   flex: 1 1 0;
   min-height: 0;
@@ -1869,47 +1901,172 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   display: none;
 }
 
-/* The palette is an overlay on the stage. The toolbar sits to its right
-   so the two controls do not share a box. */
-@media (min-width: 768px) {
-  .df2-canvas-body:has(.df2-canvas-rail:not(.is-collapsed)) .df2-canvas-edgebar {
-    left: 256px;
-  }
-}
+/* The palette is a grid column. The toolbar stays at the stage's own
+   top-left, inside the stage wrap, so it does not cover the suggestion. */
 
-.df2-page-transfer-studio.is-studio-next .df2-route-bar,
-.df2-page-transfer-studio.is-studio-next .df2-route-bar-endpoint,
-.df2-page-transfer-studio.is-studio-next .df2-route-bar-label {
-  overflow: visible;
-  text-overflow: unset;
-  max-width: none;
-}
-
-.df2-page-transfer-studio.is-studio-next .df2-route-bar-label {
+.df2-page-transfer-studio.is-studio-next .df2-route-bar {
   flex: 0 0 auto;
+  width: max-content;
+  max-width: none;
+  min-width: 0;
+  overflow: visible;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-route-bar-endpoint {
+  flex: 0 0 auto;
+  min-width: max-content;
+  overflow: visible;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-route-bar-label {
+  display: inline-block;
+  max-width: none;
+  overflow: visible;
   white-space: nowrap;
+  text-overflow: clip;
+  vertical-align: bottom;
 }
 
 .df2-page-transfer-studio.is-studio-next .df2-structure-preview,
 .df2-page-transfer-studio.is-studio-next .df2-structure-table-wrap {
   max-width: 100%;
   min-width: 0;
+  overflow-x: auto;
 }
 
 .df2-page-transfer-studio.is-studio-next .df2-structure-table {
-  width: 100%;
-  table-layout: fixed;
+  width: max-content;
+  min-width: 100%;
+  table-layout: auto;
 }
 
 .df2-page-transfer-studio.is-studio-next .df2-structure-table th,
 .df2-page-transfer-studio.is-studio-next .df2-structure-table td,
 .df2-page-transfer-studio.is-studio-next .df2-structure-table th span,
 .df2-page-transfer-studio.is-studio-next .df2-structure-table .df2-type-badge {
-  white-space: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 220px;
+  overflow-wrap: normal;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-studio-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-studio-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-main-panel,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-main-panel {
+  overflow: auto;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-step-viewport,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-step-viewport {
+  height: auto;
+  max-height: none;
+  flex: 0 0 auto;
+}
+
+/* Review stacks Map and Validate. The classic map locks are a fixed
+   viewport with hidden overflow. On this screen the shell scrolls, and
+   those locks were cutting the suggestion and the column toolbar. */
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-panel .df2-card-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-layout,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-column-review,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-column-review-editor {
   overflow: visible;
-  text-overflow: unset;
+  flex: 0 0 auto;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-column-review-scroll,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-editor-scroll-host {
+  flex: 0 0 auto;
+  height: auto;
+  max-height: 420px;
+  min-height: 160px;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:has(.df2-dest-step) .df2-source-step > .df2-wizard-footer,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-panel > .df2-card-footer {
+  display: none;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-source-step,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-dest-step {
+  display: none;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-transfer-studio-body,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-transfer-main-panel {
+  overflow: hidden;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-flow-transform {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--df-border);
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-xform-step {
+  flex: 1 1 0;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.df2-vd.is-compact-verdict .df2-vd-hero,
+.df2-vd.is-compact-verdict .df2-vd-exec-summary,
+.df2-vd.is-compact-verdict .df2-vd-blockers,
+.df2-vd.is-compact-verdict .df2-vd-assist,
+.df2-vd.is-compact-verdict:not(.is-gates-open) .df2-vd-rule-tabs,
+.df2-vd.is-compact-verdict:not(.is-gates-open) .df2-vd-rule,
+.df2-vd.is-compact-verdict:not(.is-proof-open) .df2-vd-proof {
+  display: none;
+}
+
+.df2-vd.is-compact-verdict.is-proof-open .df2-vd-proof {
+  margin: 8px 16px 16px;
+  border: 1px solid var(--df-border);
+}
+
+.df2-vd-verdict {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--df-border);
+}
+
+.df2-vd-verdict p {
+  margin: 0;
+}
+
+.df2-vd-proof-drawer {
+  margin: 8px 16px 16px;
+}
+
+.df2-canvas-inline-suggest,
+.df2-map-inline-suggest {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--df-border);
+  background: var(--df-surface);
+  min-width: 0;
+  overflow: visible;
+}
+
+.df2-canvas-inline-suggest button,
+.df2-map-inline-suggest button {
+  white-space: nowrap;
+  overflow: visible;
+  text-overflow: clip;
   max-width: none;
-  overflow-wrap: anywhere;
 }
 
 @media (min-width: 1024px) {

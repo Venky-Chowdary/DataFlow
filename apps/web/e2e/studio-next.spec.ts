@@ -355,9 +355,6 @@ test.describe("studio next", () => {
     const toMap = page.getByRole("button", { name: "Continue with this transform" });
     await expect(toMap).toBeEnabled();
     await toMap.click();
-    const toValidate = page.getByRole("button", { name: /Continue to Validate/ });
-    await expect(toValidate).toBeEnabled({ timeout: 20_000 });
-    await toValidate.click();
     const execute = page.getByRole("button", { name: /^Execute/ });
     await expect(execute).toBeVisible({ timeout: 30_000 });
     await expect(execute).toBeEnabled({ timeout: 40_000 });
@@ -406,7 +403,9 @@ conn.commit()
     await expect(page.getByTestId("transform-canvas")).toHaveCount(0);
     const schemaBrowser = page.getByTestId("studio-schema-browser");
     const steps = page.getByRole("navigation", { name: "Transfer steps" });
-    const proceed = page.getByRole("button", { name: /Continue to Destination/ });
+    const review = page.getByRole("button", { name: /Continue to Review/ });
+    const classic = page.getByRole("button", { name: /Continue to Destination/ });
+    const proceed = (await review.isVisible()) ? review : classic;
     await expectDisjoint(page, schemaBrowser, steps);
     await expectDisjoint(page, schemaBrowser, proceed);
     await expectHitInside(page, proceed, ".df2-wizard-footer");
@@ -701,40 +700,78 @@ conn.commit()
       { width: 1440, height: 900 },
       { width: 1920, height: 1080 },
     ] as const;
-    const check = async (name: string) => {
+    const settle = async () => {
+      await page.evaluate(async () => {
+        await document.fonts.ready;
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+        });
+      });
+      const shell = page.locator(".df2-transfer-studio-shell");
+      await expect(shell).toBeVisible();
+      let previous = "";
+      await expect.poll(async () => {
+        const box = await shell.boundingBox();
+        const next = box
+          ? `${Math.round(box.x)}:${Math.round(box.y)}:${Math.round(box.width)}:${Math.round(box.height)}`
+          : "";
+        const stable = next !== "" && next === previous;
+        previous = next;
+        return stable;
+      }).toBeTruthy();
+    };
+    const check = async (name: string, extra?: () => Promise<void>) => {
       for (const size of sizes) {
         await page.setViewportSize(size);
+        await settle();
+        if (extra) await extra();
+        await settle();
         await expectStudioShellClear(page, `${name} ${size.width}x${size.height}`);
       }
       await page.setViewportSize({ width: 1440, height: 900 });
+      await settle();
     };
 
     await openStudio(page);
     await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
-    await expect(page.getByRole("button", { name: /Continue to Destination/ })).toBeEnabled();
-    await check("source");
-
-    await page.getByRole("button", { name: /Continue to Destination/ }).click();
     await page.getByRole("tab", { name: "File export" }).click();
-    await check("destination");
+    await expect(page.getByRole("button", { name: /Continue to Review/ })).toBeEnabled();
+    await check("connect", async () => {
+      const structure = page.locator(".df2-structure-preview");
+      await expect(structure).toBeVisible();
+      const structureBox = await structure.boundingBox();
+      expect(structureBox).toBeTruthy();
+      expect(structureBox!.width).toBeGreaterThanOrEqual(360);
+      const cellNowrap = await page.locator(".df2-structure-table td").first().evaluate((node) => getComputedStyle(node).whiteSpace);
+      expect(cellNowrap).toBe("nowrap");
+      const labelFits = await page.locator(".df2-route-bar-label").first().evaluate((node) => {
+        const style = getComputedStyle(node);
+        return style.whiteSpace === "nowrap" && node.scrollWidth <= node.clientWidth + 1;
+      });
+      expect(labelFits).toBeTruthy();
+    });
 
-    await page.getByRole("button", { name: /Continue to Transform/ }).click();
+    await page.getByRole("button", { name: "Transform (optional)" }).click();
     await expect(page.getByRole("heading", { name: "Transform", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "More actions" }).click();
-    await page.getByRole("menuitem", { name: "Palette", exact: true }).click();
-    await page.locator(".df2-canvas-op[data-op='trim']").click();
+    const trim = page.locator(".df2-canvas-op[data-op='trim']");
+    await trim.click();
     await expect(page.locator(".react-flow__node")).toHaveCount(1);
-    await check("transform");
+    await check("transform", async () => {
+      await expect(trim).toBeVisible();
+      await expect(trim).toHaveJSProperty("draggable", true);
+    });
 
     await page.getByRole("button", { name: "Run preview" }).first().click();
-    await expect(page.getByRole("button", { name: /Continue with this transform/ })).toBeEnabled();
-    await page.getByRole("button", { name: /Continue with this transform/ }).click();
-    await expect(page.getByRole("button", { name: /Continue to Validate/ })).toBeVisible();
-    await check("map");
+    await expect.poll(async () => {
+      if (await page.getByTestId("validate-verdict").isVisible()) return "ready";
+      const button = page.getByRole("button", { name: /Continue with this transform/ });
+      if (await button.isVisible() && await button.isEnabled()) await button.click();
+      return "pending";
+    }, { timeout: 40_000 }).toBe("ready");
+    await expect(page.locator(".df2-transfer-analyzing-panel")).toBeHidden();
+    await check("review");
 
-    await page.getByRole("button", { name: /Continue to Validate/ }).click();
     await expect(page.getByRole("button", { name: /^Execute/ })).toBeVisible();
-    await check("validate");
 
     const execute = page.getByRole("button", { name: /^Execute/ });
     if (await execute.isEnabled()) await execute.click();

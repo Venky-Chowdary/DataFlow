@@ -283,6 +283,10 @@ interface ValidateDashboardProps {
   } | null;
   /** Trigger preflight from the dashboard (same as the rail CTA). */
   onRunPreflight?: () => void;
+  /** Flagged studio: one verdict, collapsed gates, proof on demand. */
+  compactVerdict?: boolean;
+  onPrimaryFix?: () => void;
+  primaryFixLabel?: string;
   /**
    * Operator attested governance policy allows moving detected PII.
    * Re-runs Validate with compliance_acknowledged=true.
@@ -780,6 +784,9 @@ export function ValidateDashboard({
   onOpenMappingProof,
   mappingProofSummary = null,
   onRunPreflight,
+  compactVerdict = false,
+  onPrimaryFix,
+  primaryFixLabel,
   onAcknowledgeCompliance,
   onAcknowledgeSchemaDrift,
   onAcknowledgeFkRisk,
@@ -812,6 +819,8 @@ export function ValidateDashboard({
     else setInternalBadDataOpen(open);
   };
   const [pickedGateKey, setPickedGateKey] = useState("");
+  const [gatesOpen, setGatesOpen] = useState(false);
+  const [proofOpen, setProofOpen] = useState(false);
   const [remediating, setRemediating] = useState(false);
   const [assistExpanded, setAssistExpanded] = useState(true);
   const [revealCellPii, setRevealCellPii] = useState(false);
@@ -1640,11 +1649,14 @@ export function ValidateDashboard({
     onApplyAction?.(action);
   };
 
+  const gateRank: Record<string, number> = { block: 0, warn: 1, running: 2, pending: 3, pass: 4 };
   const gateViews = displayGates.map((meta, index) => ({
     meta,
     index,
     ...statusForGate(meta, index),
-  }));
+  })).sort((a, b) => (
+    compactVerdict ? (gateRank[a.status] ?? 9) - (gateRank[b.status] ?? 9) : 0
+  ));
   const activeGate = gateViews.find((gate) => gate.meta.key === pickedGateKey)
     ?? gateViews.find((gate) => gate.status === "block")
     ?? gateViews.find((gate) => gate.status === "warn")
@@ -1652,7 +1664,34 @@ export function ValidateDashboard({
     ?? gateViews[0];
 
   return (
-    <section className={`df2-vd df2-vd-${heroTone}`} aria-label="Validation dashboard">
+    <section className={`df2-vd df2-vd-${heroTone}${compactVerdict ? " is-compact-verdict" : ""}${gatesOpen ? " is-gates-open" : ""}${proofOpen ? " is-proof-open" : ""}`} aria-label="Validation dashboard">
+      {compactVerdict && (
+        <div className="df2-vd-verdict" role="status" data-testid="validate-verdict">
+          <div>
+            <strong>
+              {running
+                ? "Validating"
+                : preflight?.passed
+                  ? "Ready to run"
+                  : executiveSummary?.title || "Blocked"}
+            </strong>
+            <p>{running ? "Checking this route." : executiveSummary?.subtitle || "Run Validate to judge this route."}</p>
+          </div>
+          <div className="df2-btn-row">
+            {onPrimaryFix && !preflight?.passed && (
+              <Button type="button" variant="primary" onClick={onPrimaryFix}>
+                {primaryFixLabel || "Fix"}
+              </Button>
+            )}
+            <Button type="button" variant="secondary" onClick={() => setGatesOpen((open) => !open)}>
+              {gatesOpen ? "Hide gates" : "Gates"}
+            </Button>
+            <Button type="button" variant="ghost" onClick={() => setProofOpen((open) => !open)}>
+              {proofOpen ? "Hide proof" : "Proof"}
+            </Button>
+          </div>
+        </div>
+      )}
       <header className={`df2-vd-hero${running ? " is-glass-live" : ""}`}>
         {running ? <span className="df2-vd-hero-glow" aria-hidden /> : null}
         <div
@@ -3084,7 +3123,7 @@ export function ValidateDashboard({
       </div>
 
       {reconciliation && (
-        <div id="df2-vd-gate8">
+        <div id="df2-vd-gate8" className="df2-vd-proof">
           <Gate8ProofCard
             report={reconciliation as Gate8Reconciliation}
             className="df2-vd-gate8"

@@ -85,6 +85,8 @@ interface TransferMapStepProps {
   /** Compiled workbook — shown as evidence on each mapped column. */
   ruleReport?: RuleCompileReport | null;
   onAcceptRuleDirect?: (index: number) => void;
+  /** Review already owns the action bar. */
+  hideFooter?: boolean;
 }
 
 
@@ -141,6 +143,7 @@ export function TransferMapStep({
   onReloadDestSchema,
   ruleReport = null,
   onAcceptRuleDirect,
+  hideFooter = false,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("review");
@@ -306,6 +309,22 @@ export function TransferMapStep({
       </div>
 
       <div className="df2-card-body df2-map-step-body">
+        {(llmUsed || (uniqueKeySuggestions[0] && onApplyPrimaryKey)) && (
+          <p className="df2-map-inline-suggest" data-testid="map-inline-suggest" role="status">
+            <span>Suggested</span>
+            {uniqueKeySuggestions[0] && onApplyPrimaryKey ? (
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                onClick={() => onApplyPrimaryKey(uniqueKeySuggestions[0].column)}
+              >
+                Use {uniqueKeySuggestions[0].column} as the key
+              </button>
+            ) : (
+              <span>Semantic mapping is on this route. Approve the rows that match.</span>
+            )}
+          </p>
+        )}
         {extraSourceColumns.length > 0 && (
           <details className="df2-map-stream-diverge is-compact" role="status">
             <summary>
@@ -484,7 +503,7 @@ export function TransferMapStep({
         </div>
       </div>
 
-      <div className="df2-card-footer df2-wizard-footer df2-map-footer">
+      {!hideFooter && <div className="df2-card-footer df2-wizard-footer df2-map-footer">
         <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
         <div className="df2-map-footer-status" aria-live="polite">
           <ProgressRing
@@ -554,7 +573,7 @@ export function TransferMapStep({
           )}
           {continueToValidate}
         </div>
-      </div>
+      </div>}
 
       <Dialog
         open={mapDialogOpen}

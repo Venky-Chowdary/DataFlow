@@ -35,6 +35,7 @@ import {
   planGitopsManifest,
   resetContractBreaker,
   runScheduleNow,
+  syncScheduleNow,
   updateSchedule,
 } from "../lib/api";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
@@ -720,6 +721,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                 freshnessLagSeconds={freshnessLag[sched.id]?.lag ?? null}
                 freshnessSeverity={freshnessLag[sched.id]?.severity ?? null}
                 onSelect={() => openDrawer(sched.id)}
+                onSync={() => void handleRunNow(sched.id)}
               />
             ))}
           </div>
@@ -751,6 +753,23 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         }
         onClose={closeDrawer}
         onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
+        onSync={(mode) => {
+          if (!selectedSchedule) return;
+          if (mode === "delta") {
+            void handleRunNow(selectedSchedule.id);
+            return;
+          }
+          void syncScheduleNow(selectedSchedule.id, "full").then(() => {
+            toast({ title: "Full re-sync started", tone: "success" });
+            onViewJobs?.();
+          }).catch((err: unknown) => {
+            toast({
+              title: "Re-sync unavailable",
+              message: err instanceof Error ? err.message : "The sync API is not on this server yet.",
+              tone: "error",
+            });
+          });
+        }}
         onEdit={() => {
           if (!selectedSchedule) return;
           setResumeDrawerAfterEdit(true);

@@ -11764,8 +11764,8 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
    aside collapsed the schema card to a blank right pane, so a failed read
    and the sample rows were invisible. Size the card to its content; the
    source body scrolls. */
-.df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary > .df2-source-aside,
-.df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary > .df2-structure-preview {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-transfer-step-secondary > .df2-source-aside,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-transfer-step-secondary > .df2-structure-preview {
   flex: 0 0 auto !important;
   height: auto !important;
   max-height: none !important;
@@ -11773,7 +11773,7 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   overflow: visible !important;
 }
 
-.df2-page-transfer-studio .df2-source-step .df2-multistream-preview {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-multistream-preview {
   flex: 0 0 auto !important;
   height: auto !important;
   max-height: none !important;
@@ -11781,12 +11781,12 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   overflow: visible !important;
 }
 
-.df2-page-transfer-studio .df2-source-step .df2-structure-preview {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-structure-preview {
   height: auto !important;
   max-height: none !important;
 }
 
-.df2-page-transfer-studio .df2-source-step .df2-structure-table-wrap {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-structure-table-wrap {
   flex: 0 0 auto !important;
   min-height: var(--df-preview-table-min, 220px) !important;
   max-height: 320px !important;
@@ -11837,6 +11837,36 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
     border-top: 1px solid var(--df-border) !important;
     padding-top: 10px !important;
   }
+}
+
+/* Flagged review stacks Map under a scrolling shell. The fixed map locks
+   hide the column toolbar. Flags-off keeps the locks above. */
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-workspace,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-workspace.is-full-editor,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-editor-pane,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-editor-scroll-host {
+  overflow: visible !important;
+  flex: 0 0 auto !important;
+  height: auto !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  grid-template-rows: auto !important;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-editor-scroll-host .df2-column-review-scroll,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-editor-scroll-host .df2-column-review-table-wrap {
+  flex: 0 1 auto !important;
+  min-height: 160px !important;
+  max-height: 420px !important;
+  overflow: auto !important;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-validate-dashboard-host,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-validate-body {
+  height: auto !important;
+  max-height: none !important;
+  flex: 0 0 auto !important;
+  overflow: visible !important;
 }
 
 /* ---------------------------------------------------------------------------

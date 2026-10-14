@@ -15,7 +15,7 @@ import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
-import { fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, RetryRefusedError } from "../lib/api";
+import { fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, syncJobNow, RetryRefusedError } from "../lib/api";
 import {
   jobFilterCounts,
   jobHistoryFromResponse,
@@ -467,6 +467,23 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
   const handleComplete = useCallback(() => {
     onRefresh?.();
   }, [onRefresh]);
+
+  const handleSyncNow = useCallback((mode: "delta" | "full") => {
+    if (!selectedId) return;
+    void syncJobNow(selectedId, mode).then(() => {
+      toast({
+        title: mode === "full" ? "Full re-sync started" : "Sync started",
+        message: "Watching the new run in Job Theater.",
+        tone: "success",
+      });
+    }).catch((err: unknown) => {
+      toast({
+        title: "Sync now unavailable",
+        message: err instanceof Error ? err.message : "The sync API is not on this server yet.",
+        tone: "error",
+      });
+    });
+  }, [selectedId, toast]);
 
   const handleRetry = useCallback(async () => {
     if (!selectedId) return;
@@ -1445,6 +1462,24 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                       </div>
 
                       <div className="df2-jobs-detail-footer" role="navigation" aria-label="Job actions">
+                        {detailTab === "detail" && (selected.status === "completed" || selected.status === "succeeded") && (
+                          <div className="df2-jobs-v3-actions">
+                            <button
+                              type="button"
+                              className="df2-btn df2-btn-primary"
+                              onClick={() => handleSyncNow("delta")}
+                            >
+                              <DtIcon name="activity" size={16} /> Sync now
+                            </button>
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => handleSyncNow("full")}
+                            >
+                              Re-sync (full)
+                            </button>
+                          </div>
+                        )}
                         {detailTab === "detail" && selected.status === "failed" && (
                           <div className="df2-jobs-v3-actions">
                             {duplicateKeyFailure && onStartTransfer && (
@@ -1466,6 +1501,13 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                                 {resuming ? <ButtonLoader label="Resuming…" /> : <><DtIcon name="activity" size={16} /> Resume from batch {liveJob.checkpoint.chunk_index ?? 0}</>}
                               </button>
                             )}
+                            <button
+                              type="button"
+                              className="df2-btn"
+                              onClick={() => handleSyncNow("delta")}
+                            >
+                              <DtIcon name="activity" size={16} /> Sync now
+                            </button>
                             <button
                               type="button"
                               className={

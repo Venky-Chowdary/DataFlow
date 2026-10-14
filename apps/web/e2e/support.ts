@@ -12,13 +12,20 @@ export async function openStudio(page: Page, hash = "/#/transfer"): Promise<void
 
 export async function reachTransform(page: Page): Promise<void> {
   await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
-  const cont = page.getByRole("button", { name: /Continue to Destination/ });
-  await expect(cont).toBeEnabled();
-  await cont.click();
-  await page.getByRole("tab", { name: "File export" }).click();
-  const next = page.getByRole("button", { name: /Continue to Transform/ });
-  await expect(next).toBeEnabled();
-  await next.click();
+  const classic = page.getByRole("button", { name: /Continue to Destination/ });
+  const review = page.getByRole("button", { name: /Continue to Review/ });
+  await expect.poll(async () => (await review.isVisible()) || (await classic.isVisible())).toBeTruthy();
+  if (await review.isVisible()) {
+    await page.getByRole("tab", { name: "File export" }).click();
+    await page.getByRole("button", { name: "Transform (optional)" }).click();
+  } else {
+    await expect(classic).toBeEnabled();
+    await classic.click();
+    await page.getByRole("tab", { name: "File export" }).click();
+    const next = page.getByRole("button", { name: /Continue to Transform/ });
+    await expect(next).toBeEnabled();
+    await next.click();
+  }
   await expect(page.getByRole("heading", { name: "Transform", exact: true })).toBeVisible();
 }
 
@@ -32,14 +39,15 @@ export async function shoot(
   await panel.evaluate((node) => {
     node.scrollTop = 0;
   });
-  // Toasts are fixed overlays. Masking them paints a magenta box into the
-  // baseline, so a toast that is present in one run and absent in the next
-  // fails the classic screen even when the step list did not move. Hide them
-  // before the shot. The transform id stays masked because the hash changes.
-  await page.locator(".dt-toast").evaluateAll((nodes) => {
-    for (const node of nodes) (node as HTMLElement).style.setProperty("display", "none");
+  // A toast that arrives while the shot settles used to be masked, and the
+  // mask paints a magenta rectangle the classic baseline does not have.
+  // Hiding the toast keeps the step list itself on that baseline. The
+  // transform id stays masked because the hash changes.
+  await page.addStyleTag({ content: ".dt-toast { display: none !important; }" });
+  await page.evaluate(async () => {
+    await document.fonts.ready;
   });
-  const mask = [page.locator(".dt-toast"), page.locator(".df2-xform-identity"), ...extraMask];
+  const mask = [page.locator(".df2-xform-identity"), ...extraMask];
   const options = maxDiffPixelRatio == null ? { mask } : { mask, maxDiffPixelRatio };
   const width = page.viewportSize()?.width ?? 1440;
   // Element screenshots of the scroll host come back blank under 500px.

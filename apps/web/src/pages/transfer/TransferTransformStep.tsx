@@ -94,6 +94,8 @@ interface TransferTransformStepProps {
   /** Workspace canvas is on and this browser has not opted in. */
   canvasOptIn?: boolean;
   onOptInCanvas?: () => void;
+  /** Close the optional canvas and return to Connect. */
+  onCollapse?: () => void;
 }
 
 const PREVIEW_ROWS = 12;
@@ -148,6 +150,7 @@ export function TransferTransformStep({
   studioFlagsError = "",
   canvasOptIn = false,
   onOptInCanvas,
+  onCollapse,
 }: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
@@ -464,6 +467,11 @@ export function TransferTransformStep({
               <span className="df2-xform-identity is-empty">
                 {busy ? "Previewing…" : "No transform declared"}
               </span>
+            )}
+            {canvasEnabled && onCollapse && (
+              <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onCollapse}>
+                Hide transform
+              </button>
             )}
             <button
               type="button"

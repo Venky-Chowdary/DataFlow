@@ -71,6 +71,9 @@ import {
   syncTransferPlanMappings,
   updateTransferPlan,
   uploadFile,
+  fetchShapeDraft,
+  saveShapeDraft,
+  deleteShapeDraft,
   fetchVectorRouting,
   fetchEmbeddingCacheStats,
   clearEmbeddingCache,
@@ -327,6 +330,7 @@ export function TransferPage({
   const { setActiveData } = useActiveData();
   const { registerStudioHandler } = useStudioActions();
   const [step, setStep] = useState(STEP_SOURCE);
+  const [transformOpen, setTransformOpen] = useState(false);
   const [sourceKind, setSourceKind] = useState<SourceKind>("file");
   const [sourceConnectorId, setSourceConnectorId] = useState("");
   const [sourceTable, setSourceTable] = useState("");
@@ -4340,6 +4344,7 @@ export function TransferPage({
       fkRiskAcknowledged?: boolean;
       acknowledgmentReason?: string;
       runPopulationOrphanScan?: boolean;
+      stayOnReview?: boolean;
     },
   ) => {
     const activeMappings = overrideMappings ?? columnMappings;
@@ -4461,7 +4466,7 @@ export function TransferPage({
     }
     setPreflighting(true);
     setValidateProgress(null);
-    setStep(STEP_VALIDATE);
+    if (!opts?.stayOnReview) setStep(STEP_VALIDATE);
     setPreflight(null);
     setPreflightError("");
     setValidatedContractKey(null);
@@ -5947,6 +5952,51 @@ export function TransferPage({
       ? `${selectedDestConnector.name}${targetCollection ? ` · ${targetCollection}` : ""}`
       : destinationLabel)
     : "Choose destination";
+  const hydratedDraft = useRef("");
+  useEffect(() => {
+    if (!studioFlags.canvas) return;
+    if (!sourceLabel || sourceLabel.startsWith("Choose")) return;
+    const key = `${sourceLabel}→${destLabelShort}`;
+    if (hydratedDraft.current === key) return;
+    let cancelled = false;
+    void fetchShapeDraft(key).then((body) => {
+      if (cancelled) return;
+      hydratedDraft.current = key;
+      const steps = body.draft?.steps;
+      if (steps?.length) setShapeSteps((prev) => (prev.length ? prev : steps));
+    }).catch(() => {
+      if (!cancelled) hydratedDraft.current = key;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [studioFlags.canvas, sourceLabel, destLabelShort]);
+  useEffect(() => {
+    if (!studioFlags.canvas) return;
+    const key = `${sourceLabel}→${destLabelShort}`;
+    if (hydratedDraft.current !== key || shapeSteps.length === 0) return;
+    const handle = window.setTimeout(() => {
+      void saveShapeDraft({
+        route_key: key,
+        recipe: { steps: shapeSteps },
+        source_columns: currentSourceColumns,
+      }).catch(() => {});
+    }, 500);
+    return () => window.clearTimeout(handle);
+  }, [studioFlags.canvas, shapeSteps, sourceLabel, destLabelShort, currentSourceColumns]);
+  const reviewSig = columnMappings.map((row) => `${row.source}:${row.target}:${row.transform ?? ""}:${row.riskAcknowledged ? 1 : 0}`).join("|");
+  const lastReviewSig = useRef("");
+  useEffect(() => {
+    if (!studioFlags.canvas) return;
+    if (step !== STEP_MAP && step !== STEP_VALIDATE) return;
+    if (!columnMappings.length || analyzing || preflighting) return;
+    if (lastReviewSig.current === reviewSig) return;
+    lastReviewSig.current = reviewSig;
+    const handle = window.setTimeout(() => {
+      void executePreflight(undefined, undefined, { stayOnReview: true });
+    }, 700);
+    return () => window.clearTimeout(handle);
+  }, [studioFlags.canvas, step, reviewSig, columnMappings.length, analyzing, preflighting]);
 
   const mapSourceType = sourceKind === "file"
     ? (parsed?.file_type ?? file?.name.split(".").pop() ?? "file")
@@ -6201,6 +6251,10 @@ export function TransferPage({
     setParsed(null);
     setShapeSteps([]);
     setShapeIdentity(null);
+    hydratedDraft.current = "";
+    if (sourceLabel && destLabelShort) {
+      void deleteShapeDraft(`${sourceLabel}→${destLabelShort}`).catch(() => {});
+    }
     setConnectorSampleRows([]);
     setSourceRowEstimate(null);
     setAnalysis(null);
@@ -6270,6 +6324,14 @@ export function TransferPage({
     setActiveData(null);
   }, [onFreshTransfer, setActiveData]);
 
+  const continueFromDestination = () => {
+    if (studioFlags.canvas) {
+      void goToMapping();
+      return;
+    }
+    setStep(STEP_SHAPE);
+  };
+
   return (
     <PageShell
       wide
@@ -6278,7 +6340,7 @@ export function TransferPage({
       title="Transfer Studio"
       description="Governed path: source → destination → map → preflight → run → proof"
     >
-      <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}`} showHonesty>
+      <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}${studioFlags.canvas && step < STEP_SHAPE ? " is-flow-connect" : ""}${studioFlags.canvas && transformOpen && step <= STEP_SHAPE ? " is-flow-transform" : ""}${studioFlags.canvas && (step === STEP_MAP || step === STEP_VALIDATE) ? " is-flow-review" : ""}`} showHonesty>
       <PermissionNotice
         allowed={jobRun.allowed}
         reason={jobRun.reason}
@@ -6288,18 +6350,43 @@ export function TransferPage({
         <div className="df2-transfer-studio-chrome-row">
         <WizardSteps
           variant="studio"
-          steps={STEPS}
-          current={step}
-          onStepClick={setStep}
-          canGoTo={(n) =>
-            n < step ||
-            n === STEP_SOURCE ||
-            (n === STEP_DESTINATION && canConfigureDest && !sourceIntrospecting) ||
-            (n === STEP_SHAPE && canRunPreflight) ||
-            (n === STEP_MAP && canRunPreflight) ||
-            (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0) ||
-            (n === STEP_RUN && canExecute)
-          }
+          steps={studioFlags.canvas ? [
+            { n: STEP_SOURCE, label: "Connect", shortLabel: "Connect", icon: "upload" },
+            { n: STEP_MAP, label: "Review", shortLabel: "Review", icon: "sparkle" },
+            { n: STEP_RUN, label: "Run", shortLabel: "Run", icon: "transfer" },
+          ] : STEPS}
+          current={studioFlags.canvas
+            ? (step <= STEP_SHAPE ? STEP_SOURCE : step === STEP_VALIDATE ? STEP_MAP : step)
+            : step}
+          onStepClick={(n) => {
+            if (!studioFlags.canvas) {
+              setStep(n);
+              return;
+            }
+            if (n === STEP_SOURCE) setStep(STEP_SOURCE);
+            else if (n === STEP_MAP) {
+              if (columnMappings.length) {
+                setStep(STEP_MAP);
+                void executePreflight(undefined, undefined, { stayOnReview: true });
+              } else {
+                void goToMapping();
+              }
+            } else if (n === STEP_RUN) setStep(STEP_RUN);
+          }}
+          canGoTo={(n) => {
+            if (!studioFlags.canvas) {
+              return n < step ||
+                n === STEP_SOURCE ||
+                (n === STEP_DESTINATION && canConfigureDest && !sourceIntrospecting) ||
+                (n === STEP_SHAPE && canRunPreflight) ||
+                (n === STEP_MAP && canRunPreflight) ||
+                (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0) ||
+                (n === STEP_RUN && canExecute);
+            }
+            return n === STEP_SOURCE
+              || (n === STEP_MAP && canRunPreflight)
+              || (n === STEP_RUN && canExecute);
+          }}
         />
         <TransferRouteBar
           sourceLabel={sourceLabel}
@@ -6318,9 +6405,10 @@ export function TransferPage({
 
       <div className={`df2-transfer-studio-body ${step === STEP_MAP ? "is-map-step is-full-width" : ""}${step === STEP_VALIDATE ? " is-validate-step is-full-width" : " is-full-width"}`}>
       <main className="df2-transfer-main-panel" key={step}>
-      {step === STEP_MAP && columnMappings.length > 0 && !analyzing && (
+      {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && columnMappings.length > 0 && !analyzing && (
         <TransferMapStep
           columnMappings={columnMappings}
+          hideFooter={studioFlags.canvas}
           analysis={analysis}
           destColumns={destColumns}
           ruleReport={businessRuleReport}
@@ -6440,7 +6528,7 @@ export function TransferPage({
         />
       )}
 
-      {step === STEP_MAP && !analyzing && columnMappings.length === 0 && (
+      {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && !analyzing && columnMappings.length === 0 && (
         <div className="df2-transfer-step-panel">
           <EmptyState
             icon="sparkle"
@@ -6461,7 +6549,7 @@ export function TransferPage({
         </div>
       )}
 
-      {step === STEP_MAP && analyzing && (
+      {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && analyzing && !(studioFlags.canvas && columnMappings.length > 0) && (
         <div className="df2-transfer-step-panel df2-transfer-analyzing-panel">
           <div className="df2-card-body df2-analyzing">
             <Spinner size="lg" premium />
@@ -6479,7 +6567,7 @@ export function TransferPage({
         </div>
       )}
 
-      {step === STEP_SOURCE && (
+      {(step === STEP_SOURCE || (studioFlags.canvas && step === STEP_DESTINATION)) && !(studioFlags.canvas && transformOpen) && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-source-step">
         <div className="df2-card-body">
           <div className="df2-transfer-step-split">
@@ -6976,6 +7064,7 @@ export function TransferPage({
           const connectorReady =
             isConnectorSource && (sourceKind === "database" ? dbSourceConnectors.length > 0 : cloudSourceConnectors.length > 0);
           if (!fileReady && !connectorReady) return null;
+          if (studioFlags.canvas && canConfigureDest) return null;
           const hint = fileReady
             ? "Source profiled — choose where data should land next."
             : sourceKind === "cloud"
@@ -7011,7 +7100,7 @@ export function TransferPage({
       </div>
       )}
 
-      {step === STEP_DESTINATION && (
+      {(step === STEP_DESTINATION || (studioFlags.canvas && step === STEP_SOURCE && canConfigureDest)) && !(studioFlags.canvas && transformOpen) && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-dest-step">
         <div className="df2-card-body">
           <div className="df2-dest-step-layout">
@@ -7685,17 +7774,27 @@ export function TransferPage({
           <button
             type="button"
             className="df2-btn df2-btn-primary"
-            onClick={() => setStep(STEP_SHAPE)}
+            onClick={continueFromDestination}
             disabled={!canRunPreflight || analyzing}
           >
-            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : <><DtIcon name="layers" size={18} /> Continue to Transform</>}
+            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : (
+              <><DtIcon name="layers" size={18} /> {studioFlags.canvas ? "Continue to Review" : "Continue to Transform"}</>
+            )}
           </button>
           </div>
         </div>
       </div>
       )}
 
-      {step === STEP_SHAPE && (
+      {studioFlags.canvas && step <= STEP_SHAPE && !transformOpen && (
+        <div className="df2-flow-transform">
+          <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setTransformOpen(true)}>
+            Transform (optional)
+          </button>
+        </div>
+      )}
+
+      {(step === STEP_SHAPE || (studioFlags.canvas && transformOpen && step < STEP_SHAPE)) && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-xform-step">
         <TransferTransformStep
           sampleRows={shapeSampleRows}
@@ -7718,6 +7817,7 @@ export function TransferPage({
           }}
           onIdentity={setShapeIdentity}
           onBack={() => setStep(STEP_DESTINATION)}
+          onCollapse={studioFlags.canvas ? () => setTransformOpen(false) : undefined}
           onContinue={() => void goToMapping()}
           syncMode={syncMode}
           ruleReport={businessRuleReport}
@@ -7780,11 +7880,14 @@ export function TransferPage({
         </div>
       )}
 
-      {step === STEP_VALIDATE && (
+      {(step === STEP_VALIDATE || (studioFlags.canvas && step === STEP_MAP && columnMappings.length > 0)) && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-validate-step df2-validate-dashboard-host">
           <div className="df2-card-body df2-validate-body">
           <ValidateDashboard
             preflight={preflight}
+            compactVerdict={studioFlags.canvas}
+            onPrimaryFix={primaryFix.onPrimaryFix}
+            primaryFixLabel={primaryFix.primaryFixLabel}
             preflightError={preflightError}
             running={preflighting}
             progress={validateProgress}
@@ -7954,6 +8057,8 @@ export function TransferPage({
                 onContractIdChange={setBoundContractId}
                 onRequireSignedChange={setRequireSignedContract}
                 onBlockReasonChange={setContractBlockReason}
+                sourceLabel={studioFlags.canvas ? sourceLabel : undefined}
+                destLabel={studioFlags.canvas ? destLabelShort : undefined}
                 compact
               />
             )}
