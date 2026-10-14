@@ -522,7 +522,7 @@ describe("Transfer Studio chrome contracts", () => {
     const lock = css.slice(css.lastIndexOf("Studio source / destination — one owner"));
     assert.match(
       lock,
-      /\.df2-app \.df2-page-transfer-studio \.df2-source-step \.df2-transfer-step-split \{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/,
+      /\.df2-app \.df2-page-transfer-studio:not\(\.is-studio-next\) \.df2-source-step \.df2-transfer-step-split \{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/,
     );
     assert.match(lock, /@media \(max-width: 1100px\)/);
     assert.doesNotMatch(
@@ -532,7 +532,7 @@ describe("Transfer Studio chrome contracts", () => {
     );
     assert.match(
       lock,
-      /\.df2-page-transfer-studio \.df2-dest-step > \.df2-wizard-footer[\s\S]*max-height:\s*none/,
+      /\.df2-page-transfer-studio:not\(\.is-studio-next\) \.df2-dest-step > \.df2-wizard-footer[\s\S]*max-height:\s*none/,
     );
   });
 
@@ -547,7 +547,7 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn[\s\S]*\{[\s\S]*box-sizing:\s*border-box/);
     assert.match(
       css,
-      /\.df2-page-transfer-studio \.df2-dest-step > \.df2-wizard-footer \.df2-btn,[\s\S]*height:\s*var\(--df-btn-height/,
+      /\.df2-page-transfer-studio:not\(\.is-studio-next\) \.df2-dest-step > \.df2-wizard-footer \.df2-btn,[\s\S]*height:\s*var\(--df-btn-height/,
     );
     assert.doesNotMatch(page, /size="sm"[\s\S]{0,80}df2-dest-advanced-btn|df2-dest-advanced-btn[\s\S]{0,80}size="sm"/);
     assert.match(page, /variant="secondary"[\s\S]{0,120}df2-dest-advanced-btn|df2-dest-advanced-btn[\s\S]{0,80}variant="secondary"/);
@@ -593,7 +593,7 @@ describe("Transfer Studio chrome contracts", () => {
     );
     assert.match(
       destOwner,
-      /\.df2-page-transfer-studio \.df2-dest-step > \.df2-wizard-footer \{[\s\S]*flex:\s*0 0 auto !important/,
+      /\.df2-page-transfer-studio:not\(\.is-studio-next\) \.df2-dest-step > \.df2-wizard-footer \{[\s\S]*flex:\s*0 0 auto !important/,
     );
     const afterSourceOwner = css.slice(css.lastIndexOf("Studio source / destination — one owner"));
     assert.doesNotMatch(

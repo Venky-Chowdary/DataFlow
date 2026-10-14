@@ -6274,7 +6274,7 @@ export function TransferPage({
     <PageShell
       wide
       showHeader={false}
-      className="df2-page-transfer-studio"
+      className={studioFlags.canvas ? "df2-page-transfer-studio is-studio-next" : "df2-page-transfer-studio"}
       title="Transfer Studio"
       description="Governed path: source → destination → map → preflight → run → proof"
     >

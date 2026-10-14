@@ -513,52 +513,58 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
       onKeyDown={onKeyDown}
     >
       <header className="df2-canvas-head">
-        <div>
+        <div className="df2-canvas-head-title">
           <h3>Recipe</h3>
           <p>
             {activeTable ? `Steps for ${activeTable}. Other tables stay in the recipe, dimmed.` : "Steps run in order on the read."}
           </p>
         </div>
         <div className="df2-canvas-head-actions">
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setRulesOpen(true)}>
-            Rules and suggestions
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setTemplatesOpen(true)}>
-            Templates
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => applyStack("undo")} aria-label="Undo">
-            Undo
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => applyStack("redo")} aria-label="Redo">
-            Redo
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={paletteDock} onClick={() => setPaletteDock((open) => !open)}>
-            Palette
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={inspectorOpen} onClick={() => setInspectorOpen((open) => !open)}>
-            Properties
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={validationOpen} onClick={() => setValidationOpen((open) => !open)}>
-            Validation{issues.length ? ` (${issues.length})` : ""}
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setFitTick((tick) => tick + 1)} aria-label="Fit view">
-            Fit
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => zoomBy(0.15)} aria-label="Zoom in">
-            Zoom in
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => zoomBy(-0.15)} aria-label="Zoom out">
-            Zoom out
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setFocusMode((on) => !on)}>
-            {focusMode ? "Exit focus" : "Focus canvas"}
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={arrange} aria-label="Arrange">
-            Arrange
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setHelpOpen(true)} aria-label="Keyboard shortcuts">
-            Shortcuts
-          </button>
+          <div className="df2-canvas-tool-group">
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setRulesOpen(true)}>
+              Rules and suggestions
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setTemplatesOpen(true)}>
+              Templates
+            </button>
+          </div>
+          <div className="df2-canvas-tool-group">
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={paletteDock} onClick={() => setPaletteDock((open) => !open)}>
+              Palette
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={inspectorOpen} onClick={() => setInspectorOpen((open) => !open)}>
+              Properties
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={validationOpen} onClick={() => setValidationOpen((open) => !open)}>
+              Validation{issues.length ? ` (${issues.length})` : ""}
+            </button>
+          </div>
+          <div className="df2-canvas-tool-group">
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => applyStack("undo")} aria-label="Undo" title="Undo">
+              <DtIcon name="arrow-left" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => applyStack("redo")} aria-label="Redo" title="Redo">
+              <DtIcon name="arrow-right" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setFitTick((tick) => tick + 1)} aria-label="Fit view" title="Fit view">
+              <DtIcon name="expand" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => zoomBy(0.15)} aria-label="Zoom in" title="Zoom in">
+              <DtIcon name="plus" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => zoomBy(-0.15)} aria-label="Zoom out" title="Zoom out">
+              <DtIcon name="minus" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setFocusMode((on) => !on)} aria-label={focusMode ? "Exit focus" : "Focus canvas"} title={focusMode ? "Exit focus" : "Focus canvas"}>
+              <DtIcon name={focusMode ? "collapse" : "expand"} size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={arrange} aria-label="Arrange" title="Arrange">
+              <DtIcon name="layers" size={16} chrome="product" />
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" onClick={() => setHelpOpen(true)} aria-label="Keyboard shortcuts" title="Keyboard shortcuts">
+              <DtIcon name="menu" size={16} chrome="product" />
+            </button>
+          </div>
         </div>
       </header>
       {syncRefused && (

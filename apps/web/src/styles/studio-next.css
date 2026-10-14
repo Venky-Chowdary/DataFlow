@@ -111,19 +111,29 @@
   overflow: hidden;
 }
 
-/* Reserve a row for Back / Continue. The classic rule is sticky and
-   paints the bar over whatever is scrolling underneath it. */
+/* The flagged step sits in the shared shell. The classic card, gradient,
+   and 16px frame stay on the unflagged editor. */
+.df2-xform.df2-studio-next {
+  gap: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--df-surface);
+  box-shadow: none;
+}
+
+/* The action bar is pinned in the shared shell rule below. This cancels
+   the classic sticky offset so a narrow viewport cannot drag it back. */
 .df2-xform.df2-studio-next > .df2-xform-actions {
   position: static;
   bottom: auto;
-  flex: 0 0 auto;
-  margin: 0 calc(-1 * var(--df-space-4)) calc(-1 * var(--df-space-4));
+  margin: 0;
 }
 
 @media (max-width: 860px) {
   .df2-xform.df2-studio-next > .df2-xform-actions {
     bottom: auto;
-    margin: 0 calc(-1 * var(--df-space-3)) calc(-1 * var(--df-space-3));
+    margin: 0;
   }
 }
 
@@ -137,16 +147,109 @@
 }
 
 .df2-canvas-head,
-.df2-canvas-head-actions {
+.df2-canvas-head-actions,
+.df2-canvas-tool-group {
   display: flex;
-  gap: var(--df-space-2);
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  align-items: center;
 }
 
 .df2-canvas-head {
-  justify-content: space-between;
-  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
   flex: 0 0 auto;
+  min-height: 48px;
+}
+
+.df2-canvas-head-title {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex: 0 1 200px;
+  max-width: 200px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.df2-canvas-head-title p {
+  margin: 0;
+  min-width: 0;
+  color: var(--df-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The subtitle yields the row on a laptop so every tool stays in view.
+   It stays available to assistive tech. */
+@media (max-width: 1512px) {
+  .df2-canvas-head-title {
+    flex: 0 0 auto;
+    max-width: none;
+  }
+
+  .df2-canvas-head-title p {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+    border: 0;
+  }
+}
+
+.df2-canvas-head-actions {
+  flex: 1 1 auto;
+  justify-content: flex-start;
+  gap: 0;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.df2-canvas-tool-group {
+  gap: 6px;
+  flex: 0 0 auto;
+  padding-left: 8px;
+  margin-left: 8px;
+  border-left: 1px solid var(--df-border);
+}
+
+.df2-canvas-tool-group:first-child {
+  padding-left: 0;
+  margin-left: 0;
+  border-left: 0;
+}
+
+/* Laptop density pins .df2-btn-sm to 28px. The canvas toolbar stays on the
+   32px rung, and this selector is specific enough to win on its own. */
+.df2-app .df2-canvas .df2-btn.df2-btn-sm,
+.df2-app .df2-xform.df2-studio-next .df2-xform-help.df2-btn {
+  flex: 0 0 auto;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  line-height: 1;
+  box-sizing: border-box;
+}
+
+.df2-app .df2-canvas .df2-canvas-icon-btn.df2-btn {
+  width: 32px;
+  min-width: 32px;
+  padding: 0;
+  justify-content: center;
+}
+
+.df2-app .df2-canvas :is(input.df2-input, select.df2-select, select.df2-input) {
+  height: 32px;
+  min-height: 32px;
+  font-size: 13px;
+  box-sizing: border-box;
 }
 
 /* The step title stays, but it must not spend the column the stage needs. */
@@ -155,14 +258,29 @@
   top: auto;
   margin: 0;
   gap: 0;
-  padding: 0 0 4px;
+  min-height: 48px;
+  padding: 0;
   border-bottom: 0;
   border-radius: 0;
   background: transparent;
 }
 
+.df2-xform.df2-studio-next .df2-xform-head-row {
+  align-items: center;
+  flex-wrap: nowrap;
+  min-height: 48px;
+  gap: 12px;
+}
+
 .df2-xform.df2-studio-next .df2-xform-title {
   font-size: 16px;
+  line-height: 1.2;
+}
+
+.df2-xform.df2-studio-next .df2-xform-identity {
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
 }
 
 .df2-xform.df2-studio-next .df2-xform-route {
@@ -175,7 +293,14 @@
   overflow: auto;
 }
 
-.df2-canvas-head h3,
+.df2-canvas-head h3 {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.2;
+  font-weight: var(--df-fw-semibold);
+  flex: 0 0 auto;
+}
+
 .df2-canvas-rail h4,
 .df2-canvas-inspector h4,
 .df2-canvas-validation h4 {
@@ -943,9 +1068,9 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
 }
 
 html.df2-canvas-focus .df2-sidebar {
-  /* The shell pins the sidebar with display:flex !important. Visibility
-     hides it without adding another important, and the app padding below
-     gives that column to the canvas. */
+  /* The shell pins the sidebar with a display lock this file cannot
+     override. Visibility hides it, and the app padding below gives that
+     column to the canvas. */
   visibility: hidden;
   pointer-events: none;
 }
@@ -1003,12 +1128,14 @@ html.df2-canvas-focus .df2-app {
 
   .df2-canvas-stage {
     padding: 0;
+    min-height: 168px;
   }
 
   .df2-canvas-body {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(11rem, 1fr) 4.5rem 4.5rem;
+    /* 160px card + collapsed drawer + the 8px gap, so zoom stays at 1. */
+    grid-template-rows: minmax(232px, 1fr) 4.5rem 4.5rem;
     align-items: stretch;
     flex: 1 1 0;
     min-height: 0;
@@ -1061,6 +1188,194 @@ html.df2-canvas-focus .df2-app {
 
   .df2-canvas-op-family {
     display: none;
+  }
+}
+
+/* One shell for every flagged step. Absent on flags-off pages.
+   The classic content box subtracts the header a second time, which left
+   a gap under the work area. Fill the column under the topbar instead. */
+.df2-content.is-transfer-studio-view:has(.is-studio-next) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.df2-content-inner.is-transfer-studio-view:has(.is-studio-next) {
+  flex: 1 1 0;
+  height: auto;
+  max-height: none;
+  min-height: 0;
+}
+
+.df2-content-inner.is-transfer-studio-view .df2-page-transfer-studio.is-studio-next {
+  height: 100%;
+  min-height: 0;
+  padding-bottom: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* The page padding shorthand is locked at 0. The reserve lives here
+     so the work area ends on the 48px bar. */
+  padding: 0 16px 22px;
+  box-sizing: border-box;
+}
+
+/* The enter animation leaves translateX(0), which becomes the containing
+   block for a fixed bar and pins it to the step instead of the viewport. */
+.df2-page-transfer-studio.is-studio-next .df2-transfer-main-panel > .df2-transfer-step-panel {
+  animation: none;
+  transform: none;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-chrome {
+  flex: 0 0 auto;
+  min-height: 48px;
+  margin: 0;
+  padding: 8px 0;
+  gap: 8px;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-transfer-studio-body,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-main-panel,
+.df2-page-transfer-studio.is-studio-next .df2-transfer-step-viewport {
+  flex: 1 1 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-card-body,
+.df2-page-transfer-studio.is-studio-next .df2-validate-body {
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+  position: fixed;
+  left: var(--df-sidebar-width, 260px);
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  width: auto;
+  flex: none;
+  height: 48px;
+  min-height: 48px;
+  max-height: 48px;
+  margin: 0;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  background: var(--df-surface);
+  border-top: 1px solid var(--df-border);
+  border-radius: 0;
+  box-shadow: none;
+  box-sizing: border-box;
+}
+
+@media (max-width: 1023px) {
+  .df2-app .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+  .df2-app .df2-page-transfer-studio.is-studio-next .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer,
+  .df2-app .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+    left: 0;
+  }
+}
+
+.df2-app.df2-sidebar-nav-compact .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+.df2-app.df2-sidebar-nav-compact .df2-page-transfer-studio.is-studio-next .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer,
+.df2-app.df2-sidebar-nav-compact .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+  left: var(--df-sidebar-compact-w, 88px);
+}
+
+html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-wizard-footer,
+html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer,
+html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xform.df2-studio-next > .df2-xform-actions {
+  left: 0;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-wizard-footer .df2-btn,
+.df2-page-transfer-studio.is-studio-next .df2-xform-actions .df2-btn {
+  min-height: 32px;
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-map-footer-status,
+.df2-page-transfer-studio.is-studio-next .df2-wizard-footer .df2-label-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-label,
+.df2-page-transfer-studio.is-studio-next .df2-card-sub,
+.df2-page-transfer-studio.is-studio-next .df2-label-hint {
+  font-size: 13px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-split,
+.df2-page-transfer-studio.is-studio-next .df2-dest-step .df2-dest-step-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 12px;
+  flex: 1 1 0;
+  min-height: 0;
+  align-items: stretch;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-secondary,
+.df2-page-transfer-studio.is-studio-next .df2-dest-step-right {
+  border: 1px solid var(--df-border-strong);
+  border-radius: var(--df-radius-md);
+  background: var(--df-surface);
+  padding: 12px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* A 320px rail cannot sit beside the form on a phone. Stack it under the
+   work column. The form stays as tall as its actions, and the step scrolls,
+   so the sample control is not trapped under the rail. */
+@media (max-width: 800px) {
+  .df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-split,
+  .df2-page-transfer-studio.is-studio-next .df2-dest-step .df2-dest-step-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-content: start;
+    flex: 0 0 auto;
+    height: auto;
+  }
+
+  .df2-page-transfer-studio.is-studio-next .df2-source-step .df2-transfer-step-primary {
+    align-self: start;
+    max-height: none;
+    height: auto;
+    overflow: visible;
+  }
+
+  .df2-page-transfer-studio.is-studio-next .df2-source-step.df2-transfer-step-viewport > .df2-card-body {
+    overflow: auto;
   }
 }
 

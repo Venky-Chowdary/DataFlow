@@ -2555,8 +2555,8 @@ th.df2-type-string .df2-type-badge {
 }
 
 /* Beat shell-polish card footer padding inside Transfer Studio only */
-.df2-page-transfer-studio .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-wizard-footer {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-wizard-footer {
   padding: 6px 12px !important;
   background: var(--df-surface) !important;
   border-radius: 0 !important;
@@ -2960,14 +2960,14 @@ th.df2-type-string .df2-type-badge {
 }
 
 /* Studio wizard footer ? compact, consistent, responsive (all Transfer steps) */
-.df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-transfer-step-panel > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-dest-step .df2-card-footer.df2-wizard-footer,
-.df2-dest-step .df2-card-footer.df2-wizard-footer,
-.df2-validate-step > .df2-wizard-footer,
-.df2-validate-step > .df2-studio-actions {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-transfer-step-panel > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-map-step-panel > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-studio-actions {
   flex-shrink: 0;
   position: relative !important;
   box-shadow: none !important;
@@ -3092,16 +3092,16 @@ th.df2-type-string .df2-type-badge {
 }
 
 @media (max-width: 640px) {
-  .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer,
-  .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer,
-  .df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer,
-  .df2-page-transfer-studio .df2-dest-step .df2-card-footer.df2-wizard-footer {
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-map-step-panel > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step .df2-card-footer.df2-wizard-footer {
     flex-wrap: wrap;
     row-gap: 6px;
   }
 
-  .df2-page-transfer-studio .df2-wizard-footer .df2-btn,
-  .df2-page-transfer-studio .df2-validate-footer-actions .df2-btn {
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-wizard-footer .df2-btn,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-footer-actions .df2-btn {
     min-height: 34px !important;
     height: 34px !important;
     flex: 1 1 auto;
@@ -6870,6 +6870,10 @@ th.df2-type-string .df2-type-badge {
   flex: 0 0 auto !important;
   position: relative !important;
   box-shadow: none !important;
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-theater-v3-footer {
+  position: fixed !important;
 }
 
 .df2-theater-v3-footer-actions {
@@ -10948,17 +10952,18 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
     box-shadow: 0 -1px 0 rgba(15, 23, 42, 0.08);
   }
 
-  /* Flex-pinned steps ? sticky causes double chrome / overlap. */
-  .df2-dest-step.df2-transfer-step-viewport > .df2-card-footer,
-  .df2-dest-step.df2-transfer-step-viewport > .df2-wizard-footer,
-  .df2-source-step.df2-transfer-step-viewport > .df2-card-footer,
-  .df2-source-step.df2-transfer-step-viewport > .df2-wizard-footer,
-  .df2-map-step-panel > .df2-card-footer,
-  .df2-map-step-panel > .df2-wizard-footer,
-  .df2-validate-step > .df2-card-footer,
-  .df2-validate-step > .df2-wizard-footer,
-  .df2-page-transfer-studio .df2-map-step-panel .df2-wizard-footer,
-  .df2-page-transfer-studio .df2-validate-step .df2-wizard-footer {
+  /* Flex-pinned steps ? sticky causes double chrome / overlap.
+     The flagged shell pins its own bar, so these locks stay on the classic page. */
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step.df2-transfer-step-viewport > .df2-card-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step.df2-transfer-step-viewport > .df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step.df2-transfer-step-viewport > .df2-card-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step.df2-transfer-step-viewport > .df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-map-step-panel > .df2-card-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-map-step-panel > .df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-card-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-map-step-panel .df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step .df2-wizard-footer {
     position: relative !important;
     box-shadow: none !important;
   }
@@ -10997,14 +11002,14 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   }
 
   /* Map primary is longer than the density band — wrap instead of clipping. */
-  .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer {
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer {
     flex-wrap: wrap !important;
     max-height: none !important;
   }
 }
 
 /* Map step Continue — beat density max-height / 220px button clip / 100% action wrap. */
-.df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer {
   max-height: none !important;
   min-height: 44px;
   height: auto !important;
@@ -11058,8 +11063,8 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   gap: 0 !important;
 }
 
-.df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-wizard-footer {
   flex: 0 0 auto !important;
   position: relative !important;
   display: flex !important;
@@ -11077,8 +11082,8 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   box-shadow: none !important;
 }
 
-.df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer .df2-btn,
-.df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer .df2-btn {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-wizard-footer .df2-btn,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-card-footer.df2-wizard-footer .df2-btn {
   height: var(--df-btn-height, 36px) !important;
   min-height: var(--df-btn-height, 36px) !important;
   max-height: var(--df-btn-height, 36px) !important;
@@ -11097,7 +11102,7 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   margin-left: auto !important;
 }
 
-.df2-page-transfer-studio .df2-dest-step-layout {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step-layout {
   display: grid !important;
   grid-template-columns: minmax(280px, 40%) minmax(0, 1fr) !important;
   gap: 12px 16px !important;
@@ -11125,7 +11130,7 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   gap: 8px !important;
 }
 
-.df2-page-transfer-studio .df2-dest-step-right {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step-right {
   overflow-y: auto !important;
   padding-left: 4px !important;
   padding-right: 4px !important;
@@ -11630,8 +11635,8 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
     grid-template-columns: 1fr !important;
   }
 
-  .df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer,
-  .df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer {
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-wizard-footer {
     flex-wrap: wrap !important;
     max-height: none !important;
     padding: 6px 10px !important;
@@ -11703,8 +11708,8 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   overflow-y: auto !important;
 }
 
-.df2-page-transfer-studio .df2-source-step > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-source-step > .df2-wizard-footer {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-wizard-footer {
   position: relative !important;
   bottom: auto !important;
   margin-top: 0 !important;
@@ -11722,7 +11727,7 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   cursor: not-allowed !important;
 }
 
-.df2-app .df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
+.df2-app .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-transfer-step-split {
   display: grid !important;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
   grid-template-rows: auto !important;
@@ -11732,8 +11737,8 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   min-height: min-content !important;
 }
 
-.df2-page-transfer-studio .df2-source-step .df2-transfer-step-primary,
-.df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-transfer-step-primary,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-transfer-step-secondary {
   height: auto !important;
   max-height: none !important;
   min-height: min-content !important;
@@ -11742,7 +11747,7 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   flex: 0 0 auto !important;
 }
 
-.df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-transfer-step-secondary {
   border-left: 1px solid var(--df-border) !important;
   padding-left: 12px !important;
   border-top: none !important;
@@ -11783,13 +11788,13 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
 
 /* Destination rail stays locked — do not inherit Source's overflow:visible. */
 
-.df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer,
-.df2-page-transfer-studio .df2-source-step > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-source-step > .df2-wizard-footer,
-.df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-validate-step > .df2-wizard-footer,
-.df2-page-transfer-studio .df2-validate-footer {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-validate-footer {
   max-height: none !important;
   flex-wrap: wrap !important;
   height: auto !important;
@@ -11816,11 +11821,11 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
 }
 
 @media (max-width: 1100px) {
-  .df2-app .df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
+  .df2-app .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-transfer-step-split {
     grid-template-columns: minmax(0, 1fr) !important;
   }
 
-  .df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary {
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-transfer-step-secondary {
     border-left: none !important;
     padding-left: 0 !important;
     border-top: 1px solid var(--df-border) !important;
@@ -11890,8 +11895,8 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   overflow-y: auto !important;
 }
 
-.df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-wizard-footer {
   flex: 0 0 auto !important;
   position: relative !important;
   z-index: 2 !important;
