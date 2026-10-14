@@ -95,6 +95,9 @@ class Tenant:
     mfa_required: bool = False
     session_timeout_hours: int = 8
     ip_allowlist: list[str] = field(default_factory=list)
+    # Connector egress. Empty means private ranges stay refused. This is not
+    # the inbound API allowlist, and it is not a deploy setting.
+    egress_allowlist: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
 
@@ -114,6 +117,7 @@ class Tenant:
             mfa_required=bool(data.get("mfa_required", False)),
             session_timeout_hours=int(data.get("session_timeout_hours", 8)),
             ip_allowlist=list(data.get("ip_allowlist", []) or []),
+            egress_allowlist=list(data.get("egress_allowlist", []) or []),
             created_at=data.get("created_at", _now()),
             updated_at=data.get("updated_at", _now()),
         )
@@ -138,6 +142,7 @@ def create_tenant(
     mfa_required: bool = False,
     session_timeout_hours: int = 8,
     ip_allowlist: list[str] | None = None,
+    egress_allowlist: list[str] | None = None,
 ) -> Tenant:
     """Create a new tenant bound to a workspace."""
     if custom_domain and get_tenant_by_domain(custom_domain):
@@ -158,6 +163,7 @@ def create_tenant(
         mfa_required=mfa_required,
         session_timeout_hours=max(1, min(24, int(session_timeout_hours))),
         ip_allowlist=_validate_allowlist(ip_allowlist or []),
+        egress_allowlist=_validate_egress_allowlist(egress_allowlist or []),
     )
     data["tenants"].append(tenant.to_dict())
     _save(data)
@@ -224,6 +230,8 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
                 raw["session_timeout_hours"] = max(1, min(24, int(kwargs["session_timeout_hours"])))
             if "ip_allowlist" in kwargs:
                 raw["ip_allowlist"] = _validate_allowlist(kwargs["ip_allowlist"])
+            if "egress_allowlist" in kwargs:
+                raw["egress_allowlist"] = _validate_egress_allowlist(kwargs["egress_allowlist"])
             raw["updated_at"] = _now()
             _save(data)
             return Tenant.from_dict(raw)
@@ -250,6 +258,20 @@ def _validate_region(region: str) -> str:
     if re.match(r"^[a-z0-9-]{2,32}$", r):
         return r
     raise ValueError(f"Unsupported data region: {region}")
+
+
+def _validate_egress_allowlist(entries: list[str]) -> list[str]:
+    """CIDRs a workspace may dial. Metadata and link-local cannot be listed."""
+    from services.egress_guard import egress_allowlist_error
+
+    cleaned = [str(e or "").strip() for e in entries if str(e or "").strip()]
+    reason = egress_allowlist_error(cleaned)
+    if reason:
+        raise ValueError(reason)
+    out: list[str] = []
+    for entry in cleaned:
+        out.append(str(ipaddress.ip_network(entry, strict=False)))
+    return out
 
 
 def _validate_allowlist(entries: list[str]) -> list[str]:

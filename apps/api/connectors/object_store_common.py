@@ -178,6 +178,33 @@ def object_staging_key(write_key: str) -> str:
     return f"{key}.__df_staging__"
 
 
+def refuse_empty_object_replace(
+    *,
+    rows_written: int,
+    live_exists: bool,
+    sync_mode: str,
+    key: str,
+) -> str | None:
+    """Why a 0-row export must not replace an object that already holds rows.
+
+    A quarantine replay that accepts nothing still serializes a header. Putting
+    that header on the live key deletes the rows that landed (R11-001). An
+    overwrite of a source that is actually empty may still replace. A missing
+    live key may be created.
+    """
+    if int(rows_written or 0) > 0 or not live_exists:
+        return None
+    from services.sync_cursor import is_overwrite_sync
+
+    if is_overwrite_sync(sync_mode):
+        return None
+    shown = key or "the live object"
+    return (
+        f"Refusing to replace {shown} with a header-only export "
+        f"({int(rows_written or 0)} data rows). The existing object was left untouched."
+    )
+
+
 def resolve_object_write_layout(
     *,
     table_name: str,

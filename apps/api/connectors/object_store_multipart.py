@@ -219,12 +219,117 @@ def land_object_store_export(
     part_size: int | None = None,
     **upload_kw: Any,
 ) -> None:
-    """Staging→live from one spool. Rewinds between puts. Does not close ``export``."""
+    """Upload staging, verify its size, then copy onto the live key.
+
+    The live key is not written until the staged object matches ``export.size``.
+    A failure before that copy returns leaves the live object untouched and
+    deletes the staging key. Does not close ``export``.
+    """
     common = dict(upload_kw)
     common.update(export=export, threshold=threshold, part_size=part_size)
-    upload_object_store_bytes(dialect, key=staging_key, **common)
-    export.rewind()
-    upload_object_store_bytes(dialect, key=live_key, **common)
+    expected = int(getattr(export, "size", 0) or 0)
+    try:
+        upload_object_store_bytes(dialect, key=staging_key, **common)
+        _promote_staged_object(
+            dialect,
+            staging_key=staging_key,
+            live_key=live_key,
+            expected_size=expected,
+            **upload_kw,
+        )
+    except Exception:
+        _delete_staged_object(dialect, staging_key, **upload_kw)
+        raise
+    _delete_staged_object(dialect, staging_key, **upload_kw)
+
+
+def _promote_staged_object(
+    dialect: str,
+    *,
+    staging_key: str,
+    live_key: str,
+    expected_size: int,
+    **upload_kw: Any,
+) -> None:
+    """Server-side copy of a verified staging object onto the live key."""
+    engine = (dialect or "").strip().lower()
+    if engine in {"minio", "amazon_s3"}:
+        engine = "s3"
+    if engine in {"gcp_storage", "google_cloud_storage"}:
+        engine = "gcs"
+    if engine in {"azure_blob", "azure_data_lake", "azure_datalake"}:
+        engine = "adls"
+    if engine == "s3":
+        client = upload_kw["client"]
+        bucket = upload_kw["bucket"]
+        head = client.head_object(Bucket=bucket, Key=staging_key)
+        size = int((head or {}).get("ContentLength", -1))
+        if size != expected_size:
+            raise RuntimeError(
+                f"S3 staging object {staging_key!r} is {size} bytes, expected {expected_size}"
+            )
+        client.copy_object(
+            Bucket=bucket,
+            Key=live_key,
+            CopySource={"Bucket": bucket, "Key": staging_key},
+            ContentType=str(upload_kw.get("content_type") or "application/octet-stream"),
+            MetadataDirective="REPLACE",
+        )
+        return
+    if engine == "gcs":
+        bucket_obj = upload_kw["bucket_obj"]
+        blob = bucket_obj.blob(staging_key)
+        if hasattr(blob, "reload"):
+            blob.reload()
+        size = int(getattr(blob, "size", -1) if getattr(blob, "size", None) is not None else -1)
+        if size != expected_size:
+            raise RuntimeError(
+                f"GCS staging object {staging_key!r} is {size} bytes, expected {expected_size}"
+            )
+        bucket_obj.copy_blob(blob, bucket_obj, live_key)
+        return
+    if engine == "adls":
+        factory = upload_kw["blob_client_factory"]
+        stage = factory(staging_key)
+        props = stage.get_blob_properties()
+        if isinstance(props, dict):
+            size = int(props.get("size", -1))
+        else:
+            size = int(getattr(props, "size", -1))
+        if size != expected_size:
+            raise RuntimeError(
+                f"ADLS staging object {staging_key!r} is {size} bytes, expected {expected_size}"
+            )
+        payload = stage.download_blob().readall()
+        if len(payload) != expected_size:
+            raise RuntimeError(
+                f"ADLS staging object {staging_key!r} read {len(payload)} bytes, expected {expected_size}"
+            )
+        live = factory(live_key)
+        content_type = str(upload_kw.get("content_type") or "application/octet-stream")
+        live.upload_blob(payload, overwrite=True, content_type=content_type)
+        return
+    raise ValueError(f"Unsupported object-store multipart dialect: {dialect!r}")
+
+
+def _delete_staged_object(dialect: str, staging_key: str, **upload_kw: Any) -> None:
+    """Best-effort removal of a staging key. Never raises."""
+    engine = (dialect or "").strip().lower()
+    if engine in {"minio", "amazon_s3"}:
+        engine = "s3"
+    if engine in {"gcp_storage", "google_cloud_storage"}:
+        engine = "gcs"
+    if engine in {"azure_blob", "azure_data_lake", "azure_datalake"}:
+        engine = "adls"
+    try:
+        if engine == "s3":
+            upload_kw["client"].delete_object(Bucket=upload_kw["bucket"], Key=staging_key)
+        elif engine == "gcs":
+            upload_kw["bucket_obj"].blob(staging_key).delete()
+        elif engine == "adls":
+            upload_kw["blob_client_factory"](staging_key).delete_blob()
+    except Exception:
+        return
 
 
 def _upload_s3_multipart(

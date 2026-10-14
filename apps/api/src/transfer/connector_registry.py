@@ -679,7 +679,13 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         surface="run_probe",
     ) as op:
         try:
-            result = _run_probe_impl(db_type, cfg)
+            from services.egress_guard import EgressRefused, pinned_egress
+
+            with pinned_egress(workspace_id=str(cfg.get("workspace_id") or "")):
+                result = _run_probe_impl(db_type, cfg)
+        except EgressRefused as exc:
+            op.failed(category="probe_failed")
+            return False, str(exc)
         except Exception as exc:
             op.errored(exc)
             return False, humanize_connection_error((db_type or "").lower(), exc)
@@ -702,6 +708,7 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         str(cfg.get("host") or ""),
         str(cfg.get("endpoint_url") or ""),
         str(cfg.get("connection_string") or ""),
+        workspace_id=str(cfg.get("workspace_id") or ""),
     )
     if refusal:
         return False, refusal

@@ -4257,6 +4257,7 @@ export type Tenant = {
   mfa_required: boolean;
   session_timeout_hours: number;
   ip_allowlist: string[];
+  egress_allowlist: string[];
   created_at: string;
   updated_at: string;
 };
@@ -4311,6 +4312,7 @@ export type SecurityPosture = {
   pii_detection: boolean;
   ip_allowlist_enabled: boolean;
   ip_allowlist_enforced?: boolean;
+  egress_allowlist_enabled?: boolean;
   mfa_required: boolean;
   mfa_enforced?: boolean;
   session_timeout_hours: number;

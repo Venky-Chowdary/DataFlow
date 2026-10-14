@@ -83,6 +83,9 @@ ENGINES: dict[str, dict[str, Any]] = {
         database=os.getenv("DATAFLOW_SQLSERVER_DATABASE") or "dataflow",
         username=os.getenv("DATAFLOW_SQLSERVER_USER") or "sa",
         password=os.getenv("DATAFLOW_SQLSERVER_PASSWORD") or "DataFlow_CDC_2022!",
+        # Driver 18 verifies the chain. The lab container presents a self-signed
+        # certificate; the same declaration the other live SQL Server proofs use.
+        trust_server_certificate=True,
     ),
 }
 

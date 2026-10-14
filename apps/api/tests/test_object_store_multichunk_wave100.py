@@ -87,13 +87,28 @@ def test_s3_writer_two_chunks_use_distinct_keys(monkeypatch):
     puts: list[str] = []
 
     class FakeClient:
+        def __init__(self):
+            self.bodies: dict[str, bytes] = {}
+
         def head_bucket(self, Bucket):  # noqa: N803
             return {}
 
         def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803
             puts.append(Key)
+            self.bodies[Key] = Body if isinstance(Body, bytes) else bytes(Body)
+
+        def head_object(self, Bucket, Key):  # noqa: N803
+            body = self.bodies[Key]
+            return {"ContentLength": len(body)}
+
+        def copy_object(self, **kwargs):
+            source = kwargs["CopySource"]["Key"]
+            dest = kwargs["Key"]
+            self.bodies[dest] = self.bodies[source]
+            puts.append(dest)
 
         def delete_object(self, Bucket, Key):  # noqa: N803
+            self.bodies.pop(Key, None)
             return {}
 
     monkeypatch.setattr(s3_writer, "boto3_client", lambda *a, **k: FakeClient())
@@ -298,6 +313,13 @@ def test_s3_append_rerun_writes_isolated_keys(monkeypatch):
 
         def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803
             store[Key] = Body if isinstance(Body, bytes) else str(Body).encode()
+
+        def head_object(self, Bucket, Key):  # noqa: N803
+            return {"ContentLength": len(store[Key])}
+
+        def copy_object(self, **kwargs):
+            source = kwargs["CopySource"]["Key"]
+            store[kwargs["Key"]] = store[source]
 
         def delete_object(self, Bucket, Key):  # noqa: N803
             store.pop(Key, None)
