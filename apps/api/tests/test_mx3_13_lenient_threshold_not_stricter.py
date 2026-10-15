@@ -27,10 +27,11 @@ def test_lenient_floor_is_not_stricter_than_balanced():
 
 def test_g11_reports_the_applied_mode_and_its_threshold():
     gate = _g11("lenient")
-    assert gate["details"]["validation_mode"] == "balanced"
+    assert gate["details"]["validation_mode"] == "lenient"
     assert gate["details"]["requested_validation_mode"] == "lenient"
     assert gate["details"]["confidence_threshold"] == 0.75
-    assert "runs as balanced" in gate["message"]
+    assert "lenient" in gate["message"]
+    assert "runs as balanced" not in gate["message"]
 
 
 def test_unknown_mode_still_fails_closed_to_strict_and_says_so():

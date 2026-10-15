@@ -935,6 +935,7 @@ def stream_spilled_file_to_database(
     source_filter: dict[str, Any] | None = None,
     skip_preflight: bool = False,
     shape_runner: Any = None,
+    duplicate_policy: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Stream a spilled object file to a database destination without loading it.
 
@@ -965,4 +966,5 @@ def stream_spilled_file_to_database(
         source_filter=source_filter,
         skip_preflight=skip_preflight,
         shape_runner=shape_runner,
+        duplicate_policy=duplicate_policy,
     )

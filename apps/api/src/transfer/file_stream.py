@@ -1229,6 +1229,7 @@ def stream_file_to_database(
     number_locale: str = "",
     read_options: ReadOptions | None = None,
     shape_runner: Any = None,
+    duplicate_policy: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -1398,6 +1399,19 @@ def stream_file_to_database(
         write_mode = "upsert"
     else:
         write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
+    from services.duplicate_policy import DuplicatePolicyError, resolve_duplicate_policy
+
+    try:
+        decision = resolve_duplicate_policy(
+            duplicate_policy=duplicate_policy,
+            sync_mode=effective_sync,
+            business_key=bool(pk_target_cols),
+            write_mode=write_mode,
+        )
+    except DuplicatePolicyError:
+        raise
+    if decision.explicit or decision.policy == "upsert" and write_mode == "insert":
+        write_mode = decision.write_mode
     if requires_upsert(effective_sync) and not pk_target_cols and not object_store:
         raise ValueError(
             f"Sync mode `{effective_sync}` requires primary_key for upsert; "
@@ -1447,7 +1461,10 @@ def stream_file_to_database(
     written = checkpoint.rows_processed or 0
     chunk_idx = checkpoint.chunk_index or 0
     resumed = chunk_idx > 0 or written > 0
-    dest_summary: dict[str, Any] = {}
+    dest_summary: dict[str, Any] = {
+        "duplicate_policy": decision.policy,
+        "duplicate_policy_reason": decision.reason,
+    }
     overwrite_keys_acc = begin_overwrite_source_keys(
         effective_sync, pk_target_cols, resumed=resumed
     )
@@ -1579,6 +1596,20 @@ def stream_file_to_database(
             )
             if reset_issue:
                 raise ValueError(reset_issue)
+
+    from services.file_pickup import file_upsert_rereads
+
+    if file_upsert_rereads(
+        sync_mode=effective_sync,
+        duplicate_policy=decision.policy,
+        already_loaded=bool(dest_summary.get("file_already_loaded")),
+        has_key=bool(pk_target_cols),
+    ):
+        # New file checksum: MERGE the whole file. A row watermark from the
+        # previous load would skip corrected rows that kept older timestamps.
+        watermark = None
+        incremental = False
+        dest_summary["file_change_reread"] = True
 
     pk_for_copy = ""
     if contract:

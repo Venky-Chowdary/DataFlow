@@ -168,6 +168,14 @@ class TransferRequest:
     # ``drift_connectivity`` rechecks only drift and connectivity on a signed contract.
     preflight_scope: str = ""
     parent_job_id: str = ""
+    # rerun_of is the parent job id when this run was started as a re-run.
+    rerun_of: str = ""
+    # upsert | dedupe_skip | append. Empty keeps the sync-mode default, and
+    # append-with-a-key does not insert duplicates unless this is ``append``.
+    duplicate_policy: str = ""
+    allow_duplicates: bool = False
+    # Seconds a scheduled file pattern waits for a new object. 0 fails at once.
+    file_wait_seconds: int = 0
     historical_resync: bool = False
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
@@ -467,6 +475,10 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         fk_risk_acknowledged=bool(data.get("fk_risk_acknowledged")),
         preflight_scope=str(data.get("preflight_scope") or "").strip(),
         parent_job_id=str(data.get("parent_job_id") or "").strip(),
+        rerun_of=str(data.get("rerun_of") or "").strip(),
+        duplicate_policy=str(data.get("duplicate_policy") or "").strip().lower(),
+        allow_duplicates=bool(data.get("allow_duplicates")),
+        file_wait_seconds=max(0, int(data.get("file_wait_seconds") or 0)),
         historical_resync=bool(data.get("historical_resync")),
         acknowledgment_actor=str(data.get("acknowledgment_actor") or "").strip(),
         acknowledgment_reason=str(data.get("acknowledgment_reason") or "").strip(),

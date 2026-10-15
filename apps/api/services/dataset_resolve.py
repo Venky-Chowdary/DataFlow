@@ -112,6 +112,19 @@ def pick_dataset(schemas: list[Any], hint: str | None) -> Any | None:
     if exact:
         return _prefer_measured(exact)
 
+    # ``QA_R4/pii3.csv`` is the object key. The catalog row is often just
+    # ``pii3.csv`` or a path that ends with that key.
+    base = folded.rsplit("/", 1)[-1]
+    if "/" in folded or base != folded:
+        path_hits = []
+        for schema in schemas:
+            name = _fold_name(getattr(schema, "name", ""))
+            path = str(getattr(schema, "path", "") or "").replace("\\", "/").lower()
+            if name == base or (path and (path.endswith("/" + folded) or path.endswith(folded) or path.endswith("/" + base))):
+                path_hits.append(schema)
+        if len({_fold_name(getattr(s, "name", "")) for s in path_hits}) == 1:
+            return _prefer_measured(path_hits)
+
     upload_hits: list[Any] = []
     for schema in schemas:
         if getattr(schema, "source", "") != "upload":

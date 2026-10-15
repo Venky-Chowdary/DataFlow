@@ -89,6 +89,9 @@ def get_connection(
     }
     if ssl or public_proxy:
         kwargs["ssl"] = {"ssl": {}}
+    from services.egress_guard import assert_connector_dial_allowed
+
+    assert_connector_dial_allowed(ep["host"], connection_string)
     try:
         conn = pymysql.connect(**kwargs)
     except Exception as exc:

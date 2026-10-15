@@ -714,18 +714,14 @@ async def retry_transfer_job(
                 job_id=job_id, workspace_id=job.get("workspace_id") or None,
                 reason="duplicate_risk",
             )
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": "Retry from start refused — it would duplicate committed rows",
-                    "reason": retry_decision["reason"],
-                    "rows_committed": rows_committed if rows_known else None,
-                    "rows_committed_known": rows_known,
-                    "primary_action": "resume",
-                    "resume_url": f"/api/v1/connectors/jobs/{job_id}/resume",
-                    "override": "Re-send with force=true to accept the duplicates.",
-                },
-            )
+            from services.execution_engine_contract import rerun_refusal_detail
+
+            detail = rerun_refusal_detail(retry_decision["reason"])
+            detail["rows_committed"] = rows_committed if rows_known else None
+            detail["rows_committed_known"] = rows_known
+            detail["primary_action"] = "resume"
+            detail["resume_url"] = f"/api/v1/connectors/jobs/{job_id}/resume"
+            raise HTTPException(status_code=409, detail=detail)
         # Retries from start also re-run preflight — never inherit skip_preflight.
         xfer_req.skip_preflight = False
         engine = get_transfer_engine()
@@ -822,9 +818,9 @@ async def rerun_transfer_job(
             )
 
         from services.execution_engine_contract import (
-            append_rerun_refusal_error,
             committed_rows_of,
             decide_job_rerun,
+            rerun_refusal_detail,
         )
 
         rows_committed, rows_known = committed_rows_of(job)
@@ -835,16 +831,10 @@ async def rerun_transfer_job(
             rows_committed_known=rows_known,
         )
         if not decision["allowed"] and not force:
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": append_rerun_refusal_error(decision["reason"]),
-                    "reason": decision["reason"],
-                    "rows_committed": rows_committed if rows_known else None,
-                    "rows_committed_known": rows_known,
-                    "override": "Re-send with force=true to accept duplicate append rows.",
-                },
-            )
+            detail = rerun_refusal_detail(decision["reason"])
+            detail["rows_committed"] = rows_committed if rows_known else None
+            detail["rows_committed_known"] = rows_known
+            raise HTTPException(status_code=409, detail=detail)
         xfer_req.skip_preflight = False
         engine = get_transfer_engine()
         new_job_id = engine._create_pending_job(xfer_req)
@@ -1685,6 +1675,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         open_quarantine_details,
         quarantine_sample_incomplete,
         record_replay,
+        overlay_cell_edit,
         replay_row_identity,
         restore_replay_source_cells,
         snapshot_quarantine_cells,
@@ -1724,7 +1715,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             columns = list(dict.fromkeys(k for r in records for k in r))
         else:
             details = [
-                d for d in body.rows
+                overlay_cell_edit(d, durable)
+                for d in body.rows
                 if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
             ]
     else:
@@ -1895,6 +1887,11 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             backfill_new_fields=bool(transfer_req.backfill_new_fields),
             write_mode=write_mode,
             conflict_columns=conflict_columns or None,
+            # Replay is a keyed upsert of the remediated rows. It is never a
+            # full-refresh overwrite, and a failure must not replace an object
+            # that already landed (R11-001).
+            sync_mode="incremental_deduped",
+            protect_landed_object=True,
         )
         rejected = int(dest_summary.get("rejected_rows") or 0)
         # Gate-8 on the child job — Airbyte-class post-write integrity (count +

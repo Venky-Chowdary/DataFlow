@@ -217,6 +217,22 @@ _RERUN_STATUSES = frozenset({
 })
 
 
+def rerun_refusal_detail(reason: str) -> dict[str, str]:
+    """409 body for a refused append re-run.
+
+    ``error`` and ``message`` are the same sentence. A client that reads only
+    one of those fields still sees why the append was refused and how to
+    override it (R12-001).
+    """
+    text = append_rerun_refusal_error(reason)
+    return {
+        "error": text,
+        "message": text,
+        "reason": (reason or text).strip(),
+        "override": "Re-send with force=true to accept duplicate append rows.",
+    }
+
+
 def append_rerun_refusal_error(reason: str) -> str:
     """Operator text for a refused append re-run.
 

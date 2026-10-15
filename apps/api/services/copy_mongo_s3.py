@@ -32,8 +32,7 @@ from services.copy_mongo_sink import bson_to_python
 from services.copy_pg_mongo import mongo_collection
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_s3_common import (
-    s3_bucket,
-    s3_client,
+    commit_local_object,
     s3_delete_keys,
     s3_dest_count,
     s3_ensure_bucket,
@@ -145,9 +144,7 @@ def copy_mongo_to_s3(
                 "(identity COPY would duplicate)"
             )
 
-        if replace_destination:
-            s3_delete_keys(dest_cfg, s3_list_keys(dest_cfg, dest_table))
-        created_here = dest_count_before == 0 or replace_destination
+        created_here = dest_count_before == 0
 
         projection: dict[str, int] = {c: 1 for c in source_cols}
         if "_id" not in {c.lower() for c in source_cols}:
@@ -167,7 +164,7 @@ def copy_mongo_to_s3(
                 "MongoDB→S3 COPY refused: CSV rows "
                 f"{csv_rows} != source snapshot {source_count}"
             )
-        s3_client(dest_cfg).upload_file(tmp_path, s3_bucket(dest_cfg), dest_table)
+        commit_local_object(dest_cfg, dest_table, tmp_path)
         dest_count = s3_dest_count(dest_cfg, dest_table)
         if dest_count != source_count:
             raise ValueError(

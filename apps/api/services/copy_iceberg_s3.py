@@ -40,8 +40,7 @@ from services.copy_iceberg_pg import (
 from services.copy_pg_iceberg import iceberg_copy_endpoint
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_s3_common import (
-    s3_bucket,
-    s3_client,
+    commit_local_object,
     s3_delete_keys,
     s3_dest_count,
     s3_ensure_bucket,
@@ -166,9 +165,7 @@ def copy_iceberg_to_s3(
                 "(identity COPY would duplicate)"
             )
 
-        if replace_destination:
-            s3_delete_keys(dest_cfg, s3_list_keys(dest_cfg, dest_table))
-        created_here = dest_count_before == 0 or replace_destination
+        created_here = dest_count_before == 0
 
         pa_table = _arrow_from_iceberg_files(endpoint, source_cols)
         if len(pa_table) != source_count:
@@ -188,8 +185,7 @@ def copy_iceberg_to_s3(
                 "Iceberg→S3 COPY refused: CSV rows "
                 f"{csv_rows} != source footer COUNT {source_count}"
             )
-        client = s3_client(dest_cfg)
-        client.upload_file(tmp_path, s3_bucket(dest_cfg), dest_table)
+        commit_local_object(dest_cfg, dest_table, tmp_path)
         dest_count = s3_dest_count(dest_cfg, dest_table)
         if dest_count != source_count:
             raise ValueError(

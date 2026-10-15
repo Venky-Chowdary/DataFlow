@@ -23,7 +23,7 @@ import socket
 import threading
 import urllib.parse
 from contextlib import contextmanager
-from typing import Iterator, Sequence
+from typing import Any, Iterator, Sequence
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
@@ -283,6 +283,25 @@ def host_is_blocked(host: str) -> bool:
     return classify_host(host, allowlist=(), fail_closed_dns=True) is not None
 
 
+def assert_connector_dial_allowed(
+    *values: str,
+    allowlist: Sequence[str] | None = None,
+    workspace_id: str = "",
+) -> None:
+    """Raise ``EgressRefused`` before a driver dials a blocked address.
+
+    Literal private, loopback, link-local, and CGNAT addresses are refused
+    here so a C client (libpq, ODBC) cannot time out on them. Names are
+    resolved; an unresolved name is left to :func:`pinned_egress`, which
+    fail-closes at connect.
+    """
+    refusal = metadata_endpoint_refusal(
+        *values, allowlist=allowlist, workspace_id=workspace_id
+    )
+    if refusal:
+        raise EgressRefused(refusal)
+
+
 def metadata_endpoint_refusal(
     *values: str,
     allowlist: Sequence[str] | None = None,
@@ -425,6 +444,47 @@ def pinned_egress(
     """
     with _PIN_LOCK:
         real = socket.getaddrinfo
+        real_connect = socket.socket.connect
+        real_connect_ex = socket.socket.connect_ex
+
+        def _refuse_sockaddr(address: Any) -> None:
+            host = ""
+            if isinstance(address, tuple) and address:
+                host = str(address[0] or "")
+            elif isinstance(address, str):
+                host = address
+            shown = _normalize_host(host)
+            if not shown or "://" in shown or shown.startswith(("/", "\\")):
+                return
+            if _name_is_non_overridable(shown):
+                raise EgressRefused(_refusal_text(shown, "cloud metadata and link-local"))
+            try:
+                literal = ipaddress.ip_address(shown)
+            except ValueError:
+                literal = None
+            nets = _configured_networks(allowlist, workspace_id)
+            if literal is not None:
+                phrase = _ip_refusal_phrase(literal, nets)
+                if phrase:
+                    raise EgressRefused(_refusal_text(shown, phrase))
+                return
+            try:
+                infos = real(shown, None)
+            except OSError as exc:
+                raise EgressRefused(
+                    _refusal_text(shown, "DNS did not resolve to a public address")
+                ) from exc
+            phrase = _phrase_for_infos(infos, allowlist=allowlist, workspace_id=workspace_id)
+            if phrase:
+                raise EgressRefused(_refusal_text(shown, phrase))
+
+        def guarded_connect(self, address):
+            _refuse_sockaddr(address)
+            return real_connect(self, address)
+
+        def guarded_connect_ex(self, address):
+            _refuse_sockaddr(address)
+            return real_connect_ex(self, address)
 
         def guarded(host, port, *args, **kwargs):
             if host is None or str(host) == "":
@@ -459,7 +519,11 @@ def pinned_egress(
             return infos
 
         socket.getaddrinfo = guarded
+        socket.socket.connect = guarded_connect
+        socket.socket.connect_ex = guarded_connect_ex
         try:
             yield
         finally:
             socket.getaddrinfo = real
+            socket.socket.connect = real_connect
+            socket.socket.connect_ex = real_connect_ex

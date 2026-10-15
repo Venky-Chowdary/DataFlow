@@ -1388,6 +1388,26 @@ def write_destination_database(
             clear_records=release_records,
         )
         options["source_spool"] = spill.spool
+    from services.duplicate_policy import (
+        reset_match_action,
+        resolve_duplicate_policy,
+        set_match_action,
+    )
+
+    extra = getattr(endpoint, "extra", None) or {}
+    decided = resolve_duplicate_policy(
+        duplicate_policy=str(options.get("duplicate_policy") or extra.get("duplicate_policy") or ""),
+        allow_duplicates=bool(options.get("allow_duplicates") or extra.get("allow_duplicates")),
+        sync_mode=str(options.get("sync_mode") or ""),
+        business_key=bool(conflict_columns),
+        write_mode=write_mode,
+    )
+    if decided.explicit or (
+        decided.policy == "upsert" and write_mode == "insert" and conflict_columns
+    ):
+        write_mode = decided.write_mode
+        options["write_mode"] = decided.write_mode
+    match_token = set_match_action(decided.match_action)
     try:
         # The Map governs holdouts for the whole write, including the bind and
         # salvage paths that stamp their own details.
@@ -1402,9 +1422,11 @@ def write_destination_database(
             if isinstance(summary, dict):
                 summary["dest_procedure_after"] = dest_plan.after_spec.identifier
     except Exception:
+        reset_match_action(match_token)
         if spill is not None:
             spill.close()
         raise
+    reset_match_action(match_token)
     if rows_before is not None and isinstance(summary, dict):
         summary.setdefault(PRECOUNT_KEY, int(rows_before))
     if census_payload is not None and isinstance(summary, dict):
@@ -1487,6 +1509,7 @@ def _write_destination_database(
     sync_mode: str = "",
     source_spool: Any = None,
     allow_equal_lsn: bool = False,
+    protect_landed_object: bool = False,
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
 
@@ -1571,6 +1594,7 @@ def _write_destination_database(
         "file_batch_idx": 0,
         "skip_preflight": skip_preflight,
         "sync_mode": sync_mode,
+        "protect_landed_object": protect_landed_object,
         # Live dest nullability for write-time NOT NULL escalate (G3 parity).
         "destination_column_nullability": dict(
             (cfg.get("extra") or {}).get("schema_nullability")

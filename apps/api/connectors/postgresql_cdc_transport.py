@@ -225,9 +225,16 @@ class StreamingReplicationTransport:
         import psycopg2
         from psycopg2.extras import LogicalReplicationConnection
 
+        from services.egress_guard import assert_connector_dial_allowed
+
+        dial = {k: v for k, v in self.dsn_kwargs.items() if v is not None}
+        assert_connector_dial_allowed(
+            str(dial.get("host") or ""),
+            str(dial.get("dsn") or dial.get("connection_string") or ""),
+        )
         conn = psycopg2.connect(
             connection_factory=LogicalReplicationConnection,
-            **{k: v for k, v in self.dsn_kwargs.items() if v is not None},
+            **dial,
         )
         cur = conn.cursor()
         pgoutput = self.output_plugin == "pgoutput"

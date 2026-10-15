@@ -85,6 +85,8 @@ _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _NULL_SENTINEL = "\x00NULL\x00"
+# SQL / CSV scale padding: one dot, digits only. Not ``1,000`` and not ``1.000.000``.
+_PLAIN_SQL_DECIMAL_RE = re.compile(r"^[+-]?(?:\d+\.\d+|\d+\.|\.\d+)$")
 
 
 def _looks_like_numeric_wire(text: str) -> bool:
@@ -4004,6 +4006,17 @@ def fingerprint_for_reconcile(
     return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
 
 
+def operator_cell_text(fingerprint: str) -> str:
+    """Operator spelling of a fingerprint. The internal null marker stays internal.
+
+    Gate-8 compares ``\\x00NULL\\x00``. A read-back or mismatch the operator
+    sees says ``null``, which is distinct from an empty string (R7-001).
+    """
+    if fingerprint == _NULL_SENTINEL:
+        return "null"
+    return fingerprint
+
+
 def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     """Canonical cell text for Gate-8 checksums.
 
@@ -4325,9 +4338,19 @@ def _canonicalize_number(value: Any) -> str | None:
             finally:
                 reset_active_number_locale(token)
             if parsed is None:
-                # Write path refused (Auto ``1,234`` / ``1.234`` / ``1.000``).
-                # Decimal(text) invented a different number (``1.000`` → ``1``).
-                return None
+                # Auto refuses a lone 3-digit group (``1.000`` could be 1 or
+                # 1000). SQL COPY and CSV scale padding are a single dot and
+                # no thousands comma — the same number a typed Decimal
+                # fingerprints after trailing zeros are stripped. Without
+                # this, Postgres ``NUMERIC`` ``1.500`` checksums as ``1.5``
+                # and the S3 read-back stays ``1.500`` (R7-001, ~99%).
+                if _PLAIN_SQL_DECIMAL_RE.match(text):
+                    try:
+                        parsed = Decimal(text)
+                    except (InvalidOperation, Overflow, ValueError):
+                        parsed = None
+                if parsed is None:
+                    return None
             d = parsed
             # String form of float residue (common from Excel/CSV readers).
             if d.is_finite() and ("." in text or "e" in text.lower() or "," in text):
@@ -4978,8 +5001,8 @@ def sample_compare_rows(
                         "row": str(idx),
                         "source": src_col,
                         "target": tgt_col,
-                        "source_value": src_val[:120],
-                        "target_value": tgt_val[:120],
+                        "source_value": operator_cell_text(src_val)[:120],
+                        "target_value": operator_cell_text(tgt_val)[:120],
                     }
                 )
                 if len(mismatches) >= 10:

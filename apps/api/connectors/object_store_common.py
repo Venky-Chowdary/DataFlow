@@ -184,20 +184,24 @@ def refuse_empty_object_replace(
     live_exists: bool,
     sync_mode: str,
     key: str,
+    allow_empty_replace: bool = False,
+    protect_landed_object: bool = False,
 ) -> str | None:
     """Why a 0-row export must not replace an object that already holds rows.
 
     A quarantine replay that accepts nothing still serializes a header. Putting
-    that header on the live key deletes the rows that landed (R11-001). An
-    overwrite of a source that is actually empty may still replace. A missing
-    live key may be created.
+    that header on the live key deletes the rows that landed (R11-001). A
+    measured empty overwrite may still replace. A replay sets
+    ``protect_landed_object`` and is never that overwrite. A missing live key
+    may be created.
     """
     if int(rows_written or 0) > 0 or not live_exists:
         return None
-    from services.sync_cursor import is_overwrite_sync
+    if not protect_landed_object:
+        from services.sync_cursor import is_overwrite_sync
 
-    if is_overwrite_sync(sync_mode):
-        return None
+        if allow_empty_replace or is_overwrite_sync(sync_mode):
+            return None
     shown = key or "the live object"
     return (
         f"Refusing to replace {shown} with a header-only export "

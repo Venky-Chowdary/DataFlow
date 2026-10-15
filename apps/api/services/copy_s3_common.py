@@ -133,6 +133,45 @@ def s3_delete_keys(cfg: dict[str, Any], keys: list[str]) -> None:
             continue
 
 
+def commit_local_object(cfg: dict[str, Any], live_key: str, local_path: str) -> None:
+    """Upload ``local_path`` to a staging key, then copy it onto ``live_key``.
+
+    The live object is not deleted first. A failure before the copy leaves it
+    untouched and removes only the staging key (R11-001).
+    """
+    import os
+
+    from connectors.object_store_common import object_staging_key
+
+    client = s3_client(cfg)
+    bucket = s3_bucket(cfg)
+    staging = object_staging_key(live_key)
+    expected = os.path.getsize(local_path)
+    try:
+        client.upload_file(local_path, bucket, staging)
+        head = client.head_object(Bucket=bucket, Key=staging)
+        size = int((head or {}).get("ContentLength", -1))
+        if size != expected:
+            raise RuntimeError(
+                f"S3 staging object {staging!r} is {size} bytes, expected {expected}"
+            )
+        client.copy_object(
+            Bucket=bucket,
+            Key=live_key,
+            CopySource={"Bucket": bucket, "Key": staging},
+        )
+    except Exception:
+        try:
+            client.delete_object(Bucket=bucket, Key=staging)
+        except Exception:
+            pass
+        raise
+    try:
+        client.delete_object(Bucket=bucket, Key=staging)
+    except Exception:
+        pass
+
+
 def s3_ensure_bucket(cfg: dict[str, Any]) -> None:
     from connectors.s3_writer import _ensure_bucket
 

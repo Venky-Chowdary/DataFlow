@@ -253,12 +253,19 @@ def test_postgres_null_csv_readback_is_not_an_empty_string():
     assert mat.rows_written == 2
     body = mat.export.read_all()
     mat.export.close()
+    text = body.decode("utf-8")
     rows = list(iter_csv_dicts(body))
-    assert SQL_NULL_SENTINEL in body.decode("utf-8")
+    assert SQL_NULL_SENTINEL in text
+    assert "\x00NULL\x00" not in text
+    assert rows[0]["name"] == SQL_NULL_SENTINEL
+    assert rows[1]["name"] == ""
     source_null = fingerprint_for_reconcile(None, ddl_type="TEXT", engine="postgresql")
     dest_null = fingerprint_for_reconcile(rows[0]["name"], ddl_type="TEXT", engine="s3")
     dest_empty = fingerprint_for_reconcile(rows[1]["name"], ddl_type="TEXT", engine="s3")
-    assert source_null == "\x00NULL\x00"
+    from services.reconciliation import operator_cell_text
+
+    assert operator_cell_text(source_null) == "null"
+    assert "\x00" not in operator_cell_text(source_null)
     assert dest_null == source_null
     assert dest_empty == ""
     assert dest_empty != dest_null

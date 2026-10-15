@@ -303,6 +303,14 @@ def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""
 
     source = _endpoint_from_connector(src, sched.source_table)
     destination = _endpoint_from_connector(dst, sched.dest_table)
+    src_extra = dict(getattr(source, "extra", None) or {})
+    src_extra["file_wait_seconds"] = int(getattr(sched, "file_wait_seconds", 0) or 0)
+    src_extra["duplicate_policy"] = str(getattr(sched, "duplicate_policy", "") or "")
+    source.extra = src_extra
+    dst_extra = dict(getattr(destination, "extra", None) or {})
+    if src_extra["duplicate_policy"]:
+        dst_extra["duplicate_policy"] = src_extra["duplicate_policy"]
+        destination.extra = dst_extra
     _apply_callable_schedule_source(source, sched)
     from services.schedule_cdc_extras import apply_cdc_schedule_extras
 
@@ -1182,6 +1190,22 @@ def _open_finding(
         logger.exception("Schedule %s could not be parked on a decision", schedule_id)
 
 
+def _abandon_unclaimed_schedule_job(job_id: str) -> None:
+    """A pending job that lost the schedule claim must not stay runnable."""
+    if not str(job_id or "").strip():
+        return
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        get_mongodb_service().update_job_status(
+            job_id,
+            "cancelled",
+            message="Schedule claim was already held; this attempt was not started.",
+        )
+    except Exception:
+        logger.debug("unclaimed schedule job %s was not cancelled", job_id, exc_info=True)
+
+
 def _record_authorization_use(schedule_id: str, *, rebind: bool = False) -> None:
     from services.schedule_approvals import record_authorization_use
 
@@ -1247,11 +1271,69 @@ def _dispatch_transfer(
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request)
     started_at = datetime.now(timezone.utc)
-    from services.schedule_store import set_running_job
+    from services.schedule_store import (
+        _CLAIM_LOCK,
+        describe_claim_holder,
+        get_schedule as _reload_schedule,
+        last_claim_refusal,
+        mark_schedule_running,
+        set_running_job,
+    )
 
-    # Bind the claim to this job so a long migration keeps it and a crashed one
-    # gives it back, instead of both being judged by the same wall clock.
-    set_running_job(schedule_id, job_id)
+    # The job id is part of the claim write. A follow-up update left a window
+    # where the job existed and Run now still said "no job bound yet" (R14-001).
+    with _CLAIM_LOCK:
+        current = _reload_schedule(schedule_id)
+        already = str(getattr(current, "running_job_id", "") or "").strip() if current else ""
+        running = bool(getattr(current, "running", False)) if current else False
+        if running and already and already != job_id:
+            _abandon_unclaimed_schedule_job(job_id)
+            holder = last_claim_refusal(schedule_id) or {
+                "kind": "this_schedule",
+                "schedule_id": schedule_id,
+                "schedule_name": getattr(current, "name", "") or schedule_id,
+                "job_id": already,
+                "running_since": current.running_started_at,
+            }
+            if not str(holder.get("job_id") or ""):
+                holder = {**holder, "job_id": already}
+            raise ScheduleStartError(
+                describe_claim_holder(holder),
+                http_status=409,
+                code="already_running",
+            )
+        if running and not already:
+            # This process already took the claim, then created the job. Bind
+            # that id in this same locked section.
+            set_running_job(schedule_id, job_id)
+        elif not (running and already == job_id):
+            claimed = mark_schedule_running(
+                schedule_id, _scheduler_instance_id(), job_id
+            )
+            if claimed is None:
+                fresh = _reload_schedule(schedule_id)
+                bound = str(getattr(fresh, "running_job_id", "") or "") if fresh else ""
+                fresh_running = bool(getattr(fresh, "running", False)) if fresh else False
+                if fresh_running and bound and bound != job_id:
+                    _abandon_unclaimed_schedule_job(job_id)
+                    holder = last_claim_refusal(schedule_id) or {}
+                    if not str(holder.get("job_id") or ""):
+                        holder = {
+                            **holder,
+                            "kind": holder.get("kind") or "this_schedule",
+                            "schedule_id": schedule_id,
+                            "schedule_name": getattr(fresh, "name", "") or schedule_id,
+                            "job_id": bound,
+                            "running_since": getattr(fresh, "running_started_at", None),
+                        }
+                    raise ScheduleStartError(
+                        describe_claim_holder(holder),
+                        http_status=409,
+                        code="already_running",
+                    )
+                # No durable schedule (direct dispatch tests) or the claim was
+                # not stored. Keep the job the caller just created.
+                set_running_job(schedule_id, job_id)
     if request.acknowledgment_actor or authorized_drift:
         # Delegated authority was exercised, and only now that a run actually
         # exists to exercise it: counting earlier would spend a single-use
@@ -1380,56 +1462,73 @@ def _run_schedule(
             sched = get_schedule(schedule_id) or sched
 
     # Concurrency guard: refuse to start when this schedule or another writer
-    # on the same dest object is already live.
+    # on the same dest object is already live. The lock is held until the new
+    # job id is on the claim, so a second Run now cannot observe the gap.
     from services.schedule_store import (
+        _CLAIM_LOCK,
         describe_claim_holder,
         dispatch_in_flight,
+        get_schedule as _reload_schedule,
         last_claim_refusal,
     )
 
-    if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
-        holder = last_claim_refusal(schedule_id)
-        detail = describe_claim_holder(holder)
-        _note_claim_blocked(schedule_id, holder, detail)
-        if manual:
-            raise ScheduleStartError(
-                detail,
-                http_status=409,
-                code="already_running",
-            )
-        return None
-    _clear_claim_backoff(schedule_id)
+    with _CLAIM_LOCK:
+        if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
+            holder = last_claim_refusal(schedule_id) or {}
+            fresh = _reload_schedule(schedule_id)
+            bound = str(getattr(fresh, "running_job_id", "") or "") if fresh else ""
+            if bound and not str(holder.get("job_id") or ""):
+                holder = {
+                    **holder,
+                    "kind": holder.get("kind") or "this_schedule",
+                    "schedule_id": schedule_id,
+                    "schedule_name": getattr(fresh, "name", "") or schedule_id,
+                    "job_id": bound,
+                    "running_since": getattr(fresh, "running_started_at", None),
+                }
+            detail = describe_claim_holder(holder)
+            _note_claim_blocked(schedule_id, holder, detail)
+            if manual:
+                raise ScheduleStartError(
+                    detail,
+                    http_status=409,
+                    code="already_running",
+                )
+            return None
+        _clear_claim_backoff(schedule_id)
 
-    # A parked retry resumes its own attempt count; the budget is per run, not
-    # per beat, or a schedule that fails every time retries forever.
-    try:
-        with dispatch_in_flight(schedule_id):
-            job_id = _dispatch_transfer(
+        # A parked retry resumes its own attempt count; the budget is per run, not
+        # per beat, or a schedule that fails every time retries forever.
+        try:
+            with dispatch_in_flight(schedule_id):
+                job_id = _dispatch_transfer(
+                    schedule_id,
+                    attempt=sched.retry_attempt if sched.retry_at else 0,
+                    allow_paused=manual,
+                    resync_mode=resync_mode,
+                )
+        except ScheduleStartError:
+            raise
+        except Exception:
+            # Nothing was submitted, so nothing is writing. Holding the claim for
+            # the unbound grace made every beat skip the schedule and Run now
+            # answer "already in progress" with no running job (QA MX3-24).
+            logger.exception(
+                "Schedule %s dispatch raised after its claim was taken; releasing the claim",
                 schedule_id,
-                attempt=sched.retry_attempt if sched.retry_at else 0,
-                allow_paused=manual,
-                resync_mode=resync_mode,
             )
-    except Exception:
-        # Nothing was submitted, so nothing is writing. Holding the claim for
-        # the unbound grace made every beat skip the schedule and Run now
-        # answer "already in progress" with no running job (QA MX3-24).
-        logger.exception(
-            "Schedule %s dispatch raised after its claim was taken; releasing the claim",
-            schedule_id,
-        )
-        clear_schedule_running(schedule_id)
-        raise
-    if job_id is None:
-        # Fail-closed paths (missing connector / contract) already call
-        # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.
-        clear_schedule_running(schedule_id)
-        if manual:
-            raise ScheduleStartError(
-                _manual_start_failure_detail(get_schedule(schedule_id)),
-                code="start_refused",
-            )
-    return job_id
+            clear_schedule_running(schedule_id)
+            raise
+        if job_id is None:
+            # Fail-closed paths (missing connector / contract) already call
+            # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.
+            clear_schedule_running(schedule_id)
+            if manual:
+                raise ScheduleStartError(
+                    _manual_start_failure_detail(get_schedule(schedule_id)),
+                    code="start_refused",
+                )
+        return job_id
 
 
 def _release_superseded_queued_claims() -> None:

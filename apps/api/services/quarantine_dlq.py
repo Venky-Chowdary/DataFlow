@@ -585,6 +585,55 @@ def is_open_retry_status(status: str | None) -> bool:
     return str(status or "open").strip().lower() in RETRY_OPEN_STATUSES
 
 
+def overlay_cell_edit(posted: dict[str, Any], durable: list[dict[str, Any]]) -> dict[str, Any]:
+    """Apply a one-cell edit onto the stored full source row.
+
+    The drawer posts ``{row, column, value}``. Replaying that scrap alone
+    is 1 of N mapped columns and used to be refused. The ledger already
+    holds ``source_values`` / ``values`` for the original record.
+    """
+    import copy
+
+    if not isinstance(posted, dict):
+        return posted
+    base = None
+    ident = replay_row_identity(posted)
+    for row in durable or []:
+        if isinstance(row, dict) and replay_row_identity(row) == ident:
+            base = row
+            break
+    if base is None:
+        try:
+            want = int(posted.get("row") or 0)
+        except (TypeError, ValueError):
+            want = 0
+        if want:
+            for row in durable or []:
+                if isinstance(row, dict) and int(row.get("row") or 0) == want:
+                    base = row
+                    break
+    if base is None:
+        return posted
+    merged = copy.deepcopy(base)
+    col = str(posted.get("column") or posted.get("target") or "").strip()
+    if col and "value" in posted:
+        merged["column"] = col
+        merged["value"] = posted["value"]
+        for bag_name in ("values", "source_values", "target_values"):
+            bag = merged.get(bag_name)
+            if isinstance(bag, dict):
+                bag[col] = posted["value"]
+    for bag_name in ("values", "source_values"):
+        edit_bag = posted.get(bag_name)
+        if isinstance(edit_bag, dict):
+            current = merged.get(bag_name)
+            if not isinstance(current, dict):
+                current = {}
+                merged[bag_name] = current
+            current.update(edit_bag)
+    return merged
+
+
 def open_quarantine_details(
     details: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:

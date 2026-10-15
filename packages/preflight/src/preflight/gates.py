@@ -615,6 +615,40 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             duration_ms=(time.perf_counter() - start) * 1000,
         )
 
+    source_kind = ""
+    try:
+        source_kind = (ctx.plan.source.db_type or "").lower()
+    except Exception:
+        source_kind = ""
+    mode = (getattr(ctx.plan, "validation_mode", "") or "strict").strip().lower()
+    # A lenient S3→S3 (or other object-store) file copy moves bytes. Cell
+    # values are not a schema contract, and g3 must not block the copy on a
+    # declared coercion (R8-003). Strict and database routes still type-check.
+    if (
+        mode == "lenient"
+        and object_store_put_creates_key(source_kind)
+        and object_store_put_creates_key(dest_kind)
+    ):
+        return _pass(
+            GateId.G3_SCHEMA_CONTRACT,
+            "Object-store file copy — cell values are not type-checked",
+            start,
+            _with_scope(
+                {
+                    "object_store_copy": True,
+                    "validation_mode": mode,
+                    "source_kind": source_kind,
+                    "dest_kind": dest_kind,
+                    "rule_id": "g3_schema_contract.object_store_copy",
+                },
+                evidence_scope(
+                    kind="schema_contract",
+                    coverage="n/a",
+                    note="Lenient object-store copy does not cast cell values",
+                ),
+            ),
+        )
+
     try:
         from services.type_system import (
             blocking_string_width_narrowing,

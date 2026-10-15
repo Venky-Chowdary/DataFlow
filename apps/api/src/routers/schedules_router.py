@@ -112,6 +112,8 @@ class ScheduleCreate(BaseModel):
     notify_on_failure: bool = True
     notify_on_success: bool = False
     enabled: bool = True
+    file_wait_seconds: int = Field(default=0, ge=0, le=86400)
+    duplicate_policy: str = ""
     #: Inbox → Studio footer: persist mappings onto this draft instead of a new row.
     replay_schedule_id: str = ""
 

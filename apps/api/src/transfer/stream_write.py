@@ -144,6 +144,25 @@ def _write_batch(
         source_handoff["records"] = records
     if allow_equal_lsn:
         source_handoff["allow_equal_lsn"] = True
+    from services.duplicate_policy import (
+        reset_match_action,
+        resolve_duplicate_policy,
+        set_match_action,
+    )
+
+    try:
+        decided = resolve_duplicate_policy(
+            duplicate_policy=str((getattr(dest, "extra", None) or {}).get("duplicate_policy") or ""),
+            allow_duplicates=bool((getattr(dest, "extra", None) or {}).get("allow_duplicates")),
+            sync_mode=sync_mode,
+            business_key=bool(conflict_columns),
+            write_mode=write_mode,
+        )
+    except Exception:
+        decided = None
+    if decided is not None and (decided.explicit or (decided.policy == "upsert" and write_mode == "insert" and conflict_columns)):
+        write_mode = decided.write_mode
+    match_token = set_match_action(decided.match_action if decided else "update")
     from services.sync_cursor import is_overwrite_sync
 
     # Overwrite rebuilds the table from one source snapshot, so the source key
@@ -211,6 +230,9 @@ def _write_batch(
             "driver": result.driver,
             **_writer_diagnostics(result),
         }
+        from services.duplicate_policy import reset_match_action
+
+        reset_match_action(match_token)
         return result.rows_written, result.checksum, summary
 
     if dest_type == "mysql":
@@ -263,6 +285,9 @@ def _write_batch(
             "driver": result.driver,
             **_writer_diagnostics(result),
         }
+        from services.duplicate_policy import reset_match_action
+
+        reset_match_action(match_token)
         return result.rows_written, result.checksum, summary
 
     if dest_type == "mongodb":
@@ -301,6 +326,9 @@ def _write_batch(
             "driver": result.driver,
             **_writer_diagnostics(result),
         }
+        from services.duplicate_policy import reset_match_action
+
+        reset_match_action(match_token)
         return result.rows_written, result.checksum, summary
 
     if dest_type == "sqlite":
@@ -355,6 +383,9 @@ def _write_batch(
             "driver": result.driver,
             **_writer_diagnostics(result),
         }
+        from services.duplicate_policy import reset_match_action
+
+        reset_match_action(match_token)
         return result.rows_written, result.checksum, summary
 
     if dest_type == "snowflake":
@@ -394,6 +425,9 @@ def _write_batch(
             _raise_write_failure(result, "Snowflake batch write failed")
         summary = {"type": "snowflake", "schema": result.target_schema, "table": result.table_name,
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
+        from services.duplicate_policy import reset_match_action
+
+        reset_match_action(match_token)
         return result.rows_written, result.checksum, summary
 
     if dest_type == "bigquery":
@@ -430,6 +464,9 @@ def _write_batch(
             _raise_write_failure(result, "BigQuery batch write failed")
         summary = {"type": "bigquery", "dataset": result.target_schema, "table": result.table_name,
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
+        from services.duplicate_policy import reset_match_action
+
+        reset_match_action(match_token)
         return result.rows_written, result.checksum, summary
 
     if dest_type in ("s3", "gcs", "adls", "dynamodb", "elasticsearch", "redis", "pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
@@ -542,6 +579,9 @@ def _write_batch(
         name_field = "key" if dest_type in ("s3", "gcs", "adls") else "table"
         summary = {"type": dest_type, name_field: result.table_name, "checksum": result.checksum,
                    "driver": result.driver, **_writer_diagnostics(result)}
+        from services.duplicate_policy import reset_match_action
+
+        reset_match_action(match_token)
         return result.rows_written, result.checksum, summary
 
     if resolve_driver_type(dest_type) == "generic_sql":
@@ -592,6 +632,9 @@ def _write_batch(
             _raise_write_failure(result, f"{dest_type} batch write failed")
         summary = {"type": type_name, "schema": result.target_schema, "table": result.table_name,
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
+        from services.duplicate_policy import reset_match_action
+
+        reset_match_action(match_token)
         return result.rows_written, result.checksum, summary
 
     from .connector_dispatch import (
@@ -662,6 +705,12 @@ def _write_batch(
             "driver": result.driver,
             **_writer_diagnostics(result),
         }
+        from services.duplicate_policy import reset_match_action
+
+        reset_match_action(match_token)
         return result.rows_written, result.checksum, summary
 
+    from services.duplicate_policy import reset_match_action
+
+    reset_match_action(match_token)
     raise ValueError(f"Streaming write not supported for destination type '{dest_type}'")

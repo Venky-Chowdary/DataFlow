@@ -1043,6 +1043,19 @@ def _connect_args_for(url: Any, cfg: Mapping[str, Any]) -> dict[str, Any]:
 
 def _build_engine(cfg: dict[str, Any]) -> Any:
     """Construct a brand-new Engine. Called once per distinct target."""
+    from services.egress_guard import assert_connector_dial_allowed
+
+    kind = (cfg.get("type") or "").lower().strip()
+    raw_url = str(cfg.get("connection_string") or "")
+    if kind not in {"duckdb", "sqlite"} and not raw_url.lower().startswith(
+        ("sqlite:", "duckdb:")
+    ):
+        assert_connector_dial_allowed(
+            str(cfg.get("host") or ""),
+            raw_url,
+            str(cfg.get("endpoint_url") or ""),
+            workspace_id=str(cfg.get("workspace_id") or ""),
+        )
     warehouse = _warehouse_creator(cfg, (cfg.get("type") or "").lower().strip())
     if warehouse is not None:
         url, creator = warehouse
@@ -3937,7 +3950,9 @@ def _upsert_batch(
     if not batch:
         return 0
 
-    update_cols = [c for c in target_cols if c not in conflict_cols]
+    from services.mirror_engine import upsert_set_columns
+
+    update_cols = upsert_set_columns(target_cols, conflict_cols)
     lsn_guarded = DF_LSN_COL in target_cols
 
     # Keep the highest-LSN row per conflict key so CDC redelivery inside one
@@ -3963,10 +3978,21 @@ def _upsert_batch(
             filtered.append(row)
         rows = filtered
     else:
+        from services.duplicate_policy import current_order_column, order_wins
+
+        order_col = current_order_column()
         deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
         for row in batch:
             key = tuple(_conflict_key_identity(row[c]) for c in conflict_cols)
-            deduped[key] = row
+            prev = deduped.get(key)
+            if prev is None:
+                deduped[key] = row
+                continue
+            if order_col and (order_col in row or order_col in prev):
+                if order_wins(row.get(order_col), prev.get(order_col)):
+                    deduped[key] = row
+            else:
+                deduped[key] = row
         rows = list(deduped.values())
 
     from services.mirror_engine import lattice_columns_on_table, strip_lattice_from_upsert

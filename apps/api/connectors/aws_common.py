@@ -171,6 +171,13 @@ def boto3_client(service: str, cfg: dict[str, Any]):
             (cfg.get("password") or "").strip() or "local"
         )
     if endpoint_url:
+        from services.egress_guard import assert_connector_dial_allowed
+
+        assert_connector_dial_allowed(
+            endpoint_url,
+            str(cfg.get("host") or ""),
+            workspace_id=str(cfg.get("workspace_id") or ""),
+        )
         kwargs["endpoint_url"] = endpoint_url
     # MinIO and other custom endpoints require path-style addressing.
     # Virtual-hosted style looks up ``bucket.endpoint`` and listing fails

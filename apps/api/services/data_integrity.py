@@ -56,12 +56,24 @@ def _rows_from_samples(
     ]
 
 
+def _lenient_object_store_copy(source_db_type: str, dest_kind: str) -> bool:
+    """True when both ends create keys by PUT, so cell DDL is not the contract."""
+    try:
+        from preflight.constants import object_store_put_creates_key
+    except ImportError:
+        return False
+    return object_store_put_creates_key(source_db_type) and object_store_put_creates_key(
+        dest_kind
+    )
+
+
 def _check_coercion_safety(
     mappings: list[dict],
     source_types: dict[str, str],
     target_types: dict[str, str],
     *,
     dest_kind: str = "",
+    source_db_type: str = "",
     schema_policy: str = "manual_review",
     validation_mode: str = "strict",
     rows: list[dict[str, Any]] | None = None,
@@ -89,6 +101,23 @@ def _check_coercion_safety(
         dest_table_exists=dest_table_exists,
         proven_width_narrowings=proven_width_narrowings,
     )
+    mode = (validation_mode or "strict").strip().lower()
+    if mode == "lenient" and _lenient_object_store_copy(source_db_type, dest_kind):
+        # An object copy stores bytes. Inferred cell types are not a DDL
+        # contract, and a lenient S3→S3 run must not stop on them (R8-003).
+        return {
+            "check": "coercion_safety",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": [
+                i.get("message") or i.get("reason") or ""
+                for i in issues
+                if i.get("severity") in {"warn", "block"}
+            ][:10],
+            "object_store_copy": True,
+        }
+
     schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
         # Schemaless stores values as-is — skip ordinary type-coercion blockers.
@@ -1671,6 +1700,7 @@ def run_integrity_audit(
     target_schemas: list[dict] | None = None,
     source_samples: dict[str, list[str]] | None = None,
     destination_db_type: str = "",
+    source_db_type: str = "",
     sample_rows: list[dict] | None = None,
     validation_mode: str = "strict",
     schema_policy: str = "manual_review",
@@ -1801,6 +1831,7 @@ def run_integrity_audit(
                 source_types,
                 target_types,
                 dest_kind=dest_kind,
+                source_db_type=source_db_type,
                 schema_policy=schema_policy,
                 validation_mode=validation_mode,
                 rows=rows,

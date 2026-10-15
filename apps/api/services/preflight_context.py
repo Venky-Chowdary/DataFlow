@@ -397,6 +397,7 @@ class FilePreflightContext(PreflightContext):
             sample_rows=self.sample_rows,
             validation_mode=mode,
             destination_db_type=self.plan.destination.db_type,
+            source_db_type=str(getattr(self.plan.source, "db_type", "") or ""),
             sync_mode=sync_mode,
             contract_primary_key=getattr(self.plan, "contract_primary_key", None)
             or None,

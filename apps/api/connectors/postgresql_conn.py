@@ -78,6 +78,9 @@ def get_connection(
         "keepalives_count": 5,
     }
 
+    from services.egress_guard import assert_connector_dial_allowed
+
+    assert_connector_dial_allowed(ep["host"], connection_string)
     try:
         conn = psycopg2.connect(**kwargs)
     except Exception as first_exc:

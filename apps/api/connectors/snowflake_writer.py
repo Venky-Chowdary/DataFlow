@@ -1077,7 +1077,9 @@ def build_snowflake_merge_sql(
     )
     col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
     source_cols = ", ".join(f"s.{quote_sql_identifier(c)}" for c in target_cols)
-    update_cols = [c for c in target_cols if c not in conflict]
+    from services.mirror_engine import upsert_set_columns
+
+    update_cols = upsert_set_columns(target_cols, conflict)
     lsn_guard = ""
     if lsn_column and lsn_column in target_cols:
         lsn_guard = f" AND {snowflake_lsn_match_predicate()}"

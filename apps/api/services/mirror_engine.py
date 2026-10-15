@@ -59,7 +59,17 @@ def upsert_set_columns(
     ``_fivetran_deleted=false`` hole. Conflict/PK columns are never SET.
     Pass a physical probe as ``lattice`` when the mapped column list omits
     ``_deleted``; otherwise names present on ``target_cols`` are excluded.
+
+    ``dedupe_skip`` (duplicate policy) returns no SET columns so MERGE /
+    ON CONFLICT keeps the existing row and only inserts new keys.
     """
+    try:
+        from services.duplicate_policy import current_match_action
+
+        if current_match_action() == "skip":
+            return []
+    except Exception:
+        pass
     names = lattice if lattice is not None else lattice_column_names(target_cols)
     owned = {str(n).casefold() for n in names}
     conflict = {str(c) for c in (conflict_cols or [])}

@@ -111,6 +111,80 @@ def file_already_loaded(route_key: str, digest: str) -> bool:
     return False
 
 
+def manifest_entries(route_key: str) -> list[dict[str, Any]]:
+    """Processed files for a glob/prefix route: name, size, checksum, mtime."""
+    route_key = (route_key or "").strip()
+    if not route_key:
+        return []
+    coll = _mongo_ledger()
+    if coll is not None:
+        try:
+            doc = coll.find_one({"key": route_key}) or {}
+            rows = doc.get("files")
+            if isinstance(rows, list):
+                return [row for row in rows if isinstance(row, dict)]
+        except Exception:  # noqa: BLE001
+            _logger.exception("file manifest read failed for %s", route_key)
+    for entry in _load().get("files", []):
+        if entry.get("key") == route_key and isinstance(entry.get("manifest"), list):
+            return [row for row in entry["manifest"] if isinstance(row, dict)]
+    return []
+
+
+def record_manifest_file(
+    route_key: str,
+    *,
+    name: str,
+    size: int = 0,
+    checksum: str = "",
+    mtime: str = "",
+) -> None:
+    """Remember one picked file so the next run skips it unless it changes."""
+    route_key = (route_key or "").strip()
+    name = (name or "").strip()
+    if not route_key or not name:
+        return
+    row = {
+        "name": name,
+        "size": int(size or 0),
+        "checksum": str(checksum or ""),
+        "mtime": str(mtime or ""),
+    }
+    coll = _mongo_ledger()
+    if coll is not None:
+        try:
+            coll.update_one(
+                {"key": route_key},
+                {"$pull": {"files": {"name": name}}},
+                upsert=False,
+            )
+            coll.update_one(
+                {"key": route_key},
+                {
+                    "$set": {"key": route_key, "updated_at": _now()},
+                    "$push": {"files": row},
+                    "$setOnInsert": {"digest": str(checksum or "")},
+                },
+                upsert=True,
+            )
+            return
+        except Exception:  # noqa: BLE001
+            _logger.exception("file manifest write failed for %s", route_key)
+    data = _load()
+    files = data.setdefault("files", [])
+    for entry in files:
+        if entry.get("key") != route_key:
+            continue
+        manifest = [item for item in (entry.get("manifest") or []) if item.get("name") != name]
+        manifest.append(row)
+        entry["manifest"] = manifest[-500:]
+        entry["updated_at"] = _now()
+        _save(data)
+        return
+    files.append({"key": route_key, "digest": str(checksum or ""), "manifest": [row], "updated_at": _now()})
+    _save(data)
+
+
 def record_file_loaded(route_key: str, digest: str) -> None:
     route_key = (route_key or "").strip()
     digest = (digest or "").strip()

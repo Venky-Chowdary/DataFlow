@@ -100,7 +100,10 @@ CLAIM_MAX_RUNTIME = timedelta(hours=4)
 
 _file_import_attempted = False
 # Same-process Run-now + beat must not both observe running=false.
-_CLAIM_LOCK = threading.Lock()
+# Re-entrant: Run now holds this lock from the claim through the job bind, and
+# the bind writes the same schedule. A second Run now waits, then sees the job
+# id, instead of observing a claim that says "no job bound yet" (R14-001).
+_CLAIM_LOCK = threading.RLock()
 # Check-then-insert of a pipeline name. Re-entrant because create can replay
 # onto update while the name is already reserved.
 _NAME_LOCK = threading.RLock()
@@ -264,6 +267,10 @@ class PipelineSchedule:
     #: the same acknowledgement a one-shot Confirm records on the job. Empty
     #: stays fail-closed: a name column still blocks until someone signs.
     compliance_acknowledged: bool = False
+    #: Seconds to wait for a glob/prefix file that is not in the bucket yet.
+    file_wait_seconds: int = 0
+    #: upsert | dedupe_skip | append. Empty uses the sync-mode default.
+    duplicate_policy: str = ""
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     #: A pending retry is durable state, not an in-process timer: a redeploy
@@ -399,6 +406,8 @@ class PipelineSchedule:
             claimed_missed_windows=max(0, int(data.get("claimed_missed_windows", 0) or 0)),
             schema_drift_acknowledged=bool(data.get("schema_drift_acknowledged", False)),
             compliance_acknowledged=bool(data.get("compliance_acknowledged", False)),
+            file_wait_seconds=max(0, int(data.get("file_wait_seconds") or 0)),
+            duplicate_policy=str(data.get("duplicate_policy") or "").strip().lower(),
             acknowledgment_actor=str(data.get("acknowledgment_actor") or ""),
             acknowledgment_reason=str(data.get("acknowledgment_reason") or ""),
             retry_at=data.get("retry_at"),
@@ -479,6 +488,48 @@ def interval_delta(interval: str) -> timedelta:
     return INTERVALS.get(interval, INTERVALS["daily"])
 
 
+_UNEVEN_MINUTE_CRON = re.compile(r"^\*/(\d+) \* \* \* \*$")
+
+
+def uneven_minute_step(cron: str) -> int | None:
+    """Minute step of a ``*/N * * * *`` cron that does not divide 60.
+
+    ``*/7`` fires at :00,:07,...,:56 and then waits four minutes for the next
+    hour. That is not every 7 minutes (R12-002). ``None`` means the expression
+    is not that shape, or the step does divide the hour (``*/5`` stays cron).
+    """
+    match = _UNEVEN_MINUTE_CRON.fullmatch((cron or "").strip())
+    if match is None:
+        return None
+    count = int(match.group(1))
+    if not 1 <= count <= 59 or 60 % count == 0:
+        return None
+    return count
+
+
+def canonicalize_cadence(interval: str, cron: str) -> tuple[str, str]:
+    """Land a spoken or gapped minute cadence on an anchored interval.
+
+    ``every 7 minutes`` and a stored ``*/7 * * * *`` both become ``every_7m``
+    with an empty cron, measured from the previous run. A step that divides
+    60 stays a clock cron.
+    """
+    spoken = (interval or "").strip()
+    if re.search(r"\bevery\s+\d+", spoken, re.I):
+        try:
+            from src.ai.copilot.schedule_cadence import parse_cadence
+        except ImportError:  # pragma: no cover
+            from ai.copilot.schedule_cadence import parse_cadence
+
+        spec = parse_cadence(spoken)
+        if getattr(spec, "resolved", False) and spec.interval:
+            interval, cron = spec.interval, spec.cron or ""
+    step = uneven_minute_step(cron)
+    if step is not None:
+        return f"every_{step}m", ""
+    return (interval or "").strip(), (cron or "").strip()
+
+
 def compute_next_run(
     interval: str,
     from_time: datetime | None = None,
@@ -491,11 +542,13 @@ def compute_next_run(
     A cron expression (5-field) takes precedence over the interval preset and is
     evaluated in the schedule's IANA ``tz``. Preset cadences (hourly/daily/weekly)
     are **rolling** offsets from ``from_time`` (typically last run), not fixed
-    wall-clock times — use cron for “every day at 10:10”.
+    wall-clock times — use cron for “every day at 10:10”. A minute step that
+    does not divide 60 is anchored to the previous run instead of ``*/N``.
     """
     base = from_time or datetime.now(timezone.utc)
     if base.tzinfo is None:
         base = base.replace(tzinfo=timezone.utc)
+    interval, cron = canonicalize_cadence(interval, cron)
     cron = (cron or "").strip()
     if cron:
         return _cron_next_run(cron, base, tz or "UTC").isoformat()
@@ -1222,8 +1275,10 @@ def _guard_schedule_destination(connector_id: str, table: str) -> None:
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     payload = dict(data)
     replay_id = str(payload.pop("replay_schedule_id", "") or "").strip()
-    interval = payload.get("interval", "daily")
-    cron = (payload.get("cron") or "").strip()
+    interval, cron = canonicalize_cadence(
+        str(payload.get("interval") or "daily"),
+        str(payload.get("cron") or ""),
+    )
     tz = (payload.get("timezone") or "UTC").strip() or "UTC"
     sync_mode = payload.get("sync_mode") or "full_refresh_overwrite"
     sync_mode = _validate_cadence(interval, cron, tz, sync_mode)
@@ -1381,13 +1436,17 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         if s.id != schedule_id:
             continue
         interval = resolve_machine_interval(data, s.interval)
+        interval, cron_norm = canonicalize_cadence(
+            interval, str(data.get("cron", s.cron) or "")
+        )
         data = {
             key: value
             for key, value in data.items()
             if key not in {"interval_preset", "cadence_label"}
         }
         data["interval"] = interval
-        cron = (data.get("cron", s.cron) or "").strip()
+        data["cron"] = cron_norm
+        cron = cron_norm
         tz = (data.get("timezone", s.timezone) or "UTC").strip() or "UTC"
         sync_mode = data.get("sync_mode", s.sync_mode) or "full_refresh_overwrite"
         sync_mode = _validate_cadence(interval, cron, tz, sync_mode)
@@ -1790,6 +1849,7 @@ def _claim_running_mongo(
     next_run_at: str | None = None,
     stale: PipelineSchedule | None = None,
     missed_windows: int = 0,
+    job_id: str = "",
 ) -> PipelineSchedule | None:
     """CAS the running flag on the per-schedule Mongo document.
 
@@ -1823,7 +1883,7 @@ def _claim_running_mongo(
                 "running": True,
                 "running_instance": instance,
                 "running_started_at": now,
-                "running_job_id": "",
+                "running_job_id": str(job_id or ""),
                 "claimed_missed_windows": max(0, int(missed_windows or 0)),
                 **({"next_run_at": next_run_at} if next_run_at else {}),
             },
@@ -1838,7 +1898,9 @@ def _claim_running_mongo(
     return claimed
 
 
-def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule | None:
+def mark_schedule_running(
+    schedule_id: str, instance: str, job_id: str = ""
+) -> PipelineSchedule | None:
     """Mark a schedule as running on this instance.
 
     Acts as a concurrency guard: returns ``None`` if this schedule or another
@@ -1885,12 +1947,19 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                     next_run_at=advanced,
                     stale=s,
                     missed_windows=missed,
+                    job_id=job_id,
                 )
                 if claimed is None:
+                    live = get_schedule(schedule_id)
                     _record_refusal(
                         schedule_id,
-                        {"kind": "claim_lost", "schedule_id": schedule_id,
-                         "schedule_name": s.name, "job_id": "", "running_since": None},
+                        {
+                            "kind": "this_schedule" if live and live.running else "claim_lost",
+                            "schedule_id": schedule_id,
+                            "schedule_name": s.name,
+                            "job_id": str((live.running_job_id if live else "") or ""),
+                            "running_since": live.running_started_at if live else None,
+                        },
                     )
                 elif missed:
                     emit_event(
@@ -1907,7 +1976,7 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
                 "running": True,
                 "running_instance": instance,
                 "running_started_at": now,
-                "running_job_id": "",
+                "running_job_id": str(job_id or ""),
                 "next_run_at": advanced,
                 "claimed_missed_windows": missed,
             })
@@ -1945,15 +2014,31 @@ def clear_schedule_running(schedule_id: str) -> PipelineSchedule | None:
 
 
 def set_running_job(schedule_id: str, job_id: str) -> PipelineSchedule | None:
-    """Record which job the running claim is held for."""
-    schedules = _load_all()
-    for i, s in enumerate(schedules):
-        if s.id != schedule_id:
-            continue
-        updated = PipelineSchedule.from_dict({**s.to_dict(), "running_job_id": job_id})
-        schedules[i] = updated
-        _save_all(schedules)
-        return updated
+    """Record which job the running claim is held for.
+
+    Reloads under the claim lock. A snapshot taken before this bind used to
+    be saved later and wipe the job id, so a second Run now still said the
+    claim had no job (R14-001).
+    """
+    bound = str(job_id or "")
+    with _CLAIM_LOCK:
+        schedules = _load_all()
+        for i, s in enumerate(schedules):
+            if s.id != schedule_id:
+                continue
+            updated = PipelineSchedule.from_dict({**s.to_dict(), "running_job_id": bound})
+            schedules[i] = updated
+            _save_all(schedules)
+            svc = _mongo_backend()
+            if svc is not None and bound:
+                try:
+                    svc.get_database()["pipeline_schedules"].update_one(
+                        {"_id": schedule_id},
+                        {"$set": {"running_job_id": bound}},
+                    )
+                except Exception:
+                    logger.debug("schedule job bind update skipped", exc_info=True)
+            return updated
     return None
 
 

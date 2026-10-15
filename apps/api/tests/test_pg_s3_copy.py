@@ -39,7 +39,10 @@ def test_pg_csv_export_spells_booleans_and_empty_null():
     assert "'true'" in boolean and "'false'" in boolean
     assert "CASE" not in _pg_csv_export_expr("id", "BIGINT", "id")
     source = inspect.getsource(copy_postgres_to_s3)
-    assert "NULL ''" in source
+    # SQL NULL is a sentinel, not an empty field (R7-001). ``NULL ''`` made
+    # a Postgres NULL indistinguishable from a real empty string.
+    assert "NULL '__DF_SQL_NULL__'" in source
+    assert "NULL ''" not in source
     assert "NULL '\\\\N'" not in source
 
 

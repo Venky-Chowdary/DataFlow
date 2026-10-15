@@ -71,6 +71,9 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"decision artifact (ddl identity diverged|dest schema drifted|content_hash mismatch|content_hash does not match)",
      "Re-run Validate only when Map or dest DDL actually changed. Dest existing "
      "after the first write is not a plan change — Run now if the Map is unchanged."),
+    (r"file not arrived:.*wait window elapsed",
+     "The wait-for-file window ended with no new file. Check the drop path "
+     "or widen file_wait_seconds, then run the schedule again."),
 )
 
 # Failures whose cause is the moment, not the configuration.
@@ -86,6 +89,7 @@ _TRANSIENT_PATTERNS: tuple[str, ...] = (
     r"50[0234] (server )?error|internal server error|bad gateway",
     r"worker (lost|died|terminated)|lease expired|heartbeat lost",
     r"warehouse .*(suspend|resum)|is being resumed",
+    r"file not arrived:.*no new file yet",
 )
 
 

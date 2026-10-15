@@ -128,6 +128,8 @@ def write_mapped_rows(
     del backfill_new_fields
     policy = transform_error_policy(error_policy)
     sync_mode = str(_kwargs.pop("sync_mode", "") or "")
+    protect_landed = bool(_kwargs.pop("protect_landed_object", False))
+    allow_empty_replace = bool(_kwargs.pop("allow_empty_replace", False))
     file_batch_idx = int(_kwargs.pop("file_batch_idx", 0) or 0)
     total_chunks = int(_kwargs.pop("total_chunks", 1) or 1)
     bucket = database
@@ -145,7 +147,7 @@ def write_mapped_rows(
         layout = resolve_object_write_layout(
             table_name=table_name,
             schema=schema,
-            sync_mode=sync_mode,
+            sync_mode="" if protect_landed else sync_mode,
             file_batch_idx=file_batch_idx,
             total_chunks=total_chunks,
             job_id=str(_kwargs.pop("job_id", "") or ""),
@@ -257,6 +259,8 @@ def write_mapped_rows(
             live_exists=not created_here,
             sync_mode=sync_mode,
             key=key,
+            allow_empty_replace=allow_empty_replace,
+            protect_landed_object=protect_landed,
         )
         if blocked:
             return WriteResult(
@@ -318,7 +322,9 @@ def write_mapped_rows(
 
         _final_abort = reject_on_strict_policy(policy, rejected_details, "S3")
         if _final_abort:
-            if created_here:
+            # A key this run created can be removed. A key that already held
+            # rows, and any quarantine replay, is never deleted (R11-001).
+            if created_here and not protect_landed:
                 _delete_s3_key(client, bucket, key)
                 _delete_s3_key(client, bucket, staging_key)
             return WriteResult(

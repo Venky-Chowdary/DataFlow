@@ -25,7 +25,6 @@ from services.copy_s3_common import (
     s3_bucket,
     s3_client,
     s3_copy_object,
-    s3_delete_keys,
     s3_dest_count,
     s3_ensure_bucket,
     s3_endpoint_key,
@@ -98,9 +97,6 @@ def copy_s3_to_s3(
             "(identity COPY would duplicate)"
         )
 
-    if replace_destination:
-        existing = s3_list_keys(dest_cfg, dest_table)
-        s3_delete_keys(dest_cfg, existing)
     src_client = s3_client(source_cfg)
     src_bucket = s3_bucket(source_cfg)
     dest_bucket = s3_bucket(dest_cfg)
@@ -122,7 +118,8 @@ def copy_s3_to_s3(
                 f"{dest_count} != source COUNT {source_count}"
             )
     except Exception:
-        s3_delete_keys(dest_cfg, written)
+        # The live key is only replaced by a completed CopyObject. Deleting it
+        # here turned a failed replace into an empty object (R11-001).
         raise
     s3_write = "overwrite" if replace_destination and dest_occupied else "insert"
     proof = f"dest_count:{dest_count}"

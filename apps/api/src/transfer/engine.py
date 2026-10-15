@@ -4964,6 +4964,7 @@ class UniversalTransferEngine:
                 number_locale=_run_number_locale(request),
                 read_options=read_options,
                 shape_runner=shape_runner,
+                duplicate_policy=str(getattr(request, "duplicate_policy", "") or ""),
             )
 
             with _reconcile_phase_heartbeat(

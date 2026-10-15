@@ -872,6 +872,82 @@ def _stream_database_transfer_impl(
         key = table
         if src_type in ("s3", "gcs") and not bucket:
             raise ValueError(f"{src_type.upper()} source requires bucket name in the database field")
+        from services.file_pickup import (
+            FileNotArrived,
+            is_file_pattern,
+            list_remote_files,
+            plan_pickup,
+        )
+
+        extra = getattr(source, "extra", None) or {}
+        wait_seconds = int(extra.get("file_wait_seconds") or 0)
+        if is_file_pattern(key) or wait_seconds:
+            route_key = f"{src_type}:{bucket}:{key}"
+            from services.file_load_ledger import manifest_entries, record_manifest_file
+
+            plan = plan_pickup(
+                pattern=key,
+                files=list_remote_files(src_type, src_cfg, bucket, key),
+                manifest=manifest_entries(route_key),
+                wait_seconds=wait_seconds,
+                waited_seconds=int(extra.get("file_waited_seconds") or 0),
+            )
+            if plan.action != "load":
+                raise FileNotArrived(
+                    plan.message, retryable=plan.retryable, pattern=key
+                )
+            total_rows = 0
+            ddl_log: list[str] = []
+            summary: dict[str, Any] = {"files_picked": []}
+            columns: list[str] = []
+            for item in plan.files:
+                cache_key = f"{src_type}:{bucket}:{item.name}"
+                path = download_object(
+                    cache_key,
+                    lambda p, item_name=item.name: download_for_object_store(
+                        src_type, p, src_cfg, bucket, item_name
+                    ),
+                    force=True,
+                )
+                rows, ddl, one_summary, columns = stream_spilled_file_to_database(
+                    path=path,
+                    filename=item.name,
+                    destination=destination,
+                    mappings=mappings,
+                    schema=schema,
+                    sync_mode=effective_sync,
+                    stream_contracts=stream_contracts,
+                    job_id=job_id,
+                    checkpoint=checkpoint,
+                    checkpoint_service=checkpoint_service,
+                    retry_budget=retry_budget,
+                    backfill_new_fields=backfill_new_fields,
+                    validation_mode=validation_mode,
+                    source_filter=source_filter,
+                    skip_preflight=skip_preflight,
+                    shape_runner=shape_runner,
+                    duplicate_policy=str(extra.get("duplicate_policy") or ""),
+                )
+                total_rows += int(rows or 0)
+                ddl_log.extend(ddl or [])
+                summary["files_picked"].append(
+                    {
+                        "name": item.name,
+                        "size": item.size,
+                        "checksum": item.checksum,
+                        "mtime": item.mtime,
+                        "rows": int(rows or 0),
+                    }
+                )
+                record_manifest_file(
+                    route_key,
+                    name=item.name,
+                    size=item.size,
+                    checksum=item.checksum,
+                    mtime=item.mtime,
+                )
+            summary["file_pickup"] = "glob" if is_file_pattern(key) else "wait"
+            return total_rows, ddl_log, summary, columns
         cache_key = f"{src_type}:{bucket}:{key}"
         # Always fetch a fresh copy for a transfer run; atomic download protects
         # against partial/corrupt reuse.

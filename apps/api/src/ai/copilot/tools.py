@@ -2125,6 +2125,11 @@ class DataPilotTools:
             output={
                 "id": str(job.get("_id", job.get("id", job_id))),
                 "status": job.get("status"),
+                "rerun_of": str(job.get("rerun_of") or req.get("rerun_of") or "") or None,
+                "parent_job_id": str(
+                    job.get("parent_job_id") or req.get("parent_job_id") or ""
+                )
+                or None,
                 "source": job.get("source_name") or job.get("source_type"),
                 "destination": job.get("destination_collection") or job.get("destination_database") or job.get("destination_type"),
                 "source_type": job.get("source_type"),

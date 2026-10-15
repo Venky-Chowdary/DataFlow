@@ -25,8 +25,7 @@ from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_s3_common import (
-    s3_bucket,
-    s3_client,
+    commit_local_object,
     s3_delete_keys,
     s3_dest_count,
     s3_ensure_bucket,
@@ -145,9 +144,7 @@ def copy_sqlite_to_s3(
                 "(identity COPY would duplicate)"
             )
 
-        if replace_destination:
-            s3_delete_keys(dest_cfg, s3_list_keys(dest_cfg, dest_table))
-        created_here = dest_count_before == 0 or replace_destination
+        created_here = dest_count_before == 0
 
         fd, tmp_path = tempfile.mkstemp(prefix="df-sqlite-s3-", suffix=f".{ext}")
         os.close(fd)
@@ -164,8 +161,7 @@ def copy_sqlite_to_s3(
                 "SQLite→S3 COPY refused: CSV rows "
                 f"{csv_rows} != source snapshot {source_count}"
             )
-        client = s3_client(dest_cfg)
-        client.upload_file(tmp_path, s3_bucket(dest_cfg), dest_table)
+        commit_local_object(dest_cfg, dest_table, tmp_path)
         dest_count = s3_dest_count(dest_cfg, dest_table)
         if dest_count != source_count:
             raise ValueError(

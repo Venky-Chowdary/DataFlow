@@ -615,6 +615,10 @@ def _detect_dayfirst(text: str, date_locale: str = "") -> bool | None:
 
 def _is_ambiguous_mdy_dmy(text: str, date_locale: str = "") -> bool:
     """True when slash/dash/dot date could be either MDY or DMY with different results."""
+    raw = text.strip()
+    # ISO timestamps (2024-01-02T15:04:05 and the space form) are not MDY/DMY.
+    if re.match(r"^\d{4}-\d{2}-\d{2}(?:[ T].*)?$", raw):
+        return False
     return _detect_dayfirst(text, date_locale) is None and bool(
         re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text.strip())
     )

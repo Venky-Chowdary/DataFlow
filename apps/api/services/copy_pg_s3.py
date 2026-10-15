@@ -30,8 +30,7 @@ from services.copy_pg_mysql import (
     pg_type_is_load_safe,
 )
 from services.copy_s3_common import (
-    s3_bucket,
-    s3_client,
+    commit_local_object,
     s3_delete_keys,
     s3_dest_count,
     s3_ensure_bucket,
@@ -62,8 +61,9 @@ def _pg_csv_export_expr(source: str, declared: str, target: str) -> str:
     """Project one column as operator CSV text.
 
     PostgreSQL COPY writes a boolean as ``t``/``f``. The file the operator
-    downloads spells ``true``/``false``. NULL is an empty field (the COPY
-    ``NULL ''`` clause), not ``\\N``.
+    downloads spells ``true``/``false``. NULL is the shared SQL sentinel, not
+    an empty field: CSV has no null token, and ``NULL ''`` made a Postgres
+    NULL indistinguishable from ``""`` (R7-001).
     """
     from services.copy_pg_mysql import _pg_base
 
@@ -155,9 +155,9 @@ def copy_postgres_to_s3(
                 "(identity COPY would duplicate)"
             )
 
-        if replace_destination:
-            s3_delete_keys(dest_cfg, s3_list_keys(dest_cfg, dest_table))
-        created_here = dest_count_before == 0 or replace_destination
+        # Never delete the live key before the new bytes are committed.
+        # A failed replace used to leave the object at 0 rows (R11-001).
+        created_here = dest_count_before == 0
 
         select_list = ", ".join(
             _pg_csv_export_expr(src, live_l.get(src.lower()) or "", tgt)
@@ -167,14 +167,13 @@ def copy_postgres_to_s3(
         # PostgreSQL's default COPY text (\\N and t/f) is not that file.
         copy_sql = (
             f"COPY (SELECT {select_list} FROM {source_ref}) "  # nosec B608
-            f"TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER {delim}, NULL '')"
+            f"TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER {delim}, NULL '__DF_SQL_NULL__')"
         )
         fd, tmp_path = tempfile.mkstemp(prefix="df-pg-s3-", suffix=f".{ext}")
         os.close(fd)
         with open(tmp_path, "wb") as handle:
             src_cur.copy_expert(copy_sql, handle)
-        client = s3_client(dest_cfg)
-        client.upload_file(tmp_path, s3_bucket(dest_cfg), dest_table)
+        commit_local_object(dest_cfg, dest_table, tmp_path)
         dest_count = s3_dest_count(dest_cfg, dest_table)
         if dest_count != source_count:
             raise ValueError(
