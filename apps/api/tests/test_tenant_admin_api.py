@@ -143,6 +143,54 @@ def test_tenant_without_a_workspace_is_refused_and_a_named_one_reads_back(admin)
     assert read.json()["name"] == "Scoped Tenant"
 
 
+def test_saved_egress_allowlist_turns_security_posture_on_for_that_workspace(admin):
+    """The Security card reads this flag. It must follow the tenant just saved.
+
+    An unscoped read stays off, and a second workspace does not inherit the list.
+    Clearing the list turns the flag off again.
+    """
+    ws_id = _workspace(admin, "Egress On")
+    other = _workspace(admin, "Egress Off")
+    headers = {"X-Workspace-Id": ws_id}
+
+    before = admin.get("/api/v1/workspace/security/posture", headers=headers)
+    assert before.status_code == 200, before.text
+    assert before.json()["egress_allowlist_enabled"] is False
+    assert before.json()["scope_workspace_id"] == ws_id
+    assert "no-store" in (before.headers.get("cache-control") or "")
+
+    created = admin.post(
+        "/api/v1/workspace/tenant",
+        json={"workspace_id": ws_id, "name": "Egress On", "egress_allowlist": ["10.0.0.0/8"]},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["egress_allowlist"] == ["10.0.0.0/8"]
+
+    on = admin.get("/api/v1/workspace/security/posture", headers=headers)
+    assert on.status_code == 200, on.text
+    assert on.json()["egress_allowlist_enabled"] is True
+    assert on.json()["scope_workspace_id"] == ws_id
+
+    sibling = admin.get("/api/v1/workspace/security/posture", headers={"X-Workspace-Id": other})
+    assert sibling.json()["egress_allowlist_enabled"] is False
+    assert sibling.json()["scope_workspace_id"] == other
+
+    unscoped = admin.get("/api/v1/workspace/security/posture")
+    assert unscoped.json()["egress_allowlist_enabled"] is False
+    assert unscoped.json()["scope_workspace_id"] in (None, "")
+
+    cleared = admin.patch(
+        f"/api/v1/workspace/tenant/{created.json()['id']}",
+        json={"egress_allowlist": []},
+        headers=headers,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["egress_allowlist"] == []
+    off = admin.get("/api/v1/workspace/security/posture", headers=headers)
+    assert off.json()["egress_allowlist_enabled"] is False
+
+
 def test_tenant_created_for_a_workspace_other_than_the_active_one_is_refused(admin):
     """Saving into a workspace the session is not scoped to is a contradiction."""
     active = _workspace(admin, "Active")

@@ -878,8 +878,27 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
 
 @router.get("/security/posture")
 async def get_security_posture(request: Request):
+    """Posture for the workspace this request names.
+
+    The body is not cacheable: an earlier unscoped read (allowlist off) must
+    not be reused after an admin saves a CIDR for the workspace being viewed.
+    ``scope_workspace_id`` is that workspace even when it has no tenant yet, so
+    a client can refuse to paint another scope's answer as Disabled.
+    """
+    from fastapi.encoders import jsonable_encoder
+
     tenant = _resolve_request_tenant(request)
-    return _security_posture(tenant)
+    body = _security_posture(tenant)
+    named = (request.headers.get("x-workspace-id") or "").strip() or str(
+        getattr(request.state, "tenant_workspace_id", "") or ""
+    )
+    body["scope_workspace_id"] = (
+        tenant.workspace_id if tenant and tenant.workspace_id else named
+    ) or None
+    return JSONResponse(
+        content=jsonable_encoder(body),
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/security/report")

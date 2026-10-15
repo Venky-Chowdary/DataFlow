@@ -3,7 +3,7 @@ import { useToast } from "../../components/Toast";
 import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, rotateByokKey, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
-import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
+import { TENANT_SAVED_EVENT, WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
 import { Button } from "../../components/ui/Button";
 
 const REGIONS = [
@@ -114,9 +114,9 @@ export function TenantSettings() {
   };
 
   const canSave = useMemo(() => {
-    if (!tenant) return name.trim() && workspaceId;
+    if (!tenant) return Boolean(name.trim() && (workspaceId || activeWorkspace));
     return true;
-  }, [tenant, name, workspaceId]);
+  }, [tenant, name, workspaceId, activeWorkspace]);
 
   const allowManage = () => {
     if (manage.allowed) return true;
@@ -128,6 +128,8 @@ export function TenantSettings() {
     if (!allowManage()) return;
     setSaving(true);
     try {
+      const scope = (activeWorkspace || workspaceId).trim();
+      if (scope && scope !== getActiveWorkspaceId()) setActiveWorkspaceId(scope);
       const payload = {
         name: name.trim() || "Enterprise tenant",
         custom_domain: customDomain.trim(),
@@ -143,11 +145,13 @@ export function TenantSettings() {
       if (tenant) {
         next = await updateTenant(tenant.id, payload);
       } else {
-        next = await createTenant({ workspace_id: workspaceId, ...payload });
+        next = await createTenant({ workspace_id: scope, ...payload });
       }
       setTenant(next);
-      const p = await fetchSecurityPosture().catch(() => null);
+      setEgressAllowlist((next.egress_allowlist || []).join("\n"));
+      const p = await fetchSecurityPosture(scope || undefined).catch(() => null);
       if (p) setPosture(p);
+      window.dispatchEvent(new CustomEvent(TENANT_SAVED_EVENT));
       toast({ title: "Tenant saved", message: "Enterprise SaaS settings applied.", tone: "success" });
     } catch (err) {
       toast({ title: "Save failed", message: err instanceof Error ? err.message : "Could not save tenant settings", tone: "error" });
@@ -289,7 +293,7 @@ export function TenantSettings() {
               rows={4}
               value={egressAllowlist}
               onChange={(e) => setEgressAllowlist(e.target.value)}
-              placeholder={"off until an admin adds a CIDR\n10.0.0.0/8"}
+              placeholder={"one CIDR per line"}
             />
             <p className="df2-settings-hint">
               Off when empty: connector dials refuse private, loopback, link-local, and cloud metadata addresses.

@@ -9,14 +9,15 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole } from "../lib/api";
+import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole } from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
 import { chainVerdictTitle, chainVerdictToast } from "../lib/auditChain";
-import { useActiveWorkspaceId } from "../lib/workspace";
+import { connectorEgressState } from "../lib/egressPosture";
+import { TENANT_SAVED_EVENT, useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
 import { useTheme } from "../lib/useTheme";
 import type { ThemePreference } from "../lib/theme";
@@ -101,6 +102,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [posture, setPosture] = useState<SecurityPosture | null>(null);
   const [postureLoading, setPostureLoading] = useState(false);
+  /** undefined = not read yet; null = this workspace has no tenant. */
+  const [egressTenant, setEgressTenant] = useState<{ workspace_id?: string; egress_allowlist?: string[] } | null | undefined>(undefined);
+  const postureRequest = useRef(0);
   const workspaceManage = useWriteGate(PERMISSIONS.workspaceManage);
   const retentionPurgeDisabled = !workspaceManage.allowed
     || retentionLoading
@@ -114,12 +118,34 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const generalDirtyRef = useRef(false);
 
   const loadPosture = useCallback(() => {
+    const scope = activeWorkspace;
+    const requestId = ++postureRequest.current;
+    if (!scope) {
+      setPostureLoading(false);
+      setEgressTenant(undefined);
+      setPosture(null);
+      return;
+    }
     setPostureLoading(true);
-    fetchSecurityPosture()
-      .then(setPosture)
-      .catch(() => setPosture(null))
-      .finally(() => setPostureLoading(false));
-  }, []);
+    Promise.all([
+      fetchSecurityPosture(scope),
+      fetchTenant(scope),
+    ])
+      .then(([nextPosture, tenant]) => {
+        if (postureRequest.current !== requestId) return;
+        setPosture(nextPosture);
+        setEgressTenant(tenant);
+      })
+      .catch(() => {
+        if (postureRequest.current !== requestId) return;
+        setPosture(null);
+        setEgressTenant(undefined);
+      })
+      .finally(() => {
+        if (postureRequest.current !== requestId) return;
+        setPostureLoading(false);
+      });
+  }, [activeWorkspace]);
 
   const loadGeneral = useCallback((force = false) => {
     if (!force && generalDirtyRef.current) return;
@@ -227,6 +253,12 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   useEffect(() => {
     if (tab === "security") loadPosture();
   }, [tab, activeWorkspace, loadPosture]);
+
+  useEffect(() => {
+    const onTenantSaved = () => loadPosture();
+    window.addEventListener(TENANT_SAVED_EVENT, onTenantSaved);
+    return () => window.removeEventListener(TENANT_SAVED_EVENT, onTenantSaved);
+  }, [loadPosture]);
 
   useEffect(() => {
     if (tab !== "api") return;
@@ -611,6 +643,13 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     }
   };
 
+  const egress = connectorEgressState(activeWorkspace, egressTenant, posture);
+  const egressCopy = egress === "on"
+    ? "Admin CIDRs may dial on-prem or VPC hosts. Metadata stays refused."
+    : egress === "off"
+      ? "Off. Private ranges, loopback, and cloud metadata are refused."
+      : "Reading this workspace's connector egress.";
+
   return (
     <PageShell
       wide
@@ -838,21 +877,21 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       <h3 className="df2-settings-subhead">Posture</h3>
                       <div className="df2-settings-policy-grid" style={{ marginBottom: 24 }}>
                         {[
-                          { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts.", on: posture.encryption_at_rest },
-                          { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access.", on: posture.audit_logging },
-                          { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review.", on: posture.pii_detection },
-                          { title: "IP allowlisting", desc: posture.ip_allowlist_enforced ? "Enforced when Host matches this tenant custom domain." : "Stored CIDR list. Not enforced on the default app host.", on: Boolean(posture.ip_allowlist_enforced) },
-                          { title: "Connector egress", desc: posture.egress_allowlist_enabled ? "Admin CIDRs may dial on-prem or VPC hosts. Metadata stays refused." : "Off. Private ranges, loopback, and cloud metadata are refused.", on: Boolean(posture.egress_allowlist_enabled) },
-                          { title: `Session timeout (${posture.session_timeout_hours}h)`, desc: "Recorded only. Token TTL is DATAFLOW_TOKEN_TTL_SEC — this value does not sign sessions out.", on: false },
-                          { title: "MFA required for admins", desc: "Recorded policy. Login MFA is not wired.", on: false },
+                          { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts.", on: posture.encryption_at_rest, pending: false },
+                          { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access.", on: posture.audit_logging, pending: false },
+                          { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review.", on: posture.pii_detection, pending: false },
+                          { title: "IP allowlisting", desc: posture.ip_allowlist_enforced ? "Enforced when Host matches this tenant custom domain." : "Stored CIDR list. Not enforced on the default app host.", on: Boolean(posture.ip_allowlist_enforced), pending: false },
+                          { title: "Connector egress", desc: egressCopy, on: egress === "on", pending: egress === "unknown" },
+                          { title: `Session timeout (${posture.session_timeout_hours}h)`, desc: "Recorded only. Token TTL is DATAFLOW_TOKEN_TTL_SEC — this value does not sign sessions out.", on: false, pending: false },
+                          { title: "MFA required for admins", desc: "Recorded policy. Login MFA is not wired.", on: false, pending: false },
                         ].map((item) => (
-                          <div key={item.title} className="df2-settings-policy-row">
+                          <div key={item.title} className="df2-settings-policy-row" data-testid={item.title === "Connector egress" ? "connector-egress-row" : undefined}>
                             <div>
                               <h3>{item.title}</h3>
                               <p>{item.desc}</p>
                             </div>
-                            <span className={`df2-badge ${item.on ? "df2-badge-live" : "df2-badge-muted"}`}>
-                              {item.on ? "Enabled" : "Disabled"}
+                            <span className={`df2-badge ${item.on ? "df2-badge-live" : "df2-badge-muted"}`} data-testid={item.title === "Connector egress" ? "connector-egress-badge" : undefined}>
+                              {item.pending ? "Reading" : item.on ? "Enabled" : "Disabled"}
                             </span>
                           </div>
                         ))}

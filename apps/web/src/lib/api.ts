@@ -4313,6 +4313,8 @@ export type SecurityPosture = {
   ip_allowlist_enabled: boolean;
   ip_allowlist_enforced?: boolean;
   egress_allowlist_enabled?: boolean;
+  /** Workspace this posture was resolved for. Empty when the read was unscoped. */
+  scope_workspace_id?: string | null;
   mfa_required: boolean;
   mfa_enforced?: boolean;
   session_timeout_hours: number;

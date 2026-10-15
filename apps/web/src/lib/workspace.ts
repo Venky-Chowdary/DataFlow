@@ -22,6 +22,9 @@ export const WORKSPACE_CHANGED_EVENT = "df2:workspace-changed";
  */
 export const WORKSPACE_DIRECTORY_EVENT = "df2:workspace-directory";
 
+/** Fired after an enterprise tenant is saved, including its egress allowlist. */
+export const TENANT_SAVED_EVENT = "df2:tenant-saved";
+
 export function getActiveWorkspaceId(): string {
   try {
     return (localStorage.getItem(WORKSPACE_KEY) || "").trim();
