@@ -871,8 +871,14 @@ function AppShell({
                 <PageErrorBoundary label="Schedules">
                   <SchedulesPage
                     connectors={connectors}
-                    onViewJobs={() => setScreen("jobs")}
-                    onOpenJob={(jobId) => navigateFromSearch({ screen: "jobs", jobId })}
+                    onViewJobs={() => {
+                      void loadJobs(false);
+                      setScreen("jobs");
+                    }}
+                    onOpenJob={(jobId) => {
+                      void loadJobs(false);
+                      navigateFromSearch({ screen: "jobs", jobId });
+                    }}
                     onSchedulesChange={loadSchedules}
                     highlightScheduleId={
                       searchFocus?.screen === "schedules" ? searchFocus.scheduleId : undefined

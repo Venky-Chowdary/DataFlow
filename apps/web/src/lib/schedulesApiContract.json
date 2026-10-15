@@ -1,0 +1,48 @@
+{
+  "operations": [
+    {
+      "id": "list",
+      "method": "get",
+      "openapi": "/api/v1/schedules/",
+      "client": "/schedules/"
+    },
+    {
+      "id": "create",
+      "method": "post",
+      "openapi": "/api/v1/schedules/",
+      "client": "/schedules/"
+    },
+    {
+      "id": "update",
+      "method": "patch",
+      "openapi": "/api/v1/schedules/{schedule_id}",
+      "client": "/schedules/${id}"
+    },
+    {
+      "id": "run",
+      "method": "post",
+      "openapi": "/api/v1/schedules/{schedule_id}/run",
+      "client": "/schedules/${id}/run"
+    },
+    {
+      "id": "sync",
+      "method": "post",
+      "openapi": "/api/v1/schedules/{schedule_id}/sync",
+      "client": "/schedules/${scheduleId}/sync"
+    },
+    {
+      "id": "history",
+      "method": "get",
+      "openapi": "/api/v1/schedules/{schedule_id}/history",
+      "client": "/schedules/${id}/history"
+    }
+  ],
+  "createRequired": [
+    "name",
+    "source_connector_id",
+    "source_table",
+    "dest_connector_id",
+    "dest_table"
+  ],
+  "updateFields": ["enabled", "mappings"]
+}

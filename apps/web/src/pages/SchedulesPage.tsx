@@ -11,6 +11,7 @@ import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { ScheduleForm } from "../components/schedules/ScheduleForm";
+import { SchedulesStudio } from "../components/schedules/SchedulesStudio";
 import { ApprovalInbox } from "../components/schedules/ApprovalInbox";
 import {
   PIPELINE_TABS,
@@ -40,6 +41,7 @@ import {
   SyncAlreadyRunningError,
   updateSchedule,
 } from "../lib/api";
+import { useStudioFlags } from "../lib/useStudioFlags";
 import { formatSyncModeLabel } from "../lib/transferConstants";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { fleetExportBlockedReason } from "../lib/schedulesGitops";
@@ -67,6 +69,7 @@ interface SchedulesPageProps {
 type ScheduleFilter = "all" | "active" | "paused";
 
 export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesChange, highlightScheduleId, onStartTransfer }: SchedulesPageProps) {
+  const studioFlags = useStudioFlags();
   const { toast } = useToast();
   const scheduleManage = useWriteGate(PERMISSIONS.scheduleManage);
   const jobRun = useWriteGate(PERMISSIONS.jobRun);
@@ -431,10 +434,16 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     }
     setRunningId(id);
     try {
-      await runScheduleNow(id);
+      const started = await runScheduleNow(id);
       await load();
-      onViewJobs?.();
-      toast({ title: "Schedule run started", message: "Track progress in Job Theater.", tone: "success" });
+      const jobId = (started.job_id || "").trim();
+      if (jobId) onOpenJob?.(jobId);
+      else onViewJobs?.();
+      toast({
+        title: "Schedule run started",
+        message: jobId ? `Job ${jobId.length > 8 ? `${jobId.slice(0, 8)}…` : jobId}.` : "Track progress in Job Theater.",
+        tone: "success",
+      });
     } catch (e) {
       toast({
         title: "Run failed",
@@ -561,6 +570,115 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       setGitopsBusy(false);
     }
   };
+
+  if (studioFlags.canvas) {
+    return (
+      <SchedulesStudio
+        onClassic={studioFlags.optOutCanvas}
+        connectors={connectors}
+        loading={loading}
+        loadError={loadError}
+        schedules={schedules}
+        filteredSchedules={filteredSchedules}
+        filter={filter}
+        onFilter={setFilter}
+        search={pipelineSearch}
+        onSearch={setPipelineSearch}
+        enabledCount={enabledCount}
+        pausedCount={pausedCount}
+        showForm={showForm}
+        editing={editing}
+        saving={saving}
+        intervals={intervals}
+        runningId={runningId}
+        highlightScheduleId={highlightScheduleId}
+        selectedId={drawerOpen ? selectedId : null}
+        manageAllowed={scheduleManage.allowed}
+        manageReason={scheduleManage.reason}
+        runAllowed={jobRun.allowed}
+        runReason={jobRun.reason}
+        gitopsBusy={gitopsBusy}
+        gitopsRequireSigned={gitopsRequireSigned}
+        onGitopsRequireSigned={setGitopsRequireSigned}
+        approvals={approvals}
+        onRetry={() => void load()}
+        onCreate={openCreate}
+        onSubmit={(input) => void handleSubmit(input)}
+        onCancelForm={closeForm}
+        onOpenStudio={() => onStartTransfer?.()}
+        onOpenStudioSchedule={openStudioFromSchedule}
+        onToggle={(sched) => void toggleEnabled(sched)}
+        onRun={(id) => void handleRunNow(id)}
+        onSync={(id) => void handleScheduleSync(id, "sync")}
+        onOpenJob={(jobId) => onOpenJob?.(jobId)}
+        onDetails={(id) => openDrawer(id)}
+        onExportFleet={() => void handleExportFleet()}
+        onImportFile={(file) => void handleImportFile(file)}
+        onApprovalsDecided={() => {
+          void load();
+          void onSchedulesChange?.();
+        }}
+        onReviewMapping={(id) => {
+          const sched = schedules.find((row) => row.id === id);
+          if (sched) openEdit(sched);
+        }}
+        detail={
+          <PipelineDetailDrawer
+            open={drawerOpen && Boolean(selectedSchedule)}
+            schedule={selectedSchedule}
+            source={
+              selectedSchedule
+                ? connectors.find((c) => c.id === selectedSchedule.source_connector_id)
+                : undefined
+            }
+            dest={
+              selectedSchedule
+                ? connectors.find((c) => c.id === selectedSchedule.dest_connector_id)
+                : undefined
+            }
+            tab={pipelineTab}
+            setTab={setPipelineTab}
+            running={selectedSchedule ? runningId === selectedSchedule.id : false}
+            breakerHint={
+              selectedSchedule?.contract_id
+                ? breakers[selectedSchedule.contract_id] ?? null
+                : null
+            }
+            onClose={closeDrawer}
+            onRun={() => selectedSchedule && void handleRunNow(selectedSchedule.id)}
+            onSync={() => selectedSchedule && void handleScheduleSync(selectedSchedule.id, "sync")}
+            onFullResync={() => selectedSchedule && void handleScheduleSync(selectedSchedule.id, "full")}
+            onEdit={() => {
+              if (!selectedSchedule) return;
+              setResumeDrawerAfterEdit(true);
+              closeDrawer();
+              openEdit(selectedSchedule);
+            }}
+            onDelete={() => selectedSchedule && void handleDelete(selectedSchedule.id)}
+            onToggle={() => selectedSchedule && void toggleEnabled(selectedSchedule)}
+            runRefusal={jobRun.allowed ? "" : jobRun.reason}
+            manageRefusal={scheduleManage.allowed ? "" : scheduleManage.reason}
+            onResetBreaker={handleResetBreaker}
+            onExportYaml={
+              selectedSchedule
+                ? () => void handleExportOne(selectedSchedule.id)
+                : undefined
+            }
+            onOpenJob={(jobId) => {
+              setResumeDrawerAfterEdit(false);
+              closeDrawer();
+              onOpenJob?.(jobId);
+            }}
+            onOpenStudio={
+              selectedSchedule && scheduleNeedsStudio(selectedSchedule)
+                ? () => openStudioFromSchedule(selectedSchedule.id)
+                : undefined
+            }
+          />
+        }
+      />
+    );
+  }
 
   return (
     <PageShell

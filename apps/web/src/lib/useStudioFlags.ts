@@ -13,6 +13,7 @@ export interface StudioFlags extends StudioFlagView {
   /** True only after settings have resolved. Until then both surfaces stay off. */
   ready: boolean;
   optInCanvas: () => void;
+  optOutCanvas: () => void;
   optInSchema: () => void;
 }
 
@@ -24,6 +25,7 @@ const OFF: StudioFlags = {
   canvasOptIn: false,
   schemaOptIn: false,
   optInCanvas: () => {},
+  optOutCanvas: () => {},
   optInSchema: () => {},
 };
 
@@ -111,12 +113,17 @@ export function useStudioFlags(): StudioFlags {
     load();
   }, [load]);
 
+  const optOutCanvas = useCallback(() => {
+    writeLocalStudioFlag(STUDIO_CANVAS_KEY, false, browserStorage());
+    load();
+  }, [load]);
+
   const optInSchema = useCallback(() => {
     writeLocalStudioFlag(STUDIO_SCHEMA_BROWSER_KEY, true, browserStorage());
     load();
   }, [load]);
 
-  return { ...view, optInCanvas, optInSchema };
+  return { ...view, optInCanvas, optOutCanvas, optInSchema };
 }
 
 export { OFF as STUDIO_FLAGS_OFF };
