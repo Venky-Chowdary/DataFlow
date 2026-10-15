@@ -15034,90 +15034,72 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
 
 /*
  * Transfer wizard connectors — six-step bar and Connect / Review / Run.
- * Each segment starts on the marker's right edge and ends on the next
- * marker's left edge. Labels sit under the marker.
+ * Each segment runs from one marker edge to the next, completed in the logo
+ * ink and upcoming in the border color. Labels sit under that line, inside
+ * the classic marker row.
+ *
+ * Do not restyle the track display, step padding, gap, height, or an in-flow
+ * label line-height. Those own the classic stepper box; overriding them at
+ * every width grew the row by about 16px and shifted the step panel under
+ * the flags-off baselines. Below 768px the compact grid keeps its hidden
+ * connectors so the 390px screenshots stay pixel-identical.
  */
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-track {
-  display: flex !important;
-  align-items: flex-start;
-  width: 100%;
-  gap: 0;
-  overflow: visible;
+@media (min-width: 768px) {
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-item,
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-item:last-child {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 0;
+    justify-content: center;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step {
+    position: relative;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step.active {
+    transform: none;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-line {
+    display: block !important;
+    position: absolute;
+    top: 50%;
+    left: calc(50% + (var(--df-stepper-node, 22px) / 2) - 1px);
+    width: calc(100% - var(--df-stepper-node, 22px) + 2px);
+    height: 2px;
+    min-width: 0;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: var(--df-border);
+    transform: translateY(-50%);
+    pointer-events: none;
+    transition: none;
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-line.done {
+    background: var(--df-logo-ink);
+  }
+
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label,
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
+    position: absolute;
+    top: calc(50% + 3px);
+    left: 50%;
+    line-height: 1;
+    text-align: center;
+    white-space: nowrap;
+    transform: translateX(-50%);
+  }
 }
 
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-item,
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-item:last-child {
-  position: relative;
-  display: flex;
-  flex: 1 1 0;
-  min-width: 0;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 0;
-}
-
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 4px;
-  width: 100%;
-  max-width: 100%;
-  height: auto;
-  min-height: 0;
-  padding: 0;
-  background: transparent;
-  border-radius: 0;
-  transform: none;
-}
-
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step.active,
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-step.done:not(:disabled):hover {
-  background: transparent;
-  transform: none;
-}
-
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-num {
-  position: relative;
-  z-index: 1;
-  box-sizing: border-box;
-  width: var(--df-stepper-node, 22px);
-  height: var(--df-stepper-node, 22px);
-  flex: 0 0 var(--df-stepper-node, 22px);
-}
-
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-line {
-  display: block !important;
-  position: absolute;
-  z-index: 0;
-  top: calc((var(--df-stepper-node, 22px) - 2px) / 2);
-  left: calc(50% + (var(--df-stepper-node, 22px) / 2) - 1px);
-  width: calc(100% - var(--df-stepper-node, 22px) + 2px);
-  height: 2px;
-  min-width: 0;
-  max-width: none;
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: var(--df-border);
-  pointer-events: none;
-  transition: none;
-}
-
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-line.done {
-  background: var(--df-logo-ink);
-}
-
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label,
-.df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
-  max-width: 100%;
-  overflow: hidden;
-  line-height: 16px;
-  text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* The <=1280 row uses the 18px mobile marker, not the desktop node. */
+@media (min-width: 768px) and (max-width: 1280px) {
+  .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-line {
+    left: calc(50% + (var(--df-stepper-mobile-node, 18px) / 2) - 1px);
+    width: calc(100% - var(--df-stepper-mobile-node, 18px) + 2px);
+  }
 }
