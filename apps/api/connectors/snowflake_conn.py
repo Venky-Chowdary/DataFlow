@@ -655,6 +655,26 @@ def _fakesnow_rollback_product_patch() -> None:
             _fakesnow_refcount = 0
 
 
+def fakesnow_availability_error() -> str | None:
+    """None when fakesnow and the installed connector import together.
+
+    ``import fakesnow`` loads ``conn.py``, which imports ``fakesnow.cursor``,
+    which imports ``snowflake.connector.converter``. Connector 5.0 removed
+    that module, so the failure is an ImportError even when the fakesnow
+    package is installed. Callers must return this text, not a generic
+    "package not installed" line.
+    """
+    try:
+        import fakesnow  # noqa: F401
+        import fakesnow.cursor  # noqa: F401
+        import snowflake.connector.converter as converter
+    except ImportError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if not hasattr(converter, "SnowflakeConverter"):
+        return "AttributeError: snowflake.connector.converter.SnowflakeConverter"
+    return None
+
+
 def _snowflake_connector_module() -> Any:
     try:
         import snowflake.connector

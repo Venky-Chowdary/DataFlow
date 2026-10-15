@@ -395,10 +395,11 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             extra={"endpoint_url": "http://127.0.0.1:8000"},
         )
     if engine == "snowflake":
-        try:
-            import fakesnow  # noqa: F401
-        except ImportError:
-            return "fakesnow package not installed"
+        from connectors.snowflake_conn import fakesnow_availability_error
+
+        unavailable = fakesnow_availability_error()
+        if unavailable:
+            return unavailable
         return EndpointConfig(
             kind="database",
             format="snowflake",

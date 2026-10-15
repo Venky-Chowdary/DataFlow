@@ -68,10 +68,17 @@ def _skip_reasons() -> list[str]:
     if not (os.environ.get("HUBSPOT_ACCESS_TOKEN") or "").strip():
         reasons.append("HubSpot reverse-ETL skipped — no HUBSPOT_ACCESS_TOKEN")
     # fakesnow / BQ emulator are expected in CI; note when absent for local runs.
-    try:
-        import fakesnow  # noqa: F401
-    except Exception:
-        reasons.append("fakesnow not installed — Snowflake SKU tests may skip/fail")
+    # ImportError here is often a connector mismatch (5.x dropped
+    # snowflake.connector.converter), not a missing fakesnow wheel.
+    import sys
+
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from connectors.snowflake_conn import fakesnow_availability_error
+
+    unavailable = fakesnow_availability_error()
+    if unavailable:
+        reasons.append(f"fakesnow unavailable — {unavailable}")
     return reasons
 
 
