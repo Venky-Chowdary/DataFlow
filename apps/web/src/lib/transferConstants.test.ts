@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   availableSyncModes,
+  DEFAULT_SCHEMA_POLICY,
   formatSchemaPolicyLabel,
   formatSyncModeLabel,
   formatValidationModeLabel,
@@ -101,6 +102,13 @@ describe("formatSyncModeLabel", () => {
   it("does not reuse sync-mode formatting for schema policy or validation", () => {
     assert.equal(formatSchemaPolicyLabel("manual_review"), "Manual approval");
     assert.equal(formatValidationModeLabel("strict"), "Strict");
+  });
+});
+
+describe("DEFAULT_SCHEMA_POLICY", () => {
+  it("starts a classic wizard session on manual approval", () => {
+    assert.equal(DEFAULT_SCHEMA_POLICY, "manual_review");
+    assert.match(schemaPolicyHonestyLine(DEFAULT_SCHEMA_POLICY), /does not ADD COLUMN/i);
   });
 });
 

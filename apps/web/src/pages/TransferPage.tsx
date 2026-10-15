@@ -118,6 +118,7 @@ import {
   availableSyncModes,
   DATE_LOCALES,
   NUMBER_LOCALES,
+  DEFAULT_SCHEMA_POLICY,
   PREFLIGHT_SAMPLE_LIMIT,
   SCHEMA_POLICIES,
   SYNC_MODES,
@@ -469,7 +470,7 @@ export function TransferPage({
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [result, setResult] = useState<TransferResult | null>(null);
   const [syncMode, setSyncMode] = useState<SyncMode>("full_refresh_append");
-  const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>("propagate_columns");
+  const [schemaPolicy, setSchemaPolicy] = useState<SchemaPolicy>(DEFAULT_SCHEMA_POLICY);
   const [validationMode, setValidationMode] = useState<ValidationMode>("strict");
   const [complianceAcknowledged, setComplianceAcknowledged] = useState(false);
   const [schemaDriftAcknowledged, setSchemaDriftAcknowledged] = useState(false);
@@ -6331,7 +6332,7 @@ export function TransferPage({
     setResult(null);
     setExecutedRouteKey(null);
     setSyncMode("full_refresh_append");
-    setSchemaPolicy("propagate_columns");
+    setSchemaPolicy(DEFAULT_SCHEMA_POLICY);
     setValidationMode("balanced");
     setBackfillNewFields(false);
     setMultiSubnetFailover(false);

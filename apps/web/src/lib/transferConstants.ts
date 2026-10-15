@@ -25,8 +25,12 @@ export type SchemaPolicyId =
   | "type_locked"
   | "block_all";
 
-/** New Studio sessions and new schedules. Stored jobs keep the policy they saved. */
-export const DEFAULT_SCHEMA_POLICY: SchemaPolicyId = "propagate_columns";
+/**
+ * Classic wizard sessions start on manual approval so a new column pauses
+ * until the operator approves it — Execute does not ADD COLUMN. Schedules
+ * keep their own default. Stored jobs keep the policy they saved.
+ */
+export const DEFAULT_SCHEMA_POLICY: SchemaPolicyId = "manual_review";
 
 export type ValidationModeId =
   | "balanced"
