@@ -2035,7 +2035,7 @@ class DataPilotTools:
 
         from services.job_status import job_timestamp_iso
 
-        from .job_reads import job_governance, read_transfer_job
+        from .job_reads import job_governance, job_lineage, read_transfer_job
 
         job = read_transfer_job((job_id or "").strip())
         if not job:
@@ -2125,11 +2125,7 @@ class DataPilotTools:
             output={
                 "id": str(job.get("_id", job.get("id", job_id))),
                 "status": job.get("status"),
-                "rerun_of": str(job.get("rerun_of") or req.get("rerun_of") or "") or None,
-                "parent_job_id": str(
-                    job.get("parent_job_id") or req.get("parent_job_id") or ""
-                )
-                or None,
+                **job_lineage(job),
                 "source": job.get("source_name") or job.get("source_type"),
                 "destination": job.get("destination_collection") or job.get("destination_database") or job.get("destination_type"),
                 "source_type": job.get("source_type"),

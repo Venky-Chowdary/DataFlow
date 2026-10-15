@@ -1216,6 +1216,22 @@ def _record_authorization_use(schedule_id: str, *, rebind: bool = False) -> None
         logger.exception("Schedule %s authorization use not recorded", schedule_id)
 
 
+def _abandon_unclaimed_schedule_job(job_id: str) -> None:
+    """A pending job that lost the schedule claim must not stay runnable."""
+    if not str(job_id or "").strip():
+        return
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        get_mongodb_service().update_job_status(
+            job_id,
+            "cancelled",
+            message="Schedule claim was already held; this attempt was not started.",
+        )
+    except Exception:
+        logger.debug("unclaimed schedule job %s was not cancelled", job_id, exc_info=True)
+
+
 def _dispatch_transfer(
     schedule_id: str,
     attempt: int = 0,
@@ -1449,9 +1465,12 @@ def _run_schedule(
     # after the transfer already ended.
     held = str(sched.running_job_id or "").strip()
     if sched.running and held:
-        from services.schedule_store import _job_dispatch_state, _parse_ts
+        from services.schedule_store import _job_dispatch_state, _job_is_live, _parse_ts
 
-        if _job_dispatch_state(held) == "terminal":
+        # A missing document is terminal. A job the liveness check still calls
+        # in flight is not: the two lookups can disagree for one beat, and
+        # finalizing that beat let Run now start a second writer (R14-001).
+        if _job_dispatch_state(held) == "terminal" and _job_is_live(held) is not True:
             started = _parse_ts(sched.running_started_at) or datetime.now(timezone.utc)
             _finalize_run(
                 schedule_id,

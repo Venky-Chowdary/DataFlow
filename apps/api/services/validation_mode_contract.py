@@ -116,6 +116,26 @@ def mode_contract(mode: str | None) -> dict[str, Any]:
                 "Not a substitute for Strict on financial cutovers.",
             ],
         },
+        "lenient": {
+            "id": "lenient",
+            "label": "Lenient",
+            "confidence_floor": 0.75,
+            "allows_write": True,
+            "allows_approved_risks": True,
+            "hard_block_fidelity": True,
+            "warn_recoverable": True,
+            "report_only": False,
+            "coverage": "sample_unless_probe_says_otherwise",
+            "guarantees": [
+                "Lenient is a named policy with the balanced confidence floor (0.75).",
+                "It is not silently rewritten to balanced.",
+                "Unapproved fidelity risks still block. Sample validation never claims population proof.",
+            ],
+            "non_guarantees": [
+                "Checksum mismatch always fails Gate-8.",
+                "Lenient is not a license to drop rows.",
+            ],
+        },
         "migration": {
             "id": "migration",
             "label": "Migration",
@@ -153,26 +173,6 @@ def mode_contract(mode: str | None) -> dict[str, Any]:
             "non_guarantees": [
                 "Discovery does not assure migration correctness.",
                 "Discovery never unlocks Execute — rematerialize under Strict/Balanced/Migration.",
-            ],
-        },
-        "lenient": {
-            "id": "lenient",
-            "label": "Lenient",
-            "confidence_floor": 0.75,
-            "allows_write": True,
-            "allows_approved_risks": True,
-            "hard_block_fidelity": True,
-            "warn_recoverable": True,
-            "report_only": False,
-            "coverage": "sample_unless_probe_says_otherwise",
-            "guarantees": [
-                "Lenient is a named policy with the balanced confidence floor (0.75).",
-                "It is not silently rewritten to balanced.",
-                "Unapproved fidelity risks still block. Sample validation never claims population proof.",
-            ],
-            "non_guarantees": [
-                "Checksum mismatch always fails Gate-8.",
-                "Lenient is not a license to drop rows.",
             ],
         },
         "audit": {

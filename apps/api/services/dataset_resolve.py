@@ -113,17 +113,41 @@ def pick_dataset(schemas: list[Any], hint: str | None) -> Any | None:
         return _prefer_measured(exact)
 
     # ``QA_R4/pii3.csv`` is the object key. The catalog row is often just
-    # ``pii3.csv`` or a path that ends with that key.
+    # ``pii3.csv``, and the hint's extension is already stripped, so compare
+    # stems and the original key against the stored path.
+    raw_hint = str(hint).strip().replace("\\", "/").lower()
+    raw_base = raw_hint.rsplit("/", 1)[-1]
     base = folded.rsplit("/", 1)[-1]
-    if "/" in folded or base != folded:
-        path_hits = []
+    if "/" in raw_hint:
+        path_hits: list[Any] = []
+        exact_path: list[Any] = []
         for schema in schemas:
-            name = _fold_name(getattr(schema, "name", ""))
+            name_raw = str(getattr(schema, "name", "") or "")
+            name = _fold_name(name_raw)
+            name_stem = _split_hint(name_raw)[0].rsplit("/", 1)[-1]
             path = str(getattr(schema, "path", "") or "").replace("\\", "/").lower()
-            if name == base or (path and (path.endswith("/" + folded) or path.endswith(folded) or path.endswith("/" + base))):
+            path_base = path.rsplit("/", 1)[-1]
+            path_stem = _split_hint(path_base)[0]
+            name_matches = (
+                name == base
+                or name == _fold_name(raw_base)
+                or name_stem == base
+            )
+            path_matches = bool(path) and (
+                path.endswith("/" + raw_hint)
+                or path.endswith(raw_hint)
+                or path_base == raw_base
+                or path_stem == base
+            )
+            if name_matches or path_matches:
                 path_hits.append(schema)
-        if len({_fold_name(getattr(s, "name", "")) for s in path_hits}) == 1:
-            return _prefer_measured(path_hits)
+                if path and (
+                    path.endswith("/" + raw_hint) or path.endswith(raw_hint)
+                ):
+                    exact_path.append(schema)
+        chosen_pool = exact_path or path_hits
+        if len({_fold_name(getattr(s, "name", "")) for s in chosen_pool}) == 1:
+            return _prefer_measured(chosen_pool)
 
     upload_hits: list[Any] = []
     for schema in schemas:

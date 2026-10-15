@@ -218,6 +218,22 @@ def list_transfer_jobs(
         return summaries, counts, "job_store"
 
 
+def job_lineage(job: dict[str, Any] | None) -> dict[str, str | None]:
+    """``rerun_of`` and ``parent_job_id`` from the job or its transfer request.
+
+    get_job used to drop both, so a child run looked unrelated to the job the
+    operator had just replayed or synced.
+    """
+    doc = job if isinstance(job, dict) else {}
+    req = doc.get("transfer_request") if isinstance(doc.get("transfer_request"), dict) else {}
+    rerun = str(doc.get("rerun_of") or req.get("rerun_of") or "").strip()
+    parent = str(doc.get("parent_job_id") or req.get("parent_job_id") or "").strip()
+    return {
+        "rerun_of": rerun or None,
+        "parent_job_id": parent or None,
+    }
+
+
 def read_transfer_job(job_id: str) -> dict[str, Any] | None:
     """One job from Mongo, or the engine store when Mongo misses or is down."""
     needle = (job_id or "").strip()

@@ -400,6 +400,13 @@ def sanitize_job_for_api(job: dict) -> dict:
             tr["destination"] = _mask_endpoint_secrets(tr["destination"])
         out["transfer_request"] = tr
     _project_operator_quarantine(out)
+    from src.ai.copilot.job_reads import job_lineage
+
+    lineage = job_lineage(out)
+    if lineage["rerun_of"]:
+        out["rerun_of"] = lineage["rerun_of"]
+    if lineage["parent_job_id"]:
+        out["parent_job_id"] = lineage["parent_job_id"]
     return out
 
 

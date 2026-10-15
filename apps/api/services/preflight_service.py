@@ -136,6 +136,7 @@ def _with_source_engine(fn):
 
 VALIDATION_CONFIDENCE_THRESHOLDS = {
     "balanced": 0.75,
+    "lenient": 0.75,
     "migration": 0.75,
     "strict": 0.85,
     "audit": 0.85,
@@ -1126,6 +1127,7 @@ def run_file_preflight(
     dest_nulls = destination_column_nullability or {}
     write_maps = write_mappings(mappings)
     dest_cols = []
+    plan_cast_types: dict[str, str] = {}
     for m in write_maps:
         tgt = m.get("target") or ""
         if not tgt:
@@ -1169,8 +1171,21 @@ def run_file_preflight(
         dest_cols.append(
             ColumnSchema(name=tgt, inferred_type=inferred, nullable=nullable)
         )
+        plan_cast_types[str(tgt)] = inferred
 
     from services.transform_resolver import write_plan_transform
+
+    def _one_cast_type(mapping: dict) -> str:
+        target = str(mapping.get("target") or "")
+        chosen = plan_cast_types.get(target)
+        if chosen:
+            return chosen
+        return str(
+            mapping.get("target_type")
+            or mapping.get("targetType")
+            or column_types.get(mapping.get("source") or "", "VARCHAR")
+            or "VARCHAR"
+        )
 
     plan_mappings = [
         ColumnMapping(
@@ -1178,7 +1193,10 @@ def run_file_preflight(
             target=m.get("target") or "",
             confidence=float(m.get("confidence", 0.0)),
             transform=write_plan_transform(
-                m if isinstance(m, dict) else {},
+                {
+                    **(m if isinstance(m, dict) else {}),
+                    "target_type": _one_cast_type(m if isinstance(m, dict) else {}),
+                },
                 column_types=column_types,
                 dest_types=dest_types,
                 destination_table_exists=destination_table_exists,
@@ -1187,7 +1205,7 @@ def run_file_preflight(
             reasoning=m.get("reasoning") or m.get("reason", ""),
             requires_review=bool(m.get("requires_review", False)),
             score_gap=float(m.get("score_gap", 1.0)),
-            target_type=m.get("target_type") or m.get("targetType"),
+            target_type=_one_cast_type(m if isinstance(m, dict) else {}),
             create_new=bool(m.get("create_new") or m.get("createNew", False)),
             struct_policy=m.get("struct_policy") or m.get("structPolicy"),
             struct_derived=bool(
@@ -2889,6 +2907,23 @@ def run_file_preflight(
                 "details": {"columns": number_findings},
             }
         )
+
+    # One cast type for the plan column and the transform that will run.
+    # A live INTEGER and a DECIMAL stamp used to both appear (R14).
+    out["plan"] = {
+        "mappings": [
+            {
+                "source": m.source,
+                "target": m.target,
+                "transform": m.transform,
+                "target_type": m.target_type,
+            }
+            for m in plan.mappings
+        ],
+        "destination_column_types": {
+            c.name: c.inferred_type for c in plan.destination.target_columns
+        },
+    }
 
     stamp_validation_mode(out, validation_mode)
     # Discovery / Audit: never invent an Execute unlock from Validate readiness.
