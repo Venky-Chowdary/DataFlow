@@ -17,8 +17,10 @@ from services.row_conservation import CENSUS_KEY, KEY_ADDRESSED_KEY
 def merge_file_census(summary: dict[str, Any], file_census: dict[str, Any]) -> None:
     """Add one file's key census onto the pickup summary.
 
-    Daily files in one pickup have distinct keys. Summing the live counts
-    keeps the net COUNT(*) delta (inserts minus deletes) honest for Gate-8.
+    Files are merged in deterministic order, so a later file's upsert is
+    last-wins. Each file's census was probed after the previous file
+    committed, and ``inserts = unique_keys - dest_hits``. Summing those
+    counts is the pickup's net COUNT(*) delta even when files share keys.
     """
     from services.row_conservation import KeyCensus
 
@@ -83,15 +85,25 @@ def load_picked_files(
     route_key = f"{src_type}:{bucket}:{key}"
     connector_key = str(getattr(source, "connector_id", "") or "") or route_key
     manifest = manifest_entries(route_key)
-    if dest_type == "postgresql":
-        from services.file_manifest import read_loaded_manifest
-
+    if dest_type in {"postgresql", "snowflake"}:
         try:
-            manifest = read_loaded_manifest(
-                dest_cfg,
-                connector=connector_key,
-                schema=str(getattr(destination, "schema", "") or dest_cfg.get("schema") or "public"),
+            schema_name = str(
+                getattr(destination, "schema", "") or dest_cfg.get("schema") or ""
             )
+            if dest_type == "snowflake":
+                from services.snowflake_file_manifest import read_loaded_manifest
+
+                manifest = read_loaded_manifest(
+                    dest_cfg, connector=connector_key, schema=schema_name or "PUBLIC"
+                )
+            else:
+                from services.file_manifest import read_loaded_manifest
+
+                manifest = read_loaded_manifest(
+                    dest_cfg,
+                    connector=connector_key,
+                    schema=schema_name or "public",
+                )
         except Exception:
             logging.getLogger(__name__).warning(
                 "destination file manifest unread; using the local ledger",

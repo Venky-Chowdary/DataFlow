@@ -1448,6 +1448,12 @@ def stream_file_to_database(
     checkpoint.dest_type = dest_type
     checkpoint.write_mode = write_mode
     checkpoint.conflict_columns = pk_target_cols or []
+    # Snowflake DDL cannot join the row transaction. Stage the file, then
+    # MERGE (or INSERT) it with the manifest claim in one COMMIT.
+    _file_sha = str(manifest_identity.get("sha256") or "").strip().lower()
+    snowflake_stage = ""
+    if dest_type == "snowflake" and _file_sha:
+        snowflake_stage = "DF_FILE_STAGE_" + _file_sha[:16].upper()
     checkpoint.chunk_total = chunks
     retry = retry_budget or RetryBudget()
     # File loads are the classic duplicate case: an insert-mode CSV replayed after
@@ -2074,7 +2080,7 @@ def stream_file_to_database(
             dest_type,
             destination,
             dest_cfg,
-            dest_table,
+            snowflake_stage or dest_table,
             headers,
             data_rows,
             mappings,
@@ -2084,7 +2090,7 @@ def stream_file_to_database(
             chunk_idx=idx,
             total_chunks=chunks,
             rows_so_far=0,
-            write_mode=write_mode,
+            write_mode="insert" if snowflake_stage else write_mode,
             conflict_columns=pk_target_cols,
             backfill_new_fields=backfill_new_fields,
             error_policy=stream_error_policy,
@@ -2347,6 +2353,32 @@ def stream_file_to_database(
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
+    if snowflake_stage:
+        from services.snowflake_file_manifest import drop_stage, snowflake_file_status
+
+        manifest_conn = _ensure_snowflake_conn()
+        drop_stage(manifest_conn, snowflake_stage)
+        if snowflake_file_status(
+            manifest_conn,
+            database=str(dest_cfg.get("database") or ""),
+            schema=str(getattr(destination, "schema", "") or dest_cfg.get("schema") or "PUBLIC"),
+            connector=str(manifest_identity.get("connector") or ""),
+            path=str(manifest_identity.get("path") or filename or ""),
+            sha256=_file_sha,
+        ) == "loaded":
+            try:
+                manifest_conn.close()
+            except Exception:
+                pass
+            sf_conn_state["conn"] = None
+            dest_summary["file_manifest_status"] = "loaded"
+            dest_summary["sync_mode"] = effective_sync
+            dest_summary["source_row_count"] = 0
+            dest_summary["source_row_count_source"] = "file_manifest"
+            dest_summary["rejected_rows"] = 0
+            dest_summary["rows_written"] = 0
+            return 0, ddl_log, dest_summary, columns
+
     if hold_manifest:
         from services.file_manifest import claim_file
 
@@ -2422,6 +2454,14 @@ def stream_file_to_database(
                 except Exception:
                     pass
                 pg_conn_state["conn"] = None
+        if snowflake_stage:
+            conn = sf_conn_state.get("conn")
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                sf_conn_state["conn"] = None
         if incremental and cursor_key:
             # An incremental sync whose cursor bound left nothing is a correct
             # no-op, not an empty file: the rows are already at rest and the
@@ -2459,7 +2499,43 @@ def stream_file_to_database(
             with OrderedChunkRunner(max_workers=max_workers) as runner:
                 for idx, result in runner.run(batch_enum, _process_file_chunk):
                     _apply_file_result(idx, result)
+        if snowflake_stage:
+            from services.snowflake_file_manifest import commit_staged_snowflake_file
+
+            outcome = commit_staged_snowflake_file(
+                _ensure_snowflake_conn(),
+                database=str(dest_cfg.get("database") or ""),
+                schema=str(
+                    getattr(destination, "schema", "")
+                    or dest_cfg.get("schema")
+                    or "PUBLIC"
+                ),
+                stage_table=snowflake_stage,
+                target_table=dest_table,
+                columns=list(target_cols),
+                conflict_columns=list(pk_target_cols or []),
+                write_mode=write_mode,
+                connector=str(manifest_identity.get("connector") or ""),
+                path=str(manifest_identity.get("path") or filename or ""),
+                size=int(manifest_identity.get("size") or 0),
+                mtime=str(manifest_identity.get("mtime") or ""),
+                sha256=_file_sha,
+                job_id=str(manifest_identity.get("job_id") or job_id or ""),
+                rows=int(written or 0),
+            )
+            dest_summary["file_manifest_status"] = "loaded"
+            if outcome == "skip":
+                written = 0
+                dest_summary["rows_written"] = 0
+                dest_summary["source_row_count"] = 0
+                dest_summary["source_row_count_source"] = "file_manifest"
     finally:
+        if snowflake_stage:
+            staged = sf_conn_state.get("conn")
+            if staged is not None:
+                from services.snowflake_file_manifest import drop_stage
+
+                drop_stage(staged, snowflake_stage)
         for state in (sf_conn_state, pg_conn_state):
             conn = state.get("conn")
             if conn is not None:
