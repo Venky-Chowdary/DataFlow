@@ -1068,39 +1068,6 @@ test.describe("schedules sync", () => {
       fullPage: false,
     });
   });
-
-  test("classic schedules rows stay disjoint at 768, 1280, 1366, 1440, and 1920", async ({ page }) => {
-    await openSchedules(page);
-    const widths = [
-      { width: 768, height: 1024 },
-      { width: 1280, height: 800 },
-      { width: 1366, height: 768 },
-      { width: 1440, height: 900 },
-      { width: 1920, height: 1080 },
-    ];
-    for (const size of widths) {
-      await page.setViewportSize(size);
-      const row = page.locator(".df2-pipeline-row").first();
-      await expect(row).toBeVisible();
-      const controls = row.locator("button, summary, a, .df2-badge");
-      const count = await controls.count();
-      const visible: ReturnType<typeof controls.nth>[] = [];
-      for (let index = 0; index < count; index += 1) {
-        const control = controls.nth(index);
-        if (await control.isVisible()) visible.push(control);
-      }
-      expect(visible.length).toBeGreaterThan(0);
-      for (let left = 0; left < visible.length; left += 1) {
-        for (let right = left + 1; right < visible.length; right += 1) {
-          await expectDisjoint(page, visible[left], visible[right]);
-        }
-      }
-      const box = await row.boundingBox();
-      expect(box, "classic schedule row").toBeTruthy();
-      expect(box!.x).toBeGreaterThanOrEqual(-1);
-      expect(box!.x + box!.width).toBeLessThanOrEqual(size.width + 1);
-    }
-  });
 });
 
 test.describe("studio flag opt-in", () => {

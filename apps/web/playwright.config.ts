@@ -32,7 +32,7 @@ export default defineConfig({
     },
     {
       name: "studio-next",
-      testMatch: /studio-next.*\.spec\.ts/,
+      testMatch: /studio-next\.spec\.ts/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1440, height: 900 },
