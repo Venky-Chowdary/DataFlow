@@ -236,11 +236,24 @@ def _every_n(unit: str, count: int, tz: str, assumed: bool) -> CadenceSpec:
                 "A minute cadence has to divide an hour, so I can take every 1–59 "
                 "minutes. For anything longer, say hourly, daily or weekly."
             )
+        # ``*/7`` fires at :00,:07,...,:56 and then waits four minutes for the
+        # next hour. That is not every 7 minutes (R12-002). A step that divides
+        # 60 stays a clock cron. Any other step is measured from the previous run.
+        if 60 % count == 0:
+            return CadenceSpec(
+                interval="cron",
+                cron=f"*/{count} * * * *",
+                timezone=tz,
+                description=f"every {count} minute(s)",
+                timezone_assumed=assumed,
+            )
         return CadenceSpec(
-            interval="cron",
-            cron=f"*/{count} * * * *",
+            interval=f"every_{count}m",
+            cron="",
             timezone=tz,
-            description=f"every {count} minute(s)",
+            description=(
+                f"every {count} minutes, measured from the previous run"
+            ),
             timezone_assumed=assumed,
         )
     if unit.startswith("h"):
@@ -481,7 +494,13 @@ def describe_stored_cadence(interval: str, cron: str = "", timezone: str = "UTC"
                 and step
                 and 1 <= int(step.group(1)) <= 59
             ):
-                return f"Every {int(step.group(1))} minutes {tz}"
+                count = int(step.group(1))
+                if 60 % count != 0:
+                    return (
+                        f"Cron {expr} ({tz}) — not every {count} minutes; "
+                        "the step does not divide 60"
+                    )
+                return f"Every {count} minutes {tz}"
             if (
                 hour == "*"
                 and dom == "*"
@@ -507,5 +526,9 @@ def describe_stored_cadence(interval: str, cron: str = "", timezone: str = "UTC"
             ):
                 return f"Daily at {int(hour):02d}:{int(minute):02d} {tz}"
         return f"Cron {expr} ({tz})"
+    token = (interval or "").strip().lower()
+    rolling = re.fullmatch(r"every_(\d+)m", token)
+    if rolling:
+        return f"Every {int(rolling.group(1))} minutes, measured from the previous run"
     labels = {"hourly": "Every hour", "daily": "Daily", "weekly": "Weekly"}
-    return labels.get((interval or "").strip().lower(), (interval or "").strip() or "Unscheduled")
+    return labels.get(token, token or "Unscheduled")

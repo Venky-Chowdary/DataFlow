@@ -30,7 +30,17 @@ def current_mcp_request() -> Any:
 def _detail(exc: Any) -> str:
     detail = getattr(exc, "detail", None)
     if isinstance(detail, dict):
-        return str(detail.get("error") or detail.get("detail") or detail)
+        error = str(detail.get("error") or detail.get("detail") or "").strip()
+        reason = str(detail.get("reason") or "").strip()
+        override = str(detail.get("override") or "").strip()
+        parts = [error] if error else []
+        if reason and reason not in error:
+            parts.append(reason)
+        if override and override not in error and "force=true" not in error:
+            parts.append(override)
+        if parts:
+            return " ".join(parts)
+        return str(detail)
     if detail:
         return str(detail)
     return str(exc)

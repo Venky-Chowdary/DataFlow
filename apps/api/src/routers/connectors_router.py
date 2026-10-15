@@ -821,7 +821,11 @@ async def rerun_transfer_job(
                 detail="File uploads must be re-submitted from Transfer Studio.",
             )
 
-        from services.execution_engine_contract import committed_rows_of, decide_job_rerun
+        from services.execution_engine_contract import (
+            append_rerun_refusal_error,
+            committed_rows_of,
+            decide_job_rerun,
+        )
 
         rows_committed, rows_known = committed_rows_of(job)
         decision = decide_job_rerun(
@@ -834,7 +838,7 @@ async def rerun_transfer_job(
             raise HTTPException(
                 status_code=409,
                 detail={
-                    "error": "Re-run refused",
+                    "error": append_rerun_refusal_error(decision["reason"]),
                     "reason": decision["reason"],
                     "rows_committed": rows_committed if rows_known else None,
                     "rows_committed_known": rows_known,

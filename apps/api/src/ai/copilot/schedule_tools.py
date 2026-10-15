@@ -294,7 +294,7 @@ def create_schedule(
         # operator reads follows the cron, so */5 is not shown as daily/hourly.
         "interval": (
             describe_stored_cadence(spec.interval, spec.cron, spec.timezone)
-            if spec.cron
+            if spec.cron or spec.interval.startswith("every_")
             else spec.interval
         ),
         "cron": spec.cron or "(preset interval)",

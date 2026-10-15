@@ -217,6 +217,24 @@ _RERUN_STATUSES = frozenset({
 })
 
 
+def append_rerun_refusal_error(reason: str) -> str:
+    """Operator text for a refused append re-run.
+
+    The confirm path used to keep only the title ``Re-run refused`` and drop
+    the reason and the ``force=true`` override (R12-001).
+    """
+    why = (
+        reason
+        or "This append already committed rows and has no key to collapse a second copy."
+    ).strip()
+    if why and not why.endswith("."):
+        why += "."
+    return (
+        f"Re-run refused: {why} "
+        "Re-send with force=true to accept duplicate append rows."
+    )
+
+
 def decide_job_rerun(
     *,
     status: str | None = None,

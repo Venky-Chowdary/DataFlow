@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import uuid
 from contextlib import contextmanager
@@ -34,6 +35,10 @@ STORE_PATH = data_dir() / "schedules.json"
 STORE_MIGRATED_PATH = data_dir() / "schedules.json.migrated"
 
 INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly": timedelta(weeks=1)}
+# Rolling minute steps. ``*/7`` is not every 7 minutes: the hour restarts at
+# :00, four minutes after :56 (R12-002). A step that does not divide 60 is
+# this token, measured from the previous run, not a clock cron.
+_ROLLING_MINUTE = re.compile(r"^every_(\d+)m$")
 SYNC_MODES = {
     "full_refresh_overwrite",
     "full_refresh_append",
@@ -446,6 +451,34 @@ def _parse_ts(value: str | datetime | None) -> datetime | None:
     return dt.astimezone(timezone.utc)
 
 
+def _known_interval(interval: str) -> bool:
+    token = (interval or "").strip().lower()
+    return token in INTERVALS or token == "cron" or rolling_minutes(token) is not None
+
+
+def rolling_minutes(interval: str) -> int | None:
+    """Minute count of an ``every_Nm`` token, or ``None`` when it is not one."""
+    match = _ROLLING_MINUTE.fullmatch((interval or "").strip().lower())
+    if match is None:
+        return None
+    count = int(match.group(1))
+    if 1 <= count <= 59:
+        return count
+    return None
+
+
+def interval_delta(interval: str) -> timedelta:
+    """Rolling offset for a preset or an ``every_Nm`` step.
+
+    Unknown tokens stay on the daily preset. Callers that must refuse an
+    unknown token check ``INTERVALS`` / :func:`rolling_minutes` first.
+    """
+    minutes = rolling_minutes(interval)
+    if minutes is not None:
+        return timedelta(minutes=minutes)
+    return INTERVALS.get(interval, INTERVALS["daily"])
+
+
 def compute_next_run(
     interval: str,
     from_time: datetime | None = None,
@@ -466,7 +499,7 @@ def compute_next_run(
     cron = (cron or "").strip()
     if cron:
         return _cron_next_run(cron, base, tz or "UTC").isoformat()
-    delta = INTERVALS.get(interval, INTERVALS["daily"])
+    delta = interval_delta(interval)
     return (base.astimezone(timezone.utc) + delta).isoformat()
 
 
@@ -509,7 +542,7 @@ def count_missed_windows(
             except CronError:
                 return missed
         else:
-            cursor = cursor + INTERVALS.get(interval, INTERVALS["daily"])
+            cursor = cursor + interval_delta(interval)
         if cursor > current:
             return missed
         missed += 1
@@ -833,7 +866,7 @@ def _validate_cadence(interval: str, cron: str, tz: str, sync_mode: str) -> str:
         # it (QA D11/S07: interval=daily beside ``*/3 * * * *``).
         if not cron:
             raise ValueError("interval 'cron' requires a cron expression")
-    elif interval not in INTERVALS:
+    elif interval not in INTERVALS and rolling_minutes(interval) is None:
         raise ValueError(f"Invalid interval: {interval}")
     sync_mode = accepted_schedule_sync_mode(sync_mode)
     if cron:
@@ -1303,17 +1336,17 @@ def resolve_machine_interval(data: dict[str, Any], stored: str) -> str:
     raw_preset = data.get("interval_preset")
     if raw_preset is not None and str(raw_preset).strip():
         preset = str(raw_preset).strip().lower()
-        if preset not in INTERVALS:
+        if preset not in INTERVALS and rolling_minutes(preset) is None:
             raise ValueError(f"Invalid interval: {raw_preset}")
         return preset
     if "interval" not in data:
-        return stored if stored in INTERVALS or stored == "cron" else "daily"
+        return stored if _known_interval(stored) else "daily"
     spoken_raw = str(data.get("interval") or "").strip()
     spoken = spoken_raw.lower()
-    if spoken in INTERVALS or spoken == "cron":
+    if spoken in INTERVALS or spoken == "cron" or rolling_minutes(spoken) is not None:
         return spoken
     if " " in spoken_raw:
-        return stored if stored in INTERVALS or stored == "cron" else "daily"
+        return stored if _known_interval(stored) else "daily"
     raise ValueError(f"Invalid interval: {spoken_raw}")
 
 
@@ -1329,6 +1362,8 @@ def project_operator_cadence(data: dict[str, Any]) -> dict[str, Any]:
     out = dict(data)
     out["interval_preset"] = preset
     if cron and label:
+        out["interval"] = label
+    elif rolling_minutes(preset) is not None and label:
         out["interval"] = label
     return out
 
