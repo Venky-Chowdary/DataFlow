@@ -25,7 +25,12 @@ import logging
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    occupied_pk_range_action,
+    settle_fast_path_create_on,
+)
 from services.copy_oracle_oracle import (
     _count as _ora_count,
     _ident as _ora_ident,
@@ -188,6 +193,12 @@ def copy_oracle_to_sqlserver(
                 _ss_create_sql(
                     dest_ref, dest_table, pairs, sqlserver_ddls, pk_dest
                 )
+            )
+            settle_fast_path_create_on(
+                dst_cur,
+                dest_dialect="sqlserver",
+                dest_table=dest_table,
+                dest_schema=dst_schema,
             )
             dest_conn.commit()
             created_here = True

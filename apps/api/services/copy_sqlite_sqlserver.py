@@ -22,7 +22,11 @@ from datetime import date, datetime
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    settle_fast_path_create_on,
+)
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_pg_sqlserver import _enable_fast_executemany, pg_sqlserver_copy_batch
 from services.copy_sqlserver_pg import _close_ss
@@ -180,6 +184,37 @@ def copy_sqlite_to_sqlserver(
             dest_count_before = _ss_count(dst_cur, dest_ref)
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
+            # Identity INSERT would duplicate a complete snapshot. Equal COUNT
+            # is skip; a different COUNT still declines so the row path can
+            # append with a measured target_rows_before.
+            if dest_count_before == source_count:
+                try:
+                    source_conn.commit()
+                except Exception:
+                    logger.debug("SQLite source commit skipped", exc_info=True)
+                try:
+                    dest_conn.commit()
+                except Exception:
+                    logger.debug("SQL Server dest commit skipped", exc_info=True)
+                proof = f"dest_count:{dest_count_before}"
+                return FastPathResult(
+                    rows_copied=source_count,
+                    source_rows=source_count,
+                    source_checksum=proof,
+                    target_rows=dest_count_before,
+                    target_checksum=proof,
+                    source_snapshot={
+                        "copy_workers": 1,
+                        "copy_split": "skip",
+                        "copy_partitions": 1,
+                        "partitions_skipped": 1,
+                        "partitions_loaded": 0,
+                        "shard_mode": "table",
+                        "sqlite_read": "select",
+                        "sqlserver_write": "skip",
+                    },
+                    proof_scope="dest_count_equals_source_snapshot_count",
+                )
             raise FastPathUnavailable(
                 "append into occupied SQL Server dest stays on the row path "
                 "(identity COPY would duplicate)"
@@ -191,6 +226,12 @@ def copy_sqlite_to_sqlserver(
         if not exists:
             dst_cur.execute(
                 _ss_create_sql(dest_ref, dest_table, pairs, sqlserver_ddls, [])
+            )
+            settle_fast_path_create_on(
+                dst_cur,
+                dest_dialect="sqlserver",
+                dest_table=dest_table,
+                dest_schema=dst_schema,
             )
             dest_conn.commit()
             created_here = True

@@ -269,10 +269,13 @@ def plan_fast_path_create(
     (direct callers own their proof). In scope the plan is left pending until
     ``settle_fast_path_create`` reads the destination back; the planner decides: a dialect
     in ``PLANNER_QUOTED_DIALECTS`` gets every fragment the row path would
-    render; any other builder gets PRIMARY KEY / NOT NULL and declines when the
-    plan carries anything more (DEFAULT, UNIQUE, CHECK, identity, collation,
-    placement). A planned PRIMARY KEY that contradicts the one the builder was
-    given always declines.
+    render. SQL Server's builder quotes with brackets and already appends
+    ``column_suffix``, so it also receives COLLATE / NOT NULL and still
+    declines DEFAULT, UNIQUE, CHECK, identity, CHARACTER SET, and placement
+    (those live in table constraints this builder does not render). Any other
+    builder gets PRIMARY KEY / NOT NULL and declines when the plan carries
+    anything more. A planned PRIMARY KEY that contradicts the one the builder
+    was given always declines.
     """
     scope = _CREATE_SCOPE.get()
     targets = [t for _s, t in pairs]
@@ -300,12 +303,13 @@ def plan_fast_path_create(
             "creates and certifies the destination"
         )
     pk = tuple(plan.primary_key) or given
-    if dest_dialect.lower() in PLANNER_QUOTED_DIALECTS:
+    dialect = dest_dialect.lower()
+    if dialect in PLANNER_QUOTED_DIALECTS:
         constraints = tuple(plan.table_constraints)
         if not plan.primary_key and pk:
             from connectors.sql_identifiers import quote_sql_identifier
 
-            quote = "`" if dest_dialect.lower() in {"mysql", "mariadb"} else '"'
+            quote = "`" if dialect in {"mysql", "mariadb"} else '"'
             constraints += (
                 "PRIMARY KEY ("
                 + ", ".join(quote_sql_identifier(c, quote) for c in pk)
@@ -322,6 +326,11 @@ def plan_fast_path_create(
             create_suffix=(plan.create_suffix or "").strip(),
         )
         return scope.pending
+    # SQL Server CREATE quotes identifiers itself and appends column_suffix.
+    # COLLATE Latin1_General_* is a bare fragment, safe after the bracketed
+    # name. Table-level DEFAULT / UNIQUE / CHECK / placement are not rendered
+    # here, so those still hand the load back to the row path.
+    sqlserver_dest = dialect in {"sqlserver", "mssql", "sql_server"}
     missing: list[str] = []
     if plan.column_defaults:
         missing.append(f"DEFAULT on {', '.join(plan.column_defaults)}")
@@ -337,7 +346,8 @@ def plan_fast_path_create(
     if plan.create_suffix:
         missing.append("physical placement clause")
     if any(
-        "COLLATE" in frag.upper() or "CHARACTER SET" in frag.upper()
+        "CHARACTER SET" in frag.upper()
+        or (not sqlserver_dest and "COLLATE" in frag.upper())
         for frags in plan.column_suffixes.values()
         for frag in frags
     ):
@@ -350,7 +360,14 @@ def plan_fast_path_create(
             "creates and certifies the destination"
         )
     scope.pending = FastPathCreate(
-        plan=plan, primary_key=pk, not_null=frozenset(plan.not_null_columns)
+        plan=plan,
+        primary_key=pk,
+        not_null=frozenset(plan.not_null_columns),
+        column_suffixes=(
+            {c: tuple(frags) for c, frags in plan.column_suffixes.items()}
+            if sqlserver_dest
+            else {}
+        ),
     )
     return scope.pending
 
@@ -407,6 +424,18 @@ def settle_fast_path_create_on(
                 bound = bound.replace("?", f":{idx}", 1)
             cursor.execute(bound, params)
             return cursor.fetchall()
+
+    elif dialect in {"sqlserver", "mssql", "sql_server"}:
+        # Catalog probes are written with ``?``. pyodbc (and the qmark wrapper)
+        # binds that. pymssql binds ``%s`` and aborts the batch on a marker
+        # mismatch, so the style is chosen before the first execute.
+        driver = f"{type(cursor).__module__}.{type(cursor).__name__}".lower()
+        placeholder = "%s" if "pymssql" in driver else "?"
+
+        def fetchall(sql: str, params: tuple[Any, ...]) -> Any:
+            bound = sql if placeholder == "?" else sql.replace("?", placeholder)
+            ran = cursor.execute(bound, params)
+            return (ran if ran is not None else cursor).fetchall()
 
     else:
 

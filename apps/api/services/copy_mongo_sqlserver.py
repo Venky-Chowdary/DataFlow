@@ -28,7 +28,11 @@ from itertools import islice
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    settle_fast_path_create_on,
+)
 from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session
 from services.copy_mongo_sink import bson_to_python
 from services.copy_pg_mongo import mongo_collection
@@ -130,6 +134,12 @@ def copy_mongo_to_sqlserver(
         else:
             dst_cur.execute(
                 _ss_create_sql(dest_ref, dest_table, pairs, sqlserver_ddls, [])
+            )
+            settle_fast_path_create_on(
+                dst_cur,
+                dest_dialect="sqlserver",
+                dest_table=dest_table,
+                dest_schema=dst_schema,
             )
             dest_conn.commit()
             created_here = True

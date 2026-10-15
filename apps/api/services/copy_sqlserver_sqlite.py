@@ -163,6 +163,33 @@ def copy_sqlserver_to_sqlite(
             )
         dest_occupied = dest_count_before > 0
         if dest_occupied and not replace_destination:
+            # Identity INSERT would duplicate a complete snapshot. Equal COUNT
+            # is skip; a different COUNT still declines.
+            if dest_count_before == source_count:
+                try:
+                    dest_conn.rollback()
+                except Exception:
+                    logger.debug("SQLite dest rollback skipped", exc_info=True)
+                proof = f"dest_count:{dest_count_before}"
+                return FastPathResult(
+                    rows_copied=source_count,
+                    source_rows=source_count,
+                    source_checksum=proof,
+                    target_rows=dest_count_before,
+                    target_checksum=proof,
+                    source_snapshot={
+                        "sqlserver_isolation": isolation,
+                        "copy_workers": 1,
+                        "copy_split": "skip",
+                        "copy_partitions": 1,
+                        "partitions_skipped": 1,
+                        "partitions_loaded": 0,
+                        "shard_mode": "table",
+                        "sqlserver_read": "holdlock_select",
+                        "sqlite_write": "skip",
+                    },
+                    proof_scope="dest_count_equals_source_snapshot_count",
+                )
             raise FastPathUnavailable(
                 "append into occupied SQLite dest stays on the row path "
                 "(identity COPY would duplicate)"

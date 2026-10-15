@@ -25,7 +25,11 @@ import tempfile
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    settle_fast_path_create_on,
+)
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_pg_sqlserver import _enable_fast_executemany, pg_sqlserver_copy_batch
 from services.copy_s3_common import (
@@ -131,6 +135,12 @@ def copy_s3_to_sqlserver(
         if not exists:
             dst_cur.execute(
                 _ss_create_sql(dest_ref, dest_table, pairs, sqlserver_ddls, [])
+            )
+            settle_fast_path_create_on(
+                dst_cur,
+                dest_dialect="sqlserver",
+                dest_table=dest_table,
+                dest_schema=dst_schema,
             )
             dest_conn.commit()
             created_here = True
