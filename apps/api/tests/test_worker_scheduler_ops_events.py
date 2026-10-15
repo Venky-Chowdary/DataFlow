@@ -206,9 +206,9 @@ def test_schedule_fire_started_and_held(monkeypatch, caplog):
     monkeypatch.setattr(schedule_runner, "_resolve_connector", lambda connector_id: {"id": connector_id})
     monkeypatch.setattr(
         schedule_runner,
-        "build_schedule_request",
-        lambda *_args: SimpleNamespace(acknowledgment_actor=None),
-    )
+            "build_schedule_request",
+            lambda *_args, **_kwargs: SimpleNamespace(acknowledgment_actor=None),
+        )
     monkeypatch.setattr(schedule_runner, "_guard_source_schema_drift", lambda *_args: False)
     monkeypatch.setattr(schedule_store, "set_running_job", lambda *_args: None)
 
@@ -235,7 +235,7 @@ def test_schedule_fire_started_and_held(monkeypatch, caplog):
     monkeypatch.setattr(
         schedule_runner,
         "build_schedule_request",
-        lambda *_args: (_ for _ in ()).throw(ValueError("SENTINEL_PREFLIGHT_DETAIL")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("SENTINEL_PREFLIGHT_DETAIL")),
     )
     with caplog.at_level("INFO"):
         assert schedule_runner._dispatch_transfer(schedule.id) is None

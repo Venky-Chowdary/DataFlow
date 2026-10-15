@@ -1031,6 +1031,7 @@ async def execute_transfer_json(
                 "message": redact_log_text(str(exc)),
                 "existing_job_id": exc.existing_job_id,
                 "existing_status": exc.existing_status,
+                "existing_created_at": exc.existing_created_at,
             },
         ) from exc
     except ValueError as exc:
@@ -1502,6 +1503,7 @@ async def run_universal_transfer(
                 "message": redact_log_text(str(exc)),
                 "existing_job_id": exc.existing_job_id,
                 "existing_status": exc.existing_status,
+                "existing_created_at": exc.existing_created_at,
             },
         ) from exc
     except ValueError as exc:

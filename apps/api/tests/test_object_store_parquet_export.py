@@ -119,13 +119,27 @@ def test_s3_writer_parquet_puts_typed_object(monkeypatch):
     puts: list[tuple[str, bytes, str]] = []
 
     class FakeClient:
+        def __init__(self):
+            self.bodies: dict[str, bytes] = {}
+
         def head_bucket(self, Bucket):  # noqa: N803
             return {}
 
         def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803
-            puts.append((Key, Body, ContentType))
+            self.bodies[Key] = Body if isinstance(Body, bytes) else bytes(Body)
+            puts.append((Key, self.bodies[Key], ContentType))
+
+        def head_object(self, Bucket, Key):  # noqa: N803
+            return {"ContentLength": len(self.bodies[Key])}
+
+        def copy_object(self, **kwargs):
+            source = kwargs["CopySource"]["Key"]
+            dest = kwargs["Key"]
+            self.bodies[dest] = self.bodies[source]
+            puts.append((dest, self.bodies[dest], kwargs.get("ContentType") or "application/vnd.apache.parquet"))
 
         def delete_object(self, Bucket, Key):  # noqa: N803
+            self.bodies.pop(Key, None)
             return {}
 
     monkeypatch.setattr(s3_writer, "boto3_client", lambda *a, **k: FakeClient())
@@ -169,13 +183,27 @@ def test_s3_writer_parquet_quarantines_overflow_before_write(monkeypatch):
     puts: list[str] = []
 
     class FakeClient:
+        def __init__(self):
+            self.bodies: dict[str, bytes] = {}
+
         def head_bucket(self, Bucket):  # noqa: N803
             return {}
 
         def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803
+            self.bodies[Key] = Body if isinstance(Body, bytes) else bytes(Body)
             puts.append(Key)
 
+        def head_object(self, Bucket, Key):  # noqa: N803
+            return {"ContentLength": len(self.bodies[Key])}
+
+        def copy_object(self, **kwargs):
+            source = kwargs["CopySource"]["Key"]
+            dest = kwargs["Key"]
+            self.bodies[dest] = self.bodies[source]
+            puts.append(dest)
+
         def delete_object(self, Bucket, Key):  # noqa: N803
+            self.bodies.pop(Key, None)
             return {}
 
     monkeypatch.setattr(s3_writer, "boto3_client", lambda *a, **k: FakeClient())

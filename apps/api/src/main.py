@@ -744,6 +744,7 @@ async def duplicate_transfer_handler(
             "detail": str(exc),
             "existing_job_id": exc.existing_job_id,
             "existing_status": exc.existing_status,
+            "existing_created_at": exc.existing_created_at,
             "job_id": exc.existing_job_id,
         },
     )

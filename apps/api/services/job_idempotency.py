@@ -42,6 +42,7 @@ __all__ = [
     "DEFAULT_CLAIM_TTL_SECONDS",
     "JobClaim",
     "claim_key",
+    "claim_still_blocks",
     "normalize_client_key",
     "request_fingerprint",
 ]
@@ -81,6 +82,7 @@ class JobClaim:
     acquired: bool
     existing_job_id: str = ""
     existing_status: str = ""
+    existing_created_at: str = ""
 
     @property
     def duplicate(self) -> bool:
@@ -95,7 +97,39 @@ class JobClaim:
             "duplicate": self.duplicate,
             "existing_job_id": self.existing_job_id,
             "existing_status": self.existing_status,
+            "existing_created_at": self.existing_created_at,
         }
+
+
+#: Holder id reserved before the job document exists. It is not a job, so a
+#: claim left on it after a crash must not block the next submit for the TTL.
+PENDING_CLAIM_HOLDER = "__pending__"
+
+#: Status strings older writers stored for a finished run. They are not in
+#: TERMINAL_STATUSES, and treating them as live blocked Sync now of a job the
+#: Jobs page already showed as done.
+_FINISHED_STATUS_ALIASES = frozenset({"success", "succeeded", "successful"})
+
+
+def claim_still_blocks(*, holder_id: str, holder_status: str, expired: bool) -> bool:
+    """Whether this claim still owns the write.
+
+    A claim blocks only while a real unfinished job holds it. A placeholder,
+    a missing document, a finished run (including success aliases), and an
+    expired lease do not. Unknown statuses do not block either: the only
+    live writers are pending, queued, running, and retrying.
+    """
+    holder = (holder_id or "").strip()
+    if expired or not holder or holder == PENDING_CLAIM_HOLDER:
+        return False
+    status = (holder_status or "").strip().lower()
+    if not status or status in _FINISHED_STATUS_ALIASES:
+        return False
+    from services.job_status import TERMINAL_STATUSES, UNFINISHED_JOB_STATUSES
+
+    if status in TERMINAL_STATUSES:
+        return False
+    return status in UNFINISHED_JOB_STATUSES
 
 
 def normalize_client_key(value: Any) -> str:

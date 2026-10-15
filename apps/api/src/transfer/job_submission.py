@@ -68,6 +68,7 @@ def create_pending_job(engine: Any, request: Any) -> str:
         "source_read_mode": source_read_mode_of(request.source),
         "triggered_by": (request.triggered_by or "").strip(),
         "retry_of": None,
+        "parent_job_id": str(getattr(request, "parent_job_id", "") or "").strip(),
         # Job-root copy. get_job reads this when a rewrite of transfer_request
         # drops the nested flag (R10-001 / R8-002).
         "schema_drift_acknowledged": bool(

@@ -51,6 +51,7 @@ class TenantCreateBody(BaseModel):
     mfa_required: bool = Field(default=False)
     session_timeout_hours: int = Field(default=8, ge=1, le=24)
     ip_allowlist: list[str] = Field(default_factory=list)
+    egress_allowlist: list[str] = Field(default_factory=list)
 
 
 class TenantUpdateBody(BaseModel):
@@ -62,6 +63,7 @@ class TenantUpdateBody(BaseModel):
     mfa_required: bool | None = Field(default=None)
     session_timeout_hours: int | None = Field(default=None, ge=1, le=24)
     ip_allowlist: list[str] | None = Field(default=None)
+    egress_allowlist: list[str] | None = Field(default=None)
 
 
 class BYOKKeyCreateBody(BaseModel):
@@ -602,6 +604,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
             mfa_required=body.mfa_required,
             session_timeout_hours=body.session_timeout_hours,
             ip_allowlist=body.ip_allowlist,
+            egress_allowlist=body.egress_allowlist,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -790,6 +793,7 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "audit_logging": audit_logging,
         "pii_detection": False,  # detector hooks exist; not attested as always-on
         "ip_allowlist_enabled": bool(tenant and tenant.ip_allowlist),
+        "egress_allowlist_enabled": bool(tenant and tenant.egress_allowlist),
         # Enforced only when Host resolves this tenant (custom domain). The
         # vanity app host never evaluates the CIDR list — do not badge it as live.
         "ip_allowlist_enforced": bool(
@@ -895,6 +899,7 @@ async def get_security_report(request: Request):
         f"- Audit logging: {'enabled' if posture['audit_logging'] else 'disabled'}",
         f"- PII detection: {'enabled' if posture['pii_detection'] else 'disabled'}",
         f"- IP allowlisting: {'enforced on custom domain' if posture.get('ip_allowlist_enforced') else ('stored, not enforced (needs custom domain)' if posture['ip_allowlist_enabled'] else 'disabled')}",
+        f"- Connector egress allowlist: {'on' if posture.get('egress_allowlist_enabled') else 'off (private ranges refused; metadata and link-local cannot be listed)'}",
         f"- MFA required for admins: recorded={('yes' if posture['mfa_required'] else 'no')}; enforced=no (login MFA is not wired)",
         f"- Session timeout: recorded={posture['session_timeout_hours']}h; enforced=no (token TTL is DATAFLOW_TOKEN_TTL_SEC)",
         "",

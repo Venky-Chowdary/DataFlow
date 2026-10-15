@@ -280,6 +280,8 @@ def test_s3_writer_large_export_uses_multipart(monkeypatch):
 
     completed: list[str] = []
     puts: list[str] = []
+    copies: list[str] = []
+    part_bytes: dict[str, int] = {}
 
     class FakeS3:
         def head_bucket(self, Bucket):  # noqa: N803
@@ -288,10 +290,17 @@ def test_s3_writer_large_export_uses_multipart(monkeypatch):
         def put_object(self, Bucket, Key, Body, ContentType):  # noqa: N803
             puts.append(Key)
 
+        def head_object(self, Bucket, Key):  # noqa: N803
+            return {"ContentLength": part_bytes[Key]}
+
+        def copy_object(self, **kwargs):
+            copies.append(kwargs["Key"])
+
         def create_multipart_upload(self, Bucket, Key, ContentType):  # noqa: N803
             return {"UploadId": f"up-{Key}"}
 
         def upload_part(self, Bucket, Key, UploadId, PartNumber, Body):  # noqa: N803
+            part_bytes[Key] = part_bytes.get(Key, 0) + len(Body)
             return {"ETag": f'"e{PartNumber}"'}
 
         def complete_multipart_upload(self, Bucket, Key, **_k):  # noqa: N803
@@ -330,8 +339,9 @@ def test_s3_writer_large_export_uses_multipart(monkeypatch):
     )
     assert result.ok, result.error
     assert completed
-    assert any(k == "exports/orders.json" for k in completed)
-    assert not puts  # large path must not single-PUT
+    assert all(k.endswith(".__df_staging__") for k in completed)
+    assert copies == ["exports/orders.json"]
+    assert not puts  # large path must not single-PUT the live key
 
 
 def test_capability_mentions_multipart_honesty():

@@ -690,13 +690,32 @@ def test_paused_schedule_manual_run_starts_without_activating(temp_store, monkey
     sched = _make(store, enabled=False)
     monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
 
-    def fake_dispatch(sid, attempt=0, allow_paused=False):
+    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode=""):
         assert sid == sched.id
+        assert resync_mode == ""
         return "job-manual" if allow_paused else None
 
     monkeypatch.setattr(runner, "_dispatch_transfer", fake_dispatch)
     job_id = runner._run_schedule(sched.id, manual=True)
     assert job_id == "job-manual"
+    assert store.get_schedule(sched.id).enabled is False
+
+
+def test_manual_run_forwards_resync_mode_without_activating(temp_store, monkeypatch):
+    """Sync now reaches dispatch as a one-shot. A paused cadence stays paused."""
+    sched = _make(store, enabled=False)
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
+    seen: dict[str, object] = {}
+
+    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode=""):
+        seen["sid"] = sid
+        seen["allow_paused"] = allow_paused
+        seen["resync_mode"] = resync_mode
+        return "job-sync"
+
+    monkeypatch.setattr(runner, "_dispatch_transfer", fake_dispatch)
+    assert runner._run_schedule(sched.id, manual=True, resync_mode="full") == "job-sync"
+    assert seen == {"sid": sched.id, "allow_paused": True, "resync_mode": "full"}
     assert store.get_schedule(sched.id).enabled is False
 
 

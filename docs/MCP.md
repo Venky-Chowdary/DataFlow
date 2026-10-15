@@ -71,6 +71,7 @@ defined by `services.rbac`.
 | `remediate_validation` | `job.plan` | `plan` |
 | `repair_cdc_drift` | `job.manage` | `mutate` |
 | `replay_quarantine` | `job.manage` | `mutate` |
+| `rerun_job` | `job.manage` | `mutate` |
 | `resume_job` | `job.manage` | `mutate` |
 | `retry_job` | `job.manage` | `mutate` |
 | `run_query` | `query.use` | `read` |

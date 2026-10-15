@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from services.egress_guard import egress_url_allowed, host_is_blocked
+from services.egress_guard import egress_url_allowed, host_is_blocked, redirect_target_allowed
 from services.ops_events import emit_event
 from services.notification_store import (
     NotificationChannel,
@@ -34,7 +34,9 @@ _CHANNEL_KINDS = frozenset({"slack", "teams", "email", "servicenow", "webhook"})
 
 
 def _allowed_url(url: str) -> bool:
-    return egress_url_allowed(url)
+    # Webhooks stay default-deny. The connector allowlist is for on-prem
+    # database dials, not for an HTTP client that would follow a private hop.
+    return egress_url_allowed(url, allowlist=())
 
 
 def _env_smtp() -> dict[str, Any]:
@@ -49,10 +51,16 @@ def _env_smtp() -> dict[str, Any]:
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Refuse redirect follow — a public URL must not bounce onto link-local."""
+    """Follow a public http(s) redirect. A private or metadata target is refused.
+
+    The allowlist does not apply: a webhook that 302s onto 169.254.169.254
+    stays refused even when that address would be a permitted direct dial.
+    """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
-        return None
+        if not redirect_target_allowed(str(newurl or "")):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
@@ -116,7 +124,8 @@ def _send_mailgun(recipients: list[str], subject: str, body: str, from_addr: str
     credentials = base64.b64encode(f"api:{api_key}".encode()).decode()
     req = urllib.request.Request(url, data=data, headers={"Authorization": f"Basic {credentials}"}, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec: B310 — scheme is https and validated above
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=30) as resp:  # nosec: B310 — scheme is https and validated above
             resp_body = resp.read().decode("utf-8", errors="ignore")
         return {"ok": True, "status": resp.status, "body": resp_body[:500]}
     except Exception as exc:
