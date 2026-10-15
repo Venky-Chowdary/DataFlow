@@ -876,6 +876,21 @@ def download_adls_object(path: Path, cfg: dict[str, Any], bucket: str, key: str)
         _raise_missing_object(exc, bucket=bucket, key=key)
 
 
+def _missing_sftp_file(remote_path: str, cfg: dict[str, Any]) -> Any:
+    """One operator message for a glob or a path that is not on the server yet."""
+    from services.file_pickup import FileNotArrived, plan_pickup
+
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    plan = plan_pickup(
+        pattern=remote_path,
+        files=[],
+        manifest=None,
+        wait_seconds=int(extra.get("file_wait_seconds") or 0),
+        waited_seconds=int(extra.get("file_waited_seconds") or 0),
+    )
+    return FileNotArrived(plan.message, retryable=plan.retryable, pattern=remote_path)
+
+
 def download_sftp_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
     from connectors.sftp_common import (
         connect_sftp,
@@ -896,33 +911,27 @@ def download_sftp_object(path: Path, cfg: dict[str, Any], bucket: str, key: str)
     remote_path = sftp_cfg.path
     transport, sftp = connect_sftp(sftp_cfg)
     try:
-        remote_path = _resolve_sftp_download_path(sftp, remote_path)
+        remote_path = _resolve_sftp_download_path(sftp, remote_path, cfg)
         with open(path, "wb") as f:
             try:
                 sftp.getfo(remote_path, f)
             except OSError as exc:
                 if getattr(exc, "errno", None) == 2 or "no such file" in str(exc).lower():
-                    from services.file_pickup import FileNotArrived
-
-                    raise FileNotArrived(
-                        f"expected file not arrived: {remote_path}",
-                        retryable=False,
-                        pattern=remote_path,
-                    ) from exc
+                    raise _missing_sftp_file(remote_path, cfg) from exc
                 raise
     finally:
         sftp.close()
         transport.close()
 
 
-def _resolve_sftp_download_path(sftp: Any, remote_path: str) -> str:
+def _resolve_sftp_download_path(sftp: Any, remote_path: str, cfg: dict[str, Any]) -> str:
     """Turn ``orders_*.csv`` into one concrete remote path.
 
     A glob is not a file. Listing the parent and matching the pattern is the
     only read that can succeed. Zero matches is ``expected file not arrived``,
     not paramiko's ``[Errno 2]``.
     """
-    from services.file_pickup import FileNotArrived, is_file_pattern
+    from services.file_pickup import is_file_pattern
 
     if not is_file_pattern(remote_path):
         return remote_path
@@ -932,11 +941,7 @@ def _resolve_sftp_download_path(sftp: Any, remote_path: str) -> str:
     directory, _filename = split_remote_path(remote_path)
     matches = list_file_stats_on(sftp, directory or ".", remote_path)
     if not matches:
-        raise FileNotArrived(
-            f"expected file not arrived: {remote_path}",
-            retryable=False,
-            pattern=remote_path,
-        )
+        raise _missing_sftp_file(remote_path, cfg)
     parent = directory if directory not in {"", ".", "/"} else ""
     name = str(matches[0]["name"])
     if parent:
@@ -977,6 +982,8 @@ def stream_spilled_file_to_database(
     skip_preflight: bool = False,
     shape_runner: Any = None,
     duplicate_policy: str = "",
+    file_identity: dict[str, Any] | None = None,
+    fingerprint_sink: Any = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Stream a spilled object file to a database destination without loading it.
 
@@ -1008,4 +1015,6 @@ def stream_spilled_file_to_database(
         skip_preflight=skip_preflight,
         shape_runner=shape_runner,
         duplicate_policy=duplicate_policy,
+        file_identity=file_identity,
+        fingerprint_sink=fingerprint_sink,
     )

@@ -1956,9 +1956,7 @@ def run_integrity_audit(
             if check.get("blocks_transfer"):
                 check["blocks_transfer"] = False
                 check["lenient_quarantine"] = True
-                note = (
-                    "Lenient quarantine: bad rows are held out and good rows load"
-                )
+                note = "bad rows will quarantine; good rows still load"
                 warnings = list(check.get("warnings") or [])
                 warnings.append(note)
                 check["warnings"] = warnings

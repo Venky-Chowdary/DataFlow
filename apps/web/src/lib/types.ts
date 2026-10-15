@@ -1500,6 +1500,12 @@ export interface ScheduleInput {
   notify_on_failure: boolean;
   notify_on_success: boolean;
   enabled: boolean;
+  /** upsert (default) | skip_duplicates | append. Empty stays the runner default. */
+  duplicate_policy?: "upsert" | "skip_duplicates" | "append" | "dedupe_skip" | string;
+  /** block refuses in-file duplicate keys; keep_last writes the last row. */
+  in_file_dedupe?: "block" | "keep_last" | string;
+  /** Seconds to wait for a glob file before expected-file-not-arrived. */
+  file_wait_seconds?: number;
   /** Optional signed data contract enforced on each scheduled run. */
   contract_id?: string;
   /** When true (default if contract_id set), refuse to schedule/enable until SIGNED. */
@@ -1611,6 +1617,9 @@ export interface PipelineSchedule {
   notify_on_failure: boolean;
   notify_on_success: boolean;
   enabled: boolean;
+  duplicate_policy?: string;
+  in_file_dedupe?: string;
+  file_wait_seconds?: number;
   last_run_at: string | null;
   next_run_at: string | null;
   last_job_id: string | null;

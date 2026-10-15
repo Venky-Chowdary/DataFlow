@@ -47,6 +47,38 @@ class DuplicateDecision:
     reason: str
 
 
+def validate_schedule_file_policy(
+    duplicate_policy: str | None,
+    in_file_dedupe: str | None = "block",
+    *,
+    primary_key: str = "",
+) -> tuple[str, str]:
+    """Reject an unknown schedule policy. Empty policy stays empty.
+
+    Upsert and skip-duplicates need a key. Append is the explicit opt-in
+    that keeps duplicate rows. In-file dedupe is ``block`` or ``keep_last``.
+    """
+    policy = normalize_duplicate_policy(duplicate_policy)
+    if policy and policy not in {"upsert", "dedupe_skip", "append"}:
+        raise DuplicatePolicyError(
+            f"Unknown duplicate_policy {duplicate_policy!r}. "
+            "Use upsert, skip_duplicates, or append."
+        )
+    dedupe = (in_file_dedupe or "block").strip().lower().replace("-", "_")
+    if dedupe in {"last", "last_wins"}:
+        dedupe = "keep_last"
+    if dedupe not in {"block", "keep_last"}:
+        raise DuplicatePolicyError(
+            f"Unknown in_file_dedupe {in_file_dedupe!r}. Use block or keep_last."
+        )
+    if policy in {"upsert", "dedupe_skip"} and not str(primary_key or "").strip():
+        raise DuplicatePolicyError(
+            "Upsert and skip_duplicates need a primary key. "
+            "Declare one, or choose append to allow duplicate rows."
+        )
+    return policy, dedupe
+
+
 def normalize_duplicate_policy(raw: str | None) -> str:
     text = (raw or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {

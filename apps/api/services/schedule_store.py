@@ -1286,6 +1286,15 @@ def _guard_schedule_destination(connector_id: str, table: str) -> None:
 
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     payload = dict(data)
+    from services.duplicate_policy import validate_schedule_file_policy
+
+    policy, dedupe = validate_schedule_file_policy(
+        str(payload.get("duplicate_policy") or ""),
+        str(payload.get("in_file_dedupe") or "block"),
+        primary_key=str(payload.get("primary_key") or ""),
+    )
+    payload["duplicate_policy"] = policy
+    payload["in_file_dedupe"] = dedupe
     replay_id = str(payload.pop("replay_schedule_id", "") or "").strip()
     interval, cron = canonicalize_cadence(
         str(payload.get("interval") or "daily"),
@@ -1512,6 +1521,16 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
             )
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
+        if any(key in data for key in ("duplicate_policy", "in_file_dedupe", "primary_key")):
+            from services.duplicate_policy import validate_schedule_file_policy
+
+            policy, dedupe = validate_schedule_file_policy(
+                str(merged.get("duplicate_policy") or ""),
+                str(merged.get("in_file_dedupe") or "block"),
+                primary_key=str(merged.get("primary_key") or ""),
+            )
+            merged["duplicate_policy"] = policy
+            merged["in_file_dedupe"] = dedupe
         # Resume is the re-arm for a finding no signature can clear
         # (approvable is false: remap, fix the source, set a key). Pause then
         # resume used to leave needs_approval set, so the beat kept skipping

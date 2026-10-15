@@ -113,7 +113,13 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
         return _clear_object_store(
             dest_summary, store, cfg, schema=schema, table_name=table
         )
-    removed = _delete_all_rows(db_type, cfg, schema=schema, table_name=table)
+    removed = _delete_all_rows(
+        db_type,
+        cfg,
+        schema=schema,
+        table_name=table,
+        job_id=str(dest_summary.get("job_id") or ""),
+    )
     after = precount_table(db_type, cfg, table)
     dest_summary["partial_batch_rows_after_undo"] = after
     if after == 0 and removed:
@@ -220,6 +226,7 @@ def _delete_all_rows(
     *,
     schema: str,
     table_name: str,
+    job_id: str = "",
 ) -> bool:
     from connectors.sql_identifiers import quote_table_ref
 
@@ -249,6 +256,14 @@ def _delete_all_rows(
         try:
             with conn.cursor() as cur:
                 cur.execute(f"DELETE FROM {ref}")  # nosec B608
+            from services.file_manifest import forget_job
+
+            forget_job(
+                conn,
+                dialect="postgresql",
+                schema=schema or "public",
+                job_id=job_id,
+            )
             conn.commit()
         finally:
             conn.close()

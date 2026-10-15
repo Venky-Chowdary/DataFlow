@@ -86,6 +86,9 @@ def create_schedule(
     column_transforms: dict[str, Any] | None = None,
     schema_drift_acknowledged: bool = False,
     pii_acknowledgement: dict[str, Any] | None = None,
+    duplicate_policy: str = "",
+    in_file_dedupe: str = "block",
+    file_wait_seconds: int = 0,
 ):
     """Stage a pipeline schedule for explicit Confirm. This creates nothing itself."""
     tool = "create_schedule"
@@ -273,7 +276,22 @@ def create_schedule(
         "require_signed_contract": bool(bound.get("require_signed_contract", False)),
         "schema_drift_acknowledged": bool(schema_drift_acknowledged),
         "enabled": True,
+        "duplicate_policy": str(duplicate_policy or ""),
+        "in_file_dedupe": str(in_file_dedupe or "block"),
+        "file_wait_seconds": max(0, int(file_wait_seconds or 0)),
     }
+    try:
+        from services.duplicate_policy import validate_schedule_file_policy
+
+        policy, dedupe = validate_schedule_file_policy(
+            payload["duplicate_policy"],
+            payload["in_file_dedupe"],
+            primary_key=upsert,
+        )
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
+    payload["duplicate_policy"] = policy
+    payload["in_file_dedupe"] = dedupe
     if pii_acknowledgement:
         from .transfer_tools import _pii_acknowledgement
 
@@ -318,6 +336,9 @@ def create_schedule(
         preview["cursor_column"] = payload["cursor_column"]
     if upsert:
         preview["upsert_key"] = upsert
+    if policy:
+        preview["duplicate_policy"] = policy
+    preview["in_file_dedupe"] = dedupe
     if payload["contract_id"]:
         preview["contract_id"] = payload["contract_id"]
         preview["require_signed_contract"] = payload["require_signed_contract"]

@@ -114,6 +114,7 @@ class ScheduleCreate(BaseModel):
     enabled: bool = True
     file_wait_seconds: int = Field(default=0, ge=0, le=86400)
     duplicate_policy: str = ""
+    in_file_dedupe: str = "block"
     #: Inbox → Studio footer: persist mappings onto this draft instead of a new row.
     replay_schedule_id: str = ""
 
@@ -166,6 +167,9 @@ class ScheduleUpdate(BaseModel):
     notify_on_failure: Optional[bool] = None
     notify_on_success: Optional[bool] = None
     enabled: Optional[bool] = None
+    file_wait_seconds: Optional[int] = Field(default=None, ge=0, le=86400)
+    duplicate_policy: Optional[str] = None
+    in_file_dedupe: Optional[str] = None
 
 
 class ScheduleResponse(BaseModel):
@@ -218,6 +222,9 @@ class ScheduleResponse(BaseModel):
     notify_on_failure: bool = True
     notify_on_success: bool = False
     enabled: bool
+    file_wait_seconds: int = 0
+    duplicate_policy: str = ""
+    in_file_dedupe: str = "block"
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
     last_job_id: Optional[str] = None
@@ -299,6 +306,9 @@ class ScheduleSummaryResponse(BaseModel):
     notify_on_failure: bool = True
     notify_on_success: bool = False
     enabled: bool
+    file_wait_seconds: int = 0
+    duplicate_policy: str = ""
+    in_file_dedupe: str = "block"
     last_run_at: Optional[str] = None
     next_run_at: Optional[str] = None
     last_job_id: Optional[str] = None

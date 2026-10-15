@@ -3250,6 +3250,25 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 # is intentional (date truncate, etc.) — surface as detail, not auto-block
                 # when transform is explicit; block when transform missing but types lossy.
         if mismatches:
+            mode = (getattr(ctx.plan, "validation_mode", "") or "strict").strip().lower()
+            if mode == "lenient":
+                return _pass(
+                    GateId.G8_RECONCILIATION,
+                    (
+                        f"{len(mismatches)} dry-run cell mismatch(es) will quarantine; "
+                        "good rows still load"
+                    ),
+                    start,
+                    {
+                        "issues": mismatches[:20],
+                        "source_rows": source_count,
+                        "target_rows": len(mapped_rows),
+                        "preview_only": True,
+                        "rule_id": "g8_reconciliation.lenient_quarantine",
+                        "quarantine": True,
+                        "validation_mode": mode,
+                    },
+                )
             return _block(
                 GateId.G8_RECONCILIATION,
                 "Dry-run reconciliation mismatch — identity mapping altered sample values",

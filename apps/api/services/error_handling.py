@@ -714,6 +714,20 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     """
     raw = format_exception_message(error)
     text = raw.lower()
+    if "expected file not arrived" in text or type(error).__name__ == "FileNotArrived":
+        return {
+            "code": "expected_file_not_arrived",
+            "category": "source",
+            "title": "Expected file not arrived",
+            "message": raw,
+            "fix": (
+                "Put the file where this schedule reads it, or widen "
+                "file_wait_seconds, then run the schedule again."
+            ),
+            "raw": raw,
+            "retriable": bool(getattr(error, "retryable", False)),
+            "confidence": "high",
+        }
     # KeyError('primary_key') renders as the quoted token alone. Matching that
     # token as a substring rewrote unrelated errors. Only the KeyError itself
     # is an identity-column failure.

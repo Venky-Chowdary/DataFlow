@@ -31,6 +31,12 @@ STORE_PATH = data_dir() / "file_load_ledger.json"
 _LOCK = threading.Lock()
 
 
+def _now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 def file_bytes_digest(content: bytes | str | os.PathLike) -> str:
     """sha256 of the file bytes. Paths are streamed; bytes are hashed in place."""
     digest = hashlib.sha256()

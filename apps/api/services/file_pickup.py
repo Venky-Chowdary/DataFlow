@@ -17,13 +17,24 @@ _GLOB = re.compile(r"[*?\[\]]")
 _DATE_TOKEN = re.compile(r"\{(?:date|yyyy|yyyymmdd|yyyy-mm-dd)\}", re.I)
 
 
+FILE_NOT_ARRIVED = "expected_file_not_arrived"
+FILE_NOT_ARRIVED_REMEDIATION = (
+    "Put the file where this schedule reads it, or widen file_wait_seconds, "
+    "then run the schedule again."
+)
+
+
 class FileNotArrived(RuntimeError):
     """The pattern matched nothing. ``retryable`` is the wait window."""
+
+    status = FILE_NOT_ARRIVED
 
     def __init__(self, message: str, *, retryable: bool, pattern: str) -> None:
         super().__init__(message)
         self.retryable = retryable
         self.pattern = pattern
+        self.status = FILE_NOT_ARRIVED
+        self.remediation = FILE_NOT_ARRIVED_REMEDIATION
 
 
 @dataclass(frozen=True)
@@ -42,9 +53,10 @@ class PickupPlan:
     pattern: str
     is_pattern: bool
     files: list[RemoteFile] = field(default_factory=list)
-    action: str = "load"  # load | wait | elapsed | missing
+    action: str = "load"  # load | unchanged | wait | elapsed | missing
     message: str = ""
     retryable: bool = False
+    status: str = ""
 
 
 def is_file_pattern(name: str) -> bool:
@@ -102,30 +114,45 @@ def matches_pattern(name: str, pattern: str) -> bool:
     return key == pat
 
 
+def ordered_files(files: list[RemoteFile]) -> list[RemoteFile]:
+    """Stable pickup order: path, then mtime, then checksum."""
+    return sorted(files, key=lambda item: (item.name, item.mtime, item.checksum))
+
+
 def select_new_files(
     files: list[RemoteFile],
     manifest: list[dict] | None,
     pattern: str,
 ) -> list[RemoteFile]:
-    """Files that match ``pattern`` and are not already recorded."""
-    seen = {
-        (
-            str(row.get("name") or ""),
-            int(row.get("size") or 0),
-            str(row.get("checksum") or ""),
-            str(row.get("mtime") or ""),
-        )
-        for row in (manifest or [])
-        if isinstance(row, dict)
-    }
+    """Files that match ``pattern`` and are new or changed by checksum.
+
+    A touched mtime with the same sha256 is not a new file. A checksum with
+    no digest falls back to size and mtime so an unhashed listing still skips
+    a byte-identical object.
+    """
+    loaded_checksums: dict[str, set[str]] = {}
+    loaded_stats: set[tuple[str, int, str]] = set()
+    for row in manifest or []:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "loaded").strip().lower()
+        if status not in {"", "loaded"}:
+            continue
+        name = str(row.get("name") or row.get("path") or "")
+        checksum = str(row.get("checksum") or row.get("sha256") or "")
+        if name and checksum:
+            loaded_checksums.setdefault(name, set()).add(checksum)
+        loaded_stats.add((name, int(row.get("size") or 0), str(row.get("mtime") or "")))
     chosen: list[RemoteFile] = []
     for item in files:
         if not matches_pattern(item.name, pattern):
             continue
-        if item.identity() in seen:
+        if item.checksum and item.checksum in loaded_checksums.get(item.name, set()):
+            continue
+        if not item.checksum and (item.name, int(item.size or 0), item.mtime) in loaded_stats:
             continue
         chosen.append(item)
-    return chosen
+    return ordered_files(chosen)
 
 
 def plan_pickup(
@@ -140,8 +167,21 @@ def plan_pickup(
     pat = (pattern or "").strip()
     patterned = is_file_pattern(pat)
     new_files = select_new_files(files, manifest, pat)
+    matched = [item for item in files if matches_pattern(item.name, pat)]
     if new_files:
-        return PickupPlan(pattern=pat, is_pattern=patterned, files=new_files, action="load")
+        return PickupPlan(
+            pattern=pat,
+            is_pattern=patterned,
+            files=ordered_files(new_files),
+            action="load",
+        )
+    if matched:
+        return PickupPlan(
+            pattern=pat,
+            is_pattern=patterned,
+            action="unchanged",
+            message="no new or changed files",
+        )
     wait = max(0, int(wait_seconds or 0))
     waited = max(0, int(waited_seconds or 0))
     label = pat or "(empty pattern)"
@@ -150,10 +190,12 @@ def plan_pickup(
             pattern=pat,
             is_pattern=patterned,
             action="wait",
+            status=FILE_NOT_ARRIVED,
             retryable=True,
             message=(
                 f"expected file not arrived: {label} — no new file yet. "
-                f"Waiting ({waited}s of {wait}s); the next attempt retries."
+                f"Waiting ({waited}s of {wait}s); the next attempt retries. "
+                f"{FILE_NOT_ARRIVED_REMEDIATION}"
             ),
         )
     if wait and waited >= wait:
@@ -161,20 +203,22 @@ def plan_pickup(
             pattern=pat,
             is_pattern=patterned,
             action="elapsed",
+            status=FILE_NOT_ARRIVED,
             retryable=False,
             message=(
                 f"expected file not arrived: {label} — wait window elapsed "
-                f"({wait}s) with no new file."
+                f"({wait}s) with no new file. {FILE_NOT_ARRIVED_REMEDIATION}"
             ),
         )
     return PickupPlan(
         pattern=pat,
         is_pattern=patterned,
         action="missing",
+        status=FILE_NOT_ARRIVED,
         retryable=False,
         message=(
             f"expected file not arrived: {label} — no matching file, "
-            "and no wait window is set."
+            f"and no wait window is set. {FILE_NOT_ARRIVED_REMEDIATION}"
         ),
     )
 

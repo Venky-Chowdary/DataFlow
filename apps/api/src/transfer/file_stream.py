@@ -1230,6 +1230,8 @@ def stream_file_to_database(
     read_options: ReadOptions | None = None,
     shape_runner: Any = None,
     duplicate_policy: str = "",
+    file_identity: dict[str, Any] | None = None,
+    fingerprint_sink: Any = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -1299,6 +1301,16 @@ def stream_file_to_database(
     except ImportError:
         from transfer.connector_capabilities import resolve_driver_type
     dest_type = resolve_driver_type(destination.format)
+    manifest_identity = dict(file_identity) if isinstance(file_identity, dict) else {}
+    if manifest_identity and not str(manifest_identity.get("sha256") or "").strip():
+        from services.file_load_ledger import file_bytes_digest
+
+        manifest_identity["sha256"] = file_bytes_digest(content)
+    hold_manifest = (
+        bool(str(manifest_identity.get("sha256") or "").strip())
+        and dest_type == "postgresql"
+    )
+    manifest_claim = ""
     dest_cfg = resolve_connector_config(destination)
 
     from services.value_serializer import json_default
@@ -1660,7 +1672,7 @@ def stream_file_to_database(
         or ""
     ).strip().lower().replace("-", "_")
     try:
-        csv_fast = None if in_file_dedupe == "keep_last" else try_copy_local_csv(
+        csv_fast = None if (in_file_dedupe == "keep_last" or hold_manifest) else try_copy_local_csv(
             content=content,
             filename=filename,
             file_type=file_type,
@@ -1882,7 +1894,7 @@ def stream_file_to_database(
     )
     # Public TCP proxies (Railway, Neon, etc.) drop when multiple bulk writers share
     # the same host — force a single writer connection for those destinations.
-    if dest_type in ("sqlite", "snowflake") or pg_overwrite_one_txn:
+    if dest_type in ("sqlite", "snowflake") or pg_overwrite_one_txn or hold_manifest:
         max_workers = 1
     else:
         try:
@@ -2257,6 +2269,8 @@ def stream_file_to_database(
                 overwrite_keys_acc.observe_tuples(None)
         if result["fingerprints"]:
             fp_accumulator.add_many(result["fingerprints"])
+            if fingerprint_sink is not None:
+                fingerprint_sink.add_many(result["fingerprints"])
         source_rows_seen += int(result.get("batch_rows") or 0)
         written += result["batch_written"]
         rejected_total += result["rejected"]
@@ -2333,10 +2347,81 @@ def stream_file_to_database(
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
+    if hold_manifest:
+        from services.file_manifest import claim_file
+
+        manifest_conn = _ensure_pg_conn()
+        manifest_schema = str(getattr(destination, "schema", "") or dest_cfg.get("schema") or "public")
+        manifest_claim = claim_file(
+            manifest_conn,
+            dialect="postgresql",
+            schema=manifest_schema,
+            connector=str(manifest_identity.get("connector") or ""),
+            path=str(manifest_identity.get("path") or filename or ""),
+            size=int(manifest_identity.get("size") or 0),
+            mtime=str(manifest_identity.get("mtime") or ""),
+            sha256=str(manifest_identity.get("sha256") or ""),
+            job_id=str(manifest_identity.get("job_id") or job_id or ""),
+        )
+        if manifest_claim == "skip":
+            try:
+                manifest_conn.rollback()
+            except Exception:
+                pass
+            try:
+                manifest_conn.close()
+            except Exception:
+                pass
+            pg_conn_state["conn"] = None
+            dest_summary["file_manifest_status"] = "loaded"
+            dest_summary["sync_mode"] = effective_sync
+            dest_summary["source_row_count"] = 0
+            dest_summary["source_row_count_source"] = "file_manifest"
+            dest_summary["rejected_rows"] = 0
+            dest_summary["rows_written"] = 0
+            return 0, ddl_log, dest_summary, columns
+        from connectors.write_resilience import PgOverwriteTransaction, bind_overwrite_transaction
+
+        held_manifest = PgOverwriteTransaction()
+        bind_overwrite_transaction(manifest_conn, held_manifest)
+        held_manifest.begin(job_id=str(job_id or ""))
+
+    def _release_manifest_claim(success: bool, rows: int) -> None:
+        nonlocal manifest_claim
+        conn = pg_conn_state.get("conn")
+        if conn is None or manifest_claim != "load":
+            return
+        if success:
+            from services.file_manifest import complete_file
+
+            complete_file(
+                conn,
+                dialect="postgresql",
+                schema=str(getattr(destination, "schema", "") or dest_cfg.get("schema") or "public"),
+                connector=str(manifest_identity.get("connector") or ""),
+                path=str(manifest_identity.get("path") or filename or ""),
+                sha256=str(manifest_identity.get("sha256") or ""),
+                rows=int(rows or 0),
+            )
+            dest_summary["file_manifest_status"] = "loaded"
+        from connectors.write_resilience import finish_held_overwrite
+
+        finish_held_overwrite(conn, success=success)
+        manifest_claim = ""
+
     write_started = time.perf_counter()
     try:
         first_idx, first_batch = next(batch_enum)
     except StopIteration:
+        if manifest_claim == "load":
+            _release_manifest_claim(success=bool(columns), rows=0)
+            conn = pg_conn_state.get("conn")
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                pg_conn_state["conn"] = None
         if incremental and cursor_key:
             # An incremental sync whose cursor bound left nothing is a correct
             # no-op, not an empty file: the rows are already at rest and the
@@ -2387,7 +2472,11 @@ def stream_file_to_database(
 
                     from connectors.write_resilience import finish_held_overwrite
 
-                    finish_held_overwrite(conn, success=sys.exc_info()[0] is None)
+                    manifest_ok = sys.exc_info()[0] is None
+                    if manifest_claim == "load":
+                        _release_manifest_claim(success=manifest_ok, rows=int(written or 0))
+                    else:
+                        finish_held_overwrite(conn, success=manifest_ok)
                 try:
                     conn.close()
                 except Exception as exc:

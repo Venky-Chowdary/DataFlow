@@ -812,6 +812,30 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "name": {"type": "string", "description": "Schedule display name"},
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "duplicate_policy": {
+                    "type": "string",
+                    "enum": ["upsert", "skip_duplicates", "append"],
+                    "description": (
+                        "How a scheduled file load treats rows already in the destination. "
+                        "upsert (default when a primary key is set) needs no cursor on files. "
+                        "skip_duplicates inserts only new keys. append is explicit and keeps duplicates."
+                    ),
+                },
+                "in_file_dedupe": {
+                    "type": "string",
+                    "enum": ["block", "keep_last"],
+                    "description": (
+                        "Duplicates inside one file. block refuses the file. "
+                        "keep_last writes the last row for each key."
+                    ),
+                },
+                "file_wait_seconds": {
+                    "type": "integer",
+                    "description": (
+                        "How long a glob pickup waits for the expected file before "
+                        "reporting expected file not arrived."
+                    ),
+                },
                 "schema_policy": {
                     "type": "string",
                     "enum": ["manual_review", "type_locked", "pause_on_change"],
@@ -3886,6 +3910,9 @@ class DataPilotTools:
         column_transforms: dict | None = None,
         schema_drift_acknowledged: bool = False,
         pii_acknowledgement: dict | None = None,
+        duplicate_policy: str = "",
+        in_file_dedupe: str = "block",
+        file_wait_seconds: int = 0,
     ) -> ToolResult:
         from .schedule_tools import create_schedule
 
@@ -3920,6 +3947,9 @@ class DataPilotTools:
             column_transforms=column_transforms,
             schema_drift_acknowledged=schema_drift_acknowledged,
             pii_acknowledgement=pii_acknowledgement,
+            duplicate_policy=duplicate_policy,
+            in_file_dedupe=in_file_dedupe,
+            file_wait_seconds=file_wait_seconds,
         )
 
     def _analyze_result(

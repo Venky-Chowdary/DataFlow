@@ -117,6 +117,20 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const [cursorColumn, setCursorColumn] = useState(initial?.cursor_column ?? "");
   const [cursorSemantics, setCursorSemantics] = useState(initial?.cursor_semantics ?? "");
   const [primaryKey, setPrimaryKey] = useState(initial?.primary_key ?? "");
+  const storedPolicy = (initial?.duplicate_policy || "").replace(/-/g, "_");
+  const [duplicatePolicy, setDuplicatePolicy] = useState(
+    storedPolicy === "append"
+      ? "append"
+      : storedPolicy === "skip_duplicates" || storedPolicy === "dedupe_skip"
+        ? "skip_duplicates"
+        : "upsert",
+  );
+  const [inFileDedupe, setInFileDedupe] = useState(
+    (initial?.in_file_dedupe || "block").replace(/-/g, "_") === "keep_last" ? "keep_last" : "block",
+  );
+  const [fileWaitSeconds, setFileWaitSeconds] = useState(
+    Math.max(0, Number(initial?.file_wait_seconds || 0) || 0),
+  );
   const [sourceReadMode, setSourceReadMode] = useState(initial?.source_read_mode || "table");
   const [procedureText, setProcedureText] = useState(
     initial?.procedure_call || initial?.source_query || "",
@@ -191,7 +205,9 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     showCursor ||
     syncMode === "incremental_deduped" ||
     syncMode === "scd2" ||
-    syncMode === "mirror";
+    syncMode === "mirror" ||
+    duplicatePolicy === "upsert" ||
+    duplicatePolicy === "skip_duplicates";
 
   useEffect(() => {
     if (!syncModes.includes(syncMode as typeof syncModes[number])) {
@@ -295,6 +311,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     && destTable.trim()
     && (!callable || procedureText.trim())
     && (cadenceMode === "preset" || cron.trim())
+    && (duplicatePolicy === "append" || primaryKey.trim())
     && !contractBlock,
   );
 
@@ -349,6 +366,9 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       cursor_column: showCursor ? cursorColumn.trim() : "",
       cursor_semantics: showCursor ? cursorSemantics : "",
       primary_key: showPrimaryKey ? primaryKey.trim() : "",
+      duplicate_policy: duplicatePolicy,
+      in_file_dedupe: inFileDedupe,
+      file_wait_seconds: Math.max(0, Math.floor(fileWaitSeconds) || 0),
       source_read_mode: sourceReadMode,
       procedure_call: sourceReadMode === "procedure" ? procedureText.trim() : "",
       source_query: sourceReadMode === "query" ? procedureText.trim() : "",
@@ -614,7 +634,12 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                   value={primaryKey}
                   onChange={(e) => setPrimaryKey(e.target.value)}
                   placeholder="id"
-                  required={syncMode === "scd2" || syncMode === "mirror"}
+                  required={
+                    syncMode === "scd2"
+                    || syncMode === "mirror"
+                    || duplicatePolicy === "upsert"
+                    || duplicatePolicy === "skip_duplicates"
+                  }
                 />
                 <span className="df2-field-hint">
                   {syncMode === "scd2"
@@ -627,6 +652,52 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
             )}
           </div>
         )}
+
+        <div className="df2-form-row">
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="sched-duplicate-policy">Duplicate policy</label>
+            <select
+              id="sched-duplicate-policy"
+              className="df2-input"
+              value={duplicatePolicy}
+              onChange={(e) => setDuplicatePolicy(e.target.value)}
+            >
+              <option value="upsert">Upsert — update existing keys</option>
+              <option value="skip_duplicates">Skip duplicates — insert only new keys</option>
+              <option value="append">Append — keep duplicate rows</option>
+            </select>
+            <span className="df2-field-hint">
+              Upsert is the default and does not need a cursor on file schedules. Append is explicit.
+            </span>
+          </div>
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="sched-in-file-dedupe">In-file duplicates</label>
+            <select
+              id="sched-in-file-dedupe"
+              className="df2-input"
+              value={inFileDedupe}
+              onChange={(e) => setInFileDedupe(e.target.value)}
+            >
+              <option value="block">Block the file</option>
+              <option value="keep_last">Keep the last row for each key</option>
+            </select>
+          </div>
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="sched-file-wait">Wait for file (seconds)</label>
+            <input
+              id="sched-file-wait"
+              className="df2-input"
+              type="number"
+              min={0}
+              max={86400}
+              value={fileWaitSeconds}
+              onChange={(e) => setFileWaitSeconds(Number(e.target.value) || 0)}
+            />
+            <span className="df2-field-hint">
+              How long a glob pickup waits before expected file not arrived.
+            </span>
+          </div>
+        </div>
 
         {syncMode === "cdc" && (
           <div className="df2-field">
