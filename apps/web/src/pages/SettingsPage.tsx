@@ -842,6 +842,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access.", on: posture.audit_logging },
                           { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review.", on: posture.pii_detection },
                           { title: "IP allowlisting", desc: posture.ip_allowlist_enforced ? "Enforced when Host matches this tenant custom domain." : "Stored CIDR list. Not enforced on the default app host.", on: Boolean(posture.ip_allowlist_enforced) },
+                          { title: "Connector egress", desc: posture.egress_allowlist_enabled ? "Admin CIDRs may dial on-prem or VPC hosts. Metadata stays refused." : "Off. Private ranges, loopback, and cloud metadata are refused.", on: Boolean(posture.egress_allowlist_enabled) },
                           { title: `Session timeout (${posture.session_timeout_hours}h)`, desc: "Recorded only. Token TTL is DATAFLOW_TOKEN_TTL_SEC — this value does not sign sessions out.", on: false },
                           { title: "MFA required for admins", desc: "Recorded policy. Login MFA is not wired.", on: false },
                         ].map((item) => (

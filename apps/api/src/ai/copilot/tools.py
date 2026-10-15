@@ -1818,6 +1818,7 @@ class DataPilotTools:
         refusal = metadata_endpoint_refusal(
             str(draft.get("host") or ""),
             str(draft.get("connection_string") or ""),
+            workspace_id=str(draft.get("workspace_id") or ""),
         )
         if refusal:
             from .ack_ledger import redact_payload
@@ -1851,6 +1852,7 @@ class DataPilotTools:
                         "account": draft.get("account") or "",
                         "service_account": draft.get("service_account") or "",
                         "host_key": draft.get("host_key") or "",
+                        "workspace_id": str(draft.get("workspace_id") or ""),
                     },
                 )
                 if not probe_ok:

@@ -2629,7 +2629,16 @@ def _stream_database_transfer_impl(
                 or ([keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])),
             )
 
-        write_kwargs: dict[str, Any] = {}
+        from services.preflight_source_kind import source_is_record_batch
+
+        # Object-store and file extracts spell a blank numeric cell as "".
+        # That blank is SQL NULL on a nullable typed column (R8-003). A
+        # database integer cannot store "" either, but only when the source
+        # carrier itself has no empty-string domain — that path stays in the
+        # blank-cell contract and is not flipped on here.
+        write_kwargs: dict[str, Any] = {
+            "empty_cells_as_null": source_is_record_batch("database", src_type),
+        }
         if dest_type == "snowflake":
             write_kwargs["connection"] = _ensure_snowflake_conn()
             write_kwargs["close_connection"] = False
@@ -2706,6 +2715,7 @@ def _stream_database_transfer_impl(
                     preserve_case=True,
                     dest_kind=dest_bind_dialect,
                     destination_pk_columns=list(pk_target_cols or []) or None,
+                    empty_cells_as_null=bool(write_kwargs.get("empty_cells_as_null")),
                 )
                 if mapped_fp:
                     inline_fps = row_fingerprints(

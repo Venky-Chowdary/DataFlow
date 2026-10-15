@@ -216,6 +216,7 @@ def write_mapped_rows(
             spill_max_size=spill_max,
             batch_size=resolve_materialize_batch(extra),
             dest_db_type="sftp",
+            empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
             **source_from_writer(_kwargs, extra),
         )
     except Exception as exc:

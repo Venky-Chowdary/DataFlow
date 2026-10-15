@@ -33,7 +33,11 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from services.brand_env import getenv_brand
-from services.value_serializer import cell_to_string, json_dumps_exact_numbers
+from services.value_serializer import (
+    SQL_NULL_SENTINEL,
+    cell_to_string,
+    json_dumps_exact_numbers,
+)
 
 DEFAULT_MATERIALIZE_BATCH = 1024
 _SAMPLE_LIMIT = 50
@@ -181,7 +185,19 @@ class ObjectStoreEncoder:
         for record in iter_mapped_delimited_records(
             list(mapped_rows), self.target_cols, self.dest_types
         ):
-            writer.writerow({k: cell_to_string(v) for k, v in record.items()})
+            # CSV has no null token. ``""`` is a real empty string. SQL NULL
+            # is the shared sentinel so a Postgres NULL does not read back as
+            # an empty name (R7-001). ``normalize_cell`` already maps it back.
+            writer.writerow(
+                {
+                    k: (
+                        SQL_NULL_SENTINEL
+                        if v is None
+                        else cell_to_string(v)
+                    )
+                    for k, v in record.items()
+                }
+            )
         if self._text is not None:
             self._text.flush()
 

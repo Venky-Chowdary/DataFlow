@@ -818,30 +818,40 @@ def _publish_sqlite_stage(
     snapshot. A failure leaves the live table untouched.
     """
     live_quoted = quote_sql_identifier(live_name)
-    with conn:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-            (live_name,),
-        )
-        live_exists = cur.fetchone() is not None
-        if not live_exists:
-            cur.execute(f"ALTER TABLE {stage_quoted} RENAME TO {live_quoted}")
-            return
-        col_sql = ", ".join(quote_sql_identifier(c) for c in columns)
-        try:
-            cur.execute("SAVEPOINT df_stage_pub")
-            cur.execute(f"DELETE FROM {live_quoted}")
+    try:
+        with conn:
+            cur = conn.cursor()
             cur.execute(
-                f"INSERT INTO {live_quoted} ({col_sql}) "
-                f"SELECT {col_sql} FROM {stage_quoted}"
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (live_name,),
             )
-            cur.execute(f"DROP TABLE {stage_quoted}")
-            cur.execute("RELEASE df_stage_pub")
+            live_exists = cur.fetchone() is not None
+            if not live_exists:
+                cur.execute(f"ALTER TABLE {stage_quoted} RENAME TO {live_quoted}")
+                return
+            col_sql = ", ".join(quote_sql_identifier(c) for c in columns)
+            try:
+                cur.execute("SAVEPOINT df_stage_pub")
+                cur.execute(f"DELETE FROM {live_quoted}")
+                cur.execute(
+                    f"INSERT INTO {live_quoted} ({col_sql}) "
+                    f"SELECT {col_sql} FROM {stage_quoted}"
+                )
+                cur.execute(f"DROP TABLE {stage_quoted}")
+                cur.execute("RELEASE df_stage_pub")
+            except sqlite3.Error:
+                # The savepoint undo restores the rows DELETE already removed.
+                # Dropping the live table here replaced a landed snapshot with
+                # a partial stage (R11-001).
+                cur.execute("ROLLBACK TO df_stage_pub")
+                raise
+    except sqlite3.Error:
+        try:
+            conn.execute(f"DROP TABLE IF EXISTS {stage_quoted}")
+            conn.commit()
         except sqlite3.Error:
-            cur.execute("ROLLBACK TO df_stage_pub")
-            cur.execute(f"DROP TABLE {live_quoted}")
-            cur.execute(f"ALTER TABLE {stage_quoted} RENAME TO {live_quoted}")
+            pass
+        raise
     del stage_name
 
 
