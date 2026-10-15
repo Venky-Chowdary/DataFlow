@@ -1578,6 +1578,29 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         )
 
     if issues:
+        # Lenient quarantines the bad cells and still loads the good rows.
+        # A missing destination stamp (examined == 0) already returned above.
+        if mode == "lenient":
+            return _pass(
+                GateId.G3_SCHEMA_CONTRACT,
+                (
+                    f"{len(issues)} type coercion issue(s) will quarantine; "
+                    "good rows still load"
+                ),
+                start,
+                _with_scope(
+                    {
+                        "issues": issues,
+                        "issues_detail": issues_detail,
+                        "warnings": warnings,
+                        "accepted_width_narrowings": accepted_width_narrowings,
+                        "rule_id": "g3_schema_contract.lenient_quarantine",
+                        "quarantine": True,
+                        "validation_mode": mode,
+                    },
+                    g3_scope,
+                ),
+            )
         # Sample-proven or strict declared write hazards always block Validate.
         return _block(
             GateId.G3_SCHEMA_CONTRACT,
@@ -1814,6 +1837,30 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     details = _with_scope(details, g5_scope)
 
     if hard_errors:
+        mode = (getattr(ctx.plan, "validation_mode", "") or "strict").strip().lower()
+        structural = [
+            line
+            for line in hard_errors
+            if str(line).lower().startswith("source column missing")
+            or "no sample" in str(line).lower()
+        ]
+        if mode == "lenient" and not structural:
+            # Mixed or bad cells are holdouts. The writer quarantines them.
+            # The gate must not refuse the load before that write runs.
+            details["contracted_holdouts"] = list(hard_errors[:20])
+            details["contracted_holdout_count"] = len(hard_errors)
+            details["errors"] = []
+            details["kind"] = "quarantine"
+            details["validation_mode"] = mode
+            return _pass(
+                GateId.G5_DRY_RUN,
+                (
+                    f"Sample cast failures on {len(hard_errors)} finding(s) will "
+                    "quarantine; the rest of the file will load — not a clean pass"
+                ),
+                start,
+                details,
+            )
         details["issue_texts"] = [_issue_text(i) for i in hard_errors[:20]]
         return _block(
             GateId.G5_DRY_RUN,

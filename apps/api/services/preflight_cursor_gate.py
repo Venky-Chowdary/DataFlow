@@ -52,6 +52,26 @@ CDC_CAPABLE_SOURCES = frozenset({
 MODES_REQUIRING_CURSOR = frozenset(
     {"incremental_append", "incremental_deduped", "cdc"}
 )
+#: A file has no log cursor. Keyed upsert re-reads the file and MERGEs on the
+#: business key. Demanding updated_at here is what blocked file schedules.
+_FILE_UPSERT_SOURCES = frozenset(
+    {
+        "file",
+        "csv",
+        "excel",
+        "json",
+        "parquet",
+        "sftp",
+        "s3",
+        "gcs",
+        "adls",
+        "local",
+        "upload",
+    }
+)
+_FILE_UPSERT_MODES = frozenset(
+    {"upsert", "incremental_deduped", "incremental_upsert"}
+)
 MODES_REQUIRING_PRIMARY_KEY = frozenset(
     {"upsert", "incremental_deduped", "cdc", "scd2", "mirror"}
 )
@@ -324,6 +344,16 @@ def build_sync_contract_gate(
     multi_stream = len(contracts) > 1
     requires_cursor = sync in MODES_REQUIRING_CURSOR
     requires_primary_key = sync in MODES_REQUIRING_PRIMARY_KEY
+    source_name = (src or "").strip().lower()
+    source_kind = (kind or "").strip().lower()
+    if sync in _FILE_UPSERT_MODES and (
+        source_name in _FILE_UPSERT_SOURCES
+        or (source_kind == "file" and source_name in {"", "file", * _FILE_UPSERT_SOURCES})
+    ):
+        # Plain keyed upsert. The file is the snapshot; a cursor column is not
+        # how a corrected drop is re-read.
+        requires_cursor = False
+        requires_primary_key = True
 
     missing_cursor = [
         c.get("name") or c.get("stream") or "stream"

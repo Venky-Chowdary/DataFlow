@@ -1444,6 +1444,10 @@ _VALIDATION_MODE_POLICIES = {
     "maximum": "fail",
     "strict": "fail",
     "balanced": "quarantine",
+    # Lenient is its own mode. It loads the good rows and quarantines the bad
+    # ones — the same write policy as balanced, not a silent rename, and not
+    # the strict fail that blocks the whole file.
+    "lenient": "quarantine",
 }
 
 

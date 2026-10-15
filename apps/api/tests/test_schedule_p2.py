@@ -886,7 +886,7 @@ def test_completion_pin_does_not_fire_before_the_cron_grid(temp_store, monkeypat
 
 
 def test_resume_catch_up_lands_on_the_next_boundary(temp_store):
-    """Enabling a paused cron whose slot is past runs one catch-up, then the grid."""
+    """Enabling a paused cron waits for the next slot. It does not fire the missed one."""
     sched = _make(store, cron="*/5 * * * *", interval="hourly")
     past = "2026-10-08T01:10:00+00:00"
     store._save_all([
@@ -898,7 +898,10 @@ def test_resume_catch_up_lands_on_the_next_boundary(temp_store):
     ])
     resumed = store.update_schedule(sched.id, {"enabled": True})
     assert resumed is not None
-    assert resumed.next_run_at == past
+    resumed_due = store._parse_ts(resumed.next_run_at)
+    assert resumed_due is not None
+    assert resumed_due > datetime.now(timezone.utc)
+    assert resumed.next_run_at != past
     claimed = store.mark_schedule_running(sched.id, "beat")
     assert claimed is not None
     claimed_next = store._parse_ts(claimed.next_run_at)

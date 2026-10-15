@@ -305,12 +305,20 @@ def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""
     destination = _endpoint_from_connector(dst, sched.dest_table)
     src_extra = dict(getattr(source, "extra", None) or {})
     src_extra["file_wait_seconds"] = int(getattr(sched, "file_wait_seconds", 0) or 0)
-    src_extra["duplicate_policy"] = str(getattr(sched, "duplicate_policy", "") or "")
+    policy = str(getattr(sched, "duplicate_policy", "") or "").strip().lower()
+    if not policy and str(getattr(sched, "primary_key", "") or "").strip():
+        # Schedule default is keyed upsert. A one-shot full_refresh_append
+        # that never sets this field still inserts (2N).
+        policy = "upsert"
+    src_extra["duplicate_policy"] = policy
+    in_file = str(getattr(sched, "in_file_dedupe", "") or "block").strip().lower()
+    src_extra["in_file_dedupe"] = in_file
     source.extra = src_extra
     dst_extra = dict(getattr(destination, "extra", None) or {})
-    if src_extra["duplicate_policy"]:
-        dst_extra["duplicate_policy"] = src_extra["duplicate_policy"]
-        destination.extra = dst_extra
+    if policy:
+        dst_extra["duplicate_policy"] = policy
+    dst_extra["in_file_dedupe"] = in_file
+    destination.extra = dst_extra
     _apply_callable_schedule_source(source, sched)
     from services.schedule_cdc_extras import apply_cdc_schedule_extras
 

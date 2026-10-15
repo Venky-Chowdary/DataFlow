@@ -93,6 +93,24 @@ def _save(data: dict[str, Any]) -> None:
     write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
 
 
+def stored_file_digest(route_key: str) -> str:
+    """Digest recorded for this route, or empty when the file has never landed."""
+    route_key = (route_key or "").strip()
+    if not route_key:
+        return ""
+    coll = _mongo_ledger()
+    if coll is not None:
+        try:
+            doc = coll.find_one({"key": route_key}) or {}
+            return str(doc.get("digest") or "")
+        except Exception:  # noqa: BLE001
+            _logger.exception("file load ledger digest read failed for %s", route_key)
+    for entry in _load().get("files", []):
+        if entry.get("key") == route_key:
+            return str(entry.get("digest") or "")
+    return ""
+
+
 def file_already_loaded(route_key: str, digest: str) -> bool:
     route_key = (route_key or "").strip()
     digest = (digest or "").strip()

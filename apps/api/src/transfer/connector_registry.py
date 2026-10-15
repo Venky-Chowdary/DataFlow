@@ -468,6 +468,19 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
         cleaned = _driver_snippet(raw_s)
         return cleaned
 
+    # A wrong SFTP folder used to become "Authentication failed".
+    # "SFTP authenticated but path not found" contains the substring "auth",
+    # and a missing directory is [Errno 2] / "No such file", not a bad password.
+    if driver == "sftp" and re.search(
+        r"no such file|errno 2|path not found|file not found|not a directory|"
+        r"authenticated but|no such folder|folder not found",
+        text,
+    ):
+        return (
+            "SFTP path not found. The login succeeded; the remote folder or "
+            "file does not exist. Check the remote directory."
+        )
+
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
         if driver in ("salesforce", "hubspot", "stripe", "rest_api"):

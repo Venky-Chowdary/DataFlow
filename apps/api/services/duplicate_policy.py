@@ -9,8 +9,9 @@ Three outcomes, one owner:
 * ``append`` — plain INSERT, duplicates allowed. Only when the operator
   sets ``duplicate_policy=append`` or ``allow_duplicates``.
 
-An append sync mode with a business key used to INSERT again and turn 25
-rows into 50. That path now upserts unless append was chosen explicitly.
+``full_refresh_append`` stays an insert: two runs land 2N. A schedule that
+sets ``duplicate_policy=upsert`` (the schedule default when a key exists)
+MERGEs instead. ``skip_duplicates`` inserts only new keys.
 """
 
 from __future__ import annotations
@@ -118,16 +119,9 @@ def resolve_duplicate_policy(
             "Use upsert, dedupe_skip, or append."
         )
 
-    if business_key and (mode in _APPEND_SYNC or caller == "insert"):
-        if mode in _APPEND_SYNC:
-            return DuplicateDecision(
-                "upsert",
-                "upsert",
-                "update",
-                False,
-                "A business key is declared, so append will not insert duplicates. "
-                "Set duplicate_policy=append to allow them.",
-            )
+    # full_refresh_append is already an explicit sync mode: two runs land 2N.
+    # Rewriting it to upsert failed Gate-8 (dest Δ 0) and the sync-mode matrix.
+    # Upsert and skip-duplicates apply when duplicate_policy names them.
     if caller == "upsert" and business_key:
         return DuplicateDecision(
             "upsert",
@@ -167,6 +161,54 @@ def reset_order_column(token) -> None:
 
 def current_order_column() -> str:
     return _ORDER.get()
+
+
+def collapse_keep_last(
+    rows: list[dict],
+    key_columns: list[str],
+) -> tuple[list[dict], int]:
+    """Keep the last row for each key. Earlier copies are not a second insert.
+
+    ``block`` is the other in-file choice: the caller refuses the file instead
+    of calling this. Rows with a missing key are kept in order.
+    """
+    keys = [str(col) for col in key_columns if str(col).strip()]
+    if not keys:
+        return list(rows), 0
+    index: dict[tuple, int] = {}
+    kept: list[dict] = []
+    dropped = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            kept.append(row)
+            continue
+        identity = tuple(row.get(col) for col in keys)
+        if any(value in (None, "") for value in identity):
+            kept.append(row)
+            continue
+        previous = index.get(identity)
+        if previous is None:
+            index[identity] = len(kept)
+            kept.append(row)
+            continue
+        kept[previous] = row
+        dropped += 1
+    return kept, dropped
+
+
+def iter_keep_last(batches, key_columns: list[str]):
+    """Collapse one file to last-wins, then yield it in the original chunk sizes."""
+    rows: list[dict] = []
+    width = 0
+    for batch in batches:
+        chunk = list(batch or [])
+        if chunk and width == 0:
+            width = len(chunk)
+        rows.extend(chunk)
+    collapsed, _dropped = collapse_keep_last(rows, key_columns)
+    step = width or 1000
+    for start in range(0, len(collapsed), step):
+        yield collapsed[start : start + step]
 
 
 def order_wins(incoming: object, kept: object) -> bool:

@@ -152,7 +152,7 @@ def plan_pickup(
             action="wait",
             retryable=True,
             message=(
-                f"file not arrived: {label} — no new file yet. "
+                f"expected file not arrived: {label} — no new file yet. "
                 f"Waiting ({waited}s of {wait}s); the next attempt retries."
             ),
         )
@@ -163,7 +163,7 @@ def plan_pickup(
             action="elapsed",
             retryable=False,
             message=(
-                f"file not arrived: {label} — wait window elapsed "
+                f"expected file not arrived: {label} — wait window elapsed "
                 f"({wait}s) with no new file."
             ),
         )
@@ -172,7 +172,10 @@ def plan_pickup(
         is_pattern=patterned,
         action="missing",
         retryable=False,
-        message=f"file not arrived: {label} — no matching file, and no wait window is set.",
+        message=(
+            f"expected file not arrived: {label} — no matching file, "
+            "and no wait window is set."
+        ),
     )
 
 
@@ -194,10 +197,10 @@ def list_remote_files(src_type: str, cfg: dict, bucket: str, pattern: str) -> li
 
         rows = [{"name": key} for key in list_objects(cfg, bucket, prefix=prefix)]
     elif kind == "sftp":
-        from connectors.sftp_reader import list_files
+        from connectors.sftp_reader import list_file_stats
 
         directory = bucket or "/"
-        rows = [{"name": name} for name in list_files(cfg=cfg, directory=directory)]
+        rows = list_file_stats(cfg=cfg, directory=directory, pattern=pattern)
     else:
         return []
     files = [
@@ -222,12 +225,17 @@ def file_upsert_rereads(
     duplicate_policy: str = "",
     already_loaded: bool = False,
     has_key: bool = False,
+    checksum_changed: bool = False,
 ) -> bool:
     """A changed file under upsert is reprocessed whole, not watermark-filtered.
 
     The same digest is already short-circuited by the file ledger. A new
     checksum must MERGE every row: a corrected file often keeps older
     timestamps, and a row watermark would skip the correction.
+
+    The first incremental load stays cursor-bounded so identity COPY still
+    sees a mapped cursor. Only a checksum that differs from the ledger
+    clears that bound.
     """
     if already_loaded or not has_key:
         return False
@@ -235,6 +243,18 @@ def file_upsert_rereads(
     mode = (sync_mode or "").strip().lower().replace("-", "_")
     if policy in {"append", "allow_duplicates"}:
         return False
+    incremental = mode in {
+        "incremental",
+        "incremental_append",
+        "incremental_deduped",
+        "incremental_upsert",
+    }
+    if incremental and not checksum_changed:
+        return False
+    if checksum_changed and (
+        incremental or policy in {"upsert", "merge", "dedupe_skip", "skip_duplicates"} or mode == "upsert"
+    ):
+        return True
     if policy in {"upsert", "merge", "dedupe_skip", "skip_duplicates"}:
         return True
-    return mode in {"upsert", "incremental_deduped", "incremental_upsert"}
+    return mode in {"upsert"}

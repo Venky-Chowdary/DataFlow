@@ -1945,6 +1945,24 @@ def run_integrity_audit(
     # Module 3: mapping_confidence never blocks_transfer (G4 is SSOT), so the
     # former balanced-mode "downgrade confidence blockers" path is gone.
 
+    if mode == "lenient":
+        # Cell and sample findings quarantine at write. They must not refuse
+        # the load. A missing schema or an unreadable sample still blocks:
+        # there is nothing to quarantine against.
+        structural = {"source_columns_available", "sample_available"}
+        for check in checks:
+            if check.get("check") in structural:
+                continue
+            if check.get("blocks_transfer"):
+                check["blocks_transfer"] = False
+                check["lenient_quarantine"] = True
+                note = (
+                    "Lenient quarantine: bad rows are held out and good rows load"
+                )
+                warnings = list(check.get("warnings") or [])
+                warnings.append(note)
+                check["warnings"] = warnings
+
     passed_checks = [c for c in checks if c.get("passed")]
     failed_checks = [c for c in checks if not c.get("passed")]
     blocks = any(c.get("blocks_transfer") for c in checks)

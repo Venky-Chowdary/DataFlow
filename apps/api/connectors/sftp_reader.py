@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import stat
 from typing import Any
 
 from services.object_streaming import (
@@ -70,21 +72,82 @@ def read_object(
     )
 
 
+def _remote_sha256(sftp: Any, path: str) -> str:
+    """Stream the remote bytes into sha256. A listing without this cannot see a rewrite."""
+    digest = hashlib.sha256()
+    with sftp.open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def list_file_stats_on(sftp: Any, directory: str, pattern: str = "") -> list[dict[str, Any]]:
+    """Name, size, mtime, and sha256 for files in ``directory``.
+
+    A glob is applied here. ``orders_*.csv`` is not a remote path paramiko
+    can ``getfo``. Dotfiles and directories are not pickup candidates.
+    """
+    from services.file_pickup import is_file_pattern, matches_pattern
+
+    path = directory or "."
+    rows: list[dict[str, Any]] = []
+    for entry in sftp.listdir_attr(path):
+        name = str(getattr(entry, "filename", "") or "")
+        if not name or name.startswith("."):
+            continue
+        mode = int(getattr(entry, "st_mode", 0) or 0)
+        if mode and stat.S_ISDIR(mode):
+            continue
+        if pattern and is_file_pattern(pattern) and not matches_pattern(name, pattern):
+            # Also match the path the schedule stored, not only the basename.
+            full = f"{path.rstrip('/')}/{name}" if path not in {"", ".", "/"} else name
+            if not matches_pattern(full, pattern):
+                continue
+        remote = f"{path.rstrip('/')}/{name}" if path not in {"", ".", "/"} else name
+        mtime = getattr(entry, "st_mtime", None)
+        rows.append(
+            {
+                "name": name,
+                "size": int(getattr(entry, "st_size", 0) or 0),
+                "mtime": "" if mtime is None else str(int(mtime)),
+                "checksum": _remote_sha256(sftp, remote),
+            }
+        )
+    return rows
+
+
+def list_file_stats(
+    *,
+    cfg: dict[str, Any],
+    directory: str = "",
+    pattern: str = "",
+    **_kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Processed-file identity for one SFTP directory: name, size, mtime, sha256."""
+    sftp_cfg = parse_sftp_config(**cfg)
+    if not sftp_cfg.host:
+        raise ValueError("SFTP host is required")
+    path = directory or sftp_cfg.path or "."
+    transport, sftp = connect_sftp(sftp_cfg)
+    try:
+        return list_file_stats_on(sftp, path, pattern)
+    finally:
+        sftp.close()
+        transport.close()
+
+
 def list_files(
     *,
     cfg: dict[str, Any],
     directory: str = "",
+    pattern: str = "",
     **_kwargs: Any,
 ) -> list[str]:
-    """List files in a remote SFTP directory."""
-    sftp_cfg = parse_sftp_config(**cfg)
-    if not sftp_cfg.host:
-        raise ValueError("SFTP host is required")
-
-    path = directory or sftp_cfg.path or "."
-    transport, sftp = connect_sftp(sftp_cfg)
-    try:
-        return [entry.filename for entry in sftp.listdir_attr(path) if not str(entry.filename).startswith(".")]
-    finally:
-        sftp.close()
-        transport.close()
+    """List files in a remote SFTP directory, optionally filtered by a glob."""
+    return [
+        str(row["name"])
+        for row in list_file_stats(cfg=cfg, directory=directory, pattern=pattern)
+    ]

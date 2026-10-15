@@ -269,8 +269,14 @@ class PipelineSchedule:
     compliance_acknowledged: bool = False
     #: Seconds to wait for a glob/prefix file that is not in the bucket yet.
     file_wait_seconds: int = 0
-    #: upsert | dedupe_skip | append. Empty uses the sync-mode default.
+    #: upsert (default when a key is set) | skip_duplicates | append.
+    #: Empty on a keyed schedule is upsert at run time. An explicit append
+    #: keeps full_refresh_append as insert (2N). This does not rewrite a
+    #: one-shot transfer that never set the field.
     duplicate_policy: str = ""
+    #: In-file duplicate keys: ``block`` refuses the load, ``keep_last``
+    #: writes the last row for each key.
+    in_file_dedupe: str = "block"
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     #: A pending retry is durable state, not an in-process timer: a redeploy
@@ -408,6 +414,12 @@ class PipelineSchedule:
             compliance_acknowledged=bool(data.get("compliance_acknowledged", False)),
             file_wait_seconds=max(0, int(data.get("file_wait_seconds") or 0)),
             duplicate_policy=str(data.get("duplicate_policy") or "").strip().lower(),
+            in_file_dedupe=(
+                "keep_last"
+                if str(data.get("in_file_dedupe") or "block").strip().lower().replace("-", "_")
+                in {"keep_last", "last", "last_wins"}
+                else "block"
+            ),
             acknowledgment_actor=str(data.get("acknowledgment_actor") or ""),
             acknowledgment_reason=str(data.get("acknowledgment_reason") or ""),
             retry_at=data.get("retry_at"),
@@ -1540,6 +1552,13 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         # Recompute the next due time when the cadence changed.
         if (interval, cron, tz) != (s.interval, s.cron, s.timezone):
             updated.next_run_at = next_run_for(updated)
+        # Enabling a paused schedule waits for the next cron slot. A past
+        # next_run_at used to be left in place, so the beat fired immediately.
+        if enabling:
+            due = _parse_ts(updated.next_run_at)
+            now = datetime.now(timezone.utc)
+            if due is None or due <= now:
+                updated.next_run_at = next_run_for(updated, now)
         schedules[i] = updated
         _save_all(schedules)
         if "approval_request" not in data:

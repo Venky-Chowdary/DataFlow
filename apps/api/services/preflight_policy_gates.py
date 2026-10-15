@@ -115,10 +115,20 @@ def apply_policy_gates(
             if str(g.get("id") or "") not in policy_ids
         ]
         gates = [*base, *policy_gates]
+        existing_ids = {str(b.get("id") or "") for b in blockers}
         blockers.extend(
             {"id": g["id"], "message": g["message"], "details": g.get("details", {})}
             for g in policy_gates
             if g.get("status") == GateStatus.BLOCK.value
+            and str(g.get("id") or "") not in existing_ids
+            and str(g.get("message") or "").strip() not in seen_messages
+            and not (
+                drift_already_listed
+                and (
+                    str(g.get("id") or "") == "schema_drift"
+                    or is_schema_drift_echo(g.get("message"))
+                )
+            )
         )
     else:
         gates = list(result.get("gates", []))

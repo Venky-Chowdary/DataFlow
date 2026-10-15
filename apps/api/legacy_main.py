@@ -499,7 +499,7 @@ def get_saved_connector_detail(connector_id: str):
     conn = get_connector(connector_id)
     if not conn:
         raise HTTPException(status_code=404, detail="Connector not found")
-    return conn.to_dict()
+    return mask_connector(conn)
 
 
 @app.post("/api/v1/connectors/saved")

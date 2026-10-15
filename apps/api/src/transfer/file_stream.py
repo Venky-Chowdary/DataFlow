@@ -1481,7 +1481,11 @@ def stream_file_to_database(
     if rows_before is not None:
         dest_summary[PRECOUNT_KEY] = int(rows_before)
     if isinstance(pinned_before, int) or not resumed:
-        from services.file_load_ledger import file_already_loaded, note_file_identity
+        from services.file_load_ledger import (
+            file_already_loaded,
+            note_file_identity,
+            stored_file_digest,
+        )
         from services.sync_cursor import is_overwrite_sync
 
         note_file_identity(
@@ -1508,6 +1512,11 @@ def stream_file_to_database(
             dest_summary["rejected_rows"] = 0
             dest_summary["rows_written"] = 0
             return 0, ddl_log, dest_summary, columns
+        prior_digest = stored_file_digest(str(dest_summary.get("file_route_key") or ""))
+        current_digest = str(dest_summary.get("file_digest") or "")
+        dest_summary["file_checksum_changed"] = bool(
+            prior_digest and current_digest and prior_digest != current_digest
+        )
     # A keyed write into an occupied destination grows it by the keys it
     # inserted, not by the batch, and a key-addressed destination replaces the
     # value at the key on every write. Gate-8 needs the dest-engine key census
@@ -1599,14 +1608,18 @@ def stream_file_to_database(
 
     from services.file_pickup import file_upsert_rereads
 
-    if file_upsert_rereads(
+    checksum_changed = bool(dest_summary.get("file_checksum_changed"))
+    if checksum_changed or file_upsert_rereads(
         sync_mode=effective_sync,
         duplicate_policy=decision.policy,
         already_loaded=bool(dest_summary.get("file_already_loaded")),
         has_key=bool(pk_target_cols),
+        checksum_changed=checksum_changed,
     ):
-        # New file checksum: MERGE the whole file. A row watermark from the
-        # previous load would skip corrected rows that kept older timestamps.
+        # A corrected file keeps its name. The bookmark would report
+        # completed / 0 rows. Re-read the bytes. Keyed upsert MERGEs them;
+        # an explicit append inserts them. The first incremental load is
+        # not this branch — it stays cursor-bounded so COPY still has a cursor.
         watermark = None
         incremental = False
         dest_summary["file_change_reread"] = True
@@ -1636,8 +1649,18 @@ def stream_file_to_database(
 
     copy_declines: list[str] = []
     copy_decline_token, _ = begin_copy_decline_capture(copy_declines)
+    copy_sync = effective_sync
+    if dest_summary.get("file_change_reread") and str(effective_sync).startswith("incremental"):
+        # Identity COPY refuses an incremental sync with no cursor column.
+        # The reread is a full file, so the fast path uses a non-incremental mode.
+        copy_sync = "upsert" if write_mode == "upsert" else "full_refresh_append"
+    in_file_dedupe = str(
+        getattr(destination, "extra", None)
+        and (getattr(destination, "extra", None) or {}).get("in_file_dedupe")
+        or ""
+    ).strip().lower().replace("-", "_")
     try:
-        csv_fast = try_copy_local_csv(
+        csv_fast = None if in_file_dedupe == "keep_last" else try_copy_local_csv(
             content=content,
             filename=filename,
             file_type=file_type,
@@ -1649,7 +1672,7 @@ def stream_file_to_database(
             ),
             mappings=mappings,
             schema=schema,
-            effective_sync=effective_sync,
+            effective_sync=copy_sync,
             cursor_column=cursor_source_col if incremental else "",
             watermark=watermark if incremental else None,
             pk_column=pk_for_copy if incremental else "",
@@ -1731,22 +1754,28 @@ def stream_file_to_database(
                     },
                 )
                 dest_summary["watermark"] = wm
-            # Incremental COPY returns count tokens, not a value digest. Gate-8
-            # for append/incremental then requires a key-aligned sample. The
-            # row path already stashes one; the fast path used to return
-            # without it and refuse a correct load.
-            _stash_file_reconcile_sample(
-                dest_summary,
-                sample_rows,
-                source_filter=source_filter,
-                incremental=True,
-                cursor_key=cursor_key,
-                cursor_source_col=cursor_source_col,
-                watermark=watermark,
-                cursor_pk_source=cursor_pk_source,
-                pk_target_cols=[pk_for_copy] if pk_for_copy else [],
-            )
+        # COPY returns count tokens, not a value digest. Gate-8 refuses a
+        # streaming append when no reconcile_sample was stashed. Incremental
+        # used to be the only branch that stored one; full_refresh_append
+        # returned here and the gate failed a correct load.
+        _stash_file_reconcile_sample(
+            dest_summary,
+            sample_rows,
+            source_filter=source_filter,
+            incremental=incremental,
+            cursor_key=cursor_key,
+            cursor_source_col=cursor_source_col,
+            watermark=watermark,
+            cursor_pk_source=cursor_pk_source,
+            pk_target_cols=[pk_for_copy] if pk_for_copy else [],
+        )
         return rows_copied, copy_ddl, dest_summary, columns
+
+    if in_file_dedupe == "keep_last" and contract and contract.primary_key_columns():
+        from services.duplicate_policy import iter_keep_last
+
+        batch_iter = iter_keep_last(batch_iter, list(contract.primary_key_columns()))
+        dest_summary["in_file_dedupe"] = "keep_last"
 
     if incremental and cursor_source_col:
         def _bounded_batches(batches):

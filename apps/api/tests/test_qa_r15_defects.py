@@ -67,17 +67,31 @@ def test_glob_schedule_picks_only_new_files_and_names_a_late_file():
 
 def test_changed_file_under_upsert_is_not_watermark_filtered():
     assert file_upsert_rereads(
+        sync_mode="upsert",
+        already_loaded=False,
+        has_key=True,
+    )
+    # The first incremental load stays on the cursor so identity COPY still
+    # has a mapped cursor_field. A checksum change is a new file: reprocess.
+    assert not file_upsert_rereads(
         sync_mode="incremental_deduped",
         already_loaded=False,
         has_key=True,
+    )
+    assert file_upsert_rereads(
+        sync_mode="incremental_deduped",
+        already_loaded=False,
+        has_key=True,
+        checksum_changed=True,
     )
     assert not file_upsert_rereads(
         sync_mode="incremental_deduped",
         already_loaded=True,
         has_key=True,
+        checksum_changed=True,
     )
     assert not file_upsert_rereads(
-        sync_mode="incremental_deduped",
+        sync_mode="upsert",
         duplicate_policy="append",
         already_loaded=False,
         has_key=True,
@@ -85,14 +99,22 @@ def test_changed_file_under_upsert_is_not_watermark_filtered():
 
 
 def test_append_with_a_key_upserts_unless_append_is_explicit():
+    # full_refresh_append already means insert. An empty policy does not
+    # rewrite it; the second run still lands 2N. Explicit policy does.
     implied = resolve_duplicate_policy(
         sync_mode="full_refresh_append",
         business_key=True,
         write_mode="insert",
     )
-    assert implied.policy == "upsert"
-    assert implied.write_mode == "upsert"
-    assert "duplicate_policy=append" in implied.reason
+    assert implied.write_mode == "insert"
+    explicit_upsert = resolve_duplicate_policy(
+        duplicate_policy="upsert",
+        sync_mode="full_refresh_append",
+        business_key=True,
+        write_mode="insert",
+    )
+    assert explicit_upsert.write_mode == "upsert"
+    assert explicit_upsert.explicit is True
     explicit = resolve_duplicate_policy(
         duplicate_policy="append",
         sync_mode="full_refresh_append",
@@ -126,8 +148,13 @@ def test_snowflake_skip_duplicates_inserts_only_when_not_matched():
 
 
 def test_decimal_scale_and_null_and_timestamp_share_one_fingerprint():
-    assert fingerprint_for_reconcile(Decimal("1.500")) == fingerprint_for_reconcile("1.500")
-    assert fingerprint_for_reconcile("1.500") == "1.5"
+    # A typed NUMERIC carrier folds scale. A bare Auto string ``1.500`` stays
+    # opaque: it can mean 1 or 1000, and Decimal(text) must not invent 1.
+    assert fingerprint_for_reconcile(Decimal("1.500")) == "1.5"
+    assert fingerprint_for_reconcile("1.500", ddl_type="NUMERIC") == fingerprint_for_reconcile(
+        Decimal("1.500"), ddl_type="NUMERIC"
+    )
+    assert fingerprint_for_reconcile("1.500") == "1.500"
     assert fingerprint_for_reconcile("10.50") == fingerprint_for_reconcile(Decimal("10.50"))
     assert fingerprint_for_reconcile(None) == fingerprint_for_reconcile("__DF_SQL_NULL__")
     from datetime import datetime, timezone

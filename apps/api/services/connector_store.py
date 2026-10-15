@@ -827,6 +827,36 @@ def mark_used(*connector_ids: str | None) -> int:
     return stamped
 
 
+_RESPONSE_SECRET_KEYS = frozenset(
+    {
+        "password",
+        "api_key",
+        "service_account",
+        "private_key",
+        "private_key_passphrase",
+        "secret",
+        "token",
+        "secret_access_key",
+    }
+)
+
+
+def _redact_response_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if str(key).lower() in _RESPONSE_SECRET_KEYS and item:
+                redacted[key] = "****"
+            elif str(key).lower() in {"connection_string", "url", "uri"} and item:
+                redacted[key] = _mask_conn_str(str(item))
+            else:
+                redacted[key] = _redact_response_value(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_response_value(item) for item in value]
+    return value
+
+
 def mask_connector(c: SavedConnector) -> dict[str, Any]:
     d = c.to_dict()
     if d.get("password"):
@@ -839,6 +869,8 @@ def mask_connector(c: SavedConnector) -> dict[str, Any]:
         d["service_account"] = "****"
     if d.get("private_key"):
         d["private_key"] = "****"
+    if isinstance(d.get("extra"), dict):
+        d["extra"] = _redact_response_value(d["extra"])
     d.setdefault("workspace_id", "")
     d.setdefault("endpoint_url", "")
     d.setdefault("path_style", False)

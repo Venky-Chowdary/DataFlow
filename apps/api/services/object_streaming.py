@@ -896,11 +896,52 @@ def download_sftp_object(path: Path, cfg: dict[str, Any], bucket: str, key: str)
     remote_path = sftp_cfg.path
     transport, sftp = connect_sftp(sftp_cfg)
     try:
+        remote_path = _resolve_sftp_download_path(sftp, remote_path)
         with open(path, "wb") as f:
-            sftp.getfo(remote_path, f)
+            try:
+                sftp.getfo(remote_path, f)
+            except OSError as exc:
+                if getattr(exc, "errno", None) == 2 or "no such file" in str(exc).lower():
+                    from services.file_pickup import FileNotArrived
+
+                    raise FileNotArrived(
+                        f"expected file not arrived: {remote_path}",
+                        retryable=False,
+                        pattern=remote_path,
+                    ) from exc
+                raise
     finally:
         sftp.close()
         transport.close()
+
+
+def _resolve_sftp_download_path(sftp: Any, remote_path: str) -> str:
+    """Turn ``orders_*.csv`` into one concrete remote path.
+
+    A glob is not a file. Listing the parent and matching the pattern is the
+    only read that can succeed. Zero matches is ``expected file not arrived``,
+    not paramiko's ``[Errno 2]``.
+    """
+    from services.file_pickup import FileNotArrived, is_file_pattern
+
+    if not is_file_pattern(remote_path):
+        return remote_path
+    from connectors.sftp_common import split_remote_path
+    from connectors.sftp_reader import list_file_stats_on
+
+    directory, _filename = split_remote_path(remote_path)
+    matches = list_file_stats_on(sftp, directory or ".", remote_path)
+    if not matches:
+        raise FileNotArrived(
+            f"expected file not arrived: {remote_path}",
+            retryable=False,
+            pattern=remote_path,
+        )
+    parent = directory if directory not in {"", ".", "/"} else ""
+    name = str(matches[0]["name"])
+    if parent:
+        return f"{parent.rstrip('/')}/{name}"
+    return name
 
 
 def download_for_object_store(src_type: str, path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
