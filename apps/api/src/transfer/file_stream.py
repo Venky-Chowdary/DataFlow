@@ -1755,20 +1755,23 @@ def stream_file_to_database(
                 )
                 dest_summary["watermark"] = wm
         # COPY returns count tokens, not a value digest. Gate-8 refuses a
-        # streaming append when no reconcile_sample was stashed. Incremental
-        # used to be the only branch that stored one; full_refresh_append
-        # returned here and the gate failed a correct load.
-        _stash_file_reconcile_sample(
-            dest_summary,
-            sample_rows,
-            source_filter=source_filter,
-            incremental=incremental,
-            cursor_key=cursor_key,
-            cursor_source_col=cursor_source_col,
-            watermark=watermark,
-            cursor_pk_source=cursor_pk_source,
-            pk_target_cols=[pk_for_copy] if pk_for_copy else [],
-        )
+        # streaming append when no reconcile_sample was stashed. Overwrite
+        # proves the whole table and must not switch to that sample: an empty
+        # CSV cell and a SQL NULL then disagree and the load is rolled back.
+        from services.sync_cursor import is_overwrite_sync
+
+        if not is_overwrite_sync(effective_sync):
+            _stash_file_reconcile_sample(
+                dest_summary,
+                sample_rows,
+                source_filter=source_filter,
+                incremental=incremental,
+                cursor_key=cursor_key,
+                cursor_source_col=cursor_source_col,
+                watermark=watermark,
+                cursor_pk_source=cursor_pk_source,
+                pk_target_cols=[pk_for_copy] if pk_for_copy else [],
+            )
         return rows_copied, copy_ddl, dest_summary, columns
 
     if in_file_dedupe == "keep_last" and contract and contract.primary_key_columns():

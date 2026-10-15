@@ -1517,7 +1517,7 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         # resume used to leave needs_approval set, so the beat kept skipping
         # and next_run_at stayed in the past (QA R2-107 / R2-108 / R2-109).
         # An approvable finding stays open — resume must not grant that
-        # authority. A past next_run_at is kept: the beat owns one catch-up.
+        # authority. A past next_run_at is moved to the next slot on enable.
         if enabling and "approval_request" not in data and not mapping_closes_empty:
             req = merged.get("approval_request")
             if (
