@@ -1284,6 +1284,7 @@ class DuplicateTransferSubmission(Exception):
         self.claim = claim
         self.existing_job_id = getattr(claim, "existing_job_id", "") or ""
         self.existing_status = getattr(claim, "existing_status", "") or ""
+        self.existing_created_at = getattr(claim, "existing_created_at", "") or ""
         super().__init__(
             "An equivalent transfer is already "
             f"{self.existing_status or 'in progress'}"
@@ -5291,12 +5292,22 @@ class UniversalTransferEngine:
             logger.warning("idempotency claim unavailable: %s", exc)
             return None
         job_doc["idempotency_key"] = key
+        created_at = ""
+        if not acquired and existing_id and existing_id != _PENDING_CLAIM_ID:
+            try:
+                from services.job_status import job_timestamp_iso
+
+                held = mongo.get_job(existing_id) or {}
+                created_at = job_timestamp_iso(held.get("created_at"))
+            except Exception as exc:
+                logger.debug("idempotency holder timestamp skipped: %s", exc)
         return JobClaim(
             key=key,
             job_id="",
             acquired=acquired,
             existing_job_id=existing_id,
             existing_status=existing_status,
+            existing_created_at=created_at,
         )
 
     def _bind_idempotency_claim(self, key: str, job_id: str) -> None:

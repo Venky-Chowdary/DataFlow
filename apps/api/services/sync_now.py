@@ -373,7 +373,8 @@ def begin_sync_now(payload: dict[str, Any]) -> tuple[dict[str, Any], Any | None]
     request = transfer_request_from_dict(dict(payload.get("transfer_request") or {}))
     job_id = get_transfer_engine()._create_pending_job(request)
     parent = str(payload.get("parent_job_id") or getattr(request, "parent_job_id", "") or "")
-    get_mongodb_service().update_job_status(
+    mongo = get_mongodb_service()
+    mongo.update_job_status(
         job_id,
         "pending",
         parent_job_id=parent,
@@ -382,6 +383,8 @@ def begin_sync_now(payload: dict[str, Any]) -> tuple[dict[str, Any], Any | None]
             f"Full re-sync of {parent}" if mode == "full" else f"Sync now of {parent}"
         ),
     )
+    if parent:
+        mongo.update_job_fields(parent, {"last_sync_job_id": job_id})
     return {
         "job_id": job_id,
         "parent_job_id": parent,
