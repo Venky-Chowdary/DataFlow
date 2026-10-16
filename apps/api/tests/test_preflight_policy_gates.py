@@ -65,8 +65,12 @@ def test_cdc_policy_blocks_without_cursor_and_primary_key():
 
     assert blockers
     assert blockers[0]["id"] == "g9_sync_contract"
-    assert "Missing cursor" in str(blockers[0]["details"])
-    assert "Missing primary key" in str(blockers[0]["details"])
+    # CDC's cursor is the log position. A missing table cursor is not a block.
+    # No database source and no primary key still refuse the load.
+    details = str(blockers[0]["details"])
+    assert "Missing cursor" not in details
+    assert "database source" in details
+    assert "Missing primary key" in details
 
 
 def test_proof_copy_does_not_repeat_schema_drift():
