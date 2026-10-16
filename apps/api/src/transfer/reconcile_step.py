@@ -2674,6 +2674,8 @@ def _run_reconciliation_impl(
                 sort_key=sort_key,
                 dest_db_type=db_type,
                 dest_types=dest_types,
+                duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
+                inserted_keys=dest_summary.get("inserted_keys"),
             )
 
     # CDC delete proof: stashed PKs must be absent on destination read-back.

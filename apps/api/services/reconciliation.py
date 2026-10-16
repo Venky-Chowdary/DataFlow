@@ -1106,6 +1106,32 @@ def reconcile(
                 population_proof=False,
                 assurance_level="quarantine_excluded",
             )
+        # A whole-table digest is not the batch once the destination already
+        # held rows. Incremental append and deduped updates fail this compare
+        # even when the delta is the batch. The delta identity still fails a
+        # short write. A written-key digest and a CDC value proof stay strict.
+        if (
+            allow_extra_rows
+            and target_rows_before is not None
+            and int(target_rows_before) > 0
+            and checksum_scope not in {WRITTEN_BATCH_KEYS, CDC_SOURCE_IMAGE_VALUES, CDC_SOURCE_IMAGE_COUNT}
+        ):
+            return append_row_count_report(
+                source_rows=source_rows,
+                target_rows=target_rows,
+                target_rows_before=target_rows_before,
+                expected_rows=expected_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                sample_note=sample_note,
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                sample_compare=sample_compare,
+                keyed_expected_delta=(
+                    int(keyed_expected_delta) if keyed_expected_delta is not None else None
+                ),
+            )
         if has_extra and checksum_scope != WRITTEN_BATCH_KEYS:
             return append_row_count_report(
                 source_rows=source_rows,
@@ -4537,6 +4563,29 @@ from services.sample_strategy import (  # noqa: E402,F401 — re-export
 )
 
 
+def _skip_kept_existing_key(
+    duplicate_policy: str,
+    *,
+    key: Any,
+    inserted_keys: set[str] | list[str] | None,
+) -> bool:
+    """A skip policy keeps the first image of a key that already existed.
+
+    A key this run inserted must still match the source. Missing that set,
+    a found key whose cells differ is the kept row, not a bad write.
+    """
+    if not str(duplicate_policy or "").strip() or not key:
+        return False
+    from services.duplicate_policy import normalize_duplicate_policy
+
+    if normalize_duplicate_policy(duplicate_policy) != "dedupe_skip":
+        return False
+    if inserted_keys is None:
+        return True
+    inserted = {str(normalize_cell(item) or "") for item in inserted_keys}
+    return str(key) not in inserted
+
+
 def sample_compare_rows(
     source_records: list[dict[str, Any]],
     target_rows: list[dict[str, Any]] | list[tuple[Any, ...]] | list[list[Any]],
@@ -4549,6 +4598,8 @@ def sample_compare_rows(
     dest_types: dict[str, str] | None = None,
     stratify_by: str | None = None,
     rows_are_paired: bool = False,
+    duplicate_policy: str = "",
+    inserted_keys: set[str] | list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
@@ -4896,6 +4947,7 @@ def sample_compare_rows(
         }
 
     for idx, src in enumerate(source_sorted):
+        key = ""
         if _row_write_refused(src):
             rows_excluded_quarantined += 1
             continue
@@ -4987,7 +5039,11 @@ def sample_compare_rows(
                 raw_tgt, transform=None, tgt_col=tgt_col
             )
             compared += 1
-            if src_val != tgt_val:
+            if src_val != tgt_val and not _skip_kept_existing_key(
+                duplicate_policy,
+                key=key if keyed else "",
+                inserted_keys=inserted_keys,
+            ):
                 mismatches.append(
                     {
                         "row": str(idx),
