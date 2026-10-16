@@ -56,6 +56,7 @@ from services.copy_incremental import (
     _finish_sqlite_incremental_staging,
     _prepare_sqlite_incremental_dest,
     _require_mapped_cursor,
+    create_key_for_mode,
     _stamp_incremental,
 )
 from services.copy_pg_mysql import mapping_is_plain_carry, pg_type_is_load_safe
@@ -1271,7 +1272,7 @@ def copy_csv_to_sqlite_incremental(
         if source_count == 0:
             return _empty_incremental(_sqlite_existing_count(dest_cfg, dest_table), mode)
         created_dest, dest_count_before = _prepare_sqlite_incremental_dest(
-            dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk
+            dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk, mode
         )
         from services.copy_incremental import _sqlite_incremental_idents
 
@@ -1369,7 +1370,7 @@ def copy_csv_to_postgres_incremental(
                 if not exists:
                     dst_cur.execute(
                         _pg_create_sql(
-                            dest_schema_n, dest_table, pairs, pg_ddls, [dest_pk]
+                            dest_schema_n, dest_table, pairs, pg_ddls, create_key_for_mode(mode, dest_pk)
                         )
                     )
                     created_dest = True
@@ -1496,7 +1497,7 @@ def copy_csv_to_mysql_incremental(
                     return _empty_incremental(dest_count_before, mode)
                 if not exists:
                     dst_cur.execute(
-                        _mysql_create_sql(dest_table, pairs, mysql_ddls, [dest_pk])
+                        _mysql_create_sql(dest_table, pairs, mysql_ddls, create_key_for_mode(mode, dest_pk))
                     )
                     dest_conn.commit()
                     created_dest = True

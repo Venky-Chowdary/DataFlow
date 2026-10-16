@@ -18,8 +18,9 @@ PostgreSQL is an ISO calendar day.
    the engine reader uses (Airbyte timestamp-cursor trap).
 2. COPY that filtered population into staging (one shard — do not PK-range a
    subset).
-3. ``incremental_append``: ``INSERT INTO dest SELECT FROM staging`` (duplicate
-   PK fails closed, not IGNORE).
+3. ``incremental_append``: ``INSERT INTO dest SELECT FROM staging``. The
+   destination is not given a unique key, so a repeated key inserts.
+   ``incremental_deduped`` still creates the key and MERGEs.
 4. ``incremental_deduped``: existing ``ON DUPLICATE`` / ``ON CONFLICT``.
 5. Proof: staging COUNT = filtered source COUNT. Append: dest_after =
    dest_before + staging. Deduped: dest PK ⋈ staging = staging. Dest COUNT
@@ -49,6 +50,20 @@ from services.keyset_pagination import (
     present_cursor_bookmark,
     split_cursor_bookmark,
 )
+
+
+def create_key_for_mode(mode: str, dest_pk: str) -> list[str]:
+    """Primary-key columns a new incremental table should declare.
+
+    ``incremental_append`` must not create a unique key: a later file that
+    repeats a key is an insert, and a ``{table}_pkey`` constraint fails it.
+    ``incremental_deduped`` still declares the key. An existing key is left
+    in place; this only decides CREATE.
+    """
+    normalized = (mode or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if normalized == "incremental_append" or not str(dest_pk or "").strip():
+        return []
+    return [str(dest_pk)]
 
 logger = logging.getLogger(__name__)
 
@@ -829,6 +844,7 @@ def _prepare_sqlite_incremental_dest(
     pairs: list[tuple[str, str]],
     sqlite_ddls: list[str],
     dest_pk: str,
+    mode: str = "",
 ) -> tuple[bool, int]:
     """Create dest with PK if missing. Returns (created_here, dest_count_before)."""
     from services.copy_sqlite_common import (
@@ -847,13 +863,15 @@ def _prepare_sqlite_incremental_dest(
         dest_conn.execute("BEGIN IMMEDIATE")
         if not sqlite_table_exists(dest_conn, dest_table):
             dest_conn.execute(
-                sqlite_create_sql(dest_table, pairs, sqlite_ddls, [dest_pk])
+                sqlite_create_sql(dest_table, pairs, sqlite_ddls, create_key_for_mode(mode, dest_pk))
             )
             settle_fast_path_create_on(dest_conn, dest_dialect="sqlite", dest_table=dest_table)
             created_dest = True
         else:
             dest_pks = sqlite_table_pk_columns(dest_conn, dest_table)
-            if not any(c.lower() == dest_pk.lower() for c in dest_pks):
+            if create_key_for_mode(mode, dest_pk) and not any(
+                c.lower() == dest_pk.lower() for c in dest_pks
+            ):
                 raise FastPathUnavailable(
                     "incremental COPY dest must enforce the mapped primary key"
                 )
@@ -1013,7 +1031,7 @@ def copy_postgres_to_mysql_incremental(
             )
             if dst_cur.fetchone() is None:
                 create_sql = _mysql_create_sql(
-                    dest_table, pairs, mysql_ddls, [dest_pk]
+                    dest_table, pairs, mysql_ddls, create_key_for_mode(mode, dest_pk)
                 )
                 dst_cur.execute(create_sql)  # nosec B608
                 settle_fast_path_create_on(
@@ -1289,7 +1307,7 @@ def copy_mysql_to_postgres_incremental(
             if dst_cur.fetchone()[0] is None:
                 dst_cur.execute(
                     _pg_create_sql(
-                        dest_schema, dest_table, pairs, pg_ddls, [dest_pk]
+                        dest_schema, dest_table, pairs, pg_ddls, create_key_for_mode(mode, dest_pk)
                     )
                 )
                 settle_fast_path_create_on(
@@ -1418,7 +1436,7 @@ def copy_mysql_to_mysql_incremental(
             )
             if dst_cur.fetchone() is None:
                 dst_cur.execute(
-                    _mysql_create_sql(dest_table, pairs, mysql_ddls, [dest_pk])
+                    _mysql_create_sql(dest_table, pairs, mysql_ddls, create_key_for_mode(mode, dest_pk))
                 )
                 settle_fast_path_create_on(
                     dst_cur, dest_dialect="mysql", dest_table=dest_table
@@ -1519,7 +1537,7 @@ def copy_sqlite_to_sqlite_incremental(
 
     _dest_q, staging, _staging_q = _sqlite_incremental_idents(dest_table)
     created_dest, dest_count_before = _prepare_sqlite_incremental_dest(
-        dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk
+        dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk, mode
     )
     result = copy_sqlite_to_sqlite(
         source_cfg=source_cfg,
@@ -1599,7 +1617,7 @@ def copy_postgres_to_sqlite_incremental(
 
     _dest_q, staging, _staging_q = _sqlite_incremental_idents(dest_table)
     created_dest, dest_count_before = _prepare_sqlite_incremental_dest(
-        dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk
+        dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk, mode
     )
     result = copy_postgres_to_sqlite(
         source_cfg=source_cfg,
@@ -1674,7 +1692,7 @@ def copy_mysql_to_sqlite_incremental(
 
     _dest_q, staging, _staging_q = _sqlite_incremental_idents(dest_table)
     created_dest, dest_count_before = _prepare_sqlite_incremental_dest(
-        dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk
+        dest_cfg, dest_table, pairs, sqlite_ddls, dest_pk, mode
     )
     result = copy_mysql_to_sqlite(
         source_cfg=source_cfg,
@@ -1750,7 +1768,7 @@ def copy_sqlite_to_postgres_incremental(
             if dst_cur.fetchone()[0] is None:
                 dst_cur.execute(
                     _pg_create_sql(
-                        dest_schema, dest_table, pairs, pg_ddls, [dest_pk]
+                        dest_schema, dest_table, pairs, pg_ddls, create_key_for_mode(mode, dest_pk)
                     )
                 )
                 settle_fast_path_create_on(
@@ -1863,7 +1881,7 @@ def copy_sqlite_to_mysql_incremental(
             )
             if dst_cur.fetchone() is None:
                 dst_cur.execute(
-                    _mysql_create_sql(dest_table, pairs, mysql_ddls, [dest_pk])
+                    _mysql_create_sql(dest_table, pairs, mysql_ddls, create_key_for_mode(mode, dest_pk))
                 )
                 settle_fast_path_create_on(
                     dst_cur, dest_dialect="mysql", dest_table=dest_table
