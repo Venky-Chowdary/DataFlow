@@ -1197,6 +1197,7 @@ def _open_finding(
     """
     from services.failure_retry_policy import classify_failure
     from services.blocker_titles import is_schema_drift_echo
+    from services.drift_approval import SOURCE_DRIFT_CODE, open_schedule_drift_approval
     from services.schedule_approvals import (
         ApprovalRequired,
         KIND_RUN_REFUSED,
@@ -1255,20 +1256,23 @@ def _open_finding(
             elif is_schema_drift_echo(message):
                 kind, code = KIND_SOURCE_DRIFT, SOURCE_DRIFT_CODE
             found = {"failure_class": classification.kind, **(evidence or {})}
-        open_approval_request(
-            schedule_id,
-            build_approval_request(
-                kind=kind,
-                code=code,
-                finding=message[:1000],
-                corrective_action=corrective,
-                binding=binding_from_schedule(sched),
-                requested_scopes=scopes,
-                job_id=job_id,
-                run_attempt=attempt,
-                evidence=found,
-            ),
+        request = build_approval_request(
+            kind=kind,
+            code=code,
+            finding=message[:1000],
+            corrective_action=corrective,
+            binding=binding_from_schedule(sched),
+            requested_scopes=scopes,
+            job_id=job_id,
+            run_attempt=attempt,
+            evidence=found,
         )
+        if code == SOURCE_DRIFT_CODE:
+            # Preflight may already have parked this job. A second open
+            # would count one refusal as two occurrences.
+            open_schedule_drift_approval(schedule_id, request)
+        else:
+            open_approval_request(schedule_id, request)
     except Exception:
         logger.exception("Schedule %s could not be parked on a decision", schedule_id)
 
