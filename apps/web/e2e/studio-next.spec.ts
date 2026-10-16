@@ -1196,6 +1196,41 @@ test.describe("transfer wizard stepper", () => {
             document.body.appendChild(probe);
             const border = getComputedStyle(probe).backgroundColor;
             probe.remove();
+            const parseColor = (color: string) => {
+              const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+              if (!match) return null;
+              return {
+                r: Number(match[1]),
+                g: Number(match[2]),
+                b: Number(match[3]),
+                a: match[4] === undefined ? 1 : Number(match[4]),
+              };
+            };
+            const composite = (
+              fg: { r: number; g: number; b: number; a: number },
+              bg: { r: number; g: number; b: number; a: number },
+            ) => ({
+              r: Math.round(fg.r * fg.a + bg.r * (1 - fg.a)),
+              g: Math.round(fg.g * fg.a + bg.g * (1 - fg.a)),
+              b: Math.round(fg.b * fg.a + bg.b * (1 - fg.a)),
+              a: 1,
+            });
+            const backdrop = (node: Element) => {
+              const layers: { r: number; g: number; b: number; a: number }[] = [];
+              let current: Element | null = node;
+              while (current) {
+                const parsed = parseColor(getComputedStyle(current).backgroundColor);
+                if (parsed && parsed.a > 0) layers.push(parsed);
+                if (parsed && parsed.a >= 1) break;
+                current = current.parentElement;
+              }
+              let acc = layers.length ? layers[layers.length - 1] : { r: 255, g: 255, b: 255, a: 1 };
+              for (let i = layers.length - 2; i >= 0; i -= 1) acc = composite(layers[i], acc);
+              return `rgb(${acc.r}, ${acc.g}, ${acc.b})`;
+            };
+            const track = document.querySelector(".df2-wizard-track");
+            const chromeEl = document.querySelector(".df2-transfer-studio-chrome");
+            const chromeBox = chromeEl?.getBoundingClientRect();
             const pairs = steps.map((step, index) => {
               const icon = step.querySelector(".df2-wizard-num");
               const label = [...step.querySelectorAll(".df2-wizard-label, .df2-wizard-label-short")].find(visible);
@@ -1205,8 +1240,12 @@ test.describe("transfer wizard stepper", () => {
               const line = lines[index];
               const lineBox = line ? line.getBoundingClientRect() : null;
               const nextIcon = steps[index + 1]?.querySelector(".df2-wizard-num")?.getBoundingClientRect();
+              const style = getComputedStyle(label);
+              const range = document.createRange();
+              range.selectNodeContents(label);
+              const textWidth = range.getBoundingClientRect().width;
               return {
-                text: label.textContent,
+                text: (label.textContent || "").trim(),
                 iconHitsLabel: overlaps(iconBox, labelBox),
                 gap: labelBox.left - iconBox.right,
                 align: (labelBox.top + labelBox.height / 2) - (iconBox.top + iconBox.height / 2),
@@ -1217,11 +1256,22 @@ test.describe("transfer wizard stepper", () => {
                 iconMid: iconBox.top + iconBox.height / 2,
                 color: line ? getComputedStyle(line).backgroundColor : "",
                 done: line ? line.classList.contains("done") : false,
-                position: getComputedStyle(label).position,
+                position: style.position,
+                ink: style.color,
+                weight: style.fontWeight,
+                backdrop: backdrop(label),
+                active: step.classList.contains("active"),
+                textWidth,
+                labelWidth: labelBox.width,
+                clipped: textWidth > labelBox.width + 1,
+                pastChrome: chromeBox ? labelBox.right > chromeBox.right + 1 : false,
               };
             }).filter((pair) => pair !== null);
-            const chrome = document.querySelector(".df2-transfer-studio-chrome")?.getBoundingClientRect().height ?? 0;
-            return { steps: steps.length, lines: lines.length, pairs, border, chrome };
+            const chrome = chromeBox?.height ?? 0;
+            const trackOverflow = track
+              ? track.scrollWidth > track.clientWidth + 1
+              : false;
+            return { steps: steps.length, lines: lines.length, pairs, border, chrome, trackOverflow };
           });
           expect(report.steps, where).toBe(canvas ? 3 : 6);
           expect(report.lines, where).toBe(report.steps - 1);
@@ -1245,6 +1295,22 @@ test.describe("transfer wizard stepper", () => {
           const lineGaps = report.pairs.map((pair) => pair.lineGap).filter((gap) => gap != null);
           const spread = Math.max(...lineGaps) - Math.min(...lineGaps);
           expect(spread, where).toBeLessThanOrEqual(1);
+          expect(report.trackOverflow, where).toBe(false);
+          const fullNames = canvas
+            ? ["Connect", "Review", "Run"]
+            : ["Source", "Destination", "Transform", "Map", "Validate", "Run"];
+          expect(report.pairs.map((pair) => pair.text), where).toEqual(fullNames);
+          const active = report.pairs.find((pair) => pair.active);
+          const inactive = report.pairs.find((pair) => !pair.active);
+          expect(active, where).toBeTruthy();
+          expect(inactive, where).toBeTruthy();
+          expect(Number(active?.weight), where).toBeGreaterThan(Number(inactive?.weight));
+          expect(active?.ink, where).not.toBe(inactive?.ink);
+          for (const pair of report.pairs) {
+            expect(pair.clipped, `${where} ${pair.text} text ${pair.textWidth} box ${pair.labelWidth}`).toBe(false);
+            expect(pair.pastChrome, `${where} ${pair.text}`).toBe(false);
+            expect(contrast(pair.ink, pair.backdrop), `${where} ${pair.text} ${pair.ink} on ${pair.backdrop}`).toBeGreaterThanOrEqual(4.5);
+          }
         }
       }
     }

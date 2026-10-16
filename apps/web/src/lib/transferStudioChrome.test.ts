@@ -39,7 +39,7 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(src, /shortLabel/);
   });
 
-  it("enterprise CSS enables short labels ≤1440px (overrides hide)", () => {
+  it("enterprise CSS keeps the compact short labels and the validate rail", () => {
     const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
     assert.match(css, /@media \(max-width: 1440px\)/);
     assert.match(css, /wizard-label-short \{\s*display: inline !important;/s);
@@ -48,6 +48,18 @@ describe("Transfer Studio chrome contracts", () => {
       css,
       /validate-rail-actions \{\s*[\s\S]*flex-direction: column !important/,
     );
+  });
+
+  it("studio stepper shows full names from 768px in accessible ink", () => {
+    const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+    const fullNames = css.slice(css.lastIndexOf("Full step names from 768px."));
+    assert.match(fullNames, /@media \(min-width: 768px\)/);
+    assert.match(fullNames, /max-width: 150px/);
+    assert.match(fullNames, /\.df2-wizard-label \{\s*display: inline !important;/);
+    assert.match(fullNames, /\.df2-wizard-label-short \{\s*display: none !important;/);
+    assert.match(fullNames, /color: var\(--df-text-primary\) !important/);
+    assert.match(fullNames, /color: var\(--df-brand-strong\) !important/);
+    assert.match(fullNames, /font-weight: var\(--df-fw-bold\)/);
   });
 
   it("laptop density uses tokens at 100% browser zoom — never CSS zoom", () => {
