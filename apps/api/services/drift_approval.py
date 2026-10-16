@@ -41,7 +41,17 @@ def is_source_drift_code(code: object) -> bool:
         return True
     if token.startswith("schema_drift.") or token.startswith("g13_source_coverage"):
         return True
+    # Field-reduction records the same unanswered column as ``no_disposition``
+    # and points at G13. That code is the drift, even when the gate id is G16.
+    if token == "no_disposition" or token.endswith(".no_disposition"):
+        return True
     return False
+
+
+def message_is_unmapped_column_drift(message: str) -> bool:
+    """The coverage sentence, including the field-reduction wording at G13."""
+    text = str(message or "").lower()
+    return "neither mapped nor declared omitted" in text
 
 
 def _rule_id(node: Mapping[str, Any]) -> str:

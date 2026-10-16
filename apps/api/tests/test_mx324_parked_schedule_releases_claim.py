@@ -84,8 +84,13 @@ def test_failed_then_parked_schedule_releases_claim_and_keeps_cadence(
 
     with sqlite3.connect(src_db) as c:
         c.execute('ALTER TABLE "QA_sch_src" ADD COLUMN extra REAL')
-    second = _wait(schedule_runner._run_schedule(sched.id, manual=True))
-    assert second.get("status") == "failed"
+    # The new column is refused before a job starts. Run now surfaces the
+    # parked SOURCE_DRIFT finding instead of leaving a claim with no job.
+    import pytest
+    from services.schedule_runner import ScheduleStartError
+
+    with pytest.raises(ScheduleStartError, match="neither mapped nor declared omitted: extra"):
+        schedule_runner._run_schedule(sched.id, manual=True)
     time.sleep(0.5)
     released_with_future_slot()
 
@@ -107,9 +112,12 @@ def test_failed_then_parked_schedule_releases_claim_and_keeps_cadence(
     assert "already in progress" not in caplog.text
     assert sched.id not in {s.id for s in store.due_schedules()}
 
-    third = schedule_runner._run_schedule(sched.id, manual=True)
-    assert third, "Run now on a parked schedule was refused as in progress"
-    _wait(third)
+    with pytest.raises(ScheduleStartError, match="neither mapped nor declared omitted: extra") as again:
+        schedule_runner._run_schedule(sched.id, manual=True)
+    assert "already in progress" not in str(again.value)
+    still = store.get_schedule(sched.id)
+    assert still.running is False and not still.running_job_id
+    assert still.approval_request["code"] == "SOURCE_DRIFT"
 
 
 def test_dispatch_exception_after_claim_releases_it_immediately(tmp_path, monkeypatch):

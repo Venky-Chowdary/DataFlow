@@ -21,6 +21,7 @@ from services.schedule_store import due_schedules
 from services.standing_authorization import (
     CODE_NO_AUTHORIZATION,
     SCOPE_NET_ADDITIVE_DRIFT,
+    SCOPE_SCHEMA_DRIFT,
     AuthorizationDecision,
     binding_from_schedule,
     evaluate_authorization,
@@ -597,11 +598,7 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> bool:
             exc,
         )
         return False
-    current = {
-        str(k): str(v)
-        for k, v in dict(info.get("schema") or {}).items()
-        if not isinstance(v, (dict, list))
-    }
+    current = _schema_types_from_probe(info)
     if not current:
         return False
     current_pk = [
@@ -668,10 +665,87 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> bool:
                 "current_primary_key": list(current_pk),
             },
         )
+    # An unmapped new column is REVIEW, not BLOCK: the nightly load used to
+    # record the new shape as the baseline and then fail inside the job.
+    # SFTP files hit that path — the pre-run raise above never ran — and the
+    # in-job sentence was parked as RUN_REFUSED, or not parked at all on a
+    # manual run. Refuse here, for both, and leave the baseline alone.
+    unmapped = _unmapped_added_columns(sched, request, verdict)
+    if unmapped:
+        named = ", ".join(unmapped[:8])
+        extra = f" (+{len(unmapped) - 8} more)" if len(unmapped) > 8 else ""
+        from services.drift_approval import DRIFT_CORRECTIVE, SOURCE_DRIFT_CODE
+
+        raise ApprovalRequired(
+            f"{len(unmapped)} source column(s) are neither mapped nor declared "
+            f"omitted: {named}{extra}",
+            kind=KIND_SOURCE_DRIFT,
+            code=SOURCE_DRIFT_CODE,
+            corrective_action=DRIFT_CORRECTIVE,
+            scopes=(SCOPE_SCHEMA_DRIFT,),
+            evidence={
+                "summary": verdict.summary,
+                "compatibility": verdict.compatibility,
+                "additive": list(verdict.additive or [])[:20],
+                "unmapped_columns": unmapped[:50],
+                "source_schema_fingerprint": verdict.fingerprint,
+                "current_schema": dict(current),
+                "current_columns": list(info.get("columns") or current.keys())[:200],
+                "current_primary_key": list(current_pk),
+            },
+        )
     _remember_source_schema(
         sched, current, verdict.fingerprint, primary_key=current_pk
     )
     return False
+
+
+def _schema_types_from_probe(info: dict[str, Any]) -> dict[str, str]:
+    """Flat column→type map from a schedule source probe.
+
+    File probes sometimes nest the type (``{"type": "string"}``). Dropping
+    those left the guard with an empty shape, so an SFTP file never compared
+    against its baseline. A header list with no types is still a shape:
+    VARCHAR is the placeholder the file reader already uses.
+    """
+    out: dict[str, str] = {}
+    for key, value in dict((info or {}).get("schema") or {}).items():
+        name = str(key).strip()
+        if not name or name.startswith("_"):
+            continue
+        if isinstance(value, dict):
+            inner = value.get("type") or value.get("data_type") or value.get("dataType")
+            if inner is None or isinstance(inner, (dict, list)):
+                inner = "VARCHAR"
+            out[name] = str(inner)
+        elif not isinstance(value, list):
+            out[name] = str(value)
+    if out:
+        return out
+    return {
+        str(column).strip(): "VARCHAR"
+        for column in ((info or {}).get("columns") or [])
+        if str(column).strip()
+    }
+
+
+def _unmapped_added_columns(sched: Any, request: Any, verdict: Any) -> list[str]:
+    """New source columns nobody mapped, under a policy that does not propagate."""
+    from services.schema_drift import PROPAGATE_POLICIES
+    from services.source_schema_memory import REVIEW, mapped_source_columns
+
+    policy = str(getattr(sched, "schema_policy", "") or "manual_review").strip().lower()
+    if getattr(verdict, "verdict", "") != REVIEW or policy in PROPAGATE_POLICIES:
+        return []
+    read = mapped_source_columns(list(getattr(request, "mappings", None) or []))
+    names: list[str] = []
+    for entry in getattr(verdict, "additive", None) or []:
+        if not isinstance(entry, dict) or str(entry.get("kind") or "") != "add_column":
+            continue
+        name = str(entry.get("column") or "").strip()
+        if name and name.lower() not in read:
+            names.append(name)
+    return names
 
 
 def _remember_source_schema(
@@ -1238,11 +1312,14 @@ def _open_finding(
 
             supplied = list((evidence or {}).get("gate_codes") or [])
             matched = drift_codes(supplied)
+            from services.drift_approval import message_is_unmapped_column_drift
+
+            unmapped_sentence = message_is_unmapped_column_drift(message)
             if is_empty_mapping_refusal(message):
                 code = EMPTY_MAPPING_CODE
                 scopes = ()
                 corrective = EMPTY_MAPPING_CORRECTIVE
-            elif matched:
+            elif matched or unmapped_sentence:
                 # The gate id is the classification. The coverage sentence
                 # does not say "schema drift", and matching that phrase
                 # parked additive columns as RUN_REFUSED.
