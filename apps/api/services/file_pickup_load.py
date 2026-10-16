@@ -84,6 +84,8 @@ def load_picked_files(
     wait_seconds = int(extra.get("file_wait_seconds") or 0)
     route_key = f"{src_type}:{bucket}:{key}"
     connector_key = str(getattr(source, "connector_id", "") or "") or route_key
+    dest_table_name = str(getattr(destination, "table", "") or dest_cfg.get("table") or "")
+    schedule_id = str(extra.get("schedule_id") or "")
     manifest = manifest_entries(route_key)
     if dest_type in {"postgresql", "snowflake"}:
         try:
@@ -94,7 +96,11 @@ def load_picked_files(
                 from services.snowflake_file_manifest import read_loaded_manifest
 
                 manifest = read_loaded_manifest(
-                    dest_cfg, connector=connector_key, schema=schema_name or "PUBLIC"
+                    dest_cfg,
+                    connector=connector_key,
+                    schema=schema_name or "PUBLIC",
+                    dest_table=dest_table_name,
+                    schedule_id=schedule_id,
                 )
             else:
                 from services.file_manifest import read_loaded_manifest
@@ -103,6 +109,8 @@ def load_picked_files(
                     dest_cfg,
                     connector=connector_key,
                     schema=schema_name or "public",
+                    dest_table=dest_table_name,
+                    schedule_id=schedule_id,
                 )
         except Exception:
             logging.getLogger(__name__).warning(
@@ -116,15 +124,17 @@ def load_picked_files(
         wait_seconds=wait_seconds,
         waited_seconds=int(extra.get("file_waited_seconds") or 0),
     )
-    if plan.action == "unchanged":
+    if plan.action in {"unchanged", "warn"}:
         unchanged = {
-            "file_pickup": "unchanged",
+            "file_pickup": plan.action,
             "files_picked": [],
             "source_row_count": 0,
             "source_row_count_source": "file_manifest",
             "rows_written": 0,
             "rejected_rows": 0,
             "sync_mode": effective_sync,
+            "status": plan.status,
+            "warnings": [plan.message] if plan.message else [],
         }
         if isinstance(pre_write_rows_before, int):
             unchanged[PRECOUNT_KEY] = int(pre_write_rows_before)
@@ -196,6 +206,8 @@ def load_picked_files(
                 "mtime": item.mtime,
                 "sha256": checksum,
                 "job_id": job_id or "",
+                "dest_table": dest_table_name,
+                "schedule_id": schedule_id,
             },
         )
         total_rows += int(rows or 0)

@@ -12,9 +12,11 @@ from __future__ import annotations
 import fnmatch
 import re
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 
 _GLOB = re.compile(r"[*?\[\]]")
 _DATE_TOKEN = re.compile(r"\{(?:date|yyyy|yyyymmdd|yyyy-mm-dd)\}", re.I)
+_FILE_DAY = re.compile(r"20\d{2}[-_]?\d{2}[-_]?\d{2}")
 
 
 FILE_NOT_ARRIVED = "expected_file_not_arrived"
@@ -155,6 +157,28 @@ def select_new_files(
     return ordered_files(chosen)
 
 
+def _pickup_day(today: date | datetime | str | None) -> date:
+    if isinstance(today, datetime):
+        return today.date()
+    if isinstance(today, date):
+        return today
+    if isinstance(today, str) and today.strip():
+        return date.fromisoformat(today.strip()[:10])
+    return datetime.now(timezone.utc).date()
+
+
+def _series_is_dated(pattern: str, files: list[RemoteFile]) -> bool:
+    if _DATE_TOKEN.search(pattern or ""):
+        return True
+    return any(_FILE_DAY.search(item.name or "") for item in files)
+
+
+def _listing_has_day(files: list[RemoteFile], day: date) -> bool:
+    iso = day.isoformat()
+    compact = day.strftime("%Y%m%d")
+    return any(iso in item.name or compact in item.name for item in files)
+
+
 def plan_pickup(
     *,
     pattern: str,
@@ -162,6 +186,7 @@ def plan_pickup(
     manifest: list[dict] | None = None,
     wait_seconds: int = 0,
     waited_seconds: int = 0,
+    today: date | datetime | str | None = None,
 ) -> PickupPlan:
     """Decide load vs wait vs a clear 'file not arrived' failure."""
     pat = (pattern or "").strip()
@@ -176,6 +201,16 @@ def plan_pickup(
             action="load",
         )
     if matched:
+        day = _pickup_day(today)
+        if _series_is_dated(pat, matched) and not _listing_has_day(files, day):
+            return PickupPlan(
+                pattern=pat,
+                is_pattern=patterned,
+                action="warn",
+                status=FILE_NOT_ARRIVED,
+                retryable=False,
+                message=f"expected file for {day.isoformat()} not arrived",
+            )
         return PickupPlan(
             pattern=pat,
             is_pattern=patterned,
