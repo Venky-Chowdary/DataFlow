@@ -360,6 +360,46 @@ def _idempotent_insert_many(coll, docs: list[dict]) -> int:
         return len(docs)
 
 
+def _widen_sampled_mongo_decimals(dest_types, mappings, kwargs: dict) -> dict:
+    """A sample DECIMAL(p,s) is not a Mongo catalog bound.
+
+    Mongo stores Decimal128. Rejecting a later value because the first page
+    fit DECIMAL(4,2) drops rows the document can hold. Operator overrides and
+    a declared relational domain stay as stamped.
+    """
+    from services.decimal_observe import upgrade_sampled_decimal_stamp
+    from services.dest_schema_authority import apply_sampled_profile_to_dest_types
+
+    profiled = apply_sampled_profile_to_dest_types(
+        dest_types, mappings, dest_db="mongodb"
+    )
+    by_target: dict[str, dict] = {}
+    for mapping in mappings or []:
+        if not isinstance(mapping, dict):
+            continue
+        target = str(mapping.get("target") or "").strip()
+        if target:
+            by_target[target] = mapping
+            by_target.setdefault(target.casefold(), mapping)
+    fallback_db = str(kwargs.get("source_db") or kwargs.get("source_format") or "")
+    widened: dict[str, str] = {}
+    for name, current in profiled.items():
+        mapping = by_target.get(name) or by_target.get(str(name).casefold()) or {}
+        if mapping.get("user_override") or mapping.get("userOverride"):
+            widened[name] = str(current)
+            continue
+        source_db = str(mapping.get("source_db") or fallback_db)
+        widened[name] = upgrade_sampled_decimal_stamp(
+            str(current),
+            src_type=str(mapping.get("source_type") or current),
+            dest_db="mongodb",
+            source_db=source_db,
+        )
+    if type(dest_types) is dict:
+        return widened
+    return type(dest_types)(widened)
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -439,6 +479,7 @@ def write_mapped_rows(
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="MongoDB",
     )
+    dest_types = _widen_sampled_mongo_decimals(dest_types, mappings, _kwargs)
     row_column_types = _row_projection_column_types(
         mappings, column_types, dest_types
     )

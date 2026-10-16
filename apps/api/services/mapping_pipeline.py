@@ -1235,24 +1235,25 @@ def run_mapping_pipeline(
                 # A proven-absent table has no live types: its echoed schema
                 # is a proposal and must not become the verdict's declared type.
                 declared_target_types[tgt_name] = str(tgt_type)
-            # Create-new already stamped bare DECIMAL/FLOAT — upgrade from samples.
+            # Create-new already stamped DECIMAL/FLOAT. A sized DECIMAL(4,2)
+            # from a 50-row sample is not a domain: open it to the destination's
+            # full integer capacity at the observed scale. A declared relational
+            # DECIMAL(p,s) stays. Bare DECIMAL and FLOAT still upgrade from samples.
             if (
                 strategy in {"identity_passthrough", "create_compatible_new"}
                 or destination_table_exists is False
-            ) and invent_samples:
-                from services.type_system import parse_numeric_precision_scale
+            ) and not (m.get("user_override") or m.get("userOverride")):
+                from services.decimal_observe import upgrade_sampled_decimal_stamp
 
-                bare = normalize_logical_type(tgt_type) in {"decimal", "float"}
-                p, _ = parse_numeric_precision_scale(str(tgt_type))
-                if bare and (p is None or normalize_logical_type(tgt_type) == "float"):
-                    upgraded = create_new_mapping_target_type(
-                        src_type or tgt_type,
-                        destination_db_type or "",
-                        samples=invent_samples,
-                        source_db=source_db_type,
-                    )
-                    if upgraded:
-                        tgt_type = upgraded
+                upgraded = upgrade_sampled_decimal_stamp(
+                    str(tgt_type),
+                    src_type=str(src_type or tgt_type),
+                    dest_db=destination_db_type or "",
+                    source_db=source_db_type or "",
+                    samples=invent_samples,
+                )
+                if upgraded:
+                    tgt_type = upgraded
         if (
             not (m.get("user_override") or m.get("userOverride"))
             and (intentional_create or destination_table_exists is False)
@@ -1405,6 +1406,7 @@ def run_mapping_pipeline(
                 **m,
                 "transform": transform,
                 "source_type": _reported_source_carrier(declared_src_type, src_type),
+                "source_db": source_db_type or str(m.get("source_db") or ""),
                 "target_type": tgt_type or "",
                 **(
                     {

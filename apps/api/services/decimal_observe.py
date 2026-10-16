@@ -495,6 +495,43 @@ def source_declares_numeric_domain(source_db: str) -> bool:
     return (source_db or "").strip().lower() not in _UNTYPED_NUMERIC_SOURCES
 
 
+def upgrade_sampled_decimal_stamp(
+    tgt_type: str,
+    *,
+    src_type: str,
+    dest_db: str = "",
+    source_db: str = "",
+    samples: list[Any] | None = None,
+) -> str:
+    """Widen a create-new decimal that was sized from a sample.
+
+    Returns ``tgt_type`` unchanged when the source declares a real domain,
+    the stamp is not numeric, or the caller did not ask for a wider carrier.
+    A sample ``DECIMAL(4,2)`` on a file or document source becomes
+    ``DECIMAL(38, 2)`` (or unbounded ``NUMERIC`` on PostgreSQL).
+    """
+    from services.decision_kernel.type_invent import create_new_mapping_target_type
+    from services.type_system import normalize_logical_type, parse_numeric_precision_scale
+
+    current = str(tgt_type or "")
+    logical = normalize_logical_type(current)
+    if logical not in {"decimal", "float"}:
+        return current
+    precision, _scale = parse_numeric_precision_scale(current)
+    open_domain = sampled_numeric_is_not_a_domain(source_db) and precision is not None
+    bare = precision is None or logical == "float"
+    if open_domain or (bare and samples):
+        upgraded = create_new_mapping_target_type(
+            src_type or current,
+            dest_db,
+            samples=samples,
+            source_db=source_db,
+        )
+        if upgraded:
+            return upgraded
+    return current
+
+
 def create_new_decimal_carrier(
     samples: list[Any] | None,
     *,
