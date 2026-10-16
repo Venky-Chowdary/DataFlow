@@ -538,10 +538,13 @@ def _write_batch(
             # Multi-chunk object-store writes must receive chunk index + total so
             # writers emit part-* keys instead of overwriting a fixed object.
             # job_id lets append runs isolate their part set from earlier runs.
+            # conflict_columns lets a single-chunk deduped write merge by key
+            # instead of replacing the object with only the new batch.
             kwargs["sync_mode"] = sync_mode
             kwargs["file_batch_idx"] = chunk_idx
             kwargs["total_chunks"] = total_chunks
             kwargs["job_id"] = job_id or ""
+            kwargs["conflict_columns"] = conflict_columns
             kwargs.update(source_handoff)
         if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
             kwargs["conflict_columns"] = conflict_columns

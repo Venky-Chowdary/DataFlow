@@ -15,6 +15,10 @@ from connectors.object_store_common import (
     resolve_object_store_write_dest_types,
     resolve_object_write_layout,
 )
+from connectors.object_store_incremental import (
+    ObjectMergeRefused,
+    prepare_incremental_export,
+)
 from connectors.object_store_materialize import (
     materialize_object_store_export,
     resolve_materialize_batch,
@@ -84,6 +88,7 @@ def write_mapped_rows(
     sync_mode = str(_kwargs.pop("sync_mode", "") or "")
     protect_landed = bool(_kwargs.pop("protect_landed_object", False))
     allow_empty_replace = bool(_kwargs.pop("allow_empty_replace", False))
+    conflict_columns = list(_kwargs.pop("conflict_columns", None) or [])
     file_batch_idx = int(_kwargs.pop("file_batch_idx", 0) or 0)
     total_chunks = int(_kwargs.pop("total_chunks", 1) or 1)
     bucket = database
@@ -248,6 +253,33 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=0,
                 error=blocked,
+                warnings=errors[:10],
+                rejected_rows=mat.rejected_rows,
+                rejected_details=list(rejected_details),
+            )
+        try:
+            export = prepare_incremental_export(
+                key=key,
+                export=export,
+                fetch=lambda: bucket_obj.blob(key).download_as_bytes(),
+                sync_mode=sync_mode,
+                total_chunks=total_chunks,
+                protect_landed=protect_landed,
+                created_here=created_here,
+                target_cols=target_cols,
+                dest_types=dest_types,
+                conflict_columns=conflict_columns,
+                spill_max_size=resolve_spill_max(extra),
+            )
+        except ObjectMergeRefused as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=key,
+                target_schema=bucket,
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
                 warnings=errors[:10],
                 rejected_rows=mat.rejected_rows,
                 rejected_details=list(rejected_details),
