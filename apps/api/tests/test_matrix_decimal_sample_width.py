@@ -56,6 +56,32 @@ def test_mongo_writer_does_not_keep_a_sample_decimal_ceiling():
     assert parsed is None or parsed[0] >= 38
 
 
+def test_mongo_writer_leaves_a_date_target_alone():
+    types = _widen_sampled_mongo_decimals(
+        {"created_at": "DATE", "amount": "DECIMAL(4,2)"},
+        [
+            {
+                "source": "created_at",
+                "target": "created_at",
+                "source_type": "TEXT",
+                "source_db": "csv",
+                "target_type": "DATE",
+            },
+            {
+                "source": "amount",
+                "target": "amount",
+                "source_type": "DECIMAL(4,2)",
+                "source_db": "csv",
+                "target_type": "DECIMAL(4,2)",
+            },
+        ],
+        {},
+    )
+    assert types["created_at"] == "DATE"
+    parsed = parse_decimal_precision_scale(types["amount"], dest_db="mongodb")
+    assert parsed is None or parsed[0] >= 38
+
+
 def test_mongo_writer_keeps_an_operator_decimal_ceiling():
     types = _widen_sampled_mongo_decimals(
         {"amount": "DECIMAL(4,2)"},

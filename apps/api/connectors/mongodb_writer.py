@@ -365,13 +365,26 @@ def _widen_sampled_mongo_decimals(dest_types, mappings, kwargs: dict) -> dict:
 
     Mongo stores Decimal128. Rejecting a later value because the first page
     fit DECIMAL(4,2) drops rows the document can hold. Operator overrides and
-    a declared relational domain stay as stamped.
+    a declared relational domain stay as stamped. Only decimal and float
+    stamps are rewritten: a DATE target must stay a date when the source
+    sample is text, or the document stores a string and drops the instant.
     """
     from services.decimal_observe import upgrade_sampled_decimal_stamp
     from services.dest_schema_authority import apply_sampled_profile_to_dest_types
+    from services.type_system import normalize_logical_type
 
+    original = {str(k): str(v) for k, v in dict(dest_types or {}).items()}
+    numeric = {
+        name: current
+        for name, current in original.items()
+        if normalize_logical_type(current) in {"decimal", "float"}
+    }
+    if not numeric:
+        if type(dest_types) is dict or not dest_types:
+            return original
+        return type(dest_types)(original)
     profiled = apply_sampled_profile_to_dest_types(
-        dest_types, mappings, dest_db="mongodb"
+        numeric, mappings, dest_db="mongodb"
     )
     by_target: dict[str, dict] = {}
     for mapping in mappings or []:
@@ -382,7 +395,7 @@ def _widen_sampled_mongo_decimals(dest_types, mappings, kwargs: dict) -> dict:
             by_target[target] = mapping
             by_target.setdefault(target.casefold(), mapping)
     fallback_db = str(kwargs.get("source_db") or kwargs.get("source_format") or "")
-    widened: dict[str, str] = {}
+    widened = dict(original)
     for name, current in profiled.items():
         mapping = by_target.get(name) or by_target.get(str(name).casefold()) or {}
         if mapping.get("user_override") or mapping.get("userOverride"):
@@ -395,7 +408,7 @@ def _widen_sampled_mongo_decimals(dest_types, mappings, kwargs: dict) -> dict:
             dest_db="mongodb",
             source_db=source_db,
         )
-    if type(dest_types) is dict:
+    if type(dest_types) is dict or not dest_types:
         return widened
     return type(dest_types)(widened)
 
