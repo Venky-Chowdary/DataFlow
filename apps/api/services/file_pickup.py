@@ -194,11 +194,18 @@ def plan_pickup(
     new_files = select_new_files(files, manifest, pat)
     matched = [item for item in files if matches_pattern(item.name, pat)]
     if new_files:
+        day = _pickup_day(today)
+        notice = ""
+        if _series_is_dated(pat, matched or new_files) and not _listing_has_day(files, day):
+            # The older file still loads. Today's absence is a warning on
+            # that same run, not only on a later run that finds nothing new.
+            notice = f"expected file for {day.isoformat()} not arrived"
         return PickupPlan(
             pattern=pat,
             is_pattern=patterned,
             files=ordered_files(new_files),
             action="load",
+            message=notice,
         )
     if matched:
         day = _pickup_day(today)
