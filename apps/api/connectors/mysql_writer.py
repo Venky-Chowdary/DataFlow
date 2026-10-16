@@ -1662,6 +1662,10 @@ def write_mapped_rows(
             chunk_idx = 0
             writing = True
             collect_map_details = policy != "fail"
+            if write_mode == "upsert" and conflict_columns:
+                write_acc.conflict_columns = [
+                    c for c in conflict_columns if c in target_cols
+                ]
             for finished in iter_mysql_finished_bundles(**_mysql_finish_kwargs):
                 if collect_map_details:
                     rejected_details.extend(finished.rejected_details)
@@ -1705,7 +1709,6 @@ def write_mapped_rows(
 
                         conflict_cols = [c for c in conflict_columns if c in target_cols]
                         if conflict_cols:
-                            before = len(dense)
                             dense = partition_dense_upsert_rows(
                                 dense,
                                 conflict_cols,
@@ -1714,7 +1717,7 @@ def write_mapped_rows(
                                 policy=policy,
                                 source_row_numbers=dense_nums or None,
                             )
-                            rows_skipped += before - len(dense)
+                            # Quarantine owns the null key. Do not also skip it.
                             if dense_nums and len(dense) != len(dense_nums):
                                 kept_nums: list[int] = []
                                 for i, row in enumerate(finished.dense_rows):

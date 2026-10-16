@@ -1031,6 +1031,7 @@ def fingerprint_parsed_file(
     shape_recipe: Any = None,
     use_source_spool: bool = False,
     dest_extra: dict[str, Any] | None = None,
+    duplicate_policy: str = "",
 ) -> tuple[FingerprintAccumulator, int]:
     """Second parse of a file the writer already consumed.
 
@@ -1060,6 +1061,9 @@ def fingerprint_parsed_file(
         full_iter = ShapeRunner(shape_recipe).batches(full_iter)
 
     accumulator = FingerprintAccumulator()
+    from services.policy_verification import PolicyFingerprintBook
+
+    fingerprint_book = PolicyFingerprintBook(duplicate_policy, list(pk_target_cols or []))
     source_rows = 0
     pk_cols = list(pk_target_cols or [])
     for batch in full_iter:
@@ -1081,20 +1085,28 @@ def fingerprint_parsed_file(
             )
             try:
                 source_rows += spill.unexpanded_row_count
-                fps = fingerprints_from_spool(
-                    spill.spool,
-                    mappings,
-                    target_cols,
-                    headers=list(getattr(spill.spool, "headers", None) or columns or []),
-                    column_types=column_types,
-                    dest_db_type=dest_type,
-                    dest_types=fingerprint_dest_types,
-                    error_policy=error_policy,
-                    destination_pk_columns=pk_cols or None,
-                    empty_cells_as_null=True,
+                from connectors.engine_record_spill import iter_mapped_fingerprints_from_spool
+
+                paired = list(
+                    iter_mapped_fingerprints_from_spool(
+                        spill.spool,
+                        mappings,
+                        target_cols,
+                        headers=list(getattr(spill.spool, "headers", None) or columns or []),
+                        column_types=column_types,
+                        dest_db_type=dest_type,
+                        dest_types=fingerprint_dest_types,
+                        error_policy=error_policy,
+                        destination_pk_columns=pk_cols or None,
+                        empty_cells_as_null=True,
+                    )
                 )
-                if fps:
-                    accumulator.add_many(fps)
+                if paired:
+                    fingerprint_book.add(
+                        [row for row, _fp in paired],
+                        [fp for _row, fp in paired],
+                        columns=target_cols,
+                    )
             finally:
                 spill.close()
         else:
@@ -1114,14 +1126,17 @@ def fingerprint_parsed_file(
                 empty_cells_as_null=True,
             )
             if mapped_rows:
-                accumulator.add_many(
+                fingerprint_book.add(
+                    mapped_rows,
                     row_fingerprints(
                         mapped_rows,
                         target_cols,
                         dest_db_type=dest_type,
                         dest_types=fingerprint_dest_types,
-                    )
+                    ),
+                    columns=target_cols,
                 )
+    fingerprint_book.flush(accumulator)
     return accumulator, source_rows
 
 
@@ -2091,6 +2106,31 @@ def stream_file_to_database(
             kept.append(row)
         return kept
 
+    def _spool_aligned(
+        spool: Any, skipped: set[str] | None = None
+    ) -> tuple[list[tuple[str, str]], list[tuple | None]]:
+        from connectors.engine_record_spill import iter_mapped_fingerprints_from_spool
+
+        fingerprints: list[tuple[str, str]] = []
+        identities: list[tuple | None] = []
+        for row, fingerprint in iter_mapped_fingerprints_from_spool(
+            spool,
+            mappings,
+            target_cols,
+            headers=list(getattr(spool, "headers", None) or columns or []),
+            column_types=column_types,
+            dest_db_type=dest_type,
+            dest_types=fingerprint_dest_types,
+            error_policy=stream_error_policy,
+            destination_pk_columns=list(pk_target_cols or []) or None,
+            empty_cells_as_null=True,
+            exclude_identity_keys=skipped or None,
+            identity_columns=list(pk_target_cols or []) or None,
+        ):
+            fingerprints.append(fingerprint)
+            identities.append(_identity(row, list(pk_target_cols or []), target_cols))
+        return fingerprints, identities
+
     def _spool_fingerprints(spool: Any, skipped: set[str] | None = None) -> list[tuple[str, str]]:
         return fingerprints_from_spool(
             spool,
@@ -2127,7 +2167,7 @@ def stream_file_to_database(
         )
         if skipped:
             mapped_rows = _without_skipped(mapped_rows, skipped)
-        return (
+        fingerprints = (
             row_fingerprints(
                 mapped_rows,
                 target_cols,
@@ -2137,6 +2177,42 @@ def stream_file_to_database(
             if mapped_rows
             else []
         )
+        return fingerprints
+
+    def _matrix_aligned(
+        headers: list[str],
+        data_rows: list[list[Any]],
+        skipped: set[str] | None = None,
+    ) -> tuple[list[tuple[str, str]], list[tuple | None]]:
+        mapped_rows, _ = map_rows_for_fingerprint(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            error_policy=stream_error_policy,
+            dest_types=fingerprint_dest_types,
+            preserve_case=True,
+            dest_kind=dest_type,
+            destination_pk_columns=list(pk_target_cols or []) or None,
+            empty_cells_as_null=True,
+        )
+        if skipped:
+            mapped_rows = _without_skipped(mapped_rows, skipped)
+        fingerprints = (
+            row_fingerprints(
+                mapped_rows,
+                target_cols,
+                dest_db_type=dest_type,
+                dest_types=fingerprint_dest_types,
+            )
+            if mapped_rows
+            else []
+        )
+        identities = [
+            _identity(row, list(pk_target_cols or []), target_cols) for row in mapped_rows
+        ]
+        return fingerprints, identities
 
     def _run_file_write(
         idx: int,
@@ -2228,6 +2304,11 @@ def stream_file_to_database(
                 break
         key_source_fields.append(_field)
 
+    from services.policy_verification import PolicyFingerprintBook, PolicySampleBook, _identity
+
+    sample_book = PolicySampleBook(key_source_fields, decision.policy)
+    fp_book = PolicyFingerprintBook(decision.policy, list(pk_target_cols or []))
+
     def _key_projection(batch: list[dict]) -> list[list[Any]]:
         """Target-named key cells per record; duplicates stay (census dedupes)."""
         out: list[list[Any]] = []
@@ -2262,6 +2343,13 @@ def stream_file_to_database(
         }
         if not batch:
             return empty
+        policy_sample: list[dict] = []
+        if sample_book.active:
+            # Uncapped inside the chunk so a later image of an early key is
+            # not dropped before the parent applies the fifty-row cap.
+            chunk_sample = PolicySampleBook(key_source_fields, decision.policy)
+            chunk_sample.add_batch(batch, limit=None)
+            policy_sample = chunk_sample.export()
         headers = columns or (list(batch[0].keys()) if batch else [])
         # Overwrite keys need the dict rows — collect before spill clears them.
         overwrite_keys = (
@@ -2302,7 +2390,13 @@ def stream_file_to_database(
                         str(key)
                         for key in ((dest_summary or {}).get("skipped_identity_keys") or [])
                     }
-                    fingerprints = _spool_fingerprints(spill.spool, skipped_keys)
+                    if fp_book.active:
+                        fingerprints, fingerprint_identities = _spool_aligned(
+                            spill.spool, skipped_keys
+                        )
+                    else:
+                        fingerprints = _spool_fingerprints(spill.spool, skipped_keys)
+                        fingerprint_identities = None
                     batch_rows = spill.unexpanded_row_count
                 finally:
                     spill.close()
@@ -2316,7 +2410,13 @@ def stream_file_to_database(
                     str(key)
                     for key in ((dest_summary or {}).get("skipped_identity_keys") or [])
                 }
-                fingerprints = _matrix_fingerprints(headers, data_rows, skipped_keys)
+                if fp_book.active:
+                    fingerprints, fingerprint_identities = _matrix_aligned(
+                        headers, data_rows, skipped_keys
+                    )
+                else:
+                    fingerprints = _matrix_fingerprints(headers, data_rows, skipped_keys)
+                    fingerprint_identities = None
                 batch_rows = len(data_rows)
         except Exception:
             if keyed_census_acc is not None:
@@ -2332,6 +2432,8 @@ def stream_file_to_database(
             "last_checksum": last_checksum,
             "dest_summary": dest_summary,
             "fingerprints": fingerprints,
+            "fingerprint_identities": fingerprint_identities,
+            "policy_sample": policy_sample,
             "rejected": int(dest_summary.get("rejected_rows", 0) or 0),
             "coerced_null": int(dest_summary.get("coerced_null_rows", 0) or 0),
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
@@ -2351,10 +2453,17 @@ def stream_file_to_database(
                 overwrite_keys_acc.observe_tuples(result.get("overwrite_keys"))
             elif result.get("batch_rows"):
                 overwrite_keys_acc.observe_tuples(None)
-        if result["fingerprints"]:
+        if fp_book.active:
+            fp_book.add_aligned(
+                list(result.get("fingerprint_identities") or []),
+                list(result.get("fingerprints") or []),
+            )
+        elif result["fingerprints"]:
             fp_accumulator.add_many(result["fingerprints"])
             if fingerprint_sink is not None:
                 fingerprint_sink.add_many(result["fingerprints"])
+        if sample_book.active and result.get("policy_sample"):
+            sample_book.add_batch(list(result.get("policy_sample") or []), limit=50)
         source_rows_seen += int(result.get("batch_rows") or 0)
         written += result["batch_written"]
         rejected_total += result["rejected"]
@@ -2663,6 +2772,19 @@ def stream_file_to_database(
     # All rows may be quarantined (written == 0) — that is a real transfer with
     # DLQ proof, not an empty file. Continue so rejected_details / checksum land.
 
+    if fp_book.active:
+        fp_book.flush(fp_accumulator)
+        if fingerprint_sink is not None:
+            fingerprint_sink.add_many(fp_book.survivors.values())
+            if fp_book.loose:
+                fingerprint_sink.add_many(fp_book.loose)
+        if fp_book.dropped:
+            dest_summary["rows_skipped"] = int(dest_summary.get("rows_skipped") or 0) + int(
+                fp_book.dropped
+            )
+            dest_summary["collapsed_duplicate_rows"] = int(
+                dest_summary.get("collapsed_duplicate_rows") or 0
+            ) + int(fp_book.dropped)
     # Write-pass fingerprints hash the rows just sent. A second parse is a
     # different read: identity alignment is that parse's (key, hash) multiset
     # matching the write pass. Resume still re-scans when this process only
@@ -2706,6 +2828,7 @@ def stream_file_to_database(
                 ),
                 use_source_spool=use_source_spool,
                 dest_extra=dest_extra,
+                duplicate_policy=decision.policy,
             )
         except Exception:
             if partial_write_pass:
@@ -2828,6 +2951,12 @@ def stream_file_to_database(
     if pk_target_cols:
         dest_summary["conflict_columns"] = list(pk_target_cols)
         dest_summary["primary_key_columns"] = list(pk_target_cols)
+    if sample_book.active:
+        policy_rows = sample_book.sample()
+        if policy_rows:
+            # Source-keyed survivors. The peek is the first rows and would
+            # compare 183.95 against the 184.95 the upsert kept.
+            dest_summary["reconcile_sample"] = policy_rows
     _stash_file_reconcile_sample(
         dest_summary,
         sample_rows,

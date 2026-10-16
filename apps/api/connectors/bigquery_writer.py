@@ -1443,6 +1443,8 @@ def write_mapped_rows(
                 source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
             )
         try:
+            if use_merge and conflict:
+                write_acc.conflict_columns = [c for c in conflict if c in target_cols]
             for finished in iter_bq_finished_bundles(**_bq_finish_kwargs):
                 if collect_map_details:
                     rejected_details.extend(finished.rejected_details)
@@ -1475,7 +1477,6 @@ def write_mapped_rows(
                 if use_merge and dense:
                     from connectors.writer_common import partition_dense_upsert_rows
 
-                    before_dense = len(dense)
                     dense = partition_dense_upsert_rows(
                         dense,
                         conflict,
@@ -1483,7 +1484,7 @@ def write_mapped_rows(
                         rejected_details=rejected_details,
                         policy=policy,
                     )
-                    rows_skipped += before_dense - len(dense)
+                    # Held-out null keys are quarantined, not skipped.
                 if finished.sparse_rows and use_merge:
                     sparse_written, sparse_skipped, sparse_checksum = (
                         _bq_apply_sparse_upsert(

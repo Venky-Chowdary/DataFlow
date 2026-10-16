@@ -5782,6 +5782,10 @@ def write_mapped_rows(
                     conn.commit()
                 else:
                     ledger_unavailable = True
+            if write_mode == "upsert" and conflict_columns:
+                write_acc.conflict_columns = [
+                    c for c in conflict_columns if c in target_cols
+                ]
             for finished in iter_generic_sql_finished_bundles(**_generic_finish_kwargs):
                 if collect_map_details:
                     rejected_details.extend(finished.rejected_details)

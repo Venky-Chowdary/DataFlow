@@ -2873,6 +2873,10 @@ def write_mapped_rows(
             # Fail already scanned this dest_types image — do not duplicate
             # map/quarantine details. Quarantine collects them on this pass.
             collect_map_details = policy != "fail"
+            if write_mode == "upsert" and conflict_columns:
+                write_acc.conflict_columns = [
+                    c for c in conflict_columns if c in target_cols
+                ]
             for finished in iter_pg_finished_bundles(**_pg_finish_kwargs):
                 if collect_map_details:
                     rejected_details.extend(finished.rejected_details)
@@ -2922,7 +2926,6 @@ def write_mapped_rows(
                             c for c in conflict_columns if c in target_cols
                         ]
                         if conflict_for_part:
-                            before = len(dense)
                             dense = partition_dense_upsert_rows(
                                 dense,
                                 conflict_for_part,
@@ -2931,7 +2934,8 @@ def write_mapped_rows(
                                 policy=policy,
                                 source_row_numbers=dense_nums or None,
                             )
-                            rows_skipped += before - len(dense)
+                            # Null keys are already in rejected_details. Counting
+                            # them as skipped as well makes 97+3+1 against 100 read.
                             dense, dense_nums, skipped_keys = _drop_skip_existing_keys(
                                 cur,
                                 schema=schema,

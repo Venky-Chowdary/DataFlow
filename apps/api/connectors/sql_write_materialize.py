@@ -216,6 +216,13 @@ class SqlWriteAccumulator:
         self.accepted_row_count = 0
         self.collapsed_duplicate_rows = 0
         self.batch_sizes: list[int] = []
+        # Set by upsert writers before add_accepted. Empty means first-50,
+        # which is correct for append (duplicate keys are real rows).
+        self.conflict_columns: list[str] = []
+        self._sample_index: dict[tuple, int] = {}
+        self._survivor_fp: dict[tuple, tuple[str, str]] = {}
+        self._loose_fp: list[tuple[str, str]] = []
+        self._fp_flushed = False
 
     def note_collapsed_duplicates(self, count: int) -> None:
         """Older images of a key already represented by the survivor.
@@ -235,6 +242,47 @@ class SqlWriteAccumulator:
         if errors:
             self.transform_errors.extend(errors)
 
+    def _conflict_identity(self, row: Any) -> tuple | None:
+        cols = [c for c in self.conflict_columns if c in self.target_cols]
+        if not cols:
+            return None
+        from connectors.writer_common import _conflict_key_identity
+
+        if isinstance(row, dict):
+            identity = tuple(_conflict_key_identity(row.get(col)) for col in cols)
+        else:
+            identity = tuple(
+                _conflict_key_identity(row[self.target_cols.index(col)])
+                if self.target_cols.index(col) < len(row)
+                else None
+                for col in cols
+            )
+        if any(value in (None, "") for value in identity):
+            return None
+        return identity
+
+    def _remember_sample(self, row: Any, identity: tuple | None, *, keep_first: bool) -> None:
+        if identity is None:
+            if len(self.sample_rows) < _SAMPLE_LIMIT:
+                self.sample_rows.append(row)
+            return
+        slot = self._sample_index.get(identity)
+        if slot is None:
+            if len(self.sample_rows) >= _SAMPLE_LIMIT:
+                return
+            self._sample_index[identity] = len(self.sample_rows)
+            self.sample_rows.append(row)
+            return
+        if not keep_first:
+            self.sample_rows[slot] = row
+
+    def _flush_policy_fingerprints(self) -> None:
+        if self._fp_flushed or not self.conflict_columns:
+            return
+        self._fp_flushed = True
+        self.acc.add_many(self._survivor_fp.values())
+        self.acc.add_many(self._loose_fp)
+
     def add_accepted(
         self,
         rows: list[tuple] | None,
@@ -246,7 +294,7 @@ class SqlWriteAccumulator:
         from services.reconciliation import _iter_fingerprints
 
         types = dest_types if dest_types is not None else self.dest_types
-        self.acc.add_many(
+        fingerprints = list(
             _iter_fingerprints(
                 rows,
                 self.target_cols,
@@ -254,9 +302,30 @@ class SqlWriteAccumulator:
                 dest_types=types,
             )
         )
-        need = _SAMPLE_LIMIT - len(self.sample_rows)
-        if need > 0:
-            self.sample_rows.extend(rows[:need])
+        # Upsert keeps the last image of a key. skip_duplicates keeps the first.
+        # The sample and the digest have to be that survivor, or Gate-8 compares
+        # the first amount against the last amount the write actually landed.
+        if self.conflict_columns:
+            try:
+                from services.duplicate_policy import current_match_action
+
+                keep_first = current_match_action() == "skip"
+            except Exception:
+                keep_first = False
+            for row, fingerprint in zip(rows, fingerprints):
+                identity = self._conflict_identity(row)
+                self._remember_sample(row, identity, keep_first=keep_first)
+                if identity is None:
+                    self._loose_fp.append(fingerprint)
+                    continue
+                if identity in self._survivor_fp and keep_first:
+                    continue
+                self._survivor_fp[identity] = fingerprint
+        else:
+            self.acc.add_many(fingerprints)
+            need = _SAMPLE_LIMIT - len(self.sample_rows)
+            if need > 0:
+                self.sample_rows.extend(rows[:need])
         self.accepted_row_count += len(rows)
         self.batch_sizes.append(len(rows))
 
@@ -266,6 +335,7 @@ class SqlWriteAccumulator:
     def digest(self) -> str:
         if self.accepted_row_count <= 0:
             return ""
+        self._flush_policy_fingerprints()
         return self.acc.digest()
 
     def gate8_meta(

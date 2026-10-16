@@ -205,7 +205,7 @@ def _without_identity_keys(mapped, target_cols, identity_columns, exclude: set[s
     return kept
 
 
-def iter_fingerprints_from_spool(
+def iter_mapped_fingerprints_from_spool(
     source_spool: Any,
     mappings: list[dict[str, Any]],
     target_cols: list[str],
@@ -220,12 +220,11 @@ def iter_fingerprints_from_spool(
     batch_size: int | None = None,
     exclude_identity_keys: set[str] | None = None,
     identity_columns: list[str] | None = None,
-) -> Iterator[tuple[str, str]]:
-    """Remap Gate-8 / file-stream fingerprints from the spool in bundles.
+) -> Iterator[tuple[Any, tuple[str, str]]]:
+    """Mapped row plus its fingerprint, one spool bundle at a time.
 
-    Same algorithm as the engine remap: ``struct_already_materialized=True``,
-    1-based spool starts (do not add 1 again). Peak mapped RAM is one bundle.
-    Callers that need a digest add these tuples to ``FingerprintAccumulator``.
+    The row is how a keyed policy tells the last image from the first. The
+    fingerprint tuple itself has an empty row key, so it cannot.
     """
     from connectors.sql_write_materialize import resolve_sql_materialize_batch
     from connectors.writer_common import map_rows_for_fingerprint, row_fingerprints
@@ -260,13 +259,55 @@ def iter_fingerprints_from_spool(
             mapped = _without_identity_keys(
                 mapped, target_cols, identity_columns, exclude_identity_keys
             )
-        yield from row_fingerprints(
+        fingerprints = row_fingerprints(
             mapped,
             target_cols,
             dest_db_type=dest_db_type,
             dest_types=dest_types,
         )
+        for row, fingerprint in zip(mapped, fingerprints):
+            yield row, fingerprint
         del mapped
+
+
+def iter_fingerprints_from_spool(
+    source_spool: Any,
+    mappings: list[dict[str, Any]],
+    target_cols: list[str],
+    *,
+    headers: list[str] | None = None,
+    column_types: dict[str, str] | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+    error_policy: str | None = None,
+    destination_pk_columns: list[str] | None = None,
+    empty_cells_as_null: bool = False,
+    batch_size: int | None = None,
+    exclude_identity_keys: set[str] | None = None,
+    identity_columns: list[str] | None = None,
+) -> Iterator[tuple[str, str]]:
+    """Remap Gate-8 / file-stream fingerprints from the spool in bundles.
+
+    Same algorithm as the engine remap: ``struct_already_materialized=True``,
+    1-based spool starts (do not add 1 again). Peak mapped RAM is one bundle.
+    Callers that need a digest add these tuples to ``FingerprintAccumulator``.
+    """
+    for _row, fingerprint in iter_mapped_fingerprints_from_spool(
+        source_spool,
+        mappings,
+        target_cols,
+        headers=headers,
+        column_types=column_types,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
+        error_policy=error_policy,
+        destination_pk_columns=destination_pk_columns,
+        empty_cells_as_null=empty_cells_as_null,
+        batch_size=batch_size,
+        exclude_identity_keys=exclude_identity_keys,
+        identity_columns=identity_columns,
+    ):
+        yield fingerprint
 
 
 def fingerprints_from_spool(

@@ -1770,6 +1770,7 @@ def write_mapped_rows(
             chunk_idx = 0
             if write_mode == "upsert" and conflict:
                 load_method = "merge_batch"
+                write_acc.conflict_columns = [c for c in conflict if c in target_cols]
             for finished in iter_sf_finished_bundles(**_sf_finish_kwargs):
                 if collect_map_details:
                     rejected_details.extend(finished.rejected_details)

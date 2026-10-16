@@ -629,7 +629,9 @@ def _sqlite_upsert_batch(
         policy=policy,
         row_offset=row_offset,
     )
-    empty_pk_skipped = before_pk - len(rows)
+    # partition appends null keys to rejected_details. Returning them as
+    # rows_skipped counted the same row in both buckets.
+    empty_pk_skipped = 0 if rejected_details is not None else before_pk - len(rows)
     if not rows:
         return 0, empty_pk_skipped
 
@@ -1555,6 +1557,10 @@ def write_mapped_rows(
             chunk_idx = 0
             wrote_sparse = False
             row_offset = 0
+            if write_mode == "upsert" and conflict_cols:
+                write_acc.conflict_columns = [
+                    c for c in conflict_cols if c in target_cols
+                ]
             for finished in iter_sqlite_finished_bundles(**_sqlite_finish_kwargs):
                 if collect_map_details:
                     rejected_details.extend(finished.rejected_details)
@@ -1582,6 +1588,21 @@ def write_mapped_rows(
                         write_acc.add_accepted(list(sparse_checksum))
                         wrote_sparse = True
                     dense = list(finished.dense_rows)
+                    if write_mode == "upsert" and conflict_cols:
+                        from connectors.writer_common import partition_dense_upsert_rows
+
+                        # Hold null keys out before the accumulator counts them
+                        # as accepted. The upsert helper partitions again; a
+                        # row already removed is not counted a second time.
+                        dense = partition_dense_upsert_rows(
+                            dense,
+                            [c for c in conflict_cols if c in target_cols],
+                            target_cols=target_cols,
+                            rejected_details=rejected_details,
+                            policy=policy,
+                            source_row_numbers=list(finished.dense_row_numbers or [])
+                            or None,
+                        )
                     for offset in range(0, len(dense), CHUNK_SIZE) if dense else []:
                         batch = dense[offset : offset + CHUNK_SIZE]
                         start = row_offset + offset
