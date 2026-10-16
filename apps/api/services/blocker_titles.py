@@ -22,6 +22,37 @@ def is_internal_blocker_id(gate_id: str) -> bool:
     return bool(_INTERNAL_ID.match(str(gate_id or "").strip()))
 
 
+def collapse_operator_message(message: object) -> str:
+    """One copy of a schema-drift sentence, and one drift sentence total.
+
+    Execute, the proof bundle, and the gate each state the same change.
+    A later drift echo is dropped. A different gate that follows is kept.
+    """
+    text = str(message or "").strip()
+    if not text:
+        return text
+    parts = [
+        part.strip()
+        for part in re.split(r"\s*(?:\n+|;|(?<=[.!])\s+)", text)
+        if part.strip()
+    ]
+    kept: list[str] = []
+    saw_drift = False
+    for part in parts:
+        if part in kept:
+            continue
+        if is_schema_drift_echo(part):
+            if saw_drift:
+                continue
+            saw_drift = True
+        kept.append(part)
+    collapsed = " ".join(kept)
+    half = len(collapsed) // 2
+    if half and collapsed[:half].strip() == collapsed[half:].strip():
+        return collapsed[:half].strip()
+    return collapsed
+
+
 def is_schema_drift_echo(message: object) -> bool:
     """True when this text is the schema-drift gate, not a second root cause.
 

@@ -1172,21 +1172,9 @@ def _park_on_decision(
 
 def _collapse_repeated_finding(message: str) -> str:
     """One drift sentence, even when Execute and the proof bundle both said it."""
-    import re
+    from services.blocker_titles import collapse_operator_message
 
-    text = str(message or "").strip()
-    if not text:
-        return text
-    parts = [part.strip() for part in re.split(r"\s*(?:\n+|(?<=[.!])\s+)", text) if part.strip()]
-    kept: list[str] = []
-    for part in parts:
-        if part not in kept:
-            kept.append(part)
-    collapsed = " ".join(kept)
-    half = len(collapsed) // 2
-    if half and collapsed[:half].strip() == collapsed[half:].strip():
-        return collapsed[:half].strip()
-    return collapsed
+    return collapse_operator_message(message)
 
 
 def _open_finding(

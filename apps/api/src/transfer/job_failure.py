@@ -754,10 +754,22 @@ def _fail_job_preflight(
     """
     from services.quarantine_from_preflight import quarantine_rows_from_preflight
 
+    from services.blocker_titles import collapse_operator_message, is_schema_drift_echo
+
     decision = (pf.get("proof_bundle") or {}).get("transfer_decision", {}) or {}
-    blocker_reasons = [
-        b.get("message") for b in pf.get("blockers", []) if isinstance(b, dict)
-    ]
+    blocker_reasons: list[str] = []
+    saw_drift = False
+    for blocker in pf.get("blockers", []):
+        if not isinstance(blocker, dict):
+            continue
+        text = str(blocker.get("message") or "").strip()
+        if not text or text in blocker_reasons:
+            continue
+        if is_schema_drift_echo(text):
+            if saw_drift:
+                continue
+            saw_drift = True
+        blocker_reasons.append(text)
     qrows = quarantine_rows_from_preflight(pf)
     row_ids = {d.get("row") for d in qrows if d.get("row") is not None}
     rejected_rows = len(row_ids) if row_ids else len(qrows)
@@ -803,7 +815,7 @@ def _fail_job_preflight(
             sync_mode=sync_mode,
         ).to_dict()
         error_details["row_accounting"] = ledger_dict
-    error_message = (
+    error_message = collapse_operator_message(
         decision.get("reason")
         or "; ".join(str(x) for x in blocker_reasons if x)
         or "Preflight blocked transfer"
