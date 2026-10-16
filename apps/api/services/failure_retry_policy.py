@@ -58,6 +58,10 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
      "Approve the destination drift, or pin the contract, before re-running."),
     (r"schema change detected|breaking schema change",
      "Approve the schema change, or acknowledge the drift, before re-running."),
+    (r"\bg13_source_coverage\b|\bschema_drift\b|\bno_disposition\b|"
+     r"neither mapped nor declared omitted",
+     "Map the unaccounted source column or declare it omitted, then "
+     "acknowledge the drift before the next run."),
     (r"authentication failed|invalid credentials|access denied|permission "
      r"denied|not authorized|403",
      "Credentials or grants are rejected — fix them on the connector."),

@@ -370,6 +370,55 @@ class SqlWriteAccumulator:
         )
 
 
+def accounted_rejected_rows(
+    rejected_rows: int,
+    *,
+    source_count: int,
+    written: int,
+    rows_skipped: int,
+) -> int:
+    """Quarantine floor for a direct writer call.
+
+    ``source - written - skipped`` puts an in-batch duplicate image in
+    ``rejected_rows``. That is the one bucket a writer has. A file load
+    also records the same image as skipped, and then moves it out of this
+    floor so the job counts it once.
+    """
+    remainder = int(source_count or 0) - int(written or 0) - int(rows_skipped or 0)
+    return max(int(rejected_rows or 0), remainder, 0)
+
+
+def release_collapsed_from_quarantine(
+    rejected_rows: int,
+    rejected_details: list[dict[str, Any]] | None,
+    collapsed: int,
+) -> int:
+    """Move policy-collapsed images out of the quarantine floor.
+
+    Real quarantine rows stay. They are the details. The floor above that
+    count is the in-file duplicate the writer had nowhere else to put.
+    """
+    rejected = max(0, int(rejected_rows or 0))
+    extra = max(0, int(collapsed or 0))
+    if rejected == 0 or extra == 0:
+        return rejected
+    seen: set[Any] = set()
+    anonymous = 0
+    for detail in rejected_details or []:
+        if not isinstance(detail, dict):
+            continue
+        row = detail.get("row")
+        if row is None:
+            row = detail.get("source_row")
+        if row is None:
+            anonymous += 1
+            continue
+        seen.add(row)
+    real = len(seen) + anonymous
+    inflated = max(0, rejected - real)
+    return rejected - min(extra, inflated)
+
+
 def ensure_sql_source_spool(
     *,
     headers: list[str],

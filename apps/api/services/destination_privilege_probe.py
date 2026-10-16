@@ -571,6 +571,70 @@ def probe_destination_privileges(
 
 # ── PostgreSQL / Redshift ────────────────────────────────────────────────────
 
+def _missing_postgres_schema(
+    cur: Any,
+    *,
+    engine: str,
+    schema: str,
+    table: str,
+    username: str,
+    need_update: bool,
+    signals: dict[str, bool | None],
+) -> PrivilegeProbeResult | None:
+    """A schema that is not in pg_namespace is not a broken privilege catalog.
+
+    ``has_schema_privilege`` raises ``schema "…" does not exist`` and the
+    outer probe used to report that as catalog-unavailable. When the role
+    holds CREATE on the database, the writer already runs
+    ``CREATE SCHEMA IF NOT EXISTS``. Otherwise the operator gets the grant
+    they are missing, not a catalog outage.
+    """
+    schema_name = str(schema or "").strip()
+    if not schema_name:
+        return None
+    cur.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = %s)",
+        (schema_name,),
+    )
+    if bool(cur.fetchone()[0]):
+        signals["schema_exists"] = True
+        return None
+    cur.execute(
+        "SELECT has_database_privilege(current_user, current_database(), 'CREATE')"
+    )
+    can_create_schema = bool(cur.fetchone()[0])
+    signals["schema_exists"] = False
+    signals["database_create"] = can_create_schema
+    who = username or "current_user"
+    if can_create_schema:
+        signals["schema_usage"] = True
+        signals["schema_create"] = True
+        return _finalize(
+            engine=engine,
+            can_write=True,
+            can_create=True,
+            table_exists=False,
+            table=table,
+            schema=schema_name,
+            need_update=need_update,
+            method="pg_namespace/has_database_privilege",
+            signals=signals,
+        )
+    return PrivilegeProbeResult(
+        can_write=False,
+        can_create_table=False,
+        status="denied",
+        detail=(
+            f'Destination schema "{schema_name}" does not exist, and {who} '
+            "cannot create it (CREATE on the database is not granted). "
+            "Create the schema, or grant CREATE, then re-validate."
+        ),
+        engine=engine,
+        method="pg_namespace/has_database_privilege",
+        signals=signals,
+    )
+
+
 def _probe_postgres_family(
     *,
     engine: str,
@@ -625,6 +689,17 @@ def _probe_postgres_family(
                     # Leave it unknown rather than claim absence: a blocked
                     # catalog lookup is not evidence the table is missing.
                     logger.debug("Catalog existence lookup unavailable: %s", exc)
+            missing = _missing_postgres_schema(
+                cur,
+                engine=engine,
+                schema=schema,
+                table=table,
+                username=username,
+                need_update=need_update,
+                signals=signals,
+            )
+            if missing is not None:
+                return missing
             # ``has_*_privilege`` parses its name argument as an SQL identifier,
             # so an unquoted "s.MixedCase" is folded to lower case and raises
             # undefined_table. format('%I.%I') quotes what the operator named.

@@ -84,25 +84,40 @@ def test_failed_then_parked_schedule_releases_claim_and_keeps_cadence(
 
     with sqlite3.connect(src_db) as c:
         c.execute('ALTER TABLE "QA_sch_src" ADD COLUMN extra REAL')
-    second = _wait(schedule_runner._run_schedule(sched.id, manual=True))
-    assert second.get("status") == "failed"
+    # The new column is refused before a job starts. Run now surfaces the
+    # parked SOURCE_DRIFT finding instead of leaving a claim with no job.
+    import pytest
+    from services.schedule_runner import ScheduleStartError
+
+    with pytest.raises(ScheduleStartError, match="neither mapped nor declared omitted: extra"):
+        schedule_runner._run_schedule(sched.id, manual=True)
     time.sleep(0.5)
     released_with_future_slot()
 
+    parked_now = released_with_future_slot()
+    assert parked_now.last_status == "needs_approval"
+    assert parked_now.approval_request["code"] == "SOURCE_DRIFT"
     store.update_schedule(sched.id, {"next_run_at": "2020-01-01T00:00:00+00:00"})
     with caplog.at_level(logging.INFO, logger="services.schedule_runner"):
-        assert schedule_runner._run_due_schedules() == 1
+        # The unmapped column is a drift gate. The manual run already parked
+        # it, so the cadence must not start another identical refusal.
+        assert schedule_runner._run_due_schedules() == 0
         time.sleep(1.5)
-        schedule_runner._run_due_schedules()
-    parked = released_with_future_slot()
+        assert schedule_runner._run_due_schedules() == 0
+    parked = store.get_schedule(sched.id)
+    assert parked.running is False and not parked.running_job_id
     assert parked.last_status == "needs_approval"
     assert store.has_open_approval(parked)
+    assert parked.approval_request["code"] == "SOURCE_DRIFT"
     assert "already in progress" not in caplog.text
     assert sched.id not in {s.id for s in store.due_schedules()}
 
-    third = schedule_runner._run_schedule(sched.id, manual=True)
-    assert third, "Run now on a parked schedule was refused as in progress"
-    _wait(third)
+    with pytest.raises(ScheduleStartError, match="neither mapped nor declared omitted: extra") as again:
+        schedule_runner._run_schedule(sched.id, manual=True)
+    assert "already in progress" not in str(again.value)
+    still = store.get_schedule(sched.id)
+    assert still.running is False and not still.running_job_id
+    assert still.approval_request["code"] == "SOURCE_DRIFT"
 
 
 def test_dispatch_exception_after_claim_releases_it_immediately(tmp_path, monkeypatch):

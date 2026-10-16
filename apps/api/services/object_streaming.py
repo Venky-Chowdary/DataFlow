@@ -38,10 +38,32 @@ _SPILL_DIR: Path | None = None
 _SPILL_CACHE: dict[str, tuple[Path, float]] = {}
 _SPILL_LOCK = threading.Lock()
 
-# Default TTL for cached spilled objects (seconds).  A TTL defends against
-# stale data without forcing a re-download on every call; callers that need a
-# guaranteed fresh copy (e.g. per-transfer runs) can pass force=True.
-_SPILL_TTL_SECONDS = int(getenv_brand("SPILL_TTL", "300"))
+# A spilled object has to outlive the job that is still reading it. The old
+# 300s default expired during a multi-million-row uniqueness probe, so the
+# same SFTP file was downloaded again every five minutes. The floor is the
+# longer of one hour and the running-silence window plus the worker lease.
+# ``force=True`` still downloads a fresh copy for the load itself.
+_SPILL_FLOOR_SECONDS = 60 * 60
+
+
+def spill_ttl_seconds() -> int:
+    """How long a spilled download stays reusable for one job."""
+    raw = str(getenv_brand("SPILL_TTL", "") or "").strip()
+    configured = int(raw) if raw else 0
+    try:
+        from services.lease_heartbeat import lease_ttl_seconds
+
+        lease = int(lease_ttl_seconds())
+    except Exception:
+        lease = 60
+    # 15 minutes is how long a silent running job is still treated as live.
+    floor = max(_SPILL_FLOOR_SECONDS, 15 * 60 + max(lease, 0))
+    if configured <= 0:
+        return floor
+    return max(configured, floor)
+
+
+_SPILL_TTL_SECONDS = spill_ttl_seconds()
 
 _STREAMABLE = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc"}
 
@@ -151,7 +173,7 @@ def download_object(
     downloader: Callable[[Path], None],
     *,
     force: bool = False,
-    ttl_seconds: int = _SPILL_TTL_SECONDS,
+    ttl_seconds: int | None = None,
 ) -> Path:
     """Download an object to a spilled temp file unless a fresh copy is cached.
 
@@ -167,9 +189,13 @@ def download_object(
     import time
 
     now = time.monotonic()
+    ttl = spill_ttl_seconds() if ttl_seconds is None else int(ttl_seconds)
     if not force and _cache_is_fresh(cache_key, now):
         with _SPILL_LOCK:
-            path, _ = _SPILL_CACHE[cache_key]
+            path, _expires = _SPILL_CACHE[cache_key]
+            # A long preflight keeps touching the same spill. Slide the
+            # expiry so a job that outlasts the floor does not re-download.
+            _SPILL_CACHE[cache_key] = (path, now + ttl)
         _logger.info("Reusing fresh spilled object %s at %s", cache_key, path)
         return path
 
@@ -184,7 +210,7 @@ def download_object(
         downloader(tmp_path)
         # Atomic rename so other readers never see a partially written file.
         os.replace(tmp_path, final_path)
-        expires_at = now + ttl_seconds
+        expires_at = now + ttl
         with _SPILL_LOCK:
             _SPILL_CACHE[cache_key] = (final_path, expires_at)
         _logger.info("Spilled object %s atomically to %s", cache_key, final_path)

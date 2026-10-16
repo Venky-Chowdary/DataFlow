@@ -2779,12 +2779,20 @@ def stream_file_to_database(
             if fp_book.loose:
                 fingerprint_sink.add_many(fp_book.loose)
         if fp_book.dropped:
-            dest_summary["rows_skipped"] = int(dest_summary.get("rows_skipped") or 0) + int(
-                fp_book.dropped
-            )
+            dropped = int(fp_book.dropped)
+            dest_summary["rows_skipped"] = int(dest_summary.get("rows_skipped") or 0) + dropped
             dest_summary["collapsed_duplicate_rows"] = int(
                 dest_summary.get("collapsed_duplicate_rows") or 0
-            ) + int(fp_book.dropped)
+            ) + dropped
+            # The writer floor already charged these images as quarantine
+            # when it knew the source population. They are skipped, once.
+            from connectors.sql_write_materialize import release_collapsed_from_quarantine
+
+            rejected_total = release_collapsed_from_quarantine(
+                rejected_total,
+                rejected_details,
+                dropped,
+            )
     # Write-pass fingerprints hash the rows just sent. A second parse is a
     # different read: identity alignment is that parse's (key, hash) multiset
     # matching the write pass. Resume still re-scans when this process only
@@ -3000,4 +3008,5 @@ def stream_file_to_database(
         if cleanup_write_ledger is not None:
             cleanup_write_ledger(dest_type=dest_type, cfg=dest_cfg, job_id=job_id)
 
+    dest_summary["rows_written"] = int(written or 0)
     return written, ddl_log, dest_summary, columns

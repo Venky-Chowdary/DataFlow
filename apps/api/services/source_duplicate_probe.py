@@ -99,9 +99,23 @@ PROBED_SOURCE_TYPES = (
     | PAYLOAD_SCANNED_SOURCE_TYPES
 )
 
-#: Rows scanned before a payload probe reports partial coverage instead of proof.
-_PAYLOAD_SCAN_CAP = 1_000_000
+#: Paged readers (Redis, Kafka) still stop here and report partial coverage.
+#: Object files do not use this cap: they stream once through hash partitions.
+_PAYLOAD_SCAN_CAP = 10_000_000
 _PAYLOAD_PAGE = 10_000
+
+_OBJECT_STORE_FOR_DB = {
+    "s3": "s3",
+    "minio": "s3",
+    "s3_compatible": "s3",
+    "aws_s3": "s3",
+    "gcs": "gcs",
+    "google_cloud_storage": "gcs",
+    "adls": "adls",
+    "azure_blob_storage": "adls",
+    "azure_data_lake": "adls",
+    "azure_data_lake_storage": "adls",
+}
 
 
 @dataclass
@@ -273,7 +287,56 @@ def _mongo_duplicates(
     return out
 
 
+def _spill_object(cfg: dict[str, Any], db_type: str, key: str) -> tuple[Any, str] | None:
+    """Local spill plus the filename the parser should trust, or None."""
+    store = _OBJECT_STORE_FOR_DB.get(db_type)
+    bucket = str(cfg.get("database") or cfg.get("bucket") or "")
+    if store and bucket and key:
+        from connectors.object_store_common import materialize_store_spill
+
+        return materialize_store_spill(store, cfg, bucket, key), key
+    if db_type == "sftp":
+        from connectors.sftp_reader import materialize_spill
+
+        return materialize_spill(cfg=cfg, bucket=bucket, key=key)
+    return None
+
+
 def _object_payload_duplicates(
+    cfg: dict[str, Any],
+    db_type: str,
+    key: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Count identity keys across an object payload.
+
+    File and object sources are streamed once from the spill. Paging them
+    re-parsed every prefix, so a 2M-row file spent minutes inside one gate
+    and then stopped at 1M rows without a proof.
+    """
+    spilled = _spill_object(cfg, db_type, key)
+    if spilled is not None:
+        from services.identity_uniqueness import scan_identity_file
+
+        path, filename = spilled
+        return scan_identity_file(
+            path,
+            filename,
+            pk_columns,
+            limit=limit,
+            normalize_key=_normalize_key_cell,
+            identity_cell=_identity_cell,
+            finding_value=_finding_value,
+        )
+
+    return _paged_payload_duplicates(
+        cfg, db_type, key, pk_columns, limit=limit
+    )
+
+
+def _paged_payload_duplicates(
     cfg: dict[str, Any],
     db_type: str,
     key: str,
@@ -292,8 +355,7 @@ def _object_payload_duplicates(
     and the load agree on parsing, encoding and column order rather than
     reaching two different answers about the same bytes.
     """
-    from collections import Counter
-
+    from services.identity_uniqueness import PartitionedUniqueness
     from src.transfer.batch_readers import CONTINUATION_KWARG, _read_batch_impl
     from src.transfer.connector_capabilities import resolve_driver_type
 
@@ -313,7 +375,7 @@ def _object_payload_duplicates(
         extra["auto_offset_reset"] = cfg["auto_offset_reset"]
         cfg["extra"] = extra
 
-    counts: Counter[tuple[str, ...]] = Counter()
+    scanner = PartitionedUniqueness()
     scanned = 0
     offset = 0
     total: int | None = None
@@ -323,56 +385,70 @@ def _object_payload_duplicates(
     # a fail-closed gate on a unique keyspace.
     token_kwarg = CONTINUATION_KWARG.get(resolve_driver_type(db_type), "")
     token: Any = None
-    while True:
-        result = _read_batch_impl(
-            db_type,
-            cfg,
-            key,
-            None,
-            offset,
-            _PAYLOAD_PAGE,
-            known_total_rows=total,
-            **({token_kwarg: token} if token_kwarg and token is not None else {}),
-        )
-        batch = result[0] if isinstance(result, tuple) else result
-        if token_kwarg:
-            token = result[1] if isinstance(result, tuple) and len(result) == 2 else None
-        headers = [str(h) for h in (getattr(batch, "headers", None) or [])]
-        rows = list(getattr(batch, "rows", None) or [])
-        if total is None:
-            total = getattr(batch, "total_rows", None)
-        if not rows:
-            break
-        missing = [c for c in pk_columns if c not in headers]
-        if missing:
-            # The key is not in the payload at all: that is a mapping question,
-            # not a duplicate one, and inventing "unique" here would green a
-            # column the file never carried.
-            raise ValueError(
-                f"identity column(s) {', '.join(missing)} are not present in {key}"
+    complete = True
+    try:
+        while True:
+            result = _read_batch_impl(
+                db_type,
+                cfg,
+                key,
+                None,
+                offset,
+                _PAYLOAD_PAGE,
+                known_total_rows=total,
+                **({token_kwarg: token} if token_kwarg and token is not None else {}),
             )
-        idx = [headers.index(c) for c in pk_columns]
-        for row in rows:
-            if isinstance(row, dict):
-                vals = tuple(_normalize_key_cell(row.get(c)) for c in pk_columns)
-            else:
-                vals = tuple(
-                    _normalize_key_cell(row[i] if i < len(row) else None) for i in idx
+            batch = result[0] if isinstance(result, tuple) else result
+            if token_kwarg:
+                token = result[1] if isinstance(result, tuple) and len(result) == 2 else None
+            headers = [str(h) for h in (getattr(batch, "headers", None) or [])]
+            rows = list(getattr(batch, "rows", None) or [])
+            if total is None:
+                total = getattr(batch, "total_rows", None)
+            if not rows:
+                break
+            missing = [c for c in pk_columns if c not in headers]
+            if missing:
+                # The key is not in the payload at all: that is a mapping question,
+                # not a duplicate one, and inventing "unique" here would green a
+                # column the file never carried.
+                raise ValueError(
+                    f"identity column(s) {', '.join(missing)} are not present in {key}"
                 )
-            counts[vals] += 1
-        scanned += len(rows)
-        offset += len(rows)
-        if scanned >= _PAYLOAD_SCAN_CAP:
-            return _counter_findings(counts, pk_columns, limit), scanned, False
-        if total is not None and offset >= int(total):
-            break
-        if len(rows) < _PAYLOAD_PAGE:
-            break
-        if token_kwarg and token is None:
-            # Reader handed back no continuation: it cannot be resumed, and
-            # re-reading from the top would count its own re-reads as duplicates.
-            break
-    return _counter_findings(counts, pk_columns, limit), scanned, True
+            idx = [headers.index(c) for c in pk_columns]
+            for row in rows:
+                if isinstance(row, dict):
+                    vals = tuple(_normalize_key_cell(row.get(c)) for c in pk_columns)
+                else:
+                    vals = tuple(
+                        _normalize_key_cell(row[i] if i < len(row) else None) for i in idx
+                    )
+                scanner.add(vals)
+            scanned += len(rows)
+            offset += len(rows)
+            if scanned >= _PAYLOAD_SCAN_CAP:
+                complete = False
+                break
+            if total is not None and offset >= int(total):
+                break
+            if len(rows) < _PAYLOAD_PAGE:
+                break
+            if token_kwarg and token is None:
+                # Reader handed back no continuation: it cannot be resumed, and
+                # re-reading from the top would count its own re-reads as duplicates.
+                break
+        return (
+            scanner.findings(
+                pk_columns,
+                limit,
+                identity_cell=_identity_cell,
+                finding_value=_finding_value,
+            ),
+            scanned,
+            complete,
+        )
+    finally:
+        scanner.close()
 
 
 def _salesforce_duplicates(

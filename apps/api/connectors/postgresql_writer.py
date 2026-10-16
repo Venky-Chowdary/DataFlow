@@ -2975,6 +2975,8 @@ def write_mapped_rows(
                     write_acc.add_accepted(dense)
                 del finished
             chunks = chunk_idx
+            from connectors.sql_write_materialize import accounted_rejected_rows
+
             rejected_rows = _rejected_row_count(
                 data_rows,
                 [()] * write_acc.accepted_row_count,
@@ -3043,7 +3045,12 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=chunks_completed or chunks,
                 error=child_flush_error,
-                rejected_rows=max(rejected_rows, (source_row_count or len(data_rows)) - written - rows_skipped),
+                rejected_rows=accounted_rejected_rows(
+                    rejected_rows,
+                    source_count=(source_row_count or len(data_rows)),
+                    written=written,
+                    rows_skipped=rows_skipped,
+                ),
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
@@ -3060,7 +3067,12 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=chunks_completed or chunks,
                 error=_final_abort,
-                rejected_rows=max(rejected_rows, (source_row_count or len(data_rows)) - written - rows_skipped),
+                rejected_rows=accounted_rejected_rows(
+                    rejected_rows,
+                    source_count=(source_row_count or len(data_rows)),
+                    written=written,
+                    rows_skipped=rows_skipped,
+                ),
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
@@ -3082,7 +3094,12 @@ def write_mapped_rows(
             target_schema=schema,
             checksum=write_acc.digest(),
             chunks_completed=chunks_completed or chunks,
-            rejected_rows=max(rejected_rows, (source_row_count or len(data_rows)) - written - rows_skipped),
+            rejected_rows=accounted_rejected_rows(
+                    rejected_rows,
+                    source_count=(source_row_count or len(data_rows)),
+                    written=written,
+                    rows_skipped=rows_skipped,
+                ),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,

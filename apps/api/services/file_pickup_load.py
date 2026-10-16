@@ -264,6 +264,15 @@ def load_picked_files(
         summary["checksum"] = population.digest()
         summary["checksum_mode"] = "inline_write_pass"
     summary["file_pickup"] = "glob" if is_file_pattern(key) else "wait"
+    if plan.action == "load" and plan.message:
+        held = [
+            str(item).strip()
+            for item in (summary.get("warnings") or [])
+            if str(item).strip()
+        ]
+        if plan.message not in held:
+            held.append(plan.message)
+        summary["warnings"] = held
     return total_rows, ddl_log, summary, columns
 
 
@@ -274,22 +283,30 @@ def pickup_job_outcome(
     """Job status for a dated series whose file for today has not arrived.
 
     ``unchanged`` ("no new or changed files") stays a normal completion.
-    A warn with rows already written is a real load and is not relabeled.
+    A dated load that wrote rows still carries the missing-today warning.
     """
     if not isinstance(summary, dict):
         return None
-    if str(summary.get("file_pickup") or "") != "warn":
-        return None
-    if int(rows_written or 0) != 0:
-        return None
     warnings = [str(item).strip() for item in (summary.get("warnings") or []) if str(item).strip()]
-    if not warnings:
-        return None
-    return {
-        "status": "completed_with_warnings",
-        "message": warnings[0],
-        "warnings": warnings,
-    }
+    today_missing = [
+        item
+        for item in warnings
+        if item.startswith("expected file for ") and item.endswith(" not arrived")
+    ]
+    action = str(summary.get("file_pickup") or "")
+    if action == "warn" and int(rows_written or 0) == 0 and warnings:
+        return {
+            "status": "completed_with_warnings",
+            "message": warnings[0],
+            "warnings": warnings,
+        }
+    if today_missing:
+        return {
+            "status": "completed_with_warnings",
+            "message": today_missing[0],
+            "warnings": today_missing,
+        }
+    return None
 
 
 def apply_pickup_job_outcome(
@@ -302,7 +319,13 @@ def apply_pickup_job_outcome(
     current = dict(recon or {})
     if outcome is None:
         return current, None, None
-    current["passed"] = True
+    # A real reconcile failure on rows that landed stays a failure.
+    # The 0-row "file not arrived" poll is the case that must not look like
+    # a checksum miss.
+    if int(rows_written or 0) > 0 and current.get("passed") is False:
+        return current, None, None
+    if int(rows_written or 0) == 0:
+        current["passed"] = True
     current["message"] = outcome["message"]
     current["pickup_warning"] = outcome["message"]
     return current, str(outcome["status"]), str(outcome["message"])

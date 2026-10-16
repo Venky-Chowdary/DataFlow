@@ -368,6 +368,23 @@ def _object_version_token(store: str, cfg: dict[str, Any], bucket: str, key: str
     return ""
 
 
+def materialize_store_spill(
+    store: str,
+    cfg: dict[str, Any],
+    bucket: str,
+    key: str,
+) -> Any:
+    """Download an object once. Uniqueness scans this path in a single pass."""
+    version = _object_version_token(store, cfg, bucket, key)
+    cache_key = f"{store}:{bucket}:{key}:{version or 'nov'}"
+    # No version ⇒ force download (refuse TTL reuse of potentially stale bytes).
+    return download_object(
+        cache_key,
+        lambda p: download_for_object_store(store, p, cfg, bucket, key),
+        force=not bool(version),
+    )
+
+
 def read_object_from_store(
     store: str,
     cfg: dict[str, Any],
@@ -382,14 +399,7 @@ def read_object_from_store(
     Spill cache keys include source version metadata when available so an overwritten
     object is never served as current under a stale TTL entry.
     """
-    version = _object_version_token(store, cfg, bucket, key)
-    cache_key = f"{store}:{bucket}:{key}:{version or 'nov'}"
-    # No version ⇒ force download (refuse TTL reuse of potentially stale bytes).
-    path = download_object(
-        cache_key,
-        lambda p: download_for_object_store(store, p, cfg, bucket, key),
-        force=not bool(version),
-    )
+    path = materialize_store_spill(store, cfg, bucket, key)
     headers, rows, total = read_rows_from_spill(
         path,
         key,
