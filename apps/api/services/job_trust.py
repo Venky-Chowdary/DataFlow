@@ -20,6 +20,7 @@ from services.reconcile_coverage import (
 _TERMINAL = frozenset({
     "completed",
     "completed_with_quarantine",
+    "completed_with_warnings",
     "failed",
     "cancelled",
     "success",

@@ -1034,7 +1034,9 @@ async def cancel_transfer_job(job_id: str, request: Request):
             raise HTTPException(status_code=404, detail="Job not found")
         if not _can_mutate_job(request, job):
             raise HTTPException(status_code=403, detail="Workspace write access required")
-        if job.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
+        from services.job_status import is_terminal
+
+        if is_terminal(job.get("status")):
             emit_event(
                 logger, "job.cancel.requested", outcome="skipped",
                 job_id=job_id, workspace_id=job.get("workspace_id") or None,
@@ -1147,7 +1149,9 @@ async def stream_transfer_job(job_id: str, request: Request):
             safe = sanitize_job_for_api(job)
             safe["runtime_estimate"] = estimate_for_job_doc(job)
             yield f"data: {json.dumps(safe, default=json_default)}\n\n"
-            if safe.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
+            from services.job_status import is_terminal
+
+            if is_terminal(safe.get("status")):
                 break
             await asyncio.sleep(0.4)
 

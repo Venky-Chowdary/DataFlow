@@ -39,7 +39,7 @@ _JOB_ID = re.compile(
 def short_job_id(job_id: str) -> str:
     return job_id if len(job_id) <= 24 else job_id[:8]
 
-_TERMINAL = {"completed", "completed_with_quarantine", "failed", "cancelled"}
+_TERMINAL = {"completed", "completed_with_quarantine", "completed_with_warnings", "failed", "cancelled"}
 _ACTIVE = {"pending", "queued", "running", "starting", "paused"}
 
 # Status words an operator uses to point at a job without pasting its id.

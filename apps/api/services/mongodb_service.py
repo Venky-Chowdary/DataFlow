@@ -620,7 +620,7 @@ class MongoDBService:
                 updates.pop("started_at", None)
             else:
                 updates.setdefault("started_at", datetime.now(timezone.utc))
-        elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
+        elif status in TERMINAL_JOB_STATUSES:
             updates["completed_at"] = datetime.now(timezone.utc)
 
         # Throughput evidence for the cutover-window estimate. Bounded to the
@@ -679,7 +679,7 @@ class MongoDBService:
 
                 phases = (prev_doc or {}).get("phases") or initial_phases()
                 mapped = phase_from_engine_label(str(phase_label))
-                if status in ("completed", "completed_with_quarantine"):
+                if status in COMPLETED_STATUSES:
                     phases = complete_phases(phases, success=True, message=message or "")
                 elif status in ("failed", "cancelled"):
                     phases = complete_phases(phases, success=False, message=kwargs.get("error") or message or "")
@@ -1546,7 +1546,7 @@ class MemoryMongoDBService:
             # create_transfer_job seeds started_at=None; setdefault would keep it.
             if not rec.get("started_at"):
                 rec["started_at"] = datetime.now(timezone.utc)
-        elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
+        elif status in TERMINAL_JOB_STATUSES:
             rec["completed_at"] = datetime.now(timezone.utc)
 
         if "event_log" not in kwargs:
@@ -1590,7 +1590,7 @@ class MemoryMongoDBService:
 
                 phases = rec.get("phases") or initial_phases()
                 mapped = phase_from_engine_label(str(phase_label))
-                if status in ("completed", "completed_with_quarantine"):
+                if status in COMPLETED_STATUSES:
                     phases = complete_phases(phases, success=True, message=kwargs.get("message", ""))
                 elif status in ("failed", "cancelled"):
                     phases = complete_phases(

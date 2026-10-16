@@ -265,3 +265,44 @@ def load_picked_files(
         summary["checksum_mode"] = "inline_write_pass"
     summary["file_pickup"] = "glob" if is_file_pattern(key) else "wait"
     return total_rows, ddl_log, summary, columns
+
+
+def pickup_job_outcome(
+    summary: dict[str, Any] | None,
+    rows_written: int = 0,
+) -> dict[str, Any] | None:
+    """Job status for a dated series whose file for today has not arrived.
+
+    ``unchanged`` ("no new or changed files") stays a normal completion.
+    A warn with rows already written is a real load and is not relabeled.
+    """
+    if not isinstance(summary, dict):
+        return None
+    if str(summary.get("file_pickup") or "") != "warn":
+        return None
+    if int(rows_written or 0) != 0:
+        return None
+    warnings = [str(item).strip() for item in (summary.get("warnings") or []) if str(item).strip()]
+    if not warnings:
+        return None
+    return {
+        "status": "completed_with_warnings",
+        "message": warnings[0],
+        "warnings": warnings,
+    }
+
+
+def apply_pickup_job_outcome(
+    recon: dict[str, Any] | None,
+    summary: dict[str, Any] | None,
+    rows_written: int = 0,
+) -> tuple[dict[str, Any], str | None, str | None]:
+    """Prefer the pickup warning over a 0-row reconcile failure."""
+    outcome = pickup_job_outcome(summary, rows_written)
+    current = dict(recon or {})
+    if outcome is None:
+        return current, None, None
+    current["passed"] = True
+    current["message"] = outcome["message"]
+    current["pickup_warning"] = outcome["message"]
+    return current, str(outcome["status"]), str(outcome["message"])

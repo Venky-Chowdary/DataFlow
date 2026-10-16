@@ -4116,6 +4116,11 @@ class UniversalTransferEngine:
             canonical_rejected_details = _snapshot_rejected_details(dest_summary)
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
+            from services.file_pickup_load import apply_pickup_job_outcome
+
+            recon, pickup_status, _pickup_message = apply_pickup_job_outcome(
+                recon, dest_summary, rows_written
+            )
             if not recon.get("passed"):
                 fail_message = _engine_module._note_failed_batch_undo(
                     request,
@@ -4196,7 +4201,7 @@ class UniversalTransferEngine:
             )
             from services.job_status import terminal_status_for
 
-            terminal_status = terminal_status_for(
+            terminal_status = pickup_status or terminal_status_for(
                 dest_summary.get("rejected_rows", 0),
                 dest_summary.get("coerced_null_rows", 0),
             )
@@ -5007,6 +5012,11 @@ class UniversalTransferEngine:
             canonical_rejected_details = _snapshot_rejected_details(dest_summary)
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
+            from services.file_pickup_load import apply_pickup_job_outcome
+
+            recon, pickup_status, _pickup_message = apply_pickup_job_outcome(
+                recon, dest_summary, rows_written
+            )
             if not recon.get("passed"):
                 fail_message = _engine_module._note_failed_batch_undo(
                     request,
@@ -5065,7 +5075,7 @@ class UniversalTransferEngine:
             )
             from services.job_status import terminal_status_for
 
-            terminal_status = terminal_status_for(
+            terminal_status = pickup_status or terminal_status_for(
                 dest_summary.get("rejected_rows", 0),
                 dest_summary.get("coerced_null_rows", 0),
             )
