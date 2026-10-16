@@ -338,6 +338,39 @@ def is_safe_default_expr(expr: str) -> bool:
     return bool(_SAFE_DEFAULT_RE.match(text))
 
 
+_MYSQL_CLOCK_DEFAULT_RE = re.compile(
+    r"^(?:current_timestamp|current_date|current_time|localtime|localtimestamp|"
+    r"now|curdate|curtime)\b",
+    re.IGNORECASE,
+)
+_MYSQL_ZERO_DATE_RE = re.compile(r"0000-00-00")
+_NUMERIC_LOGICALS = frozenset({"integer", "decimal", "float", "number"})
+_TEMPORAL_LOGICALS = frozenset({"date", "datetime", "time", "timestamp"})
+
+
+def mysql_default_is_legal(default_sql: str, dest_type: str) -> bool:
+    """False when MySQL rejects this DEFAULT for the column type (error 1067).
+
+    An integer key cannot take ``''`` or ``CURRENT_TIMESTAMP``. A temporal
+    column cannot take a zero date under strict sql_mode. Clock functions stay
+    on temporal types. Numeric literals and quoted strings on text stay.
+    """
+    from services.type_system import normalize_logical_type
+
+    expr = (default_sql or "").strip()
+    logical = normalize_logical_type(dest_type or "")
+    clock = bool(_MYSQL_CLOCK_DEFAULT_RE.match(expr))
+    if logical in _NUMERIC_LOGICALS:
+        if clock or expr in {"''", '""'}:
+            return False
+        return bool(re.match(r"^-?\d+(?:\.\d+)?$", expr))
+    if _MYSQL_ZERO_DATE_RE.search(expr):
+        return False
+    if clock:
+        return logical in _TEMPORAL_LOGICALS
+    return True
+
+
 def build_catalog_from_introspect(
     *,
     dialect: str,
@@ -922,6 +955,22 @@ def plan_create_new_fidelity(
             )
             continue
         default_sql = _normalize_default_sql(expr, dest, _dest_type(dest_col))
+        if (dest or "").lower() in {"mysql", "mariadb"} and not mysql_default_is_legal(
+            default_sql, _dest_type(dest_col)
+        ):
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="default",
+                    name=dest_col,
+                    status="unsupported",
+                    reason=(
+                        "MySQL rejects this DEFAULT for the destination column "
+                        "type (invalid default). The column is created without it."
+                    ),
+                    source_detail=str(expr)[:200],
+                )
+            )
+            continue
         suffixes.setdefault(dest_col, []).append(f"DEFAULT {default_sql}")
         struct_defaults[dest_col] = default_sql
         def_carried += 1
