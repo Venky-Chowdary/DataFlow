@@ -22,6 +22,36 @@ def is_compliance_only_block(proof_blockers: list[str]) -> bool:
     return all(is_compliance_block_message(b) for b in proof_blockers)
 
 
+def _collapse_drift_blockers(blockers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the first schema-drift blocker. Later echoes are the same review."""
+    kept: list[dict[str, Any]] = []
+    seen_drift = False
+    for block in blockers:
+        message = str(block.get("message") or "")
+        drift = str(block.get("id") or "") == "schema_drift" or is_schema_drift_echo(message)
+        if drift and seen_drift:
+            continue
+        if drift:
+            seen_drift = True
+            text = _collapse_repeated_text(message)
+            if text != message:
+                block = {**block, "message": text}
+        kept.append(block)
+    return kept
+
+
+def _collapse_repeated_text(message: str) -> str:
+    import re
+
+    text = str(message or "").strip()
+    parts = [part.strip() for part in re.split(r"\s*(?:\n+|(?<=[.!])\s+)", text) if part.strip()]
+    kept: list[str] = []
+    for part in parts:
+        if part not in kept:
+            kept.append(part)
+    return " ".join(kept)
+
+
 def apply_policy_gates(
     result: dict[str, Any],
     policy_gates: list[dict[str, Any]],
@@ -66,10 +96,12 @@ def apply_policy_gates(
             if "PII/compliance" not in b and "compliance review" not in b.lower()
         ]
 
-    blockers = [
-        {"id": b["id"], "message": b["message"], "details": b.get("details", {})}
-        for b in result.get("blockers", [])
-    ]
+    blockers = _collapse_drift_blockers(
+        [
+            {"id": b["id"], "message": b["message"], "details": b.get("details", {})}
+            for b in result.get("blockers", [])
+        ]
+    )
     # A proof string that repeats a gate is one cause. Copying it as proof_N
     # made Validate say "1 gate" in the header and "Schema drift" plus
     # "Schema change detected" in the analysis.

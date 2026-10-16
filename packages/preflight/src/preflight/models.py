@@ -168,6 +168,9 @@ class TransferPlan:
     # Studio stream contracts carried into G9 so composite identity keys
     # (``primary_key: [region, id]``) dedupe on the whole tuple — ACC-03.
     stream_contracts: list[dict[str, Any]] = field(default_factory=list)
+    # In-file duplicate policy. ``keep_last`` collapses the sample before
+    # uniqueness gates; ``block`` refuses a repeated key.
+    in_file_dedupe: str = "block"
     # Native DynamoDB HASH/RANGE and secondary-index scalar constraints.
     destination_dynamo_key_schema: list[dict[str, Any]] = field(default_factory=list)
     destination_dynamo_index_attributes: dict[str, str] = field(default_factory=dict)

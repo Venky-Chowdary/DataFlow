@@ -21,6 +21,23 @@ def _database_extract(ctx: FilePreflightContext) -> bool:
     kind = str(getattr(ctx.plan.source, "kind", "") or "").lower()
     return kind == "database" and not _source_is_record_batch(ctx)
 
+
+def _sample_file_groups(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """Split a peek sample on ``_df_file`` so keys shared only across files do not collide."""
+    tagged = any(isinstance(row, dict) and "_df_file" in row for row in rows)
+    if not tagged:
+        return [list(rows)]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for row in rows:
+        tag = str(row.get("_df_file") or "") if isinstance(row, dict) else ""
+        if tag not in groups:
+            order.append(tag)
+            groups[tag] = []
+        groups[tag].append(row)
+    return [groups[tag] for tag in order]
+
+
 class FilePreflightContext(PreflightContext):
     """Preflight context for file → database transfers."""
 
@@ -324,48 +341,61 @@ class FilePreflightContext(PreflightContext):
         seen: dict[str, int] = {}
         examples: dict[str, str] = {}
         dupes: list[dict[str, Any]] = []
-        for row in self.sample_rows:
-            scope = dict(row)
-            for spec in specs:
-                if spec["col"] not in scope and spec["source"] in scope:
-                    scope[spec["col"]] = scope.get(spec["source"])
-            if any(
-                not unique_key_row_in_scope(scope, spec["col"], unique_keys=unique_keys)
-                for spec in specs
-            ):
-                continue
-            parts: list[tuple[Any, str | None, bool, str | None]] = []
-            displays: list[str] = []
-            for spec in specs:
-                raw_cell = row.get(spec["source"], "")
-                raw = cell_to_string(raw_cell) if raw_cell is not None else ""
-                sentinel = "\x00NULL\x00" if spec["nulls_collide"] else None
-                parts.append(
-                    (
-                        None if raw_cell is None else raw,
-                        spec["dest_type"],
-                        bool(spec["casefold"]),
-                        sentinel,
+        keep_last = (
+            str(getattr(self.plan, "in_file_dedupe", "") or "").strip().lower().replace("-", "_")
+            == "keep_last"
+        )
+        source_keys = [str(spec["source"]) for spec in specs]
+        sample_groups = _sample_file_groups(list(self.sample_rows))
+        if keep_last and source_keys:
+            from services.duplicate_policy import collapse_keep_last
+
+            sample_groups = [collapse_keep_last(group, source_keys)[0] for group in sample_groups]
+        for group in sample_groups:
+            group_seen: dict[str, int] = {}
+            for row in group:
+                scope = dict(row)
+                for spec in specs:
+                    if spec["col"] not in scope and spec["source"] in scope:
+                        scope[spec["col"]] = scope.get(spec["source"])
+                if any(
+                    not unique_key_row_in_scope(scope, spec["col"], unique_keys=unique_keys)
+                    for spec in specs
+                ):
+                    continue
+                parts: list[tuple[Any, str | None, bool, str | None]] = []
+                displays: list[str] = []
+                for spec in specs:
+                    raw_cell = row.get(spec["source"], "")
+                    raw = cell_to_string(raw_cell) if raw_cell is not None else ""
+                    sentinel = "\x00NULL\x00" if spec["nulls_collide"] else None
+                    parts.append(
+                        (
+                            None if raw_cell is None else raw,
+                            spec["dest_type"],
+                            bool(spec["casefold"]),
+                            sentinel,
+                        )
                     )
-                )
-                displays.append(raw if raw else "<NULL>")
-            key = composite_unique_equality_key(parts, dest_kind=dest_kind)
-            if not key:
-                continue
-            seen[key] = seen.get(key, 0) + 1
-            shown = displays[0] if len(displays) == 1 else ", ".join(displays)
-            examples.setdefault(key, shown)
-        for key, count in seen.items():
-            if count > 1 and key:
-                dupes.append(
-                    {
-                        "column": label,
-                        "value": examples.get(key, key),
-                        "count": count,
-                        "collation_casefold": casefold,
-                        "nulls_not_distinct": nulls_collide,
-                    }
-                )
+                    displays.append(raw if raw else "<NULL>")
+                key = composite_unique_equality_key(parts, dest_kind=dest_kind)
+                if not key:
+                    continue
+                group_seen[key] = group_seen.get(key, 0) + 1
+                shown = displays[0] if len(displays) == 1 else ", ".join(displays)
+                examples.setdefault(key, shown)
+                seen[key] = group_seen[key]
+            for key, count in group_seen.items():
+                if count > 1 and key:
+                    dupes.append(
+                        {
+                            "column": label,
+                            "value": examples.get(key, key),
+                            "count": count,
+                            "collation_casefold": casefold,
+                            "nulls_not_distinct": nulls_collide,
+                        }
+                    )
         return dupes[:5]
 
     def run_integrity_audit(self) -> dict[str, Any]:
@@ -420,6 +450,7 @@ class FilePreflightContext(PreflightContext):
             stream_contracts=list(
                 getattr(self.plan, "stream_contracts", None) or []
             ),
+            in_file_dedupe=str(getattr(self.plan, "in_file_dedupe", "") or ""),
             proven_width_narrowings=self.proven_width_narrowings,
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.

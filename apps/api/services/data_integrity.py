@@ -1058,6 +1058,27 @@ def _business_identity_columns(identity_cols: list[str], sync: str) -> list[str]
     return business or identity_cols
 
 
+def _rows_by_file(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    tagged = any(isinstance(row, dict) and "_df_file" in row for row in rows)
+    if not tagged:
+        return [list(rows)]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for row in rows:
+        tag = str(row.get("_df_file") or "") if isinstance(row, dict) else ""
+        if tag not in groups:
+            order.append(tag)
+            groups[tag] = []
+        groups[tag].append(row)
+    return [groups[tag] for tag in order]
+
+
+def _file_scope_key(row: dict[str, Any], key: str) -> str:
+    if isinstance(row, dict) and "_df_file" in row:
+        return str(row.get("_df_file") or "") + "\x1e" + str(key)
+    return str(key)
+
+
 def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
@@ -1075,6 +1096,7 @@ def _check_duplicate_keys(
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
     identity_declared: bool | None = None,
+    in_file_dedupe: str = "",
 ) -> dict[str, Any]:
     """Duplicate check on the resolved identity key (sample + source-side probe).
 
@@ -1121,6 +1143,19 @@ def _check_duplicate_keys(
     target_cols = [
         (_target_for_source(c, mappings) or c) for c in identity_cols
     ]
+    keep_last = str(in_file_dedupe or "").strip().lower().replace("-", "_") == "keep_last"
+    if keep_last:
+        # The writer collapses after the gate. Clear the full-table probe so a
+        # repeated key the operator chose to keep-last does not block Validate.
+        source_duplicate_findings = []
+        if identity_cols:
+            from services.duplicate_policy import collapse_keep_last
+
+            collapsed_groups = []
+            for group in _rows_by_file(rows):
+                kept, _dropped = collapse_keep_last(group, identity_cols)
+                collapsed_groups.append(kept)
+            rows = [row for group in collapsed_groups for row in group]
     target_col = _target_for_source(primary_key, mappings) if primary_key else ""
     advisory_warnings = _advisory_unique_key_warnings(
         dest_kind=dest_kind,
@@ -1192,14 +1227,18 @@ def _check_duplicate_keys(
 
     # Composite UNIQUE/PK probes run whenever catalog keys are known and mapped —
     # not only when the Studio identity column participates.
-    composite_issues = _check_destination_unique_constraints(
-        mappings,
-        rows,
-        destination_pk_columns=destination_pk_columns,
-        destination_unique_keys=destination_unique_keys,
-        target_types=target_types,
-        dest_kind=dest_kind,
-    )
+    composite_issues: list[str] = []
+    for group in _rows_by_file(rows):
+        composite_issues.extend(
+            _check_destination_unique_constraints(
+                mappings,
+                group,
+                destination_pk_columns=destination_pk_columns,
+                destination_unique_keys=destination_unique_keys,
+                target_types=target_types,
+                dest_kind=dest_kind,
+            )
+        )
     issues.extend(composite_issues)
 
     if not identity_cols and not issues:
@@ -1308,9 +1347,10 @@ def _check_duplicate_keys(
             )
             if not key:
                 continue
-            seen_t[key] = seen_t.get(key, 0) + 1
+            scoped = _file_scope_key(row, key)
+            seen_t[scoped] = seen_t.get(scoped, 0) + 1
             examples_t.setdefault(
-                key,
+                scoped,
                 "(" + ", ".join(str(row.get(c)) for c in identity_cols) + ")",
             )
         dupes = [(examples_t.get(v, v), c) for v, c in seen_t.items() if c > 1]
@@ -1370,8 +1410,9 @@ def _check_duplicate_keys(
                 continue
             if not key:
                 continue
-            seen[key] = seen.get(key, 0) + 1
-            examples.setdefault(key, raw if raw else "<NULL>")
+            scoped = _file_scope_key(row, key)
+            seen[scoped] = seen.get(scoped, 0) + 1
+            examples.setdefault(scoped, raw if raw else "<NULL>")
         dupes = [(examples.get(v, v), c) for v, c in seen.items() if c > 1]
         if dupes:
             sample = ", ".join(f"{v}×{c}" for v, c in dupes[:3])
@@ -1722,6 +1763,7 @@ def run_integrity_audit(
     source_measured_empty: bool = False,
     stream_contracts: list[dict] | None = None,
     proven_width_narrowings: dict | None = None,
+    in_file_dedupe: str = "",
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1882,6 +1924,7 @@ def run_integrity_audit(
                 source_duplicate_probe_status=source_duplicate_probe_status,
                 source_duplicate_probe_message=source_duplicate_probe_message,
                 source_duplicate_probe_expected=source_duplicate_probe_expected,
+                in_file_dedupe=in_file_dedupe,
             )
         )
         checks.append(

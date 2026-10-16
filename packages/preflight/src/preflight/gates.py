@@ -55,6 +55,55 @@ def _source_column(ctx: PreflightContext, name: str) -> Any:
     return hits[0] if len(hits) == 1 else None
 
 
+def _plan_keeps_last(ctx: Any) -> bool:
+    token = str(getattr(getattr(ctx, "plan", None), "in_file_dedupe", "") or "")
+    return token.strip().lower().replace("-", "_") == "keep_last"
+
+
+def _file_groups(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """One group per file when the sample was tagged. Otherwise one batch."""
+    tagged = any(isinstance(row, dict) and "_df_file" in row for row in rows)
+    if not tagged:
+        return [list(rows)]
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for row in rows:
+        tag = str(row.get("_df_file") or "") if isinstance(row, dict) else ""
+        if tag not in groups:
+            order.append(tag)
+            groups[tag] = []
+        groups[tag].append(row)
+    return [groups[tag] for tag in order]
+
+
+def _count_target_key_duplicates(
+    rows: list[dict[str, Any]],
+    key_column: str,
+    *,
+    keep_last: bool,
+    in_scope,
+    key_of,
+) -> int:
+    """Count repeated keys inside each file. A key shared only across files is last-wins."""
+    duplicates = 0
+    for group in _file_groups(rows):
+        scan = group
+        if keep_last and key_column:
+            from services.duplicate_policy import collapse_keep_last
+
+            scan, _dropped = collapse_keep_last(group, [key_column])
+        seen: set[str] = set()
+        for row in scan:
+            if not in_scope(row):
+                continue
+            val = key_of(row)
+            if val and val in seen:
+                duplicates += 1
+            if val:
+                seen.add(str(val))
+    return duplicates
+
+
 def _risk_cleared(m: Any) -> bool:
     """Continue-policy Risk Contract only — boolean risk_acknowledged never clears."""
     return mapping_risk_cleared(m)
@@ -2203,7 +2252,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
             dupes = ctx.probe_unique_constraint(list(pk_targets))
-            if dupes:
+            if dupes and not _plan_keeps_last(ctx):
                 return _block(
                     GateId.G6_TARGET_DDL,
                     f"UNIQUE constraint would fail on {pk_tgt} — {len(dupes)} duplicate group(s)",
@@ -2492,7 +2541,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
 
     if pk_targets:
         dupes = ctx.probe_unique_constraint(list(pk_targets))
-        if dupes:
+        if dupes and not _plan_keeps_last(ctx):
             return _block(
                 GateId.G6_TARGET_DDL,
                 f"UNIQUE constraint would fail on {pk_tgt} — {len(dupes)} duplicate group(s)",
@@ -2995,11 +3044,18 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 elif str(m.target) in file_holdout_targets:
                     contracted_holdouts.append(line)
                     row_holdout = True
+                elif str(getattr(ctx.plan, "validation_mode", "") or "").strip().lower() == "lenient":
+                    # A bad cast is a quarantine holdout. The good rows stay
+                    # in the write set and the gate does not block the load.
+                    contracted_holdouts.append(line)
+                    row_holdout = True
                 else:
                     transform_errors.append(line)
                     mapped[m.target] = None
             else:
                 mapped[m.target] = transformed
+        if isinstance(row, dict) and "_df_file" in row:
+            mapped["_df_file"] = row.get("_df_file")
         if not row_holdout:
             mapped_rows.append(mapped)
             kept_sample_rows.append((row_idx, row))
@@ -3090,22 +3146,19 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             casefold = False
 
         null_sentinel = "\x00NULL\x00" if nulls_collide else None
-        seen: set[str] = set()
-        for row in mapped_rows:
-            if not unique_key_row_in_scope(row, pk_target, unique_keys=unique_keys):
-                continue
-            raw = str(_row_cell(row, pk_target, "") or "")
-            val = unique_equality_key(
-                raw if raw else None,
+        duplicates = _count_target_key_duplicates(
+            mapped_rows,
+            pk_target,
+            keep_last=_plan_keeps_last(ctx),
+            in_scope=lambda row: unique_key_row_in_scope(row, pk_target, unique_keys=unique_keys),
+            key_of=lambda row: unique_equality_key(
+                (str(_row_cell(row, pk_target, "") or "") or None),
                 dest_ddl,
                 force_casefold=casefold,
                 null_sentinel=null_sentinel,
                 dest_kind=dest_kind,
-            )
-            if val and val in seen:
-                duplicates += 1
-            if val:
-                seen.add(val)
+            ),
+        )
 
     if duplicates:
         return _block(
@@ -3316,10 +3369,19 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                         "Pre-write write-path sample check — live Gate-8 checksum runs after load"
                         + blank_clause
                         + (
-                            f"; {len(contracted_holdouts)} row(s) held out under "
-                            "quarantine/skip continue-policy"
+                            (
+                                f"; {len(contracted_holdouts)} bad row(s) will quarantine; "
+                                "good rows still load"
+                            )
                             if contracted_holdouts
-                            else ""
+                            and str(getattr(ctx.plan, "validation_mode", "") or "").strip().lower()
+                            == "lenient"
+                            else (
+                                f"; {len(contracted_holdouts)} row(s) held out under "
+                                "quarantine/skip continue-policy"
+                                if contracted_holdouts
+                                else ""
+                            )
                         )
                         + (
                             f"; {len(contracted_null_cells)} cell(s) NULL-invent under "

@@ -666,6 +666,15 @@ def _drift_column_phrase(evolution: dict[str, Any] | None) -> str:
 
 
 
+def _plan_in_file_dedupe(source_config: dict[str, Any] | None) -> str:
+    """``keep_last`` or ``block`` from the source config the schedule stamped."""
+    cfg = source_config if isinstance(source_config, dict) else {}
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    raw = str(cfg.get("in_file_dedupe") or extra.get("in_file_dedupe") or "block")
+    token = raw.strip().lower().replace("-", "_")
+    return "keep_last" if token == "keep_last" else "block"
+
+
 @_with_date_locale
 @_with_source_engine
 def run_file_preflight(
@@ -1483,6 +1492,7 @@ def run_file_preflight(
         destination_foreign_keys=list(destination_foreign_keys or []),
         fk_risk_acknowledged=bool(fk_risk_acknowledged),
         stream_contracts=list(stream_contracts or []),
+        in_file_dedupe=_plan_in_file_dedupe(source_config),
     )
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
