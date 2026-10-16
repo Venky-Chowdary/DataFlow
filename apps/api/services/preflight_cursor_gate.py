@@ -360,9 +360,11 @@ def build_sync_contract_gate(
         for c in contracts
         if requires_cursor
         and not (c.get("cursor_field") or c.get("cursor"))
-        # CDC's cursor is the log position, not a table column. A declared
-        # cdc_position is that cursor. Inventing updated_at would skip rows
-        # the log had already captured.
+        # CDC's cursor is the log position, not a table column. A contract
+        # that names no cursor_field is that log (cdc_position). Inventing
+        # updated_at would skip rows the log had already captured. Incremental
+        # append still requires a table cursor.
+        and sync != "cdc"
         and str(c.get("cursor_semantics") or "").strip().lower() != "cdc_position"
     ]
     missing_primary_key: list[str] = []
