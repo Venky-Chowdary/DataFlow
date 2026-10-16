@@ -4663,6 +4663,10 @@ def national_charset_would_collapse(
         return False
     if destination_is_unicode_only(dest_db):
         return False
+    # JSON, CSV, Parquet, and the object-store / SFTP exports are UTF-8.
+    # Naming the carrier VARCHAR does not put the bytes on a code page.
+    if destination_is_file_export(dest_db):
+        return False
     tgt_l = normalize_logical_type(target_type)
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}
 
