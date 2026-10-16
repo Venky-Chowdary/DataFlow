@@ -1106,16 +1106,20 @@ def reconcile(
                 population_proof=False,
                 assurance_level="quarantine_excluded",
             )
-        # A whole-table digest is not the batch once the destination already
-        # held rows. Incremental append and deduped updates fail this compare
-        # even when the delta is the batch. The delta identity still fails a
-        # short write. A written-key digest and a CDC value proof stay strict.
-        if (
+        # Occupied tables compare by delta. A written-key or CDC value digest stays strict.
+        occupied_table = (
             allow_extra_rows
             and target_rows_before is not None
             and int(target_rows_before) > 0
-            and checksum_scope not in {WRITTEN_BATCH_KEYS, CDC_SOURCE_IMAGE_VALUES, CDC_SOURCE_IMAGE_COUNT}
-        ):
+            and checksum_scope not in {
+                WRITTEN_BATCH_KEYS, CDC_SOURCE_IMAGE_VALUES, CDC_SOURCE_IMAGE_COUNT,
+            }
+        )
+        if occupied_table or (has_extra and checksum_scope != WRITTEN_BATCH_KEYS):
+            if occupied_table:
+                delta = int(keyed_expected_delta) if keyed_expected_delta is not None else None
+            else:
+                delta = int(keyed_expected_delta) if keyed_identity else None
             return append_row_count_report(
                 source_rows=source_rows,
                 target_rows=target_rows,
@@ -1128,26 +1132,7 @@ def reconcile(
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 sample_compare=sample_compare,
-                keyed_expected_delta=(
-                    int(keyed_expected_delta) if keyed_expected_delta is not None else None
-                ),
-            )
-        if has_extra and checksum_scope != WRITTEN_BATCH_KEYS:
-            return append_row_count_report(
-                source_rows=source_rows,
-                target_rows=target_rows,
-                target_rows_before=target_rows_before,
-                expected_rows=expected_rows,
-                source_checksum=source_checksum,
-                target_checksum=target_checksum,
-                sample_note=sample_note,
-                rejected_rows=rejected_rows,
-                coerced_null_rows=coerced_null_rows,
-                rows_skipped=rows_skipped,
-                sample_compare=sample_compare,
-                keyed_expected_delta=(
-                    int(keyed_expected_delta) if keyed_identity else None
-                ),
+                keyed_expected_delta=delta,
             )
         return ReconciliationReport(
             passed=False,
@@ -4569,11 +4554,7 @@ def _skip_kept_existing_key(
     key: Any,
     inserted_keys: set[str] | list[str] | None,
 ) -> bool:
-    """A skip policy keeps the first image of a key that already existed.
-
-    A key this run inserted must still match the source. Missing that set,
-    a found key whose cells differ is the kept row, not a bad write.
-    """
+    """Skip keeps the first image. A key this run inserted must still match."""
     if not str(duplicate_policy or "").strip() or not key:
         return False
     from services.duplicate_policy import normalize_duplicate_policy
