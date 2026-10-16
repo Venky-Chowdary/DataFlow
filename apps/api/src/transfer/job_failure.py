@@ -845,5 +845,31 @@ def _fail_job_preflight(
     if ledger_dict is not None:
         status_fields["row_accounting"] = ledger_dict
         status_fields["sync_mode"] = str(sync_mode or "")
+    from services.drift_approval import (
+        build_source_drift_approval,
+        gate_codes_from_preflight,
+        open_schedule_drift_approval,
+        schedule_id_from_job,
+    )
+
+    codes = gate_codes_from_preflight(pf)
+    approval = build_source_drift_approval(
+        message=error_message,
+        codes=codes,
+        job_id=job_id,
+        evidence={"gate_codes": codes},
+    )
+    schedule_id = ""
+    if approval is not None:
+        status_fields["approval_request"] = approval
+        try:
+            schedule_id = schedule_id_from_job(mongo.get_job(job_id) or {})
+        except Exception:
+            schedule_id = ""
     mongo.update_job_status(job_id, "failed", **status_fields)
+    if approval is not None and schedule_id:
+        try:
+            open_schedule_drift_approval(schedule_id, approval)
+        except Exception:
+            logger.exception("Manual run %s drift approval was not opened", job_id)
     return error_message, error_details

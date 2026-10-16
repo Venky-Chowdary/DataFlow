@@ -1115,6 +1115,8 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
             # This beat's verdict will not change by itself, and the next beat
             # would either replay it or — on an append with nothing to collapse
             # a second copy — land the same rows again. Park on one finding.
+            from services.drift_approval import gate_codes_from_job
+
             _open_finding(
                 schedule_id,
                 str((job_doc or {}).get("error") or decision.get("reason") or "")
@@ -1125,6 +1127,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                     "failure_class": failure_class,
                     "phase": (job_doc or {}).get("phase", ""),
                     "park_reason": park,
+                    "gate_codes": gate_codes_from_job(job_doc),
                 },
             )
     _notify_schedule(sched, job_id, status, job_doc)
@@ -1223,12 +1226,34 @@ def _open_finding(
             kind, code = KIND_RUN_REFUSED, "RUN_REFUSED"
             scopes = delegable_scopes_for(message)
             corrective = classification.corrective_action
+            from services.drift_approval import (
+                DRIFT_CORRECTIVE,
+                BREAKING_CORRECTIVE,
+                SOURCE_DRIFT_CODE,
+                drift_codes,
+                drift_is_breaking,
+            )
+            from services.standing_authorization import SCOPE_SCHEMA_DRIFT
+
+            supplied = list((evidence or {}).get("gate_codes") or [])
+            matched = drift_codes(supplied)
             if is_empty_mapping_refusal(message):
                 code = EMPTY_MAPPING_CODE
                 scopes = ()
                 corrective = EMPTY_MAPPING_CORRECTIVE
-            elif is_schema_drift_echo(message) or "schema drift" in message.lower():
-                kind, code = KIND_SOURCE_DRIFT, "SOURCE_DRIFT"
+            elif matched:
+                # The gate id is the classification. The coverage sentence
+                # does not say "schema drift", and matching that phrase
+                # parked additive columns as RUN_REFUSED.
+                kind, code = KIND_SOURCE_DRIFT, SOURCE_DRIFT_CODE
+                if drift_is_breaking(matched):
+                    scopes = ()
+                    corrective = BREAKING_CORRECTIVE
+                else:
+                    scopes = (SCOPE_SCHEMA_DRIFT,)
+                    corrective = DRIFT_CORRECTIVE
+            elif is_schema_drift_echo(message):
+                kind, code = KIND_SOURCE_DRIFT, SOURCE_DRIFT_CODE
             found = {"failure_class": classification.kind, **(evidence or {})}
         open_approval_request(
             schedule_id,
