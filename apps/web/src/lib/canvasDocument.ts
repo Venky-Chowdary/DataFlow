@@ -251,6 +251,20 @@ export function insertIndexAtPoint(stepCount: number, point: FlowPoint, position
   return Math.max(0, Math.min(stepCount, index));
 }
 
+/**
+ * A drop that shares another node's origin is a duplicate stack.
+ * Anything farther than 8px stays on the pointer.
+ */
+export function positionClearOf(point: FlowPoint, occupied: readonly FlowPoint[]): FlowPoint {
+  let next = { x: point.x, y: point.y };
+  for (let guard = 0; guard < 8; guard += 1) {
+    const stacked = occupied.some((item) => Math.abs(item.x - next.x) < 8 && Math.abs(item.y - next.y) < 8);
+    if (!stacked) return next;
+    next = { x: next.x + 16, y: next.y + 16 };
+  }
+  return next;
+}
+
 /** Fit will not shrink a card below this. The operator pans the rest. */
 export const FIT_MIN_ZOOM = 0.75;
 export const FIT_MAX_ZOOM = 1.5;

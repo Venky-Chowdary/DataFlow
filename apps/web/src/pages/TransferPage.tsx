@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { JobTheater } from "../components/JobTheater";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -27,6 +27,7 @@ import {
 import { useStudioFlags } from "../lib/useStudioFlags";
 import { StudioFlagBanner } from "../components/transfer/StudioFlagBanner";
 import { Button } from "../components/ui/Button";
+import { ButtonGroup } from "../components/ui/ButtonGroup";
 import { HiddenFileInput } from "../components/ui/HiddenFileInput";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
@@ -277,6 +278,7 @@ import {
   STEPS,
   UPLOAD_FORMATS,
 } from "./transfer/studioConstants";
+import { transferWizardReducer, WIZARD_START } from "./transfer/transferWizard";
 import { TransferTransformStep } from "./transfer/TransferTransformStep";
 import {
   acceptRuleAsDirect,
@@ -332,14 +334,26 @@ export function TransferPage({
   const routeAnalyzedKeyRef = useRef("");
   const { setActiveData } = useActiveData();
   const { registerStudioHandler } = useStudioActions();
-  const [step, setStep] = useState(STEP_SOURCE);
-  const [transformOpen, setTransformOpen] = useState(false);
+  const canvasNav = useRef(false);
+  const [wizard, dispatchWizard] = useReducer(transferWizardReducer, WIZARD_START);
+  const step = wizard.step;
+  const transformOpen = wizard.transformOpen;
+  const setStep = useCallback((next: number) => {
+    dispatchWizard({ type: "go", step: next });
+  }, []);
+  const setTransformOpen = useCallback((open: boolean) => {
+    dispatchWizard({ type: open ? "open-transform" : "close-transform" });
+  }, []);
+  const backWizard = useCallback(() => {
+    dispatchWizard({ type: "back", canvas: canvasNav.current });
+  }, []);
   const [sourceKind, setSourceKind] = useState<SourceKind>("file");
   const [sourceConnectorId, setSourceConnectorId] = useState("");
   const [sourceTable, setSourceTable] = useState("");
   const [sourceCollection, setSourceCollection] = useState("");
   const [sourceReadMode, setSourceReadMode] = useState<SourceReadMode>("table");
   const studioFlags = useStudioFlags();
+  canvasNav.current = studioFlags.canvas;
   const { bindSqlInsert, insertSql } = useSqlInsertTarget();
   const [procedureCall, setProcedureCall] = useState("");
   const [procedureParams, setProcedureParams] = useState<Record<string, string>>({});
@@ -6539,7 +6553,7 @@ export function TransferPage({
               setStreamMappings((prev) => ({ ...prev, [current]: next }));
             }
           }}
-          onBack={() => setStep(STEP_DESTINATION)}
+          onBack={() => (studioFlags.canvas ? backWizard() : setStep(STEP_DESTINATION))}
           onContinue={() => void goToPreflight()}
           initialFocusSource={mapFocusSource}
           identityFixBanner={mapIdentityBanner}
@@ -6599,7 +6613,7 @@ export function TransferPage({
         </div>
       )}
 
-      {(step === STEP_SOURCE || (studioFlags.canvas && step === STEP_DESTINATION)) && !(studioFlags.canvas && transformOpen) && (
+      {step === STEP_SOURCE && !(studioFlags.canvas && transformOpen) && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-source-step">
         <div className="df2-card-body">
           <div className="df2-transfer-step-split">
@@ -7097,7 +7111,6 @@ export function TransferPage({
           const connectorReady =
             isConnectorSource && (sourceKind === "database" ? dbSourceConnectors.length > 0 : cloudSourceConnectors.length > 0);
           if (!fileReady && !connectorReady) return null;
-          if (studioFlags.canvas && canConfigureDest) return null;
           const hint = fileReady
             ? "Source profiled — choose where data should land next."
             : sourceKind === "cloud"
@@ -7133,7 +7146,7 @@ export function TransferPage({
       </div>
       )}
 
-      {(step === STEP_DESTINATION || (studioFlags.canvas && step === STEP_SOURCE && canConfigureDest)) && !(studioFlags.canvas && transformOpen) && (
+      {step === STEP_DESTINATION && !(studioFlags.canvas && transformOpen) && (
       <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-dest-step">
         <div className="df2-card-body">
           <div className="df2-dest-step-layout">
@@ -7789,11 +7802,9 @@ export function TransferPage({
           </div>
         </div>
         <div className="df2-card-footer df2-wizard-footer">
-          {!(studioFlags.canvas && step === STEP_SOURCE) && (
-            <button type="button" className="df2-btn" onClick={() => setStep(STEP_SOURCE)}>
-              <DtIcon name="arrow-left" size={14} /> Back to source
-            </button>
-          )}
+          <button type="button" className="df2-btn" onClick={() => (studioFlags.canvas ? backWizard() : setStep(STEP_SOURCE))}>
+            <DtIcon name="arrow-left" size={14} /> Back to source
+          </button>
           <div className="df2-btn-row">
           <button
             type="button"
@@ -7824,9 +7835,11 @@ export function TransferPage({
 
       {studioFlags.canvas && step <= STEP_SHAPE && !transformOpen && (
         <div className="df2-flow-transform">
-          <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setTransformOpen(true)}>
-            Transform (optional)
-          </button>
+          <ButtonGroup label="Optional transform">
+            <button type="button" className="df2-btn df2-btn-ghost" onClick={() => setTransformOpen(true)}>
+              Transform (optional)
+            </button>
+          </ButtonGroup>
         </div>
       )}
 
@@ -7852,7 +7865,7 @@ export function TransferPage({
             )));
           }}
           onIdentity={setShapeIdentity}
-          onBack={() => setStep(STEP_DESTINATION)}
+          onBack={() => (studioFlags.canvas ? backWizard() : setStep(STEP_DESTINATION))}
           onCollapse={studioFlags.canvas ? () => setTransformOpen(false) : undefined}
           onContinue={() => void goToMapping()}
           syncMode={syncMode}

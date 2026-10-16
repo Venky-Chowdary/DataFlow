@@ -15,12 +15,14 @@ export async function reachTransform(page: Page): Promise<void> {
   const classic = page.getByRole("button", { name: /Continue to Destination/ });
   const review = page.getByRole("button", { name: /Continue to Review/ });
   await expect.poll(async () => (await review.isVisible()) || (await classic.isVisible())).toBeTruthy();
-  if (await review.isVisible()) {
+  if (!(await review.isVisible())) {
+    await expect(classic).toBeEnabled();
+    await classic.click();
+  }
+  if (await page.getByRole("button", { name: /Continue to Review/ }).isVisible()) {
     await page.getByRole("tab", { name: "File export" }).click();
     await page.getByRole("button", { name: "Transform (optional)" }).click();
   } else {
-    await expect(classic).toBeEnabled();
-    await classic.click();
     await page.getByRole("tab", { name: "File export" }).click();
     const next = page.getByRole("button", { name: /Continue to Transform/ });
     await expect(next).toBeEnabled();

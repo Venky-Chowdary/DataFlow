@@ -1,11 +1,13 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { DtIcon } from "../DtIcon";
+import { ButtonGroup } from "../ui/ButtonGroup";
 import { Dialog } from "../ui/Dialog";
 import { Drawer } from "../ui/Drawer";
 import { StudioPicker } from "../ui/StudioPicker";
 import { ShapeStepFields } from "./ShapeStepFields";
 import { StudioCommandPalette } from "./StudioCommandPalette";
 import { checkShapeExpression, previewShapeRecipe } from "../../lib/api";
+import { usePointerDrag } from "../../lib/pointerDrag";
 import { paletteActions } from "../../lib/canvasPalette";
 import {
   chainDocument,
@@ -13,6 +15,8 @@ import {
   documentKind,
   stepExpressionIssues,
   draftWithDefaults,
+  layoutFor,
+  positionClearOf,
   reorderByDrag,
   setDocumentOf,
   stepsToFlow,
@@ -180,6 +184,8 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
   const [previewOpen, setPreviewOpen] = useState(false);
   const [previewMax, setPreviewMax] = useState(false);
   const [paletteDock, setPaletteDock] = useState(true);
+  const [opTip, setOpTip] = useState<{ text: string; x: number; y: number } | null>(null);
+  const resizeProperties = usePointerDrag();
   const [validationOpen, setValidationOpen] = useState(false);
   const [overview, setOverview] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -736,18 +742,20 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
           </p>
         </div>
         <div className="df2-canvas-head-actions">
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={validationOpen} onClick={() => setValidationOpen((open) => !open)}>
-            Issues{liveIssues.length ? ` (${liveIssues.length})` : ""}
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => { setValidationOpen(true); if (selected != null) void previewNode(selected); }}>
-            Validate
-          </button>
-          <button type="button" className="df2-btn df2-btn-sm" onClick={() => { setViewMode((mode) => (mode === "canvas" ? "split" : mode)); setPropertyTab("preview"); setPreviewOpen(true); onRunPreview(); if (selected != null) void previewNode(selected); }}>
-            Run preview
-          </button>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="More actions" aria-expanded={menuOpen} title="More actions" onClick={() => setMenuOpen((open) => !open)}>
-            <DtIcon name="menu" size={16} chrome="product" />
-          </button>
+          <ButtonGroup label="Recipe actions">
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" aria-expanded={validationOpen} onClick={() => setValidationOpen((open) => !open)}>
+              Issues{liveIssues.length ? ` (${liveIssues.length})` : ""}
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => { setValidationOpen(true); if (selected != null) void previewNode(selected); }}>
+              Validate
+            </button>
+            <button type="button" className="df2-btn df2-btn-sm" onClick={() => { setViewMode((mode) => (mode === "canvas" ? "split" : mode)); setPropertyTab("preview"); setPreviewOpen(true); onRunPreview(); if (selected != null) void previewNode(selected); }}>
+              Run preview
+            </button>
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm df2-canvas-icon-btn" aria-label="More actions" aria-expanded={menuOpen} title="More actions" onClick={() => setMenuOpen((open) => !open)}>
+              <DtIcon name="menu" size={16} chrome="product" />
+            </button>
+          </ButtonGroup>
           {menuOpen && (
             <div className="df2-canvas-menu" role="menu">
               <button type="button" role="menuitem" onClick={() => { setMenuOpen(false); setRulesOpen(true); }}>Rules and suggestions</button>
@@ -775,7 +783,24 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
         </p>
       )}
       <div className="df2-canvas-body" style={{ ["--df-split-h" as string]: `${viewMode === "split" ? propertiesHeight : 0}px` }}>
-        <aside className={paletteDock ? "df2-canvas-rail" : "df2-canvas-rail is-collapsed"} aria-label="Operations">
+        <aside
+          className={paletteDock ? "df2-canvas-rail" : "df2-canvas-rail is-collapsed"}
+          aria-label="Operations"
+          onPointerOver={(event) => {
+            const op = (event.target as HTMLElement).closest(".df2-canvas-op");
+            const text = op?.getAttribute("data-tip") || "";
+            if (!op || !text) {
+              setOpTip((current) => (current == null ? current : null));
+              return;
+            }
+            const box = op.getBoundingClientRect();
+            const next = { text, x: Math.round(box.right + 8), y: Math.round(box.top) };
+            setOpTip((current) => (
+              current && current.text === next.text && current.x === next.x && current.y === next.y ? current : next
+            ));
+          }}
+          onPointerLeave={() => setOpTip(null)}
+        >
           <input
             ref={filterRef}
             className="df2-input df2-input-sm"
@@ -914,6 +939,15 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
               <a href="#/transforms">Open SQL models</a>
             </details>
           )}
+          {opTip && (
+            <div
+              className="df2-canvas-op-tip"
+              role="tooltip"
+              style={{ ["--df-tip-x" as string]: `${opTip.x}px`, ["--df-tip-y" as string]: `${opTip.y}px` }}
+            >
+              {opTip.text}
+            </div>
+          )}
         </aside>
 
         <div className="df2-canvas-stage-wrap">
@@ -930,11 +964,17 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
               onZoom={setZoomLevel}
               onReveal={revealStep}
               onSelect={loadStep}
-              onReorder={(from, to) => {
+              onReorder={(from, to, at) => {
                 if (!canEdit) return;
                 setPendingAt(null);
-                setPlaced(null);
-                commit(reorderByDrag(steps, from, to));
+                const next = reorderByDrag(steps, from, to);
+                const occupied = layoutFor(next.length).filter((_, index) => index !== to);
+                const clear = positionClearOf(at, occupied);
+                setPlaced({ index: to, x: clear.x, y: clear.y });
+                commit(next);
+              }}
+              onPlace={(index, at) => {
+                setPlaced({ index, x: at.x, y: at.y });
               }}
               onInvalidLink={(reason) => {
                 setLinkNote("");
@@ -1047,18 +1087,11 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
               aria-valuenow={propertiesHeight}
               tabIndex={0}
               onPointerDown={(event) => {
-                event.preventDefault();
                 const startY = event.clientY;
                 const startH = propertiesHeight;
-                const move = (next: PointerEvent) => {
+                resizeProperties(event, (next) => {
                   setPropertiesHeight(Math.min(420, Math.max(96, startH + (startY - next.clientY))));
-                };
-                const up = () => {
-                  window.removeEventListener("pointermove", move);
-                  window.removeEventListener("pointerup", up);
-                };
-                window.addEventListener("pointermove", move);
-                window.addEventListener("pointerup", up);
+                });
               }}
               onKeyDown={(event) => {
                 if (event.key === "ArrowUp") setPropertiesHeight((height) => Math.min(420, height + 24));
@@ -1386,19 +1419,13 @@ function PreviewDock({
   onDownload: () => void;
 }) {
   const shown = columns.slice(0, 8);
+  const resizeDock = usePointerDrag();
   const gripDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    event.preventDefault();
     const startY = event.clientY;
     const startH = height;
-    const move = (next: PointerEvent) => {
+    resizeDock(event, (next) => {
       onHeight(Math.min(420, Math.max(96, startH + (startY - next.clientY))));
-    };
-    const up = () => {
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    });
   };
   const expanded = open || maximized;
   const compareColumns = shown.length > 0 ? shown : (beforeRows[0] ? Object.keys(beforeRows[0]).slice(0, 8) : []);

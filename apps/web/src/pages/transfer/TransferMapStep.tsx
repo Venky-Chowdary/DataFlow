@@ -267,6 +267,13 @@ export function TransferMapStep({
 
   return (
     <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-map-step-panel">
+      {hideFooter && (
+        <div className="df2-wizard-back">
+          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onBack}>
+            Back to Connect
+          </button>
+        </div>
+      )}
       <div
         className="df2-card-head df2-map-step-head"
         title={`${columnMappings.length} mappings · ${approvedCount} ready${health.falseFriendCount > 0 ? ` · ${health.headline}` : mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}`}

@@ -1058,7 +1058,7 @@ export function TransferTransformStep({
 
       <footer className="df2-xform-actions">
         <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>
-          Back to Destination
+          {canvasEnabled ? "Back to Connect" : "Back to Destination"}
         </button>
         {!canvasEnabled && pane === "prepare" ? (
           <button

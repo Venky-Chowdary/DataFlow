@@ -204,12 +204,22 @@
 }
 
 .df2-canvas-head-actions {
+  position: relative;
   flex: 1 1 auto;
   justify-content: flex-start;
-  gap: 0;
+  gap: var(--df-space-2);
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
+}
+
+.df2-button-group {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--df-space-2);
+  min-width: 0;
+  flex: 0 0 auto;
 }
 
 .df2-canvas-tool-group {
@@ -429,12 +439,14 @@ button.df2-canvas-badge {
   text-align: left;
 }
 
-.df2-canvas-op:hover::after,
-.df2-canvas-op:focus-visible::after {
-  content: attr(data-tip);
-  position: absolute;
-  left: calc(100% + var(--df-space-2));
-  top: 0;
+.df2-canvas-rail {
+  scrollbar-gutter: stable;
+}
+
+.df2-canvas-op-tip {
+  position: fixed;
+  left: var(--df-tip-x);
+  top: var(--df-tip-y);
   z-index: var(--df-z-popover);
   width: max-content;
   max-width: 220px;
@@ -1066,10 +1078,6 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
   display: none;
 }
 
-.df2-canvas-head-actions {
-  position: relative;
-}
-
 .df2-canvas-validation {
   position: absolute;
   top: 52px;
@@ -1197,7 +1205,7 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
     top: auto;
     left: auto;
     bottom: auto;
-    z-index: var(--df-z-canvas-rail);
+    z-index: var(--df-z-base);
     grid-column: 1;
     grid-row: 1 / span 2;
     width: 240px;
@@ -1217,6 +1225,8 @@ html[data-theme="dark"] .df2-canvas .react-flow__edge-path {
     grid-column: 2;
     grid-row: 2;
     min-width: 0;
+    position: relative;
+    z-index: var(--df-z-raised);
   }
 
   .df2-canvas[data-view="canvas"] .df2-canvas-rail {
@@ -1995,22 +2005,17 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   border-radius: var(--df-radius-md);
 }
 
-/* Until the destination can be configured, the source column is the only
-   work surface. A reserved empty track reads as a broken second picker. */
-.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform):not(:has(.df2-dest-step)) .df2-source-step {
+/* One connect section fills the row. Source and destination are separate
+   steps, so neither sits in a half-width track beside an empty column. */
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform):not(:has(.df2-dest-step)) .df2-source-step,
+.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform):not(:has(.df2-source-step)) .df2-dest-step {
   grid-column: 1 / -1;
 }
 
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step .df2-transfer-step-split,
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step .df2-dest-step-layout {
-  grid-template-columns: minmax(0, 1fr);
+  gap: var(--df-space-3);
   min-height: 0;
-}
-
-.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step .df2-transfer-step-secondary,
-.df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step-right {
-  border-left: 0;
-  border-top: 1px solid var(--df-border);
 }
 
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-flow-transform {
@@ -2035,7 +2040,7 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-source-step,
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-dest-step {
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-transfer-step-viewport {
@@ -2083,8 +2088,22 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
 }
 
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-flow-transform {
+  display: flex;
+  align-items: center;
   flex: 0 0 auto;
+  gap: var(--df-space-3);
+  margin-top: var(--df-space-2);
+  padding: var(--df-space-3) var(--df-space-4);
   border-top: 1px solid var(--df-border);
+}
+
+.df2-page-transfer-studio.is-studio-next .df2-wizard-back {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-height: 40px;
+  padding: 0 var(--df-space-3);
+  border-bottom: 1px solid var(--df-border);
 }
 
 .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-transform .df2-xform-step {
@@ -2150,7 +2169,16 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
 
 @media (min-width: 1024px) {
   .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-vd,
-  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-theater-v3 {
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-theater-v3,
+  .df2-app.df2-app-with-edge .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-review .df2-map-step-panel {
     padding-right: 64px;
+  }
+}
+
+@media (min-width: 1024px) and (max-width: 1366px) {
+  .df2-page-transfer-studio.is-studio-next .df2-upload-formats,
+  .df2-page-transfer-studio.is-studio-next .df2-source-aside-formats,
+  .df2-page-transfer-studio.is-studio-next .df2-source-aside-steps {
+    display: flex;
   }
 }

@@ -25,6 +25,7 @@ import { DtIcon } from "../DtIcon";
 import {
   classifyPortLink,
   insertIndexAtPoint,
+  positionClearOf,
   LAYOUT_PITCH,
   ZOOM_MAX,
   ZOOM_MIN,
@@ -117,7 +118,8 @@ interface TransformFlowProps {
   pending: PendingStepModel | null;
   placed: { index: number; x: number; y: number } | null;
   onSelect: (index: number) => void;
-  onReorder: (fromIndex: number, toIndex: number) => void;
+  onReorder: (fromIndex: number, toIndex: number, at: FlowPoint) => void;
+  onPlace: (index: number, at: FlowPoint) => void;
   onInvalidLink: (reason: string) => void;
   onAcceptLink: (message: string) => void;
   onDropOp: (op: string, at: FlowPoint, index: number) => void;
@@ -160,6 +162,7 @@ function FlowCanvas({
   placed,
   onSelect,
   onReorder,
+  onPlace,
   onInvalidLink,
   onAcceptLink,
   onDropOp,
@@ -223,13 +226,26 @@ function FlowCanvas({
   nodesRef.current = flowNodes;
   const paneRef = useRef({ w: paneWidth, h: paneHeight });
   paneRef.current = { w: paneWidth, h: paneHeight };
+  const draggingId = useRef<string | null>(null);
   const autoFitted = useRef(false);
   const fittedPane = useRef({ w: 0, h: 0 });
   useEffect(() => {
-    setFlowNodes(built.map((node) => ({
-      ...node,
-      selected: selectedIndex != null && node.data.index === selectedIndex,
-    })));
+    setFlowNodes((current) => {
+      // A parent selection update must not snap the node under the pointer,
+      // and it must not copy that delta onto a sibling.
+      if (draggingId.current) {
+        const kept = new Map(current.map((node) => [node.id, node.position]));
+        return built.map((node) => ({
+          ...node,
+          position: kept.get(node.id) ?? node.position,
+          selected: node.id === draggingId.current,
+        }));
+      }
+      return built.map((node) => ({
+        ...node,
+        selected: selectedIndex != null && node.data.index === selectedIndex,
+      }));
+    });
   }, [built, selectedIndex]);
   useLayoutEffect(() => {
     const explicit = fitTick > 0;
@@ -320,7 +336,13 @@ function FlowCanvas({
   });
 
   const onNodesChange: OnNodesChange<Node<StudioNodeData>> = (changes) => {
-    setFlowNodes((current) => applyNodeChanges(changes, current));
+    const owner = draggingId.current;
+    const owned = changes.filter((change) => {
+      if (change.type !== "position") return true;
+      return owner != null && change.id === owner;
+    });
+    if (owned.length === 0) return;
+    setFlowNodes((current) => applyNodeChanges(owned, current));
   };
 
   const verdictFor = (
@@ -362,7 +384,10 @@ function FlowCanvas({
     setHot(false);
     const op = event.dataTransfer.getData("application/x-df-op");
     if (!op) return;
-    const at = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+    const at = positionClearOf(
+      screenToFlowPosition({ x: event.clientX, y: event.clientY }),
+      flowNodes.filter((node) => node.id !== "pending").map((node) => node.position),
+    );
     const positions = flowNodes
       .filter((node) => node.id !== "pending")
       .sort((a, b) => a.data.index - b.data.index)
@@ -391,6 +416,8 @@ function FlowCanvas({
         nodesDraggable
         nodesConnectable
         elementsSelectable
+        selectionOnDrag={false}
+        multiSelectionKeyCode={null}
         connectionRadius={28}
         colorMode={theme}
         deleteKeyCode={["Delete", "Backspace"]}
@@ -415,22 +442,33 @@ function FlowCanvas({
           if (node.id === "pending") return;
           onSelect(node.data.index);
         }}
+        onNodeDragStart={(_, node) => {
+          draggingId.current = node.id;
+          setFlowNodes((current) => current.map((item) => ({ ...item, selected: item.id === node.id })));
+        }}
         onNodeDragStop={(_, node) => {
+          draggingId.current = null;
           if (node.id === "pending" || node.data.disabled) return;
           const from = node.data.index;
+          const at = positionClearOf(
+            { x: node.position.x, y: node.position.y },
+            flowNodes.filter((item) => item.id !== node.id && item.id !== "pending").map((item) => item.position),
+          );
           const others = flowNodes
             .filter((item) => item.id !== node.id && item.id !== "pending")
             .sort((a, b) => a.data.index - b.data.index);
           const hit = spliceIndexAtPoint(
             others.map((item) => item.position),
-            { x: node.position.x + NODE_WIDTH / 2, y: node.position.y + NODE_BODY / 2 },
+            { x: at.x + NODE_WIDTH / 2, y: at.y + NODE_BODY / 2 },
           );
           if (hit != null) {
-            if (hit !== from) onReorder(from, hit);
+            if (hit !== from) onReorder(from, hit, at);
+            else onPlace(from, at);
             return;
           }
-          const to = Math.max(0, Math.min(nodes.length - 1, Math.round(node.position.x / PITCH)));
-          if (to !== from) onReorder(from, to);
+          const to = Math.max(0, Math.min(nodes.length - 1, Math.round(at.x / PITCH)));
+          if (to !== from) onReorder(from, to, at);
+          else onPlace(from, at);
         }}
       >
         <Background variant={BackgroundVariant.Dots} gap={18} size={1.5} color="var(--df-border-strong)" />

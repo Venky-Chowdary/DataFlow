@@ -12,6 +12,7 @@ import {
   viewportForChain,
   executableRecipe,
   insertIndexAtPoint,
+  positionClearOf,
   insertIndexForDrop,
   layoutFor,
   LAYOUT_PITCH,
@@ -127,6 +128,9 @@ describe("canvas document", () => {
     assert.equal(insertIndexAtPoint(2, gap, positions), 1);
     assert.equal(spliceIndexAtPoint(positions, { x: 48, y: 10 }), null);
     assert.equal(insertIndexAtPoint(0, { x: 10, y: 10 }, []), 0);
+    assert.deepEqual(positionClearOf({ x: 40, y: 28 }, []), { x: 40, y: 28 });
+    assert.deepEqual(positionClearOf({ x: 24, y: 28 }, [{ x: 24, y: 28 }]), { x: 40, y: 44 });
+    assert.deepEqual(positionClearOf({ x: 80, y: 28 }, [{ x: 24, y: 28 }]), { x: 80, y: 28 });
     const moved = reorderByDrag(
       [{ op: "trim", column: "a" }, { op: "trim", column: "b" }, { op: "lower", column: "a" }],
       2,

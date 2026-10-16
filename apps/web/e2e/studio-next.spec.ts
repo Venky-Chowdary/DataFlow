@@ -748,8 +748,8 @@ conn.commit()
 
     await openStudio(page);
     await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
-    await page.getByRole("tab", { name: "File export" }).click();
-    await expect(page.getByRole("button", { name: /Continue to Review/ })).toBeEnabled();
+    await expect(page.getByRole("heading", { name: "Source", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Destination", exact: true })).toHaveCount(0);
     await check("connect", async () => {
       const structure = page.locator(".df2-structure-preview");
       await expect(structure).toBeVisible();
@@ -765,6 +765,9 @@ conn.commit()
       expect(labelFits).toBeTruthy();
     });
 
+    await page.getByRole("button", { name: /Continue to Destination/ }).click();
+    await page.getByRole("tab", { name: "File export" }).click();
+    await expect(page.getByRole("button", { name: /Continue to Review/ })).toBeEnabled();
     await page.getByRole("button", { name: "Transform (optional)" }).click();
     await expect(page.getByRole("heading", { name: "Transform", exact: true })).toBeVisible();
     const trim = page.locator(".df2-canvas-op[data-op='trim']");
@@ -837,35 +840,157 @@ conn.commit()
     });
     await openStudio(page);
     await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
+    await page.getByRole("button", { name: /Continue to Destination/ }).click();
     await expect(page.getByRole("heading", { name: "Destination", exact: true })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Source", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Source", exact: true })).toHaveCount(0);
     await page.getByRole("radio", { name: /Warehouse/ }).click();
     await expect.poll(() => introspects).toBeGreaterThan(0);
     await page.locator("#dest-col").click();
     await expect(page.getByRole("option", { name: "warehouse_orders" })).toBeVisible();
   });
 
-  test("connect source and destination sit on one row at desktop widths", async ({ page }) => {
+  test("connect source and destination are separate sections", async ({ page }) => {
     await openStudio(page);
-    await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
-    await expect(page.getByRole("heading", { name: "Destination", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Structure preview", exact: true })).toBeVisible();
+    await expect(page.getByText("Supported formats", { exact: true })).toBeVisible();
     for (const size of [
       { width: 1366, height: 768 },
       { width: 1440, height: 900 },
-      { width: 1920, height: 1080 },
     ]) {
       await page.setViewportSize(size);
-      const source = page.locator(".df2-source-step");
-      const dest = page.locator(".df2-dest-step");
-      const sourceBox = await source.boundingBox();
-      const destBox = await dest.boundingBox();
-      expect(sourceBox && destBox).toBeTruthy();
-      expect(Math.abs(sourceBox!.y - destBox!.y)).toBeLessThan(4);
-      expect(destBox!.x).toBeGreaterThan(sourceBox!.x + sourceBox!.width - 1);
-      const gap = destBox!.x - (sourceBox!.x + sourceBox!.width);
-      expect(gap).toBeGreaterThanOrEqual(7);
-      expect(gap).toBeLessThanOrEqual(12);
-      await expectDisjoint(page, source, dest);
+      await expect(page.getByRole("heading", { name: "Structure preview", exact: true })).toBeVisible();
+      await expect(page.locator(".df2-source-aside-format-chip").first()).toBeVisible();
+      await expect(page.locator(".df2-upload-format-chip").first()).toBeVisible();
+    }
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.getByRole("button", { name: /Load sample orders CSV/ }).click();
+    await expect(page.getByRole("heading", { name: "Source", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Destination", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Detected structure", exact: true })).toBeVisible();
+    const transform = page.locator(".df2-flow-transform");
+    const transformBox = await transform.boundingBox();
+    const buttonBox = await transform.getByRole("button").boundingBox();
+    expect(transformBox && buttonBox).toBeTruthy();
+    expect(buttonBox!.y - transformBox!.y).toBeGreaterThanOrEqual(8);
+    expect(buttonBox!.x - transformBox!.x).toBeGreaterThanOrEqual(8);
+    await page.getByRole("button", { name: /Continue to Destination/ }).click();
+    await expect(page.getByRole("heading", { name: "Destination", exact: true })).toBeVisible();
+    await expect(page.locator(".df2-source-step")).toHaveCount(0);
+    await page.getByRole("button", { name: "Back to source" }).click();
+    await expect(page.getByRole("heading", { name: "Detected structure", exact: true })).toBeVisible();
+  });
+
+  test("back from transform and review returns to connect without dropping the source", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    await page.getByRole("button", { name: "Back to Connect" }).click();
+    await expect(page.getByRole("heading", { name: "Transform", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Destination", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "Back to source" }).click();
+    await expect(page.getByRole("heading", { name: "Detected structure", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: /Continue to Destination/ }).click();
+    await page.getByRole("tab", { name: "File export" }).click();
+    await page.getByRole("button", { name: /Continue to Review/ }).click();
+    // The map title is hidden at laptop widths; the column filter is the review landmark.
+    await expect(page.getByRole("tablist", { name: "Filter columns" })).toBeVisible({ timeout: 40_000 });
+    await page.getByRole("button", { name: "Back to Connect" }).click();
+    await expect(page.getByRole("heading", { name: "Destination", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Detected structure", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "Back to source" }).click();
+    await expect(page.getByRole("heading", { name: "Detected structure", exact: true })).toBeVisible();
+  });
+
+  test("recipe toolbar stays in one row with gaps at laptop widths", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    for (const size of [
+      { width: 1366, height: 768 },
+      { width: 1440, height: 900 },
+    ]) {
+      await page.setViewportSize(size);
+      const buttons = page.getByRole("toolbar", { name: "Recipe actions" }).getByRole("button");
+      await expect(buttons).toHaveCount(4);
+      const boxes = await buttons.evaluateAll((nodes) => nodes.map((node) => {
+        const box = node.getBoundingClientRect();
+        return { x: box.x, y: box.y, width: box.width };
+      }));
+      expect(boxes[0].y).toBeGreaterThan(0);
+      for (let index = 1; index < boxes.length; index += 1) {
+        const gap = boxes[index].x - (boxes[index - 1].x + boxes[index - 1].width);
+        expect(gap).toBeGreaterThanOrEqual(6);
+        expect(Math.abs(boxes[index].y - boxes[0].y)).toBeLessThanOrEqual(2);
+      }
+    }
+  });
+
+  test("dragging one node leaves the other in place and the drop stays under the pointer", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    await setPalette(page, true);
+    const stage = page.getByTestId("transform-canvas-stage");
+    await page.locator(".df2-canvas-op[data-op='trim']").dragTo(stage, { targetPosition: { x: 180, y: 80 } });
+    await page.locator(".df2-canvas-op[data-op='collapse_whitespace']").dragTo(stage, { targetPosition: { x: 460, y: 80 } });
+    await expect(page.locator(".react-flow__node")).toHaveCount(2);
+    const first = page.locator(".react-flow__node").nth(0);
+    const second = page.locator(".react-flow__node").nth(1);
+    const before = await first.boundingBox();
+    const moving = await second.boundingBox();
+    expect(before && moving).toBeTruthy();
+    await page.mouse.move(moving!.x + 40, moving!.y + 36);
+    await page.mouse.down();
+    await page.mouse.move(moving!.x + 40, moving!.y + 120, { steps: 8 });
+    const mid = await first.boundingBox();
+    expect(Math.abs(mid!.x - before!.x)).toBeLessThan(2);
+    expect(Math.abs(mid!.y - before!.y)).toBeLessThan(2);
+    await page.mouse.up();
+    const dropped = await second.boundingBox();
+    expect(dropped).toBeTruthy();
+    expect(Math.abs(dropped!.x - moving!.x)).toBeLessThan(24);
+    expect(dropped!.y).toBeGreaterThan(moving!.y + 40);
+    await page.getByRole("combobox", { name: "Zoom percent" }).selectOption("150");
+    const zoomedStage = await stage.boundingBox();
+    await page.locator(".df2-canvas-op[data-op='absolute']").dragTo(stage, { targetPosition: { x: 220, y: 140 } });
+    const added = page.locator(".react-flow__node", { hasText: "Absolute" });
+    await expect(added).toBeVisible();
+    const addedBox = await added.boundingBox();
+    expect(zoomedStage && addedBox).toBeTruthy();
+    expect(Math.abs(addedBox!.x - (zoomedStage!.x + 220))).toBeLessThan(28);
+    expect(Math.abs(addedBox!.y - (zoomedStage!.y + 140))).toBeLessThan(28);
+  });
+
+  test("flatten hover does not move the palette row", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    await setPalette(page, true);
+    const flatten = page.locator(".df2-canvas-op[data-op='flatten_json']");
+    await flatten.scrollIntoViewIfNeeded();
+    const before = await flatten.boundingBox();
+    await flatten.hover();
+    await page.waitForTimeout(250);
+    const after = await flatten.boundingBox();
+    expect(before && after).toBeTruthy();
+    expect(Math.abs(after!.x - before!.x)).toBeLessThan(1);
+    expect(Math.abs(after!.y - before!.y)).toBeLessThan(1);
+    await expect(page.getByRole("tooltip")).toBeVisible();
+    const settled = await flatten.boundingBox();
+    expect(Math.abs(settled!.y - before!.y)).toBeLessThan(1);
+  });
+
+  test("palette and properties do not cover each other", async ({ page }) => {
+    await openStudio(page);
+    await reachTransform(page);
+    await setPalette(page, true);
+    await page.locator(".df2-canvas-op[data-op='trim']").click();
+    for (const size of [
+      { width: 1366, height: 768 },
+      { width: 1440, height: 900 },
+    ]) {
+      await page.setViewportSize(size);
+      const rail = page.locator(".df2-canvas-rail");
+      const properties = page.locator(".df2-canvas-properties");
+      await expect(rail).toBeVisible();
+      await expect(properties).toBeVisible();
+      await expectDisjoint(page, rail, properties);
     }
   });
 });
