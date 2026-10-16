@@ -16,15 +16,17 @@ from connectors.object_store_common import ReadBatch, sampled_native_types_meta
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
 
 
-def read_object(
+def materialize_spill(
     *,
     cfg: dict[str, Any],
     bucket: str = "",
     key: str = "",
-    offset: int = 0,
-    limit: int = 500,
-    known_total_rows: int | None = None,
-) -> ReadBatch:
+) -> tuple[Any, str]:
+    """Download the remote file once and return ``(local path, remote name)``.
+
+    Page reads and the uniqueness probe share this spill. Parsing each page
+    from byte 0 made a 2M-row uniqueness gate take minutes.
+    """
     merged = dict(cfg)
     if bucket:
         merged["database"] = bucket
@@ -59,6 +61,19 @@ def read_object(
         lambda p: download_for_object_store("sftp", p, cfg, bucket, key),
         force=force,
     )
+    return path, remote_name
+
+
+def read_object(
+    *,
+    cfg: dict[str, Any],
+    bucket: str = "",
+    key: str = "",
+    offset: int = 0,
+    limit: int = 500,
+    known_total_rows: int | None = None,
+) -> ReadBatch:
+    path, remote_name = materialize_spill(cfg=cfg, bucket=bucket, key=key)
     headers, rows, total = read_rows_from_spill(
         path,
         remote_name,
