@@ -2053,7 +2053,7 @@ def test_keyed_census_closes_on_dest_delta_not_writer_ack():
     assert ledger.inserts == 1
     assert ledger.updates == 9
     assert ledger.dest_delta == 1
-    assert ledger.rows_written == 1
+    assert ledger.rows_written == 10
     assert ledger.unaccounted == 0
     assert ledger.balanced is True
     assert ledger.writer_ack == 10
@@ -2126,7 +2126,7 @@ def test_account_job_reads_keyed_census_from_dest_summary():
     assert ledger.balanced is True
     assert ledger.inserts == 1
     assert ledger.updates == 9
-    assert ledger.rows_written == 1
+    assert ledger.rows_written == 10
     assert ledger.writer_ack == 10
 
 
@@ -2240,7 +2240,7 @@ def test_keyed_census_closes_on_insert_minus_dest_held_delete():
     )
     assert ledger.balanced is True
     assert ledger.dest_delta == 0
-    assert ledger.rows_written == 0
+    assert ledger.rows_written == 3
     assert ledger.deletes == 1
     assert ledger.inserts == 1
     assert ledger.writer_ack_delta == -10_000

@@ -1275,9 +1275,13 @@ def _account_keyed(
             f" Writer acknowledged {ack:,}; dest COUNT(*) delta is "
             f"{dest_delta:,} ({abs(ack_delta):,} {sign} than the writer claimed)."
         )
+    # COUNT(*) does not move when a key is updated. The operator-facing
+    # rows_written is the rows this run inserted or updated. Conservation
+    # still closes on dest_delta versus the census, not on that count.
+    applied = int(census.inserts) + int(census.updates)
     return ConservationLedger(
         **base,
-        rows_written=dest_delta,
+        rows_written=applied,
         unaccounted=unaccounted,
         balanced=unaccounted == 0,
         rows_written_source=DEST_READBACK,

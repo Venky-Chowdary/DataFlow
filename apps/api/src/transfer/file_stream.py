@@ -3008,4 +3008,5 @@ def stream_file_to_database(
         if cleanup_write_ledger is not None:
             cleanup_write_ledger(dest_type=dest_type, cfg=dest_cfg, job_id=job_id)
 
+    dest_summary["rows_written"] = int(written or 0)
     return written, ddl_log, dest_summary, columns
