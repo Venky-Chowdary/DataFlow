@@ -2008,7 +2008,7 @@ def _write_destination_database(
             raise ValueError(
                 "SFTP destination requires a remote file path (connection_string, database, or table field)"
             )
-        result = write_mapped_rows(**common)
+        result = write_mapped_rows(**common, conflict_columns=conflict_columns or [])
         if not result.ok:
             raise_writer_failure(result, "SFTP write failed")
         ddl_log.insert(0, f"PUT sftp://{cfg.get('host', '')}/{result.table_name}")

@@ -13,6 +13,11 @@ from connectors.object_store_common import (
     resolve_object_store_export_format,
     resolve_object_store_write_dest_types,
 )
+from connectors.object_store_incremental import (
+    ObjectMergeRefused,
+    incremental_merge_strategy,
+    prepare_incremental_export,
+)
 from connectors.object_store_materialize import (
     materialize_object_store_export,
     resolve_materialize_batch,
@@ -170,6 +175,9 @@ def write_mapped_rows(
             error=cov_err,
         )
     policy = transform_error_policy(_kwargs.get("error_policy"))
+    sync_mode = str(_kwargs.pop("sync_mode", "") or "")
+    protect_landed = bool(_kwargs.pop("protect_landed_object", False))
+    conflict_columns = list(_kwargs.pop("conflict_columns", None) or [])
     directory, filename = split_remote_path(cfg.path)
     fmt = resolve_object_store_export_format(filename)
     if fmt is None:
@@ -263,6 +271,62 @@ def write_mapped_rows(
                             sftp.stat(current)
                         except Exception:
                             sftp.mkdir(current)
+            strategy = incremental_merge_strategy(
+                sync_mode, total_chunks=1, protect_landed=protect_landed
+            )
+            if strategy:
+                try:
+                    sftp.stat(cfg.path)
+                    present = True
+                except FileNotFoundError:
+                    present = False
+                except OSError as exc:
+                    if getattr(exc, "errno", None) in {2, None} and "no such" in str(exc).lower():
+                        present = False
+                    else:
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=filename,
+                            target_schema=cfg.host,
+                            checksum="",
+                            chunks_completed=0,
+                            error=(
+                                f"SFTP object {cfg.path!r} could not be read for "
+                                f"incremental merge; it was not replaced. {exc}"
+                            ),
+                            rejected_details=list(rejected_details),
+                        )
+                if present:
+                    def _read_remote() -> bytes:
+                        with sftp.file(cfg.path, "rb") as remote:
+                            return remote.read()
+
+                    try:
+                        export = prepare_incremental_export(
+                            key=serialize_key,
+                            export=export,
+                            fetch=_read_remote,
+                            sync_mode=sync_mode,
+                            total_chunks=1,
+                            protect_landed=protect_landed,
+                            created_here=False,
+                            target_cols=target_cols,
+                            dest_types=dest_types,
+                            conflict_columns=conflict_columns,
+                            spill_max_size=spill_max,
+                        )
+                    except ObjectMergeRefused as exc:
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=filename,
+                            target_schema=cfg.host,
+                            checksum="",
+                            chunks_completed=0,
+                            error=str(exc),
+                            rejected_details=list(rejected_details),
+                        )
             # Atomic replace: write temp then rename so consumers never see a
             # truncated artifact after a mid-upload disconnect.
             temp_path = f"{cfg.path}.dataflow-{uuid.uuid4().hex}.tmp"
