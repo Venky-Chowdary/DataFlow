@@ -79,6 +79,36 @@ def read_object(
     )
 
 
+def _resolved_stat_path(sftp: Any, path: str) -> str:
+    """Concrete remote path for a cache stat.
+
+    ``big_*.csv`` is not a file. ``stat`` on the glob always fails, so every
+    page downloads the object again. Resolve the same first match the
+    download uses, without hashing the bytes.
+    """
+    from services.file_pickup import is_file_pattern, matches_pattern
+
+    if not path or not is_file_pattern(path):
+        return path
+    directory, _filename = split_remote_path(path)
+    listing = directory or "."
+    try:
+        entries = sftp.listdir_attr(listing)
+    except Exception:
+        return path
+    for entry in entries:
+        name = str(getattr(entry, "filename", "") or "")
+        if not name or name.startswith("."):
+            continue
+        mode = int(getattr(entry, "st_mode", 0) or 0)
+        if mode and stat.S_ISDIR(mode):
+            continue
+        full = f"{listing.rstrip('/')}/{name}" if listing not in {"", ".", "/"} else name
+        if matches_pattern(name, path) or matches_pattern(full, path):
+            return full
+    return path
+
+
 def _remote_stat(sftp_cfg: Any) -> tuple[int, int] | None:
     """Size and mtime for the cache key. ``None`` when the stat call fails."""
     if not getattr(sftp_cfg, "path", ""):
@@ -87,7 +117,7 @@ def _remote_stat(sftp_cfg: Any) -> tuple[int, int] | None:
     sftp = None
     try:
         transport, sftp = connect_sftp(sftp_cfg)
-        st = sftp.stat(sftp_cfg.path)
+        st = sftp.stat(_resolved_stat_path(sftp, sftp_cfg.path))
         return int(getattr(st, "st_size", 0) or 0), int(getattr(st, "st_mtime", 0) or 0)
     except Exception:
         return None
