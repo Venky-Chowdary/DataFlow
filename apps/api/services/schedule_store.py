@@ -1637,6 +1637,10 @@ def delete_schedule(schedule_id: str) -> bool:
 # worker, not a long migration. Checkpoints rewrite ``updated_at``. Leaving
 # the claim held froze ``next_run_at`` in the past with no error.
 _RUNNING_SILENCE = timedelta(minutes=15)
+# A worker heartbeat older than this, with no live lease, is a crashed run.
+# A document that has no heartbeat yet stays on the updated_at rule: absence
+# is not proof the worker died.
+_HEARTBEAT_STALE = timedelta(seconds=90)
 
 
 def _job_is_live(job_id: str) -> bool | None:
@@ -1656,12 +1660,14 @@ def _job_is_live(job_id: str) -> bool | None:
         return False
     status = str(job.get("status") or "").strip().lower()
     if status == "running":
-        stamp = (
-            job.get("updated_at")
-            or job.get("heartbeat_at")
-            or job.get("last_progress_at")
-        )
-        seen = _parse_ts(stamp) if stamp else None
+        heartbeat = job.get("heartbeat_at") or job.get("last_progress_at")
+        if heartbeat:
+            seen = _parse_ts(heartbeat)
+            if seen is None or datetime.now(timezone.utc) - seen > _HEARTBEAT_STALE:
+                return _job_lease_held(job_id)
+            return True
+        updated = job.get("updated_at")
+        seen = _parse_ts(updated) if updated else None
         if seen is not None and datetime.now(timezone.utc) - seen > _RUNNING_SILENCE:
             # A silent document is not proof of a dead worker: one long batch
             # writes no checkpoint. The worker lease is the owner signal the

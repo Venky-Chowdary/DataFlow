@@ -27,6 +27,80 @@ _OFFSET_PAGEABLE = frozenset({
 })
 
 
+def _peek_each_file(
+    source: EndpointConfig,
+    *,
+    src_type: str,
+    src_cfg: dict[str, Any],
+    table: str,
+    src_db: str,
+    sdk_state: str | None,
+):
+    """Peek each new file in name order and tag rows with ``_df_file``.
+
+    A glob validated as one batch treats a key shared by two files as a
+    duplicate. Files are applied in that same order, so the key is last-wins
+    and must not block. Returns None when the source is not a multi-file pattern.
+    """
+    if src_type not in {"sftp", "s3", "gcs", "adls"}:
+        return None
+    try:
+        from services.file_pickup import is_file_pattern, list_remote_files, ordered_files
+    except Exception:
+        return None
+    if not is_file_pattern(table):
+        return None
+    try:
+        listed = ordered_files(
+            list_remote_files(src_type, src_cfg, str(source.database or src_db or ""), table)
+        )
+    except Exception:
+        return None
+    if len(listed) < 2:
+        return None
+    from .stream import CHUNK_SIZE, _read_batch, _unwrap_read
+
+    columns: list[str] | None = None
+    schema: dict[str, str] | None = None
+    sample_rows: list[dict[str, Any]] = []
+    total = 0
+    probe = None
+    for item in listed:
+        try:
+            probe, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    item.name,
+                    None,
+                    0,
+                    CHUNK_SIZE,
+                    database=src_db,
+                    sdk_state=sdk_state,
+                )
+            )
+        except Exception:
+            return None
+        if columns is None:
+            columns = list(probe.headers or [])
+            probe_meta = getattr(probe, "meta", None) or {}
+            native = probe_meta.get("native_types") or probe_meta.get("schema") or {}
+            if isinstance(native, dict) and native:
+                schema = {col: str(native.get(col) or "string") for col in columns}
+            else:
+                schema = {col: "string" for col in columns}
+        total += int(probe.total_rows or len(probe.rows or []) or 0)
+        for raw in probe.rows or []:
+            if len(sample_rows) >= 100:
+                break
+            record = dict(zip(probe.headers, raw))
+            record["_df_file"] = item.name
+            sample_rows.append(record)
+    if not columns:
+        return None
+    return columns, schema or {col: "string" for col in columns}, total, sample_rows, probe
+
+
 def peek_stream_source(
     source: EndpointConfig,
     *,
@@ -45,6 +119,19 @@ def peek_stream_source(
         raise ValueError("Source table/collection name required for streaming transfer")
 
     src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
+
+    multi = _peek_each_file(
+        source,
+        src_type=src_type,
+        src_cfg=src_cfg,
+        table=table,
+        src_db=src_db,
+        sdk_state=sdk_state,
+    )
+    if multi is not None:
+        columns, schema, total_rows, sample_rows, probe = multi
+        result = (columns, schema, total_rows, sample_rows)
+        return (*result, probe) if include_batch else result
 
     probe, _ = _unwrap_read(
         _read_batch(

@@ -46,11 +46,18 @@ def read_object(
     remote_name = filename or key or sftp_cfg.path
 
     cache_key = f"sftp:{sftp_cfg.host}:{sftp_cfg.port}:{sftp_cfg.path}"
-    # SFTP has no ETag in the common path — force refresh to avoid stale spill TTL.
+    # SFTP has no ETag. Stat size and mtime once per page so a fresh spill is
+    # reused; a changed file still downloads. A failed stat keeps a forced fetch.
+    identity = _remote_stat(sftp_cfg)
+    force = True
+    if identity is not None:
+        size, mtime = identity
+        cache_key = f"{cache_key}:{size}:{mtime}"
+        force = False
     path = download_object(
         cache_key,
         lambda p: download_for_object_store("sftp", p, cfg, bucket, key),
-        force=True,
+        force=force,
     )
     headers, rows, total = read_rows_from_spill(
         path,
@@ -70,6 +77,31 @@ def read_object(
         # over SFTP — the object-store defect, one transport later.
         meta=sampled_native_types_meta(headers, rows),
     )
+
+
+def _remote_stat(sftp_cfg: Any) -> tuple[int, int] | None:
+    """Size and mtime for the cache key. ``None`` when the stat call fails."""
+    if not getattr(sftp_cfg, "path", ""):
+        return None
+    transport = None
+    sftp = None
+    try:
+        transport, sftp = connect_sftp(sftp_cfg)
+        st = sftp.stat(sftp_cfg.path)
+        return int(getattr(st, "st_size", 0) or 0), int(getattr(st, "st_mtime", 0) or 0)
+    except Exception:
+        return None
+    finally:
+        if sftp is not None:
+            try:
+                sftp.close()
+            except Exception:
+                pass
+        if transport is not None:
+            try:
+                transport.close()
+            except Exception:
+                pass
 
 
 def _remote_sha256(sftp: Any, path: str) -> str:
