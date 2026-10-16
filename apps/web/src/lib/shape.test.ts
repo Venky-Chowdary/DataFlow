@@ -16,6 +16,7 @@ import {
   canvasValidationIssues,
   previewErrorForSteps,
   previewSampleNote,
+  sourceColumnsBeside,
   unknownExpressionColumn,
   continueTransformState,
   preloadTransformRefused,
@@ -340,6 +341,25 @@ test("CDC with a recipe cannot continue — history was not written by this reci
       syncMode: "cdc",
     }).enabled,
     true,
+  );
+});
+
+test("a renamed column still has a source column beside it", () => {
+  const steps: ShapeStepWire[] = [
+    { op: "rename_column", column: "customer_email", options: { to: "email" } },
+    { op: "drop_column", column: "status" },
+  ];
+  assert.deepEqual(
+    sourceColumnsBeside(
+      ["order_id", "customer_email", "status"],
+      ["email"],
+      steps,
+    ),
+    ["customer_email"],
+  );
+  assert.deepEqual(
+    sourceColumnsBeside(["order_id", "customer_email"], ["order_id", "email"], steps),
+    ["order_id", "customer_email"],
   );
 });
 

@@ -10467,6 +10467,13 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important;
 }
 
+/* Transform's sticky footer is taller than the shared 60px clearance, and a
+   success toast was painting over Review result and the sample. */
+body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
+  bottom: calc(104px + env(safe-area-inset-bottom, 0px)) !important;
+  max-height: min(240px, 32vh);
+}
+
 /* Compact Map callouts so the mapping table keeps viewport height */
 .df2-map-step-panel .df2-map-health-banner,
 .df2-map-editor-pane .df2-map-health-banner,

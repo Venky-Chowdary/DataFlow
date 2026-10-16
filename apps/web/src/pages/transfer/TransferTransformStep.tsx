@@ -9,6 +9,8 @@ import { TransferTransformCanvas } from "../../components/transfer/TransferTrans
 import { StudioFlagBanner } from "../../components/transfer/StudioFlagBanner";
 import { RulesImportCard, SuggestionsCard } from "../../components/transfer/TransformPrepCards";
 import { BusinessRuleLedger } from "../../components/transfer/BusinessRuleLedger";
+import { ButtonGroup } from "../../components/ui/ButtonGroup";
+import { useToast } from "../../components/Toast";
 import { Dialog } from "../../components/ui/Dialog";
 import { fetchShapeCatalog, importBusinessRules, previewShapeRecipe, profileShapeSource } from "../../lib/api";
 import type { RuleCompileReport } from "../../lib/businessRules";
@@ -27,6 +29,7 @@ import {
   canvasValidationIssues,
   previewErrorForSteps,
   previewSampleNote,
+  sourceColumnsBeside,
   samplePopulationBanner,
   recipePayload,
   stampStepSourceTable,
@@ -155,6 +158,19 @@ export function TransferTransformStep({
   onCollapse,
 }: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
+  const { dismissMatching } = useToast();
+  useEffect(() => {
+    // These confirm earlier steps. A late route analysis can toast after this
+    // step has mounted, so clear again once that response lands.
+    const clear = () => {
+      dismissMatching("Route ready");
+      dismissMatching("Source profiled");
+      dismissMatching("Dev preview workspace");
+    };
+    clear();
+    const timer = window.setTimeout(clear, 700);
+    return () => window.clearTimeout(timer);
+  }, [dismissMatching]);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
   const [catalogError, setCatalogError] = useState("");
   const [profile, setProfile] = useState<ShapeProfileResponse | null>(null);
@@ -165,7 +181,7 @@ export function TransferTransformStep({
   const [busy, setBusy] = useState(false);
   const [guideOpen, setGuideOpen] = useState(false);
   const [pane, setPane] = useState<"prepare" | "result">("prepare");
-  const [showEveryResultColumn, setShowEveryResultColumn] = useState(false);
+  const [showEveryResultColumn, setShowEveryResultColumn] = useState(true);
   const [showAllColumns, setShowAllColumns] = useState(false);
   const [selectedColumn, setSelectedColumn] = useState("");
   const [showBuilder, setShowBuilder] = useState(false);
@@ -442,7 +458,7 @@ export function TransferTransformStep({
     : changedColumnNames;
   const sourceResultColumns = showEveryResultColumn
     ? columnsBefore
-    : resultColumns.filter((column) => columnsBefore.includes(column));
+    : sourceColumnsBeside(columnsBefore, resultColumns, steps);
   const resultRefused = Boolean(shownPreviewError || preview?.refusal);
 
   return (
@@ -644,7 +660,7 @@ export function TransferTransformStep({
           allowed={plan.allowed}
         />
       ) : null}
-      <div className={canvasEnabled ? "df2-xform-grid is-canvas" : "df2-xform-grid"}>
+      <div className={canvasEnabled ? "df2-xform-grid is-canvas" : "df2-xform-flow"}>
         {!canvasEnabled && (
           <ClassicColumnLayout
             columns={layoutColumns}
@@ -834,20 +850,20 @@ export function TransferTransformStep({
                           ? "Disabled — excluded from the recipe and its identity."
                           : "Not yet measured."}
                     </p>
-                    <div className="df2-xform-step-controls">
+                    <ButtonGroup label={`Actions for step ${index + 1}`} className="df2-xform-step-controls">
                       <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" disabled={!plan.allowed || index === 0}
                         title="Move earlier" aria-label={`Move step ${index + 1} earlier`}
-                        onClick={() => onChangeSteps(moveStep(steps, index, -1))}>↑</button>
+                        onClick={() => onChangeSteps(moveStep(steps, index, -1))}>Up</button>
                       <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" disabled={!plan.allowed || index === steps.length - 1}
                         title="Move later" aria-label={`Move step ${index + 1} later`}
-                        onClick={() => onChangeSteps(moveStep(steps, index, 1))}>↓</button>
+                        onClick={() => onChangeSteps(moveStep(steps, index, 1))}>Down</button>
                       <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" disabled={!plan.allowed}
                         onClick={() => onChangeSteps(toggleStep(steps, index))}>
                         {disabled ? "Enable" : "Disable"}
                       </button>
                       <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost is-danger" disabled={!plan.allowed}
                         onClick={() => onChangeSteps(removeStep(steps, index))}>Remove</button>
-                    </div>
+                    </ButtonGroup>
                   </li>
                 );
               })}

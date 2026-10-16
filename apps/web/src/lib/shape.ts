@@ -486,6 +486,37 @@ export function linesToList(raw: string): string[] {
 }
 
 /**
+ * Source columns to sit beside the after grid.
+ *
+ * A rename's new name is not on the source row. Pair it back to the column
+ * the step read, so "What changed" cannot render an empty source bar.
+ * When nothing pairs, the whole source row is shown.
+ */
+export function sourceColumnsBeside(
+  before: readonly string[],
+  shownAfter: readonly string[],
+  steps: readonly ShapeStepWire[],
+): string[] {
+  const origin = new Map<string, string>();
+  for (const step of steps) {
+    if (step.enabled === false || step.op !== "rename_column" || !step.column) continue;
+    const to = step.options?.to;
+    if (typeof to === "string" && to) origin.set(to, step.column);
+  }
+  const picked: string[] = [];
+  for (const name of shownAfter) {
+    let source = name;
+    const seen = new Set<string>();
+    while (origin.has(source) && !seen.has(source)) {
+      seen.add(source);
+      source = origin.get(source) ?? source;
+    }
+    if (before.includes(source) && !picked.includes(source)) picked.push(source);
+  }
+  return picked.length > 0 ? picked : before.slice();
+}
+
+/**
  * Caption for the before/after grids. Source-row language is a lie after
  * unnest (2 parents become 3 children) or a filter; name both sides then.
  */
