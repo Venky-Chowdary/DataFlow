@@ -1122,14 +1122,39 @@ test.describe("studio flag opt-in", () => {
 });
 
 test.describe("transfer wizard stepper", () => {
-  const widths = [768, 1280, 1366, 1440, 1920];
+  const widths = [768, 1024, 1280, 1366, 1440, 1920];
 
   async function showStepper(page: Page, canvas: boolean, theme: "light" | "dark"): Promise<void> {
+    await page.unroute("**/api/v1/workspace/settings").catch(() => undefined);
+    await page.route("**/api/v1/workspace/settings", async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          org_name: "Datawrap",
+          timezone: "UTC",
+          retention_days: 90,
+          studio_schema_browser: canvas,
+          studio_canvas: canvas,
+        }),
+      });
+    });
     await page.goto("/#/transfer");
     await page.evaluate(({ canvasOn, themeName }) => {
-      if (canvasOn) localStorage.setItem("df.studioCanvas", "1");
-      else localStorage.removeItem("df.studioCanvas");
+      if (canvasOn) {
+        localStorage.setItem("df.studioCanvas", "1");
+        localStorage.setItem("df.studioSchemaBrowser", "1");
+      } else {
+        localStorage.removeItem("df.studioCanvas");
+        localStorage.removeItem("df.studioSchemaBrowser");
+      }
       localStorage.setItem("df2.theme", themeName);
+      document.documentElement.setAttribute("data-theme", themeName);
+      document.documentElement.classList.toggle("df2-theme-dark", themeName === "dark");
     }, { canvasOn: canvas, themeName: theme });
     await page.reload();
     const preview = page.locator("button", { hasText: "Preview workspace (UI only)" });
@@ -1139,9 +1164,10 @@ test.describe("transfer wizard stepper", () => {
       await preview.evaluate((node: HTMLButtonElement) => node.click());
     }
     await expect(marker).toBeVisible();
+    await expect(page.locator(".df2-wizard-step")).toHaveCount(canvas ? 3 : 6);
   }
 
-  test("stepper connectors meet markers with equal spacing", async ({ page }) => {
+  test("step icons sit beside their labels and separators stay clear", async ({ page }) => {
     for (const canvas of [false, true]) {
       for (const theme of ["light", "dark"] as const) {
         await showStepper(page, canvas, theme);
@@ -1154,54 +1180,137 @@ test.describe("transfer wizard stepper", () => {
         }
         for (const width of widths) {
           await page.setViewportSize({ width, height: width === 1920 ? 1080 : 900 });
+          const where = `${canvas ? "flags" : "classic"} ${theme} ${width}`;
           const report = await page.evaluate(() => {
             const visible = (node: Element) => {
-              const box = node.getBoundingClientRect();
-              return box.width > 0 && box.height > 0;
-            };
-            const nums = [...document.querySelectorAll(".df2-wizard-num")].filter(visible);
-            const lines = [...document.querySelectorAll(".df2-wizard-line")].filter(visible);
-            const labels = [...document.querySelectorAll(".df2-wizard-label, .df2-wizard-label-short")].filter((node) => {
               const style = getComputedStyle(node);
-              return style.display !== "none" && style.visibility !== "hidden" && visible(node);
-            });
+              const box = node.getBoundingClientRect();
+              return style.display !== "none" && style.visibility !== "hidden" && box.width > 1 && box.height > 1;
+            };
+            const overlaps = (a: DOMRect, b: DOMRect) =>
+              a.left < b.right - 0.5 && a.right > b.left + 0.5 && a.top < b.bottom - 0.5 && a.bottom > b.top + 0.5;
+            const steps = [...document.querySelectorAll(".df2-wizard-step")].filter(visible);
+            const lines = [...document.querySelectorAll(".df2-wizard-line")].filter(visible);
             const probe = document.createElement("div");
             probe.style.background = "var(--df-border)";
             document.body.appendChild(probe);
             const border = getComputedStyle(probe).backgroundColor;
             probe.remove();
-            const overlaps = (a: DOMRect, b: DOMRect) =>
-              a.left < b.right - 0.5 && a.right > b.left + 0.5 && a.top < b.bottom - 0.5 && a.bottom > b.top + 0.5;
-            const centers = nums.map((node) => {
-              const box = node.getBoundingClientRect();
-              return box.left + box.width / 2;
-            });
-            const spacing = centers.slice(1).map((center, index) => center - centers[index]);
-            const joins = lines.map((line, index) => {
-              const box = line.getBoundingClientRect();
-              const left = nums[index].getBoundingClientRect();
-              const right = nums[index + 1].getBoundingClientRect();
+            const parseColor = (color: string) => {
+              const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/);
+              if (!match) return null;
               return {
-                startGap: box.left - left.right,
-                endGap: right.left - box.right,
-                color: getComputedStyle(line).backgroundColor,
-                done: line.classList.contains("done"),
+                r: Number(match[1]),
+                g: Number(match[2]),
+                b: Number(match[3]),
+                a: match[4] === undefined ? 1 : Number(match[4]),
               };
+            };
+            const composite = (
+              fg: { r: number; g: number; b: number; a: number },
+              bg: { r: number; g: number; b: number; a: number },
+            ) => ({
+              r: Math.round(fg.r * fg.a + bg.r * (1 - fg.a)),
+              g: Math.round(fg.g * fg.a + bg.g * (1 - fg.a)),
+              b: Math.round(fg.b * fg.a + bg.b * (1 - fg.a)),
+              a: 1,
             });
-            const labelHits = labels.filter((label) => lines.some((line) => overlaps(label.getBoundingClientRect(), line.getBoundingClientRect()))).length;
-            return { steps: nums.length, lines: lines.length, spacing, joins, labelHits, border };
+            const backdrop = (node: Element) => {
+              const layers: { r: number; g: number; b: number; a: number }[] = [];
+              let current: Element | null = node;
+              while (current) {
+                const parsed = parseColor(getComputedStyle(current).backgroundColor);
+                if (parsed && parsed.a > 0) layers.push(parsed);
+                if (parsed && parsed.a >= 1) break;
+                current = current.parentElement;
+              }
+              let acc = layers.length ? layers[layers.length - 1] : { r: 255, g: 255, b: 255, a: 1 };
+              for (let i = layers.length - 2; i >= 0; i -= 1) acc = composite(layers[i], acc);
+              return `rgb(${acc.r}, ${acc.g}, ${acc.b})`;
+            };
+            const track = document.querySelector(".df2-wizard-track");
+            const chromeEl = document.querySelector(".df2-transfer-studio-chrome");
+            const chromeBox = chromeEl?.getBoundingClientRect();
+            const pairs = steps.map((step, index) => {
+              const icon = step.querySelector(".df2-wizard-num");
+              const label = [...step.querySelectorAll(".df2-wizard-label, .df2-wizard-label-short")].find(visible);
+              if (!icon || !label) return null;
+              const iconBox = icon.getBoundingClientRect();
+              const labelBox = label.getBoundingClientRect();
+              const line = lines[index];
+              const lineBox = line ? line.getBoundingClientRect() : null;
+              const nextIcon = steps[index + 1]?.querySelector(".df2-wizard-num")?.getBoundingClientRect();
+              const style = getComputedStyle(label);
+              const range = document.createRange();
+              range.selectNodeContents(label);
+              const textWidth = range.getBoundingClientRect().width;
+              return {
+                text: (label.textContent || "").trim(),
+                iconHitsLabel: overlaps(iconBox, labelBox),
+                gap: labelBox.left - iconBox.right,
+                align: (labelBox.top + labelBox.height / 2) - (iconBox.top + iconBox.height / 2),
+                lineHits: lineBox ? overlaps(lineBox, labelBox) || overlaps(lineBox, iconBox) : false,
+                lineGap: lineBox ? lineBox.left - labelBox.right : null,
+                nextGap: lineBox && nextIcon ? nextIcon.left - lineBox.right : null,
+                lineMid: lineBox ? lineBox.top + lineBox.height / 2 : null,
+                iconMid: iconBox.top + iconBox.height / 2,
+                color: line ? getComputedStyle(line).backgroundColor : "",
+                done: line ? line.classList.contains("done") : false,
+                position: style.position,
+                ink: style.color,
+                weight: style.fontWeight,
+                backdrop: backdrop(label),
+                active: step.classList.contains("active"),
+                textWidth,
+                labelWidth: labelBox.width,
+                clipped: textWidth > labelBox.width + 1,
+                pastChrome: chromeBox ? labelBox.right > chromeBox.right + 1 : false,
+              };
+            }).filter((pair) => pair !== null);
+            const chrome = chromeBox?.height ?? 0;
+            const trackOverflow = track
+              ? track.scrollWidth > track.clientWidth + 1
+              : false;
+            return { steps: steps.length, lines: lines.length, pairs, border, chrome, trackOverflow };
           });
-          expect(report.steps, `${canvas ? "connect" : "classic"} ${theme} ${width}`).toBeGreaterThan(1);
-          expect(report.lines).toBe(report.steps - 1);
-          const span = Math.max(...report.spacing) - Math.min(...report.spacing);
-          expect(span).toBeLessThanOrEqual(1);
-          for (const join of report.joins) {
-            expect(Math.abs(join.startGap)).toBeLessThanOrEqual(1);
-            expect(Math.abs(join.endGap)).toBeLessThanOrEqual(1);
-            if (join.done) expect(join.color).toBe("rgb(15, 118, 110)");
-            else expect(join.color).toBe(report.border);
+          expect(report.steps, where).toBe(canvas ? 3 : 6);
+          expect(report.lines, where).toBe(report.steps - 1);
+          // Classic chrome stays 54px through 1440 (58px at 1920, where the
+          // full names and the larger marker already sat before this fix).
+          // Flags-on chrome is the 44px studio shell and must not grow.
+          expect(report.chrome, where).toBe(canvas ? 44 : width >= 1920 ? 58 : 54);
+          for (const pair of report.pairs) {
+            expect(pair.iconHitsLabel, `${where} ${pair.text}`).toBe(false);
+            expect(pair.position, `${where} ${pair.text}`).toBe("static");
+            expect(pair.gap, `${where} ${pair.text}`).toBeGreaterThanOrEqual(5);
+            expect(pair.gap, `${where} ${pair.text}`).toBeLessThanOrEqual(7);
+            expect(Math.abs(pair.align), `${where} ${pair.text}`).toBeLessThanOrEqual(1);
+            expect(pair.lineHits, `${where} ${pair.text}`).toBe(false);
+            if (pair.lineGap != null) expect(pair.lineGap, `${where} ${pair.text}`).toBeGreaterThanOrEqual(8);
+            if (pair.nextGap != null) expect(pair.nextGap, `${where} ${pair.text}`).toBeGreaterThanOrEqual(8);
+            if (pair.lineMid != null) expect(Math.abs(pair.lineMid - pair.iconMid), `${where} ${pair.text}`).toBeLessThanOrEqual(1);
+            if (pair.done) expect(pair.color, where).toBe("rgb(15, 118, 110)");
+            else if (pair.color) expect(pair.color, where).toBe(report.border);
           }
-          expect(report.labelHits).toBe(0);
+          const lineGaps = report.pairs.map((pair) => pair.lineGap).filter((gap) => gap != null);
+          const spread = Math.max(...lineGaps) - Math.min(...lineGaps);
+          expect(spread, where).toBeLessThanOrEqual(1);
+          expect(report.trackOverflow, where).toBe(false);
+          const fullNames = canvas
+            ? ["Connect", "Review", "Run"]
+            : ["Source", "Destination", "Transform", "Map", "Validate", "Run"];
+          expect(report.pairs.map((pair) => pair.text), where).toEqual(fullNames);
+          const active = report.pairs.find((pair) => pair.active);
+          const inactive = report.pairs.find((pair) => !pair.active);
+          expect(active, where).toBeTruthy();
+          expect(inactive, where).toBeTruthy();
+          expect(Number(active?.weight), where).toBeGreaterThan(Number(inactive?.weight));
+          expect(active?.ink, where).not.toBe(inactive?.ink);
+          for (const pair of report.pairs) {
+            expect(pair.clipped, `${where} ${pair.text} text ${pair.textWidth} box ${pair.labelWidth}`).toBe(false);
+            expect(pair.pastChrome, `${where} ${pair.text}`).toBe(false);
+            expect(contrast(pair.ink, pair.backdrop), `${where} ${pair.text} ${pair.ink} on ${pair.backdrop}`).toBeGreaterThanOrEqual(4.5);
+          }
         }
       }
     }
