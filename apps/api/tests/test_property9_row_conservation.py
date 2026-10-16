@@ -472,7 +472,11 @@ def _upsert_contracts(name: str) -> list[dict]:
 
 
 def test_sqlite_upsert_updates_do_not_change_dest_count(tmp_path: Path):
-    """Dest-engine proof: 3 updates + 1 insert → COUNT(*) delta 1, writer ack 4."""
+    """Dest-engine proof: 3 updates + 1 insert. COUNT(*) delta stays 1.
+
+    rows_written is the rows inserted or updated (4). Conservation still
+    closes on dest_delta, not on the writer acknowledgement.
+    """
     src_path = tmp_path / "p9_up_src.db"
     dst_path = tmp_path / "p9_up_dst.db"
     src = sqlite3.connect(str(src_path))
@@ -544,7 +548,7 @@ def test_sqlite_upsert_updates_do_not_change_dest_count(tmp_path: Path):
     assert ledger["inserts"] == 1, ledger
     assert ledger["updates"] == 3, ledger
     assert ledger["dest_delta"] == 1, ledger
-    assert ledger["rows_written"] == 1, ledger
+    assert ledger["rows_written"] == 4, ledger
     assert ledger["balanced"] is True, ledger
     assert ledger["writer_ack"] == 10_000
     census = (result.destination_summary or {}).get("keyed_census") or {}
@@ -667,7 +671,7 @@ def test_pg_to_mariadb_upsert_updates_do_not_change_dest_count():
         assert ledger["inserts"] == 1, ledger
         assert ledger["updates"] == 3, ledger
         assert ledger["dest_delta"] == 1, ledger
-        assert ledger["rows_written"] == 1, ledger
+        assert ledger["rows_written"] == 4, ledger
         assert ledger["balanced"] is True, ledger
         census = (result.destination_summary or {}).get("keyed_census") or {}
         assert int(census.get("dest_preexisting") or -1) == 3, census
