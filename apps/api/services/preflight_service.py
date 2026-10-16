@@ -675,6 +675,20 @@ def _plan_in_file_dedupe(source_config: dict[str, Any] | None) -> str:
     return "keep_last" if token == "keep_last" else "block"
 
 
+def _plan_duplicate_policy(*configs: Mapping[str, Any] | None) -> str:
+    """upsert / dedupe_skip / append from the source or destination the schedule stamped."""
+    from services.duplicate_policy import normalize_duplicate_policy
+
+    for cfg in configs:
+        if not isinstance(cfg, Mapping):
+            continue
+        extra = cfg.get("extra") if isinstance(cfg.get("extra"), Mapping) else {}
+        raw = str(cfg.get("duplicate_policy") or extra.get("duplicate_policy") or "")
+        if raw.strip():
+            return normalize_duplicate_policy(raw)
+    return ""
+
+
 @_with_date_locale
 @_with_source_engine
 def run_file_preflight(
@@ -1493,6 +1507,7 @@ def run_file_preflight(
         fk_risk_acknowledged=bool(fk_risk_acknowledged),
         stream_contracts=list(stream_contracts or []),
         in_file_dedupe=_plan_in_file_dedupe(source_config),
+        duplicate_policy=_plan_duplicate_policy(source_config, destination_config),
     )
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large

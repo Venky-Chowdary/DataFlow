@@ -585,6 +585,42 @@ def run_expectation_suite(
     }
 
 
+def _rows_collapsed_for_dedupe(
+    rows: list[dict[str, Any]],
+    key_columns: list[str],
+    in_file_dedupe: str,
+) -> list[dict[str, Any]]:
+    """Apply keep-last before a unique expectation, per file when tagged.
+
+    The writer collapses after Validate. Scoring ``order_id unique`` on the
+    raw sample blocks a load the write would have reduced to one row per key.
+    """
+    if str(in_file_dedupe or "").strip().lower().replace("-", "_") != "keep_last":
+        return rows
+    keys = [str(col).strip() for col in key_columns if str(col or "").strip()]
+    if not keys:
+        return rows
+    from services.duplicate_policy import collapse_keep_last
+
+    tagged = any(isinstance(row, dict) and "_df_file" in row for row in rows)
+    if not tagged:
+        kept, _dropped = collapse_keep_last(list(rows), keys)
+        return kept
+    groups: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for row in rows:
+        tag = str(row.get("_df_file") or "") if isinstance(row, dict) else ""
+        if tag not in groups:
+            order.append(tag)
+            groups[tag] = []
+        groups[tag].append(row)
+    collapsed: list[dict[str, Any]] = []
+    for tag in order:
+        kept, _dropped = collapse_keep_last(groups[tag], keys)
+        collapsed.extend(kept)
+    return collapsed
+
+
 def run_auto_expectations(
     rows: list[dict[str, Any]],
     columns: list[str],
@@ -596,8 +632,13 @@ def run_auto_expectations(
     dest_kind: str = "",
     validation_mode: str = "strict",
     sync_mode: str = "",
+    in_file_dedupe: str = "",
 ) -> dict[str, Any]:
     """Infer + run standard expectations for a dataset."""
+    identity = [str(c).strip() for c in (primary_key_columns or []) if str(c or "").strip()]
+    if not identity and primary_key:
+        identity = [primary_key]
+    rows = _rows_collapsed_for_dedupe(rows, identity, in_file_dedupe)
     specs = infer_expectations_for_schema(
         columns,
         schema,

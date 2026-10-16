@@ -1097,6 +1097,7 @@ def _check_duplicate_keys(
     source_duplicate_probe_expected: bool = False,
     identity_declared: bool | None = None,
     in_file_dedupe: str = "",
+    duplicate_policy: str = "",
 ) -> dict[str, Any]:
     """Duplicate check on the resolved identity key (sample + source-side probe).
 
@@ -1174,10 +1175,15 @@ def _check_duplicate_keys(
         identity_declared = dest_has_enforced_key
     # A declared identity that repeats in the source cannot become the recreated
     # table's key, so overwrite blocks. An inferred key on a heap only warns.
+    # Explicit append is the operator saying duplicate keys are the load.
+    from services.duplicate_policy import normalize_duplicate_policy
+
+    append_allows_duplicates = normalize_duplicate_policy(duplicate_policy) == "append"
     overwrite_enforces_uniqueness = (
         _is_overwrite_like(sync)
         and bool(identity_cols)
         and bool(identity_declared or dest_has_enforced_key)
+        and not append_allows_duplicates
     )
     # Single-column identity enforcement (upsert/CDC/PK/single UNIQUE).
     enforce_identity = bool(identity_cols) and (
@@ -1533,6 +1539,21 @@ def _check_duplicate_keys(
             "primary_key": primary_key,
             "dest_kind": dest_kind,
         }
+    if blocks and append_allows_duplicates:
+        # Explicit append on overwrite reloads every source row. A repeated
+        # key is the data, including when the full-table probe found it.
+        return {
+            "check": "duplicate_keys",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": (advisory_warnings + issues)[:15],
+            "primary_key": primary_key,
+            "dest_kind": dest_kind,
+            "note": (
+                "Append keeps every source row, including repeated identity keys."
+            ),
+        }
     return {
         "check": "duplicate_keys",
         "passed": not blocks,
@@ -1764,6 +1785,7 @@ def run_integrity_audit(
     stream_contracts: list[dict] | None = None,
     proven_width_narrowings: dict | None = None,
     in_file_dedupe: str = "",
+    duplicate_policy: str = "",
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1925,6 +1947,7 @@ def run_integrity_audit(
                 source_duplicate_probe_message=source_duplicate_probe_message,
                 source_duplicate_probe_expected=source_duplicate_probe_expected,
                 in_file_dedupe=in_file_dedupe,
+                duplicate_policy=duplicate_policy,
             )
         )
         checks.append(
@@ -1968,6 +1991,7 @@ def run_integrity_audit(
             dest_kind=dest_kind,
             validation_mode=validation_mode,
             sync_mode=sync_mode,
+            in_file_dedupe=in_file_dedupe,
         )
         if file_row_quarantine:
             exp = _demote_mixed_file_numeric_expectations(exp, rows, mappings)

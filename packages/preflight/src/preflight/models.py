@@ -171,6 +171,10 @@ class TransferPlan:
     # In-file duplicate policy. ``keep_last`` collapses the sample before
     # uniqueness gates; ``block`` refuses a repeated key.
     in_file_dedupe: str = "block"
+    # Operator duplicate policy (upsert / dedupe_skip / append). Empty means
+    # the sync mode owns uniqueness. Explicit append allows duplicate keys,
+    # including on full_refresh_overwrite.
+    duplicate_policy: str = ""
     # Native DynamoDB HASH/RANGE and secondary-index scalar constraints.
     destination_dynamo_key_schema: list[dict[str, Any]] = field(default_factory=list)
     destination_dynamo_index_attributes: dict[str, str] = field(default_factory=dict)
