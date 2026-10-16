@@ -1200,9 +1200,9 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
     """Drop a rename-aside backup after success, or put it back after failure.
 
     MySQL and Mongo leave the previous object under ``__df_bak``. A failed
-    load must not leave the live name missing. Relational overwrite empties
-    in place and has no backup — TRUNCATE on MySQL commits, so the previous
-    rows are not restored. The constraints on that table stay.
+    load renames that backup back onto the live name, so a refused overwrite
+    does not publish an empty table. Other relational engines empty in place
+    inside a transaction the writer commits once.
     """
     extra = dict(getattr(destination, "extra", None) or {})
     backup = extra.get("overwrite_backup")

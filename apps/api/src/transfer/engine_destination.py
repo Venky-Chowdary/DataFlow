@@ -353,6 +353,24 @@ def _drop_destination_table(
             extra["pg_overwrite_in_transaction"] = True
             destination.extra = extra
             return True
+        # MySQL TRUNCATE auto-commits. A later refusal used to leave the
+        # live table empty. Rename the prior table aside and let the
+        # failure path put it back; success drops the backup.
+        if db_type in {"mysql", "mariadb"}:
+            from connectors.table_manager import retire_mysql_overwrite
+
+            try:
+                backup, kept = retire_mysql_overwrite(cfg, table_name, mappings)
+            except TableDropError as exc:
+                logger.error("full_refresh mysql retire failed for %s: %s", table_name, exc)
+                raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+            if backup:
+                extra = dict(destination.extra or {})
+                extra["overwrite_backup"] = backup
+                extra["overwrite_backup_engine"] = "mysql"
+                destination.extra = extra
+            _remember_preserved_columns(destination, kept)
+            return True
         try:
             empty_existing_for_overwrite(db_type, cfg, table_name, schema)
         except TableDropError as exc:
