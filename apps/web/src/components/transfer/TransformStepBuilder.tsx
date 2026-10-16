@@ -177,6 +177,11 @@ export function TransformStepBuilder({
           Search the engine vocabulary. The step joins the recipe only when every required
           field is filled and any expression compiles.
         </p>
+        {catalog?.post_load_only?.operations?.length ? (
+          <p className="df2-xform-postload">
+            After the load: {catalog.post_load_only.operations.join(", ")}. {catalog.post_load_only.reason}
+          </p>
+        ) : null}
       </div>
       <div className="df2-xform-builder-row">
         <div className="df2-xform-field-op">
@@ -243,6 +248,9 @@ export function TransformStepBuilder({
             onExpressionChange={(text) => void validateExpression(text)}
             idPrefix="xform-opt"
             blankRequired={blankRequired}
+            conditionBuilder
+            expressionAssist
+            functions={catalog?.functions ?? []}
           />
           <div className="df2-field">
             <label className="df2-label" htmlFor="xform-label">Step name (optional)</label>

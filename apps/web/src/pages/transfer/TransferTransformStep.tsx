@@ -3,6 +3,7 @@ import { DtIcon } from "../../components/DtIcon";
 import { TransformColumnCatalog } from "../../components/transfer/TransformColumnCatalog";
 import { TransformColumnChart } from "../../components/transfer/TransformColumnChart";
 import { TransformGuidePanel } from "../../components/transfer/TransformGuidePanel";
+import { ClassicColumnLayout } from "../../components/transfer/ClassicColumnLayout";
 import { TransformStepBuilder } from "../../components/transfer/TransformStepBuilder";
 import { TransferTransformCanvas } from "../../components/transfer/TransferTransformCanvas";
 import { StudioFlagBanner } from "../../components/transfer/StudioFlagBanner";
@@ -39,6 +40,7 @@ import {
   type ShapeSuggestion,
   type TransformImage,
 } from "../../lib/shape";
+import { columnsEnteringColumnLayout, isColumnLayoutStep } from "../../lib/columnLayout";
 import { columnsNeedingAttention } from "../../lib/transformProfile";
 
 interface TransferTransformStepProps {
@@ -385,6 +387,10 @@ export function TransferTransformStep({
   const afterRows = preview?.after?.slice(0, PREVIEW_ROWS) ?? [];
   const columnsBefore = sourceColumns.length ? sourceColumns : Object.keys(beforeRows[0] ?? {});
   const columnsAfter = shapedColumns.length ? shapedColumns : columnsBefore;
+  const layoutColumns = useMemo(
+    () => columnsEnteringColumnLayout(steps, columnsBefore),
+    [columnsBefore, steps],
+  );
 
   const hasEnabledRecipe = Boolean(recipePayload(steps));
   const kitchen = kitchenCatalogColumns(
@@ -640,6 +646,16 @@ export function TransferTransformStep({
       ) : null}
       <div className={canvasEnabled ? "df2-xform-grid is-canvas" : "df2-xform-grid"}>
         {!canvasEnabled && (
+          <ClassicColumnLayout
+            columns={layoutColumns}
+            steps={steps}
+            canPlan={plan.allowed && !preloadRefused}
+            onApply={(next) => onChangeSteps(next.map((step) => (
+              isColumnLayoutStep(step) ? ownStep(step) : step
+            )))}
+          />
+        )}
+        {!canvasEnabled && (
           <SuggestionsCard
             suggestions={openSuggestions}
             profileReady={Boolean(profile)}
@@ -865,6 +881,106 @@ export function TransferTransformStep({
           )}
         </section>
         )}
+        {!canvasEnabled && (
+          <section className="df2-xform-card df2-xform-preview" aria-labelledby="xform-preview-title">
+            <header className="df2-xform-card-head">
+              <h3 id="xform-preview-title">Sample</h3>
+              <div className="df2-xform-preview-tools">
+                {changedColumnNames.length > 0 ? (
+                  <div className="df2-segment" role="group" aria-label="Sample columns">
+                    <button
+                      type="button"
+                      className={showEveryResultColumn ? "" : "active"}
+                      aria-pressed={!showEveryResultColumn}
+                      onClick={() => setShowEveryResultColumn(false)}
+                    >
+                      What changed
+                    </button>
+                    <button
+                      type="button"
+                      className={showEveryResultColumn ? "active" : ""}
+                      aria-pressed={showEveryResultColumn}
+                      onClick={() => setShowEveryResultColumn(true)}
+                    >
+                      All columns
+                    </button>
+                  </div>
+                ) : null}
+                <span className="df2-xform-note">
+                  {busy
+                    ? "Previewing…"
+                    : previewSampleNote(beforeRows.length, afterRows.length, PREVIEW_ROWS)}
+                </span>
+              </div>
+            </header>
+            <div className="df2-xform-grids">
+              <div className="df2-xform-gridpane">
+                <h4>Source, unchanged</h4>
+                <div className="df2-xform-scroll">
+                  <table className="df2-table df2-table-compact">
+                    <thead>
+                      <tr>{sourceResultColumns.map((column) => <th key={column}>{column}</th>)}</tr>
+                    </thead>
+                    <tbody>
+                      {beforeRows.map((row, index) => (
+                        <tr key={index}>
+                          {sourceResultColumns.map((column) => <td key={column}>{cellText(row[column])}</td>)}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+              <div className="df2-xform-gridpane">
+                <h4>After the recipe</h4>
+                {afterRows.length === 0 ? (
+                  <p className="df2-xform-empty">
+                    {shownPreviewError
+                      ? "The preview did not run. The recipe was refused before any row was removed."
+                      : busy
+                        ? "Checking this recipe against the sample."
+                        : steps.length
+                          ? "No rows survive the recipe on this sample."
+                          : "Nothing transformed yet. The source rows are on the left."}
+                  </p>
+                ) : (
+                  <div className="df2-xform-scroll">
+                    <table className="df2-table df2-table-compact">
+                      <thead>
+                        <tr>{resultColumns.map((column) => <th key={column}>{column}</th>)}</tr>
+                      </thead>
+                      <tbody>
+                        {afterRows.map((row, index) => (
+                          <tr key={index}>
+                            {resultColumns.map((column) => (
+                              <td
+                                key={column}
+                                className={changed.has(`${index}:${column}`) ? "is-xform-changed" : ""}
+                                title={changed.has(`${index}:${column}`) ? "Changed by the recipe" : undefined}
+                              >
+                                {changed.has(`${index}:${column}`) ? <span className="df2-sr-only">changed</span> : null}
+                                {cellText(row[column])}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+            {retyped.length > 0 && (
+              <p className="df2-xform-note df2-xform-retyped">
+                <DtIcon name="info" size={14} />
+                {" "}Map and Validate now read {retyped.length === 1 ? "this column" : "these columns"} as
+                the transform leaves {retyped.length === 1 ? "it" : "them"}:{" "}
+                {retyped.map(([column, carrier]) => `${column} → ${carrier}`).join(", ")}. Columns no step
+                wrote keep their declared source type.
+              </p>
+            )}
+          </section>
+        )}
       {!canvasEnabled && ruleReport ? (
         <BusinessRuleLedger
           report={ruleReport}
@@ -955,104 +1071,9 @@ export function TransferTransformStep({
         </section>
       )}
 
-      <section className="df2-xform-card df2-xform-preview" aria-labelledby="xform-preview-title">
-        <header className="df2-xform-card-head">
-          <h3 id="xform-preview-title">Sample</h3>
-          <div className="df2-xform-preview-tools">
-            {changedColumnNames.length > 0 ? (
-              <div className="df2-segment" role="group" aria-label="Sample columns">
-                <button
-                  type="button"
-                  className={showEveryResultColumn ? "" : "active"}
-                  aria-pressed={!showEveryResultColumn}
-                  onClick={() => setShowEveryResultColumn(false)}
-                >
-                  What changed
-                </button>
-                <button
-                  type="button"
-                  className={showEveryResultColumn ? "active" : ""}
-                  aria-pressed={showEveryResultColumn}
-                  onClick={() => setShowEveryResultColumn(true)}
-                >
-                  All columns
-                </button>
-              </div>
-            ) : null}
-            <span className="df2-xform-note">
-              {busy
-                ? "Previewing…"
-                : previewSampleNote(beforeRows.length, afterRows.length, PREVIEW_ROWS)}
-            </span>
-          </div>
-        </header>
-        <div className="df2-xform-grids">
-          <div className="df2-xform-gridpane">
-            <h4>Source, unchanged</h4>
-            <div className="df2-xform-scroll">
-              <table className="df2-table df2-table-compact">
-                <thead>
-                  <tr>{sourceResultColumns.map((column) => <th key={column}>{column}</th>)}</tr>
-                </thead>
-                <tbody>
-                  {beforeRows.map((row, index) => (
-                    <tr key={index}>
-                      {sourceResultColumns.map((column) => <td key={column}>{cellText(row[column])}</td>)}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-          <div className="df2-xform-gridpane">
-            <h4>After the recipe</h4>
-            {afterRows.length === 0 ? (
-              <p className="df2-xform-empty">
-                {shownPreviewError
-                  ? "The preview did not run. The recipe was refused before any row was removed."
-                  : busy
-                    ? "Checking this recipe against the sample."
-                    : steps.length
-                      ? "No rows survive the recipe on this sample."
-                      : "Nothing transformed yet."}
-              </p>
-            ) : (
-              <div className="df2-xform-scroll">
-                <table className="df2-table df2-table-compact">
-                  <thead>
-                    <tr>{resultColumns.map((column) => <th key={column}>{column}</th>)}</tr>
-                  </thead>
-                  <tbody>
-                    {afterRows.map((row, index) => (
-                      <tr key={index}>
-                        {resultColumns.map((column) => (
-                          <td
-                            key={column}
-                            className={changed.has(`${index}:${column}`) ? "is-xform-changed" : ""}
-                            title={changed.has(`${index}:${column}`) ? "Changed by the recipe" : undefined}
-                          >
-                            {changed.has(`${index}:${column}`) ? <span className="df2-sr-only">changed</span> : null}
-                            {cellText(row[column])}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </div>
-        {retyped.length > 0 && (
-          <p className="df2-xform-note df2-xform-retyped">
-            <DtIcon name="info" size={14} />
-            {" "}Map and Validate now read {retyped.length === 1 ? "this column" : "these columns"} as
-            the transform leaves {retyped.length === 1 ? "it" : "them"}:{" "}
-            {retyped.map(([column, carrier]) => `${column} → ${carrier}`).join(", ")}. Columns no step
-            wrote keep their declared source type.
-          </p>
-        )}
-      </section>
+      <p className="df2-xform-note">
+        Before and after sample rows stay on Rules & transforms, next to the recipe.
+      </p>
 
       </div>
 

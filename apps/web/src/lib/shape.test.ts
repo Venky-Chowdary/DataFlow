@@ -6,6 +6,7 @@ import {
   fieldsFor,
   linesToList,
   draftOptionsForWire,
+  insertExpressionToken,
   isBlankOption,
   missingRequired,
   moveStep,
@@ -102,6 +103,12 @@ test("a step reads as its operation and target until the operator names it", () 
     describeStep({ op: "derive_column", options: { to: "total" } }),
     "derive_column · total",
   );
+});
+
+test("a column token fills the empty call the operator just inserted", () => {
+  assert.equal(insertExpressionToken("upper()", "[email]"), "upper([email])");
+  assert.equal(insertExpressionToken("", "trim()"), "trim()");
+  assert.equal(insertExpressionToken("upper([email])", "trim()"), "upper([email]) trim()");
 });
 
 test("an expression option renders as an expression field, not a text box", () => {

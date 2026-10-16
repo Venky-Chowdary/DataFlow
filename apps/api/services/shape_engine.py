@@ -644,6 +644,9 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
         return _call("to_number", value)
     if op == "parse_date":
         parsed = _call("to_date", value, options.get("format"))
+        zone = options.get("timezone")
+        if parsed is not None and zone:
+            parsed = _with_timezone(parsed, zone)
         output = options.get("output_format")
         if parsed is not None and output:
             return _call("format_date", parsed, output)
@@ -653,12 +656,36 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
     if op == "normalize_unicode":
         return _call("normalize_unicode", value, options.get("form", "NFC"))
     if op == "cast_column":
-        return _cast(value, str(options.get("to_type")), options.get("format"))
+        return _cast(
+            value,
+            str(options.get("to_type")),
+            options.get("format"),
+            precision=options.get("precision"),
+            scale=options.get("scale"),
+            timezone=options.get("timezone"),
+        )
+    if op in ("hash_pii", "mask_pii"):
+        if is_blank(value):
+            return None
+        from services.transform_engine import apply_transform
+
+        digested, err = apply_transform(value, op)
+        if err:
+            raise EvalError(err)
+        return digested
 
     raise ValueError(f"'{op}' has no value implementation")
 
 
-def _cast(value: Any, to_type: str, fmt: Any) -> Any:
+def _cast(
+    value: Any,
+    to_type: str,
+    fmt: Any,
+    *,
+    precision: Any = None,
+    scale: Any = None,
+    timezone: Any = None,
+) -> Any:
     """Declare a value's logical type, so the profiler is told rather than asked.
 
     This is the direct answer to a profiler collapsing `1.50000000` to a
@@ -676,15 +703,73 @@ def _cast(value: Any, to_type: str, fmt: Any) -> Any:
             raise EvalError(f"'{value}' is not a whole number")
         return int(whole)
     if to_type == "decimal":
-        return _call("to_number", value)
+        return _fit_decimal(_call("to_number", value), precision, scale)
     if to_type == "boolean":
         return _call("to_boolean", value)
     if to_type in ("date", "timestamp"):
         parsed = _call("to_date", value, fmt)
         if parsed is None:
             return None
-        return parsed.date() if to_type == "date" else parsed
+        if to_type == "date":
+            return parsed.date()
+        return _with_timezone(parsed, timezone) if timezone else parsed
     raise EvalError(f"'{to_type}' is not a logical type")
+
+
+def _fit_decimal(number: Any, precision: Any, scale: Any) -> Any:
+    """Quantize to the declared scale, then refuse a value that does not fit.
+
+    Half-up is the same rule ``round()`` uses. Integer digits that overflow
+    the precision are not truncated: the row is refused so a NUMBER(5,2)
+    cannot silently become 1000.00.
+    """
+    from decimal import ROUND_HALF_UP
+
+    if not isinstance(number, Decimal):
+        number = Decimal(str(number))
+    if scale not in (None, ""):
+        number = number.quantize(Decimal(1).scaleb(-int(scale)), rounding=ROUND_HALF_UP)
+    if precision in (None, ""):
+        return number
+    width = int(precision)
+    _sign, digits, exponent = number.as_tuple()
+    if not isinstance(exponent, int):
+        raise EvalError(f"'{number}' is not a finite decimal")
+    if digits == (0,):
+        return number
+    scale_digits = -exponent if exponent < 0 else 0
+    int_digits = len(digits) - scale_digits
+    if int_digits < 0:
+        int_digits = 0
+    used = int_digits + scale_digits
+    if used > width:
+        declared = f"precision {width}"
+        if scale not in (None, ""):
+            declared += f", scale {int(scale)}"
+        raise EvalError(f"'{number}' needs {used} digits but the cast allows {declared}")
+    return number
+
+
+def _with_timezone(moment: Any, zone_name: Any) -> Any:
+    """Read a naive clock in the named zone and store the UTC instant.
+
+    A value that already carries an offset keeps that instant. A blank zone
+    never reaches here, so a naive source clock is not shifted by default.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    if moment is None:
+        return None
+    name = str(zone_name or "").strip()
+    try:
+        zone = ZoneInfo(name)
+    except ZoneInfoNotFoundError as exc:
+        raise EvalError(f"'{name}' is not a known time zone") from exc
+    if moment.tzinfo is None:
+        local = moment.replace(tzinfo=zone)
+    else:
+        local = moment.astimezone(zone)
+    return local.astimezone(ZoneInfo("UTC"))
 
 
 def _hash_identity_value(row: Mapping[str, Any], columns: Sequence[str]) -> str:

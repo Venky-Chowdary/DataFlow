@@ -123,7 +123,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         "cast_column",
         "Declare a column's logical type explicitly",
         family="structural",
-        options=("to_type", "format"),
+        options=("to_type", "format", "precision", "scale", "timezone"),
         required=("to_type",),
     ),
     _StepDef(
@@ -198,7 +198,17 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     _StepDef(
         "parse_date",
         "Parse a write-path calendar date, or an explicit format",
-        options=("format", "output_format"),
+        options=("format", "output_format", "timezone"),
+    ),
+    _StepDef(
+        "hash_pii",
+        "Replace a value with an HMAC-SHA256 digest",
+        family="cleanse",
+    ),
+    _StepDef(
+        "mask_pii",
+        "Mask a value in place and keep its shape",
+        family="cleanse",
     ),
     _StepDef(
         "parse_boolean",
@@ -650,6 +660,26 @@ def _normalize_options(
                 f"{', '.join(_CAST_TYPES)}"
             )
         out["to_type"] = to_type
+        precision, scale = _optional_decimal_size(out, where=where)
+        if (precision is not None or scale is not None) and to_type != "decimal":
+            raise ShapeError(f"{where}: precision and scale apply only to a decimal cast")
+        if precision is None:
+            out.pop("precision", None)
+        else:
+            out["precision"] = precision
+        if scale is None:
+            out.pop("scale", None)
+        else:
+            out["scale"] = scale
+        if to_type == "timestamp":
+            _optional_timezone(out, where=where)
+        elif str(out.get("timezone") or "").strip():
+            raise ShapeError(f"{where}: timezone applies only to a timestamp cast")
+        else:
+            out.pop("timezone", None)
+
+    if op == "parse_date":
+        _optional_timezone(out, where=where)
 
     if op == "pad":
         out["width"] = _as_positive_int(out.get("width"), "width", where=where)
@@ -873,6 +903,36 @@ def _valid_name(name: str, *, where: str) -> str:
             "or over 255 characters)"
         )
     return cleaned
+
+
+def _optional_decimal_size(options: dict[str, Any], *, where: str) -> tuple[int | None, int | None]:
+    """Precision is total digits. Scale is digits after the point. Overflow refuses."""
+    raw_precision = options.get("precision")
+    raw_scale = options.get("scale")
+    precision = None if raw_precision in (None, "") else _as_positive_int(raw_precision, "precision", where=where)
+    scale = None if raw_scale in (None, "") else _as_int(raw_scale, "scale", where=where)
+    if precision is not None and precision > 38:
+        raise ShapeError(f"{where}: precision must be at most 38")
+    if scale is not None and (scale < 0 or scale > 38):
+        raise ShapeError(f"{where}: scale must be between 0 and 38")
+    if precision is not None and scale is not None and scale > precision:
+        raise ShapeError(f"{where}: scale {scale} is wider than precision {precision}")
+    return precision, scale
+
+
+def _optional_timezone(options: dict[str, Any], *, where: str) -> None:
+    """A named zone is an explicit reading of a naive clock. Blank keeps the source clock."""
+    zone = str(options.get("timezone") or "").strip()
+    if not zone:
+        options.pop("timezone", None)
+        return
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        ZoneInfo(zone)
+    except ZoneInfoNotFoundError as exc:
+        raise ShapeError(f"{where}: '{zone}' is not a known time zone") from exc
+    options["timezone"] = zone
 
 
 def _as_int(value: Any, field_name: str, *, where: str) -> int:

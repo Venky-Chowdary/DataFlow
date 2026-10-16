@@ -9,6 +9,7 @@ import {
 } from "../../lib/filterCondition";
 import {
   fieldsFor,
+  insertExpressionToken,
   linesToList,
   parseNumberOption,
   type ShapeField,
@@ -27,8 +28,11 @@ interface ShapeStepFieldsProps {
   onExpressionChange: (text: string) => void;
   idPrefix: string;
   blankRequired: Set<string>;
-  /** Field, operator, and value for a filter. The classic builder leaves this off. */
+  /** Field, operator, and value for a filter. Off unless the caller asks. */
   conditionBuilder?: boolean;
+  /** Insert function and column tokens into an expression. Off unless the caller asks. */
+  expressionAssist?: boolean;
+  functions?: { name: string }[];
 }
 
 /**
@@ -47,13 +51,15 @@ export function ShapeStepFields({
   idPrefix,
   blankRequired,
   conditionBuilder = false,
+  expressionAssist = false,
+  functions = [],
 }: ShapeStepFieldsProps) {
   const columnOptions: StudioPickerOption[] = columns.map((name) => ({ value: name, label: name }));
   const setField = (name: string, value: unknown) => onChange({ ...options, [name]: value });
 
   return (
     <>
-      {fieldsFor(operation).map((field) => (
+      {fieldsFor(operation).filter((field) => fieldApplies(operation.op, field.name, options)).map((field) => (
         <Field
           key={field.name}
           field={field}
@@ -68,10 +74,25 @@ export function ShapeStepFields({
           onExpressionChange={onExpressionChange}
           onCommit={onCommit}
           conditionBuilder={conditionBuilder && field.name === "condition"}
+          expressionAssist={expressionAssist && field.kind === "expression" && field.name !== "condition"}
+          functions={functions}
         />
       ))}
     </>
   );
+}
+
+/** Precision, scale, and a zone are meaningful only on the cast that consumes them. */
+function fieldApplies(op: string, name: string, options: Record<string, unknown>): boolean {
+  if (op !== "cast_column") return true;
+  const type = String(options.to_type ?? "");
+  if (name === "precision" || name === "scale") {
+    return type === "decimal" || (options[name] !== undefined && options[name] !== "");
+  }
+  if (name === "timezone") {
+    return type === "timestamp" || Boolean(String(options.timezone ?? "").trim());
+  }
+  return true;
 }
 
 function Field({
@@ -87,6 +108,8 @@ function Field({
   onExpressionChange,
   onCommit,
   conditionBuilder = false,
+  expressionAssist = false,
+  functions = [],
 }: {
   field: ShapeField;
   operation: ShapeOperation;
@@ -100,6 +123,8 @@ function Field({
   onExpressionChange: (text: string) => void;
   onCommit?: () => void;
   conditionBuilder?: boolean;
+  expressionAssist?: boolean;
+  functions?: { name: string }[];
 }) {
   if (conditionBuilder && field.kind === "expression") {
     return (
@@ -179,20 +204,34 @@ function Field({
           onChange={(event) => onChange(linesToList(event.target.value))}
         />
       ) : field.kind === "expression" ? (
-        <textarea
-          id={id}
-          className={`df2-input df2-studio-field df2-xform-code${expressionError ? " is-invalid" : ""}`}
-          rows={3}
-          placeholder="[status] <> 'void'"
-          value={typeof value === "string" ? value : ""}
-          disabled={!canPlan}
-          aria-invalid={expressionError ? true : undefined}
-          onBlur={onCommit}
-          onChange={(event) => {
-            onChange(event.target.value);
-            onExpressionChange(event.target.value);
-          }}
-        />
+        <>
+          <textarea
+            id={id}
+            className={`df2-input df2-studio-field df2-xform-code${expressionError ? " is-invalid" : ""}`}
+            rows={3}
+            placeholder="[status] <> 'void'"
+            value={typeof value === "string" ? value : ""}
+            disabled={!canPlan}
+            aria-invalid={expressionError ? true : undefined}
+            onBlur={onCommit}
+            onChange={(event) => {
+              onChange(event.target.value);
+              onExpressionChange(event.target.value);
+            }}
+          />
+          {expressionAssist && (
+            <ExpressionAssist
+              text={typeof value === "string" ? value : ""}
+              columns={columnOptions}
+              functions={functions}
+              disabled={!canPlan}
+              onInsert={(next) => {
+                onChange(next);
+                onExpressionChange(next);
+              }}
+            />
+          )}
+        </>
       ) : (
         <input
           id={id}
@@ -213,6 +252,46 @@ function Field({
           {field.label} is required for {operation.op}.
         </span>
       )}
+    </div>
+  );
+}
+
+function ExpressionAssist({
+  text,
+  columns,
+  functions,
+  disabled,
+  onInsert,
+}: {
+  text: string;
+  columns: StudioPickerOption[];
+  functions: { name: string }[];
+  disabled: boolean;
+  onInsert: (next: string) => void;
+}) {
+  if (columns.length === 0 && functions.length === 0) return null;
+  return (
+    <div className="df2-xform-assist" aria-label="Insert into the expression">
+      {columns.map((column) => (
+        <button
+          key={column.value}
+          type="button"
+          disabled={disabled}
+          onClick={() => onInsert(insertExpressionToken(text, `[${column.value}]`))}
+        >
+          {column.label}
+        </button>
+      ))}
+      {functions.map((fn) => (
+        <button
+          key={fn.name}
+          type="button"
+          disabled={disabled}
+          onClick={() => onInsert(insertExpressionToken(text, `${fn.name}()`))}
+        >
+          {fn.name}()
+        </button>
+      ))}
     </div>
   );
 }

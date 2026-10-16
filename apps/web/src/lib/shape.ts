@@ -326,9 +326,12 @@ const FIELD_LABEL: Record<string, string> = {
   replacement: "Replace with",
   regex: "Treat as a pattern",
   places: "Decimal places",
+  precision: "Precision",
+  scale: "Scale",
   min: "Minimum",
   max: "Maximum",
   format: "Input format",
+  timezone: "Time zone",
   output_format: "Output format",
   form: "Normal form",
   expression: "Expression",
@@ -347,6 +350,9 @@ const FIELD_HINT: Record<string, string> = {
   into: "One name per piece, in order.",
   format: "Explicit, e.g. %d/%m/%Y — the engine never guesses day/month order.",
   places: "Digits kept after the decimal point.",
+  precision: "Total digits. A value that needs more digits is refused, not truncated.",
+  scale: "Digits after the decimal point. Half rounds away from zero, the same rule as round.",
+  timezone: "Source zone for a naive clock. The value is stored in UTC. Blank keeps the source clock with no zone.",
   condition: "A row-local expression, e.g. [status] <> 'void'.",
   expression: "A row-local expression over this row's columns.",
   keep: "Off keeps the rows the condition does not match.",
@@ -365,7 +371,7 @@ const FIELD_CHOICES: Record<string, string[]> = {
   depth: ["top", "deep"],
 };
 
-const NUMBER_FIELDS = new Set(["places", "width", "limit", "min", "max"]);
+const NUMBER_FIELDS = new Set(["places", "precision", "scale", "width", "limit", "min", "max"]);
 const BOOLEAN_FIELDS = new Set(["regex", "keep", "keep_parent"]);
 const COLUMN_LIST_FIELDS = new Set(["columns"]);
 const LIST_FIELDS = new Set(["values", "into", "keys"]);
@@ -456,6 +462,19 @@ export function missingRequired(
     }
   }
   return "";
+}
+
+/**
+ * Insert a column or function into an expression.
+ * A column token fills the empty call the operator just inserted, so
+ * `upper()` then `[email]` becomes `upper([email])` rather than two fragments.
+ */
+export function insertExpressionToken(current: string, token: string): string {
+  if (token.startsWith("[") && /\(\)\s*$/.test(current)) {
+    return current.replace(/\(\)\s*$/, `(${token})`);
+  }
+  if (!current) return token;
+  return /\s$/.test(current) ? `${current}${token}` : `${current} ${token}`;
 }
 
 /** Parse a textarea of one-per-line values into the list the API expects. */

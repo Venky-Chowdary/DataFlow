@@ -586,3 +586,128 @@ def test_unpivot_stays_refused_by_name_unnest_is_not_a_back_door():
             {"steps": [{"op": "unpivot", "column": "line_items"}]},
             source_columns=["line_items"],
         )
+
+
+def test_hash_pii_shape_step_is_the_mapping_digest(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PII_HASH_KEY", "test-pii-key")
+    shaped, _ = shape_records(
+        recipe({"op": "hash_pii", "column": "name"}),
+        [{"name": "ada@example.com"}],
+    )
+    from services.transform_engine import apply_transform
+
+    assert shaped[0]["name"] == apply_transform("ada@example.com", "hash_pii")[0]
+
+
+def test_hash_pii_leaves_a_blank_cell_blank(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PII_HASH_KEY", "test-pii-key")
+    shaped, _ = shape_records(
+        recipe({"op": "hash_pii", "column": "name"}),
+        [{"name": "  "}],
+    )
+    assert shaped[0]["name"] is None
+
+
+def test_hash_pii_shape_step_fails_closed_without_a_key(monkeypatch):
+    for name in (
+        "DATAFLOW_PII_HASH_KEY",
+        "DATAWRAP_PII_HASH_KEY",
+        "DATAFLOW_SECRET",
+        "DATAWRAP_SECRET",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ShapeRowError, match="hash_pii is not configured"):
+        shape_records(
+            recipe({"op": "hash_pii", "column": "name"}),
+            [{"name": "ada@example.com"}],
+        )
+
+
+def test_mask_pii_keeps_email_shape():
+    shaped, _ = shape_records(
+        recipe({"op": "mask_pii", "column": "name"}),
+        [{"name": "ada@example.com"}],
+    )
+    masked = shaped[0]["name"]
+    assert masked != "ada@example.com"
+    assert masked.startswith("a") and "@" in masked and masked.endswith(".com")
+
+
+def test_decimal_cast_quantizes_to_the_declared_scale():
+    shaped, _ = shape_records(
+        recipe({
+            "op": "cast_column",
+            "column": "amount",
+            "options": {"to_type": "decimal", "precision": 5, "scale": 2},
+        }),
+        [{"amount": Decimal("1.239")}],
+    )
+    assert shaped[0]["amount"] == Decimal("1.24")
+
+
+def test_decimal_cast_refuses_a_value_that_does_not_fit():
+    with pytest.raises(ShapeRowError, match="precision 5"):
+        shape_records(
+            recipe({
+                "op": "cast_column",
+                "column": "amount",
+                "options": {"to_type": "decimal", "precision": 5, "scale": 2},
+            }),
+            [{"amount": Decimal("999.996")}],
+        )
+
+
+def test_parse_date_with_a_zone_stores_utc():
+    shaped, _ = shape_records(
+        recipe({
+            "op": "parse_date",
+            "column": "when",
+            "options": {"format": "%Y-%m-%d %H:%M", "timezone": "America/New_York"},
+        }),
+        [{"when": "2026-01-15 12:00"}],
+    )
+    moment = shaped[0]["when"]
+    assert moment.hour == 17
+    assert moment.utcoffset().total_seconds() == 0
+
+
+def test_an_aware_instant_is_not_shifted_again():
+    from datetime import timezone
+
+    shaped, _ = shape_records(
+        recipe({
+            "op": "parse_date",
+            "column": "when",
+            "options": {"timezone": "America/New_York"},
+        }),
+        [{"when": datetime(2026, 1, 15, 12, 0, tzinfo=timezone.utc)}],
+    )
+    assert shaped[0]["when"].hour == 12
+    assert shaped[0]["when"].utcoffset().total_seconds() == 0
+
+
+def test_timezone_on_a_text_cast_is_refused():
+    with pytest.raises(ShapeError, match="timezone applies only to a timestamp cast"):
+        recipe({
+            "op": "cast_column",
+            "column": "when",
+            "options": {"to_type": "text", "timezone": "America/New_York"},
+        })
+
+
+def test_unknown_timezone_is_refused():
+    with pytest.raises(ShapeError, match="not a known time zone"):
+        recipe({
+            "op": "parse_date",
+            "column": "when",
+            "options": {"timezone": "Not/AZone"},
+        })
+
+
+def test_precision_on_a_text_cast_is_refused():
+    with pytest.raises(ShapeError, match="precision and scale apply only to a decimal cast"):
+        recipe({
+            "op": "cast_column",
+            "column": "amount",
+            "options": {"to_type": "text", "precision": 5},
+        })
