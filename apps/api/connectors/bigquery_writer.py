@@ -1568,6 +1568,8 @@ def write_mapped_rows(
                 leftover = drop_bigquery_staging(client, staging_id)
                 if leftover:
                     transform_errors.append(leftover)
+        from connectors.sql_write_materialize import accounted_rejected_rows
+
         rejected_rows = _rejected_row_count(
             data_rows,
             [()] * write_acc.accepted_row_count,
@@ -1588,7 +1590,13 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=chunks_completed or chunks,
                 error=_final_abort,
-                rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+                rejected_rows=accounted_rejected_rows(
+                    rejected_rows,
+                    source_count=len(data_rows),
+                    written=written,
+                    rows_skipped=rows_skipped,
+                    collapsed_duplicates=write_acc.collapsed_duplicate_rows,
+                ),
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
@@ -1603,7 +1611,13 @@ def write_mapped_rows(
             target_schema=dataset_id,
             checksum=write_acc.digest(),
             chunks_completed=chunks_completed or chunks,
-            rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+            rejected_rows=accounted_rejected_rows(
+                rejected_rows,
+                source_count=len(data_rows),
+                written=written,
+                rows_skipped=rows_skipped,
+                collapsed_duplicates=write_acc.collapsed_duplicate_rows,
+            ),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,

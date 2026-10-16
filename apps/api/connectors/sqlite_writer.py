@@ -1675,6 +1675,8 @@ def write_mapped_rows(
                     "previous attempt (write ledger prevented duplicate rows)"
                 )
 
+            from connectors.sql_write_materialize import accounted_rejected_rows
+
             rejected_rows = _rejected_row_count(
                 data_rows,
                 [()] * write_acc.accepted_row_count,
@@ -1695,8 +1697,12 @@ def write_mapped_rows(
                     checksum="",
                     chunks_completed=chunks or (1 if wrote_sparse else 0),
                     error=_final_abort,
-                    rejected_rows=max(
-                        rejected_rows, len(data_rows) - written - rows_skipped
+                    rejected_rows=accounted_rejected_rows(
+                        rejected_rows,
+                        source_count=len(data_rows),
+                        written=written,
+                        rows_skipped=rows_skipped,
+                        collapsed_duplicates=write_acc.collapsed_duplicate_rows,
                     ),
                     rejected_details=rejected_details,
                     coerced_null_rows=coerced_null_rows,
@@ -1726,8 +1732,12 @@ def write_mapped_rows(
                 target_schema=schema or "main",
                 checksum=write_acc.digest(),
                 chunks_completed=chunks or (1 if wrote_sparse else 0),
-                rejected_rows=max(
-                    rejected_rows, len(data_rows) - written - rows_skipped
+                rejected_rows=accounted_rejected_rows(
+                    rejected_rows,
+                    source_count=len(data_rows),
+                    written=written,
+                    rows_skipped=rows_skipped,
+                    collapsed_duplicates=write_acc.collapsed_duplicate_rows,
                 ),
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,

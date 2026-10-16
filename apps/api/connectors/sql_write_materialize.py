@@ -370,6 +370,31 @@ class SqlWriteAccumulator:
         )
 
 
+def accounted_rejected_rows(
+    rejected_rows: int,
+    *,
+    source_count: int,
+    written: int,
+    rows_skipped: int,
+    collapsed_duplicates: int = 0,
+) -> int:
+    """Quarantine is what did not land and was not a policy collapse.
+
+    ``_rejected_row_count`` already excludes in-bundle images. A floor of
+    ``source - written - skipped`` puts those images back into quarantine,
+    and the file stream also counts them as skipped. The survivor is
+    written. The earlier image is skipped. It is not a second bucket.
+    """
+    collapsed = max(0, int(collapsed_duplicates or 0))
+    remainder = (
+        int(source_count or 0)
+        - int(written or 0)
+        - int(rows_skipped or 0)
+        - collapsed
+    )
+    return max(int(rejected_rows or 0), remainder, 0)
+
+
 def ensure_sql_source_spool(
     *,
     headers: list[str],
