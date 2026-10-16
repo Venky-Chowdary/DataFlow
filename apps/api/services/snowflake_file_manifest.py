@@ -43,8 +43,8 @@ def _session(cur: Any, *, database: str, schema: str) -> str:
     return schema_name
 
 
-def _ensure_manifest(cur: Any) -> None:
-    cur.execute(
+def _create_manifest_sql() -> str:
+    return (
         f"CREATE TABLE IF NOT EXISTS {_table(_TABLE)} ("
         "connector VARCHAR NOT NULL, "
         "path VARCHAR NOT NULL, "
@@ -54,8 +54,50 @@ def _ensure_manifest(cur: Any) -> None:
         "status VARCHAR NOT NULL, "
         "job_id VARCHAR NOT NULL, "
         "rows NUMBER NOT NULL DEFAULT 0, "
-        "PRIMARY KEY (connector, path, sha256))"
+        "dest_table VARCHAR NOT NULL DEFAULT '', "
+        "schedule_id VARCHAR NOT NULL DEFAULT '', "
+        "PRIMARY KEY (connector, path, sha256, dest_table, schedule_id))"
     )
+
+
+def _manifest_columns(cur: Any) -> set[str]:
+    cur.execute(f"SELECT * FROM {_table(_TABLE)} WHERE 1 = 0")
+    return {str(item[0]).lower() for item in (cur.description or [])}
+
+
+def _rebuild_unscoped_manifest(cur: Any) -> None:
+    """Copy a legacy (connector, path, sha256) manifest onto the scoped key.
+
+    Existing rows keep an empty destination and schedule. They still match an
+    empty-scope claim and do not suppress a named table.
+    """
+    legacy = "DATAFLOW_FILE_MANIFEST_LEGACY"
+    cur.execute(f"ALTER TABLE {_table(_TABLE)} RENAME TO {_table(legacy)}")
+    cur.execute(_create_manifest_sql())
+    cur.execute(
+        f"INSERT INTO {_table(_TABLE)} "
+        "(connector, path, size, mtime, sha256, status, job_id, rows, dest_table, schedule_id) "
+        f"SELECT connector, path, size, mtime, sha256, status, job_id, rows, '', '' "
+        f"FROM {_table(legacy)}"
+    )
+    cur.execute(f"DROP TABLE IF EXISTS {_table(legacy)}")
+
+
+def _ensure_manifest(cur: Any) -> None:
+    """Create the scoped manifest. A legacy table is rebuilt outside the load transaction."""
+    cur.execute(_create_manifest_sql())
+    try:
+        columns = _manifest_columns(cur)
+    except Exception:
+        cur.execute(_create_manifest_sql())
+        return
+    if "dest_table" in columns and "schedule_id" in columns:
+        return
+    _rebuild_unscoped_manifest(cur)
+
+
+def _scope(dest_table: str = "", schedule_id: str = "") -> tuple[str, str]:
+    return str(dest_table or ""), str(schedule_id or "")
 
 
 def drop_stage(conn: Any, stage_table: str) -> None:
@@ -77,19 +119,23 @@ def snowflake_file_status(
     connector: str,
     path: str,
     sha256: str,
+    dest_table: str = "",
+    schedule_id: str = "",
 ) -> str:
-    """``loaded`` when this sha256 already committed. Missing table is empty."""
+    """``loaded`` when this sha256 already committed for this table and schedule."""
     digest = (sha256 or "").strip().lower()
     if not digest:
         return ""
+    table_name, schedule_name = _scope(dest_table, schedule_id)
     cur = conn.cursor()
     try:
         _session(cur, database=database, schema=schema)
         _ensure_manifest(cur)
         cur.execute(
             f"SELECT status FROM {_table(_TABLE)} "
-            "WHERE connector = %s AND path = %s AND sha256 = %s",
-            (connector, path, digest),
+            "WHERE connector = %s AND path = %s AND sha256 = %s "
+            "AND dest_table = %s AND schedule_id = %s",
+            (connector, path, digest, table_name, schedule_name),
         )
         row = cur.fetchone()
     except Exception:
@@ -119,6 +165,8 @@ def commit_staged_snowflake_file(
     job_id: str,
     rows: int,
     before_commit: Callable[[], None] | None = None,
+    dest_table: str = "",
+    schedule_id: str = "",
 ) -> str:
     """Commit the staged rows and the manifest claim together.
 
@@ -130,6 +178,7 @@ def commit_staged_snowflake_file(
         raise ValueError("A processed-file claim needs a sha256")
     if not columns:
         raise ValueError("A staged Snowflake file needs columns")
+    table_name, schedule_name = _scope(dest_table, schedule_id)
     cur = conn.cursor()
     _session(cur, database=database, schema=schema)
     _ensure_manifest(cur)
@@ -150,10 +199,11 @@ def commit_staged_snowflake_file(
         # atomic claim.
         cur.execute(
             f"INSERT INTO {_table(_TABLE)} "
-            "(connector, path, size, mtime, sha256, status, job_id, rows) "
-            "SELECT %s, %s, %s, %s, %s, 'loading', %s, 0 "
+            "(connector, path, size, mtime, sha256, status, job_id, rows, dest_table, schedule_id) "
+            "SELECT %s, %s, %s, %s, %s, 'loading', %s, 0, %s, %s "
             f"WHERE NOT EXISTS (SELECT 1 FROM {_table(_TABLE)} "
-            "WHERE connector = %s AND path = %s AND sha256 = %s)",
+            "WHERE connector = %s AND path = %s AND sha256 = %s "
+            "AND dest_table = %s AND schedule_id = %s)",
             (
                 connector,
                 path,
@@ -161,20 +211,35 @@ def commit_staged_snowflake_file(
                 str(mtime or ""),
                 digest,
                 str(job_id or ""),
+                table_name,
+                schedule_name,
                 connector,
                 path,
                 digest,
+                table_name,
+                schedule_name,
             ),
         )
         cur.execute(
             f"UPDATE {_table(_TABLE)} SET status = 'loading', job_id = %s, size = %s, mtime = %s "
-            "WHERE connector = %s AND path = %s AND sha256 = %s AND status <> 'loaded'",
-            (str(job_id or ""), int(size or 0), str(mtime or ""), connector, path, digest),
+            "WHERE connector = %s AND path = %s AND sha256 = %s "
+            "AND dest_table = %s AND schedule_id = %s AND status <> 'loaded'",
+            (
+                str(job_id or ""),
+                int(size or 0),
+                str(mtime or ""),
+                connector,
+                path,
+                digest,
+                table_name,
+                schedule_name,
+            ),
         )
         cur.execute(
             f"SELECT status FROM {_table(_TABLE)} "
-            "WHERE connector = %s AND path = %s AND sha256 = %s",
-            (connector, path, digest),
+            "WHERE connector = %s AND path = %s AND sha256 = %s "
+            "AND dest_table = %s AND schedule_id = %s",
+            (connector, path, digest, table_name, schedule_name),
         )
         found = cur.fetchone()
         status = str(found[0] if found else "")
@@ -211,8 +276,9 @@ def commit_staged_snowflake_file(
             )
         cur.execute(
             f"UPDATE {_table(_TABLE)} SET status = 'loaded', rows = %s "
-            "WHERE connector = %s AND path = %s AND sha256 = %s",
-            (int(rows or 0), connector, path, digest),
+            "WHERE connector = %s AND path = %s AND sha256 = %s "
+            "AND dest_table = %s AND schedule_id = %s",
+            (int(rows or 0), connector, path, digest, table_name, schedule_name),
         )
         if before_commit is not None:
             before_commit()
@@ -227,7 +293,12 @@ def commit_staged_snowflake_file(
 
 
 def read_loaded_manifest(
-    dest_cfg: dict[str, Any], *, connector: str, schema: str = ""
+    dest_cfg: dict[str, Any],
+    *,
+    connector: str,
+    schema: str = "",
+    dest_table: str = "",
+    schedule_id: str = "",
 ) -> list[dict[str, Any]]:
     """Loaded Snowflake files for pickup selection. Does not write rows."""
     from connectors.snowflake_conn import get_connection, normalize_account
@@ -253,10 +324,13 @@ def read_loaded_manifest(
             database=str(dest_cfg.get("database") or ""),
             schema=schema or str(dest_cfg.get("schema") or "PUBLIC"),
         )
+        table_name, schedule_name = _scope(dest_table, schedule_id)
+        _ensure_manifest(cur)
         cur.execute(
             f"SELECT path, size, mtime, sha256, status, job_id, rows FROM {_table(_TABLE)} "
-            "WHERE connector = %s AND status = 'loaded'",
-            (connector,),
+            "WHERE connector = %s AND status = 'loaded' "
+            "AND dest_table = %s AND schedule_id = %s",
+            (connector, table_name, schedule_name),
         )
         out: list[dict[str, Any]] = []
         for path, size, mtime, sha256, status, job_id, rows in cur.fetchall():

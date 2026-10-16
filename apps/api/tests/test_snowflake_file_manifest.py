@@ -235,8 +235,53 @@ def test_stream_load_commits_the_manifest_and_a_rerun_skips(monkeypatch, tmp_pat
         },
         connector="file:orders",
         schema="PUBLIC",
+        dest_table=table,
     )
     assert {row["path"] for row in loaded} == {"orders_a.csv", "orders_b.csv"}
+
+
+def test_same_sha_loads_a_second_table_and_schedule(monkeypatch, tmp_path):
+    """A loaded sha256 must not skip a different destination table."""
+    monkeypatch.setenv("FAKESNOW_DB_PATH", str(tmp_path / "scope.db"))
+    digest = uuid.uuid4().hex
+    table_a = "A_" + uuid.uuid4().hex[:8].upper()
+    table_b = "B_" + uuid.uuid4().hex[:8].upper()
+    stage_a = "SA_" + uuid.uuid4().hex[:8].upper()
+    stage_b = "SB_" + uuid.uuid4().hex[:8].upper()
+    conn = _conn()
+    cur = conn.cursor()
+    _stage(cur, stage_a, [(1, "alpha")])
+    _stage(cur, stage_b, [(1, "beta")])
+    shared = dict(
+        database="DATAFLOW",
+        schema="PUBLIC",
+        columns=["id", "label"],
+        conflict_columns=["id"],
+        write_mode="upsert",
+        connector="sftp:/:orders_*.csv",
+        path="orders_a.csv",
+        size=12,
+        mtime="2026-10-15T00:00:00Z",
+        sha256=digest,
+        job_id="job-scope",
+        rows=1,
+    )
+    assert commit_staged_snowflake_file(
+        conn, stage_table=stage_a, target_table=table_a,
+        dest_table=table_a, schedule_id="sched-a", **shared,
+    ) == "loaded"
+    assert commit_staged_snowflake_file(
+        conn, stage_table=stage_b, target_table=table_b,
+        dest_table=table_b, schedule_id="sched-b", **shared,
+    ) == "loaded"
+    assert _dest_rows(cur, table_a) == [(1, "alpha")]
+    assert _dest_rows(cur, table_b) == [(1, "beta")]
+    assert commit_staged_snowflake_file(
+        conn, stage_table=stage_a, target_table=table_a,
+        dest_table=table_a, schedule_id="sched-a", **shared,
+    ) == "skip"
+    assert _dest_rows(cur, table_a) == [(1, "alpha")]
+    assert _dest_rows(cur, table_b) == [(1, "beta")]
 
 
 def test_shared_key_census_counts_the_net_insert():
