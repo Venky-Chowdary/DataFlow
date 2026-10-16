@@ -178,6 +178,33 @@ def spill_engine_write_records(
     )
 
 
+def _without_identity_keys(mapped, target_cols, identity_columns, exclude: set[str]):
+    indexes = []
+    for col in identity_columns:
+        if col not in target_cols:
+            return mapped
+        indexes.append(target_cols.index(col))
+    kept = []
+    for row in mapped or []:
+        if isinstance(row, dict):
+            values = tuple(
+                None if row.get(col) is None else str(row.get(col)).strip()
+                for col in identity_columns
+            )
+        else:
+            values = tuple(
+                None if index >= len(row) or row[index] is None else str(row[index]).strip()
+                for index in indexes
+            )
+        marker = values[0] if len(values) == 1 else "\x1f".join(
+            "" if value is None else value for value in values
+        )
+        if str(marker) in exclude:
+            continue
+        kept.append(row)
+    return kept
+
+
 def iter_fingerprints_from_spool(
     source_spool: Any,
     mappings: list[dict[str, Any]],
@@ -191,6 +218,8 @@ def iter_fingerprints_from_spool(
     destination_pk_columns: list[str] | None = None,
     empty_cells_as_null: bool = False,
     batch_size: int | None = None,
+    exclude_identity_keys: set[str] | None = None,
+    identity_columns: list[str] | None = None,
 ) -> Iterator[tuple[str, str]]:
     """Remap Gate-8 / file-stream fingerprints from the spool in bundles.
 
@@ -227,6 +256,10 @@ def iter_fingerprints_from_spool(
             row_number_start=start,
             struct_already_materialized=True,
         )
+        if exclude_identity_keys and identity_columns:
+            mapped = _without_identity_keys(
+                mapped, target_cols, identity_columns, exclude_identity_keys
+            )
         yield from row_fingerprints(
             mapped,
             target_cols,

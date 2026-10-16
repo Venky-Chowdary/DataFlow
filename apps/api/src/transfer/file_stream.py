@@ -1336,6 +1336,8 @@ def stream_file_to_database(
         batch_size = max(1, int(total_rows or 10_000_000))
     chunks = max(1, (total_rows + batch_size - 1) // batch_size)
     dest_table = resolve_dest_table(dest_type, destination, "import")
+    manifest_dest_table = str(manifest_identity.get("dest_table") or dest_table or "")
+    manifest_schedule_id = str(manifest_identity.get("schedule_id") or "")
 
     ddl_log: list[str] = [
         f"STREAM FILE {filename} → {dest_type}.{dest_table} ({total_rows:,} rows, {chunks} batches)",
@@ -1391,6 +1393,23 @@ def stream_file_to_database(
         pk_target_cols = [
             map_source_to_target(col, mappings) for col in contract.primary_key_columns()
         ]
+    from services.duplicate_policy import normalize_duplicate_policy
+
+    if not str(duplicate_policy or "").strip():
+        duplicate_policy = str(
+            (getattr(destination, "extra", None) or {}).get("duplicate_policy") or ""
+        )
+    if not pk_target_cols:
+        if normalize_duplicate_policy(duplicate_policy) in {"upsert", "dedupe_skip"}:
+            extra_pk = str(
+                (getattr(destination, "extra", None) or {}).get("primary_key") or ""
+            )
+            pk_target_cols = [
+                map_source_to_target(part.strip(), mappings)
+                for part in extra_pk.split(",")
+                if part.strip()
+            ]
+            pk_target_cols = [col for col in pk_target_cols if col]
     if not pk_target_cols and shape_runner is not None:
         pk_target_cols = [
             map_source_to_target(col, mappings)
@@ -1424,6 +1443,11 @@ def stream_file_to_database(
         raise
     if decision.explicit or decision.policy == "upsert" and write_mode == "insert":
         write_mode = decision.write_mode
+    if decision.explicit:
+        dest_extra_now = dict(getattr(destination, "extra", None) or {})
+        if not str(dest_extra_now.get("duplicate_policy") or "").strip():
+            dest_extra_now["duplicate_policy"] = decision.policy
+            destination.extra = dest_extra_now
     if requires_upsert(effective_sync) and not pk_target_cols and not object_store:
         raise ValueError(
             f"Sync mode `{effective_sync}` requires primary_key for upsert; "
@@ -1678,7 +1702,13 @@ def stream_file_to_database(
         or ""
     ).strip().lower().replace("-", "_")
     try:
-        csv_fast = None if (in_file_dedupe == "keep_last" or hold_manifest) else try_copy_local_csv(
+        # An insert-mode COPY lands every source row. Incremental deduped COPY
+        # already merges on the key, so only a keyed policy on an insert sync
+        # mode has to take the row writer.
+        keyed_insert_copy = write_mode == "upsert" and not requires_upsert(copy_sync)
+        csv_fast = None if (
+            in_file_dedupe == "keep_last" or hold_manifest or keyed_insert_copy
+        ) else try_copy_local_csv(
             content=content,
             filename=filename,
             file_type=file_type,
@@ -1993,7 +2023,13 @@ def stream_file_to_database(
         local_warnings: list[str] = []
         if not batch_quality_enabled:
             return local_warnings
-        audit_sync = "upsert" if write_mode == "upsert" else effective_sync
+        # Upsert and skip-duplicates collapse a repeated key in the writer.
+        # Auditing them as a unique-identity sync mode refused the file before
+        # that collapse, so a full-refresh keyed policy never got to write.
+        if decision.policy in {"upsert", "dedupe_skip"}:
+            audit_sync = effective_sync
+        else:
+            audit_sync = "upsert" if write_mode == "upsert" else effective_sync
         from services.primary_key import identity_source_columns
 
         audit_pk = identity_source_columns(pk_target_cols, mappings)
@@ -2027,7 +2063,35 @@ def stream_file_to_database(
             local_warnings.extend(drift_warnings[:3])
         return local_warnings
 
-    def _spool_fingerprints(spool: Any) -> list[tuple[str, str]]:
+    def _without_skipped(mapped_rows: list, skipped: set[str]) -> list:
+        if not skipped or not pk_target_cols:
+            return mapped_rows
+        indexes = []
+        for col in pk_target_cols:
+            if col not in target_cols:
+                return mapped_rows
+            indexes.append(target_cols.index(col))
+        kept = []
+        for row in mapped_rows:
+            if isinstance(row, dict):
+                values = tuple(
+                    None if row.get(col) is None else str(row.get(col)).strip()
+                    for col in pk_target_cols
+                )
+            else:
+                values = tuple(
+                    None if index >= len(row) or row[index] is None else str(row[index]).strip()
+                    for index in indexes
+                )
+            marker = values[0] if len(values) == 1 else "\x1f".join(
+                "" if value is None else value for value in values
+            )
+            if str(marker) in skipped:
+                continue
+            kept.append(row)
+        return kept
+
+    def _spool_fingerprints(spool: Any, skipped: set[str] | None = None) -> list[tuple[str, str]]:
         return fingerprints_from_spool(
             spool,
             mappings,
@@ -2039,10 +2103,14 @@ def stream_file_to_database(
             error_policy=stream_error_policy,
             destination_pk_columns=list(pk_target_cols or []) or None,
             empty_cells_as_null=True,
+            exclude_identity_keys=skipped or None,
+            identity_columns=list(pk_target_cols or []) or None,
         )
 
     def _matrix_fingerprints(
-        headers: list[str], data_rows: list[list[Any]]
+        headers: list[str],
+        data_rows: list[list[Any]],
+        skipped: set[str] | None = None,
     ) -> list[tuple[str, str]]:
         mapped_rows, _ = map_rows_for_fingerprint(
             headers=headers,
@@ -2057,6 +2125,8 @@ def stream_file_to_database(
             destination_pk_columns=list(pk_target_cols or []) or None,
             empty_cells_as_null=True,
         )
+        if skipped:
+            mapped_rows = _without_skipped(mapped_rows, skipped)
         return (
             row_fingerprints(
                 mapped_rows,
@@ -2225,20 +2295,28 @@ def stream_file_to_database(
                     clear_records=True,
                 )
                 try:
-                    fingerprints = _spool_fingerprints(spill.spool)
                     batch_written, last_checksum, dest_summary = _run_file_write(
                         idx, headers, [], source_spool=spill.spool
                     )
+                    skipped_keys = {
+                        str(key)
+                        for key in ((dest_summary or {}).get("skipped_identity_keys") or [])
+                    }
+                    fingerprints = _spool_fingerprints(spill.spool, skipped_keys)
                     batch_rows = spill.unexpanded_row_count
                 finally:
                     spill.close()
             else:
                 headers, data_rows = records_to_matrix(batch, columns)
                 local_warnings = _apply_batch_audit(idx, headers, rows=data_rows)
-                fingerprints = _matrix_fingerprints(headers, data_rows)
                 batch_written, last_checksum, dest_summary = _run_file_write(
                     idx, headers, data_rows
                 )
+                skipped_keys = {
+                    str(key)
+                    for key in ((dest_summary or {}).get("skipped_identity_keys") or [])
+                }
+                fingerprints = _matrix_fingerprints(headers, data_rows, skipped_keys)
                 batch_rows = len(data_rows)
         except Exception:
             if keyed_census_acc is not None:
@@ -2295,7 +2373,13 @@ def stream_file_to_database(
             # rows this job already appended, which would hide the delta.
             prior_precount = dest_summary.get(PRECOUNT_KEY)
             prior_key_addressed = dest_summary.get(KEY_ADDRESSED_KEY)
+            prior_skipped = int(dest_summary.get("rows_skipped") or 0)
             dest_summary = dict(batch_summary)
+            dest_summary["duplicate_policy"] = decision.policy
+            dest_summary["duplicate_policy_reason"] = decision.reason
+            dest_summary["rows_skipped"] = prior_skipped + int(
+                batch_summary.get("rows_skipped") or 0
+            )
             if copy_declines:
                 dest_summary["copy_fast_path"] = "declined"
                 dest_summary["copy_decline_reason"] = copy_declines[0]
@@ -2365,6 +2449,8 @@ def stream_file_to_database(
             connector=str(manifest_identity.get("connector") or ""),
             path=str(manifest_identity.get("path") or filename or ""),
             sha256=_file_sha,
+            dest_table=manifest_dest_table,
+            schedule_id=manifest_schedule_id,
         ) == "loaded":
             try:
                 manifest_conn.close()
@@ -2394,6 +2480,8 @@ def stream_file_to_database(
             mtime=str(manifest_identity.get("mtime") or ""),
             sha256=str(manifest_identity.get("sha256") or ""),
             job_id=str(manifest_identity.get("job_id") or job_id or ""),
+            dest_table=manifest_dest_table,
+            schedule_id=manifest_schedule_id,
         )
         if manifest_claim == "skip":
             try:
@@ -2434,6 +2522,8 @@ def stream_file_to_database(
                 path=str(manifest_identity.get("path") or filename or ""),
                 sha256=str(manifest_identity.get("sha256") or ""),
                 rows=int(rows or 0),
+                dest_table=manifest_dest_table,
+                schedule_id=manifest_schedule_id,
             )
             dest_summary["file_manifest_status"] = "loaded"
         from connectors.write_resilience import finish_held_overwrite
@@ -2522,6 +2612,8 @@ def stream_file_to_database(
                 sha256=_file_sha,
                 job_id=str(manifest_identity.get("job_id") or job_id or ""),
                 rows=int(written or 0),
+                dest_table=manifest_dest_table,
+                schedule_id=manifest_schedule_id,
             )
             dest_summary["file_manifest_status"] = "loaded"
             if outcome == "skip":

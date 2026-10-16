@@ -487,6 +487,38 @@ def build_mapped_rows_from_source(
     )
 
 
+def _keep_first_keeping_numbers(
+    rows: list[tuple],
+    conflict_columns: list[str],
+    target_cols: list[str],
+    row_numbers: list[int] | None,
+) -> tuple[list[tuple], list[int] | None]:
+    """First row for each key. skip_duplicates must not keep the later copy."""
+    from connectors.writer_common import (
+        _conflict_key_identity,
+        resolve_conflict_targets,
+        resolve_row_number,
+    )
+
+    if not conflict_columns or not rows:
+        return rows, row_numbers
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
+    if not conflict:
+        return rows, row_numbers
+    indices = [target_cols.index(col) for col in conflict]
+    seen: dict[tuple, tuple] = {}
+    seen_numbers: dict[tuple, int] = {}
+    for position, row in enumerate(rows):
+        key = tuple(_conflict_key_identity(row[i]) for i in indices)
+        if key in seen:
+            continue
+        seen[key] = row
+        seen_numbers[key] = resolve_row_number(row_numbers, position)
+    if row_numbers is None:
+        return list(seen.values()), None
+    return list(seen.values()), [seen_numbers[key] for key in seen]
+
+
 def finish_sql_mapped_bundle(
     bundle: SqlMappedBundle,
     *,
@@ -535,7 +567,17 @@ def finish_sql_mapped_bundle(
             mapped, source_row_numbers=nums
         )
         before_dense = len(mapped)
-        if DF_LSN_COL in target_cols:
+        try:
+            from services.duplicate_policy import current_match_action
+
+            keep_first = current_match_action() == "skip"
+        except Exception:
+            keep_first = False
+        if keep_first and DF_LSN_COL not in target_cols:
+            mapped, nums = _keep_first_keeping_numbers(
+                mapped, conflict_columns, target_cols, nums
+            )
+        elif DF_LSN_COL in target_cols:
             mapped, nums = dedupe_rows_by_pk_and_lsn_keeping_numbers(
                 mapped, conflict_columns, target_cols, nums
             )

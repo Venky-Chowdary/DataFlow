@@ -5523,6 +5523,11 @@ def write_mapped_rows(
                         ),
                         carry_keys=write_mode != "insert"
                         or bool(_kwargs.get("carry_source_keys")),
+                        operator_key_columns=(
+                            list(conflict_columns or [])
+                            if write_mode == "upsert"
+                            else None
+                        ),
                     )
                     placement_suffix = fidelity_plan.create_suffix
                     table_obj = _build_table_for_write(

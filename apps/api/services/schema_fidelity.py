@@ -551,6 +551,21 @@ _FILE_SOURCE_DIALECTS = frozenset({
 })
 
 
+def _operator_keys_in_target(
+    operator_key_columns: list[str] | None,
+    target_columns: list[str],
+) -> list[str]:
+    """Operator key columns that exist on the destination column list."""
+    folded = {str(col).casefold(): str(col) for col in target_columns}
+    resolved: list[str] = []
+    for raw in operator_key_columns or []:
+        name = str(raw or "").strip()
+        dest_col = folded.get(name.casefold())
+        if dest_col and dest_col not in resolved:
+            resolved.append(dest_col)
+    return resolved
+
+
 def _synthesized_primary_key(
     *,
     catalog: SourceSchemaCatalog,
@@ -608,17 +623,42 @@ def resolve_create_fidelity_plan(
         dest = "postgresql"
     catalog = catalog_from_payload(source_schema_catalog)
     if catalog is None:
-        # Types-only CREATE still requires an explicit unsupported certificate.
+        # A file has no source catalog. The operator's upsert key is still the
+        # destination key; without it ON CONFLICT cannot see duplicate rows.
+        keys = (
+            _operator_keys_in_target(operator_key_columns, target_columns)
+            if carry_keys
+            else []
+        )
+        constraints: list[str] = []
+        suffixes: dict[str, list[str]] = {}
+        not_null: list[str] = []
+        if keys:
+            quoted = ", ".join(_q(col, dest) for col in keys)
+            constraints.append(f"PRIMARY KEY ({quoted})")
+            for col in keys:
+                suffixes[col] = ["NOT NULL"]
+                not_null.append(col)
+            reason = (
+                "Source schema catalog unavailable. Operator upsert key "
+                f"{','.join(keys)} is the destination PRIMARY KEY."
+            )
+        else:
+            reason = (
+                "Source schema catalog unavailable; create-new emitted column "
+                "types only — PK/NOT NULL/DEFAULT/UNIQUE not certified carried."
+            )
         return CreateFidelityPlan(
             report=empty_unsupported_report(
                 source_dialect="",
                 dest_dialect=dest,
-                reason=(
-                    "Source schema catalog unavailable; create-new emitted column "
-                    "types only — PK/NOT NULL/DEFAULT/UNIQUE not certified carried."
-                ),
+                reason=reason,
             ),
             dest_columns=list(target_columns),
+            column_suffixes=suffixes,
+            table_constraints=constraints,
+            primary_key=list(keys),
+            not_null_columns=not_null,
         )
     plan = plan_create_new_fidelity(
         catalog,

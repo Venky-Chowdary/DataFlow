@@ -40,6 +40,8 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     if isinstance(meta, dict) and meta.get("schema_fidelity"):
         out["schema_fidelity"] = meta["schema_fidelity"]
     if isinstance(meta, dict):
+        if isinstance(meta.get("skipped_identity_keys"), list):
+            out["skipped_identity_keys"] = [str(key) for key in meta["skipped_identity_keys"]]
         for key in ("vector_docs_unchanged_skipped", "vector_docs_embedded"):
             if isinstance(meta.get(key), (int, float)):
                 out[key] = int(meta[key])
@@ -145,6 +147,7 @@ def _write_batch(
     if allow_equal_lsn:
         source_handoff["allow_equal_lsn"] = True
     from services.duplicate_policy import (
+        DuplicatePolicyError,
         reset_match_action,
         resolve_duplicate_policy,
         set_match_action,
@@ -158,6 +161,9 @@ def _write_batch(
             business_key=bool(conflict_columns),
             write_mode=write_mode,
         )
+    except DuplicatePolicyError:
+        # A keyed policy with no key must not fall through to INSERT.
+        raise
     except Exception:
         decided = None
     if decided is not None and (decided.explicit or (decided.policy == "upsert" and write_mode == "insert" and conflict_columns)):

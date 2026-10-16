@@ -605,7 +605,18 @@ def _sqlite_upsert_batch(
         sqlite_lsn_update_guard_sql,
     )
 
-    rows = dedupe_rows_by_pk_and_lsn(batch, conflict_cols, target_cols)
+    try:
+        from services.duplicate_policy import current_match_action
+
+        skip_existing = current_match_action() == "skip"
+    except Exception:
+        skip_existing = False
+    # Last-wins collapse would replace the row skip_duplicates must keep.
+    rows = (
+        list(batch)
+        if skip_existing
+        else dedupe_rows_by_pk_and_lsn(batch, conflict_cols, target_cols)
+    )
     if not rows:
         return 0, 0
 
@@ -651,6 +662,27 @@ def _sqlite_upsert_batch(
     cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
     placeholders = ", ".join("?" for _ in insert_cols)
     conflict_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
+
+    # Skip-duplicates keeps the first row. The delete+insert fallback below
+    # is last-wins and would replace a key the policy said to leave alone.
+    if not update_cols:
+        try:
+            from services.duplicate_policy import current_match_action
+
+            skip_existing = current_match_action() == "skip"
+        except Exception:
+            skip_existing = False
+        if skip_existing:
+            written = _sqlite_update_insert_upsert(
+                cur,
+                table_quoted,
+                target_cols,
+                conflict_cols,
+                [],
+                insert_cols,
+                rows,
+            )
+            return written, empty_pk_skipped + skipped + max(0, len(rows) - written)
 
     if lsn_guarded and update_cols:
         where_sql = sqlite_lsn_update_guard_sql(
@@ -748,6 +780,8 @@ def _sqlite_update_insert_upsert(
                 to_update.append(_project_row(row, target_cols, update_cols) + key)
         else:
             to_insert.append(_project_row(row, target_cols, insert_cols))
+            if not update_cols:
+                existing.add(key)
     if to_update and update_cols:
         set_sql = ", ".join(f"{quote_sql_identifier(c)}=?" for c in update_cols)
         where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)

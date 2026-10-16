@@ -1928,6 +1928,9 @@ def write_mapped_rows(
                     ),
                     carry_keys=write_mode != "insert"
                     or bool(_kwargs.get("carry_source_keys")),
+                    operator_key_columns=(
+                        list(conflict_columns or []) if write_mode == "upsert" else None
+                    ),
                 )
                 if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                     target_cols[:] = list(fidelity_plan.dest_columns)
@@ -2587,6 +2590,7 @@ def write_mapped_rows(
             )
 
             rows_skipped = 0
+            skipped_identity_keys: list[str] = []
             insert = None if use_copy else _build_insert()
             redshift_upsert_cols = (
                 [c for c in (conflict_columns or []) if c in target_cols]
@@ -2928,6 +2932,17 @@ def write_mapped_rows(
                                 source_row_numbers=dense_nums or None,
                             )
                             rows_skipped += before - len(dense)
+                            dense, dense_nums, skipped_keys = _drop_skip_existing_keys(
+                                cur,
+                                schema=schema,
+                                table_name=table_name,
+                                dense=dense,
+                                dense_nums=dense_nums,
+                                target_cols=target_cols,
+                                conflict_columns=conflict_for_part,
+                            )
+                            rows_skipped += len(skipped_keys)
+                            skipped_identity_keys.extend(skipped_keys)
                             if dense_nums and len(dense) != len(dense_nums):
                                 kept_nums: list[int] = []
                                 for i, row in enumerate(finished.dense_rows):
@@ -3049,6 +3064,9 @@ def write_mapped_rows(
                 load_method=load_method,
             )
         meta_out = write_acc.gate8_meta(conflict_columns=conflict_columns or None)
+        if skipped_identity_keys:
+            meta_out = dict(meta_out or {})
+            meta_out["skipped_identity_keys"] = list(skipped_identity_keys)
         fid_report = _kwargs.get("_schema_fidelity_report")
         if isinstance(fid_report, dict):
             meta_out = dict(meta_out or {})
@@ -3091,3 +3109,81 @@ def write_mapped_rows(
         )
     finally:
         _cleanup_spool()
+
+
+def _identity_marker(values: tuple) -> str:
+    if len(values) == 1:
+        return "" if values[0] is None else str(values[0]).strip()
+    return "\x1f".join("" if value is None else str(value).strip() for value in values)
+
+
+def _drop_skip_existing_keys(
+    cur,
+    *,
+    schema: str,
+    table_name: str,
+    dense: list,
+    dense_nums: list,
+    target_cols: list[str],
+    conflict_columns: list[str],
+) -> tuple[list, list, list[str]]:
+    """Drop keys already stored when the policy is skip-duplicates.
+
+    ON CONFLICT DO NOTHING would leave the old cells in place. Counting those
+    rows as written makes read-back compare the file to values the policy
+    refused to change. New keys still insert.
+    """
+    from services.duplicate_policy import current_match_action
+
+    if current_match_action() != "skip" or not dense or not conflict_columns:
+        return dense, dense_nums, []
+    names = [col for col in conflict_columns if col in target_cols]
+    if len(names) != len(list(conflict_columns)):
+        return dense, dense_nums, []
+    indexes = [target_cols.index(col) for col in names]
+    from psycopg2 import sql as psql
+
+    existing: set[tuple] = set()
+    table_sql = psql.SQL("{}.{}").format(
+        psql.Identifier(schema or "public"),
+        psql.Identifier(table_name),
+    )
+    cols_sql = psql.SQL(", ").join(psql.Identifier(col) for col in names)
+    try:
+        for start in range(0, len(dense), 200):
+            chunk = dense[start : start + 200]
+            placeholders = psql.SQL(", ").join(
+                psql.SQL("({})").format(
+                    psql.SQL(", ").join(psql.Placeholder() for _ in names)
+                )
+                for _ in chunk
+            )
+            params = [row[index] for row in chunk for index in indexes]
+            cur.execute(
+                psql.SQL("SELECT {} FROM {} WHERE ({}) IN (VALUES {})").format(
+                    cols_sql, table_sql, cols_sql, placeholders
+                ),
+                params,
+            )
+            for found in cur.fetchall():
+                existing.add(tuple(
+                    None if value is None else str(value).strip() for value in found
+                ))
+    except Exception:
+        return dense, dense_nums, []
+    kept = []
+    kept_nums = []
+    skipped: list[str] = []
+    for index, row in enumerate(dense):
+        key = tuple(
+            None if row[col] is None else str(row[col]).strip() for col in indexes
+        )
+        if key in existing:
+            skipped.append(_identity_marker(key))
+            continue
+        kept.append(row)
+        if dense_nums and index < len(dense_nums):
+            kept_nums.append(dense_nums[index])
+    if not dense_nums:
+        kept_nums = dense_nums
+    return kept, kept_nums, skipped

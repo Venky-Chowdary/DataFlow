@@ -305,19 +305,31 @@ def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""
     destination = _endpoint_from_connector(dst, sched.dest_table)
     src_extra = dict(getattr(source, "extra", None) or {})
     src_extra["file_wait_seconds"] = int(getattr(sched, "file_wait_seconds", 0) or 0)
-    policy = str(getattr(sched, "duplicate_policy", "") or "").strip().lower()
-    if not policy and str(getattr(sched, "primary_key", "") or "").strip():
-        # Schedule default is keyed upsert. A one-shot full_refresh_append
-        # that never sets this field still inserts (2N).
+    from services.duplicate_policy import normalize_duplicate_policy
+
+    policy = normalize_duplicate_policy(
+        str(getattr(sched, "duplicate_policy", "") or "")
+    )
+    schedule_pk = str(getattr(sched, "primary_key", "") or "").strip()
+    if not policy and schedule_pk:
+        # A keyed schedule defaults to upsert. A one-shot transfer that never
+        # sets duplicate_policy still inserts (2N). This default is the schedule.
         policy = "upsert"
     src_extra["duplicate_policy"] = policy
     in_file = str(getattr(sched, "in_file_dedupe", "") or "block").strip().lower()
     src_extra["in_file_dedupe"] = in_file
+    sched_id = str(getattr(sched, "id", "") or "")
+    if sched_id:
+        src_extra["schedule_id"] = sched_id
     source.extra = src_extra
     dst_extra = dict(getattr(destination, "extra", None) or {})
     if policy:
         dst_extra["duplicate_policy"] = policy
     dst_extra["in_file_dedupe"] = in_file
+    if sched_id:
+        dst_extra["schedule_id"] = sched_id
+    if schedule_pk:
+        dst_extra["primary_key"] = schedule_pk
     destination.extra = dst_extra
     _apply_callable_schedule_source(source, sched)
     from services.schedule_cdc_extras import apply_cdc_schedule_extras
@@ -345,7 +357,22 @@ def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""
                 "initial",
             ),
         )
-    if not stream_contracts and effective_mode not in ("full_refresh_overwrite", "full_refresh_append"):
+    def _declared_key(raw: object) -> str:
+        if not isinstance(raw, dict):
+            return ""
+        value = raw.get("primary_key")
+        if value is None or (isinstance(value, str) and not str(value).strip()):
+            value = raw.get("primary_keys")
+        if isinstance(value, (list, tuple)):
+            return ",".join(str(part).strip() for part in value if str(part).strip())
+        return str(value or "").strip()
+
+    # The key rides on the contract for every sync mode, including full refresh.
+    # Dropping it there made upsert and skip_duplicates insert (60 rows / 50 keys).
+    if not stream_contracts and (
+        effective_mode not in ("full_refresh_overwrite", "full_refresh_append")
+        or schedule_pk
+    ):
         stream_contracts = [{
             "selected": True,
             "name": sched.source_table,
@@ -353,12 +380,12 @@ def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""
             "sync_mode": effective_mode,
             "cursor_field": sched.cursor_column,
             "cursor_semantics": sched.cursor_semantics,
-            "primary_key": sched.primary_key,
+            "primary_key": schedule_pk,
             "schema_policy": sched.schema_policy,
             "validation_mode": sched.validation_mode,
             **({"snapshot_mode": snapshot_mode} if snapshot_mode else {}),
         }]
-    elif snapshot_mode or sched.cursor_semantics:
+    elif stream_contracts and (snapshot_mode or sched.cursor_semantics or schedule_pk):
         stamped: list[dict] = []
         for raw in stream_contracts:
             row = dict(raw) if isinstance(raw, dict) else {}
@@ -368,8 +395,19 @@ def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""
             # their own; a stream's own word about its cursor is never replaced.
             if sched.cursor_semantics and not str(row.get("cursor_semantics") or "").strip():
                 row["cursor_semantics"] = sched.cursor_semantics
+            if schedule_pk and not _declared_key(row):
+                row["primary_key"] = schedule_pk
             stamped.append(row)
         stream_contracts = stamped
+    if policy in {"upsert", "dedupe_skip"} and not (
+        schedule_pk or any(_declared_key(row) for row in stream_contracts)
+    ):
+        from services.duplicate_policy import DuplicatePolicyError
+
+        raise DuplicatePolicyError(
+            "Upsert and skip_duplicates need a primary key. "
+            "Declare one, or choose append to allow duplicate rows."
+        )
 
     from services.schedule_store import assert_schedule_run_allowed
 
@@ -452,6 +490,7 @@ def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""
         ),
         limit=max(0, int(getattr(sched, "row_limit", 0) or 0)),
         stream_contracts=stream_contracts,
+        duplicate_policy=policy,
         date_locale=str(getattr(sched, "date_locale", "") or ""),
         number_locale=str(getattr(sched, "number_locale", "") or ""),
         shape_recipe=dict(getattr(sched, "shape_recipe", None) or {})
@@ -1131,6 +1170,25 @@ def _park_on_decision(
     _open_finding(schedule_id, exc, attempt=attempt, job_id=job_id)
 
 
+def _collapse_repeated_finding(message: str) -> str:
+    """One drift sentence, even when Execute and the proof bundle both said it."""
+    import re
+
+    text = str(message or "").strip()
+    if not text:
+        return text
+    parts = [part.strip() for part in re.split(r"\s*(?:\n+|(?<=[.!])\s+)", text) if part.strip()]
+    kept: list[str] = []
+    for part in parts:
+        if part not in kept:
+            kept.append(part)
+    collapsed = " ".join(kept)
+    half = len(collapsed) // 2
+    if half and collapsed[:half].strip() == collapsed[half:].strip():
+        return collapsed[:half].strip()
+    return collapsed
+
+
 def _open_finding(
     schedule_id: str,
     exc: BaseException | str,
@@ -1147,9 +1205,11 @@ def _open_finding(
     configuration change that has to happen instead.
     """
     from services.failure_retry_policy import classify_failure
+    from services.blocker_titles import is_schema_drift_echo
     from services.schedule_approvals import (
         ApprovalRequired,
         KIND_RUN_REFUSED,
+        KIND_SOURCE_DRIFT,
         build_approval_request,
         open_approval_request,
     )
@@ -1161,7 +1221,7 @@ def _open_finding(
     from services.schedule_store import get_schedule
     from services.standing_authorization import delegable_scopes_for
 
-    message = str(exc)
+    message = _collapse_repeated_finding(str(exc))
     try:
         sched = get_schedule(schedule_id)
         if not sched:
@@ -1179,6 +1239,8 @@ def _open_finding(
                 code = EMPTY_MAPPING_CODE
                 scopes = ()
                 corrective = EMPTY_MAPPING_CORRECTIVE
+            elif is_schema_drift_echo(message) or "schema drift" in message.lower():
+                kind, code = KIND_SOURCE_DRIFT, "SOURCE_DRIFT"
             found = {"failure_class": classification.kind, **(evidence or {})}
         open_approval_request(
             schedule_id,
