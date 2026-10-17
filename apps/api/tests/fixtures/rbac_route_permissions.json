@@ -305,6 +305,7 @@
   "PUT /api/v1/connectors/saved/{connector_id}": "connector.write",
   "PUT /api/v1/iam/scim/group-mappings": "iam.manage",
   "PUT /api/v1/mcp/policy": "workspace.manage",
+  "PUT /api/v1/schedules/{schedule_id}": "schedule.manage",
   "PUT /api/v1/scim/v2/Groups/{group_id}": "scim.provision",
   "PUT /api/v1/scim/v2/Users/{user_id}": "scim.provision",
   "PUT /api/v1/shape/drafts": "job.plan"

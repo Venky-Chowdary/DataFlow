@@ -578,6 +578,7 @@ async def create_pipeline_schedule(
     return ScheduleResponse.from_schedule(sched)
 
 
+@router.put("/{schedule_id}", response_model=ScheduleResponse)
 @router.patch("/{schedule_id}", response_model=ScheduleResponse)
 async def patch_pipeline_schedule(
     schedule_id: str,
