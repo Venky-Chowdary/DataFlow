@@ -949,6 +949,12 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 f"{title}. Driver reported: {raw}. "
                 "This does not say the destination was missing, and it is not a capacity problem."
             )
+        elif matched.get("code") == "shape_refused_row":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "Open Transform and fix that step, or change its error policy, "
+                "then re-run Validate."
+            )
         else:
             message = (
                 f"{title}. Driver reported: {raw}. "
