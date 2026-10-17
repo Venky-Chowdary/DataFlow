@@ -460,6 +460,13 @@ class ShapeEngine:
         )
 
         raw = row.get(step.column)
+        # SQL NULL and a JSON null are absent objects. Flattening them is a
+        # no-op so one null cell does not fail the run. A present non-object
+        # still refuses — flatten will not guess a shape.
+        if raw is None or (
+            isinstance(raw, str) and raw.strip().lower() in {"", "null", "none"}
+        ):
+            return dict(row)
         obj = parse_json_object(raw)
         if obj is None:
             raise ValueError(
