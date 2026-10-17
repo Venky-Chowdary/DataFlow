@@ -440,6 +440,12 @@ def write_mapped_rows(
     del backfill_new_fields
     try:
         import pymongo
+        # ``import pymongo`` does not load the errors submodule. An except
+        # clause is evaluated while another exception is already active, so
+        # ``pymongo.errors.PyMongoError`` raises AttributeError and hides the
+        # original failure when this process has not imported the submodule yet.
+        import pymongo.errors
+        from pymongo.errors import PyMongoError
         from pymongo import MongoClient  # noqa: F401
     except ImportError:
         from connectors.driver_guard import require_driver, stub_writes_allowed
@@ -1205,7 +1211,7 @@ def write_mapped_rows(
                     # without the method) must not fail the write.
                     try:
                         coll.create_index([(c, pymongo.ASCENDING) for c in pk_cols])
-                    except (pymongo.errors.PyMongoError, AttributeError) as exc:
+                    except (PyMongoError, AttributeError) as exc:
                         logger.warning(
                             "could not index Mongo conflict key %s on %s: %s",
                             pk_cols,
@@ -1253,7 +1259,7 @@ def write_mapped_rows(
                             for existing in coll.find({"$or": batch_filters}, projection):
                                 key = _mongo_conflict_key(existing, pk_cols)
                                 existing_lsn[key] = existing.get(DF_LSN_COL)
-                    except pymongo.errors.PyMongoError as exc:
+                    except PyMongoError as exc:
                         # Fail closed: without the prior LSN map we cannot prove
                         # idempotency, so we must not write this batch.
                         return WriteResult(
@@ -1378,7 +1384,7 @@ def write_mapped_rows(
             ],
             meta=gate8_writer_meta(mapped_rows, target_cols),
         )
-    except (pymongo.errors.PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
+    except (PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
         return WriteResult(
             ok=False,
             rows_written=written if "written" in locals() else 0,
