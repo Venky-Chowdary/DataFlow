@@ -674,6 +674,57 @@ def _offset_text_preserves_instant(
     return saw
 
 
+def _measured_text_preserves_scalar(
+    source_type: str,
+    target_type: str,
+    population: Any,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when file text binds onto the destination number without loss.
+
+    A second full overwrite reads the same CSV as VARCHAR against the INTEGER
+    or NUMERIC column the first run created. Unmeasured string→number stays
+    lossy, because a later token can fail. A population that binds and keeps
+    every fraction is the value the first run already wrote.
+    """
+    src = normalize_logical_type(source_type)
+    tgt = normalize_logical_type(target_type)
+    if src not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    if tgt not in {LOGICAL_INTEGER, LOGICAL_DECIMAL}:
+        return False
+    if not isinstance(population, (list, tuple)) or not population:
+        return False
+    from decimal import Decimal
+
+    from connectors.sql_bind import normalize_sql_bind_value
+    from services.transform_engine import decimal_wire_value
+
+    saw = False
+    for raw in population:
+        if raw is None:
+            continue
+        text = str(raw).strip()
+        if not text or text.lower() in {"null", "none"}:
+            continue
+        saw = True
+        number = decimal_wire_value(text)
+        if number is None:
+            return False
+        if tgt == LOGICAL_INTEGER and number != number.to_integral_value():
+            return False
+        try:
+            bound = normalize_sql_bind_value(text, target_type, engine=dest_db or "")
+        except Exception:
+            return False
+        if isinstance(bound, bool) or not isinstance(bound, (int, Decimal)):
+            return False
+        if Decimal(bound) != number:
+            return False
+    return saw
+
+
 def is_lossy_coercion(
     source_type: str,
     target_type: str,
@@ -1148,5 +1199,9 @@ def is_lossy_coercion(
             source_type, target_type, dest_db=dest_db
         ) and not _width_proven(source, target, proven):
             return True
+        return False
+    if _measured_text_preserves_scalar(
+        source_type, target_type, population, dest_db=dest_db
+    ):
         return False
     return True

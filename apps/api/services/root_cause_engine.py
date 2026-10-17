@@ -280,6 +280,42 @@ def _is_sample_cast_not_declared_collapse(
     return False
 
 
+def _non_narrowing_decimal_cast(details: dict[str, Any] | None) -> bool:
+    """True when every typed issue is DECIMAL→DECIMAL and the scale still fits.
+
+    One narrowed pair keeps the gate a fidelity signal. A gate with no typed
+    rows is not this exemption.
+    """
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        decimal_params_would_narrow,
+        normalize_logical_type,
+    )
+
+    rows = [
+        row
+        for row in ((details or {}).get("issues_detail") or [])
+        if isinstance(row, dict)
+    ]
+    if not rows:
+        return False
+    saw = False
+    for row in rows:
+        src = str(row.get("source_type") or "").strip()
+        tgt = str(row.get("target_type") or "").strip()
+        if not src or not tgt:
+            return False
+        if (
+            normalize_logical_type(src) != LOGICAL_DECIMAL
+            or normalize_logical_type(tgt) != LOGICAL_DECIMAL
+        ):
+            return False
+        if decimal_params_would_narrow(src, tgt):
+            return False
+        saw = True
+    return saw
+
+
 def _is_fidelity_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -340,6 +376,12 @@ def _is_fidelity_signal(
             # Still allow true fidelity stamps on G9.
             if not details.get("issues_detail") and not details.get("fidelity_collapse"):
                 return False
+    # DECIMAL(10,2) → DECIMAL(18,2) is a cast, not a collapse. The gate text
+    # still says "cast" / "coercion", which used to title the root "Lossy /
+    # fidelity collapse" on a first MySQL → SQL Server load. A real narrowing
+    # stays a fidelity signal.
+    if _non_narrowing_decimal_cast(details):
+        return False
     if details.get("fidelity_collapse") is True:
         return True
     # Blank cells and bad casts on a safe widening are not fidelity collapse.
