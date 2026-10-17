@@ -199,6 +199,10 @@ def copy_sqlite_to_postgres(
         )
 
         dst_cur = dest_conn.cursor()
+        if dest_schema_n:
+            dst_cur.execute(
+                f"CREATE SCHEMA IF NOT EXISTS {_pg_ident(dest_schema_n)}"  # nosec B608
+            )
         dst_cur.execute(
             "SELECT 1 FROM information_schema.tables "
             "WHERE table_schema = %s AND table_name = %s LIMIT 1",

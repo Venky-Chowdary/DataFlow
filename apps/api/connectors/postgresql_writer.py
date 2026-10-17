@@ -1880,10 +1880,15 @@ def write_mapped_rows(
 
     def _run_setup(cursor) -> None:
         nonlocal target_types, additive_refuse
+        # The chunk ledger is ``_dataflow_write_*`` in this schema. Creating it
+        # before the schema exists fails the job after preflight already passed.
+        if schema:
+            cursor.execute(
+                sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema))
+            )
         if use_ledger:
             ensure_raw_write_ledger(cursor, dialect="postgresql", schema=schema)
         if create_table:
-            cursor.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(schema)))
             if engine not in {"redshift", "amazon_redshift", "redshift_serverless"}:
                 from services.type_system import collect_pg_enum_prerequisites
 

@@ -315,12 +315,20 @@ def probe_destination_privileges(
 
     try:
         if engine in {"postgresql", "redshift"}:
+            # A dotted destination ``qa_r16_schema.qa_r16_orders`` is schema.table.
+            # Leaving it as one name probed ``public`` and then CREATE of the
+            # ledger died because the named schema did not exist.
+            from connectors.sql_identifiers import split_qualified_table
+
+            split_schema, split_table = split_qualified_table(tbl, sch or None)
+            sch = split_schema or "public"
+            tbl = split_table
             return _probe_postgres_family(
                 engine=engine,
                 host=host,
                 port=port or (5439 if engine == "redshift" else 5432),
                 database=database,
-                schema=sch or "public",
+                schema=sch,
                 table=tbl,
                 username=username,
                 password=password,
