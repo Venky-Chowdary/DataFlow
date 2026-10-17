@@ -114,6 +114,15 @@ _REDIS_WEAK_KEYS = frozenset(
 )
 
 
+def sync_collapses_in_file_duplicates(sync_mode: str | None) -> bool:
+    """Upsert keeps the last in-file copy of a key. Append and insert do not.
+
+    ``incremental_upsert`` normalizes to ``incremental_deduped``. CDC, mirror,
+    and SCD2 still require a unique identity and are not collapsed here.
+    """
+    return _normalized_mode(sync_mode) in {"upsert", "incremental_deduped"}
+
+
 def sync_requires_unique_identity(
     sync_mode: str | None,
     dest_kind: str | None = None,

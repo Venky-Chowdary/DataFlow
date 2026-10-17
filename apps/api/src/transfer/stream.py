@@ -2748,6 +2748,15 @@ def _stream_database_transfer_impl(
                     destination_pk_columns=list(pk_target_cols or []) or None,
                     empty_cells_as_null=bool(write_kwargs.get("empty_cells_as_null")),
                 )
+                if mapped_fp and pk_target_cols:
+                    from services.primary_key import sync_collapses_in_file_duplicates
+
+                    if sync_collapses_in_file_duplicates(effective_sync):
+                        from connectors.writer_common import dedupe_rows
+
+                        mapped_fp = dedupe_rows(
+                            list(mapped_fp), list(pk_target_cols), list(target_cols)
+                        )
                 if mapped_fp:
                     inline_fps = row_fingerprints(
                         mapped_fp,

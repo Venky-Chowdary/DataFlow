@@ -2324,6 +2324,32 @@ def _run_reconciliation_impl(
                 digest_provenance["source_scope"] = (
                     f"live_population_excluding_{tombstones_excluded}_tombstones"
                 )
+        from services.primary_key import sync_collapses_in_file_duplicates
+
+        if (
+            digest_records
+            and pk_cols
+            and sync_collapses_in_file_duplicates(
+                str(dest_summary.get("sync_mode") or dest_summary.get("effective_sync_mode") or "")
+            )
+        ):
+            from services.duplicate_policy import collapse_keep_last
+
+            source_keys: list[str] = []
+            for col in pk_cols:
+                src_name = str(col)
+                for item in mapping_dicts:
+                    if str(item.get("target") or "") == str(col) and item.get("source"):
+                        src_name = str(item.get("source"))
+                        break
+                source_keys.append(src_name)
+            digest_records, collapsed_n = collapse_keep_last(
+                list(digest_records), source_keys
+            )
+            if collapsed_n:
+                digest_provenance["source_scope"] = (
+                    f"last_wins_excluding_{collapsed_n}_in_file_duplicates"
+                )
         source_checksum, source_checksum_provenance = _compute_source_checksum(
             digest_records,
             columns,

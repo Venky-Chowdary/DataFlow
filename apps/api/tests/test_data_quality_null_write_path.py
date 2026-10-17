@@ -65,11 +65,11 @@ def test_true_and_dest_true_are_one_duplicate_pk():
         sync_mode="incremental_deduped",
         primary_key="id",
     )
-    assert not report.passed
-    assert any("Duplicate primary key" in issue for issue in report.issues)
-    blob = " ".join(report.issues)
+    assert report.passed, report.issues
+    blob = " ".join(report.warnings)
     assert "true" in blob
     assert "True" not in blob
+    assert report.stats.get("collapsed_duplicate_rows") == 1
 
 
 def test_scientific_and_dest_100_are_one_duplicate_pk():
@@ -80,14 +80,14 @@ def test_scientific_and_dest_100_are_one_duplicate_pk():
         sync_mode="incremental_deduped",
         primary_key="id",
     )
-    assert not report.passed
-    assert any("Duplicate primary key" in issue for issue in report.issues)
-    blob = " ".join(report.issues)
+    assert report.passed, report.issues
+    blob = " ".join(report.warnings)
     assert "100" in blob
     assert "1E+2" not in blob
+    assert report.stats.get("collapsed_duplicate_rows") == 1
 
 
-def test_real_duplicate_pk_still_blocks():
+def test_real_duplicate_pk_on_upsert_collapses_once():
     report = run_integrity_audit(
         headers=["id", "amount"],
         rows=[["1", "100"], ["1", "200"]],
@@ -95,5 +95,14 @@ def test_real_duplicate_pk_still_blocks():
         sync_mode="incremental_deduped",
         primary_key="id",
     )
-    assert not report.passed
-    assert any("Duplicate primary key" in issue for issue in report.issues)
+    assert report.passed, report.issues
+    assert report.stats.get("collapsed_duplicate_rows") == 1
+    blocked = run_integrity_audit(
+        headers=["id", "amount"],
+        rows=[["1", "100"], ["1", "200"]],
+        dest_kind="postgresql",
+        sync_mode="full_refresh_append",
+        primary_key="id",
+    )
+    # Append that did not ask to collapse still surfaces the duplicate.
+    assert blocked.stats.get("collapsed_duplicate_rows") in {None, 0}

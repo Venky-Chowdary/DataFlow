@@ -465,9 +465,14 @@ def infer_expectations_for_schema(
     schemaless = (dest_kind or "").lower() in SCHEMALESS_DESTS
     require_unique = True
     try:
-        from services.primary_key import sync_requires_unique_identity
+        from services.primary_key import (
+            sync_collapses_in_file_duplicates,
+            sync_requires_unique_identity,
+        )
 
-        require_unique = sync_requires_unique_identity(sync_mode, dest_kind=dest_kind)
+        require_unique = sync_requires_unique_identity(
+            sync_mode, dest_kind=dest_kind
+        ) and not sync_collapses_in_file_duplicates(sync_mode)
     except Exception:
         require_unique = True
     for col in columns:

@@ -1144,17 +1144,24 @@ def _check_duplicate_keys(
     target_cols = [
         (_target_for_source(c, mappings) or c) for c in identity_cols
     ]
+    from services.primary_key import sync_collapses_in_file_duplicates
+
     keep_last = str(in_file_dedupe or "").strip().lower().replace("-", "_") == "keep_last"
-    if keep_last:
-        # The writer collapses after the gate. Clear the full-table probe so a
-        # repeated key the operator chose to keep-last does not block Validate.
-        source_duplicate_findings = []
+    collapses_in_file = keep_last or sync_collapses_in_file_duplicates(sync)
+    collapsed_extra = 0
+    if collapses_in_file:
+        # Explicit keep-last clears the source probe: the operator chose it.
+        # Upsert still collapses the sample in hand, but a source-table probe
+        # that found real duplicate keys keeps blocking.
+        if keep_last:
+            source_duplicate_findings = []
         if identity_cols:
             from services.duplicate_policy import collapse_keep_last
 
             collapsed_groups = []
             for group in _rows_by_file(rows):
-                kept, _dropped = collapse_keep_last(group, identity_cols)
+                kept, dropped = collapse_keep_last(group, identity_cols)
+                collapsed_extra += int(dropped or 0)
                 collapsed_groups.append(kept)
             rows = [row for group in collapsed_groups for row in group]
     target_col = _target_for_source(primary_key, mappings) if primary_key else ""
@@ -1166,6 +1173,12 @@ def _check_duplicate_keys(
         destination_pk_columns=destination_pk_columns,
         target_types=target_types,
     )
+    if collapsed_extra:
+        advisory_warnings.append(
+            f"In-file duplicate keys on {pk_label or primary_key}: "
+            f"{collapsed_extra} extra row(s) collapsed to one per key "
+            "(last wins). Counted once. Not quarantined and not skipped."
+        )
 
     dest_has_enforced_key = bool(destination_pk_columns) or any(
         _unique_constraint_enforced(uk, dest_kind=dest_kind)
@@ -1188,9 +1201,16 @@ def _check_duplicate_keys(
     # Single-column identity enforcement (upsert/CDC/PK/single UNIQUE).
     enforce_identity = bool(identity_cols) and (
         schemaless
-        or sync_requires_unique_identity(sync, dest_kind=dest_kind)
+        or (
+            sync_requires_unique_identity(sync, dest_kind=dest_kind)
+            and not collapses_in_file
+        )
         or overwrite_enforces_uniqueness
-        or (not _is_append_like(sync) and not _is_overwrite_like(sync))
+        or (
+            not _is_append_like(sync)
+            and not _is_overwrite_like(sync)
+            and not collapses_in_file
+        )
     )
     covering_single = False
     covering_composite_only = False
@@ -1474,7 +1494,9 @@ def _check_duplicate_keys(
             "sample-only uniqueness; append may still write duplicate keys"
         )
     if probe_authoritative and blocks:
-        if uniqueness_required:
+        # In-file copies collapse. A full-table probe that found duplicate
+        # keys is still a block: the source itself is not unique.
+        if uniqueness_required or collapses_in_file:
             return {
                 "check": "duplicate_keys",
                 "passed": False,

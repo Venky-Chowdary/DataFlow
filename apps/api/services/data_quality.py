@@ -487,7 +487,9 @@ def run_integrity_audit(
         dup_tuples = {t: c for t, c in Counter(tuples).items() if c > 1}
         if dup_tuples:
             examples = ", ".join("(" + ", ".join(t) + ")" for t in list(dup_tuples)[:3])
-            if require_unique_identity:
+            from services.primary_key import sync_collapses_in_file_duplicates
+
+            if require_unique_identity and not sync_collapses_in_file_duplicates(sync_mode):
                 _hard(
                     f"Duplicate composite key values in '{label}': "
                     f"{len(dup_tuples)} key tuple(s) repeat (e.g. {examples})"
@@ -533,11 +535,22 @@ def run_integrity_audit(
             duplicates = {v: c for v, c in dup_counts.items() if v is not None and c > 1}
             if duplicates:
                 examples = ", ".join(list(duplicates)[:3])
-                if require_unique_identity:
+                from services.primary_key import sync_collapses_in_file_duplicates
+
+                if require_unique_identity and not sync_collapses_in_file_duplicates(sync_mode):
                     _hard(
                         f"Duplicate primary key values in '{pk_source}': "
                         f"{len(duplicates)} keys repeat (e.g. {examples})"
                     )
+                elif sync_collapses_in_file_duplicates(sync_mode):
+                    extra = sum(count - 1 for count in duplicates.values())
+                    stats["collapsed_duplicate_rows"] = extra
+                    _warn(
+                        f"In-file duplicate primary key values in '{pk_source}' "
+                        f"collapsed to one row per key: {extra} extra row(s) "
+                        f"(e.g. {examples}). Counted once. Not quarantined and not skipped."
+                    )
+                    report.checks_passed += 1
                 else:
                     # Full append / overwrite on SQL: Validate already unlocked Execute.
                     # Writing every row is intentional; inventing a PK uniqueness hard

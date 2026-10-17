@@ -55,7 +55,11 @@ def test_full_append_warns_not_blocks_duplicate_identity_sql():
     assert report.stats.get("require_unique_identity") is False
 
 
-def test_upsert_sync_still_hard_blocks_duplicate_identity():
+def test_upsert_sync_collapses_in_file_duplicates_once():
+    """Upsert keeps the last copy. The extra row is a warning, not a block.
+
+    The previous contract hard-blocked before dedup, so the job never ran.
+    """
     report = run_integrity_audit(
         headers=["id", "email"],
         rows=[["1", "a@x.com"], ["1", "b@x.com"]],
@@ -63,8 +67,9 @@ def test_upsert_sync_still_hard_blocks_duplicate_identity():
         sync_mode="incremental_deduped",
         primary_key="id",
     )
-    assert not report.passed
-    assert any("Duplicate primary key" in i for i in report.issues)
+    assert report.passed, report.issues
+    assert report.stats.get("collapsed_duplicate_rows") == 1
+    assert any("Counted once" in w for w in report.warnings)
 
 
 def test_key_addressed_append_still_hard_blocks_duplicates():
@@ -81,8 +86,8 @@ def test_key_addressed_append_still_hard_blocks_duplicates():
         assert any("Duplicate primary key" in i for i in report.issues), kind
 
 
-def test_resume_upsert_posture_hard_blocks_even_when_sync_label_is_append():
-    """When write_mode upgraded to upsert, pass sync_mode='upsert' into the audit."""
+def test_resume_upsert_posture_collapses_in_file_duplicates():
+    """When write_mode upgraded to upsert, in-file copies collapse instead of blocking."""
     report = run_integrity_audit(
         headers=["id", "email"],
         rows=[["1", "a@x.com"], ["1", "b@x.com"]],
@@ -90,8 +95,8 @@ def test_resume_upsert_posture_hard_blocks_even_when_sync_label_is_append():
         sync_mode="upsert",
         primary_key="id",
     )
-    assert not report.passed
-    assert any("Duplicate primary key" in i for i in report.issues)
+    assert report.passed, report.issues
+    assert report.stats.get("collapsed_duplicate_rows") == 1
 
 
 def test_schemaless_uses_underscore_id_not_business_id():
