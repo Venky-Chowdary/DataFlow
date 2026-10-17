@@ -2707,7 +2707,7 @@ def run_file_preflight(
         else:
             # manual_review / type_locked review: human must acknowledge before green.
             # Silently passing hides new columns that will not transfer.
-            if schema_drift_acknowledged:
+            if schema_drift_acknowledged and drift.get("saved_contract", True):
                 from datetime import datetime, timezone
 
                 ack = {
@@ -2748,14 +2748,14 @@ def run_file_preflight(
                     acknowledgment=ack,
                 )
             else:
-                drift_msg = (
-                    f"Schema change detected — policy '{policy}' requires review "
-                    "before Execute. Use Acknowledge drift for this run to keep "
-                    "the existing mappings, or open Map to include the changed columns."
-                    f"{column_phrase}"
+                from services.schema_drift import schema_review_copy
+
+                review = schema_review_copy(
+                    drift, policy=policy, column_phrase=column_phrase
                 )
+                drift_msg = str(review["message"])
                 drift_gate = {
-                    "id": "schema_drift",
+                    "id": str(review["gate_id"]),
                     "status": "block",
                     "message": drift_msg,
                     "duration_ms": 0,
@@ -2764,9 +2764,9 @@ def run_file_preflight(
                         "severity": evolution.get("severity") or "warning",
                         "schema_policy": policy,
                         "schema_evolution": evolution,
-                        "rule_id": "schema_drift.manual_review",
-                        "remediation_kind": "acknowledge_schema_drift",
-                        "ack_required": True,
+                        "rule_id": review["rule_id"],
+                        "remediation_kind": review["remediation_kind"],
+                        "ack_required": bool(review["ack_required"]),
                     },
                 }
                 out["gates"] = [*out["gates"], drift_gate]

@@ -474,6 +474,22 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             {"kind": "review_mappings", "label": "Review proof and mappings"},
         ],
     },
+    "schema_mismatch": {
+        "title": "Schema mismatch",
+        "category": "hard",
+        "why": (
+            "The source has columns the destination table does not. "
+            "There is no saved mapping contract, so this is an ADD COLUMN "
+            "review, not drift."
+        ),
+        "fix": "Review the ADD COLUMN proposals and apply them before Execute.",
+        "examples": [
+            "customer_email is in the file and not on the destination table.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Review ADD COLUMN proposals"},
+        ],
+    },
     "schema_drift": {
         "title": "Schema drift",
         "category": "hard",

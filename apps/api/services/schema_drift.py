@@ -919,6 +919,48 @@ def apply_propagate_mappings(
     return mappings, applied
 
 
+def schema_review_copy(drift: dict[str, Any], *, policy: str, column_phrase: str = "") -> dict[str, str | bool]:
+    """Operator copy for a manual-review schema block.
+
+    A first mapping has no saved contract. Missing destination columns are
+    ADD COLUMN proposals, not drift and not an acknowledgement. A later
+    contract that no longer matches still says drift and can be acknowledged.
+    """
+    saved = bool((drift or {}).get("saved_contract", True))
+    if saved:
+        return {
+            "gate_id": "schema_drift",
+            "message": (
+                f"Schema change detected — policy '{policy}' requires review "
+                "before Execute. Use Acknowledge drift for this run to keep "
+                "the existing mappings, or open Map to include the changed columns."
+                f"{column_phrase}"
+            ),
+            "remediation_kind": "acknowledge_schema_drift",
+            "ack_required": True,
+            "rule_id": "schema_drift.manual_review",
+        }
+    additive = [
+        str(item.get("column") or item.get("source") or "")
+        for item in ((drift or {}).get("schema_evolution") or {}).get("additive") or []
+        if isinstance(item, dict)
+    ]
+    names = ", ".join(name for name in additive if name) or "the missing columns"
+    return {
+        "gate_id": "schema_mismatch",
+        "message": (
+            "Source and destination schemas do not match. "
+            f"Review ADD COLUMN proposals for {names} before Execute. "
+            "Those columns stay unwritten until you add them. "
+            "There is no saved mapping contract."
+            f"{column_phrase}"
+        ),
+        "remediation_kind": "review_add_column",
+        "ack_required": False,
+        "rule_id": "schema_mismatch.add_column",
+    }
+
+
 def detect_schema_drift(
     *,
     source_columns: list[str],
@@ -1354,12 +1396,21 @@ def detect_schema_drift(
         if shared_cols and schemas_match(stored_target_fp, shared_cols, shared_schema):
             target_changed = False
 
+    saved_contract = bool(
+        stored_source_fp or stored_target_fp or previous_source_columns
+    )
     evolution = resolve_schema_evolution(
         classification,
         schema_policy=schema_policy,
         unmapped_sources=evolution_unmapped,
         source_changed=source_changed or target_changed,
     )
+    if not saved_contract and evolution.get("compatibility") == COMPAT_FORWARD:
+        evolution["compatibility_note"] = (
+            "Source and destination schemas differ. Review ADD COLUMN proposals "
+            "for columns the destination does not have yet. There is no saved "
+            "mapping contract."
+        )
     non_breaking_audit: list[dict[str, Any]] = list(evolution.get("audit") or [])
     if dest_only_preserve:
         non_breaking_audit.append({
@@ -1422,6 +1473,7 @@ def detect_schema_drift(
         ),
         "classification": classification,
         "schema_evolution": evolution,
+        "saved_contract": saved_contract,
         "table_exists": table_exists,
         "create_new": create_new,
         "live_ddl_contract": live_ddl_contract,
