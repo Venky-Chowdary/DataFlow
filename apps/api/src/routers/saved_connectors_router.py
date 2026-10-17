@@ -59,6 +59,12 @@ class ConnectorSaveDTO(BaseModel):
     endpoint_url: str = ""
     path_style: bool = False
     auth_source: str = ""
+    # SFTP trust. The probe tells the operator to save a host-key pin, and the
+    # store already lifts these into ``extra``. They have to be on the DTO or
+    # Pydantic drops them before create/update.
+    host_key: str = ""
+    known_hosts: str = ""
+    host_key_policy: str = ""
     # Optional: persist an in-form Test result so the list matches on first save.
     last_test_ok: bool | None = None
 
