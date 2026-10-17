@@ -269,6 +269,15 @@ def classify_host(
     phrase = _phrase_for_infos(infos, allowlist=allowlist, workspace_id=workspace_id)
     if phrase and phrase.startswith("DNS") and not fail_closed_dns:
         return None
+    # ``localhost`` resolves to 127.0.0.1 and ::1. A list that covers
+    # 127.0.0.0/8 is the operator's loopback exception. Another hostname that
+    # happens to resolve to the same pair stays refused until ::1 is listed too.
+    if (
+        phrase == "loopback"
+        and raw == "localhost"
+        and _ip_refusal_phrase(ipaddress.ip_address("127.0.0.1"), nets) is None
+    ):
+        return None
     return phrase
 
 
