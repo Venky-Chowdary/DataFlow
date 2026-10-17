@@ -437,16 +437,19 @@ def _paged_payload_duplicates(
                 # Reader handed back no continuation: it cannot be resumed, and
                 # re-reading from the top would count its own re-reads as duplicates.
                 break
-        return (
+        from services.identity_uniqueness import annotate_identity_findings
+
+        findings = annotate_identity_findings(
             scanner.findings(
                 pk_columns,
                 limit,
                 identity_cell=_identity_cell,
                 finding_value=_finding_value,
             ),
-            scanned,
-            complete,
+            scanner,
+            complete=complete,
         )
+        return findings, scanned, complete
     finally:
         scanner.close()
 

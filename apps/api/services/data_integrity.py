@@ -1079,6 +1079,36 @@ def _file_scope_key(row: dict[str, Any], key: str) -> str:
     return str(key)
 
 
+def _in_file_collapse_message(
+    pk: str,
+    extra: int,
+    example: str,
+    *,
+    sample: bool = False,
+    unique: int | None = None,
+    scanned: int | None = None,
+) -> str:
+    """Operator text for an in-file upsert collapse.
+
+    A finished scan names the population. A partial scan says the number is
+    from the rows that were read. Neither path invents a count it did not make.
+    """
+    if sample:
+        counted = f"{extra} extra row(s) in the scanned sample"
+    else:
+        counted = f"{extra} extra row(s)"
+    shown = f"({example}) " if example else ""
+    scope = ""
+    if not sample and unique is not None and scanned is not None:
+        scope = f"({unique} unique, {scanned} scanned) "
+    return (
+        f"In-file duplicate keys on {pk}: "
+        f"{counted} collapsed to one per key "
+        f"{shown}{scope}"
+        "(last wins). Counted once. Not quarantined and not skipped."
+    )
+
+
 def _check_duplicate_keys(
     mappings: list[dict],
     rows: list[dict[str, Any]],
@@ -1152,6 +1182,11 @@ def _check_duplicate_keys(
     collapse_example = ""
     probe_collapsed_extra = 0
     probe_example = ""
+    population_extra: int | None = None
+    population_unique: int | None = None
+    population_scanned: int | None = None
+    sample_only = False
+    sample_extra: int | None = None
     if collapses_in_file:
         # Explicit keep-last clears the source probe: the operator chose it.
         # Upsert collapses in-file copies the payload scan found. A SQL
@@ -1163,6 +1198,19 @@ def _check_duplicate_keys(
             kept_findings: list[dict[str, Any]] = []
             for finding in source_duplicate_findings or []:
                 if isinstance(finding, dict) and finding.get("in_file"):
+                    if (
+                        finding.get("population_complete") is True
+                        and finding.get("population_extra") is not None
+                    ):
+                        population_extra = int(finding["population_extra"])
+                        if finding.get("population_unique") is not None:
+                            population_unique = int(finding["population_unique"])
+                        if finding.get("population_scanned") is not None:
+                            population_scanned = int(finding["population_scanned"])
+                    elif finding.get("sample_only"):
+                        sample_only = True
+                        if finding.get("sample_extra") is not None:
+                            sample_extra = int(finding["sample_extra"])
                     count = int(finding.get("count") or 0)
                     if count > 1:
                         probe_collapsed_extra += count - 1
@@ -1210,22 +1258,46 @@ def _check_duplicate_keys(
         destination_pk_columns=destination_pk_columns,
         target_types=target_types,
     )
-    if collapsed_extra:
+    if population_extra:
+        # A finished payload scan counted every extra row. The example list is
+        # capped, so summing those examples under-counts the file.
         advisory_warnings.append(
-            f"In-file duplicate keys on {pk_label or primary_key}: "
-            f"{collapsed_extra} extra row(s) collapsed to one per key "
-            f"{collapse_example + ' ' if collapse_example else ''}"
-            "(last wins). Counted once. Not quarantined and not skipped."
+            _in_file_collapse_message(
+                pk_label or primary_key or "",
+                population_extra,
+                probe_example,
+                unique=population_unique,
+                scanned=population_scanned,
+            )
+        )
+    elif collapsed_extra:
+        advisory_warnings.append(
+            _in_file_collapse_message(
+                pk_label or primary_key or "",
+                collapsed_extra,
+                collapse_example.lstrip("(").rstrip(")") if collapse_example else "",
+            )
+        )
+    elif sample_only and (sample_extra or probe_collapsed_extra):
+        # The scan stopped before the rest of the file. Say so. Do not promote
+        # the rows that were read into a population.
+        advisory_warnings.append(
+            _in_file_collapse_message(
+                pk_label or primary_key or "",
+                sample_extra if sample_extra is not None else probe_collapsed_extra,
+                probe_example,
+                sample=True,
+            )
         )
     elif probe_collapsed_extra:
         # The Validate sample missed the repeated keys (it is capped). The
         # file scan found them. Upsert still keeps one row per key.
-        shown = f"({probe_example}) " if probe_example else ""
         advisory_warnings.append(
-            f"In-file duplicate keys on {pk_label or primary_key}: "
-            f"{probe_collapsed_extra} extra row(s) collapsed to one per key "
-            f"{shown}"
-            "(last wins). Counted once. Not quarantined and not skipped."
+            _in_file_collapse_message(
+                pk_label or primary_key or "",
+                probe_collapsed_extra,
+                probe_example,
+            )
         )
 
     dest_has_enforced_key = bool(destination_pk_columns) or any(

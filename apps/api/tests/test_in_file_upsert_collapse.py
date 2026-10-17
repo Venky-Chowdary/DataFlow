@@ -142,6 +142,97 @@ def test_file_probe_duplicates_are_advisory_on_upsert_and_still_block_elsewhere(
     assert overwrite["blocks_transfer"] is True
 
 
+def test_capped_probe_advisory_uses_population_for_sixty_row_file(tmp_path, monkeypatch) -> None:
+    """60 rows, 50 unique, ids 1-10 twice. The example cap is 5, not the file.
+
+    Summing the five returned groups produced '5 extra row(s) collapsed to one
+    per key'. The scan already knew 10 extra, 50 unique, and 60 scanned.
+    """
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    path = tmp_path / "dups.csv"
+    lines = ["id,name"]
+    for i in range(1, 51):
+        lines.append(f"{i},a{i}")
+    for i in range(1, 11):
+        lines.append(f"{i},b{i}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "connectors.sftp_reader.materialize_spill",
+        lambda **_kwargs: (path, "dups.csv"),
+    )
+    result = probe_source_duplicate_keys_result(
+        source_config={
+            "type": "sftp",
+            "host": "files.example",
+            "database": "/inbound",
+            "table": "dups.csv",
+        },
+        source_table="dups.csv",
+        primary_key_columns=["id"],
+    )
+    assert result.status == "ran"
+    findings = result.findings
+    assert len(findings) == 5
+    assert sum(int(item["count"]) - 1 for item in findings) == 5
+    assert findings[0]["population_complete"] is True
+    assert findings[0]["population_extra"] == 10
+    assert findings[0]["population_unique"] == 50
+    assert findings[0]["population_scanned"] == 60
+
+    sample = [{"id": str(i), "name": f"a{i}"} for i in range(1, 51)]
+    report = _check_duplicate_keys(
+        [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}],
+        sample,
+        "strict",
+        dest_kind="postgresql",
+        primary_key="id",
+        sync_mode="incremental_upsert",
+        identity_declared=True,
+        source_duplicate_findings=findings,
+        source_duplicate_probe_status="ran",
+        source_duplicate_probe_expected=True,
+    )
+    assert report["blocks_transfer"] is False
+    warning = " ".join(report["warnings"])
+    assert "5 extra" not in warning, warning
+    assert "10 extra" in warning, warning
+    assert "50 unique" in warning, warning
+    assert "60 scanned" in warning, warning
+
+
+def test_partial_scan_labels_collapsed_extra_as_sample() -> None:
+    """A scan that did not finish the file must not invent a population."""
+    findings = [
+        {
+            "value": str(i),
+            "count": 2,
+            "in_file": True,
+            "sample_only": True,
+            "sample_extra": 5,
+        }
+        for i in range(1, 6)
+    ]
+    report = _check_duplicate_keys(
+        [{"source": "id", "target": "id"}],
+        [{"id": str(i), "name": f"a{i}"} for i in range(1, 51)],
+        "strict",
+        dest_kind="postgresql",
+        primary_key="id",
+        sync_mode="incremental_upsert",
+        identity_declared=True,
+        source_duplicate_findings=findings,
+        source_duplicate_probe_status="ran",
+        source_duplicate_probe_expected=True,
+    )
+    warning = " ".join(report["warnings"])
+    assert "sample" in warning.lower(), warning
+    assert "5 extra" in warning, warning
+    assert "10 extra" not in warning, warning
+    assert "50 unique" not in warning, warning
+    assert report["blocks_transfer"] is False
+
+
 def test_append_with_enforced_key_still_blocks_in_file_duplicates() -> None:
     report = _check_duplicate_keys(
         [{"source": "id", "target": "id"}],

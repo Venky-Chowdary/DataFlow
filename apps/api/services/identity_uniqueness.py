@@ -30,6 +30,8 @@ class PartitionedUniqueness:
         ]
         self._handles = [path.open("w", encoding="utf-8") for path in self._paths]
         self._closed = False
+        self.unique_keys = 0
+        self.extra_rows = 0
 
     def add(self, key: tuple[str, ...]) -> None:
         blob = "\x1f".join(key)
@@ -58,6 +60,8 @@ class PartitionedUniqueness:
         self._seal()
         out: list[dict[str, Any]] = []
         cap = max(1, int(limit))
+        extra = 0
+        unique = 0
         for path in self._paths:
             counts: dict[str, int] = {}
             with path.open(encoding="utf-8") as handle:
@@ -65,7 +69,13 @@ class PartitionedUniqueness:
                     token = line[:-1] if line.endswith("\n") else line
                     counts[token] = counts.get(token, 0) + 1
             for token, count in counts.items():
+                unique += 1
                 if count < 2:
+                    continue
+                # Example findings stay capped. The extra-row total does not:
+                # stopping here reported the example cap (5) as the population.
+                extra += count - 1
+                if len(out) >= cap:
                     continue
                 parts = token.split("\x1f")
                 values = [identity_cell(part) for part in parts]
@@ -77,13 +87,44 @@ class PartitionedUniqueness:
                         "count": int(count),
                     }
                 )
-                if len(out) >= cap:
-                    return out
+        self.unique_keys = unique
+        self.extra_rows = extra
         return out
 
     def close(self) -> None:
         self._seal()
         self._tmp.cleanup()
+
+
+def annotate_identity_findings(
+    findings: list[dict[str, Any]],
+    scanner: PartitionedUniqueness,
+    *,
+    complete: bool,
+) -> list[dict[str, Any]]:
+    """Attach the scan total the example list does not carry.
+
+    ``findings`` is capped at the probe limit. A finished scan knows the
+    population (extra rows, unique keys, rows scanned). A scan that stopped
+    early only knows the rows it read, so those counts are marked as a sample
+    and must not be described as the file.
+    """
+    extra = int(scanner.extra_rows or 0)
+    unique = int(scanner.unique_keys or 0)
+    scanned = int(scanner.rows or 0)
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        if complete:
+            finding["population_extra"] = extra
+            finding["population_unique"] = unique
+            finding["population_scanned"] = scanned
+            finding["population_complete"] = True
+        else:
+            finding["sample_only"] = True
+            finding["sample_extra"] = extra
+            finding["sample_scanned"] = scanned
+    return findings
 
 
 def iter_identity_records(path: Path, filename: str) -> Iterator[dict[str, Any]]:
@@ -139,6 +180,7 @@ def scan_identity_file(
             identity_cell=identity_cell,
             finding_value=finding_value,
         )
+        annotate_identity_findings(findings, scanner, complete=True)
         return findings, scanner.rows, True
     finally:
         scanner.close()

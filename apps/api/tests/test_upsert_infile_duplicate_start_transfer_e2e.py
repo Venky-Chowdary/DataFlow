@@ -178,6 +178,11 @@ def test_start_transfer_upsert_collapses_infile_duplicates(
     advisory = _advisory(preflight)
     assert advisory["blocks_transfer"] is False
     assert advisory["gate"] == "g9_data_integrity"
+    message = str(advisory.get("message") or "")
+    assert "5 extra" not in message, message
+    assert "10 extra" in message, message
+    assert "50 unique" in message, message
+    assert "60 scanned" in message, message
 
     confirmed = transfer_client.post(
         "/api/v1/copilot/confirm",
