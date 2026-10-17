@@ -418,6 +418,7 @@ def _endpoint_from_connector(conn: dict[str, Any], table: str = "") -> Any:
     from src.transfer.models import EndpointConfig
 
     fmt = str(conn.get("type") or conn.get("format") or "").lower()
+    extra = conn.get("extra") if isinstance(conn.get("extra"), dict) else {}
     return EndpointConfig(
         kind="database",
         format=fmt,
@@ -436,6 +437,7 @@ def _endpoint_from_connector(conn: dict[str, Any], table: str = "") -> Any:
         auth_mode=str(conn.get("auth_mode") or ""),
         auth_role=str(conn.get("auth_role") or ""),
         auth_source=str(conn.get("auth_source") or ""),
+        extra=dict(extra),
     )
 
 

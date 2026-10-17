@@ -666,6 +666,44 @@ def _drift_column_phrase(evolution: dict[str, Any] | None) -> str:
 
 
 
+def _lift_in_file_collapse_advisories(out: dict[str, Any]) -> None:
+    """Surface a passing in-file collapse where Pilot reads warnings.
+
+    Gate details are dropped from the staged preflight. The advisory has to
+    travel on the top-level warning list, with ``blocks_transfer`` false, or
+    the operator only sees a silent pass.
+    """
+    warnings = out.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+        out["warnings"] = warnings
+    seen = {
+        str(item.get("message") if isinstance(item, dict) else item)
+        for item in warnings
+    }
+    for gate in out.get("gates") or []:
+        if not isinstance(gate, dict) or gate.get("id") != "g9_data_integrity":
+            continue
+        if str(gate.get("status") or "") == "block":
+            continue
+        for item in (gate.get("details") or {}).get("warnings") or []:
+            text = str(item or "").strip()
+            if "counted once" not in text.lower():
+                continue
+            if text in seen:
+                continue
+            seen.add(text)
+            warnings.insert(
+                0,
+                {
+                    "id": "in_file_duplicate_collapsed",
+                    "message": text,
+                    "blocks_transfer": False,
+                    "gate": "g9_data_integrity",
+                },
+            )
+
+
 def _plan_in_file_dedupe(source_config: dict[str, Any] | None) -> str:
     """``keep_last`` or ``block`` from the source config the schedule stamped."""
     cfg = source_config if isinstance(source_config, dict) else {}
@@ -2980,6 +3018,7 @@ def run_file_preflight(
     from services.file_pickup import attach_direct_dated_file_warning
 
     attach_direct_dated_file_warning(out, source_table or source_filename)
+    _lift_in_file_collapse_advisories(out)
     out = apply_root_causes_to_preflight(
         _block_decision_on_hard_gate(apply_readiness_honesty_caps(out))
     )

@@ -1150,12 +1150,27 @@ def _check_duplicate_keys(
     collapses_in_file = operator_collapses_in_file_duplicates(sync, in_file_dedupe)
     collapsed_extra = 0
     collapse_example = ""
+    probe_collapsed_extra = 0
+    probe_example = ""
     if collapses_in_file:
         # Explicit keep-last clears the source probe: the operator chose it.
-        # Upsert still collapses the sample in hand, but a source-table probe
-        # that found real duplicate keys keeps blocking.
+        # Upsert collapses in-file copies the payload scan found. A SQL
+        # source-table probe that found real duplicate keys still blocks,
+        # and so does an explicit block policy (collapses_in_file is false).
         if keep_last:
             source_duplicate_findings = []
+        elif identity_cols:
+            kept_findings: list[dict[str, Any]] = []
+            for finding in source_duplicate_findings or []:
+                if isinstance(finding, dict) and finding.get("in_file"):
+                    count = int(finding.get("count") or 0)
+                    if count > 1:
+                        probe_collapsed_extra += count - 1
+                        if not probe_example:
+                            probe_example = str(finding.get("value") or "")
+                    continue
+                kept_findings.append(finding)
+            source_duplicate_findings = kept_findings
         if identity_cols:
             from services.duplicate_policy import collapse_keep_last
             from services.type_system import unique_equality_key
@@ -1200,6 +1215,16 @@ def _check_duplicate_keys(
             f"In-file duplicate keys on {pk_label or primary_key}: "
             f"{collapsed_extra} extra row(s) collapsed to one per key "
             f"{collapse_example + ' ' if collapse_example else ''}"
+            "(last wins). Counted once. Not quarantined and not skipped."
+        )
+    elif probe_collapsed_extra:
+        # The Validate sample missed the repeated keys (it is capped). The
+        # file scan found them. Upsert still keeps one row per key.
+        shown = f"({probe_example}) " if probe_example else ""
+        advisory_warnings.append(
+            f"In-file duplicate keys on {pk_label or primary_key}: "
+            f"{probe_collapsed_extra} extra row(s) collapsed to one per key "
+            f"{shown}"
             "(last wins). Counted once. Not quarantined and not skipped."
         )
 

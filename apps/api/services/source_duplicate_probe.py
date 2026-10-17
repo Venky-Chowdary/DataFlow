@@ -922,6 +922,13 @@ def probe_source_duplicate_keys_result(
             findings, scanned, complete = _object_payload_duplicates(
                 cfg, db_type, obj, pk_columns, limit=limit
             )
+            # A file or object payload is one batch. Duplicate keys in it are
+            # in-file copies the upsert writer collapses, not a SQL table that
+            # is itself non-unique. Stamp them so G9 can tell the two apart.
+            if db_type in OBJECT_PAYLOAD_SOURCE_TYPES:
+                for finding in findings:
+                    if isinstance(finding, dict):
+                        finding["in_file"] = True
             if not complete:
                 # A truncated scan proves the duplicates it found but cannot
                 # prove their absence, so it must not be stamped as population

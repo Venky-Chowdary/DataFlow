@@ -569,6 +569,16 @@ def _introspect_schema(
         })
     if db_type == "redis":
         return _introspect_redis(host=host, port=port, password=password, table=table, connection_string=connection_string)
+    if db_type == "sftp":
+        return _introspect_sftp(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            table=table,
+            reader_cfg=reader_cfg,
+        )
     if db_type == "sqlite":
         return _introspect_sqlite(database=database, connection_string=connection_string, host=host, table=table)
     if db_type == "neo4j":
@@ -592,6 +602,81 @@ def _introspect_schema(
             ssl=ssl,
         )
     return {"ok": False, "error": f"Schema introspection not implemented for {db_type}", "columns": [], "tables": []}
+
+
+def _introspect_sftp(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    table: str | None,
+    reader_cfg: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Column profile for one remote file. The transfer reader already owns this."""
+    from src.transfer.endpoint_intelligence import introspect_endpoint
+    from src.transfer.models import EndpointConfig
+
+    cfg = dict(reader_cfg or {})
+    nested = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    extra = {}
+    for key in ("host_key", "known_hosts", "host_key_policy"):
+        value = cfg.get(key)
+        if value in (None, "") and key in nested:
+            value = nested.get(key)
+        if value not in (None, ""):
+            extra[key] = value
+    endpoint = EndpointConfig(
+        kind="database",
+        format="sftp",
+        host=str(cfg.get("host") or host or ""),
+        port=int(cfg.get("port") or port or 0),
+        database=str(cfg.get("database") or database or ""),
+        username=str(cfg.get("username") or username or ""),
+        password=str(cfg.get("password") or password or ""),
+        table=str(table or cfg.get("table") or ""),
+        extra=extra,
+    )
+    probed = introspect_endpoint(endpoint)
+    schema = probed.get("schema") if isinstance(probed.get("schema"), dict) else {}
+    raw_cols = probed.get("columns") or []
+    columns: list[dict[str, Any]] = []
+    for item in raw_cols:
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            columns.append(
+                {
+                    "name": name,
+                    "type": str(item.get("type") or schema.get(name) or "TEXT"),
+                    "nullable": True,
+                }
+            )
+            continue
+        name = str(item or "").strip()
+        if not name:
+            continue
+        columns.append(
+            {"name": name, "type": str(schema.get(name) or "TEXT"), "nullable": True}
+        )
+    if not columns:
+        detail = str(
+            probed.get("sample_error") or probed.get("message") or probed.get("error") or ""
+        ).strip()
+        return {
+            "ok": False,
+            "error": detail or "SFTP file has no readable columns",
+            "columns": [],
+            "tables": [],
+        }
+    return {
+        "ok": True,
+        "columns": columns,
+        "tables": [endpoint.table] if endpoint.table else [],
+        "schema": schema,
+    }
 
 
 def _introspect_object_store(

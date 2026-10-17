@@ -677,6 +677,9 @@ def _lookup_saved_connector(
                 "endpoint_url": getattr(conn, "endpoint_url", ""),
                 "path_style": getattr(conn, "path_style", False),
                 "role": getattr(conn, "auth_role", ""),
+                # SFTP host-key pin and other operator extras live here. Dropping
+                # them made a saved pin look untrusted on Pilot introspect.
+                "extra": dict(getattr(conn, "extra", None) or {}),
             }
     except Exception as exc:
         logger.debug("connector store lookup failed: %s", exc, exc_info=exc)

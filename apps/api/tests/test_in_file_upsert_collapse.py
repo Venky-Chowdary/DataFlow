@@ -75,6 +75,73 @@ def test_incremental_upsert_collapses_in_file_duplicates_without_blocking() -> N
     assert preflight["passed"] is True
 
 
+def test_file_probe_duplicates_are_advisory_on_upsert_and_still_block_elsewhere() -> None:
+    """A file scan's duplicate keys are in-file copies. A SQL probe is not."""
+    findings = [{"value": "1", "count": 2, "in_file": True}]
+    rows = [{"id": "1", "name": "only-in-sample"}]
+    upsert = _check_duplicate_keys(
+        [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}],
+        rows,
+        "strict",
+        dest_kind="postgresql",
+        primary_key="id",
+        sync_mode="incremental_upsert",
+        identity_declared=True,
+        source_duplicate_findings=findings,
+        source_duplicate_probe_status="ran",
+        source_duplicate_probe_expected=True,
+    )
+    assert upsert["blocks_transfer"] is False
+    assert upsert["passed"] is True
+    warning = " ".join(upsert["warnings"])
+    assert "1 extra row" in warning
+    assert "Counted once" in warning
+    assert "quarantined" in warning
+
+    sql_probe = _check_duplicate_keys(
+        [{"source": "id", "target": "id"}],
+        rows,
+        "strict",
+        dest_kind="postgresql",
+        primary_key="id",
+        sync_mode="incremental_upsert",
+        identity_declared=True,
+        source_duplicate_findings=[{"value": "1", "count": 2}],
+        source_duplicate_probe_status="ran",
+        source_duplicate_probe_expected=True,
+    )
+    assert sql_probe["blocks_transfer"] is True
+
+    blocked = _check_duplicate_keys(
+        [{"source": "id", "target": "id"}],
+        rows,
+        "strict",
+        dest_kind="postgresql",
+        primary_key="id",
+        sync_mode="incremental_upsert",
+        identity_declared=True,
+        in_file_dedupe="block",
+        source_duplicate_findings=findings,
+        source_duplicate_probe_status="ran",
+        source_duplicate_probe_expected=True,
+    )
+    assert blocked["blocks_transfer"] is True
+
+    overwrite = _check_duplicate_keys(
+        [{"source": "id", "target": "id"}],
+        rows,
+        "strict",
+        dest_kind="postgresql",
+        primary_key="id",
+        sync_mode="full_refresh_overwrite",
+        identity_declared=True,
+        source_duplicate_findings=findings,
+        source_duplicate_probe_status="ran",
+        source_duplicate_probe_expected=True,
+    )
+    assert overwrite["blocks_transfer"] is True
+
+
 def test_append_with_enforced_key_still_blocks_in_file_duplicates() -> None:
     report = _check_duplicate_keys(
         [{"source": "id", "target": "id"}],
