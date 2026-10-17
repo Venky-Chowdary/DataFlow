@@ -173,6 +173,55 @@ def _series_is_dated(pattern: str, files: list[RemoteFile]) -> bool:
     return any(_FILE_DAY.search(item.name or "") for item in files)
 
 
+def dated_file_day(name: str) -> date | None:
+    """Calendar day embedded in a file name, or None when the name is not dated."""
+    match = _FILE_DAY.search(name or "")
+    if not match:
+        return None
+    digits = re.sub(r"\D", "", match.group(0))
+    if len(digits) != 8:
+        return None
+    try:
+        return date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+    except ValueError:
+        return None
+
+
+def direct_dated_file_warning(name: str, today: date | datetime | str | None = None) -> str:
+    """Warn when an explicitly chosen file is not today's file.
+
+    A glob or schedule is not required. Today's own file does not warn.
+    A name with no date does not warn.
+    """
+    found = dated_file_day(name)
+    if found is None:
+        return ""
+    day = _pickup_day(today)
+    if found == day:
+        return ""
+    return f"expected file for {day.isoformat()} not arrived"
+
+
+def attach_direct_dated_file_warning(
+    payload: dict,
+    name: str,
+    today: date | datetime | str | None = None,
+) -> str:
+    """Append the direct-key warning onto a preflight or job summary."""
+    note = direct_dated_file_warning(name, today)
+    if not note or not isinstance(payload, dict):
+        return note
+    warnings = list(payload.get("warnings") or [])
+    texts = {
+        str(item.get("message") if isinstance(item, dict) else item)
+        for item in warnings
+    }
+    if note not in texts:
+        warnings.append({"id": "expected_file_not_arrived", "message": note})
+    payload["warnings"] = warnings
+    return note
+
+
 def _listing_has_day(files: list[RemoteFile], day: date) -> bool:
     iso = day.isoformat()
     compact = day.strftime("%Y%m%d")

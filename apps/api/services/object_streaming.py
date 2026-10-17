@@ -1023,7 +1023,7 @@ def stream_spilled_file_to_database(
     except ImportError:  # pragma: no cover
         from transfer.file_stream import stream_file_to_database
 
-    return stream_file_to_database(
+    rows, ddl, summary, columns = stream_file_to_database(
         content=path,
         filename=filename,
         destination=destination,
@@ -1044,3 +1044,8 @@ def stream_spilled_file_to_database(
         file_identity=file_identity,
         fingerprint_sink=fingerprint_sink,
     )
+    from services.file_pickup import attach_direct_dated_file_warning
+
+    if isinstance(summary, dict):
+        attach_direct_dated_file_warning(summary, filename)
+    return rows, ddl, summary, columns

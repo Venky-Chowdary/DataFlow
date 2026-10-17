@@ -287,7 +287,12 @@ def pickup_job_outcome(
     """
     if not isinstance(summary, dict):
         return None
-    warnings = [str(item).strip() for item in (summary.get("warnings") or []) if str(item).strip()]
+    warnings = []
+    for item in summary.get("warnings") or []:
+        text = item.get("message") if isinstance(item, dict) else item
+        text = str(text or "").strip()
+        if text:
+            warnings.append(text)
     today_missing = [
         item
         for item in warnings

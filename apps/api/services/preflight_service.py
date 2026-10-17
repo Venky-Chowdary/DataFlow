@@ -2968,6 +2968,9 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
+    from services.file_pickup import attach_direct_dated_file_warning
+
+    attach_direct_dated_file_warning(out, source_table or source_filename)
     out = apply_root_causes_to_preflight(
         _block_decision_on_hard_gate(apply_readiness_honesty_caps(out))
     )
