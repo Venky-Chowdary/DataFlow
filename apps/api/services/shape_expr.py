@@ -209,7 +209,10 @@ class _Unary(_Node):
             return not _as_bool(value)
         if value is None:
             return None
-        return -_as_number(value)
+        number = _as_number(value)
+        if number is None:
+            return None
+        return -number
 
     def columns(self) -> set[str]:
         return self.operand.columns()
@@ -314,8 +317,12 @@ def _as_text(value: Any) -> str | None:
     return text
 
 
-def _as_number(value: Any) -> Decimal:
-    """Write-path decimal bind — locale/currency money, Auto 1,234 refuses."""
+def _as_number(value: Any) -> Decimal | None:
+    """Write-path decimal bind — locale/currency money, Auto 1,234 refuses.
+
+    A computed NULL or blank is NULL. Arithmetic and numeric functions propagate
+    it. A non-empty token that is not a number still refuses.
+    """
     if isinstance(value, Decimal):
         return value
     if isinstance(value, bool):
@@ -329,7 +336,7 @@ def _as_number(value: Any) -> Decimal:
         return Decimal(str(value))
     text = _as_text(value)
     if text is None or text.strip() == "":
-        raise EvalError("expected a number, got an empty value")
+        return None
     from services.transform_engine import (
         decimal_wire_value,
         number_locale_ambiguity_reason,
@@ -382,6 +389,8 @@ def _compare(op: str, left: Any, right: Any) -> bool | None:
         pair: tuple[Any, Any] = (_as_bool(left), _as_bool(right))
     elif _both_numeric(left, right):
         pair = (_as_number(left), _as_number(right))
+        if pair[0] is None or pair[1] is None:
+            return None
     elif isinstance(left, (datetime, date)) and isinstance(right, (datetime, date)):
         pair = (_comparable_moment(left), _comparable_moment(right))
     else:
@@ -417,6 +426,8 @@ def _arithmetic(op: str, left: Any, right: Any) -> Any:
         )
     a = _as_number(left)
     b = _as_number(right)
+    if a is None or b is None:
+        return None
     if op == "+":
         return a + b
     if op == "-":
@@ -469,13 +480,19 @@ def _fn_substr(value: Any, start: Any, length: Any = None) -> Any:
     text = _as_text(value)
     if text is None:
         return None
-    begin = int(_as_number(start))
+    begin_n = _as_number(start)
+    if begin_n is None:
+        return None
+    begin = int(begin_n)
     if begin == 0:
         raise EvalError("substr positions are 1-based; 0 is not a position")
     index = begin - 1 if begin > 0 else max(len(text) + begin, 0)
     if length is None:
         return text[index:]
-    count = int(_as_number(length))
+    count_n = _as_number(length)
+    if count_n is None:
+        return None
+    count = int(count_n)
     if count < 0:
         raise EvalError("substr length cannot be negative")
     return text[index : index + count]
@@ -526,7 +543,10 @@ def _fn_regex_extract(value: Any, pattern: Any, group: Any = 0) -> Any:
     match = _compiled_pattern(pattern).search(_guard_subject(text))
     if match is None:
         return None
-    index = int(_as_number(group))
+    index_n = _as_number(group)
+    if index_n is None:
+        return None
+    index = int(index_n)
     try:
         return match.group(index)
     except (IndexError, re.error) as exc:
@@ -547,7 +567,10 @@ def _fn_split_part(value: Any, separator: Any, index: Any) -> Any:
     sep = _as_text(separator) or ""
     if sep == "":
         raise EvalError("split_part needs a non-empty separator")
-    position = int(_as_number(index))
+    position_n = _as_number(index)
+    if position_n is None:
+        return None
+    position = int(position_n)
     if position == 0:
         raise EvalError("split_part positions are 1-based; 0 is not a position")
     parts = text.split(sep)
@@ -561,7 +584,10 @@ def _fn_pad(value: Any, width: Any, fill: Any, *, left: bool) -> Any:
     text = _as_text(value)
     if text is None:
         return None
-    target = int(_as_number(width))
+    target_n = _as_number(width)
+    if target_n is None:
+        return None
+    target = int(target_n)
     if target < 0:
         raise EvalError("pad width cannot be negative")
     if target > _MAX_REPEAT:
@@ -599,7 +625,12 @@ def _round_half_up(value: Any, places: Any = 0) -> Any:
     if value is None:
         return None
     number = _as_number(value)
-    digits = int(_as_number(places))
+    if number is None:
+        return None
+    digits_n = _as_number(places)
+    if digits_n is None:
+        return None
+    digits = int(digits_n)
     if abs(digits) > 40:
         raise EvalError("round places must be within 40 digits")
     quantum = Decimal(1).scaleb(-digits)
@@ -612,7 +643,12 @@ def _fn_truncate(value: Any, places: Any = 0) -> Any:
     if value is None:
         return None
     number = _as_number(value)
-    digits = int(_as_number(places))
+    if number is None:
+        return None
+    digits_n = _as_number(places)
+    if digits_n is None:
+        return None
+    digits = int(digits_n)
     quantum = Decimal(1).scaleb(-digits)
     return _quantize_wide(number, quantum, "ROUND_DOWN")
 
@@ -766,17 +802,24 @@ def _fn_greatest(*values: Any) -> Any:
 
 def _sort_key(value: Any) -> tuple[int, Any]:
     try:
-        return (0, _as_number(value))
+        number = _as_number(value)
     except EvalError:
         return (1, _as_text(value) or "")
+    if number is None:
+        return (1, _as_text(value) or "")
+    return (0, number)
 
 
 def _fn_clamp(value: Any, low: Any, high: Any) -> Any:
     if is_blank(value):
         return None
     number = _as_number(value)
+    if number is None:
+        return None
     floor_v = _as_number(low)
     ceil_v = _as_number(high)
+    if floor_v is None or ceil_v is None:
+        return None
     if floor_v > ceil_v:
         raise EvalError("clamp lower bound is above its upper bound")
     return max(floor_v, min(ceil_v, number))
