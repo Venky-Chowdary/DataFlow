@@ -123,6 +123,23 @@ def sync_collapses_in_file_duplicates(sync_mode: str | None) -> bool:
     return _normalized_mode(sync_mode) in {"upsert", "incremental_deduped"}
 
 
+def operator_collapses_in_file_duplicates(
+    sync_mode: str | None,
+    in_file_dedupe: str | None = "",
+) -> bool:
+    """Collapse when the sync mode does, unless the operator asked to block.
+
+    An explicit ``block`` policy still fails the load. ``keep_last`` collapses
+    even on append. An empty policy follows the sync mode.
+    """
+    policy = str(in_file_dedupe or "").strip().lower().replace("-", "_")
+    if policy == "block":
+        return False
+    if policy == "keep_last":
+        return True
+    return sync_collapses_in_file_duplicates(sync_mode)
+
+
 def sync_requires_unique_identity(
     sync_mode: str | None,
     dest_kind: str | None = None,

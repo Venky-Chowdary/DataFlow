@@ -61,8 +61,10 @@ def test_nchar_pad_space_uniqueness_collides():
         sync_mode="upsert",
         target_types={"k": "NCHAR(10)"},
     )
-    # Either blocks or reports issues — must not silent-pass pad-space dupes.
-    assert result.get("passed") is False or result.get("blocks_transfer") is True or result.get("issues")
+    warning = " ".join(str(item) for item in (result.get("warnings") or []))
+    assert result.get("blocks_transfer") is False
+    assert "collapsed" in warning.lower()
+    assert "counted once" in warning.lower()
 
 
 def test_parallel_workers_default_ordered_honesty():

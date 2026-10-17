@@ -54,7 +54,7 @@ def test_unique_composite_key_with_repeating_components_never_blocks(sync_mode: 
     assert result["blocks_transfer"] is False, result
 
 
-@pytest.mark.parametrize("sync_mode", BLOCKING_MODES)
+@pytest.mark.parametrize("sync_mode", [mode for mode in BLOCKING_MODES if mode != "upsert"])
 def test_duplicate_scalar_key_blocks_keyed_and_overwrite_modes(sync_mode: str) -> None:
     rows = [{"id": 1}, {"id": 1}, {"id": 2}]
     result = _check(rows, ["id"], sync_mode=sync_mode, identity_declared=True)
@@ -62,12 +62,26 @@ def test_duplicate_scalar_key_blocks_keyed_and_overwrite_modes(sync_mode: str) -
     assert result["passed"] is False
 
 
-@pytest.mark.parametrize("sync_mode", BLOCKING_MODES)
+@pytest.mark.parametrize("sync_mode", [mode for mode in BLOCKING_MODES if mode != "upsert"])
 def test_duplicate_composite_tuple_blocks_keyed_and_overwrite_modes(sync_mode: str) -> None:
     rows = [{"region": "eu", "id": 1}, {"region": "eu", "id": 1}, {"region": "us", "id": 1}]
     result = _check(rows, ["region", "id"], sync_mode=sync_mode, identity_declared=True)
     assert result["blocks_transfer"] is True, result
     assert any("duplicate" in str(i).lower() for i in result["issues"])
+
+
+@pytest.mark.parametrize("sync_mode", ["upsert", "incremental_deduped"])
+def test_upsert_collapses_in_file_duplicates_once(sync_mode: str) -> None:
+    rows = [{"id": 1, "v": "a"}, {"id": 1, "v": "b"}]
+    result = _check(rows, ["id"], sync_mode=sync_mode, identity_declared=True)
+    assert result["blocks_transfer"] is False, result
+    warning = " ".join(result.get("warnings") or [])
+    assert "Counted once" in warning
+    assert "collapsed" in warning.lower()
+    blocked = _check(
+        rows, ["id"], sync_mode=sync_mode, identity_declared=True, in_file_dedupe="block"
+    )
+    assert blocked["blocks_transfer"] is True, blocked
 
 
 @pytest.mark.parametrize("sync_mode", ["overwrite", "replace", "full_refresh_overwrite"])

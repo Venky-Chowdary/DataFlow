@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextvars
 from dataclasses import dataclass
+from typing import Any
 
 _MATCH = contextvars.ContextVar("df_duplicate_match_action", default="update")
 _ORDER = contextvars.ContextVar("df_duplicate_order_column", default="")
@@ -198,6 +199,7 @@ def current_order_column() -> str:
 def collapse_keep_last(
     rows: list[dict],
     key_columns: list[str],
+    key_fn: Any = None,
 ) -> tuple[list[dict], int]:
     """Keep the last row for each key. Earlier copies are not a second insert.
 
@@ -214,7 +216,9 @@ def collapse_keep_last(
         if not isinstance(row, dict):
             kept.append(row)
             continue
-        identity = tuple(row.get(col) for col in keys)
+        identity = key_fn(row) if key_fn is not None else tuple(row.get(col) for col in keys)
+        if not isinstance(identity, tuple):
+            identity = (identity,)
         if any(value in (None, "") for value in identity):
             kept.append(row)
             continue

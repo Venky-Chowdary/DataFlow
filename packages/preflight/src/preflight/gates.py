@@ -56,17 +56,17 @@ def _source_column(ctx: PreflightContext, name: str) -> Any:
 
 
 def _plan_keeps_last(ctx: Any) -> bool:
-    token = str(getattr(getattr(ctx, "plan", None), "in_file_dedupe", "") or "")
-    if token.strip().lower().replace("-", "_") == "keep_last":
-        return True
+    plan = getattr(ctx, "plan", None)
+    token = str(getattr(plan, "in_file_dedupe", "") or "")
     try:
-        from services.primary_key import sync_collapses_in_file_duplicates
+        from services.primary_key import operator_collapses_in_file_duplicates
 
-        return sync_collapses_in_file_duplicates(
-            getattr(getattr(ctx, "plan", None), "sync_mode", "") or ""
+        return operator_collapses_in_file_duplicates(
+            getattr(plan, "sync_mode", "") or "",
+            token,
         )
     except Exception:
-        return False
+        return token.strip().lower().replace("-", "_") == "keep_last"
 
 
 def _file_groups(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:

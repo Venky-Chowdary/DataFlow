@@ -470,10 +470,11 @@ def build_scenarios() -> list[Scenario]:
                     dest=dest,
                     dest_family=_family(dest),
                     mode=mode,
-                    # Duplicate identity always blocks — balanced softens encoding/
-                    # confidence, not silent duplicate-key writes (enterprise proof bar).
-                    expect="block",
-                    note="Sole user_id is the identity candidate; duplicates must block Execute",
+                    # Upsert collapses in-file copies of the key, warns, and counts
+                    # them once. It does not block Execute and it does not drop them
+                    # quietly. Overwrite modes still block; this runner is upsert.
+                    expect="warn",
+                    note="Sole user_id repeats in the file; upsert collapses it once and warns",
                     runner="identity_duplicate",
                 )
             )
@@ -1046,8 +1047,15 @@ def _run_identity_duplicate(sc: Scenario) -> dict[str, Any]:
     )
     duplicate = next(c for c in report["checks"] if c["check"] == "duplicate_keys")
     blocked = bool(duplicate["blocks_transfer"])
+    warning = " ".join(str(item) for item in (duplicate.get("warnings") or []))
+    if sc.expect == "pass":
+        ok = not blocked
+    elif sc.expect == "warn":
+        ok = (not blocked) and "counted once" in warning.lower() and "collapsed" in warning.lower()
+    else:
+        ok = blocked
     return {
-        "ok": (not blocked) if sc.expect == "pass" else blocked,
+        "ok": ok,
         "primary_key": duplicate.get("primary_key"),
         "duplicate_check": duplicate,
     }

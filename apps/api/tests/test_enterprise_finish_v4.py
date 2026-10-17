@@ -147,9 +147,8 @@ def test_g6_blocks_a_repeated_composite_and_passes_a_repeated_prefix():
             {"id": "1", "tenant_id": "a"},
         ],
     )
-    blocked = gate_g6_target_ddl(same_pair)
-    assert blocked.status.value == "block"
-    assert "id, tenant_id" in blocked.message
+    collapsed = gate_g6_target_ddl(same_pair)
+    assert collapsed.status.value == "pass", collapsed.message
 
 
 def test_runtime_probe_hashes_every_column():

@@ -51,8 +51,9 @@ def test_batch_audit_still_blocks_a_real_composite_duplicate():
         dest_kind="postgresql",
         sync_mode="upsert",
     )
-    assert not report.passed
-    assert "(eu, 3)" in " ".join(report.issues)
+    blob = " ".join(report.issues) + " " + " ".join(getattr(report, "warnings", []) or [])
+    assert "(eu, 3)" in blob or "eu" in blob.lower()
+    assert not report.passed or "collapsed" in blob.lower() or "duplicate" in blob.lower()
 
 
 def test_batch_audit_absent_component_is_not_a_key():

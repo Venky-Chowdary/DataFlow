@@ -670,9 +670,18 @@ def _plan_in_file_dedupe(source_config: dict[str, Any] | None) -> str:
     """``keep_last`` or ``block`` from the source config the schedule stamped."""
     cfg = source_config if isinstance(source_config, dict) else {}
     extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
-    raw = str(cfg.get("in_file_dedupe") or extra.get("in_file_dedupe") or "block")
-    token = raw.strip().lower().replace("-", "_")
-    return "keep_last" if token == "keep_last" else "block"
+    raw = cfg.get("in_file_dedupe")
+    if raw in (None, "") and isinstance(extra, dict):
+        raw = extra.get("in_file_dedupe")
+    token = str(raw or "").strip().lower().replace("-", "_")
+    # Unset follows the sync mode. Upsert collapses in-file copies. An explicit
+    # block still refuses them. Only keep_last used to be recognized, so a
+    # missing value was stored as block and stopped dedup.
+    if token == "keep_last":
+        return "keep_last"
+    if token == "block":
+        return "block"
+    return ""
 
 
 def _plan_duplicate_policy(*configs: Mapping[str, Any] | None) -> str:

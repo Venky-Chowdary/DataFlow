@@ -1144,11 +1144,12 @@ def _check_duplicate_keys(
     target_cols = [
         (_target_for_source(c, mappings) or c) for c in identity_cols
     ]
-    from services.primary_key import sync_collapses_in_file_duplicates
+    from services.primary_key import operator_collapses_in_file_duplicates
 
     keep_last = str(in_file_dedupe or "").strip().lower().replace("-", "_") == "keep_last"
-    collapses_in_file = keep_last or sync_collapses_in_file_duplicates(sync)
+    collapses_in_file = operator_collapses_in_file_duplicates(sync, in_file_dedupe)
     collapsed_extra = 0
+    collapse_example = ""
     if collapses_in_file:
         # Explicit keep-last clears the source probe: the operator chose it.
         # Upsert still collapses the sample in hand, but a source-table probe
@@ -1157,11 +1158,32 @@ def _check_duplicate_keys(
             source_duplicate_findings = []
         if identity_cols:
             from services.duplicate_policy import collapse_keep_last
+            from services.type_system import unique_equality_key
+
+            def _equality_identity(row: dict[str, Any]) -> tuple:
+                parts = []
+                for col in identity_cols:
+                    ddl = _lookup_target_ddl(col, target_types) if target_types else ""
+                    parts.append(
+                        unique_equality_key(
+                            row.get(col),
+                            ddl or "",
+                            dest_kind=dest_kind,
+                        )
+                    )
+                return tuple(parts)
 
             collapsed_groups = []
             for group in _rows_by_file(rows):
-                kept, dropped = collapse_keep_last(group, identity_cols)
+                kept, dropped = collapse_keep_last(
+                    group, identity_cols, key_fn=_equality_identity
+                )
                 collapsed_extra += int(dropped or 0)
+                if dropped and not collapse_example and group:
+                    sample = group[-1]
+                    collapse_example = (
+                        "(" + ", ".join(str(sample.get(col)) for col in identity_cols) + ")"
+                    )
                 collapsed_groups.append(kept)
             rows = [row for group in collapsed_groups for row in group]
     target_col = _target_for_source(primary_key, mappings) if primary_key else ""
@@ -1177,6 +1199,7 @@ def _check_duplicate_keys(
         advisory_warnings.append(
             f"In-file duplicate keys on {pk_label or primary_key}: "
             f"{collapsed_extra} extra row(s) collapsed to one per key "
+            f"{collapse_example + ' ' if collapse_example else ''}"
             "(last wins). Counted once. Not quarantined and not skipped."
         )
 

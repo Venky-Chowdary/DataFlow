@@ -85,7 +85,10 @@ def test_keep_last_unique_expectation_does_not_block():
         destination_pk_columns=["order_id"],
     )
     suite = next(item for item in blocked["checks"] if item["check"] == "expectations_suite")
-    assert suite["blocks_transfer"] is True
+    dup = next(item for item in blocked["checks"] if item["check"] == "duplicate_keys")
+    assert suite["blocks_transfer"] is False
+    assert dup["blocks_transfer"] is False
+    assert "Counted once" in " ".join(dup.get("warnings") or [])
 
     kept = run_integrity_audit(
         mappings=[{"source": "order_id", "target": "order_id", "confidence": 1}],

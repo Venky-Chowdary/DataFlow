@@ -268,7 +268,10 @@ def test_integrity_blocks_duplicate_primary_keys():
     )
     dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
     assert dup_check is not None
-    assert dup_check["blocks_transfer"] is True
+    assert dup_check["blocks_transfer"] is False
+    warning = " ".join(dup_check.get("warnings") or [])
+    assert "Counted once" in warning
+    assert "collapsed" in warning.lower()
 
 
 def test_integrity_balanced_still_blocks_dupes_on_upsert():
@@ -288,9 +291,10 @@ def test_integrity_balanced_still_blocks_dupes_on_upsert():
     )
     dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
     assert dup_check is not None
-    assert dup_check["blocks_transfer"] is True
-    assert dup_check["passed"] is False
-    assert dup_check.get("warnings") or dup_check.get("issues")
+    assert dup_check["blocks_transfer"] is False
+    warning = " ".join(dup_check.get("warnings") or [])
+    assert "Counted once" in warning
+    assert "collapsed" in warning.lower()
 
 
 def test_integrity_source_probe_warns_append_without_dest_unique():

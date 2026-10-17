@@ -170,7 +170,7 @@ class TransferPlan:
     stream_contracts: list[dict[str, Any]] = field(default_factory=list)
     # In-file duplicate policy. ``keep_last`` collapses the sample before
     # uniqueness gates; ``block`` refuses a repeated key.
-    in_file_dedupe: str = "block"
+    in_file_dedupe: str = ""
     # Operator duplicate policy (upsert / dedupe_skip / append). Empty means
     # the sync mode owns uniqueness. Explicit append allows duplicate keys,
     # including on full_refresh_overwrite.

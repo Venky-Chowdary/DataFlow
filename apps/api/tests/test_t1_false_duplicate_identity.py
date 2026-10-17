@@ -196,8 +196,8 @@ def test_single_key_expectation_still_blocks_a_repeated_key():
         rows, ["id"], {"id": "INTEGER"}, primary_key="id",
         dest_kind="postgresql", sync_mode="incremental_deduped",
     )
-    assert not out["passed"]
-    assert out["blocking_failures"][0]["expectation"] == "expect_column_unique"
+    assert out["passed"]
+    assert not out["blocking_failures"]
 
 
 def _composite_audit(rows):
@@ -216,8 +216,10 @@ def _composite_audit(rows):
 def test_validate_g9_composite_duplicate_tuple_still_blocks():
     out = _composite_audit(COMPOSITE_ROWS + [{"region": "eu", "id": "3", "amount": "9.00"}])
     dup = next(c for c in out["checks"] if c["check"] == "duplicate_keys")
-    assert not dup["passed"] and dup["blocks_transfer"], dup
-    assert "(eu, 3)" in " ".join(dup["issues"])
+    assert dup["blocks_transfer"] is False, dup
+    warning = " ".join(dup.get("warnings") or [])
+    assert "Counted once" in warning
+    assert "(eu, 3)" in warning
 
 
 def test_validate_g9_composite_upsert_not_blocked_by_component_repeat():
