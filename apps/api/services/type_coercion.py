@@ -680,14 +680,19 @@ def _measured_text_preserves_scalar(
     population: Any,
     *,
     dest_db: str = "",
+    dest_table_exists: bool | None = None,
 ) -> bool:
-    """True when file text binds onto the destination number without loss.
+    """True when file text binds onto an existing Postgres number without loss.
 
     A second full overwrite reads the same CSV as VARCHAR against the INTEGER
     or NUMERIC column the first run created. Unmeasured string→number stays
-    lossy, because a later token can fail. A population that binds and keeps
-    every fraction is the value the first run already wrote.
+    lossy. Declared TEXT→NUMBER on other engines, and a create-new stamp,
+    stay a collapse even when the sample happens to be numeric.
     """
+    if dest_table_exists is not True:
+        return False
+    if (dest_db or "").strip().lower() not in {"postgresql", "postgres"}:
+        return False
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     if src not in {LOGICAL_STRING, LOGICAL_TEXT}:
@@ -1201,7 +1206,11 @@ def is_lossy_coercion(
             return True
         return False
     if _measured_text_preserves_scalar(
-        source_type, target_type, population, dest_db=dest_db
+        source_type,
+        target_type,
+        population,
+        dest_db=dest_db,
+        dest_table_exists=dest_table_exists,
     ):
         return False
     return True
