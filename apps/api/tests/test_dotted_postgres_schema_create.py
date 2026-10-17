@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 os.environ.setdefault("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.1,127.0.0.0/8,::1/128")
-os.environ["DATAFLOW_SQLITE_PG_COPY"] = "0"
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_ALLOW_STUB_WRITES", "1")
 os.environ.setdefault("DATAFLOW_PII_HASH_KEY", "test-pii-key")
@@ -41,7 +40,12 @@ def _postgres_or_fail():
     return psycopg2
 
 
-def test_dotted_destination_creates_missing_schema_before_the_write_ledger(tmp_path: Path) -> None:
+def test_dotted_destination_creates_missing_schema_before_the_write_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The row writer creates the ledger. COPY would create the table first and
+    # hide that proof. Scope the switch to this test so later COPY tests still run.
+    monkeypatch.setenv("DATAFLOW_SQLITE_PG_COPY", "0")
     psycopg2 = _postgres_or_fail()
     from services.destination_privilege_probe import probe_destination_privileges
     from src.transfer.engine import UniversalTransferEngine
