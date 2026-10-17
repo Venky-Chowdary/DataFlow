@@ -324,6 +324,26 @@ def _endpoint_identity(endpoint: dict[str, Any]) -> str:
     )
 
 
+def _schema_version(columns: Mapping[str, Any]) -> str:
+    """Identity of a profile's columns and dtypes.
+
+    Null-rate history is only comparable inside one schema version. A later
+    mongo→postgres shape that reuses a column name must not inherit the
+    previous version's 0% baseline.
+    """
+    parts: list[str] = []
+    for name in sorted(columns):
+        prof = columns[name]
+        if isinstance(prof, ColumnProfile):
+            dtype = prof.dtype
+        elif isinstance(prof, dict):
+            dtype = str(prof.get("dtype") or "")
+        else:
+            dtype = ""
+        parts.append(f"{name}:{dtype}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
 def _profile_key(source: dict[str, Any], destination: dict[str, Any]) -> str:
     return hashlib.sha256(
         f"{_endpoint_identity(source)}→{_endpoint_identity(destination)}".encode("utf-8")
@@ -534,6 +554,7 @@ def save_profile(
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "job_id": jid or None,
         "row_count": rc,
+        "schema_version": _schema_version(profile),
         "columns": columns,
         "quarantine_histogram": quarantine_histogram(rejected_details),
         "rejected_rows": int(rejected_rows or 0),
@@ -655,10 +676,16 @@ def build_load_history_report(
     anomalies: list[str] = []
     column_findings: list[dict[str, Any]] = []
 
-    # Build per-column series from history.
+    # Build per-column series from history of the same schema version.
+    # A stale baseline from an earlier column set must not move this load's
+    # null rate (mongo→postgres "0% to 46%").
+    current_version = _schema_version(current_profile)
     col_series: dict[str, dict[str, list[Any]]] = {}
     for run in history:
         cols = _deserialize_profile(run.get("columns") or {})
+        version = str(run.get("schema_version") or "") or _schema_version(cols)
+        if version != current_version:
+            continue
         for name, prof in cols.items():
             bucket = col_series.setdefault(name, {"null_rate": [], "mean": [], "count": [], "distinct_rate": []})
             bucket["null_rate"].append(prof.null_rate)
@@ -669,7 +696,11 @@ def build_load_history_report(
                 bucket["mean"].append(bound)
 
     # If no ring history, fall back to single baseline dict.
-    if not history and fallback_baseline:
+    if (
+        not history
+        and fallback_baseline
+        and _schema_version(fallback_baseline) == current_version
+    ):
         for name, prof in fallback_baseline.items():
             bucket = col_series.setdefault(name, {"null_rate": [], "mean": [], "count": [], "distinct_rate": []})
             bucket["null_rate"].append(prof.null_rate)
