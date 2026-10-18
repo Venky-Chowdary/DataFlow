@@ -1058,7 +1058,18 @@ def fingerprint_parsed_file(
     if shape_recipe is not None:
         from services.shape_apply import ShapeRunner
 
-        full_iter = ShapeRunner(shape_recipe).batches(full_iter)
+        shape_runner = ShapeRunner(shape_recipe)
+        full_iter = shape_runner.batches(full_iter)
+
+        def _with_shape_drain():
+            yield from full_iter
+            # Buffering steps (dedupe keep-last, aggregate, sort, rank) emit
+            # only once the population is read — the file's last batch is it.
+            tail = shape_runner.drain()
+            if tail:
+                yield tail
+
+        full_iter = _with_shape_drain()
 
     accumulator = FingerprintAccumulator()
     from services.policy_verification import PolicyFingerprintBook
@@ -1909,7 +1920,16 @@ def stream_file_to_database(
                 shape_raw_rows_read += len(raw or [])
                 yield raw
 
-        batch_iter = shape_runner.batches(_count_rows_read(batch_iter))
+        shaped_iter = shape_runner.batches(_count_rows_read(batch_iter))
+
+        def _with_shape_drain():
+            yield from shaped_iter
+            # Buffering steps emit at end-of-stream — the file's last batch.
+            tail = shape_runner.drain()
+            if tail:
+                yield tail
+
+        batch_iter = _with_shape_drain()
 
     fp_accumulator = FingerprintAccumulator()
     # Independent reader cardinality for Gate-8 — never invent from written+held_out.

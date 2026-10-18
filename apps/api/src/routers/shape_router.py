@@ -182,6 +182,10 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
             # is to show it now rather than let Execute discover it at scale.
             refusal = exc.as_dict()
             break
+    # The sample's end is the stream's end: buffering steps (dedupe keep-last,
+    # aggregate, sort, rank) emit now, same as the transfer's drain.
+    if refusal is None:
+        shaped.extend(engine.drain())
 
     out_columns = list(engine.output_columns) or list(recipe.output_columns) or _columns_of(shaped or rows)
     profiles = (

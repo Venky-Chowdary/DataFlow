@@ -383,6 +383,7 @@ def test_a_refusing_row_stops_the_preview_and_names_the_row(client):
 
 
 def test_a_global_operation_is_refused_with_the_place_that_does_it(client):
+    # 'dedupe' is the old name — the refusal names the op that does the work.
     response = client.post(
         "/api/v1/shape/validate",
         json={"recipe": {"steps": [{"op": "dedupe", "column": "id"}]}, "source_columns": ["id"]},
@@ -390,7 +391,15 @@ def test_a_global_operation_is_refused_with_the_place_that_does_it(client):
     assert response.status_code == 400
     detail = response.json()["detail"]
     assert "dedupe" in detail
-    assert "Transforms" in detail or "post-load" in detail
+    assert "dedupe_rows" in detail or "Transforms" in detail or "post-load" in detail
+
+    # An op that truly cannot stream still names the post-load place.
+    response = client.post(
+        "/api/v1/shape/validate",
+        json={"recipe": {"steps": [{"op": "pivot", "column": "id"}]}, "source_columns": ["id"]},
+    )
+    assert response.status_code == 400
+    assert "post-load" in response.json()["detail"]
 
 
 def test_a_step_on_a_column_dropped_earlier_is_refused_at_design_time(client):

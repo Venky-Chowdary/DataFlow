@@ -500,8 +500,11 @@ def _preview_via_engine(
     results: list[dict[str, Any]] = []
     failed = 0
     removed = 0
+    buffered = 0
     for row in rows:
         errors: list[dict[str, Any]] = []
+        buffered_before = full.effect.rows_buffered
+        diverted_before = full.effect.rows_diverted
         try:
             outs = full.apply_records(dict(row))
             after = outs[0] if outs else None
@@ -513,12 +516,23 @@ def _preview_via_engine(
         removed += int(outs == [])
 
         entry: dict[str, Any] = {"before": row, "after": after, "errors": errors}
-        if outs == []:
+        held = full.effect.rows_buffered > buffered_before
+        if held:
+            # A dedupe/aggregate/sort/rank step keeps the row until the
+            # end of the sample — "held", not "removed".
+            entry["held"] = True
+            buffered += 1
+            removed -= int(outs == [])
+        elif full.effect.rows_diverted > diverted_before:
+            entry["diverted"] = True
+            removed -= int(outs == [])
+        elif outs == []:
             entry["removed"] = True
         if per_step:
             trace: list[dict[str, Any]] = []
             for k, wire in enumerate(wires):
                 step_errors: list[str] = []
+                step_buffered_before = engines[k].effect.rows_buffered
                 try:
                     stepped = engines[k].apply_records(dict(row))
                 except ShapeRowError as exc:
@@ -530,16 +544,25 @@ def _preview_via_engine(
                         "op": wire.get("op"),
                         "column": wire.get("column") or "",
                         "after": stepped[0] if stepped else None,
-                        "removed": stepped == [],
+                        "removed": stepped == [] and engines[k].effect.rows_buffered == step_buffered_before,
+                        "held": engines[k].effect.rows_buffered > step_buffered_before,
                         "errors": step_errors,
                     }
                 )
             entry["steps"] = trace
         results.append(entry)
+
+    # End of the sample is the stream's end: drain every buffered step so a
+    # dedupe/aggregate/sort recipe shows the rows it actually emits.
+    drained = full.drain()
+    for row in drained:
+        results.append({"before": None, "after": row, "errors": [], "drained": True})
     return {
         "rows": len(rows),
         "rows_with_errors": failed,
         "rows_removed": removed,
+        "rows_buffered": buffered,
+        "rows_emitted_after_drain": len(drained),
         "results": results,
         "compiled": True,
     }

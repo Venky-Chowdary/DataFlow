@@ -101,6 +101,8 @@ def shaped_preflight_image(
     engine = ShapeEngine(recipe, keep_diverted_records=False)
     try:
         shaped = engine.apply_batch(rows)
+        # Buffering steps emit at end-of-stream — the sample is the stream.
+        shaped.extend(engine.drain())
     except ShapeRowError as exc:
         raise ShapePreflightRefused(
             f"The approved transform recipe refused a sampled row: {exc}"

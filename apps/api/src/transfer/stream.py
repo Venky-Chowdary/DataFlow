@@ -3455,6 +3455,29 @@ def _stream_database_transfer_impl(
         finally:
             if reread_scan is not None:
                 close_table_scan(reread_scan)
+        if reread_shaper is not None:
+            # Buffering recipe steps emitted their winners on the write pass at
+            # end-of-stream; the digest population must include the same tail
+            # or the write-pass checksum cannot align.
+            tail_headers, tail_rows = reread_shaper.drain_matrix()
+            if tail_rows:
+                tail_mapped, _tail_rejected = map_rows_for_fingerprint(
+                    headers=tail_headers,
+                    data_rows=tail_rows,
+                    mappings=mappings,
+                    target_cols=target_cols,
+                    column_types=column_types,
+                    error_policy=stream_error_policy,
+                )
+                if tail_mapped:
+                    fp_accumulator.add_many(
+                        row_fingerprints(
+                            tail_mapped,
+                            target_cols,
+                            dest_db_type=dest_bind_dialect,
+                            dest_types=digest_dest_types,
+                        )
+                    )
         phase_profile.add(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=fp_accumulator.total
         )

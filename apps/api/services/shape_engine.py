@@ -1218,4 +1218,5 @@ def shape_records(
     """One-shot convenience for preview and tests."""
     engine = ShapeEngine(recipe, sample_limit=sample_limit)
     shaped = engine.apply_batch(records)
+    shaped.extend(engine.drain())
     return shaped, engine.effect
