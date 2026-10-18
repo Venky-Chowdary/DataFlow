@@ -46,6 +46,7 @@ def _open_shape_runner(
         source_columns=list(columns or []),
         approved_hash=str(getattr(request, "approved_shape_recipe_hash", "") or ""),
         approved_set_hash=str(getattr(request, "approved_set_hash", "") or ""),
+        workspace_id=str(getattr(request, "workspace_id", "") or ""),
     )
 
 
@@ -99,7 +100,9 @@ def _shaped_population_rows(
     """
     if runner is None:
         return rows
-    probe = ShapeRunner(runner.recipe)
+    probe = ShapeRunner(
+        runner.recipe, workspace_id=runner.workspace_id
+    )
 
     def _iter() -> Iterator[dict[str, Any]]:
         for row in rows:

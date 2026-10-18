@@ -1032,6 +1032,7 @@ def fingerprint_parsed_file(
     use_source_spool: bool = False,
     dest_extra: dict[str, Any] | None = None,
     duplicate_policy: str = "",
+    workspace_id: str = "",
 ) -> tuple[FingerprintAccumulator, int]:
     """Second parse of a file the writer already consumed.
 
@@ -1058,7 +1059,7 @@ def fingerprint_parsed_file(
     if shape_recipe is not None:
         from services.shape_apply import ShapeRunner
 
-        shape_runner = ShapeRunner(shape_recipe)
+        shape_runner = ShapeRunner(shape_recipe, workspace_id=workspace_id)
         full_iter = shape_runner.batches(full_iter)
 
         def _with_shape_drain():
@@ -1296,7 +1297,10 @@ def stream_file_to_database(
         # peeked row is never counted as a written row.
         from services.shape_apply import ShapeRunner, shaped_schema
 
-        probe = ShapeRunner(shape_runner.recipe)
+        probe = ShapeRunner(
+            shape_runner.recipe,
+            workspace_id=getattr(shape_runner, "workspace_id", ""),
+        )
         sample_rows = probe.records(sample_rows)
         columns = list(probe.output_columns or columns)
         schema = shaped_schema(probe, sample_rows, schema)
@@ -1793,6 +1797,7 @@ def stream_file_to_database(
             watermark=watermark,
             cursor_pk_source=cursor_pk_source,
             shape_recipe=getattr(shape_runner, "recipe", None) if shape_runner is not None else None,
+            workspace_id=getattr(shape_runner, "workspace_id", ""),
         )
         if dest_summary.get("source_independently_reread") is True or isinstance(
             dest_summary.get("identity_alignment"), dict
@@ -2888,6 +2893,7 @@ def stream_file_to_database(
                 use_source_spool=use_source_spool,
                 dest_extra=dest_extra,
                 duplicate_policy=decision.policy,
+                workspace_id=getattr(shape_runner, "workspace_id", ""),
             )
         except Exception:
             if partial_write_pass:

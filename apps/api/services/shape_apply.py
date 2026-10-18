@@ -40,13 +40,20 @@ class ShapeRunner:
     the counts cover the whole population, not one chunk.
     """
 
-    def __init__(self, recipe: ShapeRecipe, *, sample_limit: int = 25) -> None:
+    def __init__(self, recipe: ShapeRecipe, *, sample_limit: int = 25, workspace_id: str = "") -> None:
         self.recipe = recipe
-        self._engine = ShapeEngine(recipe, sample_limit=sample_limit)
+        self._engine = ShapeEngine(
+            recipe, sample_limit=sample_limit, workspace_id=workspace_id
+        )
 
     @property
     def recipe_hash(self) -> str:
         return self.recipe.recipe_hash
+
+    @property
+    def workspace_id(self) -> str:
+        """Workspace the runner resolves lookup references inside."""
+        return self._engine.workspace_id
 
     @property
     def effect(self):
@@ -145,6 +152,7 @@ def build_shape_runner(
     approved_hash: str = "",
     approved_set_hash: str = "",
     sample_limit: int = 25,
+    workspace_id: str = "",
 ) -> ShapeRunner | None:
     """Parse a recipe payload into a runner, or ``None`` when there is nothing to do.
 
@@ -177,7 +185,7 @@ def build_shape_runner(
             f"transform recipe {recipe.recipe_hash} is not the one approved at Validate "
             f"({approved_hash}) — re-validate the changed recipe before running"
         )
-    return ShapeRunner(recipe, sample_limit=sample_limit)
+    return ShapeRunner(recipe, sample_limit=sample_limit, workspace_id=workspace_id)
 
 
 def _scale_ceilings(recipe: ShapeRecipe) -> dict[str, int]:

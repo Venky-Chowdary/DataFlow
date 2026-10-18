@@ -282,6 +282,7 @@ def stream_database_transfer(
     shape_steps: list[dict] | None = None,
     mappings_inherited: bool = False,
     initial_batch: Any = None,
+    workspace_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -324,6 +325,7 @@ def stream_database_transfer(
             shape_steps=shape_steps,
             mappings_inherited=mappings_inherited,
             initial_batch=initial_batch,
+            workspace_id=workspace_id,
         )
         ok = True
         return result
@@ -387,6 +389,7 @@ def _stream_database_transfer_impl(
     shape_steps: list[dict] | None = None,
     mappings_inherited: bool = False,
     initial_batch: Any = None,
+    workspace_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -1286,6 +1289,7 @@ def _stream_database_transfer_impl(
             effective_sync=effective_sync,
             cursor_field=cursor_source_col or "",
             key_columns=pk_source_cols,
+            workspace_id=workspace_id,
         )
 
     # Schemaless sources — absorb sparse attrs discovered mid-transfer so they

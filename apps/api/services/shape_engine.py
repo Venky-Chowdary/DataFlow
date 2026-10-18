@@ -304,9 +304,11 @@ class ShapeEngine:
         *,
         sample_limit: int = _DEFAULT_SAMPLES,
         keep_diverted_records: bool = True,
+        workspace_id: str = "",
     ):
         self.recipe = recipe
         self.steps = recipe.enabled_steps
+        self.workspace_id = workspace_id
         self.sample_limit = max(0, sample_limit)
         self.keep_diverted_records = keep_diverted_records
         self.effect = ShapeEffect(
@@ -558,14 +560,40 @@ class ShapeEngine:
         return current
 
     def _lookup_table(self, step: ShapeStep, index: int) -> dict[str, dict[str, Any]]:
-        """The reference rows as a key-indexed dict, built once per run."""
+        """The reference rows as a key-indexed dict, built once per run.
+
+        Inline ``rows`` are part of the recipe; a ``reference`` block resolves
+        its saved connector's table at first use — the run's cache boundary is
+        the run itself, so a rerun after reference data changed sees the new
+        values and a run never re-reads mid-flight.
+        """
         table = self._state.get(index)
         if table is None:
             table = {}
             key_col = str(step.options.get("lookup_key") or "")
-            for raw in step.options.get("rows", []):
-                if isinstance(raw, Mapping):
-                    table[_as_text(raw.get(key_col)) or ""] = dict(raw)
+            reference = step.options.get("reference")
+            if reference is not None:
+                from services.lookup_reference import load_reference_rows
+
+                rows = load_reference_rows(
+                    reference, workspace_id=self.workspace_id
+                )
+            else:
+                rows = step.options.get("rows") or []
+            match_policy = str(step.options.get("match") or "first").casefold()
+            for raw in rows:
+                if not isinstance(raw, Mapping):
+                    continue
+                key = _as_text(raw.get(key_col)) or ""
+                if key in table:
+                    if match_policy == "refuse":
+                        raise ValueError(
+                            f"lookup step {index + 1}: reference key '{key}' "
+                            "appears more than once and match=refuse — a "
+                            "second hit would pick a row arbitrarily"
+                        )
+                    continue  # match=first: earliest row keeps the key
+                table[key] = dict(raw)
             self._state[index] = table
         return table
 
@@ -689,6 +717,13 @@ class ShapeEngine:
                         step_index=index,
                         op=op,
                     )
+                if unmatched == "default":
+                    defaults = options.get("defaults") or {}
+                    for source_col, target in targets.items():
+                        value = defaults.get(target, defaults.get(source_col))
+                        self._record_write(tally, before=row.get(target), after=value, existed=target in row)
+                        row[target] = value
+                    return row
                 for target in targets.values():
                     self._record_write(tally, before=row.get(target), after=None, existed=target in row)
                     row[target] = None

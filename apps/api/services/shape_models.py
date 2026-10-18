@@ -313,11 +313,14 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     ),
     _StepDef(
         "lookup",
-        "Enrich a row from an inline reference list (rows baked into the "
-        "recipe, keyed on this column — not a live table lookup)",
+        "Enrich a row by key — either from an inline reference list or a "
+        "saved connector's table (loaded once at run start)",
         family="advanced",
-        options=("lookup_key", "rows", "map", "unmatched", "reason"),
-        required=("lookup_key", "rows", "map"),
+        options=(
+            "lookup_key", "rows", "reference", "map", "unmatched",
+            "defaults", "match", "reason",
+        ),
+        required=("lookup_key", "map"),
     ),
     _StepDef(
         "surrogate_key",
@@ -1016,13 +1019,42 @@ def _normalize_options(
 
     if op == "lookup":
         rows = out.get("rows")
-        if not isinstance(rows, (list, tuple)):
+        reference = out.get("reference")
+        if rows is not None and reference is not None:
             raise ShapeError(
-                f"{where}: lookup rows must be a list of reference objects"
+                f"{where}: lookup takes either rows or a reference, not both"
             )
-        for i, ref in enumerate(rows, start=1):
-            if not isinstance(ref, Mapping):
-                raise ShapeError(f"{where}: lookup reference row {i} is not an object")
+        if reference is not None:
+            if not isinstance(reference, Mapping):
+                raise ShapeError(
+                    f"{where}: lookup reference must be an object "
+                    "{connector_id, table, columns?}"
+                )
+            connector_id = str(reference.get("connector_id") or "").strip()
+            if not connector_id:
+                raise ShapeError(f"{where}: lookup reference needs connector_id")
+            table = str(reference.get("table") or "").strip()
+            if not table:
+                raise ShapeError(f"{where}: lookup reference needs table")
+            ref_columns = _name_list(
+                reference.get("columns"), "reference.columns", where=where
+            )
+            out["reference"] = {
+                "connector_id": connector_id,
+                "table": table,
+                "columns": ref_columns,
+            }
+        else:
+            if not isinstance(rows, (list, tuple)) or not rows:
+                raise ShapeError(
+                    f"{where}: lookup needs either a reference "
+                    "{connector_id, table} or a non-empty rows list of "
+                    "reference objects"
+                )
+            for i, ref in enumerate(rows, start=1):
+                if not isinstance(ref, Mapping):
+                    raise ShapeError(f"{where}: lookup reference row {i} is not an object")
+            out["rows"] = [dict(r) for r in rows]
         lookup_key = str(out.get("lookup_key") or "").strip()
         if not lookup_key:
             raise ShapeError(f"{where}: lookup needs lookup_key")
@@ -1036,9 +1068,34 @@ def _normalize_options(
             str(ref_col): _valid_name(str(dest_col), where=where)
             for ref_col, dest_col in mapping.items()
         }
+        # A declared return-column list bounds what the reference read selects;
+        # a map key outside it is a typo that would silently produce nulls.
+        if reference is not None and out["reference"]["columns"]:
+            unknown = [c for c in out["map"] if c not in out["reference"]["columns"]]
+            if unknown:
+                raise ShapeError(
+                    f"{where}: lookup map reads '{unknown[0]}' which is not in "
+                    "reference.columns"
+                )
+        match_policy = str(out.get("match") or "first").strip().casefold()
+        if match_policy not in ("first", "refuse"):
+            raise ShapeError(
+                f"{where}: lookup match must be first or refuse"
+            )
+        out["match"] = match_policy
         unmatched = str(out.get("unmatched") or "null").strip().casefold()
-        if unmatched not in ("null", "drop", "divert"):
-            raise ShapeError(f"{where}: lookup unmatched must be null, drop or divert")
+        if unmatched not in ("null", "drop", "divert", "default"):
+            raise ShapeError(
+                f"{where}: lookup unmatched must be null, drop, divert or default"
+            )
+        if unmatched == "default":
+            defaults = out.get("defaults")
+            if not isinstance(defaults, Mapping) or not defaults:
+                raise ShapeError(
+                    f"{where}: lookup unmatched=default needs a non-empty "
+                    "defaults map of output column → value"
+                )
+            out["defaults"] = dict(defaults)
         out["unmatched"] = unmatched
 
     if op == "surrogate_key":

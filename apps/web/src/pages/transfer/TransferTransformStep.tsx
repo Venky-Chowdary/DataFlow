@@ -850,6 +850,14 @@ export function TransferTransformStep({
                           buffered · 500k row cap
                         </span>
                       ) : null}
+                      {step.op === "lookup" && step.options?.reference ? (
+                        <span
+                          className="df2-badge"
+                          title="Reads the saved connector's table live once at run start and caches it for the run — re-run to pick up changed reference data"
+                        >
+                          live table · run-start cache
+                        </span>
+                      ) : null}
                       {operationsByName.get(step.op)?.expands ? (
                         <span
                           className="df2-badge df2-badge-warn"

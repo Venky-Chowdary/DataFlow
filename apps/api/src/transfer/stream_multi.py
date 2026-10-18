@@ -87,6 +87,7 @@ def run_non_cdc_multi_stream_sequential(
     skip_preflight: bool = False,
     shape_by_stream: dict[str, list[dict]] | None = None,
     approved_shape_hash: str = "",
+    workspace_id: str = "",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run full/incremental for N streams sequentially (one object at a time).
 
@@ -310,6 +311,7 @@ def run_non_cdc_multi_stream_sequential(
                         skip_preflight=skip_preflight,
                         shape_steps=_steps_for(stream_name),
                         mappings_inherited=not declared_maps,
+                        workspace_id=workspace_id,
                     )
                 ddl_log.extend(stream_ddl)
                 total_rows += rows

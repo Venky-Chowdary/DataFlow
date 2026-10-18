@@ -233,6 +233,23 @@ function Field({
             />
           )}
         </>
+      ) : field.kind === "json" ? (
+        <textarea
+          id={id}
+          className="df2-input df2-studio-field df2-xform-code"
+          rows={4}
+          placeholder='{"key":"value"}'
+          value={
+            typeof value === "string"
+              ? value
+              : value === undefined || value === null
+                ? ""
+                : JSON.stringify(value)
+          }
+          disabled={!canPlan}
+          onBlur={onCommit}
+          onChange={(event) => onChange(event.target.value)}
+        />
       ) : (
         <input
           id={id}

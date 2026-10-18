@@ -298,7 +298,7 @@ export function describeStep(step: ShapeStepWire, operation?: ShapeOperation): s
 }
 
 /** The kind of input an option needs, so the editor is not a wall of text boxes. */
-export type ShapeFieldKind = "text" | "number" | "boolean" | "columns" | "list" | "expression" | "choice";
+export type ShapeFieldKind = "text" | "number" | "boolean" | "columns" | "list" | "expression" | "choice" | "json";
 
 export interface ShapeField {
   name: string;
@@ -343,6 +343,13 @@ const FIELD_LABEL: Record<string, string> = {
   keep_parent: "Keep the original JSON column (Validate then needs drop/flatten)",
   depth: "Flatten depth",
   keys: "Object keys to promote",
+  lookup_key: "Reference key column",
+  rows: "Inline reference rows",
+  reference: "Connector reference",
+  map: "Return columns map",
+  unmatched: "No-match policy",
+  match: "Duplicate-key policy",
+  defaults: "Defaults for unmatched",
 };
 
 const FIELD_HINT: Record<string, string> = {
@@ -362,6 +369,13 @@ const FIELD_HINT: Record<string, string> = {
   keep_parent: "Off drops the parent as a named step so Validate is not blocked on leftover ARRAY. On keeps the blob — drop or flatten it before Validate.",
   depth: "top promotes one level; deep walks further, still capped.",
   keys: "One key per line. Leave blank to promote every key the sample holds.",
+  lookup_key: "The column in the reference data matched against this column's value.",
+  rows: 'JSON array of objects, e.g. [{"code":"US","name":"United States"}] — baked into the recipe. Leave blank when a connector reference is set.',
+  reference: '{"connector_id":"<saved id>","table":"<table>","columns":["key","name"]} — read live once at run start; re-run to pick up changed reference data.',
+  map: 'JSON object: reference column → output column, e.g. {"name":"country_name"}. Multiple return columns supported.',
+  unmatched: "null writes nulls · drop removes the row · divert quarantines with the reason · default writes the defaults map.",
+  match: "first keeps the earliest row for a duplicate key · refuse fails the run on a duplicate key.",
+  defaults: 'JSON object: output column → value, used when no reference row matches, e.g. {"country_name":"UNKNOWN"}.',
 };
 
 const FIELD_CHOICES: Record<string, string[]> = {
@@ -370,12 +384,17 @@ const FIELD_CHOICES: Record<string, string[]> = {
   side: ["left", "right"],
   form: ["NFC", "NFD", "NFKC", "NFKD"],
   depth: ["top", "deep"],
+  unmatched: ["null", "drop", "divert", "default"],
+  match: ["first", "refuse"],
 };
 
 const NUMBER_FIELDS = new Set(["places", "precision", "scale", "width", "limit", "min", "max"]);
 const BOOLEAN_FIELDS = new Set(["regex", "keep", "keep_parent"]);
 const COLUMN_LIST_FIELDS = new Set(["columns"]);
 const LIST_FIELDS = new Set(["values", "into", "keys"]);
+/** Options whose value must be a JSON object/array — typed text is parsed and
+ *  refused with a named error at draft time, never silently coerced. */
+const JSON_FIELDS = new Set(["rows", "reference", "map", "defaults"]);
 
 /** The fields to render for one operation, in the catalog's own order. */
 export function fieldsFor(operation: ShapeOperation): ShapeField[] {
@@ -385,6 +404,8 @@ export function fieldsFor(operation: ShapeOperation): ShapeField[] {
       ? "expression"
       : FIELD_CHOICES[name]
         ? "choice"
+      : JSON_FIELDS.has(name)
+        ? "json"
         : NUMBER_FIELDS.has(name)
           ? "number"
           : BOOLEAN_FIELDS.has(name)
@@ -728,7 +749,22 @@ export function stepFromDraft(
 ): { step: ShapeStepWire | null; error: string } {
   const missing = missingRequired(operation, column, options);
   if (missing) return { step: null, error: missing };
-  const step: ShapeStepWire = { op: operation.op, options: draftOptionsForWire(options) };
+  const wire = draftOptionsForWire(options);
+  // Object-typed options must parse as JSON before Add — a string the engine
+  // would refuse at save is caught here naming the field instead.
+  for (const name of JSON_FIELDS) {
+    const raw = wire[name];
+    if (typeof raw !== "string") continue;
+    try {
+      wire[name] = JSON.parse(raw);
+    } catch {
+      return {
+        step: null,
+        error: `${FIELD_LABEL[name] ?? name} must be valid JSON (object or array).`,
+      };
+    }
+  }
+  const step: ShapeStepWire = { op: operation.op, options: wire };
   if (operation.needs_column) step.column = column;
   if (label.trim()) step.label = label.trim();
   if (policy && policy !== "refuse") step.on_error = policy;

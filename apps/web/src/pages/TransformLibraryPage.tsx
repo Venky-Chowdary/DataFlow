@@ -455,6 +455,13 @@ export function TransformLibraryPage() {
                       emits at end-of-stream — the run fails loud past the cap.
                     </p>
                   ) : null}
+                  {step.op === "lookup" && step.options?.reference ? (
+                    <p className="df2-label-hint" style={{ marginTop: 6 }}>
+                      Connector reference: the table is read live once at run
+                      start and cached for the run — re-run to pick up changed
+                      reference data.
+                    </p>
+                  ) : null}
                 </div>
               ))}
             </div>

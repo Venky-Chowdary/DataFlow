@@ -93,6 +93,7 @@ def runner_for_stream_steps(
     effective_sync: str,
     cursor_field: str,
     key_columns: list[str],
+    workspace_id: str = "",
 ) -> Any:
     """Build this stream's recipe runner. ``None`` when the stream has no steps."""
     if not steps:
@@ -106,6 +107,7 @@ def runner_for_stream_steps(
         built = build_shape_runner(
             {"steps": list(steps)},
             source_columns=list(columns),
+            workspace_id=workspace_id,
         )
     except ShapeError as exc:
         raise ValueError(f"{table}: {exc}") from exc

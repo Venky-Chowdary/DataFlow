@@ -118,7 +118,7 @@ def test_lookup_refuses_an_empty_map():
 
 
 def test_lookup_refuses_an_unknown_unmatched_policy():
-    with pytest.raises(ShapeError, match="null, drop or divert"):
+    with pytest.raises(ShapeError, match="null, drop, divert or default"):
         _parse(
             [
                 {

@@ -4061,6 +4061,7 @@ class UniversalTransferEngine:
                         skip_preflight=request.skip_preflight,
                         shape_by_stream=shape_by_stream or None,
                         approved_shape_hash=approved_shape_hash,
+                        workspace_id=str(getattr(request, "workspace_id", "") or ""),
                     )
                 )
             else:
@@ -4082,6 +4083,7 @@ class UniversalTransferEngine:
                     skip_preflight=request.skip_preflight,
                     shape_runner=shape_runner,
                     initial_batch=initial_batch,
+                    workspace_id=str(getattr(request, "workspace_id", "") or ""),
                 )
 
             with _reconcile_phase_heartbeat(
