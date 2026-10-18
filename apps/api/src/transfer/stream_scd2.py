@@ -214,12 +214,18 @@ def stream_scd2_mirror_transfer(
             dest_summary[PRECOUNT_KEY] = int(rows_before)
 
         if effective_sync == "scd2":
+            from datetime import datetime as _dt_cls, timezone as _tz
+
             from services.scd2_engine import (
                 apply_scd2,
                 prepare_scd2_mapped_rows,
                 resolve_scd2_cols,
             )
 
+            # Gate-8 recount window: every valid_from/valid_to stamp this
+            # run writes — each batch and the close pass stamp their own
+            # instant — is >= this. Recounted per run, not per timestamp.
+            dest_summary["run_started_at"] = _dt_cls.now(_tz.utc).isoformat()
             _scd2_cols = resolve_scd2_cols(scd2_opts)
             batch_size = 1_000
             if key_columns:

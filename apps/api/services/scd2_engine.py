@@ -1279,6 +1279,11 @@ def apply_scd2(
                 engine, table, schema_name, target_cols, column_types,
                 db_type, cols,
             )
+            # Window start for the Gate-8 version recount: every stamp this
+            # call writes is >= this instant. Callers that split the run
+            # across several apply calls (streaming) stamp their own, earlier
+            # window on the run summary.
+            run_started_at = _now_utc()
             timestamp = _now_utc()
             inserted_total = 0
             expired_total = 0
@@ -1360,6 +1365,7 @@ def apply_scd2(
         "rejected_details": list(rejected_details),
         "rejected_rows": len(rejected_details),
         "transform_errors": list(transform_errors)[:20],
+        "run_started_at": run_started_at.isoformat(),
     }
 
 
@@ -1374,6 +1380,29 @@ def _instant(value: Any) -> Any:
         if s.endswith(suffix):
             s = s[: -len(suffix)]
     return s
+
+
+def _as_dt(value: Any) -> datetime | None:
+    """Parse a stamp to a tz-aware UTC datetime (datetime or ISO string).
+
+    None when the value is absent or unparseable — an unparseable stamp
+    then simply misses the recount window and surfaces as a count
+    mismatch, which is the honest outcome."""
+    if isinstance(value, datetime):
+        d = value
+    else:
+        s = str(value or "").strip()
+        if not s:
+            return None
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            d = datetime.fromisoformat(s)
+        except ValueError:
+            return None
+    if d.tzinfo is None:
+        d = d.replace(tzinfo=timezone.utc)
+    return d.astimezone(timezone.utc)
 
 
 def verify_scd2_history(
@@ -1494,42 +1523,59 @@ def verify_scd2_history(
             int(expected.get("inserted") or 0)
             or int(expected.get("closed") or 0)
         ):
-            # The run's writes share one timestamp: rows opened this run
-            # carry valid_from == max(valid_from); rows closed carry
-            # valid_to == the same instant. Recount them independently —
-            # opened == inserted, closed == closed, and the keys holding
-            # both an open and a close at the run timestamp are the
-            # changed keys counted from the destination, which must equal
-            # closed - closed_missing.
-            # The run's writes share one timestamp — opened rows stamp it
-            # as valid_from, closed rows as valid_to. A close-only run has
-            # no new valid_from, so the newest instant across both columns
-            # is the run's timestamp.
-            instants = [
-                _instant(m.get(c))
-                for rows in versions.values()
-                for m in rows
-                for c in (cols["valid_from"], cols["valid_to"])
-                if m.get(c) is not None
-            ]
-            run_ts = max(instants) if instants else None
+            # Recount this run's writes independently — opened ==
+            # inserted, closed == closed, and the keys holding both an open
+            # and a close inside the run window are the changed keys,
+            # which must equal closed - closed_missing. The run's writes do
+            # NOT share one timestamp: each merge batch and the close pass
+            # stamps its own instant, so the window is every stamp >= the
+            # recorded run start. Without a recorded run start (older
+            # summaries or direct callers) fall back to the max-instant
+            # heuristic, which is exact only for single-timestamp runs.
+            run_start = _as_dt(expected.get("run_started_at"))
             opened_now = 0
             closed_now = 0
             changed_now = 0
-            for rows in versions.values():
-                opened = sum(
-                    1 for m in rows
-                    if _instant(m.get(cols["valid_from"])) == run_ts
-                )
-                closed = sum(
-                    1 for m in rows
-                    if m.get(cols["valid_to"]) is not None
-                    and _instant(m.get(cols["valid_to"])) == run_ts
-                )
-                opened_now += opened
-                closed_now += closed
-                if opened and closed:
-                    changed_now += 1
+            if run_start is not None:
+                for rows in versions.values():
+                    opened = sum(
+                        1 for m in rows
+                        if (d := _as_dt(m.get(cols["valid_from"]))) is not None
+                        and d >= run_start
+                    )
+                    closed = sum(
+                        1 for m in rows
+                        if (d := _as_dt(m.get(cols["valid_to"]))) is not None
+                        and d >= run_start
+                    )
+                    opened_now += opened
+                    closed_now += closed
+                    if opened and closed:
+                        changed_now += 1
+                run_ts = str(expected.get("run_started_at"))
+            else:
+                instants = [
+                    _instant(m.get(c))
+                    for rows in versions.values()
+                    for m in rows
+                    for c in (cols["valid_from"], cols["valid_to"])
+                    if m.get(c) is not None
+                ]
+                run_ts = max(instants) if instants else None
+                for rows in versions.values():
+                    opened = sum(
+                        1 for m in rows
+                        if _instant(m.get(cols["valid_from"])) == run_ts
+                    )
+                    closed = sum(
+                        1 for m in rows
+                        if m.get(cols["valid_to"]) is not None
+                        and _instant(m.get(cols["valid_to"])) == run_ts
+                    )
+                    opened_now += opened
+                    closed_now += closed
+                    if opened and closed:
+                        changed_now += 1
             exp_changed = int(expected.get("closed") or 0) - int(
                 expected.get("closed_missing") or 0
             )
@@ -1554,8 +1600,8 @@ def verify_scd2_history(
                 )
             if changed_now != exp_changed:
                 violations.append(
-                    f"version recount: {changed_now} changed keys at the "
-                    f"run timestamp, expected {exp_changed} "
+                    f"version recount: {changed_now} changed keys in the "
+                    f"run window, expected {exp_changed} "
                     "(closed - closed_missing)"
                 )
         return {

@@ -491,3 +491,131 @@ def test_scd2_history_tamper_fails_gate8_pg(tmp_path, monkeypatch):
     res = _exec(fake, req_strict)
     assert not res.success, "an overlapping interval must fail strict Gate-8"
     conn.close()
+
+
+def _mk_src_bulk(cur, rows, table="scd2_src"):
+    cur.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+    cur.execute(
+        f"CREATE TABLE {table} (id INT, name TEXT, price TEXT, note TEXT)"
+    )
+    cur.executemany(
+        f"INSERT INTO {table} (id, name, price, note) "
+        "VALUES (%s, %s, %s, %s)",
+        [(r["id"], r["name"], r["price"], r["note"]) for r in rows],
+    )
+
+
+def _bulk_rows(n, start=0):
+    return [
+        {"id": str(i), "name": f"n{i}", "price": f"{i}.00", "note": f"note{i}"}
+        for i in range(start, start + n)
+    ]
+
+
+def test_scd2_multi_batch_recount_default_path_pg(tmp_path, monkeypatch):
+    """B1-E3: the version recount is per run, not per timestamp — each
+    streaming batch and the close pass stamps its own instant. A >2-batch
+    first load plus a change run (tracked changes + deletes + inserts
+    across batches) must recount every row the run opened and closed on
+    the DEFAULT scd2 path (no recipe)."""
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    # 2500 source rows -> 3 merge batches of 1000, each with its own stamp.
+    _mk_src_bulk(cur, _bulk_rows(2500))
+    cur.execute("DROP TABLE IF EXISTS scd2_dst CASCADE")
+    req = _engine_req("scd2_src", "scd2_dst", None, mode="strict")
+
+    res = _exec(fake, req)
+    assert res.success, res.error
+    cur.execute("SELECT COUNT(*) FROM scd2_dst WHERE is_current")
+    assert cur.fetchone()[0] == 2500
+
+    # Change run across batches: 1200 tracked changes + 300 deletes + 400
+    # inserts = 1600 opened / 1500 closed / 1200 changed this run.
+    changed = _bulk_rows(2500)
+    for i in range(1200):
+        changed[i]["name"] = f"changed{i}"
+    changed = [r for r in changed if int(r["id"]) < 2200]
+    changed += _bulk_rows(400, start=2500)
+    _mk_src_bulk(cur, changed)
+
+    res = _exec(fake, req)
+    assert res.success, res.error
+    cur.execute("SELECT COUNT(*) FROM scd2_dst WHERE is_current")
+    assert cur.fetchone()[0] == 2600
+    recon = getattr(res, "reconciliation", None) or {}
+    hist = recon.get("scd2_history") or {}
+    deltas = hist.get("deltas") or {}
+    assert deltas.get("opened") == 1600, deltas
+    assert deltas.get("closed") == 1500, deltas
+    assert deltas.get("changed") == 1200, deltas
+    conn.close()
+
+
+def test_scd2_multi_batch_recount_recipe_path_pg(tmp_path, monkeypatch):
+    """B1-E3 on the recipe path — same multi-batch recount with declared
+    stamp names and a version column."""
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src_bulk(cur, _bulk_rows(2500))
+    cur.execute("DROP TABLE IF EXISTS scd2_dst CASCADE")
+    # version=None: >400 missing keys trips B1-E4's unchunked
+    # _fetch_max_versions — that column+chunking regression is covered by
+    # the B1-E4 fix commit; the recount contract itself does not need it.
+    recipe = _scd2_recipe(version=None)
+    req = _engine_req("scd2_src", "scd2_dst", recipe, mode="strict")
+
+    res = _exec(fake, req)
+    assert res.success, res.error
+    cur.execute("SELECT COUNT(*) FROM scd2_dst WHERE cur_flag")
+    assert cur.fetchone()[0] == 2500
+
+    changed = _bulk_rows(2500)
+    for i in range(1100):
+        changed[i]["price"] = f"{i}.99"
+    changed = [r for r in changed if int(r["id"]) < 2400]
+    changed += _bulk_rows(300, start=2500)
+    _mk_src_bulk(cur, changed)
+
+    res = _exec(fake, req)
+    assert res.success, res.error
+    recon = getattr(res, "reconciliation", None) or {}
+    hist = recon.get("scd2_history") or {}
+    deltas = hist.get("deltas") or {}
+    assert deltas.get("opened") == 1400, deltas
+    assert deltas.get("closed") == 1200, deltas
+    assert deltas.get("changed") == 1100, deltas
+    conn.close()
+
+
+def test_scd2_recount_catches_deleted_opened_row_pg(tmp_path, monkeypatch):
+    """B1-E3 regression: deleting one row this run opened, mid read-back,
+    must still fail the recount — the window must not swallow tampers."""
+    import services.scd2_engine as scd2_mod
+
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src_bulk(cur, _bulk_rows(1500))
+    cur.execute("DROP TABLE IF EXISTS scd2_dst CASCADE")
+    req = _engine_req("scd2_src", "scd2_dst", None, mode="strict")
+
+    real = scd2_mod.verify_scd2_history
+
+    def _delete_then_verify(*a, **kw):
+        cur.execute("DELETE FROM scd2_dst WHERE id = '7' AND is_current")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(
+        scd2_mod, "verify_scd2_history", _delete_then_verify
+    )
+    res = _exec(fake, req)
+    assert not res.success, (
+        "deleting a row this run opened must fail the version recount"
+    )
+    recon = getattr(res, "reconciliation", None) or {}
+    hist = recon.get("scd2_history") or {}
+    assert "recount" in str(hist.get("violations") or res.error or "")
+    conn.close()

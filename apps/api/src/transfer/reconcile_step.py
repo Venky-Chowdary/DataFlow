@@ -2005,6 +2005,14 @@ def _run_reconciliation_impl(
                                 )
                                 or 0
                             ),
+                            # Per-run recount window — every batch and the
+                            # close pass stamps its own instant.
+                            "run_started_at": (
+                                _ds.get("run_started_at")
+                                or (_ds.get("scd2") or {}).get(
+                                    "run_started_at"
+                                )
+                            ),
                         },
                     )
                     stamped["scd2_history"] = _hist
