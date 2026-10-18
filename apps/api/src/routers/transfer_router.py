@@ -1181,6 +1181,10 @@ async def run_universal_transfer(
     read_options_json: str = Form(""),
     shape_recipe_json: str = Form(""),
     approved_shape_recipe_hash: str = Form(""),
+    transform_recipe_id: str = Form(""),
+    transform_recipe_version: str = Form("0"),
+    transform_recipe_version_mode: str = Form("pin"),
+    transform_recipe_params_json: str = Form(""),
     approved_set_hash: str = Form(""),
     priority_column: str = Form(""),
     priority_direction: str = Form("desc"),
@@ -1340,6 +1344,15 @@ async def run_universal_transfer(
         read_options=_validated_read_options(read_options_json),
         shape_recipe=_validated_shape_recipe(shape_recipe_json),
         approved_shape_recipe_hash=(approved_shape_recipe_hash or "").strip(),
+        transform_recipe_id=(transform_recipe_id or "").strip(),
+        transform_recipe_version=int(transform_recipe_version or 0),
+        transform_recipe_version_mode=(transform_recipe_version_mode or "pin")
+        .strip()
+        .lower()
+        or "pin",
+        transform_recipe_params=_validated_shape_recipe(transform_recipe_params_json)
+        if (transform_recipe_params_json or "").strip()
+        else {},
         approved_set_hash=(approved_set_hash or "").strip(),
         priority_column=priority_column,
         priority_direction=priority_direction,

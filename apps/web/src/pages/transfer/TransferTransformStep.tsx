@@ -5,6 +5,7 @@ import { TransformColumnChart } from "../../components/transfer/TransformColumnC
 import { TransformGuidePanel } from "../../components/transfer/TransformGuidePanel";
 import { ClassicColumnLayout } from "../../components/transfer/ClassicColumnLayout";
 import { TransformStepBuilder } from "../../components/transfer/TransformStepBuilder";
+import { TransformLibraryPicker, type TransformRecipeBinding } from "../../components/transfer/TransformLibraryPicker";
 import { TransferTransformCanvas } from "../../components/transfer/TransferTransformCanvas";
 import { StudioFlagBanner } from "../../components/transfer/StudioFlagBanner";
 import { RulesImportCard, SuggestionsCard } from "../../components/transfer/TransformPrepCards";
@@ -60,6 +61,11 @@ interface TransferTransformStepProps {
   rowCount?: number;
   steps: ShapeStepWire[];
   onChangeSteps: (steps: ShapeStepWire[]) => void;
+  /** Library binding (two-transform model): which named recipe produced the
+   * steps, at which version, under which params. Propagates to the transfer
+   * payload as provenance. */
+  recipeBinding?: TransformRecipeBinding | null;
+  onBindRecipe?: (binding: TransformRecipeBinding | null) => void;
   /**
    * The transformed image Map, Validate and the run request are held to: the
    * recipe identity, the columns it produces, and the carriers those columns
@@ -136,6 +142,8 @@ export function TransferTransformStep({
   rowCount,
   steps,
   onChangeSteps,
+  recipeBinding,
+  onBindRecipe,
   onIdentity,
   onBack,
   onContinue,
@@ -649,6 +657,21 @@ export function TransferTransformStep({
         className="df2-xform-panel"
       >
       <h2 id="xform-prepare-label" className="df2-sr-only">Rules and transforms</h2>
+      {onBindRecipe ? (
+        <TransformLibraryPicker
+          sourceColumns={sourceColumns}
+          applied={recipeBinding}
+          disabled={!plan.allowed}
+          onApply={(steps, binding) => {
+            onChangeSteps(steps);
+            onBindRecipe(binding);
+          }}
+          onClear={() => {
+            onBindRecipe(null);
+            onChangeSteps([]);
+          }}
+        />
+      ) : null}
       {!canvasEnabled && onApplyRules ? (
         <RulesImportCard
           ruleReport={ruleReport}

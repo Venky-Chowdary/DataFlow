@@ -629,7 +629,66 @@ export async function deleteShapeDraft(routeKey: string): Promise<void> {
   const res = await apiFetch(`${API_BASE}/shape/drafts?route_key=${encodeURIComponent(routeKey)}`, {
     method: "DELETE",
   });
-  if (!res.ok) throw await apiErrorFrom(res, "Could not clear the transform draft");
+  if (!res.ok) throw await apiErrorFrom(res, "Could not delete the transform draft");
+}
+
+// ── Transform Library — named, versioned, reusable recipes ──────────────────
+
+export interface TransformLibraryRecipe {
+  id: string;
+  name: string;
+  description: string;
+  version: number;
+  status: "draft" | "active";
+  enabled: boolean;
+  issues: string[];
+  parameters: Record<string, { default?: unknown; description?: string }>;
+  input_columns: string[];
+  output_columns: string[];
+  steps: {
+    column: string;
+    op: string;
+    on_error: string;
+    enabled: boolean;
+    options?: Record<string, unknown>;
+    output_column?: string;
+  }[];
+  updated_at: string;
+}
+
+export interface TransformRecipeCompileResult {
+  recipe_id: string;
+  recipe_name: string;
+  bound_version: number;
+  shape_recipe: ShapeRecipeWire;
+  recipe_hash: string;
+  parameters: TransformLibraryRecipe["parameters"];
+  input_columns: string[];
+  output_columns: string[];
+}
+
+export async function listTransformLibrary(): Promise<TransformLibraryRecipe[]> {
+  const res = await apiFetch(`${API_BASE}/transform-library/`);
+  if (!res.ok) throw await apiErrorFrom(res, "Transform library unavailable");
+  return res.json();
+}
+
+export async function compileTransformRecipe(
+  recipeId: string,
+  body: { params?: Record<string, unknown>; source_columns?: string[] },
+  version?: number,
+): Promise<TransformRecipeCompileResult> {
+  const qs = version != null ? `?version=${version}` : "";
+  const res = await apiFetch(
+    `${API_BASE}/transform-library/${encodeURIComponent(recipeId)}/compile${qs}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  if (!res.ok) throw await apiErrorFrom(res, "Recipe could not be prepared");
+  return res.json();
 }
 
 export async function syncJobNow(
@@ -2928,6 +2987,11 @@ export async function runUniversalTransfer(options: {
   shapeRecipe?: ShapeRecipeWire;
   /** Recipe identity Validate approved — a changed recipe is refused, not run. */
   approvedShapeRecipeHash?: string;
+  /** Which Transform Library recipe produced the steps (provenance). */
+  transformRecipeId?: string;
+  transformRecipeVersion?: number;
+  transformRecipeVersionMode?: "pin" | "follow";
+  transformRecipeParams?: Record<string, unknown>;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2961,6 +3025,14 @@ export async function runUniversalTransfer(options: {
     formData.append("shape_recipe_json", JSON.stringify(options.shapeRecipe));
     if (options.approvedShapeRecipeHash) {
       formData.append("approved_shape_recipe_hash", options.approvedShapeRecipeHash);
+    }
+    if (options.transformRecipeId) {
+      formData.append("transform_recipe_id", options.transformRecipeId);
+      formData.append("transform_recipe_version", String(options.transformRecipeVersion || 0));
+      formData.append("transform_recipe_version_mode", options.transformRecipeVersionMode || "pin");
+      if (options.transformRecipeParams && Object.keys(options.transformRecipeParams).length) {
+        formData.append("transform_recipe_params_json", JSON.stringify(options.transformRecipeParams));
+      }
     }
   }
   if (options.destExtra && Object.keys(options.destExtra).length) {

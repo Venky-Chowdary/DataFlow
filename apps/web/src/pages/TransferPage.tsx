@@ -280,6 +280,7 @@ import {
 } from "./transfer/studioConstants";
 import { transferWizardReducer, WIZARD_START } from "./transfer/transferWizard";
 import { TransferTransformStep } from "./transfer/TransferTransformStep";
+import type { TransformRecipeBinding } from "../components/transfer/TransformLibraryPicker";
 import {
   acceptRuleAsDirect,
   mergeBusinessRules,
@@ -377,6 +378,8 @@ export function TransferPage({
    * Validate, the run is refused rather than quietly running a different one.
    */
   const [shapeSteps, setShapeSteps] = useState<ShapeStepWire[]>([]);
+  /** Which Transform Library recipe produced shapeSteps (provenance only). */
+  const [recipeBinding, setRecipeBinding] = useState<TransformRecipeBinding | null>(null);
   const [shapeIdentity, setShapeIdentity] = useState<TransformImage | null>(null);
   const [businessRuleReport, setBusinessRuleReport] = useState<RuleCompileReport | null>(null);
   const businessRuleReportRef = useRef<RuleCompileReport | null>(null);
@@ -5352,6 +5355,12 @@ export function TransferPage({
         readOptions: sourceKind === "file" ? readOptions : undefined,
         shapeRecipe: recipePayload(shapeSteps),
         approvedShapeRecipeHash: shapeIdentity?.hash || undefined,
+        ...(recipeBinding ? {
+          transformRecipeId: recipeBinding.recipe_id,
+          transformRecipeVersion: recipeBinding.version,
+          transformRecipeVersionMode: recipeBinding.version_mode,
+          transformRecipeParams: recipeBinding.params,
+        } : {}),
         sourceExtra: (() => {
           const extra: Record<string, unknown> = {
             ...(sourceKind === "database"
@@ -5727,6 +5736,12 @@ export function TransferPage({
         stream_contracts: streamContracts,
         shape_recipe: recipePayload(shapeSteps),
         approved_shape_recipe_hash: shapeIdentity?.hash || "",
+        ...(recipeBinding ? {
+          transform_recipe_id: recipeBinding.recipe_id,
+          transform_recipe_version: recipeBinding.version,
+          transform_recipe_version_mode: recipeBinding.version_mode,
+          transform_recipe_params: recipeBinding.params,
+        } : {}),
         ...studioScheduleValidateIdentity(preflight),
         ...studioSchedulePolicies({
           validationMode,
@@ -7854,6 +7869,8 @@ export function TransferPage({
           destRouteLabel={mapDestRouteLabel}
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
           steps={shapeSteps}
+          recipeBinding={recipeBinding}
+          onBindRecipe={setRecipeBinding}
           onChangeSteps={(next) => {
             if (!isMultiStreamSource) {
               setShapeSteps(next);
