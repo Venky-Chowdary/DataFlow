@@ -208,6 +208,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         "mask_pii",
         "Mask a value in place and keep its shape",
         family="cleanse",
+        options=("pattern",),
     ),
     _StepDef(
         "parse_boolean",

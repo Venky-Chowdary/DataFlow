@@ -1117,6 +1117,8 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
     if op in ("hash_pii", "mask_pii"):
         if is_blank(value):
             return None
+        if op == "mask_pii" and options.get("pattern"):
+            return _mask_pattern(str(value), str(options["pattern"]))
         from services.transform_engine import apply_transform
 
         digested, err = apply_transform(value, op)
@@ -1125,6 +1127,31 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
         return digested
 
     raise ValueError(f"'{op}' has no value implementation")
+
+
+def _mask_pattern(value: str, pattern: str) -> str:
+    """Pattern masks that keep a hint of the value's shape.
+
+    ``last4`` keeps the final four characters (cards/SSNs), ``first4`` the
+    leading four, ``email`` preserves the domain so the masked value still
+    sorts and reads plausibly. Anything else is refused — an unknown pattern
+    must not degrade to "reveal" or "all stars" silently.
+    """
+    if pattern == "last4":
+        tail = value[-4:] if len(value) > 4 else ""
+        return "*" * (len(value) - len(tail)) + tail
+    if pattern == "first4":
+        head = value[:4] if len(value) > 4 else value
+        return head + "*" * (len(value) - len(head))
+    if pattern == "email":
+        local, sep, domain = value.partition("@")
+        if not sep:
+            raise EvalError("email mask needs an address with a domain")
+        visible = local[0] if local else ""
+        return f"{visible}***@{domain}"
+    raise EvalError(
+        f"mask pattern '{pattern}' is not one of last4 | first4 | email"
+    )
 
 
 def _cast(

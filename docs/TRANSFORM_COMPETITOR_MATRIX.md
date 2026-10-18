@@ -28,7 +28,7 @@ Missing = nothing in code yet.
 |17|PII blocking|Have|`omit` + field deselection|
 |18|PII hashing|Have|`hash_pii`|
 |19|PII encryption|Missing|—|
-|20|Masking patterns/substitution|Partial|`mask_pii`/`redact`; no pattern/substitution dictionary|
+|20|Masking patterns/substitution|Implemented|`mask_pii` pattern=last4|first4|email; unknown pattern refuses|
 |21|Policy masking by role|Missing|—|
 |22|Flatten JSON/array|Implemented|`flatten_json` (depth/keys) + `unnest_json` array explode w/ caps|
 |23|Nest relational→JSON|Implemented|`nest_json` groups columns into a JSON object; missing source refuses, drop option|
