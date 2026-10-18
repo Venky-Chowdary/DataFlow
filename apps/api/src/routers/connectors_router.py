@@ -1434,8 +1434,15 @@ def _merge_edited_row_payloads(
             recs, _cols = _quarantine_details_to_records([d])
             rebuilt.append(recs[0] if recs else {})
         base_records = rebuilt
+    # A cell finding quarantines one named column; a shape-divert finding
+    # quarantines the whole record (``row`` is a dict), so its marker is "*" —
+    # the edit may rewrite any cell and binds on the cells that still agree.
     quarantined_cols = {
-        i: str(d.get("column") or d.get("target") or "").strip()
+        i: (
+            "*"
+            if isinstance(d.get("row"), dict)
+            else str(d.get("column") or d.get("target") or "").strip()
+        )
         for i, d in enumerate(open_details)
     }
     bound: list[tuple[int, dict]] = []
@@ -1457,11 +1464,19 @@ def _merge_edited_row_payloads(
                 for i, detail in enumerate(open_details):
                     if i in used:
                         continue
+                    row_val = detail.get("row")
                     try:
-                        if int(detail.get("row") or -1) == want_row:
-                            candidates.append(i)
+                        # Dict-row findings address themselves by the source
+                        # row index they were diverted from.
+                        have_row = int(
+                            detail.get("source_row_index")
+                            if isinstance(row_val, dict)
+                            else (row_val or -1)
+                        )
                     except (TypeError, ValueError):
                         continue
+                    if have_row == want_row:
+                        candidates.append(i)
         if len(candidates) == 1:
             idx = candidates[0]
             used.add(idx)
@@ -1481,10 +1496,14 @@ def _merge_edited_row_payloads(
                 k for k in shared
                 if str(edit[k]) == str(base[k]) and not _mask_preview(base.get(k))
             ]
-            disagreeing = [
-                k for k in shared
-                if k not in agreeing and k != qcol and not _mask_preview(base.get(k))
-            ]
+            disagreeing = (
+                []
+                if qcol == "*"
+                else [
+                    k for k in shared
+                    if k not in agreeing and k != qcol and not _mask_preview(base.get(k))
+                ]
+            )
             if agreeing and not disagreeing:
                 candidates.append(i)
         if not candidates:
@@ -1527,13 +1546,27 @@ def _quarantine_details_to_records(details: list[dict], transform_overrides: Opt
     by_row: dict[int, dict] = {}
     order: list[int] = []
     for detail in details:
-        try:
-            row_num = int(detail.get("row") or 0)
-        except (TypeError, ValueError):
-            row_num = 0
-        if row_num not in by_row:
-            by_row[row_num] = {}
+        raw_row = detail.get("row")
+        if isinstance(raw_row, dict):
+            # Shape-divert findings carry the rejected record in ``row``
+            # itself — a dict, not a source row index. Hydrate it as its own
+            # record under a synthetic negative key so it never merges with a
+            # real row number; cell-scrap fields below can still refine it.
+            from connectors.writer_common import quarantine_cell_wire
+
+            row_num = -(len(order) + 1)
+            by_row[row_num] = {
+                str(k): quarantine_cell_wire(v) for k, v in raw_row.items()
+            }
             order.append(row_num)
+        else:
+            try:
+                row_num = int(raw_row or 0)
+            except (TypeError, ValueError):
+                row_num = 0
+            if row_num not in by_row:
+                by_row[row_num] = {}
+                order.append(row_num)
         # Prefer explicit source_values when dual-stamped (Wave 32).
         base = detail.get("source_values") if isinstance(detail.get("source_values"), dict) else None
         if not base:

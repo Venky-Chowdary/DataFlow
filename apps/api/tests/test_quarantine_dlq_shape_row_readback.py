@@ -71,9 +71,10 @@ def test_canonical_replay_details_returns_the_row(tmp_path, monkeypatch):
     assert rows[0]["row"]["id"] == "2"
 
 
-def test_end_to_end_shape_divert_is_replayable(tmp_path, isolated, monkeypatch):
+def test_end_to_end_shape_divert_is_persisted_and_readable(tmp_path, isolated, monkeypatch):
     """Real SQLite->SQLite cast-divert run -> DLQ persist -> canonical replay
-    read-back returns the diverted source row."""
+    read-back returns the diverted source row. (Read-back only — the write
+    path is covered by the replay tests below.)"""
     from tests.test_shape_buffered_ops_stream_e2e import _exec
 
     dlq_path = tmp_path / "dlq.jsonl"
@@ -108,3 +109,182 @@ def test_end_to_end_shape_divert_is_replayable(tmp_path, isolated, monkeypatch):
     rows = dlq.canonical_replay_details({"id": job_id})
     assert len(rows) == 1
     assert rows[0]["row"] == {"id": "2", "v": "BAD"}
+
+
+# ---------------------------------------------------------------------------
+# Replay WRITE path — dict-row findings must hydrate into writable records.
+# ---------------------------------------------------------------------------
+
+
+def _shape_detail() -> dict:
+    return {
+        "row": {"id": "2", "amt": "BAD"},
+        "reason": "transform divert — step 1 'cast_column': 'BAD' is not an integer",
+        "failure_reason": "'BAD' is not an integer",
+        "shape_step": 1,
+        "shape_op": "cast_column",
+        "source_row_index": 2,
+    }
+
+
+def test_quarantine_details_to_records_hydrates_dict_row():
+    from src.routers.connectors_router import _quarantine_details_to_records
+
+    records, columns = _quarantine_details_to_records([_shape_detail()])
+    assert records == [{"id": "2", "amt": "BAD"}]
+    assert columns == ["id", "amt"]
+
+
+def test_merge_edited_row_binds_to_whole_record_finding():
+    from src.routers.connectors_router import _merge_edited_row_payloads
+
+    records, merged_details = _merge_edited_row_payloads(
+        [_shape_detail()], [{"id": "2", "amt": "BAD"}], [{"id": "2", "amt": 42}]
+    )
+    assert records == [{"id": "2", "amt": 42}]
+    assert merged_details == [_shape_detail()]
+
+
+def test_merge_edited_row_refuses_an_edit_that_agrees_on_nothing():
+    import pytest
+    from fastapi import HTTPException
+
+    from src.routers.connectors_router import _merge_edited_row_payloads
+
+    with pytest.raises(HTTPException) as exc:
+        _merge_edited_row_payloads(
+            [_shape_detail()],
+            [{"id": "2", "amt": "BAD"}],
+            [{"id": "9", "amt": 42}],  # disagrees on every shared cell
+        )
+    assert exc.value.status_code == 400
+
+
+def _replay_request():
+    class _State:
+        pass
+
+    class _Req:
+        state = _State()
+        headers: dict = {}
+
+    return _Req()
+
+
+def test_shape_divert_edited_replay_writes_row_to_destination(tmp_path, isolated, monkeypatch):
+    """Cast-divert run -> DLQ -> edit v to 42 via the replay endpoint ->
+    destination read-back contains (2, '42') and the finding closes."""
+    import asyncio
+    import sqlite3
+    import uuid
+
+    import importlib
+
+    router = importlib.import_module("src.routers.connectors_router")
+    from src.routers.connectors_router import QuarantineReplayRequest, replay_job_quarantine
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import transfer_request_to_dict
+    from tests.test_shape_buffered_ops_stream_e2e import _exec, _request
+
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
+    monkeypatch.setattr(router, "get_mongodb_service", lambda: isolated)
+
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _exec(src, "CREATE TABLE t (id TEXT, v TEXT)")
+    _exec(src, "INSERT INTO t (id, v) VALUES (?, ?)", [("1", "10"), ("2", "BAD")])
+
+    req = _request(
+        src,
+        dst,
+        [{"op": "cast_column", "column": "v", "options": {"to_type": "integer"}, "on_error": "divert"}],
+    )
+    job_id = "dlqedit" + uuid.uuid4().hex[:12]
+    isolated.update_job_status(job_id, "pending", transfer_request={})
+    result = UniversalTransferEngine().execute_tracked(req, job_id)
+    assert result.success, result.error
+    isolated.update_job_fields(
+        job_id,
+        {"id": job_id, "job_id": job_id, "transfer_request": transfer_request_to_dict(req)},
+    )
+
+    resp = asyncio.run(
+        replay_job_quarantine(job_id, QuarantineReplayRequest(rows=[{"id": "2", "v": 42}]), _replay_request())
+    )
+    assert resp.get("rows_written", 0) >= 1, resp
+
+    conn = sqlite3.connect(str(dst))
+    try:
+        got = [(r[0], str(r[1])) for r in conn.execute("SELECT id, v FROM t ORDER BY id")]
+    finally:
+        conn.close()
+    assert ("2", "42") in got, got
+
+    open_rows = dlq.open_quarantine_details(dlq.canonical_replay_details({"id": job_id}))
+    assert open_rows == [], "the remediated finding must close after a written replay"
+
+
+def test_shape_divert_unedited_replay_behaves_sensibly(tmp_path, isolated, monkeypatch):
+    """Unedited replay of a shape-diverted row must not 400 or silently drop:
+    either the row lands verbatim (replay-as-is) or the shape recipe diverts
+    it again — but never a 'no row payload' crash."""
+    import asyncio
+    import sqlite3
+    import uuid
+
+    import importlib
+
+    router = importlib.import_module("src.routers.connectors_router")
+    from src.routers.connectors_router import QuarantineReplayRequest, replay_job_quarantine
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import transfer_request_to_dict
+    from tests.test_shape_buffered_ops_stream_e2e import _exec, _request
+
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
+    monkeypatch.setattr(router, "get_mongodb_service", lambda: isolated)
+
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _exec(src, "CREATE TABLE t (id TEXT, v TEXT)")
+    _exec(src, "INSERT INTO t (id, v) VALUES (?, ?)", [("1", "10"), ("2", "BAD")])
+
+    req = _request(
+        src,
+        dst,
+        [{"op": "cast_column", "column": "v", "options": {"to_type": "integer"}, "on_error": "divert"}],
+    )
+    job_id = "dlqraw" + uuid.uuid4().hex[:12]
+    isolated.update_job_status(job_id, "pending", transfer_request={})
+    result = UniversalTransferEngine().execute_tracked(req, job_id)
+    assert result.success, result.error
+    isolated.update_job_fields(
+        job_id,
+        {"id": job_id, "job_id": job_id, "transfer_request": transfer_request_to_dict(req)},
+    )
+
+    from fastapi import HTTPException
+
+    refused = None
+    try:
+        asyncio.run(
+            replay_job_quarantine(job_id, QuarantineReplayRequest(), _replay_request())
+        )
+    except HTTPException as exc:
+        refused = exc
+
+    conn = sqlite3.connect(str(dst))
+    try:
+        landed = [r[0] for r in conn.execute("SELECT id FROM t WHERE id = '2'")]
+    finally:
+        conn.close()
+    still_open = dlq.open_quarantine_details(dlq.canonical_replay_details({"id": job_id}))
+    # Honest outcomes only: the row landed verbatim, or the write was refused
+    # loudly (the child re-validation names the failing cell) and the finding
+    # stays open for the operator. Never a silent drop, never a hydration
+    # crash.
+    if refused is not None:
+        assert landed == [], refused.detail
+        assert still_open, "a refused replay must leave the finding open"
+        assert "BAD" in str(refused.detail)
+    else:
+        assert landed == ["2"] or still_open, (
+            f"row neither written (landed={landed}) nor still quarantined ({still_open})"
+        )
