@@ -2956,17 +2956,24 @@ def _stream_database_transfer_impl(
                 bind_overwrite_transaction(_rconn, _rheld)
             _rheld.begin(job_id=job_id or "")
             # Failed-Gate-8 restore guard: a replace-mode routed run into
-            # non-empty route tables renames each occupied table aside
-            # inside this transaction — a write failure rolls the renames
-            # back with the rows, and a post-write proof failure lets
-            # _settle_overwrite_backup rename the backups back onto the
-            # live names (the txn commits before Gate-8, so the backup is
-            # the only way to restore prior content).
+            # non-empty route tables takes a row-level COPY of each occupied
+            # table inside this transaction (CREATE TABLE bak (LIKE t
+            # INCLUDING ALL) + INSERT SELECT). The live table object is never
+            # renamed or replaced — the customer's DDL, indexes, grants and
+            # dependent views stay bound to it (P0-G1). A write failure rolls
+            # the copies back with the rows; a post-write proof failure lets
+            # _settle_overwrite_backup DELETE+INSERT the prior rows back and
+            # drop the copies (the txn commits before Gate-8, so the backup
+            # is the only way to restore prior content).
             _rsync_now = str(effective_sync or "")
             if is_overwrite_sync(_rsync_now) and not route_backup_state.get(
                 "armed"
             ):
                 route_backup_state["armed"] = True
+                from connectors.sql_identifiers import (
+                    quote_table_ref,
+                    split_qualified_table,
+                )
                 from connectors.table_manager import pg_route_backup_name
 
                 _rprecount = route_backup_state.get("precount") or {}
@@ -2979,16 +2986,45 @@ def _stream_database_transfer_impl(
                     _rrt = str(
                         _rtargets_map.get(_rrn) or f"{dest_table}__{_rrn}"
                     )
-                    _rbak = pg_route_backup_name(_rrt, job_id or "")
+                    _rschema, _rtbl = split_qualified_table(
+                        _rrt, str(dest_cfg.get("schema") or "public")
+                    )
+                    _rbak = pg_route_backup_name(_rtbl, job_id or "")
                     try:
+                        _live_ref = quote_table_ref(
+                            _rtbl, _rschema, dialect="postgresql"
+                        )
+                        _bak_ref = quote_table_ref(
+                            _rbak, _rschema, dialect="postgresql"
+                        )
                         with _rconn.cursor() as _rcur:
+                            # Backup existence is schema-qualified — a
+                            # same-named table in another schema must not
+                            # match (P0-G2).
                             _rcur.execute(
-                                f'ALTER TABLE "{_rrt}" RENAME TO "{_rbak}"'
+                                "SELECT 1 FROM information_schema.tables "
+                                "WHERE table_schema = %s AND table_name = %s",
+                                (_rschema, _rtbl),
                             )
-                        _rbaks[_rrn] = {"table": _rrt, "backup": _rbak}
+                            if not _rcur.fetchone():
+                                raise LookupError(
+                                    f"route table {_rschema}.{_rtbl} not found"
+                                )
+                            _rcur.execute(
+                                f"CREATE TABLE {_bak_ref} "
+                                f"(LIKE {_live_ref} INCLUDING ALL)"
+                            )
+                            _rcur.execute(
+                                f"INSERT INTO {_bak_ref} SELECT * FROM {_live_ref}"
+                            )
+                        _rbaks[_rrn] = {
+                            "table": _rtbl,
+                            "backup": _rbak,
+                            "schema": _rschema,
+                        }
                     except Exception as _rbak_exc:
                         logger.warning(
-                            "Route %s backup rename skipped (%s); "
+                            "Route %s backup copy skipped (%s); "
                             "post-write proof failure cannot restore it",
                             _rrn,
                             _rbak_exc,

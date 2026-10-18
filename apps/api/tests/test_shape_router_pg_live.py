@@ -45,7 +45,9 @@ def _setup_source(cur, rows):
     for t in ("rt", "rt_out", "rt_high", "rt_mid", "rt_other",
               "rt_out__high", "rt_out__mid", "rt_out__other",
               "rt__us", "rt__rest", "rt_us", "rt_rest"):
-        cur.execute(f"DROP TABLE IF EXISTS {t}")
+        # CASCADE: a leftover dependent view (P0-G1 test) must not block the
+        # reset.
+        cur.execute(f"DROP TABLE IF EXISTS {t} CASCADE")
     cur.execute("CREATE TABLE rt (id INT, amt TEXT, region TEXT)")
     for r in rows:
         cur.execute("INSERT INTO rt (id, amt, region) VALUES (%s, %s, %s)", r)
@@ -608,4 +610,196 @@ def test_rt8_per_route_map_carries_source_column_type_to_ddl(
     assert types["amount"] in ("text", "character varying"), types
     cur.execute("SELECT cust_id, amount FROM rt_us ORDER BY cust_id")
     assert cur.fetchall() == [(1, "150"), (3, "10")]
+    conn.close()
+
+
+def _ddl_fingerprint(cur, table, schema="public"):
+    """Customer-facing DDL fingerprint: columns+types+nullability+defaults,
+    PK constraint, secondary indexes, grants — everything a rename-aside
+    would destroy (P0-G1)."""
+    cur.execute(
+        "SELECT column_name, data_type, is_nullable, column_default "
+        "FROM information_schema.columns "
+        "WHERE table_schema = %s AND table_name = %s ORDER BY column_name",
+        (schema, table),
+    )
+    cols = cur.fetchall()
+    cur.execute(
+        "SELECT conname, contype FROM pg_constraint c "
+        "JOIN pg_class t ON t.oid = c.conrelid "
+        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+        "WHERE t.relname = %s AND n.nspname = %s ORDER BY conname",
+        (table, schema),
+    )
+    cons = cur.fetchall()
+    cur.execute(
+        "SELECT indexname FROM pg_indexes "
+        "WHERE schemaname = %s AND tablename = %s ORDER BY indexname",
+        (schema, table),
+    )
+    idx = [r[0] for r in cur.fetchall()]
+    cur.execute(
+        "SELECT grantee, privilege_type FROM information_schema.role_table_grants "
+        "WHERE table_schema = %s AND table_name = %s ORDER BY grantee, privilege_type",
+        (schema, table),
+    )
+    grants = cur.fetchall()
+    return {"columns": cols, "constraints": cons, "indexes": idx, "grants": grants}
+
+
+def test_p0g1_customer_route_ddl_survives_overwrite_guard(tmp_path, monkeypatch):
+    """P0-G1: overwrite rerun over customer-owned route tables must keep the
+    customer's table OBJECT — columns, PK, NOT NULL, defaults, indexes,
+    grants and dependent views — on success AND after a restored failure."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    cur.execute(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='df_reader') "
+        "THEN CREATE ROLE df_reader NOLOGIN; END IF; END $$"
+    )
+    for t in ("rt_high", "rt_mid", "rt_other"):
+        cur.execute(f"DROP VIEW IF EXISTS {t}_v CASCADE")
+        cur.execute(f"DROP TABLE IF EXISTS {t} CASCADE")
+        cur.execute(
+            f"CREATE TABLE {t} (id INT PRIMARY KEY, amt TEXT NOT NULL, "
+            "region TEXT, loaded_at TIMESTAMPTZ DEFAULT now())"
+        )
+        cur.execute(f"CREATE INDEX {t}_region_idx ON {t} (region)")
+        cur.execute(f"GRANT SELECT ON {t} TO df_reader")
+    cur.execute("CREATE VIEW rt_high_v AS SELECT id, amt FROM rt_high")
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    req = _req(parsed, recipe, parsed_recipe.recipe_hash)
+    res1, _ = _run(fake, req, prefix="rtg1")
+    assert res1.success, res1.error
+    fp1 = _ddl_fingerprint(cur, "rt_high")
+    assert ("id", "integer", "NO", None) in [tuple(c) for c in fp1["columns"]]
+    assert len(fp1["columns"]) == 4
+    # Successful rerun over occupied tables.
+    res2, _ = _run(fake, req, prefix="rtg2")
+    assert res2.success, res2.error
+    assert _ddl_fingerprint(cur, "rt_high") == fp1
+    assert set(_ddl_fingerprint(cur, "rt_mid")["indexes"]) == {
+        "rt_mid_region_idx",
+        "rt_mid_pkey",
+    }
+    # The view still reads the live table — not a frozen backup.
+    cur.execute("SELECT COUNT(*) FROM rt_high_v")
+    assert cur.fetchone()[0] == 1
+    cur.execute(
+        "SELECT definition FROM pg_views WHERE viewname='rt_high_v'"
+    )
+    assert "__dfbak_" not in cur.fetchone()[0]
+    cur.execute(
+        "SELECT table_schema, table_name FROM information_schema.tables "
+        "WHERE table_name LIKE '%__dfbak_%'"
+    )
+    assert cur.fetchall() == []
+
+    # Restored failure: prior rows AND the full customer DDL come back.
+    import services.reconciliation as recon_mod
+
+    real_route_verify = recon_mod.verify_postgres_route_table
+
+    def _wrong_route_count(*a, **k):
+        rows, checksum, additive = real_route_verify(*a, **k)
+        return rows + 1, checksum, additive
+
+    monkeypatch.setattr(
+        recon_mod, "verify_postgres_route_table", _wrong_route_count
+    )
+    res3, _ = _run(fake, req, prefix="rtg3")
+    assert not res3.success
+    assert _ddl_fingerprint(cur, "rt_high") == fp1
+    cur.execute("SELECT id, amt, region FROM rt_high ORDER BY id")
+    assert cur.fetchall() == [(1, "150", "US")]
+    cur.execute("SELECT COUNT(*) FROM rt_high_v")
+    assert cur.fetchone()[0] == 1
+    cur.execute(
+        "SELECT table_schema, table_name FROM information_schema.tables "
+        "WHERE table_name LIKE '%__dfbak_%'"
+    )
+    assert cur.fetchall() == []
+    cur.execute("DROP VIEW IF EXISTS rt_high_v")
+    conn.close()
+
+
+def test_p0g2_nonpublic_schema_routed_overwrite_rerun(tmp_path, monkeypatch):
+    """P0-G2: route tables in a non-public schema — rerun succeeds and a
+    forced Gate-8 failure restores pre-run rows; every guard statement is
+    schema-qualified."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    cur.execute("DROP SCHEMA IF EXISTS dfqb_g2 CASCADE")
+    cur.execute("CREATE SCHEMA dfqb_g2")
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    src_ep = EndpointConfig(
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"],
+        schema="public", table="rt")
+    dst_ep = EndpointConfig(
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"],
+        schema="dfqb_g2", table="rt_out")
+    req = TransferRequest(
+        source=src_ep, destination=dst_ep, sync_mode="full_refresh_overwrite",
+        shape_recipe=recipe, approved_shape_recipe_hash=parsed_recipe.recipe_hash,
+        skip_preflight=True, validation_mode="strict")
+    res1, _ = _run(fake, req, prefix="g2a")
+    assert res1.success, res1.error
+    cur.execute(
+        "SELECT id FROM dfqb_g2.rt_high ORDER BY id"
+    )
+    assert cur.fetchall() == [(1,)]
+    # Rerun over occupied tables — armed backup must resolve the schema.
+    res2, _ = _run(fake, req, prefix="g2b")
+    assert res2.success, res2.error
+    cur.execute("SELECT id FROM dfqb_g2.rt_mid ORDER BY id")
+    assert cur.fetchall() == [(2,), (5,)]
+
+    import services.reconciliation as recon_mod
+
+    real_route_verify = recon_mod.verify_postgres_route_table
+
+    def _wrong_route_count(*a, **k):
+        rows, checksum, additive = real_route_verify(*a, **k)
+        return rows + 1, checksum, additive
+
+    monkeypatch.setattr(
+        recon_mod, "verify_postgres_route_table", _wrong_route_count
+    )
+    cur.execute("INSERT INTO rt (id, amt, region) VALUES (7, '200', 'US')")
+    res3, _ = _run(fake, req, prefix="g2c")
+    assert not res3.success
+    cur.execute("SELECT id FROM dfqb_g2.rt_high ORDER BY id")
+    assert cur.fetchall() == [(1,)]
+    cur.execute("SELECT id FROM dfqb_g2.rt_other ORDER BY id")
+    assert cur.fetchall() == [(3,), (6,)]
+    cur.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema='dfqb_g2' AND table_name LIKE '%__dfbak_%'"
+    )
+    assert cur.fetchall() == []
+    cur.execute("DROP SCHEMA dfqb_g2 CASCADE")
     conn.close()

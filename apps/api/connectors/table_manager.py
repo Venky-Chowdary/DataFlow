@@ -2018,41 +2018,79 @@ def pg_route_backup_name(table_name: str, job_id: str) -> str:
     return f"{base}{suffix}"
 
 
+def _pg_route_backup_parts(
+    pair: dict[str, Any], default_schema: str
+) -> tuple[str, str, str, str]:
+    """(schema, table, backup_schema, backup) — schema-qualified for every
+    lookup; a same-named table in another schema must never match (P0-G2)."""
+    from connectors.sql_identifiers import split_qualified_table
+
+    schema, table = split_qualified_table(
+        str(pair.get("table") or ""), str(pair.get("schema") or default_schema)
+    )
+    bak_schema, backup = split_qualified_table(
+        str(pair.get("backup") or ""), schema
+    )
+    return schema, table, bak_schema, backup
+
+
 def restore_pg_route_backups(
     cfg: dict[str, Any],
     backups: dict[str, dict[str, str]],
 ) -> list[str]:
-    """Put every renamed-aside route table back after a failed run.
+    """Restore every occupied route table's pre-run rows after a failed run.
 
-    ``backups`` maps route name -> {"table": live_name, "backup": bak_name}.
-    Each restore drops this run's partial/new table and renames the pre-run
-    table back to the live name. Returns the routes that were restored;
-    a route whose backup is missing reports its name as unrestored by staying
-    out of the list AND raising nothing — callers compare against the input.
+    ``backups`` maps route name -> {"table": live_name, "backup": bak_name,
+    "schema": schema}. The live table object was never touched (P0-G1 — a
+    rename-aside steals the customer's DDL, indexes, grants and re-binds
+    dependent views to the backup), so restore is DELETE + INSERT FROM the
+    backup copy, then DROP the backup — all inside one transaction with a
+    savepoint per route so a single unrestorable table does not abort the
+    others.
     """
-    from connectors.sql_identifiers import quote_sql_identifier
+    from connectors.sql_identifiers import quote_table_ref
 
     restored: list[str] = []
     conn = None
     try:
         conn = _pg_route_backup_connection(cfg)
+        conn.autocommit = False
+        default_schema = str(cfg.get("schema") or "public")
         with conn.cursor() as cur:
             for route, pair in (backups or {}).items():
-                table = str(pair.get("table") or "")
-                backup = str(pair.get("backup") or "")
+                schema, table, bak_schema, backup = _pg_route_backup_parts(
+                    pair, default_schema
+                )
                 if not table or not backup:
                     continue
-                src_q = quote_sql_identifier(table, '"')
-                bak_q = quote_sql_identifier(backup, '"')
-                cur.execute(f"DROP TABLE IF EXISTS {src_q}")
-                cur.execute(
-                    "SELECT 1 FROM information_schema.tables "
-                    "WHERE table_name = %s",
-                    (backup,),
+                tbl_ref = quote_table_ref(
+                    table, schema, dialect="postgresql"
                 )
-                if cur.fetchone():
-                    cur.execute(f"ALTER TABLE {bak_q} RENAME TO {src_q}")
+                bak_ref = quote_table_ref(
+                    backup, bak_schema, dialect="postgresql"
+                )
+                cur.execute("SAVEPOINT route_backup_restore")
+                try:
+                    cur.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema = %s AND table_name = %s",
+                        (bak_schema, backup),
+                    )
+                    if not cur.fetchone():
+                        cur.execute("RELEASE SAVEPOINT route_backup_restore")
+                        continue
+                    cur.execute(f"DELETE FROM {tbl_ref}")
+                    cur.execute(f"INSERT INTO {tbl_ref} SELECT * FROM {bak_ref}")
+                    cur.execute(f"DROP TABLE {bak_ref}")
+                    cur.execute("RELEASE SAVEPOINT route_backup_restore")
                     restored.append(str(route))
+                except Exception as exc:  # noqa: BLE001 - report, keep others
+                    logger.warning(
+                        "Route %s backup restore failed: %s", route, exc
+                    )
+                    cur.execute("ROLLBACK TO SAVEPOINT route_backup_restore")
+                    cur.execute("RELEASE SAVEPOINT route_backup_restore")
+            conn.commit()
     finally:
         if conn is not None:
             try:
@@ -2066,18 +2104,24 @@ def discard_pg_route_backups(
     cfg: dict[str, Any],
     backups: dict[str, dict[str, str]],
 ) -> None:
-    """Drop the renamed-aside originals after a Gate-8-verified run."""
-    from connectors.sql_identifiers import quote_sql_identifier
+    """Drop the backup copies after a Gate-8-verified run."""
+    from connectors.sql_identifiers import quote_table_ref
 
     conn = None
     try:
         conn = _pg_route_backup_connection(cfg)
+        default_schema = str(cfg.get("schema") or "public")
         with conn.cursor() as cur:
             for pair in (backups or {}).values():
-                backup = str(pair.get("backup") or "")
+                _, _, bak_schema, backup = _pg_route_backup_parts(
+                    pair, default_schema
+                )
                 if backup:
                     cur.execute(
-                        f"DROP TABLE IF EXISTS {quote_sql_identifier(backup, chr(34))}"
+                        "DROP TABLE IF EXISTS "
+                        + quote_table_ref(
+                            backup, bak_schema, dialect="postgresql"
+                        )
                     )
     finally:
         if conn is not None:
