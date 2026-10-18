@@ -9,13 +9,15 @@
 #   redis — CDC lease backend. Started here, not as a service container:
 #            a Docker Hub rate-limit on `services:` aborts the job before
 #            checkout and every later step exits 254 (package.json missing).
+#   postgres — plain postgres:16 for jobs that do not need the CDC build.
 #   bigquery — goccy/bigquery-emulator (warehouse SKU proof); re-runnable:
 #              an existing container is replaced with a fresh catalog
 # Emulator greens are labelled emulator_not_customer_tenant by the lab; they
 # are not customer-tenant certificates.
-# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls] [bigquery] [redis]
+# Usage: start_ci_databases.sh [mysql] [mongo] [gcs] [adls] [bigquery] [redis] [postgres]
 set -euo pipefail
 
+POSTGRES_IMAGE="${POSTGRES_IMAGE:-public.ecr.aws/docker/library/postgres:16}"
 MYSQL_IMAGE="${MYSQL_IMAGE:-public.ecr.aws/docker/library/mysql:8.0}"
 MONGO_IMAGE="${MONGO_IMAGE:-public.ecr.aws/docker/library/mongo:7}"
 GCS_IMAGE="${GCS_IMAGE:-docker.io/fsouza/fake-gcs-server:latest}"
@@ -148,8 +150,25 @@ start_bigquery() {
     --format 'emulator restarts={{.RestartCount}} state={{.State.Status}} started={{.State.StartedAt}}'
 }
 
+start_postgres() {
+  # Service-container pulls have no registry fallback — same public.ecr.aws →
+  # Docker Hub retry as the other images.
+  POSTGRES_IMAGE=$(pull_image "$POSTGRES_IMAGE" "docker.io/library/postgres:16")
+  docker rm -f dataflow-ci-postgres >/dev/null 2>&1 || true
+  docker run -d --name dataflow-ci-postgres \
+    -e POSTGRES_USER=dataflow \
+    -e POSTGRES_PASSWORD=dataflow \
+    -e POSTGRES_DB=dataflow \
+    -p 5432:5432 \
+    "$POSTGRES_IMAGE"
+  wait_for "Postgres" 60 2 docker exec dataflow-ci-postgres \
+    pg_isready -U dataflow -d dataflow \
+    || { docker logs dataflow-ci-postgres || true; exit 1; }
+}
+
 for svc in "$@"; do
   case "$svc" in
+    postgres) start_postgres ;;
     mysql) start_mysql ;;
     mongo) start_mongo ;;
     gcs) start_gcs ;;

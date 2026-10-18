@@ -149,20 +149,10 @@ jobs:
   # Services make the full golden matrix (PG/MySQL/Mongo) runnable with zero skips.
   no-config-transfer:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: public.ecr.aws/docker/library/postgres:16
-        env:
-          POSTGRES_USER: dataflow
-          POSTGRES_PASSWORD: dataflow
-          POSTGRES_DB: dataflow
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd="pg_isready -U dataflow -d dataflow"
-          --health-interval=5s
-          --health-timeout=5s
-          --health-retries=10
+    # No `services:` — a public.ecr.aws/docker.io rate-limit on a service
+    # container aborts the job before checkout with no retry. Postgres starts
+    # in a step via start_ci_databases.sh, which retries pulls with backoff
+    # and falls back to the other registry.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -170,9 +160,11 @@ jobs:
       # Service containers cannot take a command line, so MySQL (local_infile
       # for LOAD DATA LOCAL) and Mongo (--replSet for snapshot reads, as in
       # docker-compose.yml) are started in steps that mirror production.
-      - name: Start MySQL (local_infile) and Mongo replica set
+      # Postgres joins the same script: a `services:` pull has no registry
+      # fallback — a rate-limit there aborted the job before checkout.
+      - name: Start Postgres, MySQL (local_infile) and Mongo replica set
         run: |
-          bash .github/scripts/start_ci_databases.sh mysql mongo
+          bash .github/scripts/start_ci_databases.sh postgres mysql mongo
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -260,7 +252,8 @@ jobs:
   gitops-cd-staging:
     runs-on: ubuntu-latest
     needs: [gitops]
-    if: ${{ vars.DATAFLOW_STAGING_API_BASE != '' }}
+    # Job always runs so a missing staging config is a visible skip, not an
+    # absent job. The plan/apply steps gate on the repo variable.
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -276,6 +269,7 @@ jobs:
           python -m pip install -r apps/api/requirements.txt
 
       - name: Plan against staging API
+        if: ${{ vars.DATAFLOW_STAGING_API_BASE != '' }}
         env:
           DATAFLOW_API_BASE: ${{ vars.DATAFLOW_STAGING_API_BASE }}
           DATAFLOW_API_TOKEN: ${{ secrets.DATAFLOW_STAGING_API_TOKEN }}
@@ -559,24 +553,16 @@ jobs:
   # Separate job: SQL Server image is large/slow; keep main CI lean.
   cdc-sqlserver:
     runs-on: ubuntu-latest
-    services:
-      mysql:
-        image: public.ecr.aws/docker/library/mysql:8.0
-        env:
-          MYSQL_ROOT_PASSWORD: dataflow
-          MYSQL_DATABASE: dataflow
-          MYSQL_USER: dataflow
-          MYSQL_PASSWORD: dataflow
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pdataflow"
-          --health-interval=10s
-          --health-timeout=5s
-          --health-retries=10
+    # No `services:` — same rate-limit fragility as no-config-transfer; MySQL
+    # starts via the shared script (binlog/GTID flags are a superset of what
+    # this job's destination needs).
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Start MySQL
+        run: |
+          bash .github/scripts/start_ci_databases.sh mysql
 
       - name: Start Postgres with logical CDC
         run: |
@@ -734,22 +720,25 @@ jobs:
           DATAFLOW_PII_HASH_KEY: test-pii-key
           DATAFLOW_ALLOW_STUB_WRITES: "1"
 
-  # Optional: enable via repo variable ENABLE_ORACLE_CDC=true.
-  # Secrets must NOT appear in job `if:` (GitHub rejects `secrets` there).
-  # Missing credentials → pytest skip via DATAFLOW_ORACLE_* gates.
+  # Optional live IT: enable via repo variable ENABLE_ORACLE_CDC=true plus the
+  # DATAFLOW_ORACLE_* secrets. The job always runs so the opt-out is a visible
+  # skip reason, not an absent job.
   cdc-oracle:
     runs-on: ubuntu-latest
-    if: ${{ vars.ENABLE_ORACLE_CDC == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Require Oracle password secret
+      - name: Require Oracle enable + password secret
         id: oracle_creds
         env:
           DATAFLOW_ORACLE_PASSWORD: ${{ secrets.DATAFLOW_ORACLE_PASSWORD }}
+          ENABLE_ORACLE_CDC: ${{ vars.ENABLE_ORACLE_CDC }}
         run: |
-          if [ -z "${DATAFLOW_ORACLE_PASSWORD}" ]; then
+          if [ "${ENABLE_ORACLE_CDC}" != "true" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "ENABLE_ORACLE_CDC repo variable is not 'true' — Oracle CDC live IT stays opt-in"
+          elif [ -z "${DATAFLOW_ORACLE_PASSWORD}" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "DATAFLOW_ORACLE_PASSWORD secret not set — skipping Oracle CDC live IT"
           else

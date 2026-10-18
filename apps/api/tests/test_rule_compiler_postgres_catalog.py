@@ -24,14 +24,25 @@ def _psql(sql: str) -> subprocess.CompletedProcess[str]:
 
 
 def _postgres_up() -> bool:
-    ready = subprocess.run(["pg_isready"], capture_output=True, text=True)
+    try:
+        ready = subprocess.run(
+            ["pg_isready"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        # pg_ismissing on the host or a stuck probe must skip, not crash collection.
+        return False
     if ready.returncode != 0:
         return False
     probe = _psql("SELECT 1")
     return probe.returncode == 0
 
 
-pytestmark = pytest.mark.skipif(not _postgres_up(), reason="Postgres is not accepting connections")
+@pytest.fixture(autouse=True)
+def _require_postgres():
+    # Skip at run time, not at module import: a subprocess spawn during
+    # collection crashed the api-and-web slice when pg_isready was absent.
+    if not _postgres_up():
+        pytest.skip("Postgres is not accepting connections")
 
 
 def test_live_postgres_customers_and_orders_id_is_not_silent():
