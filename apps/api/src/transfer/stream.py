@@ -3885,9 +3885,65 @@ def _stream_database_transfer_impl(
             conn = state.get("conn")
             if conn is not None:
                 if state is pg_conn_state:
-                    from connectors.write_resilience import finish_held_overwrite
+                    from connectors.write_resilience import (
+                        finish_held_overwrite,
+                        overwrite_transaction_for,
+                    )
 
+                    _rtx = overwrite_transaction_for(conn)
                     finish_held_overwrite(conn, success=row_path_ok)
+                    _rtables = sorted(
+                        {
+                            str(v.get("table") or "")
+                            for v in (dest_summary.get("routes") or {}).values()
+                            if isinstance(v, dict) and v.get("table")
+                        }
+                    )
+                    if row_path_ok and _rtables:
+                        # Stamp the transaction id that wrote this run's
+                        # routed rows (xmin = txid) so a failed Gate-8 can
+                        # undo exactly this run's rows — never pre-existing
+                        # ones, including byte-identical copies (P2). All of
+                        # this run's writes share one committed xid, which is
+                        # the newest xmin in each table it wrote. Each route
+                        # table commits under its own xid, so keep the map
+                        # table -> xid and undo per table (P2).
+                        try:
+                            from connectors.sql_identifiers import (
+                                quote_table_ref as _qtr,
+                                split_qualified_table as _sqt,
+                            )
+
+                            _rschema = str(
+                                dest_cfg.get("schema") or "public"
+                            )
+                            _txids: dict[str, int] = {}
+                            with conn.cursor() as _txcur:
+                                for _t in _rtables:
+                                    _ts, _tt = _sqt(_t, _rschema)
+                                    # xid has no ordering ops — max client-side.
+                                    _txcur.execute(
+                                        "SELECT DISTINCT xmin FROM "
+                                        + _qtr(
+                                            _tt,
+                                            _ts,
+                                            dialect="postgresql",
+                                        )
+                                    )
+                                    _vals = [
+                                        int(_r[0])
+                                        for _r in _txcur.fetchall()
+                                        if _r[0] is not None
+                                    ]
+                                    if _vals:
+                                        _txids[_t] = max(_vals)
+                            if _txids:
+                                dest_summary["route_run_txid"] = _txids
+                                dest_summary["route_run_tables"] = _rtables
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "Route run txid capture failed: %s", exc
+                            )
                 try:
                     conn.close()
                 except Exception as exc:

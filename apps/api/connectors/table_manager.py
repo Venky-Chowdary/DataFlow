@@ -2100,6 +2100,72 @@ def restore_pg_route_backups(
     return restored
 
 
+def undo_pg_route_run(
+    cfg: dict[str, Any],
+    txids: dict[str, int | str],
+    tables: list[str],
+) -> list[str]:
+    """Delete exactly the rows one committed routed run wrote (P2 undo).
+
+    Each route table's write commits under its own transaction id, so every
+    row this run inserted into ``t`` carries ``xmin = txids[t]``. Deleting
+    by ``xmin`` removes exactly this run's copies — a byte-identical row an
+    earlier run landed has a different ``xmin`` and survives — and never
+    touches rows that pre-date the run. One transaction with a savepoint
+    per table so a single missing table does not abort the others. Returns
+    the table names it removed this run's rows from.
+    """
+    from connectors.sql_identifiers import quote_table_ref, split_qualified_table
+
+    if not txids:
+        return []
+    restored: list[str] = []
+    conn = None
+    try:
+        conn = _pg_route_backup_connection(cfg)
+        conn.autocommit = False
+        default_schema = str(cfg.get("schema") or "public")
+        with conn.cursor() as cur:
+            for t in tables or []:
+                schema, table = split_qualified_table(str(t), default_schema)
+                if not table:
+                    continue
+                txid = txids.get(t) or txids.get(table)
+                if not txid:
+                    continue
+                tbl_ref = quote_table_ref(table, schema, dialect="postgresql")
+                cur.execute("SAVEPOINT route_run_undo")
+                try:
+                    cur.execute(
+                        "SELECT 1 FROM information_schema.tables "
+                        "WHERE table_schema = %s AND table_name = %s",
+                        (schema, table),
+                    )
+                    if not cur.fetchone():
+                        cur.execute("RELEASE SAVEPOINT route_run_undo")
+                        continue
+                    cur.execute(
+                        f"DELETE FROM {tbl_ref} WHERE xmin = %s",  # nosec B608
+                        (str(txid),),
+                    )
+                    cur.execute("RELEASE SAVEPOINT route_run_undo")
+                    restored.append(table)
+                except Exception as exc:  # noqa: BLE001 - report, keep others
+                    logger.warning(
+                        "Route run undo failed for %s: %s", table, exc
+                    )
+                    cur.execute("ROLLBACK TO SAVEPOINT route_run_undo")
+                    cur.execute("RELEASE SAVEPOINT route_run_undo")
+            conn.commit()
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - close is best-effort
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+    return restored
+
+
 def discard_pg_route_backups(
     cfg: dict[str, Any],
     backups: dict[str, dict[str, str]],

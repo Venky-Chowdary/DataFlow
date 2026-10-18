@@ -296,9 +296,20 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         # fingerprint); population_proof is the conservation verdict.
         _route_cm = out.get("checksum_match")
         route_matched = bool(out.get("passed")) and bool(_route_cm)
-        out["phase"] = (
-            "post_write_verified" if out.get("passed") else "post_write_failed"
+        # A measured digest mismatch or cross-route key duplication is a
+        # verification-failed outcome in EVERY validation mode — never a
+        # *_verified phase. Balanced/lenient keeps the rows (passed stays
+        # true) but anything reading passed/phase/verdict (UI badge,
+        # get_job, MCP, alerting) must not see "verified".
+        out["verification_verdict"] = (
+            "failed" if (_route_cm is False or not out.get("passed")) else "passed"
         )
+        if not out.get("passed"):
+            out["phase"] = "post_write_failed"
+        elif _route_cm is False:
+            out["phase"] = "post_write_verification_failed"
+        else:
+            out["phase"] = "post_write_verified"
         out["post_write_pending"] = False
         out["preview"] = False
         out["coverage"] = ROUTE_PARTITIONED
@@ -1072,18 +1083,21 @@ def reconcile(
             source_checksum=source_checksum,
             target_checksum=target_checksum,
             message=(
-                f"Routed output verified: {target_rows:,} row(s) across the "
-                f"route tables vs expected {expected_rows:,}. Each route "
-                "table's row count was read back independently"
-                + (
-                    " and every comparable route's value digest matched the "
-                    "write-pass fingerprint"
-                    if route_digest_match
-                    else (
-                        " — VALUE VERIFICATION FAILED: at least one route "
-                        "table's digest does not equal what this run wrote "
-                        "(see the route ledger)"
-                        if route_digest_match is False
+                (
+                    "VALUE VERIFICATION FAILED — at least one route table's "
+                    "value digest does not equal what this run wrote or a "
+                    "key exists in more than one route table (see the route "
+                    f"ledger). {target_rows:,} row(s) landed across route "
+                    f"tables vs expected {expected_rows:,}."
+                    if route_digest_match is False
+                    else f"Routed output verified: {target_rows:,} row(s) "
+                    f"across the route tables vs expected "
+                    f"{expected_rows:,}. Each route table's row count was "
+                    "read back independently"
+                    + (
+                        " and every comparable route's value digest matched "
+                        "the write-pass fingerprint"
+                        if route_digest_match
                         else "; per-route digests are in the route ledger"
                     )
                 )

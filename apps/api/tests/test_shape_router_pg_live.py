@@ -874,9 +874,12 @@ def test_p1a_strict_route_digest_mismatch_fails_and_restores(
 def test_p1a_balanced_digest_mismatch_carries_failed_verdict(
     tmp_path, monkeypatch
 ):
-    """P1-A (non-strict): a digest mismatch may keep the rows but the job must
-    carry a verification-failed verdict — checksum_match false and an
-    explicit message, never a clean verified success."""
+    """P1-A (non-strict): a post-write digest mismatch keeps the rows under
+    balanced/lenient but the structured verdict must never read "verified" —
+    phase is not *_verified, verification_verdict is failed, checksum_match
+    is false, and the message leads with the failure. Corruption is injected
+    only on the post-write read-back (the pre-write additive scan stays
+    honest, so the delta identity itself is still being proven)."""
     fake = _pg_env(monkeypatch)
     parsed = _parse_dsn()
     conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
@@ -891,23 +894,108 @@ def test_p1a_balanced_digest_mismatch_carries_failed_verdict(
         targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
     )
     req = _req(parsed, recipe, parsed_recipe.recipe_hash, sync="full_refresh_append")
-    req.validation_mode = "balanced"
 
     import services.reconciliation as recon_mod
 
     real_route_verify = recon_mod.verify_postgres_route_table
 
-    def _corrupt_digest(*a, **k):
+    # Run 1 lands cleanly and occupies the route tables.
+    res1, _ = _run(fake, req, prefix="pv1")
+    assert res1.success, res1.error
+
+    state = {"calls": 0}
+
+    def _corrupt_post_only(*a, **k):
+        # The pre-write additive scan runs once per occupied route table
+        # (all three) before the write; corrupt only the later calls.
+        state["calls"] += 1
         rows, checksum, additive = real_route_verify(*a, **k)
-        return rows, "0" * 64, "0" * 64
+        if state["calls"] > 3:
+            return rows, "0" * 64, "0" * 64
+        return rows, checksum, additive
+
+    for mode, prefix in (("balanced", "pv2"), ("lenient", "pv3")):
+        req.validation_mode = mode
+        state["calls"] = 0
+        monkeypatch.setattr(
+            recon_mod, "verify_postgres_route_table", _corrupt_post_only
+        )
+        res, _ = _run(fake, req, prefix=prefix)
+        monkeypatch.setattr(
+            recon_mod, "verify_postgres_route_table", real_route_verify
+        )
+        assert res.success, res.error  # rows kept under non-strict
+        recon = res.reconciliation or {}
+        assert recon.get("checksum_match") is False, recon
+        assert recon.get("verification_verdict") == "failed", recon
+        phase = str(recon.get("phase") or "")
+        assert phase == "post_write_verification_failed", phase
+        assert not phase.endswith("_verified"), phase
+        msg = str(recon.get("message") or "")
+        assert msg.startswith("VALUE VERIFICATION FAILED"), msg
+    conn.close()
+
+
+def test_p2_failed_append_undoes_only_this_runs_rows(tmp_path, monkeypatch):
+    """P2: a strict append run that fails Gate-8 undoes exactly this run's
+    routed rows — the write transaction id (xmin) identifies them, so
+    byte-identical copies landed by earlier runs survive and a retry does
+    not duplicate."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    req = _req(parsed, recipe, parsed_recipe.recipe_hash, sync="full_refresh_append")
+    # Two clean appends: every route table now holds byte-identical
+    # duplicate rows (each source row landed twice).
+    for p in ("u1", "u2"):
+        res, _ = _run(fake, req, prefix=p)
+        assert res.success, res.error
+    before = {t: _fetchrows(cur, t) for t in ("rt_high", "rt_mid", "rt_other")}
+    assert len(before["rt_high"]) == 2 and len(before["rt_mid"]) == 4
+    assert len(before["rt_other"]) == 4
+
+    import services.reconciliation as recon_mod
+
+    real_route_verify = recon_mod.verify_postgres_route_table
+    state = {"calls": 0}
+
+    def _corrupt_post_only(*a, **k):
+        state["calls"] += 1
+        rows, checksum, additive = real_route_verify(*a, **k)
+        if state["calls"] > 3:  # first three = pre-write additive scans
+            return rows, "0" * 64, "0" * 64
+        return rows, checksum, additive
 
     monkeypatch.setattr(
-        recon_mod, "verify_postgres_route_table", _corrupt_digest
+        recon_mod, "verify_postgres_route_table", _corrupt_post_only
     )
-    res, _ = _run(fake, req, prefix="p1b2")
-    recon = res.reconciliation or {}
-    assert recon.get("checksum_match") is False, recon
-    assert "VERIFICATION FAILED" in str(recon.get("message") or ""), recon.get("message")
+    res3, job3 = _run(fake, req, prefix="u3")
+    assert not res3.success
+    # Exactly the run-3 copies were removed — the pre-existing
+    # byte-identical duplicates from runs 1-2 are untouched.
+    for t, want in before.items():
+        assert _fetchrows(cur, t) == want, f"{t}: prior content not restored"
+    doc3 = fake.jobs.get(job3) or {}
+    holder = _find_key(doc3, "partial_batch_undo") or {}
+    assert holder.get("partial_batch_undo") == "restored", holder
+    # A retry lands cleanly — no leftover from the failed run.
+    monkeypatch.setattr(
+        recon_mod, "verify_postgres_route_table", real_route_verify
+    )
+    res4, _ = _run(fake, req, prefix="u4")
+    assert res4.success, res4.error
+    for t, want in before.items():
+        assert len(_fetchrows(cur, t)) == len(want) + len(want) // 2
     conn.close()
 
 

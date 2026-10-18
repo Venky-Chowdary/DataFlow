@@ -276,11 +276,56 @@ def _note_failed_batch_undo(
         dest_summary["partial_batch_undo_note"] = note
         base = message or "Reconciliation failed"
         return base if note in base else f"{base} {note}"
-    # Routed append/incremental run: rows were ADDED to live route tables and
-    # cannot be selectively removed — report honestly which rows were added
-    # and that prior content is intact.
+    # Routed append/incremental run: rows were ADDED to live route tables.
+    # When the run stamped its write transaction id, delete exactly this
+    # run's rows by xmin — byte-identical copies from earlier runs keep
+    # their own txid and survive, and pre-existing rows are never touched
+    # (P2 keyed undo). Without a txid, report honestly which rows were
+    # added and that prior content is intact.
     route_map = dest_summary.get("routes") or {}
-    if route_map and int(dest_summary.get("destination_row_count") or 0) > 0:
+    if route_map:
+        _run_txids = dest_summary.get("route_run_txid")
+        _run_tables = list(dest_summary.get("route_run_tables") or [])
+        if _run_txids and _run_tables:
+            try:
+                from .adapters import resolve_connector_config
+                from .connector_capabilities import resolve_driver_type
+                from connectors.table_manager import undo_pg_route_run
+
+                _db_type = resolve_driver_type(
+                    str(getattr(destination, "format", "") or "")
+                )
+                _undone = (
+                    undo_pg_route_run(
+                        resolve_connector_config(destination),
+                        _run_txids,
+                        _run_tables,
+                    )
+                    if _db_type == "postgresql"
+                    else []
+                )
+            except Exception as exc:  # noqa: BLE001 - report, don't mask
+                logger.warning("Route run undo failed: %s", exc)
+                _undone = []
+            if _undone:
+                note = (
+                    "This run's routed rows were removed from every route "
+                    "table it wrote (" + ", ".join(sorted(_undone)) + "); "
+                    "the prior content — including byte-identical copies "
+                    "from earlier runs — is intact. A retry will not "
+                    "duplicate."
+                )
+                dest_summary["partial_batch_undo"] = "restored"
+            else:
+                note = (
+                    "The prior rows in every route table are intact, but "
+                    "this run's added rows could not be selectively removed "
+                    "— investigate the route tables before re-running."
+                )
+                dest_summary["partial_batch_undo"] = "restore_failed"
+            dest_summary["partial_batch_undo_note"] = note
+            base = message or "Reconciliation failed"
+            return base if note in base else f"{base} {note}"
         added = {
             str(name): int(info.get("rows") or 0)
             for name, info in route_map.items()

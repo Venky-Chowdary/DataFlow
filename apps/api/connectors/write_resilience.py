@@ -234,10 +234,15 @@ class PgOverwriteTransaction:
         self.truncated = False
         self.truncated_tables: set[str] = set()
         self.job_id = ""
+        # Real xid of the committing transaction, captured inside finish()
+        # just before commit — the value stamped on the rows' xmin, so a
+        # failed run can undo exactly its own rows (P2 keyed undo).
+        self.tx_id: int | None = None
 
     def begin(self, *, job_id: str = "") -> None:
         """Hold every commit until :meth:`finish`. Safe to call on each batch."""
         self.active = True
+        self.tx_id = None
         if job_id and not self.job_id:
             self.job_id = str(job_id)
 
@@ -267,6 +272,14 @@ class PgOverwriteTransaction:
             return
         try:
             if success:
+                try:
+                    # Inside the write transaction: pg_current_xact_id() is
+                    # the xid that stamps xmin on every row this txn wrote.
+                    with conn.cursor() as _txc:
+                        _txc.execute("SELECT pg_current_xact_id()")
+                        self.tx_id = int(_txc.fetchone()[0])
+                except Exception:
+                    self.tx_id = None
                 conn.commit()
                 if self.job_id:
                     try:
