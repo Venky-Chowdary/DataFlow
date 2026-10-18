@@ -325,6 +325,40 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+def _build_commit() -> str:
+    """Best-effort deployed git SHA for health reporting.
+
+    Env first — Railway injects RAILWAY_GIT_COMMIT_SHA, Docker images may
+    carry DATAFLOW_COMMIT_SHA/SOURCE_COMMIT at build time. Otherwise the
+    checkout's HEAD. "unknown" rather than a hardcoded fake.
+    """
+    env = (
+        os.getenv("DATAFLOW_COMMIT_SHA")
+        or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+        or os.getenv("SOURCE_COMMIT")
+        or ""
+    ).strip()
+    if env:
+        return env[:12]
+    try:
+        import subprocess
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        out = subprocess.run(
+            ["git", "rev-parse", "--short=12", "HEAD"],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else "unknown"
+    except Exception:
+        return "unknown"
+
+
+_BUILD_COMMIT = _build_commit()
+
 _cors_origins = cors_origins()
 # Railway deploys give each service a *.up.railway.app public domain, which is
 # not known until runtime.  Match exactly one Railway subdomain so origins like
@@ -643,6 +677,7 @@ async def root():
     payload = {
         "name": "Datawrap",
         "version": "1.0.0",
+        "commit": _BUILD_COMMIT,
         "status": "operational",
         "environment": "production" if is_production() else "development",
     }
@@ -665,6 +700,8 @@ async def health_check():
     return {
         "status": "misconfigured" if errors else "healthy",
         "liveness": True,
+        "version": "1.0.0",
+        "commit": _BUILD_COMMIT,
         "ready": bool(getattr(app.state, "ready", False)) and not errors,
         # Present only after proxy-write hardening is deployed. Use this to
         # confirm Railway is not still running a pre-fix API image.
