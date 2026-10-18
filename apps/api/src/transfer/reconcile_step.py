@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter
 import time
 from typing import Any
 
@@ -395,71 +396,21 @@ def _transform_applied_proof(
             declared_map[i] = cols
             declared_src.extend(cols)
 
-    try:
-        parsed = ShapeRecipe.parse(shape_recipe, source_columns=list(columns))
-        runner = ShapeRunner(parsed)
-        src_type = resolve_driver_type(source_endpoint.format or "")
-        src_cfg = resolve_connector_config(source_endpoint)
-        read_cols = list(runner.recipe.input_columns or columns)
-        expected_rows: list[dict[str, Any]] = []
-        raw_rows_mapped: list[dict[str, Any]] = []
-        raw_count = 0
-        for batch in _proof_source_batches(
-            source_endpoint=source_endpoint,
-            src_type=src_type,
-            src_cfg=src_cfg,
-            read_cols=read_cols,
-        ):
-            raw_count += len(batch)
-            raw_rows_mapped.extend(
-                {
-                    map_source_to_target(k, mappings or []): v
-                    for k, v in row.items()
-                }
-                for row in batch
-            )
-            expected_rows.extend(runner.records(batch))
-        expected_rows.extend(runner.drain() or [])
-    except Exception as exc:  # the proof must not crash the verifier
-        return {
-            "status": "unverifiable",
-            "reason": f"expected-output recompute failed: {exc!s}"[:300],
-        }
-
     mappings = mappings or []
     dest_db_type = resolve_driver_type(endpoint.format or "")
     dest_types = _dest_types_from_mappings(mappings)
-    # The write path maps source names to destination names — do the same.
-    mapped_expected = [
-        {map_source_to_target(src, mappings): val for src, val in row.items()}
-        for row in expected_rows
-    ]
-
     scd2_opts = dest_summary.get("scd2_opts")
-    scope_keys: set[tuple[str, ...]] | None = None
-    scope_pk: list[str] = []
     sync_mode = str(
         dest_summary.get("sync_mode")
         or dest_summary.get("effective_sync_mode")
         or ""
     )
+    scope_pk: list[str] = []
     if scd2_opts:
         target_cols, _ = resolve_target_columns(
             mappings, source_schema or {}, preserve_case=True
         )
         digest_cols = [c for c in target_cols if c not in _stamp_set(scd2_opts)]
-        actual_checksum = str(
-            dest_summary.get("source_scoped_checksum")
-            or dest_summary.get("active_checksum")
-            or ""
-        )
-        actual_rows = int(
-            dest_summary.get("source_scoped_rows")
-            or dest_summary.get("active_rows")
-            or 0
-        )
-        actual_label = "destination current rows"
-        comparable = bool(actual_checksum)
     else:
         digest_cols = _mapped_targets(mappings, columns)
         if not is_overwrite_sync(sync_mode):
@@ -484,98 +435,362 @@ def _transform_applied_proof(
                         "run's population"
                     ),
                 }
-            scope_keys = {
-                tuple(_key_norm(r.get(c)) for c in scope_pk)
-                for r in mapped_expected
-            }
-        if scope_keys is None:
-            actual_checksum = str(recon.get("target_checksum") or "")
-            actual_rows = int(recon.get("target_rows") or 0)
-            actual_label = "destination read-back"
-            comparable = bool(actual_checksum)
-        else:
-            actual_label = "destination rows for this run's keys"
-            comparable = True
-            try:
-                dst_cfg0 = resolve_connector_config(endpoint)
-                dest_ref0 = warehouse_sql_table_ref(
-                    dest_db_type,
-                    dst_cfg0,
-                    str(
-                        getattr(endpoint, "schema", "")
-                        or dst_cfg0.get("schema")
-                        or ""
-                    ),
-                    str(endpoint.table or ""),
-                )
-                dq0 = (
-                    "`"
-                    if dest_db_type in {"mysql", "mariadb", "clickhouse"}
-                    else '"'
-                )
-                sel_cols0 = list(
-                    dict.fromkeys(list(digest_cols) + list(scope_pk))
-                )
-                qc0 = ", ".join(
-                    quote_sql_identifier(c, dq0) for c in sel_cols0
-                )
-                scoped_rows: list[dict[str, Any]] = []
-                with warehouse_sql_engine(dest_db_type, dst_cfg0) as e0:
-                    with e0.connect() as c0:
-                        for batch in iter_select_row_dicts(
-                            c0,
-                            sa.text(f"SELECT {qc0} FROM {dest_ref0}"),  # nosec B608
-                            sel_cols0,
-                        ):
-                            scoped_rows.extend(
-                                {c: r.get(c) for c in digest_cols}
-                                for r in batch
-                                if tuple(
-                                    _key_norm(r.get(c)) for c in scope_pk
-                                )
-                                in scope_keys
-                            )
-                actual_rows = len(scoped_rows)
-                actual_checksum = canonical_checksum_from_iter(
-                    scoped_rows,
-                    digest_cols,
-                    dest_db_type=dest_db_type,
-                    dest_types=dest_types,
-                )
-            except Exception as exc:
-                return {
-                    "status": "unverifiable",
-                    "reason": f"key-scoped destination read failed: {exc!s}"[:300],
-                    "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
+
+    declared_tcols = [map_source_to_target(c, mappings) for c in declared_src]
+    col_pairs = list(zip(declared_src, declared_tcols))
+
+    # --- G-1e: streaming proof -----------------------------------------
+    # Nothing below materializes a full row list: populations compare as
+    # row-fingerprint Counters and per-declared-column value Counters, so
+    # memory is bounded by distinct values, not row count.
+    raw_count = 0
+    raw_fp: Counter = Counter()
+    exp_fp: Counter = Counter()
+    raw_col: dict[str, Counter] = {c: Counter() for c in set(declared_src)}
+    exp_col: dict[str, Counter] = {c: Counter() for c in set(declared_tcols)}
+    # Oracle pairing: raw value -> recipe-produced value, per declared col
+    # (deterministic for row-local ops).
+    exp_out: dict[str, dict[str, str]] = {
+        t: {} for t in set(declared_tcols)
+    }
+    scope_keys: set[tuple[str, ...]] | None = set() if scope_pk else None
+
+    def _fp(row: dict[str, Any]) -> tuple:
+        return tuple(_key_norm(row.get(c)) for c in digest_cols)
+
+    def _expected_iter():
+        nonlocal raw_count
+        for batch in _proof_source_batches(
+            source_endpoint=source_endpoint,
+            src_type=src_type,
+            src_cfg=src_cfg,
+            read_cols=read_cols,
+        ):
+            raw_count += len(batch)
+            outs = runner.records(batch)
+            for row in batch:
+                trow = {
+                    map_source_to_target(k, mappings): v
+                    for k, v in row.items()
                 }
+                raw_fp[_fp(trow)] += 1
+                for sc in raw_col:
+                    raw_col[sc][_key_norm(row.get(sc))] += 1
+            for i, out in enumerate(outs):
+                orow = {
+                    map_source_to_target(k, mappings): v
+                    for k, v in out.items()
+                }
+                exp_fp[_fp(orow)] += 1
+                if scope_keys is not None:
+                    scope_keys.add(
+                        tuple(_key_norm(orow.get(c)) for c in scope_pk)
+                    )
+                for sc, tc in col_pairs:
+                    exp_col[tc][_key_norm(orow.get(tc))] += 1
+                    if i < len(batch):
+                        exp_out[tc].setdefault(
+                            _key_norm(batch[i].get(sc)),
+                            _key_norm(orow.get(tc)),
+                        )
+                yield orow
+        for out in runner.drain() or []:
+            orow = {
+                map_source_to_target(k, mappings): v
+                for k, v in out.items()
+            }
+            exp_fp[_fp(orow)] += 1
+            if scope_keys is not None:
+                scope_keys.add(
+                    tuple(_key_norm(orow.get(c)) for c in scope_pk)
+                )
+            for _sc, tc in col_pairs:
+                exp_col[tc][_key_norm(orow.get(tc))] += 1
+            yield orow
+
+    try:
+        parsed = ShapeRecipe.parse(shape_recipe, source_columns=list(columns))
+        runner = ShapeRunner(parsed)
+        src_type = resolve_driver_type(source_endpoint.format or "")
+        src_cfg = resolve_connector_config(source_endpoint)
+        read_cols = list(runner.recipe.input_columns or columns)
+        expected_checksum = canonical_checksum_from_iter(
+            _expected_iter(),
+            digest_cols,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
+    except Exception as exc:  # the proof must not crash the verifier
+        return {
+            "status": "unverifiable",
+            "reason": f"expected-output recompute failed: {exc!s}"[:300],
+        }
+    exp_n = sum(exp_fp.values())
+
+    # --- G-1d: independent SQL oracle for row-local ops ----------------
+    # The recipe is re-applied in Python; a bug in _transform_value then
+    # lands identically on the write and the expected side and is
+    # invisible. For ops with a faithful SQL equivalent we recompute the
+    # declared columns in the SOURCE database on the same re-read —
+    # drift-free — and compare per-column multisets. Any disagreement is
+    # an op-implementation defect, not drift, so it fails and names the
+    # step. Coverage is honestly partial: ops/dialects without a faithful
+    # SQL mapping are reported as "recipe re-applied" only.
+    _ORACLE_DIALECTS = {"postgresql", "postgres", "mysql", "mariadb"}
+
+    def _step_sql(
+        op: str, opts: dict[str, Any], col_expr: str, params: dict[str, Any]
+    ) -> str | None:
+        def _lit(v: Any) -> str:
+            key = f"ov{len(params)}"
+            params[key] = v
+            return f":{key}"
+
+        if op == "case":
+            mode = str(opts.get("mode") or "").casefold()
+            if mode == "upper":
+                return f"UPPER({col_expr})"
+            if mode == "lower":
+                return f"LOWER({col_expr})"
+            return None
+        if op == "trim":
+            return f"TRIM({col_expr})"
+        if op == "replace" and not opts.get("regex"):
+            return (
+                f"REPLACE({col_expr}, {_lit(opts.get('search'))}, "
+                f"{_lit(opts.get('replacement', ''))})"
+            )
+        if op == "null_if":
+            expr = col_expr
+            for v in opts.get("values") or []:
+                expr = f"NULLIF({expr}, {_lit(v)})"
+            return expr
+        if op == "cast_column" and str(
+            opts.get("to_type") or ""
+        ).casefold() == "text":
+            cast = "TEXT" if src_type in {"postgresql", "postgres"} else "CHAR"
+            return f"CAST({col_expr} AS {cast})"
+        return None
+
+    qs = '`' if src_type in {"mysql", "mariadb", "clickhouse"} else '"'
+    src_ref_sql = warehouse_sql_table_ref(
+        src_type,
+        src_cfg,
+        str(
+            getattr(source_endpoint, "schema", "")
+            or src_cfg.get("schema")
+            or ""
+        ),
+        str(source_endpoint.table or ""),
+    )
+    oracle_params: dict[str, Any] = {}
+    oracle_exprs: dict[str, str] = {}
+    oracle_ok = (
+        src_type in _ORACLE_DIALECTS
+        and bool(declared_src)
+        and not any(
+            str(st.get("op") or "") in _TRANSFORM_PROOF_POPULATION_OPS
+            for st in steps
+        )
+    )
+    if oracle_ok:
+        for st in steps:
+            if not oracle_ok:
+                break
+            op = str(st.get("op") or "")
+            opts = st.get("options") or {}
+            for scol in _step_cols(st):
+                expr = oracle_exprs.get(scol) or quote_sql_identifier(
+                    scol, qs
+                )
+                expr = _step_sql(op, opts, expr, oracle_params)
+                if expr is None:
+                    oracle_ok = False
+                    break
+                oracle_exprs[scol] = expr
+    oracle_bad: set[str] = set()
+    if oracle_ok and oracle_exprs:
+        # The oracle returns (raw -> oracle) pairs per declared column; a
+        # source value that moved between the seam read and the oracle
+        # read is excluded (that is drift, owned by the population
+        # classifier) — only agreed-upon inputs may judge the op
+        # implementation.
+        try:
+            sel = ", ".join(
+                f"{quote_sql_identifier(c, qs)} AS "
+                f'{qs}__raw_{c}{qs}, {e} AS {qs}__o_{c}{qs}'
+                for c, e in oracle_exprs.items()
+            )
+            stmt = sa.text(
+                f"SELECT {sel} FROM {src_ref_sql}"  # nosec B608
+            ).bindparams(**oracle_params)
+            oracle_out: dict[str, dict[str, str]] = {
+                c: {} for c in oracle_exprs
+            }
+            sel_cols = [
+                x for c in oracle_exprs for x in (f"__raw_{c}", f"__o_{c}")
+            ]
+            with warehouse_sql_engine(src_type, src_cfg) as oeng:
+                with oeng.connect() as oconn:
+                    for batch in iter_select_row_dicts(
+                        oconn, stmt, sel_cols
+                    ):
+                        for r in batch:
+                            for c in oracle_out:
+                                rv = _key_norm(r.get(f"__raw_{c}"))
+                                oracle_out[c][rv] = _key_norm(
+                                    r.get(f"__o_{c}")
+                                )
+            for scol in oracle_exprs:
+                tcol = map_source_to_target(scol, mappings)
+                for rv, ov in oracle_out[scol].items():
+                    if rv in exp_out[tcol] and exp_out[tcol][rv] != ov:
+                        oracle_bad.add(tcol)
+        except Exception:
+            oracle_ok = False
+    if oracle_bad:
+        bad_steps = sorted(
+            {
+                f"step {i + 1} ({s.get('op')} on "
+                f"'{map_source_to_target(c, mappings)}')"
+                for i, cols in declared_map.items()
+                for c in cols
+                if map_source_to_target(c, mappings) in oracle_bad
+            }
+        )
+        return {
+            "status": "failed",
+            "reason": (
+                "recipe output disagrees with the independent SQL oracle "
+                f"on {sorted(oracle_bad)} — the step implementation, not "
+                "the data, is wrong"
+            ),
+            "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
+            "culprit_steps": bad_steps,
+            "culprit_columns": sorted(oracle_bad),
+            "provenance": "independent SQL oracle",
+        }
+
+    if scd2_opts:
+        actual_checksum = str(
+            dest_summary.get("source_scoped_checksum")
+            or dest_summary.get("active_checksum")
+            or ""
+        )
+        actual_rows = int(
+            dest_summary.get("source_scoped_rows")
+            or dest_summary.get("active_rows")
+            or 0
+        )
+        actual_label = "destination current rows"
+        comparable = bool(actual_checksum)
+        dest_fp: Counter | None = None
+        dest_col: dict[str, Counter] | None = None
+    elif scope_keys is None:
+        actual_checksum = str(recon.get("target_checksum") or "")
+        actual_rows = int(recon.get("target_rows") or 0)
+        actual_label = "destination read-back"
+        comparable = bool(actual_checksum)
+        dest_fp = None
+        dest_col = None
+    else:
+        actual_label = "destination rows for this run's keys"
+        comparable = True
+        dest_fp = Counter()
+        dest_col = {t: Counter() for t in set(declared_tcols)}
+        try:
+            dst_cfg0 = resolve_connector_config(endpoint)
+            dest_ref0 = warehouse_sql_table_ref(
+                dest_db_type,
+                dst_cfg0,
+                str(
+                    getattr(endpoint, "schema", "")
+                    or dst_cfg0.get("schema")
+                    or ""
+                ),
+                str(endpoint.table or ""),
+            )
+            dq0 = (
+                "`"
+                if dest_db_type in {"mysql", "mariadb", "clickhouse"}
+                else '"'
+            )
+            sel_cols0 = list(
+                dict.fromkeys(list(digest_cols) + list(scope_pk))
+            )
+            qc0 = ", ".join(
+                quote_sql_identifier(c, dq0) for c in sel_cols0
+            )
+
+            def _scoped_gen(conn):
+                for batch in iter_select_row_dicts(
+                    conn,
+                    sa.text(
+                        f"SELECT {qc0} FROM {dest_ref0}"  # nosec B608
+                    ),
+                    sel_cols0,
+                ):
+                    for r in batch:
+                        if (
+                            tuple(
+                                _key_norm(r.get(c)) for c in scope_pk
+                            )
+                            not in scope_keys
+                        ):
+                            continue
+                        row = {c: r.get(c) for c in digest_cols}
+                        dest_fp[_fp(row)] += 1
+                        for _sc, tc in col_pairs:
+                            dest_col[tc][_key_norm(row.get(tc))] += 1
+                        yield row
+
+            with warehouse_sql_engine(dest_db_type, dst_cfg0) as e0:
+                with e0.connect() as c0:
+                    actual_checksum = canonical_checksum_from_iter(
+                        _scoped_gen(c0),
+                        digest_cols,
+                        dest_db_type=dest_db_type,
+                        dest_types=dest_types,
+                    )
+            actual_rows = sum(dest_fp.values())
+        except Exception as exc:
+            return {
+                "status": "unverifiable",
+                "reason": f"key-scoped destination read failed: {exc!s}"[
+                    :300
+                ],
+                "recipe_hash": str(
+                    dest_summary.get("shape_recipe_hash") or ""
+                ),
+            }
 
     if not comparable:
         return {
             "status": "unverifiable",
-            "reason": "no destination read-back digest to compare against",
+            "reason": (
+                "destination read-back unavailable for the transform "
+                "proof"
+            ),
         }
 
-    expected_checksum = canonical_checksum_from_iter(
-        mapped_expected,
-        digest_cols,
-        dest_db_type=dest_db_type,
-        dest_types=dest_types,
-    )
-    if expected_checksum == actual_checksum and actual_rows == len(mapped_expected):
+    if expected_checksum == actual_checksum and actual_rows == exp_n:
         return {
             "status": "verified",
             "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
-            "rows": len(mapped_expected),
+            "rows": exp_n,
+            "provenance": (
+                "independent SQL oracle"
+                if oracle_ok and oracle_exprs
+                else "recipe re-applied"
+            ),
         }
 
     # G-1a: the re-read runs AFTER the write — a busy source may have
     # drifted in between. Row-local steps never change the written row
     # count, so a count divergence is always drift (or a population issue
-    # the ledger itself reports); and a step is only blamed when the
-    # population is provably stable AND the destination provably holds
-    # untransformed values on the step's column. Anything ambiguous is
-    # unverifiable — never a false failure that rolls back correct data.
-    if actual_rows != len(mapped_expected):
+    # the ledger itself reports); anything ambiguous is unverifiable —
+    # never a false failure that rolls back correct data.
+    if actual_rows != exp_n:
         # G-1b: for row-removing recipes a dropped step inflates the
         # written population toward the raw count — keep going so the
         # declared-column check can prove it. Anything else is drift.
@@ -584,119 +799,100 @@ def _transform_applied_proof(
                 "status": "unverifiable",
                 "reason": (
                     "source changed during run — re-read returned "
-                    f"{len(mapped_expected)} recipe-applied rows but "
+                    f"{exp_n} recipe-applied rows but "
                     f"{actual_label} holds {actual_rows}"
                 ),
                 "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
-                "expected_rows": len(mapped_expected),
+                "expected_rows": exp_n,
                 "actual_rows": actual_rows,
             }
 
-    declared_tcols = [map_source_to_target(c, mappings) for c in declared_src]
-    pk_cols = [
-        c
-        for c in (
-            dest_summary.get("primary_key_columns")
-            or dest_summary.get("conflict_columns")
-            or []
-        )
-        if c in digest_cols
-    ]
-    # Population key for row-level classification: the declared key columns
-    # when present, whole-row identity otherwise (no key needed).
-    key_cols = pk_cols or list(digest_cols)
-
-    def _rk(r: dict[str, Any]) -> tuple:
-        return tuple(_key_norm(r.get(c)) for c in key_cols)
-
-    def _row_eq(a: dict[str, Any], b: dict[str, Any]) -> bool:
-        return all(
-            _key_norm(a.get(c)) == _key_norm(b.get(c)) for c in digest_cols
-        )
-
-    exp_by_key = {_rk(r): r for r in mapped_expected}
-    raw_by_key = {_rk(r): r for r in raw_rows_mapped}
-
+    # Multiset classification over row fingerprints: a destination row
+    # provably equal to the raw re-read is untransformed by construction
+    # (a post-write source change cannot write raw values to the
+    # destination) — it names the step and fails. Every other divergence
+    # is ambiguous — touched-column drift and wrong values are
+    # observationally identical here — and lands as unverifiable, never
+    # blame. (The wrong-value case is owned by the G-1d oracle above.)
     culprits: list[str] = []
     drift = False
     try:
-        dst_cfg = resolve_connector_config(endpoint)
-        dest_ref = warehouse_sql_table_ref(
-            dest_db_type,
-            dst_cfg,
-            str(getattr(endpoint, "schema", "") or dst_cfg.get("schema") or ""),
-            str(endpoint.table or ""),
-        )
-        dq = "`" if dest_db_type in {"mysql", "mariadb", "clickhouse"} else '"'
-        sel_cols = list(dict.fromkeys(list(digest_cols) + list(scope_pk)))
-        qc = ", ".join(quote_sql_identifier(c, dq) for c in sel_cols)
-        stmt = sa.text(f"SELECT {qc} FROM {dest_ref}")  # nosec B608
-        if scd2_opts:
-            from services.scd2_engine import scd2_is_current_predicate
-
-            cur_pred = scd2_is_current_predicate(
+        if dest_fp is None:
+            dst_cfg = resolve_connector_config(endpoint)
+            dest_ref = warehouse_sql_table_ref(
                 dest_db_type,
-                quote_sql_identifier(str(scd2_opts["is_current"]), dq),
+                dst_cfg,
+                str(
+                    getattr(endpoint, "schema", "")
+                    or dst_cfg.get("schema")
+                    or ""
+                ),
+                str(endpoint.table or ""),
             )
-            stmt = sa.text(  # nosec B608
-                f"SELECT {qc} FROM {dest_ref} WHERE {cur_pred}"
+            dq = (
+                "`"
+                if dest_db_type in {"mysql", "mariadb", "clickhouse"}
+                else '"'
             )
-        # Stream the destination once, index by the population key. A row
-        # proven equal to the raw re-read is untransformed by construction —
-        # a post-write source change cannot write raw values to the
-        # destination. Everything else is ambiguous (drift or wrong values)
-        # and goes to unverifiable, never blame.
-        dest_by_key: dict[tuple, dict[str, Any]] = {}
-        with warehouse_sql_engine(dest_db_type, dst_cfg) as deng:
-            with deng.connect() as dconn:
-                for batch in iter_select_row_dicts(dconn, stmt, sel_cols):
-                    for r in batch:
-                        if scope_keys is not None and (
-                            tuple(_key_norm(r.get(c)) for c in scope_pk)
-                            not in scope_keys
-                        ):
-                            continue
-                        row = {c: r.get(c) for c in digest_cols}
-                        dest_by_key[_rk(row)] = row
+            sel_cols = list(
+                dict.fromkeys(list(digest_cols) + list(scope_pk))
+            )
+            qc = ", ".join(quote_sql_identifier(c, dq) for c in sel_cols)
+            stmt = sa.text(f"SELECT {qc} FROM {dest_ref}")  # nosec B608
+            if scd2_opts:
+                from services.scd2_engine import scd2_is_current_predicate
 
-        culprit_keys: list[tuple] = []
-        ambiguous = 0
-        for k, erow in exp_by_key.items():
-            drow = dest_by_key.get(k)
-            if drow is None:
-                ambiguous += 1
-            elif _row_eq(drow, erow):
-                continue
-            elif _row_eq(drow, raw_by_key.get(k, {})):
-                culprit_keys.append(k)
-            else:
-                ambiguous += 1
-        for k, drow in dest_by_key.items():
-            if k in exp_by_key:
-                continue
-            if _row_eq(drow, raw_by_key.get(k, {})):
-                culprit_keys.append(k)
-            else:
-                ambiguous += 1
+                cur_pred = scd2_is_current_predicate(
+                    dest_db_type,
+                    quote_sql_identifier(str(scd2_opts["is_current"]), dq),
+                )
+                stmt = sa.text(  # nosec B608
+                    f"SELECT {qc} FROM {dest_ref} WHERE {cur_pred}"
+                )
+            dest_fp = Counter()
+            dest_col = {t: Counter() for t in set(declared_tcols)}
+            with warehouse_sql_engine(dest_db_type, dst_cfg) as deng:
+                with deng.connect() as dconn:
+                    for batch in iter_select_row_dicts(
+                        dconn, stmt, sel_cols
+                    ):
+                        for r in batch:
+                            if scope_keys is not None and (
+                                tuple(
+                                    _key_norm(r.get(c)) for c in scope_pk
+                                )
+                                not in scope_keys
+                            ):
+                                continue
+                            row = {c: r.get(c) for c in digest_cols}
+                            dest_fp[_fp(row)] += 1
+                            for _sc, tc in col_pairs:
+                                dest_col[tc][_key_norm(row.get(tc))] += 1
 
-        if culprit_keys:
+        extra = dest_fp - exp_fp
+        missing = exp_fp - dest_fp
+        culprit_n = 0
+        for fp, n in extra.items():
+            culprit_n += min(n, raw_fp.get(fp, 0))
+        ambiguous = sum(extra.values()) - culprit_n + sum(
+            missing.values()
+        )
+        if culprit_n:
             culprit_cols: set[str] = set()
-            for k in culprit_keys:
-                drow = dest_by_key[k]
-                erow = exp_by_key.get(k) or {}
-                for tcol in declared_tcols:
-                    if tcol not in digest_cols:
-                        continue
-                    if _key_norm(drow.get(tcol)) != _key_norm(erow.get(tcol)):
-                        culprit_cols.add(tcol)
+            for scol, tcol in col_pairs:
+                if tcol not in exp_col:
+                    continue
+                extra_c = dest_col[tcol] - exp_col[tcol]
+                hit = sum(
+                    min(n, raw_col[scol].get(v, 0))
+                    for v, n in extra_c.items()
+                )
+                if hit:
+                    culprit_cols.add(tcol)
             culprits = sorted(culprit_cols or declared_tcols)
         else:
             culprits = []
-        # Drift means "unattributable": a touched-column-only source update
-        # and a wrong-valued op are observationally identical here, and both
-        # must be unverifiable (the wrong-value case is owned by the G-1d
-        # independent oracle, not this heuristic).
-        drift = bool(ambiguous) and not culprit_keys
+        drift = bool(ambiguous) and not culprit_n
     except Exception:
         # Localization is best-effort; never upgrade an ambiguous
         # divergence into a blamed failure.
@@ -711,7 +907,7 @@ def _transform_applied_proof(
                 "longer matches what was written"
             ),
             "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
-            "expected_rows": len(mapped_expected),
+            "expected_rows": exp_n,
             "actual_rows": actual_rows,
         }
     if not culprits:
@@ -722,7 +918,7 @@ def _transform_applied_proof(
                 "to a declared step or to source drift"
             ),
             "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
-            "expected_rows": len(mapped_expected),
+            "expected_rows": exp_n,
             "actual_rows": actual_rows,
         }
 
@@ -743,7 +939,7 @@ def _transform_applied_proof(
         "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
         "expected_checksum": expected_checksum,
         "actual_checksum": actual_checksum,
-        "expected_rows": len(mapped_expected),
+        "expected_rows": exp_n,
         "actual_rows": actual_rows,
         "culprit_columns": culprits,
         "culprit_steps": culprit_steps,
@@ -4714,9 +4910,10 @@ def run_reconciliation(
                     f"{proof.get('recipe_hash')})."
                 )
             elif proof.get("status") == "verified":
+                prov = proof.get("provenance") or "recipe re-applied"
                 note = (
-                    f"transform output verified against an independent "
-                    f"source re-read ({proof.get('rows')} rows)"
+                    f"transform output verified — {prov} "
+                    f"({proof.get('rows')} rows)"
                 )
                 if recon.get("message"):
                     recon["message"] = f"{recon['message']} ({note})"

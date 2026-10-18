@@ -1477,3 +1477,56 @@ def test_g1a_partial_chunk_application_fails_pg(tmp_path, monkeypatch):
     assert proof.get("status") == "failed", proof
     assert any("case" in s for s in proof.get("culprit_steps") or []), proof
     conn.close()
+
+
+def test_g1d_wrong_op_impl_caught_by_sql_oracle_pg(tmp_path, monkeypatch):
+    """G-1d: an op-implementation bug shared by write and proof is
+    invisible to the recipe re-application but visible to the SQL
+    oracle. Simulate 'case upper' wrongly lowercasing: the oracle
+    computes UPPER(note) in SQL and must fail the run naming the step."""
+    import services.shape_engine as se
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS, table="ovr_g1d_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1d_dst CASCADE")
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = TransferRequest(
+        source=ep("ovr_g1d_src"), destination=ep("ovr_g1d_dst"),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in COLS
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=COLS
+        ).recipe_hash,
+        skip_preflight=True, validation_mode="strict",
+    )
+
+    _orig_tv = se._transform_value
+
+    def _buggy(step, value):
+        if step.op == "case" and (step.options or {}).get("mode") == "upper":
+            return None if value is None else str(value).lower()
+        return _orig_tv(step, value)
+
+    monkeypatch.setattr(se, "_transform_value", _buggy)
+    res = _exec(fake, req, prefix="ovrg1d")
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    assert not res.success, res.error
+    assert proof.get("status") == "failed", proof
+    assert proof.get("provenance") == "independent SQL oracle", proof
+    assert any("case" in s for s in proof.get("culprit_steps") or []), proof
+    conn.close()
