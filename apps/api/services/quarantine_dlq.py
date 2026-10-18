@@ -368,6 +368,21 @@ def persist_rejected_rows(
     return out
 
 
+def _hashable_row_key(row: Any) -> Any:
+    """A hashable dedupe key member for a rejected row of any shape.
+
+    Scalars keep their value; records/lists serialize canonically (key order
+    stable, exotic values through json_default) so the same row dedupes to the
+    same key and an unhashable record can never crash a quarantine read.
+    """
+    if isinstance(row, (str, int, float, bool, type(None))):
+        return row
+    try:
+        return json.dumps(row, sort_keys=True, default=json_default)
+    except (TypeError, ValueError):
+        return repr(row)
+
+
 def quarantine_details_from_dlq(
     job_id: str,
     *,
@@ -403,8 +418,12 @@ def quarantine_details_from_dlq(
         for d in chunk:
             if not isinstance(d, dict):
                 continue
+            row = d.get("row")
+            # The row is a record (dict/list), not a scalar — dedupe on its
+            # canonical serialization; an unhashable member made every read
+            # of a shape-divert quarantine crash with TypeError.
             key = (
-                d.get("row"),
+                _hashable_row_key(row),
                 str(d.get("column") or ""),
                 str(d.get("reason") or "")[:160],
             )
